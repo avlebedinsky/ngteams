@@ -1,0 +1,9 @@
+# Same thresholds as agterm-rs (its clippy.toml). Lowered, never raised. `excessive-nesting-threshold` counts item
+# nesting and closure bodies too.
+cognitive-complexity-threshold = 15
+too-many-lines-threshold = 80
+too-many-arguments-threshold = 6
+excessive-nesting-threshold = 5
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

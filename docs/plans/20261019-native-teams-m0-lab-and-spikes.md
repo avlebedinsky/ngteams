@@ -81,7 +81,7 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 ```
 - The UI never touches the network: it reads the store and dispatches commands.
 - tokio runs on its own thread and is bridged to the GPUI executor through channels.
-- GPUI is pinned to a Zed git revision.
+- GPUI comes as the pinned crates.io `gpui-pre` release, the same as in agterm-rs, with agterm-rs's patches vendored if we need them (external surfaces for video).
 
 ### The write fence (core safety mechanism)
 
@@ -158,13 +158,26 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `tests/fixture_guard.rs`, `tests/fixtures/.gitkeep`, `docs/protocol/.gitkeep`, `docs/spikes/.gitkeep`
 
 - [ ] `git init`; `.gitignore` covers `/target`, `*.pkg`, `*.msix`, `*.har`, `captures/`, `.env*`. The installers stay on disk but are never committed.
-- [ ] workspace `Cargo.toml` with shared lints (`unsafe_code = "deny"` outside `spikes/`, clippy pedantic as warnings) and shared dependency versions; `rust-toolchain.toml` pinned to stable
+- [x] ➕ lint setup identical to agterm-rs, already in the repo:
+  - `clippy.toml` (complexity thresholds, unwrap/expect/panic allowed only in tests)
+  - `[workspace.lints]` in `Cargo.toml` (`all` + `pedantic` deny, unwrap/expect/panic/todo/dbg deny, unsafe-block lints, `allow_attributes` deny)
+  - `rustfmt.toml` (`max_width = 120`)
+  - `rust-toolchain.toml` (1.98.1)
+  - `scripts/lint-report.sh` (refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s; scans `crates/` and `spikes/`)
+  - `members` is an explicit list, because cargo refuses a glob that matches nothing
+- [ ] every crate, spikes included, gets `[lints] workspace = true`; add each crate to `members` as it's created; add shared dependency versions to `[workspace.dependencies]`
 - [ ] `CLAUDE.md` with the hard rules:
   - writes go only through the fence and only within the 3 lab accounts
   - nothing runs live before the browser fence is armed
   - raw captures and tokens never enter the repo
   - agents never build or run a personal build and never receive the user's tokens
   - protocol notes are written in our own words; Microsoft JS is never copied in
+  - lint rules, as in agterm-rs:
+    - a function over a complexity limit is split, not excused; the only exception is an outer `#[expect(clippy::..., reason = "...")]` on that one item
+    - `#[allow]` and inner `#![allow]`/`#![expect]` are refused
+    - `clippy.toml` thresholds are lowered, never raised
+    - a toolchain bump is a separate change
+  - the gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test --workspace`
 - [ ] write the failing fixture-guard test first (a planted JWT in a temp directory must be detected), then implement the scanner
 - [ ] `cargo test --workspace` passes
 
@@ -339,7 +352,8 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 **Files:**
 - Create: `spikes/gpui-video/{Cargo.toml,src/main.rs}`
 
-- [ ] stock GPUI (pinned Zed rev) opens a window on niri/Wayland and renders text plus an image on the iGPU and the dGPU (`DRI_PRIME` / Vulkan device selection)
+- [ ] take GPUI the way agterm-rs does: the crates.io `gpui-pre` releases rather than a Zed git rev, so the patches from agterm-rs apply as they are. Check its experience with tracing: calloop requests tracing's `log` feature, which inflates `cognitive_complexity` in every tracing macro. agterm-rs vendors calloop without that request (`scripts/vendor-calloop.sh`, `scripts/check-tracing-features.sh`); take the same approach if clippy hits it.
+- [ ] stock GPUI opens a window on niri/Wayland and renders text plus an image on the iGPU and the dGPU (`DRI_PRIME` / Vulkan device selection)
 - [ ] a test (with `#[ignore]` when there's no Wayland session): the window starts and closes within N seconds without errors
 - [ ] if there's a windowing blocker, add ⚠️ to the plan and stop before Task 16
 
@@ -350,7 +364,11 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 
 - [ ] tests first for the synthetic frame generator (1280×720 NV12/BGRA, with a burned-in frame counter that can be read back from the pixels) and the stats aggregator (p50/p95, fps)
 - [ ] approach (a): stock GPUI, uploading each frame as an image into a 3×3 grid; measure on the iGPU and the dGPU
-- [ ] approach (b), only if (a) misses the target: patch GPUI's Linux renderer to add an external texture with NV12→RGB conversion in a shader, on a fork pinned to a revision; measure
+- [ ] approach (b), only if (a) misses the target: patching GPUI is acceptable (user's decision, 2026-10-19). Start from agterm-rs's existing patch rather than writing our own:
+  - `build/patches/gpui-pre/0001-external-surfaces.patch` and `build/patches/gpui-pre-wgpu/0001`: `Window::paint_external_surface`, dmabuf import through wgpu-hal Vulkan, CPU frames uploaded by damaged rectangles
+  - vendored by `scripts/vendor-gpui.sh` from a crates.io archive with a verified checksum into `vendor/` + `[patch.crates-io]`, checked with `--check`
+  - on top of it we may need NV12→RGB in a shader and zero-copy from VA-API/NVDEC dmabufs
+  - measure
 - [ ] `docs/spikes/gpui-video.md`: the numbers, the chosen approach, the cost of maintaining the patch
 - [ ] target: 9 × 720p at 30 fps with p95 frame time under 33 ms. If we miss it, add ⚠️ and the decision to this plan.
 
@@ -389,7 +407,7 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - [ ] the fence suite (decision + enforcement, HTTP + WS, page + workers + SW + beacon) passes; `proto-lab run ab-chat` passes, including the live enforcement test
 - [ ] GPUI runs on niri and meets 9×720p30, or the decision and patch are documented
 - [ ] the echo call returns our tone, or the blocker and next step are documented
-- [ ] `cargo test --workspace` and `cargo clippy --workspace -- -D warnings` pass; the fixture guard is green
+- [ ] the full gate passes: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test --workspace`; the fixture guard is green
 
 ### Task 21: [Final] Update documentation
 - [ ] README.md: what this is, the lab layout, `proto-lab` commands, how to run tests

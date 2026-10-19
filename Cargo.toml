@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+# Explicit list: cargo refuses a glob that matches nothing. Every new crate is added here.
+members = []
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98.1"
+publish = false
+
+# Same lint set as agterm-rs. Every crate opts in with `[lints] workspace = true`, spikes included; only generated
+# -sys crates may set their own (scripts/lint-report.sh). A function over a complexity limit (clippy.toml) is split,
+# not excused: the only exception is an outer `#[expect(clippy::..., reason = "...")]` on that one item.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# complexity (thresholds in clippy.toml)
+cognitive_complexity = "deny"
+too_many_lines = "deny"
+excessive_nesting = "deny"
+too_many_arguments = "deny"
+type_complexity = "deny"
+fn_params_excessive_bools = "deny"
+struct_excessive_bools = "deny"
+# robustness
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+# FFI
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+# exceptions
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
