@@ -20,7 +20,6 @@ teams-fence.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-tungstenite.workspace = true
-toml.workspace = true
 url.workspace = true
 zip.workspace = true
 
@@ -28,6 +27,9 @@ zip.workspace = true
 # a local HTTPS server: Chrome uploads Reporting API reports only over a secure connection
 rcgen.workspace = true
 tempfile.workspace = true
+# the fence tests build fences over test rosters and fake membership sources; never a normal dependency, and the
+# binary refuses to run when a test build unified it in
+teams-fence = { workspace = true, features = ["test-support"] }
 # a local websocket server for the CDP client tests
 tokio = { workspace = true, features = ["net"] }
 tokio-rustls.workspace = true

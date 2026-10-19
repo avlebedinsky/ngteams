@@ -11,9 +11,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use fixture_guard::Guard;
+use teams_fence::lab::LabConfig;
 use teams_fence::{
-    Channel, DenyReason, Fence, FenceLog, FetchFailure, Membership, MembershipFuture, MembershipSource, Mri,
-    PartialReason, RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind,
+    Channel, DenyReason, FailClosed, Fence, FenceLog, FetchFailure, Membership, MembershipFuture, MembershipSource,
+    Mri, OpenError, PartialReason, RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -505,6 +506,37 @@ async fn deny_reasons_are_logged_by_name() {
 }
 
 #[tokio::test]
+async fn the_fail_closed_source_denies_every_write_that_needs_a_fetch() {
+    let lab = try_lab().unwrap();
+    let call = Scope::Call {
+        id: "call-from-lab-b".to_owned(),
+    };
+    for kind in WriteKind::ALL {
+        for scope in [chat(), call.clone()] {
+            let denied = lab
+                .fence
+                .check(Target::new(kind, scope), &FailClosed)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                denied.reason(),
+                &DenyReason::Partial(PartialReason::NoSource),
+                "{kind:?}"
+            );
+        }
+    }
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert_eq!(entries.len(), WriteKind::ALL.len() * 2);
+    for entry in &entries {
+        assert_eq!(entry["reason"], serde_json::json!({"partial": "no_source"}), "{entry}");
+    }
+
+    // a new chat isn't fetched: it is still judged by its proposed members alone
+    let create = Target::new(WriteKind::ChatCreate, Scope::New).with_added(mris(&[LAB_A, LAB_B]));
+    assert!(lab.fence.check(create, &FailClosed).await.is_ok());
+}
+
+#[tokio::test]
 async fn the_log_appends_across_fences_and_is_private() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fence.log");
@@ -727,4 +759,51 @@ fn request_entries_share_the_log_with_write_decisions_and_its_failure_mode() {
     assert!(log.record_request(&record).is_err(), "and so does every later one");
     let text = written.lock().unwrap().clone();
     assert!(!text.contains(&b'\n'), "nothing after the half-written entry");
+}
+
+/// A `lab.toml` with MRIs for accounts a and b but not c, and for one of two service participants.
+fn lab_toml(data_dir: &Path) -> String {
+    let account = |alias: &str, mri: Option<&str>| {
+        let mri = mri.map(|mri| format!("mri = \"{mri}\"\n")).unwrap_or_default();
+        format!("[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.com\"\n{mri}\n")
+    };
+    format!(
+        "data_dir = \"{}\"\n\n{}{}{}[[service_participants]]\nname = \"echo\"\nmri = \"{ECHO}\"\n\n\
+         [[service_participants]]\nname = \"other\"\n",
+        data_dir.display(),
+        account("a", Some(LAB_A)),
+        account("b", Some(LAB_B)),
+        account("c", None),
+    )
+}
+
+#[tokio::test]
+async fn the_lab_fence_takes_its_roster_and_log_from_lab_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    fs::create_dir(&data_dir).unwrap();
+    let config = LabConfig::parse(&lab_toml(&data_dir), dir.path()).unwrap();
+    let fence = Fence::open(&config).unwrap();
+
+    let message = || Target::new(WriteKind::Message, chat());
+    let allowed = fence.check(message(), &Fixed::complete(&[LAB_A, LAB_B, ECHO])).await;
+    assert!(allowed.is_ok(), "the accounts and the service with an MRI are admitted");
+    // account c has no MRI in lab.toml yet, so its MRI matches nobody
+    let denied = fence.check(message(), &Fixed::complete(&[LAB_A, LAB_C])).await;
+    assert_eq!(denied.unwrap_err().reason(), &DenyReason::Outsiders { count: 1 });
+
+    let log = data_dir.join("fence.log");
+    let verdicts: Vec<_> = log_entries(&log)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry["verdict"].clone())
+        .collect();
+    assert_eq!(verdicts, ["allow", "deny"]);
+    assert_eq!(fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
+
+    // a log that can't be opened: no fence, and the error names the file
+    let missing = LabConfig::parse(&lab_toml(&dir.path().join("missing")), dir.path()).unwrap();
+    let error = Fence::open(&missing).unwrap_err();
+    assert!(matches!(error, OpenError::Log { .. }), "{error:?}");
+    assert!(error.to_string().contains("missing/fence.log"), "{error}");
 }

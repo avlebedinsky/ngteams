@@ -1799,6 +1799,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fence-seal"
+version = "0.1.0"
+dependencies = [
+ "teams-fence",
+ "trybuild",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4622,7 +4630,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
- "toml 1.1.8+spec-1.1.0",
  "url",
  "wiremock",
  "zip",
@@ -6018,9 +6025,11 @@ dependencies = [
  "fixture-guard",
  "serde",
  "serde_json",
+ "teams-fence",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]

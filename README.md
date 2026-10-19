@@ -10,7 +10,8 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
 | path | contents |
 |---|---|
-| `crates/teams-fence` | the write fence: a write is allowed only within the 3 lab accounts |
+| `crates/teams-fence` | the write fence: a write is allowed only within the 3 lab accounts; the lab config (`lab.toml`) |
+| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, and a lab binary has a membership source (`FailClosed`) |
 | `crates/teams-auth` | PKCE code exchange, token refresh and storage, skypetoken |
 | `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
 | `crates/proto-lab` | the lab harness CLI |
@@ -38,3 +39,7 @@ an invalid one is refused; the tests look in the same place.
 The GPUI smoke tests (`spikes/gpui-video/tests/smoke.rs`) start their own headless weston with a niri nested in it and
 never touch the desktop session. They need weston 15.0 or later (for `--fake-seat`) and niri on `PATH`; without them
 they're skipped, unless `GPUI_SMOKE_REQUIRE=1`. They run the window once on every GPU, chosen with `ZED_DEVICE_ID`.
+
+The tests enable `teams-fence`'s `test-support` feature through dev-dependencies, and cargo unifies it into everything
+built together with them (`cargo test`, `--all-targets`, `--all-features`), the `proto-lab` binary included. Such a
+binary refuses to run; `cargo build -p proto-lab` or `cargo run -p proto-lab` builds one without it.

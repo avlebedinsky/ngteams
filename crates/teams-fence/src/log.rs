@@ -138,12 +138,17 @@ impl FenceLog {
             .mode(0o600)
             .open(path)?;
         terminate_last_line(&mut file)?;
-        Ok(Self::from_writer(file))
+        Ok(Self::with_writer(file))
     }
 
-    /// Logs into any writer.
+    /// Logs into any writer. Tests only (`test-support`): a lab binary's log is the lab's `fence.log`.
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn from_writer(writer: impl Write + Send + 'static) -> Self {
+        Self::with_writer(writer)
+    }
+
+    fn with_writer(writer: impl Write + Send + 'static) -> Self {
         Self {
             sink: Mutex::new(Sink {
                 writer: Box::new(writer),

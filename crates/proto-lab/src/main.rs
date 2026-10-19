@@ -63,6 +63,12 @@ enum BundlesCommand {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if teams_fence::test_support_enabled() {
+        // cargo unified a dev-dependency's feature into this build (`cargo test`, `--all-targets`, `--all-features`):
+        // its fence API would take any roster and any member list, so this binary is for the test harness only
+        eprintln!("proto-lab: built with teams-fence's test-support feature; rebuild with `cargo build -p proto-lab`");
+        return ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
