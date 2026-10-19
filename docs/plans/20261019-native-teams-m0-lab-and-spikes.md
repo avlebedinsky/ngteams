@@ -123,7 +123,9 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - **Presence:** signed-in clients report activity on their own, so lab accounts show "Available" during runs. The lab never sets presence or a status message.
 - **Trouter and calling-endpoint registration:** makes a lab account reachable by coworkers. An incoming call is **never answered**: the native client ignores it, and in the browser, answering is a write that the fence blocks.
 
-**Native login with no clicks.** Each lab account's session lives in a persistent Chromium profile, created once with `proto-lab login` and MFA. `teams-auth` opens the authorize URL in that profile over CDP. The authorization code is taken from the redirect's `Location` header at the `Fetch` response stage, before navigation. This also works when the registered redirect is a custom scheme Chrome won't navigate to.
+**Login always happens in a browser engine**, as in the official clients. We never draw our own username, password or MFA forms. "Native" means only that the PKCE code exchange, token storage and refresh are done by our Rust code. In the product (M2) the interactive step runs in an embedded WebKitGTK window; in the lab it runs in Chromium over CDP.
+
+**Native login with no clicks (lab).** Each lab account's session lives in a persistent Chromium profile, created once with `proto-lab login` and MFA. `teams-auth` opens the authorize URL in that profile over CDP. The authorization code is taken from the redirect's `Location` header at the `Fetch` response stage, before navigation. This also works when the registered redirect is a custom scheme Chrome won't navigate to.
 
 ## Technical Details
 - **Lab directories (outside the repo):**
@@ -397,7 +399,7 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 
 ## Roadmap after M0 (each milestone gets its own plan)
 - **M1 — headless chat core:** `teams-store` (SQLite), `teams-trouter`, chatsvc (conversations, messages, send/edit/delete/react, rich text, mentions, attachments), an outbox with `clientmessageid` dedupe, catch-up sync, `teams-mock`. *Exit:* A→B delivery in under 2 s, covering edits, reactions and a 3-person group chat, automated.
-- **M2 — GPUI daily driver:** chat list, chat view and compose, desktop notifications, presence, search, teams and channels, files and calendar (Graph), Adaptive Cards, tray. *Exit:* GPUI UI tests plus screenshots against the live lab. From here the user can switch to a personal build.
+- **M2 — GPUI daily driver:** a sign-in window on an embedded WebKitGTK webview, the same way the official clients use WebView2/WKWebView: Microsoft's page handles MFA and Conditional Access, and the webview catches the redirect to the official client's native redirect URI. Then chat list, chat view and compose, desktop notifications, presence, search, teams and channels, files and calendar (Graph), Adaptive Cards, tray. *Exit:* GPUI UI tests plus screenshots against the live lab. From here the user can switch to a personal build.
 - **M3 — calls:** 1:1 and group audio, video and screen share (portal ScreenCast), TURN/TCP, `webrtc-audio-processing`, jitter buffer + PLC, H.264 via VA-API/NVENC + openh264. *Exit:* A↔B media assertions pass; a 3-way video call is stable for 10 minutes.
 - **M4 — meetings:** joining scheduled meetings, lobby, roster, raise hand, meeting chat, simulcast for large meetings, content sharing. *Exit:* A schedules with B and C, all three join natively, roster and media assertions pass.
 - **M5 — long tail:** breakout rooms, live captions, recording indicator, background blur (ONNX), PSTN, `teams-webhost` (WebKitGTK + JS SDK shim).
