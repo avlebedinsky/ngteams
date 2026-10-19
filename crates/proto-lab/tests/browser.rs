@@ -64,6 +64,17 @@ fn every_lab_browser_keeps_off_the_keyring_and_google_background_traffic() {
 }
 
 #[test]
+fn every_lab_browser_has_report_uploads_off_in_its_only_disable_features() {
+    let options = LaunchOptions::new(PathBuf::from("/lab/p"));
+    let disabled: Vec<String> = strings(&options.args())
+        .into_iter()
+        .filter(|arg| arg.starts_with("--disable-features="))
+        .collect();
+    // Chrome keeps only the last --disable-features, so there must be exactly one
+    assert_eq!(disabled, ["--disable-features=Reporting,NetworkErrorLogging"]);
+}
+
+#[test]
 fn headed_with_fake_media_still_leaves_the_port_to_chrome() {
     let options = LaunchOptions {
         user_data_dir: PathBuf::from("/tmp/profile with space"),
@@ -190,24 +201,6 @@ async fn launch_fake(root: &Path) -> TestResult<(Browser, u32)> {
     Ok((browser, helper))
 }
 
-/// Whether a process is still running (a zombie waiting for its parent counts as gone).
-fn running(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-    })
-}
-
-async fn gone(pid: u32) -> bool {
-    for _ in 0..100 {
-        if !running(pid) {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
 #[tokio::test]
 async fn the_endpoint_is_read_from_the_profile_and_dropping_the_browser_kills_its_whole_group() {
     let root = tempfile::tempdir().unwrap();
@@ -217,10 +210,10 @@ async fn the_endpoint_is_read_from_the_profile_and_dropping_the_browser_kills_it
         browser.endpoint().ws_url(),
         "ws://127.0.0.1:40123/devtools/browser/fake"
     );
-    assert!(running(helper));
+    assert!(common::running(helper));
     drop(browser);
 
-    assert!(gone(helper).await, "the helper outlived the browser");
+    assert!(common::gone(helper).await, "the helper outlived the browser");
 }
 
 #[tokio::test]
@@ -233,7 +226,7 @@ async fn a_browser_that_does_not_exit_gets_sigterm_and_its_group_goes_with_it() 
     let status = browser.wait_or_kill(Duration::from_millis(100)).await.unwrap();
 
     assert_eq!(status.signal(), Some(15));
-    assert!(gone(helper).await, "the helper outlived the browser");
+    assert!(common::gone(helper).await, "the helper outlived the browser");
 }
 
 // --- checksum and install ---

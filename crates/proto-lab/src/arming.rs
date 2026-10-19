@@ -1,6 +1,6 @@
 //! Arming the lab browser: the fence's HTTP layer on every request, before any target's code runs.
 //!
-//! [`ArmedBrowser::arm`] runs on a fresh debugging connection, before any page is opened:
+//! [`ArmedBrowser::arm`] takes the browser over and runs on a fresh debugging connection, before any page is opened:
 //! 1. `Fetch.enable` with the pattern `*` on the **browser** session. It pauses every request of every target, and it
 //!    is the only layer that still sees a `sendBeacon` or `fetch(keepalive)` fired from `pagehide` when the tab closes:
 //!    the tab's own session is gone by then, and such a request reaches the network if only per-target `Fetch` is on
@@ -24,8 +24,15 @@
 //!
 //! A request therefore pauses on its target's session first and on the browser session after that, and each layer
 //! decides it on its own ([`crate::fence_http::HttpFence`]); a deny at either fails it.
+//!
+//! The fence holds only while its connection does: a browser that no longer sees the client drops the browser-level
+//! `Fetch` and the auto-attach hold, and later requests go out unexamined. So the browser lives and dies with the
+//! fence: [`ArmedBrowser`] owns the [`Browser`], dropping it (or a failed [`ArmedBrowser::arm`]) kills the browser
+//! before the connection closes, and if the connection's events end while the fence is up (the browser closed the
+//! websocket, or the reader stopped on a message it couldn't read) the browser is killed at once and the run fails.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -33,6 +40,7 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::browser::{Browser, BrowserError};
 use crate::cdp::{Cdp, CdpError, Event, Events, SessionId};
 use crate::fence_http::{Denial, HttpFence};
 
@@ -147,6 +155,8 @@ pub enum ArmError {
     Timeout(Duration),
     #[error("the blank tab for the service-worker cleanup couldn't be closed")]
     SetupNotClosed,
+    #[error("the fence lost its connection to the browser; the browser was killed")]
+    ConnectionLost,
     #[error(transparent)]
     Cdp(#[from] CdpError),
 }
@@ -235,16 +245,27 @@ pub struct ArmingFailure {
     pub closed: bool,
 }
 
-/// Why a run failed: a denied request or a target that couldn't be armed.
+/// Why a run failed: a denied request, a target that couldn't be armed, or a fence that lost its connection.
 #[derive(Debug, thiserror::Error)]
-#[error("the run failed: {} request(s) denied, {} target(s) not armed", denials.len(), failures.len())]
+#[error(
+    "the run failed: {} request(s) denied, {} target(s) not armed{}",
+    denials.len(),
+    failures.len(),
+    if *connection_lost { ", and the fence lost its connection to the browser" } else { "" }
+)]
 pub struct RunFailed {
     pub denials: Vec<Denial>,
     pub failures: Vec<ArmingFailure>,
+    /// The connection's events ended while the fence was up: nothing was decided after that, and the browser was
+    /// killed.
+    pub connection_lost: bool,
 }
 
 #[derive(Default)]
 struct Targets {
+    /// Every session attached and not detached since, armed or not. A target's arming records it only if its session
+    /// is still here, so one that detaches mid-arming never shows up as armed.
+    attached: HashSet<SessionId>,
     armed: HashMap<SessionId, ArmedTarget>,
     failures: Vec<ArmingFailure>,
 }
@@ -253,15 +274,36 @@ struct Shared {
     http: HttpFence,
     targets: Mutex<Targets>,
     changed: Notify,
+    /// The browser, until the fence is closed or dropped, or its connection is lost.
+    browser: Mutex<Option<Browser>>,
+    /// The connection's events ended while the fence was up.
+    lost: AtomicBool,
 }
 
 impl Shared {
     fn targets(&self) -> MutexGuard<'_, Targets> {
         self.targets.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn take_browser(&self) -> Option<Browser> {
+        self.browser.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+
+    /// Kills the browser and every process it started, unless it was taken already.
+    fn kill_browser(&self) {
+        drop(self.take_browser());
+    }
+
+    fn lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
+    }
 }
 
-/// A browser with the fence's HTTP layer armed. It handles the connection's events until dropped.
+/// A browser with the fence's HTTP layer armed. It owns the browser, and handles the connection's events until it is
+/// closed or dropped.
+///
+/// Dropping it kills the browser (with every process the browser started) before the connection closes, so the browser
+/// never runs without the fence; [`Self::close`] lets the browser exit on its own first.
 pub struct ArmedBrowser {
     cdp: Cdp,
     shared: Arc<Shared>,
@@ -270,24 +312,31 @@ pub struct ArmedBrowser {
 
 impl Drop for ArmedBrowser {
     fn drop(&mut self) {
+        // this body runs before the fields (the connection among them) are dropped
+        self.shared.kill_browser();
         self.task.abort();
     }
 }
 
 impl ArmedBrowser {
-    /// Arms the browser behind `cdp` (see the module docs) and handles `events` from then on: every paused request goes
-    /// through `http`, every attached target is armed before it runs.
+    /// Takes `browser` over, arms it on a fresh connection (see the module docs) and handles that connection's events
+    /// from then on: every paused request goes through `http`, every attached target is armed before it runs.
     ///
     /// # Errors
-    /// When the browser refuses browser-level `Fetch` or auto-attach, or the service-worker cleanup fails.
-    pub async fn arm(cdp: Cdp, events: Events, http: HttpFence, options: &ArmOptions) -> Result<Self, ArmError> {
+    /// When the connection can't be opened, the browser refuses browser-level `Fetch` or auto-attach, or the
+    /// service-worker cleanup fails. The browser is killed then: it never runs half armed.
+    pub async fn arm(browser: Browser, http: HttpFence, options: &ArmOptions) -> Result<Self, ArmError> {
+        let (cdp, events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
         cdp.call(None, "Fetch.enable", intercept_all()).await?;
         let shared = Arc::new(Shared {
             http,
             targets: Mutex::new(Targets::default()),
             changed: Notify::new(),
+            browser: Mutex::new(Some(browser)),
+            lost: AtomicBool::new(false),
         });
         let task = tokio::spawn(handle_events(cdp.clone(), events, Arc::clone(&shared)));
+        // from here on, an early return drops `armed`, and that kills the browser
         let armed = Self { cdp, shared, task };
         armed.cdp.call(None, "Target.setAutoAttach", hold_new_targets()).await?;
         let blank = armed.open_page(SETUP_TIMEOUT).await?;
@@ -296,6 +345,23 @@ impl ArmedBrowser {
             return Err(ArmError::SetupNotClosed);
         }
         Ok(armed)
+    }
+
+    /// Asks the browser to close (`Browser.close`), waits up to `grace` for it to exit, and stops it the way
+    /// [`Browser::wait_or_kill`] does if it doesn't. A browser killed already (its connection was lost) needs nothing
+    /// more.
+    ///
+    /// # Errors
+    /// [`BrowserError::Stop`] when the browser process can't be reaped.
+    pub async fn close(self, grace: Duration) -> Result<(), BrowserError> {
+        // taken first, so the connection closing as the browser exits isn't taken for a lost one
+        let Some(browser) = self.shared.take_browser() else {
+            return Ok(());
+        };
+        // best effort: the connection may drop before the reply, or never answer if its reader is gone
+        let _ = tokio::time::timeout(grace, self.cdp.call(None, "Browser.close", Value::Null)).await;
+        browser.wait_or_kill(grace).await?;
+        Ok(())
     }
 
     /// The connection, for driving the armed targets.
@@ -318,14 +384,17 @@ impl ArmedBrowser {
             loop {
                 let changed = self.shared.changed.notified();
                 if let Some(page) = self.armed_page(target_id) {
-                    return page;
+                    return Ok(page);
+                }
+                if self.shared.lost() {
+                    return Err(ArmError::ConnectionLost);
                 }
                 changed.await;
             }
         };
         tokio::time::timeout(timeout, wait)
             .await
-            .map_err(|_| ArmError::Timeout(timeout))
+            .map_err(|_| ArmError::Timeout(timeout))?
     }
 
     fn armed_page(&self, target_id: &str) -> Option<ArmedTarget> {
@@ -355,36 +424,59 @@ impl ArmedBrowser {
         self.shared.http.denials()
     }
 
-    /// The run's verdict so far: any denied request or unarmed target fails it.
+    /// The run's verdict so far: any denied request or unarmed target fails it, and so does a lost connection.
     ///
     /// # Errors
     /// [`RunFailed`] listing them.
     pub fn verdict(&self) -> Result<(), RunFailed> {
         let denials = self.denials();
         let failures = self.failures();
-        if denials.is_empty() && failures.is_empty() {
+        let connection_lost = self.shared.lost();
+        if denials.is_empty() && failures.is_empty() && !connection_lost {
             return Ok(());
         }
-        Err(RunFailed { denials, failures })
+        Err(RunFailed {
+            denials,
+            failures,
+            connection_lost,
+        })
     }
 }
 
-async fn handle_events(cdp: Cdp, mut events: Events, shared: Arc<Shared>) {
+/// Handles the connection's events until they end, which happens only when the connection does: the browser dropped
+/// it, or the reader stopped on a message it couldn't read. Either way nothing is decided any more, so the run fails
+/// and the browser is killed: a browser that no longer sees the client releases what the fence held, and one that
+/// still does keeps its paused requests and held targets waiting forever.
+async fn handle_events(cdp: Cdp, events: Events, shared: Arc<Shared>) {
+    dispatch_events(cdp, events, &shared).await;
+    shared.lost.store(true, Ordering::SeqCst);
+    shared.kill_browser();
+    shared.changed.notify_waiters();
+}
+
+async fn dispatch_events(cdp: Cdp, mut events: Events, shared: &Arc<Shared>) {
     while let Some(event) = events.recv().await {
         match event.method.as_str() {
             "Fetch.requestPaused" => {
-                let (cdp, shared) = (cdp.clone(), Arc::clone(&shared));
+                let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
                 // a request whose target is gone can't be answered; it was never sent either
                 tokio::spawn(async move {
                     let _ = shared.http.handle(&cdp, &event).await;
                 });
             }
             "Target.attachedToTarget" => {
-                tokio::spawn(on_attached(cdp.clone(), Arc::clone(&shared), event));
+                // recorded here, in event order, so the arming sees a detach that comes before it finishes
+                if let Some(session) = event.params["sessionId"].as_str() {
+                    shared.targets().attached.insert(SessionId::new(session));
+                }
+                tokio::spawn(on_attached(cdp.clone(), Arc::clone(shared), event));
             }
             "Target.detachedFromTarget" => {
                 if let Some(session) = event.params["sessionId"].as_str() {
-                    shared.targets().armed.remove(&SessionId::new(session));
+                    let session = SessionId::new(session);
+                    let mut targets = shared.targets();
+                    targets.attached.remove(&session);
+                    targets.armed.remove(&session);
                 }
             }
             _ => {}
@@ -412,11 +504,16 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
     };
     match outcome {
         Ok(armed) => {
-            shared.targets().armed.insert(armed.session.clone(), armed);
+            let mut targets = shared.targets();
+            // one that detached while it was being armed is gone: listing it would hand out a dead session
+            if targets.attached.contains(&armed.session) {
+                targets.armed.insert(armed.session.clone(), armed);
+            }
         }
         // the session is gone; nothing left to arm, resume or close through it
-        Err(error) if error.session_gone() => {}
+        Err(error) if error.session_gone() => forget(&shared, session.as_ref()),
         Err(error) => {
+            forget(&shared, session.as_ref());
             let closed = match &target_id {
                 Some(id) => close_target(&cdp, id).await,
                 None => false,
@@ -430,6 +527,13 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
         }
     }
     shared.changed.notify_waiters();
+}
+
+/// Drops a session that won't be armed from the attached set: if its target can't be closed, no detach may come.
+fn forget(shared: &Shared, session: Option<&SessionId>) {
+    if let Some(session) = session {
+        shared.targets().attached.remove(session);
+    }
 }
 
 async fn close_target(cdp: &Cdp, target_id: &str) -> bool {

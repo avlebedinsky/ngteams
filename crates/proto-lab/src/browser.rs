@@ -18,7 +18,13 @@ use crate::config::{Alias, LabPaths};
 /// Flags every lab browser gets: no first-run UI, no Google background traffic (sync, component and field-trial
 /// downloads), no extensions, no crash reporter, and the plain password store. The lab profiles were created with
 /// `--password-store=basic` (Playwright's default), and that keeps Chrome away from the user's keyring.
+///
+/// The Reporting API and Network Error Logging are off: the network service uploads their reports (CSP `report-to`,
+/// deprecations, interventions, NEL) itself, and those POSTs never pause in `Fetch`, so the fence can't see them
+/// (checked on Chrome 155: an armed browser delivered a CSP report to a local server with no deny). This is the only
+/// `--disable-features`; Chrome keeps just the last one, so another must be merged into it.
 pub const BASE_ARGS: &[&str] = &[
+    "--disable-features=Reporting,NetworkErrorLogging",
     "--no-first-run",
     "--no-default-browser-check",
     "--password-store=basic",

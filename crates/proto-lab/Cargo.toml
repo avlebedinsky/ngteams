@@ -23,9 +23,12 @@ url.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+# a local HTTPS server: Chrome uploads Reporting API reports only over a secure connection
+rcgen.workspace = true
 tempfile.workspace = true
 # a local websocket server for the CDP client tests
 tokio = { workspace = true, features = ["net"] }
+tokio-rustls.workspace = true
 wiremock.workspace = true
 
 [lints]

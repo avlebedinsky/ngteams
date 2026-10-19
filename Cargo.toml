@@ -24,6 +24,7 @@ teams-proto = { path = "crates/teams-proto" }
 clap = { version = "4.6.7", features = ["derive"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 oo7 = "0.6.0"
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 rustix = { version = "1.1.5", features = ["process"] }
@@ -33,6 +34,7 @@ sha2 = "0.11.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = "1.53.3"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
 tokio-tungstenite = "0.30.0"
 toml = "1.1.8"
 trybuild = "1.0.122"

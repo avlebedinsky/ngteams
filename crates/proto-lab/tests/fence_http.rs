@@ -8,6 +8,7 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -22,7 +23,11 @@ use serde_json::{Value, json};
 use teams_fence::{
     DenyReason, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope, Target, WriteKind,
 };
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
+};
 use tokio::sync::mpsc;
+use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
 use tokio_tungstenite::tungstenite::Message;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -390,21 +395,60 @@ fn the_default_run_neutralizes_the_teams_origins() {
 }
 
 /// A fake browser endpoint: it answers every command (with an error when `refuse` says so), records them, and sends
-/// whatever events the test pushes.
+/// whatever events the test pushes. Its process is a shell script that points `DevToolsActivePort` at the endpoint,
+/// starts a helper (as Chrome starts its crash handler) and waits, so the tests can see the browser killed.
 struct FakeBrowser {
-    url: String,
+    port: u16,
     commands: Arc<Mutex<Vec<Value>>>,
     push: mpsc::UnboundedSender<Value>,
+    root: tempfile::TempDir,
 }
+
+/// Hangs the fake browser up when pushed as an event, as a browser dropping the connection would.
+const HANG_UP: Value = Value::Null;
 
 impl FakeBrowser {
     async fn start(refuse: fn(&str, Option<&str>) -> bool) -> TestResult<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let url = format!("ws://{}/devtools/browser/fake", listener.local_addr()?);
+        let port = listener.local_addr()?.port();
         let commands = Arc::new(Mutex::new(Vec::new()));
         let (push, pushed) = mpsc::unbounded_channel();
         tokio::spawn(serve_fake(listener, Arc::clone(&commands), pushed, refuse));
-        Ok(Self { url, commands, push })
+        Ok(Self {
+            port,
+            commands,
+            push,
+            root: tempfile::tempdir()?,
+        })
+    }
+
+    /// Starts the fake browser's process.
+    async fn launch(&self) -> TestResult<Browser> {
+        let script = format!(
+            "#!/bin/sh\n\
+             for arg; do case \"$arg\" in --user-data-dir=*) dir=\"${{arg#--user-data-dir=}}\";; esac; done\n\
+             sleep 300 &\n\
+             echo $! > \"$dir/helper.pid\"\n\
+             printf '{}\\n/devtools/browser/fake\\n' > \"$dir/DevToolsActivePort\"\n\
+             exec sleep 300\n",
+            self.port
+        );
+        let executable = self.root.path().join("fake-chrome");
+        std::fs::write(&executable, script)?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let options = LaunchOptions::new(self.root.path().join("p"));
+        Ok(Browser::launch(&executable, &options, Duration::from_secs(10)).await?)
+    }
+
+    /// The helper the fake browser's process started: it lives as long as the browser's process group.
+    fn helper(&self) -> TestResult<u32> {
+        let pid = std::fs::read_to_string(self.root.path().join("p").join("helper.pid"))?;
+        Ok(pid.trim().parse()?)
+    }
+
+    fn hang_up(&self) -> TestResult {
+        self.push.send(HANG_UP).map_err(|_| "the fake browser is gone")?;
+        Ok(())
     }
 
     fn event(&self, session: Option<&str>, method: &str, params: &Value) -> TestResult {
@@ -458,22 +502,41 @@ async fn serve_fake(
             message = socket.next() => {
                 let Some(Ok(Message::Text(text))) = message else { return Ok(()) };
                 let command: Value = serde_json::from_str(text.as_str())?;
-                let reply = fake_reply(&command, refuse);
-                let created = command["method"] == "Target.createTarget";
-                commands.lock().unwrap_or_else(PoisonError::into_inner).push(command);
-                socket.send(Message::text(reply.to_string())).await?;
-                if created {
-                    // a new tab attaches through the browser's auto-attach
-                    let event = json!({"method": "Target.attachedToTarget", "params": attached("S-new", "T-new", "page")});
-                    socket.send(Message::text(event.to_string())).await?;
-                }
+                commands.lock().unwrap_or_else(PoisonError::into_inner).push(command.clone());
+                answer_fake(&mut socket, &command, refuse).await?;
             }
             event = pushed.recv() => {
-                let Some(event) = event else { return Ok(()) };
+                let Some(event) = event.filter(|event| *event != HANG_UP) else { return Ok(()) };
                 socket.send(Message::text(event.to_string())).await?;
             }
         }
     }
+}
+
+/// The session whose target detaches before its resume is answered: a short-lived worker, or a tab closed at once.
+const SHORT_LIVED: &str = "S-short";
+
+async fn answer_fake(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    command: &Value,
+    refuse: fn(&str, Option<&str>) -> bool,
+) -> SendResult<()> {
+    let method = &command["method"];
+    if method == "Runtime.runIfWaitingForDebugger" && command["sessionId"] == SHORT_LIVED {
+        let event = json!({"method": "Target.detachedFromTarget", "params": {"sessionId": SHORT_LIVED}});
+        socket.send(Message::text(event.to_string())).await?;
+        // the detach is handled well before the resume's reply wakes the arming up
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    socket
+        .send(Message::text(fake_reply(command, refuse).to_string()))
+        .await?;
+    if method == "Target.createTarget" {
+        // a new tab attaches through the browser's auto-attach
+        let event = json!({"method": "Target.attachedToTarget", "params": attached("S-new", "T-new", "page")});
+        socket.send(Message::text(event.to_string())).await?;
+    }
+    Ok(())
 }
 
 fn fake_reply(command: &Value, refuse: fn(&str, Option<&str>) -> bool) -> Value {
@@ -504,11 +567,15 @@ fn attached(session: &str, target: &str, kind: &str) -> Value {
 
 async fn arm_fake(fake: &FakeBrowser, origins: &[&str]) -> TestResult<(ArmedBrowser, Lab)> {
     let lab = lab()?;
-    let (cdp, events) = Cdp::connect(&fake.url).await?;
     let options = ArmOptions {
         service_worker_origins: origins.iter().map(|&origin| origin.to_owned()).collect(),
     };
-    let armed = ArmedBrowser::arm(cdp, events, http_fence(&lab, Classifier::seeded(), &[]), &options).await?;
+    let armed = ArmedBrowser::arm(
+        fake.launch().await?,
+        http_fence(&lab, Classifier::seeded(), &[]),
+        &options,
+    )
+    .await?;
     Ok((armed, lab))
 }
 
@@ -742,6 +809,99 @@ async fn a_session_gone_before_it_is_armed_is_dropped_without_closing_its_target
 }
 
 #[tokio::test]
+async fn a_target_that_detaches_while_it_is_armed_is_never_listed() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+
+    fake.event(
+        None,
+        "Target.attachedToTarget",
+        &attached(SHORT_LIVED, "T-short", "worker"),
+    )
+    .unwrap();
+    fake.event(None, "Target.attachedToTarget", &attached("S-long", "T-long", "page"))
+        .unwrap();
+
+    armed_target(&armed, "S-long").await.unwrap();
+    fake.sent("the short-lived target's resume", |command| {
+        command["method"] == "Runtime.runIfWaitingForDebugger" && command["sessionId"] == SHORT_LIVED
+    })
+    .await
+    .unwrap();
+    // the resume is answered 200 ms after the detach; the arming finishes right after that
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sessions: Vec<String> = armed
+        .targets()
+        .iter()
+        .map(|target| target.session.to_string())
+        .collect();
+    assert!(!sessions.iter().any(|session| session == SHORT_LIVED), "{sessions:?}");
+    assert!(sessions.iter().any(|session| session == "S-long"), "{sessions:?}");
+    armed.verdict().unwrap();
+}
+
+#[tokio::test]
+async fn dropping_the_fence_kills_the_browser() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let helper = fake.helper().unwrap();
+    assert!(common::running(helper));
+
+    drop(armed);
+
+    assert!(common::gone(helper).await, "the browser outlived its fence");
+}
+
+fn refuse_browser_auto_attach(method: &str, session: Option<&str>) -> bool {
+    method == "Target.setAutoAttach" && session.is_none()
+}
+
+#[tokio::test]
+async fn a_browser_that_cannot_be_armed_is_killed() {
+    let fake = FakeBrowser::start(refuse_browser_auto_attach).await.unwrap();
+
+    let armed = arm_fake(&fake, &[]).await;
+
+    assert!(armed.is_err(), "the browser refused auto-attach");
+    assert!(
+        common::gone(fake.helper().unwrap()).await,
+        "the browser outlived a failed arming"
+    );
+}
+
+#[tokio::test]
+async fn closing_the_fence_asks_the_browser_to_close_then_stops_it() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let helper = fake.helper().unwrap();
+
+    armed.close(Duration::from_millis(100)).await.unwrap();
+
+    assert!(fake.methods_on(None).contains(&"Browser.close".to_owned()));
+    assert!(common::gone(helper).await, "the browser outlived close");
+}
+
+#[tokio::test]
+async fn a_lost_connection_fails_the_run_and_kills_the_browser() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let helper = fake.helper().unwrap();
+    armed.verdict().unwrap();
+
+    fake.hang_up().unwrap();
+
+    assert!(
+        common::gone(helper).await,
+        "the browser outlived its fence's connection"
+    );
+    let failed = armed.verdict().unwrap_err();
+    assert!(failed.connection_lost);
+    assert!(failed.denials.is_empty() && failed.failures.is_empty());
+    assert!(failed.to_string().contains("lost its connection"), "{failed}");
+    assert!(armed.open_page(Duration::from_secs(5)).await.is_err());
+}
+
+#[tokio::test]
 async fn a_paused_request_is_answered_on_the_session_it_paused_on() {
     let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
     let (armed, lab) = arm_fake(&fake, &[]).await.unwrap();
@@ -921,7 +1081,6 @@ async fn denials_until(
 
 /// One armed run on a throwaway profile.
 struct Run {
-    browser: Browser,
     armed: ArmedBrowser,
     lab: Lab,
     _profile: tempfile::TempDir,
@@ -931,13 +1090,11 @@ async fn start_run(chrome: &Path, server: &MockServer, classifier: Classifier) -
     let profile = tempfile::tempdir()?;
     let browser = Browser::launch(chrome, &LaunchOptions::new(profile.path().join("p")), STEP).await?;
     let lab = lab()?;
-    let (cdp, events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };
-    let armed = ArmedBrowser::arm(cdp, events, http_fence(&lab, classifier, &[]), &options).await?;
+    let armed = ArmedBrowser::arm(browser, http_fence(&lab, classifier, &[]), &options).await?;
     Ok(Run {
-        browser,
         armed,
         lab,
         _profile: profile,
@@ -946,10 +1103,7 @@ async fn start_run(chrome: &Path, server: &MockServer, classifier: Classifier) -
 
 impl Run {
     async fn finish(self) -> TestResult {
-        // closing is best effort: the connection may drop before the reply
-        let _ = self.armed.cdp().call(None, "Browser.close", Value::Null).await;
-        drop(self.armed);
-        self.browser.wait_or_kill(Duration::from_secs(10)).await?;
+        self.armed.close(Duration::from_secs(10)).await?;
         Ok(())
     }
 }
@@ -1148,15 +1302,15 @@ async fn service_workers_are_neutralized_at_run_start_and_bypassed_during_it() {
         .await
         .unwrap();
 
-    let outcome = tokio::time::timeout(Duration::from_secs(90), async {
+    // the browser moves into the run: an error or the timeout drops it (or the fence owning it), which kills it
+    let outcome = tokio::time::timeout(Duration::from_secs(90), async move {
         leave_a_service_worker_behind(&browser, &probe_page).await?;
 
         let lab = lab()?;
-        let (cdp, events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
         let options = ArmOptions {
             service_worker_origins: vec![server.uri()],
         };
-        let armed = ArmedBrowser::arm(cdp, events, http_fence(&lab, Classifier::seeded(), &[]), &options).await?;
+        let armed = ArmedBrowser::arm(browser, http_fence(&lab, Classifier::seeded(), &[]), &options).await?;
         let cdp = armed.cdp().clone();
         let page = armed.open_page(STEP).await?;
         navigate(&cdp, &page, &probe_page).await?;
@@ -1171,10 +1325,190 @@ async fn service_workers_are_neutralized_at_run_start_and_bypassed_during_it() {
         assert_eq!(evaluate(&cdp, &page.session, "window.setUp()").await?, "controlled");
         assert_eq!(evaluate(&cdp, &page.session, "window.probe()").await?, "from-network");
         armed.verdict()?;
-        let _ = cdp.call(None, "Browser.close", Value::Null).await;
+        armed.close(Duration::from_secs(10)).await?;
         TestResult::Ok(())
     })
     .await;
-    browser.wait_or_kill(Duration::from_secs(10)).await.unwrap();
     outcome.expect("the run took over 90 s").unwrap();
+}
+
+// --- reports the network service uploads by itself ---
+
+/// A page that sets a reporting endpoint and a CSP whose violation (its own image) is reported there.
+const REPORTING_PAGE: &str = r#"<!doctype html><title>reporting</title><img src="/blocked.png">"#;
+
+/// A local HTTPS server with a fresh self-signed certificate (Chrome uploads reports only over a secure connection;
+/// the test browser ignores certificate errors). It serves [`REPORTING_PAGE`] at `/page`, answers anything else with
+/// an empty 200, and records every request as `METHOD path`.
+struct ReportingServer {
+    origin: String,
+    received: Arc<Mutex<Vec<String>>>,
+}
+
+impl ReportingServer {
+    async fn start() -> TestResult<Self> {
+        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])?;
+        let key = PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+        let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+        let config = tokio_rustls::rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_single_cert(vec![certified.cert.der().clone()], key.into())?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let origin = format!("https://127.0.0.1:{}", listener.local_addr()?.port());
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        tokio::spawn(accept_reporting(
+            listener,
+            acceptor,
+            origin.clone(),
+            Arc::clone(&received),
+        ));
+        Ok(Self { origin, received })
+    }
+
+    fn received(&self) -> Vec<String> {
+        self.received.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+async fn accept_reporting(
+    listener: tokio::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    origin: String,
+    received: Arc<Mutex<Vec<String>>>,
+) -> SendResult<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let (acceptor, origin, received) = (acceptor.clone(), origin.clone(), Arc::clone(&received));
+        tokio::spawn(async move {
+            // a connection that fails the handshake or breaks off is just over
+            if let Ok(stream) = acceptor.accept(stream).await {
+                let _ = answer_reporting(stream, &origin, &received).await;
+            }
+        });
+    }
+}
+
+/// Answers the HTTP/1.1 requests on one connection.
+async fn answer_reporting(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    origin: &str,
+    received: &Mutex<Vec<String>>,
+) -> SendResult<()> {
+    let mut stream = BufReader::new(stream);
+    while let Some((method, path)) = read_request(&mut stream).await? {
+        received
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(format!("{method} {path}"));
+        let response = if path == "/page" {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nReporting-Endpoints: main=\"{origin}/reports\"\r\n\
+                 Content-Security-Policy: img-src 'none'; report-to main\r\nContent-Length: {}\r\n\r\n{REPORTING_PAGE}",
+                REPORTING_PAGE.len()
+            )
+        } else {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_owned()
+        };
+        stream.get_mut().write_all(response.as_bytes()).await?;
+    }
+    Ok(())
+}
+
+/// Reads one request (its body skipped) and gives its method and path; `None` once the connection is closed.
+async fn read_request(stream: &mut (impl AsyncBufRead + Unpin)) -> SendResult<Option<(String, String)>> {
+    let mut line = String::new();
+    if stream.read_line(&mut line).await? == 0 {
+        return Ok(None);
+    }
+    let mut parts = line.split_whitespace();
+    let (method, path) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+    let mut length = 0;
+    loop {
+        let mut header = String::new();
+        stream.read_line(&mut header).await?;
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse()?;
+        }
+    }
+    stream.read_exact(&mut vec![0; length]).await?;
+    Ok(Some((method.to_owned(), path.to_owned())))
+}
+
+/// How long a report gets to arrive. With `--short-reporting-delay` Chrome uploads within a second.
+const REPORT_WINDOW: Duration = Duration::from_secs(5);
+
+/// The test's Chrome: the lab flags plus `--ignore-certificate-errors` and `--short-reporting-delay`. With
+/// `reporting_on`, the lab's `--disable-features` is left out.
+fn reporting_chrome(chrome: &Path, dir: &Path, reporting_on: bool) -> TestResult<PathBuf> {
+    let skipped = if reporting_on { "--disable-features=*" } else { "--none" };
+    let script = format!(
+        "#!/bin/sh\n\
+         for arg; do shift; case \"$arg\" in {skipped}) ;; *) set -- \"$@\" \"$arg\";; esac; done\n\
+         exec '{}' \"$@\" --ignore-certificate-errors --short-reporting-delay\n",
+        chrome.display()
+    );
+    let wrapper = dir.join("chrome");
+    std::fs::write(&wrapper, script)?;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+    Ok(wrapper)
+}
+
+/// Loads the reporting page in an armed browser and gives what reached the server within [`REPORT_WINDOW`] (or until
+/// a report did) and what the fence denied.
+async fn reports_reaching(chrome: &Path, reporting_on: bool) -> TestResult<(Vec<String>, Vec<String>)> {
+    let server = ReportingServer::start().await?;
+    let profile = tempfile::tempdir()?;
+    let wrapper = reporting_chrome(chrome, profile.path(), reporting_on)?;
+    let browser = Browser::launch(&wrapper, &LaunchOptions::new(profile.path().join("p")), STEP).await?;
+    let lab = lab()?;
+    let options = ArmOptions {
+        service_worker_origins: vec![],
+    };
+    let armed = ArmedBrowser::arm(browser, http_fence(&lab, Classifier::seeded(), &[]), &options).await?;
+    let page = armed.open_page(STEP).await?;
+    navigate(armed.cdp(), &page, &format!("{}/page", server.origin)).await?;
+    let reported = async {
+        while !server.received().iter().any(|request| request.starts_with("POST ")) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let _ = tokio::time::timeout(REPORT_WINDOW, reported).await;
+    let denied = armed
+        .denials()
+        .iter()
+        .map(|denial| format!("{} {}", denial.method, denial.url))
+        .collect();
+    armed.close(Duration::from_secs(10)).await?;
+    Ok((server.received(), denied))
+}
+
+#[tokio::test]
+async fn reports_the_network_service_uploads_by_itself_are_off() {
+    let Some(chrome) = common::chrome_or_skip() else {
+        return;
+    };
+    let run = |reporting_on| tokio::time::timeout(Duration::from_secs(60), reports_reaching(&chrome, reporting_on));
+
+    // with the Reporting API on, the CSP report reaches the server and the fence never sees it
+    let (received, denied) = run(true).await.expect("the run took over 60 s").unwrap();
+    assert!(
+        received.contains(&"POST /reports".to_owned()),
+        "no report even with Reporting on, so the test proves nothing: {received:?}"
+    );
+    assert_eq!(denied, Vec::<String>::new(), "the report went past the fence");
+
+    // a lab browser sends none
+    let (received, denied) = run(false).await.expect("the run took over 60 s").unwrap();
+    assert!(received.contains(&"GET /page".to_owned()), "{received:?}");
+    let posted: Vec<&String> = received.iter().filter(|request| request.starts_with("POST ")).collect();
+    assert_eq!(posted, Vec::<&String>::new(), "a report got out");
+    assert_eq!(denied, Vec::<String>::new());
 }
