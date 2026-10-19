@@ -1,7 +1,11 @@
 //! The fixture guard: scans files meant for the repository (sanitized fixtures, docs) for what must never be committed,
 //! such as JWTs, `Bearer` and skypetoken values, OAuth tokens, email addresses and real MRIs.
 //!
-//! Sanitized placeholders (`<user:a>`, `<mri:b>`, `<guid:1>`, `<token:1>`) and prose that only names these things pass.
+//! Each line is scanned twice: as written, and decoded the way captures hide text, with `%XX` percent escapes decoded
+//! (`8%3Aorgid%3A…`, `someone%40contoso.com`) and backslash escapes of a JSON string body removed
+//! (`{"body":"{\"refresh_token\":…}"}`).
+//!
+//! Sanitized placeholders (`<user:a>`,`<mri:b>`, `<guid:1>`, `<token:1>`) and prose that only names these things pass.
 //! A finding reports where and what, never the matched value, so the report itself cannot leak it.
 //!
 //! The repo-wide check is `tests/fixture_guard.rs`; `proto-lab export` (M0 Task 9) runs the same scan before it
@@ -23,7 +27,8 @@ pub enum Kind {
     Bearer,
     /// A skypetoken value, in a header (`X-Skypetoken`, `skypetoken=`) or a JSON field.
     Skypetoken,
-    /// An `access_token`, `refresh_token` or `id_token` value.
+    /// An OAuth token value under an `access`/`refresh`/`id` token key in any spelling (`refresh_token`,
+    /// `refreshToken`, `x-refresh-token`), or a `secret` value (the MSAL cache keeps opaque refresh tokens there).
     OauthToken,
     /// An email address outside the reserved `example.com`/`.org`/`.net` domains.
     Email,
@@ -75,7 +80,7 @@ impl Guard {
             ),
             (
                 Kind::OauthToken,
-                format!(r#"(?i)\b(?:access|refresh|id)_token["']?\s*[:=]\s*["']?{VALUE}"#),
+                format!(r#"(?i)(?:(?:access|refresh|id)[_-]?token|secret)["']?\s*[:=]\s*["']?{VALUE}"#),
             ),
             (
                 Kind::Email,
@@ -93,13 +98,19 @@ impl Guard {
         Ok(Self { rules })
     }
 
-    /// Every hit in `text`, as (1-based line, kind), at most one per kind and line, in line order.
+    /// Every hit in `text`, as (1-based line, kind), at most one per kind and line, in line order. A line is checked
+    /// both as written and decoded (see the module docs).
     #[must_use]
     pub fn scan_text(&self, text: &str) -> Vec<(usize, Kind)> {
         let mut found = Vec::new();
         for (index, line) in text.lines().enumerate() {
+            let decoded = decode(line);
             for (kind, regex) in &self.rules {
-                if matches_line(*kind, regex, line) {
+                if matches_line(*kind, regex, line)
+                    || decoded
+                        .as_deref()
+                        .is_some_and(|decoded| matches_line(*kind, regex, decoded))
+                {
                     found.push((index + 1, *kind));
                 }
             }
@@ -111,7 +122,7 @@ impl Guard {
     /// skipped; non-UTF-8 bytes are read lossily, so binary files are scanned too.
     ///
     /// # Errors
-    /// A root is missing, or a file or directory under it can't be read.
+    /// A root is missing, or a file or directory under it can't be read; the error message names that path.
     pub fn scan_paths(&self, roots: &[&Path]) -> io::Result<Vec<Finding>> {
         let mut findings = Vec::new();
         for root in roots {
@@ -121,17 +132,20 @@ impl Guard {
     }
 
     fn scan_entry(&self, path: &Path, findings: &mut Vec<Finding>) -> io::Result<()> {
-        let kind = fs::symlink_metadata(path)?.file_type();
+        let kind = fs::symlink_metadata(path).map_err(|e| at(path, &e))?.file_type();
         if kind.is_dir() {
-            let mut entries = fs::read_dir(path)?
+            let mut entries = fs::read_dir(path)
+                .map_err(|e| at(path, &e))?
                 .map(|entry| entry.map(|e| e.path()))
-                .collect::<io::Result<Vec<_>>>()?;
+                .collect::<io::Result<Vec<_>>>()
+                .map_err(|e| at(path, &e))?;
             entries.sort();
             for entry in entries {
                 self.scan_entry(&entry, findings)?;
             }
         } else if kind.is_file() {
-            let text = String::from_utf8_lossy(&fs::read(path)?).into_owned();
+            let bytes = fs::read(path).map_err(|e| at(path, &e))?;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
             findings.extend(self.scan_text(&text).into_iter().map(|(line, kind)| Finding {
                 path: path.to_owned(),
                 line,
@@ -140,6 +154,71 @@ impl Guard {
         }
         Ok(())
     }
+}
+
+/// `error` with `path` in its message.
+fn at(path: &Path, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+/// How many nested encodings are peeled off at most (`%253A` → `%3A` → `:`).
+const DECODE_ROUNDS: usize = 4;
+
+/// `line` with percent escapes decoded and backslash escapes removed, repeated until nothing changes, or `None` when
+/// the line has neither.
+fn decode(line: &str) -> Option<String> {
+    if !line.contains(['%', '\\']) {
+        return None;
+    }
+    let mut current = line.to_owned();
+    for _ in 0..DECODE_ROUNDS {
+        let next = decode_once(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    Some(current)
+}
+
+/// One decoding pass: `%XX` becomes its byte; a backslash is dropped, and `\n`, `\r`, `\t` become a space so the words
+/// around them stay apart.
+fn decode_once(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&byte) = bytes.get(i) {
+        match byte {
+            b'%' => {
+                if let (Some(high), Some(low)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+                    out.push(high << 4 | low);
+                    i += 3;
+                } else {
+                    out.push(byte);
+                    i += 1;
+                }
+            }
+            b'\\' => {
+                if matches!(bytes.get(i + 1), Some(b'n' | b'r' | b't')) {
+                    out.push(b' ');
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The value of an ASCII hex digit.
+fn hex(byte: Option<&u8>) -> Option<u8> {
+    let digit = char::from(*byte?).to_digit(16)?;
+    u8::try_from(digit).ok()
 }
 
 fn matches_line(kind: Kind, regex: &Regex, line: &str) -> bool {

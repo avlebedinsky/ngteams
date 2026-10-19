@@ -70,6 +70,40 @@ fn every_kind_of_secret_is_detected() {
         ("8:orgid:1fec8e78-bce4-4aaf-ab1b-5451cc387264", Kind::Mri),
         ("8:live:somebody", Kind::Mri),
         ("28:1fec8e78-bce4-4aaf-ab1b-5451cc387264", Kind::Mri),
+        // camelCase and prefixed keys, and the MSAL cache shape, hold opaque (non-JWT) refresh tokens.
+        (
+            r#"{"refreshToken": "0.AXYZabcdefghijklmnopqrstuvwxyz0123456789"}"#,
+            Kind::OauthToken,
+        ),
+        (
+            "x_refresh_token=0.AXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            Kind::OauthToken,
+        ),
+        (
+            r#"{"credentialType":"RefreshToken","secret":"1.AUoabcdefghijklmnopqrstuvwxyz0123456789"}"#,
+            Kind::OauthToken,
+        ),
+        // Percent-encoded, as in request URLs.
+        (
+            "/v1/users/8%3Aorgid%3A1fec8e78-bce4-4aaf-ab1b-5451cc387264/properties",
+            Kind::Mri,
+        ),
+        ("/v1/users/8%3aorgid%3a1fec8e78-bce4-4aaf-ab1b-5451cc387264", Kind::Mri),
+        ("?mri=28%253A1fec8e78-bce4-4aaf-ab1b-5451cc387264", Kind::Mri),
+        ("authorize?login_hint=someone%40contoso.com&x=1", Kind::Email),
+        // A response body serialized into a JSON string.
+        (
+            r#"{"body":"{\"refresh_token\":\"0.AXYZabcdefghijklmnopqrstuvwxyz0123456789\"}"}"#,
+            Kind::OauthToken,
+        ),
+        (
+            r#"{"body":"{\"skypetoken\":\"abcdefghijklmnopqrstuvwxyz0123456789\"}"}"#,
+            Kind::Skypetoken,
+        ),
+        (
+            r#"{"body":"line one\n8:orgid:1fec8e78-bce4-4aaf-ab1b-5451cc387264"}"#,
+            Kind::Mri,
+        ),
     ];
     let guard = Guard::new().unwrap();
     for (text, kind) in cases {
@@ -92,6 +126,10 @@ fn placeholders_and_prose_pass() {
         "mail to someone@example.com or ops@lab.example.org",
         "the meeting is at 8:30, see 28:fixed-note",
         "client ID `1fec8e78-bce4-4aaf-ab1b-5451cc387264`",
+        r#"{"credentialType":"RefreshToken","secret":"<token:1>"}"#,
+        "/v1/users/%3Cmri%3Ab%3E/properties?login_hint=%3Cuser%3Aa%3E",
+        r#"{"body":"{\"refreshToken\":\"<token:1>\",\"to\":\"ops%40example.com\"}"}"#,
+        "100% done, a stray backslash \\ and 50%3",
     ];
     let guard = Guard::new().unwrap();
     for text in clean {
@@ -110,7 +148,13 @@ fn line_numbers_are_one_based_per_line() {
 #[test]
 fn a_missing_root_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(Guard::new().unwrap().scan_paths(&[&dir.path().join("absent")]).is_err());
+    let missing = dir.path().join("absent");
+    let error = Guard::new().unwrap().scan_paths(&[&missing]).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        error.to_string().contains(&missing.display().to_string()),
+        "the error should name the path: {error}"
+    );
 }
 
 #[test]
