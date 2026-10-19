@@ -8,6 +8,13 @@
 // the original `send` only on an explicit allow; a denied frame is dropped (the fence logs it and fails the run). A
 // socket's frames leave in the order they were sent: a frame waits until every earlier frame of its socket is decided.
 //
+// A guard queues the frames of its own realm's sockets only. Blink's `send` takes a socket of any realm, so a page can
+// call one window's `send` on another window's socket (a same-origin iframe's, a popup's or its opener's); two guards
+// would then keep two queues for one socket, and the frame would be asked for in a context (and, for a popup, a CDP
+// session) that isn't the socket's. So the `WebSocket` constructor is wrapped to note every socket made in this realm,
+// and a `send` on any other socket is refused: the frame is dropped and reported to the fence, which denies it (and
+// fails the run) without classifying it. Teams sends on each socket from the realm that made it.
+//
 // Hardening, against code that would use the guard to send what the fence didn't allow:
 // - the binding is taken off the global before any page code runs, so only the guard can ask for a verdict;
 // - the resolver is a non-writable, non-configurable global that does nothing without the token, which only this
@@ -17,7 +24,9 @@
 // - every built-in the guard calls later is captured here, before page code can replace it; the guard's own records
 //   have no prototype, and its code past this point uses no array iteration, destructuring or spread, so nothing the
 //   page defines on Object.prototype or Array.prototype is consulted;
-// - `WebSocketStream` (which writes without `send`) is removed.
+// - `WebSocketStream` (which writes without `send`) is removed;
+// - `WebSocket` is a proxy whose `construct` notes the socket and does nothing else; the original constructor isn't
+//   reachable from it (`WebSocket.prototype.constructor` is the proxy too), and a socket made without it is foreign.
 // Anything that still gets a frame out (a context the guard isn't in) is caught afterwards by the audit of
 // `Network.webSocketFrameSent`, which fails the run.
 //
@@ -59,6 +68,7 @@
     return 'no binding';
   }
 
+  const { construct } = Reflect;
   const getter = (owner, name) => getOwnPropertyDescriptor(owner, name).get;
   const originalSend = proto.send;
   const readyStateOf = getter(proto, 'readyState');
@@ -84,6 +94,9 @@
   const blobBytes = Blob_ === undefined ? undefined : Blob_.prototype.arrayBuffer;
   const then = Promise.prototype.then;
   const Exception = scope.DOMException;
+  const own = new WeakSet();
+  const isOwn = WeakSet.prototype.has;
+  const noteOwn = WeakSet.prototype.add;
   const states = new WeakMap();
   const getState = WeakMap.prototype.get;
   const setState = WeakMap.prototype.set;
@@ -197,6 +210,12 @@
     if (apply(readyStateOf, this, []) === 0) {
       throw new Exception("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", 'InvalidStateError');
     }
+    if (!apply(isOwn, own, [this])) {
+      // another realm's socket: dropped like a denied frame, and reported (nothing waits for an answer)
+      const url = apply(urlOf, this, []);
+      binding(stringify({ __proto__: null, token: TOKEN, socket: 0, seq: 0, url, kind: 'foreign', data: '' }));
+      return;
+    }
     const sent = frameOf(data);
     const state = stateOf(this);
     state.seq += 1;
@@ -235,7 +254,31 @@
     apply(then, apply(blobBytes, sent.data, []), [read, unreadable]);
   }
 
+  // Only what `construct` does differs from the original: the proxy forwards its name, length, statics and prototype.
+  // The handler has no prototype, so no trap is looked up on Object.prototype.
+  const Guarded = new Proxy(Socket, {
+    __proto__: null,
+    construct(target, args, newTarget) {
+      const socket = construct(target, args, newTarget);
+      apply(noteOwn, own, [socket]);
+      return socket;
+    },
+  });
+  // the same attributes as the originals, with the proxy as the value
+  const replace = (owner, name, value) => {
+    const slot = getOwnPropertyDescriptor(owner, name);
+    defineProperty(owner, name, {
+      __proto__: null,
+      value,
+      writable: slot.writable,
+      enumerable: slot.enumerable,
+      configurable: slot.configurable,
+    });
+  };
+
   defineProperty(scope, RESOLVER, { value: resolve, writable: false, enumerable: false, configurable: false });
   defineProperty(proto, 'send', { value: send, writable: true, enumerable: true, configurable: true });
+  replace(proto, 'constructor', Guarded);
+  replace(scope, 'WebSocket', Guarded);
   return 'armed';
 })();

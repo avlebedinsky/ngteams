@@ -63,6 +63,9 @@ pub enum DenyCause {
     Fenced(teams_fence::DenyReason),
     /// The paused event couldn't be read.
     Malformed,
+    /// A WebSocket frame sent through another realm's `send` (not the one whose `WebSocket` made the socket); the guard
+    /// dropped it unasked.
+    ForeignSocket,
 }
 
 /// What happens to one request (or, in the WebSocket layer, one frame).

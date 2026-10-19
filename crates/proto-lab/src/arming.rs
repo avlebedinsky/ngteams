@@ -31,8 +31,9 @@
 //! A popup (`window.open`, the three-argument `document.open`) is a page target of its own, whose initial
 //! `about:blank` document its opener can script at once. Chrome 155 holds the opener inside `open` while the popup,
 //! attached and held, is armed: `open('')` returned after about 100 ms, with the guard already in the popup. So the
-//! opener never reaches an unguarded `send` through it. Checked live by
-//! `tests/fence_ws.rs`, which would see the frame reach the server if a later Chrome stopped holding the opener.
+//! opener never reaches an unguarded `send` through it, and the popup's guard refuses the opener's sockets (a guard
+//! queues only its own realm's: see [`crate::fence_ws`]). Checked live by `tests/fence_ws.rs`, which would see the frame
+//! reach the server if a later Chrome stopped holding the opener.
 //!
 //! A target's own auto-attach leaves service workers out: each one attaches once, through the browser, and is armed
 //! there. A page in a service worker's scope would attach it too, and on Chrome 155 a service worker attached twice

@@ -1,7 +1,8 @@
 //! The browser fence's WebSocket layer: the frame classifier, the guard script, the decision on one frame, the answer
 //! to the guard and the audit of what was sent (against a recording endpoint and synthetic events), and, with Chrome
 //! installed, enforcement on a local echo server: in the page, a dedicated, a shared and a service worker a denied
-//! frame never reaches the server, an allowed one does, in order; and a frame that gets past the guard fails the run.
+//! frame never reaches the server, an allowed one does, in order; a frame sent through another realm's `send` (an
+//! iframe's, a popup's) is refused whatever it holds; and a frame that gets past the guard fails the run.
 //!
 //! The Chrome tests run headless on throwaway user-data-dirs against local servers; see `common` for how Chrome is
 //! found.
@@ -129,6 +130,8 @@ fn a_guard_request_is_read_from_the_binding_payload_with_the_runs_token_only() {
     assert_eq!(binary.frame.payload, Payload::Binary("AQID".to_owned()));
     let unreadable = read(&request(7, "unreadable", "")).unwrap();
     assert_eq!(unreadable.frame.payload, Payload::Unreadable);
+    let foreign = read(&request(0, "foreign", "")).unwrap();
+    assert_eq!(foreign.frame.payload, Payload::Foreign);
 
     let with = |field: &str, value: Value| {
         let mut payload = request(7, "text", "");
@@ -321,6 +324,36 @@ async fn an_unknown_frame_is_denied_kept_and_logged_without_its_query_or_content
     );
 }
 
+#[tokio::test]
+async fn a_frame_on_another_realms_socket_is_denied_unclassified_whatever_rule_would_match() {
+    let lab = lab().unwrap();
+    let ws = ws_fence(
+        &lab.fence,
+        FrameClassifier::seeded().with_own(local_rule("ws://127.0.0.1:9")),
+        &[],
+    )
+    .unwrap();
+    let foreign = Frame {
+        url: LOCAL.to_owned(),
+        payload: Payload::Foreign,
+    };
+
+    assert_eq!(ws.decide(&foreign).await, Verdict::Deny(DenyCause::ForeignSocket));
+    assert_eq!(ws.denials()[0].url, "ws://127.0.0.1:9/page");
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert_eq!(
+        entries.into_iter().map(untimed).collect::<Vec<_>>(),
+        [json!({
+            "verdict": "deny",
+            "channel": "web_socket",
+            "method": "SEND",
+            "url": "ws://127.0.0.1:9/page",
+            "reason": "unclassified",
+            "message": "no rule classifies this request",
+        })]
+    );
+}
+
 /// A log sink that takes nothing.
 struct Refuses;
 
@@ -470,12 +503,29 @@ async fn the_verdict_goes_back_to_the_context_that_asked_and_an_allow_covers_one
     let mut forged = ask(3, "allow:forged");
     forged["token"] = json!("00");
     let unauthenticated = ws.handle_binding(&cdp, &binding_called("S1", 5, &forged)).await;
+    // a frame another realm's guard dropped: denied whatever its socket, never answered, no allow for the audit
+    let foreign = ws
+        .handle_binding(&cdp, &binding_called("S2", 6, &request(0, "foreign", "")))
+        .await;
 
     assert_eq!(allowed.unwrap(), Some(Verdict::Allow));
     assert_eq!(denied.unwrap(), Some(Verdict::Deny(DenyCause::Unclassified)));
     assert_eq!(ignored.unwrap(), None);
     assert_eq!(malformed.unwrap(), Some(Verdict::Deny(DenyCause::Malformed)));
     assert_eq!(unauthenticated.unwrap(), Some(Verdict::Deny(DenyCause::Malformed)));
+    assert_eq!(foreign.unwrap(), Some(Verdict::Deny(DenyCause::ForeignSocket)));
+    let causes: Vec<DenyCause> = ws.denials().iter().map(|denial| denial.cause).collect();
+    assert_eq!(
+        causes,
+        [
+            DenyCause::Unclassified,
+            DenyCause::Malformed,
+            DenyCause::Malformed,
+            DenyCause::ForeignSocket
+        ]
+    );
+    assert_eq!(ws.denials()[3].url, "ws://127.0.0.1:9/page");
+    assert_eq!(ws.allows_not_seen_sent(), 1, "only allow:1");
     let commands = commands.lock().unwrap_or_else(PoisonError::into_inner).clone();
     assert_eq!(
         commands.len(),
@@ -1007,6 +1057,124 @@ async fn the_guard_replays_in_order_only_what_the_fence_allowed() {
     outcome.expect("the run took over 60 s").unwrap();
 }
 
+/// Installs the guard by hand in a same-origin iframe too, with a fence of its own played by the test (`asked` in each
+/// realm), and opens a socket from each realm to `/realms`, and one of a subclass to `/realms-sub`.
+const TWO_REALMS: &str = r"
+    new Promise((resolve, reject) => {
+        const iframe = document.body.appendChild(document.createElement('iframe'));
+        window.inner = iframe.contentWindow;
+        // an indirect eval runs in the realm of the eval it calls
+        inner.eval(PLAY_FENCE + GUARD);
+        const opened = (socket) => new Promise((ok) => { socket.onopen = ok; socket.onerror = reject; });
+        window.outerSocket = new WebSocket(BASE + '/realms');
+        window.innerSocket = new inner.WebSocket(BASE + '/realms');
+        window.Sub = class extends WebSocket {};
+        window.subSocket = new Sub(BASE + '/realms-sub');
+        Promise.all([opened(outerSocket), opened(innerSocket), opened(subSocket)]).then(() => resolve('open'));
+    })";
+
+/// Sends on each realm's socket through both realms' `send`, and on the subclass socket.
+const SEND_ACROSS: &str = r"
+    (() => {
+        const innerSend = inner.WebSocket.prototype.send;
+        outerSocket.send('allow:first');
+        innerSend.call(outerSocket, 'allow:second');
+        outerSocket.send('allow:third');
+        innerSocket.send('allow:inner');
+        WebSocket.prototype.send.call(innerSocket, 'allow:inner-through-outer');
+        subSocket.send('allow:sub');
+        return [window.asked.length, inner.asked.length];
+    })()";
+
+/// What the wrapped constructor still looks like from the page.
+const LOOKS_NATIVE: &str = r"
+    [
+        WebSocket.prototype.constructor === WebSocket,
+        outerSocket instanceof WebSocket,
+        subSocket instanceof WebSocket,
+        WebSocket.name,
+        WebSocket.length,
+        WebSocket.OPEN,
+        Object.getPrototypeOf(outerSocket) === WebSocket.prototype,
+        typeof WebSocketStream,
+    ]";
+
+#[tokio::test]
+async fn a_guard_queues_only_its_own_realms_sockets() {
+    let Some(chrome) = common::chrome_or_skip() else {
+        return;
+    };
+    let pages = serve_pages().await;
+    let echo = EchoServer::start().await.unwrap();
+    let profile = tempfile::tempdir().unwrap();
+    let browser = Browser::launch(&chrome, &LaunchOptions::new(profile.path().join("p")), STEP)
+        .await
+        .unwrap();
+    // the browser moves into the run: an error or the timeout drops it, which kills it
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async move {
+        let (cdp, _events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
+        let blank = format!("{}/pages/blank.html", pages.uri());
+        let target = cdp.call(None, "Target.createTarget", json!({"url": blank})).await?;
+        let attach = json!({"targetId": target["targetId"], "flatten": true});
+        let attached = cdp.call(None, "Target.attachToTarget", attach).await?;
+        let page = SessionId::new(attached["sessionId"].as_str().ok_or("no sessionId")?);
+        loaded(&cdp, &page, "/pages/blank.html").await?;
+        let script = GuardScript::with_token(TOKEN)?;
+        evaluate_in(&cdp, &page, PLAY_FENCE, None).await?;
+        assert_eq!(evaluate_in(&cdp, &page, script.source(), None).await?, "armed");
+        let open = TWO_REALMS
+            .replace("BASE", &format!("'{}'", echo.origin))
+            .replace("PLAY_FENCE", &serde_json::to_string(PLAY_FENCE)?)
+            .replace("GUARD", &serde_json::to_string(script.source())?);
+        assert_eq!(evaluate_in(&cdp, &page, &open, None).await?, "open");
+        assert_eq!(
+            evaluate_in(&cdp, &page, LOOKS_NATIVE, None).await?,
+            json!([true, true, true, "WebSocket", 1, 1, true, "undefined"])
+        );
+        assert_eq!(evaluate_in(&cdp, &page, SEND_ACROSS, None).await?, json!([4, 2]));
+
+        // each realm queues and asks for its own sockets only; a send on the other's is reported and dropped
+        let url = format!("{}/realms", echo.origin);
+        let sub = format!("{}/realms-sub", echo.origin);
+        let foreign = json!({"token": TOKEN, "socket": 0, "seq": 0, "url": url, "kind": "foreign", "data": ""});
+        let outer = [
+            json!({"token": TOKEN, "socket": 1, "seq": 1, "url": url, "kind": "text", "data": "allow:first"}),
+            json!({"token": TOKEN, "socket": 1, "seq": 2, "url": url, "kind": "text", "data": "allow:third"}),
+            foreign.clone(),
+            json!({"token": TOKEN, "socket": 2, "seq": 1, "url": sub, "kind": "text", "data": "allow:sub"}),
+        ];
+        let inner = [
+            foreign,
+            json!({"token": TOKEN, "socket": 1, "seq": 1, "url": url, "kind": "text", "data": "allow:inner"}),
+        ];
+        assert_eq!(evaluate_in(&cdp, &page, "window.asked", None).await?, json!(outer));
+        assert_eq!(evaluate_in(&cdp, &page, "inner.asked", None).await?, json!(inner));
+
+        // the inner fence answers first; the outer one answers its socket's second frame before its first
+        let inner_verdict = format!("inner.{}", script.verdict_expression(1, 1, true));
+        evaluate_in(&cdp, &page, &inner_verdict, None).await?;
+        for (socket, seq) in [(1, 2), (1, 1), (2, 1)] {
+            evaluate_in(&cdp, &page, &script.verdict_expression(socket, seq, true), None).await?;
+        }
+        echo.received_once("/realms", 3).await;
+        assert_eq!(echo.received_once("/realms-sub", 1).await, ["allow:sub"]);
+        // what must not arrive gets this long to show up anyway
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // the two sockets' frames interleave as they please; each socket's keep their order, the foreign ones none
+        let received = echo.received_on("/realms");
+        let (inner, outer): (Vec<String>, Vec<String>) =
+            received.into_iter().partition(|frame| frame.starts_with("allow:inner"));
+        assert_eq!(inner, ["allow:inner"]);
+        assert_eq!(outer, ["allow:first", "allow:third"]);
+        // best effort: the connection may drop before the reply
+        let _ = cdp.call(None, "Browser.close", Value::Null).await;
+        browser.wait_or_kill(Duration::from_secs(5)).await?;
+        TestResult::Ok(())
+    })
+    .await;
+    outcome.expect("the run took over 60 s").unwrap();
+}
+
 /// What an isolated world (a context the guard isn't in) sends: one text and one binary frame, straight out.
 const BYPASS: &str = r"
     new Promise((resolve, reject) => {
@@ -1109,12 +1277,15 @@ async fn a_frame_that_gets_past_the_guard_is_caught_by_the_audit_and_fails_the_r
 }
 
 /// Opens a socket to `/cross-realm` and defines `sendThrough(window, data)`: a send on that socket through another
-/// window's `WebSocket.prototype.send` (Blink's brand check takes a socket from any realm).
+/// window's `WebSocket.prototype.send` (Blink's brand check takes a socket from any realm). The socket's own first frame
+/// goes out before any other window's.
 const CROSS_REALM: &str = r"
     new Promise((resolve, reject) => {
         const socket = new WebSocket(BASE + '/cross-realm');
         socket.onerror = () => reject(new Error('the socket failed'));
         socket.onopen = () => {
+            window.ownSocket = socket;
+            socket.send('allow:own-1');
             window.sendThrough = (other, data) => {
                 if (other === null) {
                     return 'no window';
@@ -1128,25 +1299,27 @@ const CROSS_REALM: &str = r"
 
 /// Windows the page opens and sends through in the same task, before anything else could run: popups (a separate
 /// target each, its initial `about:blank` document scriptable by the opener at once) and a same-origin `about:blank`
-/// iframe. None of the frames starts with `allow:`.
+/// iframe. Every frame starts with `allow:`, so the fence would allow it if it were asked for as a frame of its own: a
+/// popup's guard would record the allow on the popup's session while the browser reports the frame on the opener's, and
+/// an iframe's guard would keep a second queue for the socket, its frame overtaking the socket's own.
 const OTHER_WINDOWS: [(&str, &str); 6] = [
-    ("popup", "sendThrough(open(''), 'popup')"),
+    ("popup", "sendThrough(open(''), 'allow:popup')"),
     (
         "about:blank popup",
-        "sendThrough(open('about:blank'), 'popup about:blank')",
+        "sendThrough(open('about:blank'), 'allow:popup about:blank')",
     ),
     (
         "same-origin popup",
-        "sendThrough(open('/pages/blank.html'), 'popup same-origin')",
+        "sendThrough(open('/pages/blank.html'), 'allow:popup same-origin')",
     ),
-    ("named popup", "sendThrough(open('', 'lab-named'), 'popup named')"),
+    ("named popup", "sendThrough(open('', 'lab-named'), 'allow:popup named')"),
     (
         "document.open popup",
-        "sendThrough(document.open('', '_blank', ''), 'popup document.open')",
+        "sendThrough(document.open('', '_blank', ''), 'allow:popup document.open')",
     ),
     (
         "about:blank iframe",
-        "sendThrough(document.body.appendChild(document.createElement('iframe')).contentWindow, 'iframe')",
+        "sendThrough(document.body.appendChild(document.createElement('iframe')).contentWindow, 'allow:iframe')",
     ),
 ];
 
@@ -1167,8 +1340,10 @@ async fn a_window_the_page_opens_lends_it_no_unguarded_send() {
             let result = cdp.call(Some(&page.session), "Runtime.evaluate", params).await?;
             assert_eq!(result["result"]["value"], "called", "{name}: {result}");
         }
+        evaluate_in(cdp, &page.session, "ownSocket.send('allow:own-2')", None).await?;
 
-        // Chrome 155 holds the opener inside `open` until the popup is armed, so every frame went through a guard
+        // Chrome 155 holds the opener inside `open` until the popup is armed, so every frame went through a guard,
+        // which refused it: the socket isn't its realm's
         let poll = async {
             while run.armed.frame_denials().len() < OTHER_WINDOWS.len() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1177,11 +1352,29 @@ async fn a_window_the_page_opens_lends_it_no_unguarded_send() {
         tokio::time::timeout(STEP, poll)
             .await
             .map_err(|_| format!("not every frame was asked for: {:?}", run.armed.frame_denials()))?;
+        assert_eq!(
+            echo.received_once("/cross-realm", 2).await,
+            ["allow:own-1", "allow:own-2"]
+        );
         // what must not arrive gets this long to show up anyway
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(echo.received_on("/cross-realm"), Vec::<String>::new());
+        assert_eq!(echo.received_on("/cross-realm"), ["allow:own-1", "allow:own-2"]);
         assert_eq!(run.armed.unsanctioned_frames(), []);
-        assert_eq!(run.armed.frame_denials().len(), OTHER_WINDOWS.len());
+        let denials = run.armed.frame_denials();
+        assert_eq!(denials.len(), OTHER_WINDOWS.len());
+        for denial in &denials {
+            assert_eq!(denial.cause, DenyCause::ForeignSocket, "{denial:?}");
+            assert_eq!(denial.url, format!("{}/cross-realm", echo.origin));
+        }
+        // the socket's own allows were recorded on the session its frames are reported on
+        let poll = async {
+            while run.armed.allows_not_seen_sent() > 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(STEP, poll)
+            .await
+            .map_err(|_| format!("{} allowed frame(s) never seen sent", run.armed.allows_not_seen_sent()))?;
         assert!(run.armed.failures().is_empty(), "{:?}", run.armed.failures());
         Ok(())
     })

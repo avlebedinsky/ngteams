@@ -8,6 +8,12 @@
 //! answers by calling the resolver [`RESOLVER`] in the frame's context with the run's token; the guard replays the
 //! original `send` only on an allow, and drops a denied frame. A socket's frames leave in the order they were sent.
 //!
+//! A guard queues only the sockets its own realm made: a `send` called through another realm's prototype (a same-origin
+//! iframe's, a popup's, an opener's) is dropped by that realm's guard and reported as [`Payload::Foreign`], which is
+//! denied ([`DenyCause::ForeignSocket`]) without being classified. So each socket has one queue, and the context that
+//! asks for a frame's verdict is always the socket's own: an allow is recorded for the audit on the session the browser
+//! reports the frame on.
+//!
 //! The token goes both ways: the guard puts it in every request, and a binding call without it is denied and never
 //! answered. The binding is in every context of a target, isolated worlds the guard isn't in included, and answering a
 //! call from one would hand the token to whatever that world defined as the resolver.
@@ -133,6 +139,9 @@ pub enum Payload {
     Binary(String),
     /// A `Blob` the guard couldn't read; it is dropped whatever the verdict.
     Unreadable,
+    /// A frame on a socket of another realm, which the guard dropped without reading it; denied unclassified, and not
+    /// answered (nothing waits for it).
+    Foreign,
 }
 
 impl Payload {
@@ -141,7 +150,7 @@ impl Payload {
         match self {
             Self::Text(text) => Some((1, text)),
             Self::Binary(base64) => Some((2, base64)),
-            Self::Unreadable => None,
+            Self::Unreadable | Self::Foreign => None,
         }
     }
 }
@@ -260,6 +269,7 @@ impl GuardRequest {
             "text" => Payload::Text(raw.data),
             "binary" => Payload::Binary(raw.data),
             "unreadable" => Payload::Unreadable,
+            "foreign" => Payload::Foreign,
             other => return Err(MalformedRequest(format!("frame kind {other:?}"))),
         };
         Ok(Self {
@@ -345,8 +355,21 @@ impl WsFence {
         self.audit.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Classifies a frame and decides it. Every deny is logged and kept.
+    /// Classifies a frame and decides it. Every deny is logged and kept. A [`Payload::Foreign`] frame is denied
+    /// unclassified ([`DenyCause::ForeignSocket`]; `fence.log` has it as `unclassified`).
     pub async fn decide(&self, frame: &Frame) -> Verdict {
+        if frame.payload == Payload::Foreign {
+            let record = RequestRecord {
+                channel: Channel::WebSocket,
+                method: SEND,
+                url: &frame.url,
+                outcome: RequestOutcome::Unclassified,
+            };
+            // denied whether or not the log takes it
+            let _ = self.fence.log().record_request(&record);
+            self.keep(&frame.url, DenyCause::ForeignSocket);
+            return Verdict::Deny(DenyCause::ForeignSocket);
+        }
         let classification = self.classifier.classify(frame);
         self.judge(classification, &frame.url).await
     }
@@ -408,7 +431,9 @@ impl WsFence {
     }
 
     /// Decides one `Runtime.bindingCalled` event of the guard's binding and answers the guard in the context that asked.
-    /// An allow is recorded for the audit before the guard hears of it. Calls of other bindings are ignored (`None`);
+    /// An allow is recorded for the audit, on the session that asked, before the guard hears of it: the guard asks only
+    /// for its own realm's sockets, so that is the session the browser reports the frame on. A [`Payload::Foreign`]
+    /// frame is denied and not answered. Calls of other bindings are ignored (`None`);
     /// a malformed request, or one without the run's token (not the guard's: see the module docs), is denied and left
     /// unanswered, so its frame waits forever and is never sent, and the token goes to no context that didn't show it.
     ///
@@ -428,6 +453,9 @@ impl WsFence {
         };
         let session = event.session_id.as_ref();
         let verdict = self.decide(&request.frame).await;
+        if request.frame.payload == Payload::Foreign {
+            return Ok(Some(verdict));
+        }
         let allow = verdict == Verdict::Allow;
         if let (true, Some((opcode, content))) = (allow, request.frame.payload.sent_as()) {
             let sent = Sent {
