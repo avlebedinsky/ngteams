@@ -11,15 +11,16 @@
 //! stderr and pass, unless `GPUI_SMOKE_REQUIRE=1`, which makes them fail instead.
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
+    os::unix::net::UnixListener,
     path::Path,
     process::Stdio,
     time::{Duration, Instant},
 };
 
 use gpui_video::sandbox::{
-    Gpu, Ready, Running, Sandbox, SandboxOptions, SandboxResult, check_selected_gpu, clean_command, parse_ready,
-    private_dir, render_node_gpus, sandbox_or_skip, wait_ready, wait_until,
+    Gpu, Ready, Running, SANDBOX_ENV, Sandbox, SandboxOptions, SandboxResult, check_selected_gpu, clean_command,
+    parse_ready, private_dir, render_node_gpus, sandbox_or_skip, wait_ready, wait_until,
 };
 use tempfile::TempDir;
 
@@ -180,6 +181,48 @@ fn refuses_to_run_without_a_wayland_display() {
     assert!(output.stdout.is_empty(), "{}", String::from_utf8_lossy(&output.stdout));
 }
 
+/// A compositor outside an opted-in sandbox (the desktop session's) is refused before the binary connects to it:
+/// without `GPUI_VIDEO_SANDBOX`, with it naming another dir, and with a bare socket name in `XDG_RUNTIME_DIR`.
+#[test]
+fn refuses_a_compositor_outside_the_sandbox() {
+    let dir = TempDir::new().unwrap();
+    let other = TempDir::new().unwrap();
+    let run = private_dir(dir.path().join("run")).unwrap();
+    let socket = run.join("wayland-1");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let cases: [(&OsStr, Option<&Path>); 3] = [
+        (socket.as_os_str(), None),
+        (socket.as_os_str(), Some(other.path())),
+        (OsStr::new("wayland-1"), Some(dir.path())),
+    ];
+    for (wayland, sandbox) in cases {
+        let mut command = clean_command(SMOKE);
+        command
+            .env("XDG_RUNTIME_DIR", &run)
+            .env("WAYLAND_DISPLAY", wayland)
+            .env("DISPLAY", ":4242");
+        if let Some(sandbox) = sandbox {
+            command.env(SANDBOX_ENV, sandbox);
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{wayland:?} in {sandbox:?} accepted: {stderr}"
+        );
+        assert!(stderr.contains("not a private compositor"), "{stderr}");
+        assert!(output.stdout.is_empty(), "{}", String::from_utf8_lossy(&output.stdout));
+        let accepted = listener.accept();
+        assert!(
+            accepted
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+            "{wayland:?} in {sandbox:?} connected to the compositor: {accepted:?}"
+        );
+    }
+}
+
 /// A `WAYLAND_DISPLAY` naming no socket is fatal: no fallback to X11 or headless, and nothing on stdout.
 #[test]
 fn fails_on_a_wayland_display_with_no_compositor() {
@@ -189,6 +232,7 @@ fn fails_on_a_wayland_display_with_no_compositor() {
     let mut child = clean_command(SMOKE)
         .env("XDG_RUNTIME_DIR", &run)
         .env("WAYLAND_DISPLAY", missing)
+        .env(SANDBOX_ENV, dir.path())
         .env("DISPLAY", ":4242")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

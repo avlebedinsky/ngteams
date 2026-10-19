@@ -4,7 +4,8 @@
 //! weston runs headless with the GL renderer and `--fake-seat` (GPUI needs a `wl_seat`); niri runs nested in it.
 //! Each gets its own `XDG_RUNTIME_DIR` in a temp dir, and every child's environment is built from scratch: no
 //! `WAYLAND_DISPLAY`, `DISPLAY`, `NIRI_SOCKET` or D-Bus address of the session leaks in. A client gets the nested
-//! niri's socket as an absolute `WAYLAND_DISPLAY`, and `niri msg` always gets the nested niri's `NIRI_SOCKET`.
+//! niri's socket as an absolute `WAYLAND_DISPLAY` and the sandbox dir as [`SANDBOX_ENV`] (the `gpui-video` binary
+//! opens no window without both), and `niri msg` always gets the nested niri's `NIRI_SOCKET`.
 //!
 //! Frame pacing: weston's headless output repaints on a timer at its refresh rate (60 Hz unless set), the nested niri
 //! draws when weston's frame callback arrives, and GPUI draws when niri's frame callback arrives. Nothing scans out
@@ -27,6 +28,10 @@ use tempfile::TempDir;
 
 /// Errors of the harness: anything goes, with a readable message.
 pub type SandboxResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// The opt-in the `gpui-video` binary needs before it opens a window: the absolute path of the sandbox's temp dir,
+/// which its `WAYLAND_DISPLAY` must lie in. [`Sandbox::spawn`] sets it; the desktop session never has it.
+pub const SANDBOX_ENV: &str = "GPUI_VIDEO_SANDBOX";
 
 /// How long a compositor gets to create its sockets, and niri to write a screenshot.
 pub const SOCKET_WAIT: Duration = Duration::from_secs(15);
@@ -305,8 +310,8 @@ impl Sandbox {
         Ok(png)
     }
 
-    /// `program` with `args` as a client of the nested niri, with `extra_env` on top of its clean environment;
-    /// stdout and stderr piped.
+    /// `program` with `args` as a client of the nested niri, with `extra_env` on top of its clean environment
+    /// (which also holds [`SANDBOX_ENV`]); stdout and stderr piped.
     ///
     /// # Errors
     /// The program can't be started.
@@ -316,6 +321,7 @@ impl Sandbox {
             .args(args)
             .env("XDG_RUNTIME_DIR", &self.niri_run)
             .env("WAYLAND_DISPLAY", &self.wayland)
+            .env(SANDBOX_ENV, self.dir.path())
             .envs(extra_env.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

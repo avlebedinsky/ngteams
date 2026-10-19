@@ -25,7 +25,10 @@
 //! can't connect to makes GPUI panic at startup. GPUI's log goes to stderr as `[LEVEL target] message`: GPUI's own
 //! records from info up, everyone else's from warn up.
 //!
-//! Run it only against a private compositor (the tests start a headless weston with a nested niri). The GPU is
+//! It also refuses (exit 1) any compositor but a private one: `WAYLAND_DISPLAY` must be an absolute socket path
+//! inside the dir `GPUI_VIDEO_SANDBOX` names. The test sandbox (`gpui_video::sandbox`, a headless weston with a
+//! nested niri) sets both; a desktop session has no `GPUI_VIDEO_SANDBOX` and names its socket bare (`wayland-1`), so
+//! the binary doesn't open a window there. The GPU is
 //! chosen by GPUI itself: `ZED_DEVICE_ID=<pci device id>` puts that adapter first, otherwise the compositor's GPU, then
 //! a discrete one.
 
@@ -33,6 +36,7 @@ use std::{
     cell::Cell,
     ffi::OsStr,
     io::Write as _,
+    path::{Component, Path},
     process::ExitCode,
     rc::Rc,
     sync::Arc,
@@ -44,7 +48,10 @@ use gpui::{
     SharedString, Styled as _, Window, WindowBounds, WindowHandle, WindowOptions, WindowingModes, div, img, px, rgb,
     size,
 };
-use gpui_video::grid::{Grid, Source, TILES, Upload, VideoFrame};
+use gpui_video::{
+    grid::{Grid, Source, TILES, Upload, VideoFrame},
+    sandbox::SANDBOX_ENV,
+};
 use image::{Frame, ImageBuffer, Rgba};
 
 /// The smoke window's Wayland app id (the window has no title).
@@ -230,6 +237,20 @@ fn names_wayland_display(value: Option<&OsStr>) -> bool {
     value.is_some_and(|value| !value.is_empty())
 }
 
+/// Whether `WAYLAND_DISPLAY` is a socket inside the sandbox dir that `GPUI_VIDEO_SANDBOX` (`sandbox`) opts in to:
+/// both absolute, no `..` in the socket path, the socket under the dir. A bare socket name (the desktop session's
+/// `wayland-1`, resolved in its `XDG_RUNTIME_DIR`) never passes.
+fn in_sandbox(wayland: Option<&OsStr>, sandbox: Option<&OsStr>) -> bool {
+    let (Some(wayland), Some(sandbox)) = (wayland.map(Path::new), sandbox.map(Path::new)) else {
+        return false;
+    };
+    wayland.is_absolute()
+        && sandbox.is_absolute()
+        && !wayland.components().any(|part| part == Component::ParentDir)
+        && wayland.starts_with(sandbox)
+        && wayland != sandbox
+}
+
 /// Runs `done` once `frames` more frames of `window` have been presented.
 fn after_frames(window: &Window, frames: usize, done: impl FnOnce(&mut Window, &mut App) + 'static) {
     window.on_next_frame(move |window, cx| {
@@ -383,8 +404,16 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if !names_wayland_display(std::env::var_os("WAYLAND_DISPLAY").as_deref()) {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY");
+    if !names_wayland_display(wayland.as_deref()) {
         log::error!("no Wayland compositor: WAYLAND_DISPLAY is unset or empty (this build never uses X11)");
+        return ExitCode::FAILURE;
+    }
+    if !in_sandbox(wayland.as_deref(), std::env::var_os(SANDBOX_ENV).as_deref()) {
+        log::error!(
+            "not a private compositor: WAYLAND_DISPLAY must be an absolute socket path inside the dir {SANDBOX_ENV} \
+             names (the test sandbox sets both); refusing to open a window on the desktop session"
+        );
         return ExitCode::FAILURE;
     }
     run(options)
@@ -491,6 +520,26 @@ mod tests {
         assert!(!names_wayland_display(Some(OsStr::new(""))));
         assert!(names_wayland_display(Some(OsStr::new("wayland-1"))));
         assert!(names_wayland_display(Some(OsStr::new("/run/user/1000/wayland-1"))));
+    }
+
+    #[test]
+    fn only_a_socket_inside_the_opted_in_sandbox_counts() {
+        let sandbox = Some(OsStr::new("/tmp/.tmpAbc"));
+        let inside = |wayland: &str| in_sandbox(Some(OsStr::new(wayland)), sandbox);
+        assert!(inside("/tmp/.tmpAbc/niri-run/wayland-1"));
+        // The desktop session: a bare name, or its runtime dir, or no opt-in at all.
+        assert!(!inside("wayland-1"));
+        assert!(!inside("/run/user/1000/wayland-1"));
+        assert!(!in_sandbox(Some(OsStr::new("/tmp/.tmpAbc/niri-run/wayland-1")), None));
+        // Escapes and look-alikes.
+        assert!(!inside("/tmp/.tmpAbc/../../run/user/1000/wayland-1"));
+        assert!(!inside("/tmp/.tmpAbcd/wayland-1"));
+        assert!(!inside("/tmp/.tmpAbc"));
+        assert!(!in_sandbox(
+            Some(OsStr::new("niri-run/wayland-1")),
+            Some(OsStr::new("niri-run"))
+        ));
+        assert!(!in_sandbox(None, sandbox));
     }
 
     #[test]

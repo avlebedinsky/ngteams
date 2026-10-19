@@ -359,13 +359,8 @@ fn tile_element(shown: &Shown) -> AnyElement {
 
 /// The window's size in device pixels, rounded.
 fn device_size(window: &Window) -> (u32, u32) {
-    let size = window.viewport_size();
-    let scale = window.scale_factor();
-    let device = |logical: f32| {
-        let rounded = format!("{:.0}", (logical * scale).max(0.0));
-        rounded.parse().unwrap_or(0)
-    };
-    (device(size.width.into()), device(size.height.into()))
+    let size = window.viewport_size().to_device_pixels(window.scale_factor());
+    (u32::from(size.width), u32::from(size.height))
 }
 
 /// `<name>_p50_us=.. <name>_p95_us=.. <name>_max_us=..`, zeros when there are no samples.

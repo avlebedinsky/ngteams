@@ -43,7 +43,7 @@ build, where the image path is unchanged stock code):
 - (b) on the dGPU: 29.8 and 29.9 fps, p95 15.5 and 18.1 ms (runs 3 and 4).
 - (b) on the iGPU: 29.4 fps, p95 18.7 ms in run 3; **27.8 fps, p95 36.1 ms in run 4**, started at load 20 with a
   5-minute load of 33.
-- Run 5 is void: the load climbed from 12 to 49 during it and every path fell to 5–13 fps.
+- Run 5 is void: the load climbed from 15.6 to 49.5 during it and every path fell to 5–13 fps.
 
 ## How it was measured
 - **Source.** One thread per stream (`video-src-N`), 9 streams staggered over one frame period. Every 1/30 s a thread
@@ -70,7 +70,7 @@ Every run went to a private headless weston 15 (GL renderer, 1920×1080, `--refr
 nested in it (output 1280×800, the window full-screen in it, so each tile shows at 426×266). Nothing ran on the
 desktop session. weston repaints on a 60 Hz timer; niri draws when weston's frame callback arrives, and GPUI draws
 when niri's does. So draws are capped at 60 per second, as on a 60 Hz display, and with 9 staggered 30 fps streams
-nearly every callback has a new frame (≈55–59 draws/s on (b)). The p50 interval of 16.7 ms is that cadence.
+nearly every callback has a new frame (55.0–59.2 draws/s on (b); 38.0 in the loaded run 4 on the iGPU). The p50 interval of 16.7 ms is that cadence.
 
 What this means for the 33 ms p95 target:
 - **The frame time (draw + present on the CPU) doesn't depend on the compositor.** It's the work GPUI does per
@@ -89,9 +89,14 @@ Other agents were building in parallel the whole time, so the machine was never 
 on all of them, `Cpus_allowed_list` 0–19). The process can be descheduled while it draws, and the iGPU shares memory
 bandwidth with the builds, so **the numbers are pessimistic, and the load varied between runs by a factor of 2–3**.
 A run with nobody else on the machine was not possible: the quietest moment we caught (load ≈ 11–12) went into run 2,
-and the last attempt (run 5) saw the load climb to 49 and is void. Comparisons between (a) and (b) inside one run
-(same load) are sound; absolute numbers are not lab-grade. The iGPU on (b) is the case closest to the limit:
-under load 20 with a 5-minute load of 33 (run 4) it fell to 27.8 fps, p95 36 ms.
+and the last attempt (run 5) saw the load climb to 49.5 and is void. The cases inside a run ran one after another,
+not at the same load: the start loads in the raw file's blocks differ by up to 6.5 within an (a)/(b) pair on one GPU
+(up to 10.8 across a whole run). In 3 of the 4 pairs of runs 3–4, (b) started at the higher load; the exception is
+run 3's dGPU pair, (a) at 27.2 and (b) at 20.7. The headline table compares (a) from run 2 with (b) from run 3, where
+(b) started at the higher load on both GPUs (16.9 against 10.9, 20.7 against 12.5). (b) beat (a) in every pair,
+including the ones where it ran under more load, so the comparison holds; absolute numbers are not lab-grade. The
+iGPU on (b) is the case closest to the limit: under load 20 with a 5-minute load of 33 (run 4) it fell to 27.8 fps,
+p95 36 ms.
 
 ## Approach (b): the patch and what keeping it costs
 - **What:** agterm-rs's `build/patches/gpui-pre/0001-external-surfaces.patch` (368 lines: `ExternalSurface`,
@@ -108,7 +113,8 @@ under load 20 with a 5-minute load of 33 (run 4) it fell to 27.8 fps, p95 36 ms.
   opens as before. That path changes how GPUI starts on every GPU, not only for video: the smoke tests (`tests/smoke.rs`)
   run on both GPUs on the patched build.
 - **Not used yet:** the dmabuf half. Zero-copy from VA-API/NVDEC needs it plus an NV12 → RGB shader (the patch
-  imports RGB dmabufs). Today the CPU does NV12 → BGRA, 170–240% of a core for 9 streams with scalar code. That's the
+  imports RGB dmabufs). Today the CPU does NV12 → BGRA, 170–272% of a core for 9 streams with scalar code over
+  the valid runs 1–4 (170–219% in the best runs of the table; the top, 243% and 272%, in the loaded run 4 on the iGPU). That's the
   next cost to cut: SIMD conversion (libyuv-style) as the cheap step, NV12 sampled in a shader or decoder dmabufs
   imported zero-copy as the real fix. It doesn't affect the render thread's numbers above.
 
