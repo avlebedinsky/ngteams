@@ -331,21 +331,41 @@ impl Running {
         })
     }
 
+    /// The ready line; an early exit is told apart from a timeout. Errors carry no stderr: see [`Running::fail`].
     fn ready(&self) -> TestResult<Ready> {
-        let line = self
-            .lines
-            .recv_timeout(STARTUP)
-            .map_err(|_| format!("no ready line within {STARTUP:?}"))?;
+        let line = self.lines.recv_timeout(STARTUP).map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => format!("no ready line within {STARTUP:?}"),
+            mpsc::RecvTimeoutError::Disconnected => "stdout closed before the ready line".to_owned(),
+        })?;
         Ok(parse_ready(&line).ok_or_else(|| format!("unexpected stdout line: {line}"))?)
+    }
+
+    /// Everything the binary wrote to stderr; it must have exited or been killed.
+    fn take_stderr(&mut self) -> String {
+        match self.stderr.take().map(thread::JoinHandle::join) {
+            Some(Ok(text)) => text,
+            Some(Err(_)) => "<stderr reader panicked>".to_owned(),
+            None => "<stderr already taken>".to_owned(),
+        }
+    }
+
+    /// Kills the binary and returns `error` with its exit status and stderr attached.
+    fn fail(&mut self, error: &dyn std::fmt::Display) -> Box<dyn std::error::Error> {
+        let _ = self.child.kill();
+        let status = self
+            .child
+            .wait()
+            .map_or_else(|wait| format!("wait failed: {wait}"), |status| status.to_string());
+        let stderr = self.take_stderr();
+        format!("{error} (gpui-video: {status})\n--- gpui-video stderr\n{stderr}").into()
     }
 
     /// Waits up to `deadline` for the exit; returns the status and stderr.
     fn finish(mut self, deadline: Duration) -> TestResult<(ExitStatus, String)> {
-        let status = wait_until(deadline, || self.child.try_wait().ok().flatten())
-            .ok_or_else(|| format!("still running {deadline:?} after the close request"))?;
-        let stderr = self.stderr.take().ok_or("stderr taken")?;
-        let stderr = stderr.join().map_err(|_| "stderr reader panicked")?;
-        Ok((status, stderr))
+        let Some(status) = wait_until(deadline, || self.child.try_wait().ok().flatten()) else {
+            return Err(self.fail(&format!("still running {deadline:?} after the close request")));
+        };
+        Ok((status, self.take_stderr()))
     }
 }
 
@@ -385,14 +405,22 @@ fn screenshot_colours(sandbox: &Sandbox, shot: &str) -> TestResult<[usize; 3]> {
     colour_counts(&png)
 }
 
-/// Runs the smoke binary on the sandbox's niri: ready, screenshot with text and image, listed by niri, closed by
-/// niri, clean exit without an error logged. Returns what the ready line said.
-fn smoke(sandbox: &Sandbox, extra_env: &[(&str, &str)], shot: &str) -> TestResult<Ready> {
-    let running = Running::new(sandbox.spawn_smoke(extra_env)?)?;
+/// Waits for the ready line, screenshots the screen, lists the windows and asks niri to close the focused one.
+fn show_and_close(sandbox: &Sandbox, running: &Running, shot: &str) -> TestResult<(Ready, [usize; 3], String)> {
     let ready = running.ready()?;
-    let [magenta, cyan, white] = screenshot_colours(sandbox, shot)?;
+    let colours = screenshot_colours(sandbox, shot)?;
     let windows = sandbox.niri_msg(&["windows"])?;
     sandbox.niri_msg(&["action", "close-window"])?;
+    Ok((ready, colours, windows))
+}
+
+/// Runs the smoke binary on the sandbox's niri: ready, screenshot with text and image, listed by niri, closed by
+/// niri, clean exit without an error logged. Returns what the ready line said and the binary's stderr. A step that
+/// fails kills the binary and reports its stderr.
+fn smoke(sandbox: &Sandbox, extra_env: &[(&str, &str)], shot: &str) -> TestResult<(Ready, String)> {
+    let mut running = Running::new(sandbox.spawn_smoke(extra_env)?)?;
+    let (ready, [magenta, cyan, white], windows) =
+        show_and_close(sandbox, &running, shot).map_err(|error| running.fail(&error))?;
     let (status, stderr) = running.finish(CLOSE)?;
     eprintln!("{ready:?}\n{stderr}");
     assert!(windows.contains(APP_ID), "niri does not list the window: {windows}");
@@ -404,7 +432,7 @@ fn smoke(sandbox: &Sandbox, extra_env: &[(&str, &str)], shot: &str) -> TestResul
         "image not on screen: magenta {magenta}, cyan {cyan}"
     );
     assert!(white > 50, "text not on screen: {white} white pixels");
-    Ok(ready)
+    Ok((ready, stderr))
 }
 
 #[test]
@@ -412,7 +440,7 @@ fn window_opens_renders_and_closes_on_niri() {
     let Some(sandbox) = sandbox_or_skip("window_opens_renders_and_closes_on_niri").unwrap() else {
         return;
     };
-    let ready = smoke(&sandbox, &[], "default.png").unwrap();
+    let (ready, _) = smoke(&sandbox, &[], "default.png").unwrap();
     assert_eq!(ready.compositor, "Wayland");
     assert!(!ready.software, "rendered in software: {ready:?}");
 }
@@ -443,18 +471,82 @@ fn render_node_gpus() -> Vec<Gpu> {
     gpus
 }
 
-/// The name a GPU vendor's Vulkan driver puts in its device names.
-fn vendor_name(vendor: &str) -> Option<&'static str> {
-    match vendor {
-        "0x8086" => Some("Intel"),
-        "0x10de" => Some("NVIDIA"),
-        "0x1002" => Some("AMD"),
-        _ => None,
+fn parse_hex(text: &str) -> Option<u32> {
+    u32::from_str_radix(text.strip_prefix("0x")?, 16).ok()
+}
+
+/// One entry of GPUI's `Found N GPU adapter(s):` listing (`gpui_wgpu`, logged at info).
+#[derive(Debug, PartialEq)]
+struct Adapter {
+    name: String,
+    vendor: u32,
+    device: u32,
+    backend: String,
+}
+
+/// `[INFO target]   - <name> (vendor=0x8086, device=0xa7a0, backend=Vulkan, type=IntegratedGpu)`.
+fn parse_adapter(line: &str) -> Option<Adapter> {
+    let (_, entry) = line.split_once("]   - ")?;
+    let (name, fields) = entry.rsplit_once(" (vendor=")?;
+    let mut fields = fields.strip_suffix(')')?.split(", ");
+    let vendor = parse_hex(fields.next()?)?;
+    let device = parse_hex(fields.next()?.strip_prefix("device=")?)?;
+    let backend = fields.next()?.strip_prefix("backend=")?;
+    Some(Adapter {
+        name: name.to_owned(),
+        vendor,
+        device,
+        backend: backend.to_owned(),
+    })
+}
+
+/// `[INFO target] Selected GPU (passed configuration test): <name> (<backend>)`, as (name, backend).
+fn parse_selected(line: &str) -> Option<(&str, &str)> {
+    let (_, chosen) = line.split_once("] Selected GPU (passed configuration test): ")?;
+    let (name, backend) = chosen.rsplit_once(" (")?;
+    Some((name, backend.strip_suffix(')')?))
+}
+
+/// Checks from GPUI's stderr that the adapter it rendered on is the PCI device `gpu` asked for with
+/// `ZED_DEVICE_ID`: an adapter with that vendor and device id is listed, the first adapter tried passed (no
+/// `trying next`), the selected adapter is one of the listed ones with that id, and the ready line names it.
+/// `ZED_DEVICE_ID` only moves the matching adapter to the front, so any of these failing is a silent fallback.
+fn check_selected_gpu(gpu: &Gpu, ready: &Ready, stderr: &str) -> Result<(), String> {
+    let (vendor, device) = parse_hex(&gpu.vendor)
+        .zip(parse_hex(&gpu.device))
+        .ok_or_else(|| format!("unreadable PCI ids {} {}", gpu.vendor, gpu.device))?;
+    let adapters: Vec<_> = stderr.lines().filter_map(parse_adapter).collect();
+    let wanted: Vec<_> = adapters
+        .iter()
+        .filter(|adapter| adapter.vendor == vendor && adapter.device == device)
+        .collect();
+    if wanted.is_empty() {
+        return Err(format!(
+            "no adapter {vendor:#06x}:{device:#06x} listed by GPUI: {adapters:#?}"
+        ));
     }
+    if let Some(line) = stderr.lines().find(|line| line.ends_with(", trying next...")) {
+        return Err(format!("GPUI fell back from the requested adapter: {line}"));
+    }
+    let (name, backend) = stderr
+        .lines()
+        .find_map(parse_selected)
+        .ok_or("GPUI logged no selected adapter")?;
+    if !wanted
+        .iter()
+        .any(|adapter| adapter.name == name && adapter.backend == backend)
+    {
+        return Err(format!("selected {name} ({backend}), not one of {wanted:#?}"));
+    }
+    if ready.gpu != name {
+        return Err(format!("selected {name}, but the ready line says {ready:?}"));
+    }
+    Ok(())
 }
 
 /// Every GPU in turn (the iGPU and the dGPU on a hybrid laptop), selected with GPUI's `ZED_DEVICE_ID`, which puts
-/// that adapter first; the ready line must name that vendor's device, so a silent fallback to another GPU fails.
+/// that adapter first; GPUI's log must show it rendered on that PCI device, so a silent fallback to another GPU, of
+/// the same vendor or not, fails.
 #[test]
 fn window_renders_on_every_gpu() {
     let Some(sandbox) = sandbox_or_skip("window_renders_on_every_gpu").unwrap() else {
@@ -464,16 +556,63 @@ fn window_renders_on_every_gpu() {
     assert!(!gpus.is_empty(), "no render nodes in /sys/class/drm");
     for gpu in gpus {
         let shot = format!("gpu-{}.png", gpu.device);
-        let ready = smoke(&sandbox, &[("ZED_DEVICE_ID", gpu.device.as_str())], &shot).unwrap();
+        let (ready, stderr) = smoke(&sandbox, &[("ZED_DEVICE_ID", gpu.device.as_str())], &shot).unwrap();
         assert!(!ready.software, "{}: rendered in software: {ready:?}", gpu.device);
-        if let Some(name) = vendor_name(&gpu.vendor) {
-            assert!(
-                ready.gpu.contains(name),
-                "{}: asked for a {name} GPU, got {ready:?}",
-                gpu.device
-            );
+        if let Err(error) = check_selected_gpu(&gpu, &ready, &stderr) {
+            panic!("{}: {error}\n--- gpui-video stderr\n{stderr}", gpu.device);
         }
     }
+}
+
+/// A GPUI adapter log for `check_selected_gpu`: an Intel iGPU and an Intel dGPU, `selected` chosen.
+fn adapter_log(selected: &str) -> String {
+    format!(
+        "[INFO gpui_wgpu::wgpu_context] ZED_DEVICE_ID filter: 0xa7a0\n\
+         [INFO gpui_wgpu::wgpu_context] Found 2 GPU adapter(s):\n\
+         [INFO gpui_wgpu::wgpu_context]   - Intel(R) Iris(R) Xe Graphics (RPL-P) (vendor=0x8086, device=0xa7a0, \
+         backend=Vulkan, type=IntegratedGpu)\n\
+         [INFO gpui_wgpu::wgpu_context]   - Intel(R) Arc(tm) A770 Graphics (DG2) (vendor=0x8086, device=0x56a0, \
+         backend=Vulkan, type=DiscreteGpu)\n\
+         [INFO gpui_wgpu::wgpu_context] Selected GPU (passed configuration test): {selected} (Vulkan)\n"
+    )
+}
+
+#[test]
+fn selected_gpu_is_checked_by_pci_id() {
+    let igpu = Gpu {
+        vendor: "0x8086".to_owned(),
+        device: "0xa7a0".to_owned(),
+    };
+    let ready = |gpu: &str| Ready {
+        compositor: "Wayland".to_owned(),
+        gpu: gpu.to_owned(),
+        software: false,
+    };
+    let iris = "Intel(R) Iris(R) Xe Graphics (RPL-P)";
+    let arc = "Intel(R) Arc(tm) A770 Graphics (DG2)";
+    check_selected_gpu(&igpu, &ready(iris), &adapter_log(iris)).unwrap();
+    // The other GPU of the same vendor rendered.
+    let error = check_selected_gpu(&igpu, &ready(arc), &adapter_log(arc)).unwrap_err();
+    assert!(error.contains("not one of"), "{error}");
+    let fallback = adapter_log(arc).replace(
+        "[INFO gpui_wgpu::wgpu_context] Selected",
+        "[INFO gpui_wgpu::wgpu_context]   Adapter x (Vulkan) failed: boom, trying next...\n\
+         [INFO gpui_wgpu::wgpu_context] Selected",
+    );
+    let error = check_selected_gpu(&igpu, &ready(arc), &fallback).unwrap_err();
+    assert!(error.contains("fell back"), "{error}");
+    // The requested id matches no adapter (its driver is missing, or a vendor nobody mapped).
+    let virtio = Gpu {
+        vendor: "0x1af4".to_owned(),
+        device: "0x1050".to_owned(),
+    };
+    let error = check_selected_gpu(&virtio, &ready(iris), &adapter_log(iris)).unwrap_err();
+    assert!(error.contains("no adapter 0x1af4:0x1050"), "{error}");
+    // The ready line names another adapter than the selected one.
+    let error = check_selected_gpu(&igpu, &ready(arc), &adapter_log(iris)).unwrap_err();
+    assert!(error.contains("ready line"), "{error}");
+    let error = check_selected_gpu(&igpu, &ready(iris), "").unwrap_err();
+    assert!(error.contains("no adapter"), "{error}");
 }
 
 /// With no Wayland compositor named (and an X11 display that isn't there), the binary refuses to start instead of
@@ -516,6 +655,29 @@ fn fails_on_a_wayland_display_with_no_compositor() {
     };
     assert!(!output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(output.stdout.is_empty(), "{}", String::from_utf8_lossy(&output.stdout));
+}
+
+/// A binary that dies before its ready line is reported at once as an early exit, with its stderr and status.
+#[test]
+fn early_exit_is_reported_with_stderr() {
+    let child = clean_command("sh")
+        .args(["-c", "echo 'adapter exploded' >&2; exit 3"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut running = Running::new(child).unwrap();
+    let start = Instant::now();
+    let error = running.ready().unwrap_err();
+    assert!(
+        start.elapsed() < STARTUP / 2,
+        "waited {:?} for a dead process",
+        start.elapsed()
+    );
+    let error = running.fail(&error).to_string();
+    assert!(error.contains("stdout closed before the ready line"), "{error}");
+    assert!(error.contains("adapter exploded"), "{error}");
+    assert!(error.contains("exit status: 3"), "{error}");
 }
 
 #[test]

@@ -27,7 +27,7 @@ use gpui::{
 };
 use image::{Frame, ImageBuffer, Rgba};
 
-/// The window's title and Wayland app id.
+/// The window's Wayland app id (the window has no title).
 const APP_ID: &str = "ms-teams-gpui-smoke";
 /// The text line the window draws.
 const TEXT: &str = "ms-teams GPUI smoke";
