@@ -228,10 +228,12 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/teams-proto/src/{lib.rs,client.rs,write.rs}`
 - Create: `crates/teams-proto/tests/fence_types.rs`, `crates/teams-proto/tests/ui/*.rs` (trybuild)
 
-- [ ] tests first with `trybuild`: calling a mutating method without a `WritePermit` doesn't compile, and `WritePermit` can't be constructed outside `teams-fence`
-- [ ] a `Mutating` request trait in `teams-proto`: every mutating call takes a `WritePermit` bound to one `Target`, and a runtime check verifies the permit's target matches the request's target
-- [ ] a test checks that a permit issued for conversation X is rejected on a request for conversation Y
-- [ ] `cargo test -p teams-proto` passes
+- [x] tests first with `trybuild`: calling a mutating method without a `WritePermit` doesn't compile, and `WritePermit` can't be constructed outside `teams-fence`
+- [x] a `Mutating` request trait in `teams-proto`: every mutating call takes a `WritePermit` bound to one `Target`, and a runtime check verifies the permit's target matches the request's target
+- [x] a test checks that a permit issued for conversation X is rejected on a request for conversation Y
+- [x] `cargo test -p teams-proto` passes
+  - ➕ `Mutating::target()` names the request's one `Target`; `Authorized::new(request, permit)` is the only way to pair them (private fields), checks `permit.target() == request.target()` (kind, scope and added participants) and consumes the permit, so one permit covers one write. `Client::write(request, permit)` builds the `Authorized` before anything reaches the `Transport` trait, which only ever receives an `Authorized`; there is no live transport yet (it comes with the protocol work). The first request is `SendMessage` (a `Message` on a `Conversation`)
+  - ➕ the trybuild cases (`tests/ui/`): a write without a permit, a `WritePermit` literal, a `WritePermit::new`, cloning a permit, and an `Authorized` literal all fail to compile
 
 ### Task 5: Chrome for Testing and lab profiles
 **Files:**

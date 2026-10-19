@@ -1,0 +1,15 @@
+error[E0061]: this method takes 2 arguments but 1 argument was supplied
+ --> tests/ui/write_without_permit.rs:5:20
+  |
+5 |     let _ = client.write(SendMessage::new("19:lab-chat@thread.v2", "hello"));
+  |                    ^^^^^---------------------------------------------------- argument #2 of type `teams_fence::decision::WritePermit` is missing
+  |
+note: method defined here
+ --> src/client.rs
+  |
+  |     pub async fn write<R: Mutating + Send>(&self, request: R, permit: WritePermit) -> Result<(), WriteError<T::Error>> {
+  |                  ^^^^^
+help: provide the argument
+  |
+5 |     let _ = client.write(SendMessage::new("19:lab-chat@thread.v2", "hello"), /* teams_fence::decision::WritePermit */);
+  |                                                                            ++++++++++++++++++++++++++++++++++++++++++

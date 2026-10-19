@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `new` found for struct `WritePermit` in the current scope
+ --> tests/ui/permit_constructor.rs:6:26
+  |
+6 |     let _ = WritePermit::new(target);
+  |                          ^^^ associated function or constant not found in `WritePermit`

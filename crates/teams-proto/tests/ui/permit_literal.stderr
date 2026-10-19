@@ -1,0 +1,5 @@
+error[E0451]: field `target` of struct `WritePermit` is private
+ --> tests/ui/permit_literal.rs:6:27
+  |
+6 |     let _ = WritePermit { target };
+  |                           ^^^^^^ private field

@@ -29,6 +29,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = "1.53.3"
 toml = "1.1.8"
+trybuild = "1.0.122"
 zeroize = "1.9.1"
 
 # Same lint set as agterm-rs. Every crate opts in with `[lints] workspace = true`, spikes included; only generated
