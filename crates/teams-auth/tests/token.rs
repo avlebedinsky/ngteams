@@ -5,15 +5,20 @@
 //! `docs/protocol/auth.md`). The tests take their inputs from the fixture's request (client ID, redirect, code, refresh
 //! token, scope, endpoint path) and their expectations from its response, so a sanitized export from a real capture
 //! with the same file name and shape drops in for the synthetic one. The only value the tests supply themselves is the
-//! PKCE verifier, since a fixture's verifier is a placeholder.
+//! PKCE verifier, since a fixture's verifier is a placeholder, and the code exchange's ID token: a fixture's is a
+//! placeholder too (the fixture guard refuses committed JWTs), so the code tests build an unsigned one at run time with
+//! the claims each case needs.
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::time::{Duration, SystemTime};
 
-use serde_json::Value;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde_json::{Value, json};
+use teams_auth::id_token::IdTokenError;
 use teams_auth::pkce::Pkce;
-use teams_auth::refresh::refresh_token_key;
+use teams_auth::refresh::{SignIn, refresh_token_key};
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
 use teams_auth::token::{
     Authorization, EntraConfig, NATIVE_CLIENT_REDIRECT, SPACES_RESOURCE, Scope, TEAMS_NATIVE_CLIENT_ID, TokenClient,
@@ -26,6 +31,8 @@ use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/auth");
 const ACCOUNT: &str = "a@lab.example.test";
 const TOKEN_SUFFIX: &str = "oauth2/v2.0/token";
+const OID: &str = "00000000-0000-4000-8000-00000000000a";
+const TENANT: &str = "00000000-0000-4000-8000-0000000000ff";
 
 /// RFC 7636 Appendix B's octets: a fixed, valid verifier for the code exchange.
 const OCTETS: [u8; 32] = [
@@ -136,7 +143,8 @@ impl Fixture {
         self.mount(server, form, 1).await
     }
 
-    /// The fixture's secret values: none of them may show up in an error or in `Debug`.
+    /// The fixture's secret values: none of them may show up in an error or in `Debug`. An ID token's payload part
+    /// counts on its own too.
     fn secrets(&self) -> Vec<String> {
         let sent = ["code", "code_verifier", "refresh_token"]
             .into_iter()
@@ -144,8 +152,39 @@ impl Fixture {
         let received = ["access_token", "refresh_token", "id_token"]
             .into_iter()
             .filter_map(|key| self.body[key].as_str().map(str::to_owned));
-        sent.chain(received).collect()
+        let id_payload = self.body["id_token"]
+            .as_str()
+            .and_then(|token| token.split('.').nth(1))
+            .filter(|payload| !payload.is_empty())
+            .map(str::to_owned);
+        sent.chain(received).chain(id_payload).collect()
     }
+
+    /// The code fixture answering with an unsigned ID token carrying `claims`.
+    fn with_id_token(mut self, claims: &Value) -> TestResult<Self> {
+        let body = self.body.as_object_mut().ok_or("response.body is not an object")?;
+        body.insert("id_token".into(), Value::String(id_token(claims)?));
+        Ok(self)
+    }
+}
+
+/// An unsigned JWT with `claims`, built at run time: the fixture guard keeps JWTs out of the repo.
+fn id_token(claims: &Value) -> TestResult<String> {
+    let header = URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"RS256","kid":"test"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims)?);
+    Ok(format!("{header}.{payload}.c2lnbmF0dXJlLW5vdC1jaGVja2Vk"))
+}
+
+/// The claims of `username` signed in to the native client.
+fn claims_of(username: &str) -> Value {
+    json!({
+        "aud": TEAMS_NATIVE_CLIENT_ID,
+        "iss": format!("https://login.microsoftonline.com/{TENANT}/v2.0"),
+        "oid": OID,
+        "tid": TENANT,
+        "preferred_username": username,
+        "name": "Lab account",
+    })
 }
 
 /// A JSON object of strings (a form or headers); a missing object is empty.
@@ -349,22 +388,56 @@ fn defaults_match_the_fixtures() -> TestResult {
 
 // ---- code → tokens ----
 
-#[tokio::test]
-async fn code_is_exchanged_and_the_refresh_token_stored() -> TestResult {
-    let fixture = Fixture::load("entra-token-code")?;
+/// Runs a code exchange for `ACCOUNT` (with `expect` applied to the authorization) against `fixture`, with
+/// `already` stored as the account's refresh token beforehand when given.
+async fn exchange(
+    fixture: &Fixture,
+    expect: impl FnOnce(Authorization) -> Authorization,
+    already: Option<&str>,
+) -> TestResult<(Result<SignIn, TokenError>, MemorySecretStore)> {
     let server = MockServer::start().await;
     let client = fixture.client(&server)?;
-    let authorization = authorization(client.config(), &fixture)?;
+    let authorization = expect(authorization(client.config(), fixture)?);
     fixture.mount_code(&server, authorization.pkce()).await?;
     let store = MemorySecretStore::new();
+    if let Some(refresh_token) = already {
+        store
+            .put(&refresh_token_key(ACCOUNT), &Secret::new(refresh_token))
+            .await?;
+    }
+    let result = client
+        .exchange_code(&store, &authorization, fixture.form("code")?)
+        .await;
+    Ok((result, store))
+}
+
+/// A code exchange that must fail without touching the store: an earlier refresh token stays, nothing else is added.
+async fn refused_exchange(
+    fixture: &Fixture,
+    expect: impl FnOnce(Authorization) -> Authorization,
+) -> TestResult<TokenError> {
+    let earlier = "earlier-refresh-token-of-a";
+    let (result, store) = exchange(fixture, expect, Some(earlier)).await?;
+    let error = result.err().ok_or("the exchange should be refused")?;
+    assert_error_hidden(&error, &fixture.secrets());
+    assert_eq!(stored(&store, ACCOUNT).await?.as_deref(), Some(earlier));
+    assert_eq!(stored(&store, "b@lab.example.test").await?, None);
+    Ok(error)
+}
+
+#[tokio::test]
+async fn code_is_exchanged_and_the_refresh_token_stored() -> TestResult {
+    let fixture = Fixture::load("entra-token-code")?.with_id_token(&claims_of(ACCOUNT))?;
 
     let sent = SystemTime::now();
-    let tokens = client
-        .exchange_code(&store, &authorization, fixture.form("code")?)
-        .await
-        .expect("code redeemed");
+    let (result, store) = exchange(&fixture, |authorization| authorization, None).await?;
+    let sign_in = result.expect("code redeemed");
 
-    assert_tokens(&tokens, &fixture, sent)?;
+    assert_tokens(&sign_in.tokens, &fixture, sent)?;
+    assert_eq!(sign_in.account.username, ACCOUNT);
+    assert_eq!(sign_in.account.object_id, OID);
+    assert_eq!(sign_in.account.tenant, TENANT);
+    assert_hidden(&sign_in, &fixture.secrets());
     assert_eq!(
         stored(&store, ACCOUNT).await?.as_deref(),
         Some(fixture.body("refresh_token")?)
@@ -373,8 +446,160 @@ async fn code_is_exchanged_and_the_refresh_token_stored() -> TestResult {
 }
 
 #[tokio::test]
-async fn a_code_answer_without_a_refresh_token_is_refused() -> TestResult {
+async fn the_account_check_ignores_case_and_takes_the_expected_ids() -> TestResult {
+    let mut claims = claims_of(&ACCOUNT.to_ascii_uppercase());
+    claims["upn"] = Value::String(ACCOUNT.into());
+    claims["aud"] = json!(["another-client", TEAMS_NATIVE_CLIENT_ID]);
+    let fixture = Fixture::load("entra-token-code")?.with_id_token(&claims)?;
+
+    let (result, store) = exchange(
+        &fixture,
+        |authorization| {
+            authorization
+                .expect_tenant(TENANT.to_ascii_uppercase())
+                .expect_object_id(OID)
+        },
+        Some("earlier-refresh-token-of-a"),
+    )
+    .await?;
+
+    let sign_in = result.expect("the same account");
+    assert_eq!(sign_in.account.username, ACCOUNT.to_ascii_uppercase());
+    assert_eq!(
+        stored(&store, ACCOUNT).await?.as_deref(),
+        Some(fixture.body("refresh_token")?),
+        "a new sign-in replaces the earlier refresh token"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_signed_in_account_is_refused_and_stores_nothing() -> TestResult {
+    let other = "b@lab.example.test";
+    let fixture = Fixture::load("entra-token-code")?.with_id_token(&claims_of(other))?;
+
+    let error = refused_exchange(&fixture, |authorization| authorization).await?;
+
+    let TokenError::WrongAccount { claim, expected, found } = &error else {
+        panic!("expected WrongAccount, got {error:?}");
+    };
+    assert_eq!(
+        (*claim, expected.as_str(), found.as_str()),
+        ("preferred_username", ACCOUNT, other)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_name_claim_must_match() -> TestResult {
+    let mut claims = claims_of(ACCOUNT);
+    claims["upn"] = Value::String("b@lab.example.test".into());
+    let fixture = Fixture::load("entra-token-code")?.with_id_token(&claims)?;
+
+    let error = refused_exchange(&fixture, |authorization| authorization).await?;
+
+    assert!(
+        matches!(&error, TokenError::WrongAccount { claim: "upn", .. }),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_id_token_without_a_name_claim_is_refused() -> TestResult {
+    let mut claims = claims_of(ACCOUNT);
+    claims.as_object_mut().ok_or("claims")?.remove("preferred_username");
+    let fixture = Fixture::load("entra-token-code")?.with_id_token(&claims)?;
+
+    let error = refused_exchange(&fixture, |authorization| authorization).await?;
+
+    assert!(
+        matches!(
+            error,
+            TokenError::IdToken(IdTokenError::MissingClaim("preferred_username"))
+        ),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_tenant_or_object_id_is_refused() -> TestResult {
+    let fixture = Fixture::load("entra-token-code")?.with_id_token(&claims_of(ACCOUNT))?;
+    let other = "00000000-0000-4000-8000-0000000000ee";
+
+    let tenant = refused_exchange(&fixture, |authorization| authorization.expect_tenant(other)).await?;
+    let object = refused_exchange(&fixture, |authorization| authorization.expect_object_id(other)).await?;
+
+    assert!(
+        matches!(&tenant, TokenError::WrongAccount { claim: "tid", found, .. } if found == TENANT),
+        "{tenant:?}"
+    );
+    assert!(
+        matches!(&object, TokenError::WrongAccount { claim: "oid", found, .. } if found == OID),
+        "{object:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_id_token_for_another_client_is_refused() -> TestResult {
+    let mut claims = claims_of(ACCOUNT);
+    claims["aud"] = Value::String("another-client".into());
+    let fixture = Fixture::load("entra-token-code")?.with_id_token(&claims)?;
+
+    let error = refused_exchange(&fixture, |authorization| authorization).await?;
+
+    assert!(
+        matches!(&error, TokenError::WrongAccount { claim: "aud", found, .. } if found == "another-client"),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_code_answer_without_an_id_token_is_refused() -> TestResult {
     let mut fixture = Fixture::load("entra-token-code")?;
+    fixture.body.as_object_mut().ok_or("body")?.remove("id_token");
+
+    let error = refused_exchange(&fixture, |authorization| authorization).await?;
+
+    assert!(matches!(error, TokenError::IdToken(IdTokenError::Missing)), "{error:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_id_token_that_is_not_a_jwt_is_refused() -> TestResult {
+    // The fixture's own ID token is a placeholder, not a JWT.
+    let fixture = Fixture::load("entra-token-code")?;
+
+    let error = refused_exchange(&fixture, |authorization| authorization).await?;
+
+    assert!(
+        matches!(error, TokenError::IdToken(IdTokenError::Malformed)),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_id_token_without_an_object_id_is_refused() -> TestResult {
+    let mut claims = claims_of(ACCOUNT);
+    claims.as_object_mut().ok_or("claims")?.remove("oid");
+    let fixture = Fixture::load("entra-token-code")?.with_id_token(&claims)?;
+
+    let error = refused_exchange(&fixture, |authorization| authorization).await?;
+
+    assert!(
+        matches!(error, TokenError::IdToken(IdTokenError::MissingClaim("oid"))),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_code_answer_without_a_refresh_token_is_refused() -> TestResult {
+    let mut fixture = Fixture::load("entra-token-code")?.with_id_token(&claims_of(ACCOUNT))?;
     fixture.body.as_object_mut().expect("an object").remove("refresh_token");
     let server = MockServer::start().await;
     let client = fixture.client(&server)?;

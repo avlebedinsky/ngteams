@@ -4,9 +4,15 @@
 //! multi-resource, so the same one is redeemed for every audience (`docs/protocol/auth.md`). Whenever Entra sends a new
 //! one it replaces the stored one. Access tokens aren't stored; callers keep them in memory until `expires_at`.
 //!
+//! A refresh token is stored under an account only once the ID token of the same answer names that account
+//! ([`IdTokenClaims::bind`]): `login_hint` doesn't decide who signs in, the profile's SSO session does, and another
+//! account's refresh token under this name would silently act as that account from then on. An answer without an ID
+//! token, or with one that can't be read, stores nothing either.
+//!
 //! An error never deletes the stored refresh token: a Conditional Access block on one audience leaves it good for the
 //! others, and an expired one is replaced by the next sign-in anyway.
 
+use crate::id_token::{Account, IdTokenClaims, IdTokenError};
 use crate::secrets::{SecretKey, SecretStore};
 use crate::token::{Authorization, Scope, TokenClient, TokenError, Tokens};
 
@@ -19,27 +25,42 @@ pub fn refresh_token_key(account: &str) -> SecretKey {
     SecretKey::new(account, REFRESH_TOKEN)
 }
 
+/// A finished code exchange: the access token for the authorization's scope, and the account the ID token named.
+#[derive(Clone, Debug)]
+pub struct SignIn {
+    pub tokens: Tokens,
+    pub account: Account,
+}
+
 impl TokenClient {
-    /// Redeems the code from `authorization`'s redirect and stores the refresh token under the authorization's
-    /// account. Returns the access token for the authorization's scope.
+    /// Redeems the code from `authorization`'s redirect, checks that the answer's ID token names the authorization's
+    /// account (and its expected tenant and object id, where given) and was issued to this client, and only then
+    /// stores the refresh token under that account.
     ///
     /// The caller has already checked the redirect's `state` against [`Authorization::state`].
     ///
     /// # Errors
-    /// Entra's refusal ([`TokenError::InvalidGrant`], [`TokenError::RedirectMismatch`], …), an answer without a refresh
-    /// token ([`TokenError::MissingField`]; nothing is stored then), or a store failure.
+    /// Entra's refusal ([`TokenError::InvalidGrant`], [`TokenError::RedirectMismatch`], …), an ID token that is
+    /// missing or unreadable ([`TokenError::IdToken`]) or names another account ([`TokenError::WrongAccount`]), an
+    /// answer without a refresh token ([`TokenError::MissingField`]), or a store failure. On every error but the last
+    /// nothing is stored, and a refresh token already stored for the account is left as it was.
     pub async fn exchange_code<S: SecretStore>(
         &self,
         store: &S,
         authorization: &Authorization,
         code: &str,
-    ) -> Result<Tokens, TokenError> {
+    ) -> Result<SignIn, TokenError> {
         let grant = self.redeem_code(authorization, code).await?;
+        let id_token = grant.tokens.id_token.as_ref().ok_or(IdTokenError::Missing)?;
+        let account = IdTokenClaims::parse(id_token)?.bind(authorization, self.config().client_id())?;
         let refresh_token = grant.refresh_token.ok_or(TokenError::MissingField("refresh_token"))?;
         store
             .put(&refresh_token_key(authorization.account()), &refresh_token)
             .await?;
-        Ok(grant.tokens)
+        Ok(SignIn {
+            tokens: grant.tokens,
+            account,
+        })
     }
 
     /// An access token for `scope` from `account`'s stored refresh token. A new refresh token from Entra replaces the

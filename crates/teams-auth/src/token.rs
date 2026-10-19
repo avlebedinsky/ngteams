@@ -14,6 +14,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use serde_json::{Map, Value};
 use url::form_urlencoded;
 
+use crate::id_token::IdTokenError;
 use crate::pkce::{Pkce, PkceError, random_state};
 use crate::secrets::{Secret, SecretError};
 
@@ -145,7 +146,8 @@ impl Scope {
 /// One authorize request: the URL to open in the lab profile, and what the code exchange needs afterwards.
 ///
 /// The caller opens [`url`](Self::url), takes `code` and `state` from the redirect, checks the state against
-/// [`state`](Self::state), and hands the code to [`TokenClient::exchange_code`].
+/// [`state`](Self::state), and hands the code to [`TokenClient::exchange_code`], which stores the refresh token only
+/// once the answer's ID token names this account.
 #[derive(Clone, Debug)]
 pub struct Authorization {
     account: String,
@@ -154,6 +156,8 @@ pub struct Authorization {
     state: String,
     redirect_uri: String,
     url: String,
+    expected_tenant: Option<String>,
+    expected_object_id: Option<String>,
 }
 
 impl Authorization {
@@ -198,7 +202,23 @@ impl Authorization {
             pkce,
             state,
             redirect_uri: config.redirect_uri().to_owned(),
+            expected_tenant: None,
+            expected_object_id: None,
         }
+    }
+
+    /// Also require the ID token's `tid` to be this tenant id.
+    #[must_use]
+    pub fn expect_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.expected_tenant = Some(tenant.into());
+        self
+    }
+
+    /// Also require the ID token's `oid` to be this object id (an account seen before).
+    #[must_use]
+    pub fn expect_object_id(mut self, object_id: impl Into<String>) -> Self {
+        self.expected_object_id = Some(object_id.into());
+        self
     }
 
     /// The authorize URL. It carries the challenge, never the verifier.
@@ -207,10 +227,21 @@ impl Authorization {
         &self.url
     }
 
-    /// The account the request is for; its refresh token is stored under this name.
+    /// The account the request is for (sent as `login_hint`, which Entra doesn't enforce). Its refresh token is stored
+    /// under this name, and only when the ID token names it too.
     #[must_use]
     pub fn account(&self) -> &str {
         &self.account
+    }
+
+    #[must_use]
+    pub fn expected_tenant(&self) -> Option<&str> {
+        self.expected_tenant.as_deref()
+    }
+
+    #[must_use]
+    pub fn expected_object_id(&self) -> Option<&str> {
+        self.expected_object_id.as_deref()
     }
 
     #[must_use]
@@ -317,6 +348,19 @@ pub enum TokenError {
     /// A success without a required field, or with one of the wrong type.
     #[error("the token answer has no valid {0}")]
     MissingField(&'static str),
+    /// The code exchange's ID token is missing or unreadable, so the signed-in account can't be checked; nothing was
+    /// stored.
+    #[error(transparent)]
+    IdToken(#[from] IdTokenError),
+    /// The code exchange signed in another account than the one asked for (the profile holds someone else's
+    /// session), or the ID token is for another client; nothing was stored.
+    #[error("the sign-in is not for {expected}: the ID token's {claim} is {found}; nothing was stored")]
+    WrongAccount {
+        /// The mismatching claim: `aud`, `preferred_username`, `upn`, `tid` or `oid`.
+        claim: &'static str,
+        expected: String,
+        found: String,
+    },
     /// The request didn't get an answer.
     #[error("token request failed: {0}")]
     Http(#[source] reqwest::Error),
