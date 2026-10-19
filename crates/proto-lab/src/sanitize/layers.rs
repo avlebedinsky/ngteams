@@ -211,6 +211,28 @@ pub(super) fn decode_all(text: &str) -> String {
     layered.plain()
 }
 
+/// `text` with one layer of escapes decoded, twice: as is, and with a NUL on both sides of every decoded character
+/// (so a word that only joins an escaped letter, `%41Jane`, is seen apart from it too); `None` when there is no escape.
+pub(super) fn decode_once(text: &str) -> Option<(String, String)> {
+    let escapes = escapes(text);
+    if escapes.is_empty() {
+        return None;
+    }
+    let mut plain = String::with_capacity(text.len());
+    let mut apart = String::with_capacity(text.len() + escapes.len() * 2);
+    let mut at = 0;
+    for (range, char) in escapes {
+        plain.push_str(&text[at..range.start]);
+        plain.push(char);
+        apart.push_str(&text[at..range.start]);
+        apart.extend(['\0', char, '\0']);
+        at = range.end;
+    }
+    plain.push_str(&text[at..]);
+    apart.push_str(&text[at..]);
+    Some((plain, apart))
+}
+
 /// Every escape in `text`, with the character it stands for, in order: percent escapes (a run of them read as UTF-8,
 /// a byte that isn't as Latin-1), backslash escapes (`\n`, `\"`, `\\`, `\uXXXX` and surrogate pairs, `\xXX`), and HTML
 /// character references (`&#233;`, `&#xE9;`, `&amp;`, `&quot;`, `&apos;`, `&lt;`, `&gt;`, `&nbsp;`).

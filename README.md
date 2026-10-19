@@ -46,7 +46,9 @@ A recorded run writes `captures/<scenario>/<ts>/events.jsonl` under the lab's da
 is described in `crates/proto-lab/src/capture.rs`). `cargo run -p proto-lab -- export <capture> <fixture-name>`
 sanitizes one into the repository's `tests/fixtures/<fixture-name>.jsonl` (or one JSON array for a `.json` name; the
 workspace root is found from the current directory, even inside a crate, or `--fixtures-dir` names another) and writes
-nothing unless the fixture guard passes the result.
+nothing unless no word (3 characters or more) of a name found in the capture is left in the result, at any layer of
+encoding, and the fixture guard passes it. A word of a name that is also an ordinary word left anywhere refuses the
+export too; a name never seen under a name field, or a shorter word, is outside that check.
 
 ## Test-only builds
 

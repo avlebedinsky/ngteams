@@ -1,7 +1,7 @@
 //! The sanitizer and `proto-lab export`, offline, on a synthetic capture shaped like the recorder's (`cdp` events,
 //! bodies, verdicts, WebRTC reports) and planted with every kind of secret and identity a Teams capture holds: secrets
 //! are gone, identities are stable placeholders (the lab's by alias), sanitizing twice changes nothing, the fixture
-//! guard finds nothing in the result, and an export the guard refuses writes nothing.
+//! guard finds nothing in the result, and an export the guard or the export's name check refuses writes nothing.
 //!
 //! Every secret and identity here is made up.
 
@@ -12,7 +12,10 @@ use base64::Engine as _;
 use fixture_guard::{Guard, Kind};
 use proto_lab::commands::export::{self, ExportError, Layout};
 use proto_lab::config::Alias;
-use proto_lab::sanitize::{Identities, KnownAccount, KnownService, Sanitizer, sanitize_events};
+use proto_lab::sanitize::{
+    CHECK_ROUNDS, Identities, KnownAccount, KnownService, LearnedNames, NameFinding, Sanitizer, check_names,
+    sanitize_capture, sanitize_events,
+};
 use serde_json::{Value, json};
 
 const TENANT: &str = "contoso-lab.com";
@@ -671,6 +674,10 @@ const AMZ_SIGNATURE: &str = "3f1a9c0b7e2d4f6a8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6
 const ACCENTED_NAME: &str = "José García";
 /// A name only ever seen percent-encoded, in a query.
 const CYRILLIC_NAME: &str = "Дмитрий Иванов";
+/// A display name in the "Last, First" form many tenants use.
+const COMMA_NAME: &str = "Doe, Jane";
+/// A name only ever seen in a form body, `+` for its space.
+const FORM_ONLY_NAME: &str = "Odalys Quennell";
 
 /// Percent-encodes every byte but the unreserved ones (as `encodeURIComponent` does, and a little more).
 fn enc(text: &str) -> String {
@@ -738,13 +745,27 @@ fn planted() -> Vec<(&'static str, String, Vec<String>)> {
         ("q", format!("Hola {ACCENTED_NAME}"), pieces(ACCENTED_NAME)),
         ("displayName", CYRILLIC_NAME.to_owned(), pieces(CYRILLIC_NAME)),
         ("text", "Привет, Дмитрий".to_owned(), pieces(CYRILLIC_NAME)),
+        // a "Last, First" display name (learned from JSON): its surname alone, the swapped order, a OneDrive path
+        ("text", "thanks Doe".to_owned(), pieces(COMMA_NAME)),
+        ("text", "Hi Jane Doe".to_owned(), pieces(COMMA_NAME)),
+        (
+            "path",
+            "/personal/jane_doe_contoso_com/Documents".to_owned(),
+            vec!["jane_doe".to_owned(), "jane".to_owned(), "doe".to_owned()],
+        ),
+        // a name only ever seen in form data (`displayName=Odalys+Quennell`), used elsewhere
+        ("text", format!("Hi {FORM_ONLY_NAME}"), pieces(FORM_ONLY_NAME)),
     ]
 }
 
 /// Every planted value in a query, in JSON in a query, and in a form, each as is and behind one and two redirects
-/// that encode it again, plus the event a name is learned from.
+/// that encode it again, plus the events names are learned from.
 fn encoded_capture() -> Vec<Value> {
-    let mut events = vec![json!({"type": "response_body", "body": json!({"displayName": ACCENTED_NAME}).to_string()})];
+    let mut events = vec![
+        json!({"type": "response_body", "body": json!({"displayName": ACCENTED_NAME}).to_string()}),
+        json!({"type": "response_body", "body": json!({"value": [{"displayName": COMMA_NAME}]}).to_string()}),
+        json!({"type": "request_body", "postData": format!("displayName={}&next=1", form_enc(FORM_ONLY_NAME))}),
+    ];
     for (key, value, _) in planted() {
         let query = format!("https://svc.example.invalid/p?{key}={}&next=1", enc(&value));
         let in_json = format!(
@@ -781,7 +802,10 @@ fn encodings(original: &str) -> Vec<String> {
 
 #[test]
 fn nothing_planted_survives_in_any_encoding() {
-    let out = sanitize_events(&encoded_capture(), &identities()).unwrap();
+    let sanitized = sanitize_capture(&encoded_capture(), &identities()).unwrap();
+    let out = sanitized.events;
+    // the export's own check for names finds nothing left either
+    assert_eq!(check_names(&sanitized.names, &as_jsonl(&out)), []);
     let text = as_jsonl(&out).to_lowercase();
     for (key, _, originals) in planted() {
         for original in originals {
@@ -878,6 +902,178 @@ fn a_name_seen_only_in_an_encoded_field_is_learned() {
     }
 }
 
+#[test]
+fn a_name_seen_only_in_form_data_is_learned_with_its_spaces() {
+    let events = [
+        json!({"type": "request_body", "postData": "displayName=Marguerite+Fakename&x=1"}),
+        json!({"text": "Hi Marguerite Fakename", "query": "?q=Marguerite%20Fakename"}),
+        // a `%2B` is a literal plus: `C++` stays together while the `+` between words is a space
+        json!({"type": "request_body", "postData": "givenName=Ottoline%2B+Quarrington"}),
+        json!({"text": "ottoline+ and Quarrington"}),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    assert_eq!(out[0]["postData"], "displayName=<name:1>&x=1");
+    assert_eq!(out[1]["text"], "Hi <name:1>");
+    assert_eq!(out[1]["query"], "?q=<name:1>");
+    let text = as_jsonl(&out).to_lowercase();
+    for gone in ["marguerite", "fakename", "ottoline", "quarrington"] {
+        assert!(!text.contains(gone), "{gone} survived: {text}");
+    }
+}
+
+#[test]
+fn a_last_comma_first_name_is_replaced_word_by_word_and_swapped() {
+    let events = [
+        json!({"displayName": "Doe, Jane"}),
+        json!({
+            "text": "thanks Doe",
+            "greeting": "Hi Jane Doe",
+            "path": "https://contoso-my.example.invalid/personal/jane_doe_contoso_com/Documents",
+            "query": "?q=Jane+Doe&r=jane%20doe",
+        }),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    assert_eq!(out[0]["displayName"], "<name:1>");
+    assert_eq!(out[1]["text"], "thanks <name:1>");
+    assert_eq!(out[1]["greeting"], "Hi <name:1>");
+    assert_eq!(
+        out[1]["path"],
+        "https://contoso-my.example.invalid/personal/<name:1>_contoso_com/Documents"
+    );
+    assert_eq!(out[1]["query"], "?q=<name:1>&r=<name:1>");
+    // punctuation around a word of a name doesn't keep the word from being one
+    let dotted = sanitize_events(
+        &[
+            json!({"displayName": "O'Hara-Quill (Contractor)"}),
+            json!({"text": "ask quill or o'hara, the contractor"}),
+        ],
+        &Identities::default(),
+    )
+    .unwrap();
+    assert_eq!(dotted[1]["text"], "ask <name:1> or o'<name:1>, the <name:1>");
+}
+
+#[test]
+fn a_name_is_found_where_a_longer_variant_stops_short_and_in_keys() {
+    let events = [
+        json!({"displayName": "Doe, Jane"}),
+        json!({
+            // `Jane Doe` matches up to `Does`, which isn't the name: `Jane` still is one
+            "text": "Jane Doesn't know, xJane Doe",
+            // a map keyed by display name
+            "reactions": {"Jane Doe": "like", "Doe, Jane": "heart", "other": "ok"},
+        }),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    assert_eq!(out[1]["text"], "<name:1> Doesn't know, xJane <name:1>");
+    // keys holding a name become its placeholder (two keys for one name become one)
+    let keys: Vec<&String> = out[1]["reactions"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["<name:1>", "other"]);
+}
+
+// --- the export's check for names ---
+
+/// The names found in `events` (a capture), as the export gets them.
+fn names_in(events: &[Value]) -> TestResult<LearnedNames> {
+    Ok(sanitize_capture(events, &Identities::default())?.names)
+}
+
+#[test]
+fn the_name_check_finds_a_name_left_as_written() {
+    let names = names_in(&[
+        json!({"displayName": "Doe, Jane"}),
+        json!({"postData": "givenName=Marguerite+Fakename"}),
+    ])
+    .unwrap();
+    let text =
+        "{\"ok\":\"<name:1> and <name:2>\"}\n{\"text\":\"thanks DOE\"}\n{\"path\":\"/personal/x_fakename_y/\"}\n";
+    let found = check_names(&names, text);
+    assert_eq!(
+        found,
+        [
+            NameFinding::Name {
+                line: 2,
+                layer: 0,
+                label: "<name:1>".to_owned()
+            },
+            NameFinding::Name {
+                line: 3,
+                layer: 0,
+                label: "<name:2>".to_owned()
+            },
+        ]
+    );
+    // what it reports and how it prints never holds the name
+    let shown = format!("{found:?} {} {names:?}", found[0]);
+    for name in ["doe", "jane", "marguerite", "fakename"] {
+        assert!(!shown.to_lowercase().contains(name), "{shown}");
+    }
+    // a sanitized capture holding those names passes
+    let clean = sanitize_events(
+        &[
+            json!({"displayName": "Doe, Jane"}),
+            json!({"postData": "givenName=Marguerite+Fakename"}),
+            json!({"text": "thanks Doe, said Marguerite", "path": "/personal/jane_doe_contoso_com/"}),
+        ],
+        &Identities::default(),
+    )
+    .unwrap();
+    assert_eq!(check_names(&names, &as_jsonl(&clean)), []);
+}
+
+#[test]
+fn the_name_check_sees_through_every_layer_of_encoding() {
+    let names = names_in(&[json!({"displayName": "Jane Doe"})]).unwrap();
+    // every byte of `Jane` percent-encoded, then encoded twice more: only the third decoded layer shows it
+    let deep = enc_times("%4A%61%6E%65", 2);
+    let lines = [
+        "{\"ok\":\"<name:1>\"}".to_owned(),
+        format!("{{\"q\":\"?q={deep}\"}}"),
+        // an HTML reference and a backslash escape
+        "{\"html\":\"<p>Hi &#68;oe</p>\",\"js\":\"\\\\u0044oe\"}".to_owned(),
+        // a letter escaped right before the name: the name is a word apart from it too
+        "{\"q\":\"?q=%41Jane\"}".to_owned(),
+        // placeholder-shaped text that only shows once decoded is no placeholder
+        "{\"q\":\"%3Cname:%44oe%3E\"}".to_owned(),
+    ];
+    let found = check_names(&names, &lines.join("\n"));
+    let at: Vec<(usize, usize)> = found
+        .iter()
+        .map(|finding| match finding {
+            NameFinding::Name { line, layer, .. } => (*line, *layer),
+            NameFinding::TooDeep { line } => panic!("line {line} too deep"),
+        })
+        .collect();
+    assert_eq!(at, [(2, 3), (3, 1), (4, 1), (5, 1)]);
+}
+
+#[test]
+fn a_line_too_deep_to_check_is_refused() {
+    let names = names_in(&[json!({"displayName": "Jane Doe"})]).unwrap();
+    let deep = |times: usize| enc_times(&enc("a b"), times);
+    // within the bound: decoded to the end, nothing found
+    assert_eq!(check_names(&names, &deep(CHECK_ROUNDS - 1)), []);
+    assert_eq!(
+        check_names(&names, &format!("x\n{}", deep(CHECK_ROUNDS))),
+        [NameFinding::TooDeep { line: 2 }]
+    );
+    // nothing to look for, nothing to refuse
+    assert_eq!(check_names(&LearnedNames::default(), &deep(CHECK_ROUNDS + 2)), []);
+}
+
+#[test]
+fn placeholders_and_short_words_are_no_names_to_the_check() {
+    // a group whose words are placeholder kinds, and a name of two short words
+    let names = names_in(&[json!({"displayName": "Domain Users"}), json!({"displayName": "Li Wu"})]).unwrap();
+    let text = "{\"to\":\"<user:a>\",\"tenant\":\"<domain:tenant>\",\"who\":\"<name:2>\",\"short\":\"li wu\"}\n";
+    assert_eq!(check_names(&names, text), []);
+    let text = "{\"text\":\"for all domain users\"}\n";
+    assert_eq!(check_names(&names, text).len(), 1);
+    // a short name is still replaced whole where it is a name field's value
+    let out = sanitize_events(&[json!({"displayName": "Li Wu"})], &Identities::default()).unwrap();
+    assert_eq!(out[0]["displayName"], "<name:1>");
+}
+
 // --- export ---
 
 fn write_capture(dir: &Path, events: &[Value]) -> TestResult<std::path::PathBuf> {
@@ -963,6 +1159,78 @@ fn a_fixture_that_cant_be_put_in_place_leaves_no_staging_file() {
     names.sort();
     assert_eq!(names, ["taken.jsonl"]);
     assert!(path.join("inside").is_dir());
+}
+
+/// A capture naming people only in places the sanitizer reads: a "Last, First" display name, a name in form data.
+fn named_capture() -> Vec<Value> {
+    vec![
+        json!({"type": "response_body", "body": json!({"value": [{"displayName": COMMA_NAME}]}).to_string()}),
+        json!({"type": "request_body", "postData": format!("displayName={}&x=1", form_enc(FORM_ONLY_NAME))}),
+        json!({"type": "rtc", "text": "thanks Doe", "path": "/personal/jane_doe_contoso_com/", "hi": "Hi Odalys Quennell"}),
+    ]
+}
+
+#[test]
+fn an_export_with_names_in_it_is_written_without_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixtures = dir.path().join("fixtures");
+    let capture = write_capture(dir.path(), &named_capture()).unwrap();
+    let exported = export::export(&capture, "people", &fixtures, &Identities::default()).unwrap();
+    let written = fs::read_to_string(&exported.path).unwrap().to_lowercase();
+    for gone in ["doe", "jane", "odalys", "quennell"] {
+        assert!(!written.contains(gone), "{gone} survived: {written}");
+    }
+    assert!(
+        written.contains("<name:1>") && written.contains("<name:2>"),
+        "{written}"
+    );
+}
+
+#[test]
+fn an_export_with_a_name_left_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixtures = dir.path().join("fixtures");
+    let capture = write_capture(dir.path(), &named_capture()).unwrap();
+    let path = fixtures.join("people.jsonl");
+    fs::create_dir_all(&fixtures).unwrap();
+    fs::write(&path, "{\"old\":true}\n").unwrap();
+    // a sanitizer that misses a surname: the real one, with the surname put back into its output
+    let leaky = |events: &[Value]| {
+        let mut sanitized = sanitize_capture(events, &Identities::default())?;
+        sanitized.events[2]["text"] = json!("thanks Doe");
+        Ok(sanitized)
+    };
+    let error = export::export_with(&capture, "people", &fixtures, leaky).unwrap_err();
+    let ExportError::NameLeft(found) = &error else {
+        panic!("expected a name left, got {error}");
+    };
+    assert_eq!(
+        found,
+        &[NameFinding::Name {
+            line: 3,
+            layer: 0,
+            label: "<name:1>".to_owned()
+        }]
+    );
+    let message = error.to_string();
+    assert!(message.contains("line 3: <name:1>"), "{message}");
+    assert!(
+        !message.to_lowercase().contains("doe"),
+        "the refusal must not show the name: {message}"
+    );
+    // the existing fixture stays as it was, and nothing else is written
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{\"old\":true}\n");
+    let names: Vec<_> = fs::read_dir(&fixtures)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["people.jsonl"]);
+    // the same seam with the real sanitizer writes the fixture: the check refuses only what is left
+    export::export_with(&capture, "people", &fixtures, |events| {
+        sanitize_capture(events, &Identities::default())
+    })
+    .unwrap();
+    assert_ne!(fs::read_to_string(&path).unwrap(), "{\"old\":true}\n");
 }
 
 #[test]

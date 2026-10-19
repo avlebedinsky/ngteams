@@ -21,8 +21,14 @@
 //! - **Names** are learned from name fields (`displayName`, `givenName`, `surname`, `imdisplayname`, …) across the whole
 //!   capture first, base64 bodies, JSON inside strings and `displayName=…` in (encoded) text included; then every
 //!   occurrence of a learned name, or of a word of it with 3 letters or more, in any case and as a whole word (`_`
-//!   separates words too), is replaced in every text (a message body that says "Hi Jane", a `OneDrive` path with
-//!   `jane_doe`, a query with `Hello%20Jane`). A name only ever seen under a generic key such as `name` isn't learned.
+//!   separates words too), is replaced in every text and every object key (a message body that says "Hi Jane", a
+//!   `OneDrive` path with `jane_doe`, a query with `Hello%20Jane`, a map keyed by display name). A name's words are its
+//!   runs of letters and digits, so punctuation never sticks to one (`Doe, Jane` gives `Doe`); a "Last, First" name
+//!   also stands for "First Last". A name found in form data is learned both as written and form-decoded
+//!   (`Marguerite+Fakename` also as `Marguerite Fakename`; `%2B` stays a plus), only here: to every other rule `+`
+//!   stays `+`, so a base64 secret isn't split. A name only ever seen under a generic key such as `name` isn't learned.
+//!   Every name value is also kept as it was found ([`Sanitizer::learned_names`]), for the export's own check
+//!   ([`check_names`], `sanitize/backstop.rs`) that no word of one is left.
 //!
 //! **Every rule sees every layer of encoding** (`sanitize/layers.rs`). Text rules run on a text as written, then again
 //! with one layer of escapes decoded (percent escapes, `%25XX` being one more layer, as UTF-8; backslash escapes; HTML
@@ -38,11 +44,13 @@
 //! the identifier rules as well (maps keyed by MRI).
 //!
 //! Sanitizing is idempotent: placeholders are never matched again, so a sanitized capture comes out unchanged.
-//! Whatever this misses, the fixture guard is the last check before a fixture is written.
+//! Whatever this misses, the export's name check and the fixture guard are the last checks before a fixture is
+//! written.
 
+mod backstop;
 mod layers;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ops::Range;
 
@@ -50,6 +58,7 @@ use base64::Engine as _;
 use regex::{Captures, Regex};
 use serde_json::{Map, Value};
 
+pub use self::backstop::{CHECK_ROUNDS, LearnedNames, NameFinding, check_names};
 use self::layers::{DECODE_ROUNDS, Layered, decode_all};
 use crate::config::{Alias, LabConfig};
 
@@ -313,6 +322,11 @@ struct State {
     /// Every text that stands for a learned name (the name, its encoded forms, its longer words), lowercased, with the
     /// name's label.
     variants: HashMap<String, String>,
+    /// The names whose variants are in [`Self::variants`], as compared ([`identity_text`]).
+    learned: HashSet<String>,
+    /// Every name value as it was found (before any decoding), with its label: what the export's check
+    /// ([`check_names`]) looks for, apart from [`Self::variants`].
+    found_names: HashMap<String, String>,
     names_regex: Option<Regex>,
     names_changed: bool,
 }
@@ -323,33 +337,41 @@ impl State {
         format!("<token:{}>", self.tokens.label(&decode_all(value)))
     }
 
+    /// A whole name value's placeholder.
     fn name(&mut self, name: &str) -> String {
-        format!("<name:{}>", self.names.label(&identity_text(name)))
+        let label = self.names.label(&identity_text(name));
+        self.found_names.entry(name.to_owned()).or_insert_with(|| label.clone());
+        format!("<name:{label}>")
     }
 
     fn pii(&mut self, value: &str) -> String {
         format!("<pii:{}>", self.pii.label(&identity_text(value)))
     }
 
-    fn learn_name(&mut self, name: &str) {
-        let name = identity_text(name);
-        let name = name.as_str();
-        if name.chars().count() < 2 || self.names.labels.contains_key(name) {
+    /// Learns a name value as it was found: as compared ([`identity_text`], where `+` stays `+`) and form-decoded (a
+    /// `+` a space, `%2B` still a `+`), both under one label, each with its variants ([`name_variants`]).
+    fn learn_name(&mut self, raw: &str) {
+        let mut forms = vec![identity_text(raw), identity_text(&raw.replace('+', " "))];
+        forms.dedup();
+        forms.retain(|form| form.chars().count() >= 2);
+        let Some(first) = forms.first() else {
             return;
+        };
+        let known = forms.iter().find_map(|form| self.names.labels.get(form).cloned());
+        let label = known.unwrap_or_else(|| self.names.label(first));
+        self.found_names.entry(raw.to_owned()).or_insert_with(|| label.clone());
+        for form in forms {
+            self.names.seed(form.clone(), &label);
+            if !self.learned.insert(form.clone()) {
+                continue;
+            }
+            for variant in name_variants(&form) {
+                self.variants
+                    .entry(variant.to_lowercase())
+                    .or_insert_with(|| label.clone());
+            }
+            self.names_changed = true;
         }
-        let label = self.names.label(name);
-        let mut variants = vec![name.to_owned(), name.replace(' ', "%20"), name.replace(' ', "+")];
-        variants.extend(
-            name.split_whitespace()
-                .filter(|word| word.chars().count() >= 3)
-                .map(str::to_owned),
-        );
-        for variant in variants {
-            self.variants
-                .entry(variant.to_lowercase())
-                .or_insert_with(|| label.clone());
-        }
-        self.names_changed = true;
     }
 
     fn rebuild_names(&mut self) -> Result<(), regex::Error> {
@@ -499,6 +521,18 @@ impl Sanitizer {
         self.rules.whole_placeholder.is_match(text)
     }
 
+    /// Every name value found so far (learned, or replaced whole under a name key), as it was found, with its
+    /// placeholder: what [`check_names`] looks for in the output.
+    #[must_use]
+    pub fn learned_names(&self) -> LearnedNames {
+        LearnedNames::new(
+            self.state
+                .found_names
+                .iter()
+                .map(|(raw, label)| (raw.clone(), format!("<name:{label}>"))),
+        )
+    }
+
     fn value(&mut self, value: &Value, mode: Mode) -> Value {
         match value {
             Value::String(text) => Value::String(self.string(text, mode)),
@@ -626,11 +660,32 @@ impl Sanitizer {
 /// # Errors
 /// As [`Sanitizer::new`] and [`Sanitizer::sanitize`].
 pub fn sanitize_events(events: &[Value], identities: &Identities) -> Result<Vec<Value>, regex::Error> {
+    sanitize_capture(events, identities).map(|sanitized| sanitized.events)
+}
+
+/// A capture sanitized, with the names found in it for [`check_names`].
+pub struct Sanitized {
+    pub events: Vec<Value>,
+    pub names: LearnedNames,
+}
+
+/// As [`sanitize_events`], also handing back the names found ([`Sanitizer::learned_names`]).
+///
+/// # Errors
+/// As [`Sanitizer::new`] and [`Sanitizer::sanitize`].
+pub fn sanitize_capture(events: &[Value], identities: &Identities) -> Result<Sanitized, regex::Error> {
     let mut sanitizer = Sanitizer::new(identities)?;
     for event in events {
         sanitizer.learn(event);
     }
-    events.iter().map(|event| sanitizer.sanitize(event)).collect()
+    let events = events
+        .iter()
+        .map(|event| sanitizer.sanitize(event))
+        .collect::<Result<_, _>>()?;
+    Ok(Sanitized {
+        events,
+        names: sanitizer.learned_names(),
+    })
 }
 
 fn seed_mri(rules: &Rules, state: &mut State, mri: &str, label: &str) {
@@ -643,6 +698,32 @@ fn seed_mri(rules: &Rules, state: &mut State, mri: &str, label: &str) {
 
 fn normalize_mri(mri: &str) -> String {
     decode_all(mri).to_lowercase()
+}
+
+/// Every text that stands for a name: the name and, for a "Last, First" name (one comma), "First Last", each also with
+/// `%20`, `+` and `_` for its spaces; and every word of 3 letters or more, words being runs of letters and digits (any
+/// script), so punctuation never sticks to one (`Doe, Jane` gives `Doe` and `Jane`).
+fn name_variants(name: &str) -> Vec<String> {
+    let mut full = vec![name.to_owned()];
+    if let Some((last, first)) = name.split_once(',').filter(|_| name.matches(',').count() == 1) {
+        let (last, first) = (last.trim(), first.trim());
+        if !last.is_empty() && !first.is_empty() {
+            full.push(format!("{first} {last}"));
+        }
+    }
+    let mut variants = Vec::new();
+    for name in full {
+        for space in ["%20", "+", "_"] {
+            variants.push(name.replace(' ', space));
+        }
+        variants.push(name);
+    }
+    variants.extend(
+        name.split(|char: char| !char.is_alphanumeric())
+            .filter(|word| word.chars().count() >= 3)
+            .map(str::to_owned),
+    );
+    variants
 }
 
 /// What an identity is compared by: decoded, without the spaces around it.
@@ -754,8 +835,9 @@ const TEXT_RULES: [Rule; 15] = [
     opaque,
 ];
 
-/// The rules for object keys: identifiers only (a key is never a secret's name to redact, and never a name).
-const KEY_RULES: [Rule; 10] = [
+/// The rules for object keys: identifiers and learned names (a map may be keyed by MRI or by display name), never
+/// secrets (a key is never a secret's name to redact).
+const KEY_RULES: [Rule; 11] = [
     jwts,
     mris,
     guids,
@@ -765,6 +847,7 @@ const KEY_RULES: [Rule; 10] = [
     hosted_domains,
     ipv4s,
     ipv6s,
+    names,
     opaque,
 ];
 
@@ -1031,23 +1114,45 @@ fn fields(rules: &Rules, state: &mut State, text: &str) -> Edits {
 }
 
 /// Learned names, in any case, as whole words: neither the character before a match nor the one after it may be a
-/// letter or a digit (a name behind an escape, `Hello%20Jane`, is found once the escape is decoded).
+/// letter or a digit (a name behind an escape, `Hello%20Jane`, is found once the escape is decoded). A match that isn't
+/// bounded is looked at again as the single word it starts (`Jane Does` holds `Jane`, not `Jane Doe`), and the search
+/// goes on from the next character, so nothing inside it is skipped.
 fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
     let Some(regex) = &state.names_regex else {
         return Vec::new();
     };
     let mut edits = Vec::new();
-    for found in regex.find_iter(text) {
-        let before = text[..found.start()].chars().next_back();
-        let after = text[found.end()..].chars().next();
-        if before.is_some_and(char::is_alphanumeric) || after.is_some_and(char::is_alphanumeric) {
-            continue;
-        }
-        if let Some(label) = state.variants.get(&found.as_str().to_lowercase()) {
-            edits.push((found.range(), format!("<name:{label}>")));
+    let mut at = 0;
+    while let Some(found) = regex.find_at(text, at) {
+        let start = found.start();
+        if let Some((end, label)) = name_at(state, text, start, found.end()) {
+            edits.push((start..end, format!("<name:{label}>")));
+            at = end;
+        } else {
+            at = start + text[start..].chars().next().map_or(1, char::len_utf8);
         }
     }
     edits
+}
+
+/// The learned name that starts at `start`, bounded on both sides: what the names pattern matched (up to `end`), or
+/// else the single word there; where it ends, and its label.
+fn name_at(state: &State, text: &str, start: usize, end: usize) -> Option<(usize, String)> {
+    if text[..start].chars().next_back().is_some_and(char::is_alphanumeric) {
+        return None;
+    }
+    let bounded = !text[end..].chars().next().is_some_and(char::is_alphanumeric);
+    let matched = bounded
+        .then(|| state.variants.get(&text[start..end].to_lowercase()))
+        .flatten();
+    if let Some(label) = matched {
+        return Some((end, label.clone()));
+    }
+    let word = text[start..]
+        .find(|char: char| !char.is_alphanumeric())
+        .map_or(text.len(), |len| start + len);
+    let label = state.variants.get(&text[start..word].to_lowercase())?;
+    Some((word, label.clone()))
 }
 
 fn opaque(rules: &Rules, state: &mut State, text: &str) -> Edits {

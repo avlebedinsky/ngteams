@@ -2,7 +2,10 @@
 //!
 //! The capture's events are sanitized as one capture ([`crate::sanitize`]), and the result goes to
 //! `tests/fixtures/<fixture-name>`: JSONL by default (`.jsonl` is added to a name without an extension), or one
-//! pretty-printed JSON array for a name ending in `.json`. The fixture guard scans the text before anything is written:
+//! pretty-printed JSON array for a name ending in `.json`. Before anything is written, the text is checked for every
+//! name the sanitizer found in the capture ([`check_names`], at every layer of encoding, apart from the sanitizer's own
+//! replacing): if a word of one is still there, nothing is written and the export fails, naming the lines and the
+//! names' placeholders, never the names. Then the fixture guard scans the text:
 //! if it finds anything, nothing is written (an existing fixture of that name stays as it was) and the export fails,
 //! naming the lines and what was found, never the values. The file is written next to its final name, scanned once more
 //! as it lies on disk, and only then renamed into place, so a refusal at either scan leaves an existing fixture as it
@@ -19,7 +22,7 @@ use fixture_guard::{Guard, Kind};
 use serde_json::Value;
 
 use crate::capture::EVENTS_FILE;
-use crate::sanitize::{Identities, sanitize_events};
+use crate::sanitize::{Identities, NameFinding, Sanitized, check_names, sanitize_capture};
 
 /// Where fixtures live, relative to the repository root.
 pub const FIXTURES_DIR: &str = "tests/fixtures";
@@ -42,6 +45,8 @@ pub enum ExportError {
     GuardPattern(#[source] regex::Error),
     #[error("the fixture guard refused the export, nothing was written: {}", findings(.0))]
     Refused(Vec<(usize, Kind)>),
+    #[error("a name found in the capture is still in the sanitized text, nothing was written: {}", name_findings(.0))]
+    NameLeft(Vec<NameFinding>),
     #[error("no cargo workspace with a {FIXTURES_DIR} in {} or above it; pass --fixtures-dir", .0.display())]
     NoFixturesDir(PathBuf),
 }
@@ -52,6 +57,11 @@ fn findings(found: &[(usize, Kind)]) -> String {
         .map(|(line, kind)| format!("line {line}: {kind:?}"))
         .collect();
     lines.join(", ")
+}
+
+fn name_findings(found: &[NameFinding]) -> String {
+    let found: Vec<String> = found.iter().map(ToString::to_string).collect();
+    found.join(", ")
 }
 
 fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ExportError + '_ {
@@ -184,24 +194,46 @@ fn stage(guard: &Guard, staging: &Path, text: &str) -> Result<(), ExportError> {
     }
 }
 
-/// Exports a capture: reads it, sanitizes it as one capture, and writes it as fixture `name` under `fixtures_dir`
-/// through [`write_fixture`].
+/// Exports a capture: reads it, sanitizes it as one capture, checks the names found in it ([`check_names`]), and
+/// writes it as fixture `name` under `fixtures_dir` through [`write_fixture`].
 ///
 /// # Errors
-/// As [`fixture_path`], [`read_capture`] and [`write_fixture`].
+/// As [`fixture_path`], [`read_capture`] and [`write_fixture`]; [`ExportError::NameLeft`] when a name is left, with
+/// nothing written.
 pub fn export(
     capture: &Path,
     name: &str,
     fixtures_dir: &Path,
     identities: &Identities,
 ) -> Result<Exported, ExportError> {
+    export_with(capture, name, fixtures_dir, |events| {
+        sanitize_capture(events, identities)
+    })
+}
+
+/// [`export`] with the sanitizing step given: the seam its tests use to hand the checks a sanitizer that misses
+/// something. Every check after that step runs as in [`export`].
+///
+/// # Errors
+/// As [`export`].
+pub fn export_with(
+    capture: &Path,
+    name: &str,
+    fixtures_dir: &Path,
+    sanitize: impl FnOnce(&[Value]) -> Result<Sanitized, regex::Error>,
+) -> Result<Exported, ExportError> {
     let (path, layout) = fixture_path(fixtures_dir, name)?;
     let events = read_capture(capture)?;
-    let sanitized = sanitize_events(&events, identities).map_err(ExportError::Pattern)?;
-    write_fixture(&path, &render(&sanitized, layout))?;
+    let sanitized = sanitize(&events).map_err(ExportError::Pattern)?;
+    let text = render(&sanitized.events, layout);
+    let left = check_names(&sanitized.names, &text);
+    if !left.is_empty() {
+        return Err(ExportError::NameLeft(left));
+    }
+    write_fixture(&path, &text)?;
     Ok(Exported {
         path,
-        events: sanitized.len(),
+        events: sanitized.events.len(),
     })
 }
 
