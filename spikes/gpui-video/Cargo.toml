@@ -1,0 +1,21 @@
+[package]
+name = "gpui-video"
+description = "M0 spikes: GPUI on niri/Wayland smoke check (Task 15), then video rendering (Task 16)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-pre.workspace = true
+gpui-pre-platform.workspace = true
+image.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+# the smoke test reads the compositor's screenshot back
+image = { workspace = true, features = ["png"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

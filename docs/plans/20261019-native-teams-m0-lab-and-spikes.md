@@ -394,10 +394,16 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 **Files:**
 - Create: `spikes/gpui-video/{Cargo.toml,src/main.rs}`
 
-- [ ] take GPUI the way agterm-rs does: the crates.io `gpui-pre` releases rather than a Zed git rev, so the patches from agterm-rs apply as they are. Check its experience with tracing: calloop requests tracing's `log` feature, which inflates `cognitive_complexity` in every tracing macro. agterm-rs vendors calloop without that request (`scripts/vendor-calloop.sh`, `scripts/check-tracing-features.sh`); take the same approach if clippy hits it.
-- [ ] stock GPUI opens a window on niri/Wayland and renders text plus an image on the iGPU and the dGPU (`DRI_PRIME` / Vulkan device selection)
-- [ ] a test (with `#[ignore]` when there's no Wayland session): the window starts and closes within N seconds without errors
-- [ ] if there's a windowing blocker, add ⚠️ to the plan and stop before Task 16
+- [x] take GPUI the way agterm-rs does: the crates.io `gpui-pre` releases rather than a Zed git rev, so the patches from agterm-rs apply as they are. Check its experience with tracing: calloop requests tracing's `log` feature, which inflates `cognitive_complexity` in every tracing macro. agterm-rs vendors calloop without that request (`scripts/vendor-calloop.sh`, `scripts/check-tracing-features.sh`); take the same approach if clippy hits it.
+  - `gpui-pre` and `gpui-pre-platform` `=0.3.9` (the newest on crates.io, the same snapshot agterm-rs pins), stock, `wayland` only: no `x11` feature, and the app is built with `WindowingModes::WAYLAND`, so GPUI has no X11 or headless fallback (an unset `WAYLAND_DISPLAY` is refused, an unreachable one panics at startup).
+  - calloop 0.14.5 does turn on tracing's `log` in the graph, but no workspace crate calls tracing macros yet, so clippy is clean and nothing is vendored. The first crate that logs with tracing takes agterm-rs's calloop vendoring.
+  - ➕ oo7 switched to its async-io flavour (`default-features = false`, `async-std` + `native_crypto`, the set GPUI's Linux platform uses). GPUI's ashpd/zbus refuse `async-io` and `tokio` together, and workspace builds unify features, so oo7's default `tokio` broke every `--workspace` build. The real-keyring test passes on it.
+- [x] stock GPUI opens a window on niri/Wayland and renders text plus an image on the iGPU and the dGPU (`DRI_PRIME` / Vulkan device selection)
+  - run on a niri 26.04 nested in a private headless weston 15.0.1 (`--renderer=gl --fake-seat`), never on the live session. The screenshot taken through the nested niri shows the text and the checkerboard `RenderImage`.
+  - GPU choice: GPUI ranks adapters itself (`ZED_DEVICE_ID` first, then the compositor's GPU from dmabuf feedback, then discrete over integrated), so `DRI_PRIME` has no effect on it. `ZED_DEVICE_ID=0xa7a0` gives Intel Iris Xe (RPL-P, Vulkan, Mesa), `ZED_DEVICE_ID=0x2820` gives the RTX 4070 Laptop GPU (Vulkan, NVIDIA). By default it takes the iGPU, because the compositor runs on it.
+- [x] a test (with `#[ignore]` when there's no Wayland session): the window starts and closes within N seconds without errors
+  - `spikes/gpui-video/tests/smoke.rs` starts its own weston plus nested niri, so it needs no session and isn't `#[ignore]`d. Without weston ≥ 15 or niri it skips with a note, and `GPUI_SMOKE_REQUIRE=1` makes that a failure. It checks: ready within 30 s, the window listed by niri, the image and text pixels in the screenshot, exit within 5 s of niri's close request with status 0 and no `ERROR` in GPUI's log. This runs on every render-node GPU. It also checks the refusals without a compositor.
+- [x] if there's a windowing blocker, add ⚠️ to the plan and stop before Task 16 (no blocker: Task 16 can start)
 
 ### Task 16: GPUI video rendering spike (spike 2)
 **Files:**
