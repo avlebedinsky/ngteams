@@ -447,17 +447,22 @@ impl Driver {
         timeout: Duration,
     ) -> Result<(), StepError> {
         let deadline = tokio::time::Instant::now() + timeout;
+        let timed_out = || StepError::Timeout {
+            step: step.to_owned(),
+            waited: timeout,
+            waiting_for: waiting_for.to_owned(),
+        };
         loop {
             self.drain();
-            if self.evaluate(step, expression).await? == Value::Bool(true) {
+            // a page that doesn't answer (a busy renderer, a modal dialog) runs out the wait too
+            let value = tokio::time::timeout_at(deadline, self.evaluate(step, expression))
+                .await
+                .map_err(|_| timed_out())??;
+            if value == Value::Bool(true) {
                 return Ok(());
             }
             if tokio::time::Instant::now() + POLL > deadline {
-                return Err(StepError::Timeout {
-                    step: step.to_owned(),
-                    waited: timeout,
-                    waiting_for: waiting_for.to_owned(),
-                });
+                return Err(timed_out());
             }
             tokio::time::sleep(POLL).await;
         }

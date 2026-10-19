@@ -19,9 +19,16 @@
 //! An own-state rule matches the method, the exact origin (scheme, host and port) and the path segment by segment; a
 //! `*` segment stands for exactly one non-empty segment (an Entra tenant). The query plays no part.
 
-use percent_encoding::percent_decode_str;
-use serde_json::Value;
-use teams_fence::{AFD_HOSTS, Mri, REGIONAL_SUFFIX, Scope, Target, WriteKind};
+use std::collections::HashSet;
+use std::fmt;
+
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Value};
+/// The chat service path of a request URL after its base, from `v1` on, each segment percent-decoded; `None` for
+/// anything but the chat service. It is teams-fence's, so the mapping and the live member read recognize the chat
+/// service by one check.
+pub use teams_fence::chat_service_path;
+use teams_fence::{Mri, Scope, Target, WriteKind};
 use url::Url;
 
 /// A reviewed kind of own-state request: it changes only the signed-in account's own session state.
@@ -222,35 +229,6 @@ impl Classifier {
     }
 }
 
-/// The chat service path of `url` after its base, from `v1` on, each segment percent-decoded: `Some` for
-/// `https://<AFD host>/api/chatsvc/<region>/v1/…` and `https://<name>.msg.teams.microsoft.com/v1/…` only (no port, no
-/// user info).
-#[must_use]
-pub fn chat_service_path(url: &Url) -> Option<Vec<String>> {
-    if url.scheme() != "https" || url.port().is_some() || !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-    let host = url.host_str()?.to_ascii_lowercase();
-    let segments: Vec<&str> = url.path_segments()?.collect();
-    let rest = if AFD_HOSTS.contains(&host.as_str()) {
-        match segments.as_slice() {
-            ["api", "chatsvc", region, rest @ ..] if !region.is_empty() => rest,
-            _ => return None,
-        }
-    } else if host.strip_suffix(REGIONAL_SUFFIX).is_some_and(|name| !name.is_empty()) {
-        segments.as_slice()
-    } else {
-        return None;
-    };
-    if rest.first() != Some(&"v1") {
-        return None;
-    }
-    rest[1..]
-        .iter()
-        .map(|segment| percent_decode_str(segment).decode_utf8().ok().map(String::from))
-        .collect()
-}
-
 /// The write a chat service request makes, if the mapping knows it (`docs/protocol/fence-targets.md`).
 fn map_write(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
     let path = chat_service_path(url)?;
@@ -295,9 +273,10 @@ fn chat_scope(id: &str) -> Option<Scope> {
 }
 
 /// What a message post is, by its `messagetype`: typing (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`,
-/// `RichText`, `RichText/…`). Any other type, or a body that isn't a JSON object with one, is unknown.
+/// `RichText`, `RichText/…`). Any other type, or a body that isn't a JSON object with one (read by [`strict_json`]), is
+/// unknown.
 fn message_kind(body: &[u8]) -> Option<WriteKind> {
-    let body: Value = serde_json::from_slice(body).ok()?;
+    let body = strict_json(body)?;
     match body.get("messagetype")?.as_str()? {
         "Control/Typing" | "Control/ClearTyping" => Some(WriteKind::Typing),
         "Text" | "RichText" => Some(WriteKind::Message),
@@ -306,10 +285,10 @@ fn message_kind(body: &[u8]) -> Option<WriteKind> {
     }
 }
 
-/// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the list is
-/// missing, empty, or has a member without a string id.
+/// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the body
+/// isn't read by [`strict_json`], or the list is missing, empty, or has a member that isn't an object with a string id.
 fn body_members(body: &[u8]) -> Option<Vec<Mri>> {
-    let body: Value = serde_json::from_slice(body).ok()?;
+    let body = strict_json(body)?;
     let members: Vec<Mri> = body
         .get("members")?
         .as_array()?
@@ -317,6 +296,93 @@ fn body_members(body: &[u8]) -> Option<Vec<Mri>> {
         .map(|member| member.get("id")?.as_str().map(Mri::new))
         .collect::<Option<_>>()?;
     (!members.is_empty()).then_some(members)
+}
+
+/// A request body as one JSON value, read so that the fence and the chat service can't read it differently: `None`
+/// for anything but a single JSON value, and for a body in which any object has two keys a case-insensitive reader
+/// could take for one (an exact duplicate, `members` beside `Members`, `id` beside `ID`). A .NET service may bind keys
+/// in any case and keep either duplicate, so such a body is ambiguous and its write stays unknown. With every key
+/// unique in any case, an exact lookup ([`Value::get`]) finds the one key the service binds, or nothing: a key the
+/// fence would miss only because of its case (`Members` alone) reads as missing, which is unknown too.
+fn strict_json(body: &[u8]) -> Option<Value> {
+    let mut reader = serde_json::Deserializer::from_slice(body);
+    let value = Strict.deserialize(&mut reader).ok()?;
+    reader.end().ok()?;
+    Some(value)
+}
+
+/// A key as a case-insensitive reader compares it: upper-cased, then lower-cased, so `ſ` and `K` (Kelvin) fold with
+/// `s` and `k`. Where it folds more than such a reader would (`ß` and `ss`), a body is refused that didn't need to be.
+fn fold(key: &str) -> String {
+    key.to_uppercase().to_lowercase()
+}
+
+/// [`strict_json`]'s reader: a [`Value`], refusing an object with two keys of one [`fold`].
+struct Strict;
+
+impl<'de> DeserializeSeed<'de> for Strict {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Strict {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JSON whose objects have no two keys alike in any case")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(Strict)? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut object = Map::new();
+        let mut seen = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(fold(&key)) {
+                return Err(de::Error::custom("two keys alike in some case"));
+            }
+            let value = map.next_value_seed(Strict)?;
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
 }
 
 /// One member named in a path: an MRI, not the `ALL` every-member form.

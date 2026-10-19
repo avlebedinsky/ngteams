@@ -43,7 +43,7 @@ use crate::classify::{Classification, Classifier, OwnKind};
 use crate::commands::chrome::ChromeBuild;
 use crate::config::{Alias, LabPaths};
 use crate::fence_http::{Denial, ForcedDeny, HttpFence};
-use crate::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use crate::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
 use crate::scenario::dsl::Driver;
 
 /// Where the web client starts.
@@ -578,6 +578,12 @@ impl LabSession {
     #[must_use]
     pub fn denials(&self) -> Vec<Denial> {
         self.armed.denials()
+    }
+
+    /// Every WebSocket frame denied so far.
+    #[must_use]
+    pub fn frame_denials(&self) -> Vec<FrameDenial> {
+        self.armed.frame_denials()
     }
 
     /// Navigates the tab.

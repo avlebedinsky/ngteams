@@ -44,6 +44,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     };
     let last_authz = session.watch().last_authz_status();
     let denials = session.denials();
+    let frame_denials = session.frame_denials();
     // the browser goes down, and the capture is finished, whatever happened
     let (fence, capture) = session.close_recorded().await?;
     let state = state?;
@@ -66,6 +67,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             alias: ACCOUNT,
             fence,
             denials,
+            frame_denials,
             capture,
         },
         DenyPolicy::AllExpected,

@@ -20,8 +20,8 @@ use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
 use proto_lab::scenario::dsl::{Driver, RequestPattern, Selector};
 use serde_json::{Value, json};
 use teams_fence::{
-    DenyReason, FailClosed, Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, PartialReason, Roster, Scope,
-    Target, WriteKind,
+    ChatCredential, DenyReason, FailClosed, Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri,
+    PartialReason, Roster, Scope, Target, WriteKind,
 };
 use url::Url;
 use wiremock::matchers::{method, path};
@@ -182,6 +182,12 @@ fn a_write_is_mapped_only_on_the_chat_service_hosts() {
         format!("https://emea.ng.msg.teams.microsoft.com/api/{path}"),
         format!("https://chatsvcagg.teams.microsoft.com/{path}"),
         format!("https://graph.microsoft.com/v1.0/chats/{chat}/messages"),
+        // the live read's checks: a region of lowercase letters, digits and `-`, every regional host label sound
+        format!("https://teams.microsoft.com/api/chatsvc/EMEA/{path}"),
+        format!("https://teams.microsoft.com/api/chatsvc/x%20y/{path}"),
+        format!("https://teams.microsoft.com/api/chatsvc//{path}"),
+        format!("https://a_b.msg.teams.microsoft.com/{path}"),
+        format!("https://a..b.msg.teams.microsoft.com/{path}"),
     ];
     for url in &unmapped {
         assert_eq!(
@@ -216,6 +222,96 @@ fn the_chat_service_path_is_decoded_segment_by_segment() -> TestResult {
         Classification::Unknown
     );
     Ok(())
+}
+
+#[test]
+fn the_mapping_and_the_live_read_accept_the_same_chat_service_urls() -> TestResult {
+    let auth = format!("skypetoken={TOKEN}");
+    let urls = [
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations",
+        "https://teams.cloud.microsoft/api/chatsvc/amer-2/v1/threads",
+        "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations",
+        "https://teams.microsoft.com/api/chatsvc/EMEA/v1/users/ME/conversations",
+        "https://teams.microsoft.com/api/chatsvc/x%20y/v1/users/ME/conversations",
+        "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints",
+        "https://a_b.msg.teams.microsoft.com/v1/users/ME/conversations",
+        "https://msg.teams.microsoft.com/v1/users/ME/conversations",
+        "https://teams.microsoft.com:8443/api/chatsvc/emea/v1/users/ME/conversations",
+        "http://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations",
+    ];
+    for url in urls {
+        let mapped = chat_service_path(&Url::parse(url)?).is_some();
+        let read = ChatCredential::from_request(url, [("Authentication", auth.as_str())]).is_some();
+        assert_eq!(mapped, read, "{url}");
+    }
+    Ok(())
+}
+
+/// The mapped classifier's verdict on a body: the target, or `None` for unknown.
+fn mapped_target(method: &str, url: &str, body: &str) -> Option<Target> {
+    match Classifier::mapped().classify(method, url, Some(body.as_bytes())) {
+        Classification::Write(target) => Some(target),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_body_the_chat_service_could_read_differently_is_unknown() {
+    let lab = format!("8:orgid:{GUID_A}");
+    let outsider = format!("8:orgid:{GUID_X}");
+    let threads = "https://teams.microsoft.com/api/chatsvc/emea/v1/threads";
+    let members = "https://teams.microsoft.com/api/chatsvc/emea/v1/threads/19%3Agroup%40thread.v2/members";
+    let messages = format!(
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{}/messages",
+        one_to_one()
+    );
+    // the clean shapes map
+    let clean = format!(r#"{{"members":[{{"id":"{lab}","role":"Admin"}}]}}"#);
+    assert!(mapped_target("POST", threads, &clean).is_some());
+    assert!(mapped_target("PUT", members, &clean).is_some());
+    assert!(mapped_target("POST", &messages, r#"{"messagetype":"Text","content":"hi"}"#).is_some());
+
+    let ambiguous_members = [
+        // a key in another case beside it: a case-insensitive reader could bind either
+        format!(r#"{{"members":[{{"id":"{lab}"}}],"Members":[{{"id":"{outsider}"}}]}}"#),
+        format!(r#"{{"Members":[{{"id":"{outsider}"}}],"members":[{{"id":"{lab}"}}]}}"#),
+        format!(r#"{{"members":[{{"id":"{lab}","Id":"{outsider}"}}]}}"#),
+        format!(r#"{{"members":[{{"ID":"{outsider}","id":"{lab}"}}]}}"#),
+        // the same key twice: a reader could keep either
+        format!(r#"{{"members":[{{"id":"{lab}"}}],"members":[{{"id":"{outsider}"}}]}}"#),
+        format!(r#"{{"members":[{{"id":"{outsider}","id":"{lab}"}}]}}"#),
+        // a case-insensitive key alone, which the fence would miss
+        format!(r#"{{"Members":[{{"id":"{outsider}"}}]}}"#),
+        format!(r#"{{"members":[{{"ID":"{outsider}"}}]}}"#),
+        // `ſ` folds to `s` in a case-insensitive comparison
+        format!(r#"{{"members":[{{"id":"{lab}"}}],"memberſ":[{{"id":"{outsider}"}}]}}"#),
+        // a duplicate anywhere, even off the read path
+        format!(r#"{{"members":[{{"id":"{lab}","properties":{{"x":1,"X":2}}}}]}}"#),
+        // unexpected shapes
+        format!(r#"{{"members":{{"id":"{lab}"}}}}"#),
+        format!(r#"{{"members":["{lab}"]}}"#),
+        format!(r#"{{"members":[{{"id":"{lab}"}},null]}}"#),
+        format!(r#"{{"members":[{{"id":["{lab}"]}}]}}"#),
+        format!(r#"[{{"members":[{{"id":"{lab}"}}]}}]"#),
+        format!(r#"{{"members":[{{"id":"{lab}"}}]}} {{"members":[{{"id":"{outsider}"}}]}}"#),
+        format!(r#"{{"members":[{{"id":"{lab}"}}],}}"#),
+        r#"{"members":[]}"#.to_owned(),
+    ];
+    for body in &ambiguous_members {
+        assert_eq!(mapped_target("POST", threads, body), None, "{body}");
+        assert_eq!(mapped_target("PUT", members, body), None, "{body}");
+    }
+    let ambiguous_messages = [
+        r#"{"messagetype":"Text","MessageType":"Control/Typing"}"#,
+        r#"{"messagetype":"Control/Typing","messagetype":"Text"}"#,
+        r#"{"MessageType":"Text"}"#,
+        r#"{"messagetype":"Text","content":"hi","properties":{"a":1,"A":2}}"#,
+        r#"{"messagetype":"Text"} {"messagetype":"Text"}"#,
+        r#"["messagetype","Text"]"#,
+    ];
+    for body in ambiguous_messages {
+        assert_eq!(mapped_target("POST", &messages, body), None, "{body}");
+    }
 }
 
 /// A source reading the fixture's thread answer from `server`, with a credential taken from a page request.

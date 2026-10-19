@@ -15,8 +15,9 @@
 //! classified, whatever it is. That is how a scenario checks, live, that a denied write never leaves the browser.
 //!
 //! For a run that writes, [`HttpFence::with_credentials`] hands the live membership source the lab account's chat
-//! service credential: [`HttpFence::handle`] offers every paused request's URL and headers to
-//! [`ChatCredential::from_request`] before anything else reads the event, and [`PausedRequest`] never holds a header.
+//! service credential: [`HttpFence::handle`] offers every paused request's URL and headers, from the raw event, to
+//! [`ChatCredential::from_request`] before it builds the [`PausedRequest`], which never holds a header. The raw event,
+//! headers included, has been handed to the run's event watchers and offered to the capture recorder before that.
 
 use std::sync::{Arc, Mutex, PoisonError};
 

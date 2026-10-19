@@ -12,7 +12,7 @@ use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::classify::{Classifier, OwnKind, OwnRule};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
-use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use proto_lab::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
 use proto_lab::scenario::ab_chat::{MESSAGE_POST, chat_link, message_text, probe_text};
 use proto_lab::scenario::dsl::{Driver, RequestPattern, Selector, StepError};
 use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
@@ -24,9 +24,11 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// A page that adds a `data-tid` element after 400 ms, fetches `/api/ping` at once and `/api/late` after 600 ms, and
-/// echoes what is typed into its box when Enter is pressed.
+/// echoes what is typed into its box when Enter is pressed. Its `hang` button stalls the page for good, a moment after
+/// the click.
 const PAGE: &str = r#"<!doctype html><html><body>
 <div id="out"></div>
+<button data-tid="hang" onclick="setTimeout(() => { for (;;) {} }, 50)">hang</button>
 <div contenteditable="true" role="textbox" data-tid="box" id="box"></div>
 <script>
 fetch('/api/ping?n=1');
@@ -216,6 +218,27 @@ async fn a_wait_that_runs_out_names_its_step() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_wait_runs_out_even_when_the_page_stops_answering() -> TestResult {
+    with_page(async |run| {
+        run.driver
+            .wait_for_tid("the page ran", "hang", Duration::from_secs(10))
+            .await?;
+        run.driver.click("hang the page", Selector::Tid("hang")).await?;
+        let started = std::time::Instant::now();
+        let error = run
+            .driver
+            .wait_for_text("a stalled page", "never shown", Duration::from_secs(1))
+            .await
+            .err()
+            .ok_or("a stalled page showed the text")?;
+        assert!(matches!(error, StepError::Timeout { .. }), "{error:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn typing_and_enter_send_and_the_text_shows() -> TestResult {
     with_page(async |run| {
         run.driver
@@ -315,8 +338,53 @@ fn account(denials: Vec<Denial>, fence: FenceReport) -> AccountRun {
         alias: Alias::A,
         fence,
         denials,
+        frame_denials: Vec::new(),
         capture: None,
     }
+}
+
+#[test]
+fn a_writing_run_fails_on_any_denied_frame() {
+    let policy = DenyPolicy::ForcedAnd(&TELEMETRY_HOSTS);
+    let frame = FrameDenial {
+        url: "wss://teams.microsoft.com/api/socket".to_owned(),
+        cause: DenyCause::Unclassified,
+    };
+    let fence = FenceReport {
+        denied_frames: 1,
+        ..FenceReport::default()
+    };
+    let run = AccountRun {
+        frame_denials: vec![frame.clone()],
+        ..account(Vec::new(), fence.clone())
+    };
+    let mut report = ScenarioReport::new(ScenarioName::AbChat);
+    report.add_account(run, policy);
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    assert!(
+        report.failures[0].contains("WebSocket frame") && report.failures[0].contains("/api/socket"),
+        "{:?}",
+        report.failures
+    );
+
+    // a deny the report counts but the list missed fails it too
+    let mut counted = ScenarioReport::new(ScenarioName::AbChat);
+    counted.add_account(account(Vec::new(), fence.clone()), policy);
+    assert!(counted.failed());
+    assert!(
+        counted.failures[0].contains("1 more WebSocket frame"),
+        "{:?}",
+        counted.failures
+    );
+
+    // the fail-closed load expects frame denies like any other
+    let mut load = ScenarioReport::new(ScenarioName::Load);
+    let run = AccountRun {
+        frame_denials: vec![frame],
+        ..account(Vec::new(), fence)
+    };
+    load.add_account(run, DenyPolicy::AllExpected);
+    assert!(!load.failed(), "{:?}", load.failures);
 }
 
 #[test]

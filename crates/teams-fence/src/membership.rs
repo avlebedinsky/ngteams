@@ -22,6 +22,7 @@ use std::fmt;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use percent_encoding::percent_decode_str;
 use serde_json::Value;
 use url::Url;
 use zeroize::Zeroizing;
@@ -56,27 +57,36 @@ enum ChatBase {
 }
 
 impl ChatBase {
-    /// The base a chat service request URL went to, if it is one: `https`, no user info, no port, and either an AFD
-    /// host with a `/api/chatsvc/<region>/v1/…` path or a regional host with a `/v1/…` path.
-    fn of_request(url: &Url) -> Option<Self> {
+    /// The base a chat service request URL went to, if it is one, and the raw path segments after its `v1`: `https`,
+    /// no user info, no port, and either an AFD host with a `/api/chatsvc/<region>/v1/…` path or a regional host (every
+    /// DNS label checked) with a `/v1/…` path.
+    fn split(url: &Url) -> Option<(Self, Vec<&str>)> {
         if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
             return None;
         }
         let host = url.host_str()?.to_ascii_lowercase();
         let mut segments = url.path_segments()?;
-        if let Some(afd) = AFD_HOSTS.iter().find(|afd| **afd == host) {
-            let (api, chatsvc, region, v1) = (segments.next()?, segments.next()?, segments.next()?, segments.next()?);
-            return (api == "api" && chatsvc == "chatsvc" && is_region(region) && v1 == "v1").then(|| Self::Afd {
+        let base = if let Some(afd) = AFD_HOSTS.iter().find(|afd| **afd == host) {
+            let (api, chatsvc, region) = (segments.next()?, segments.next()?, segments.next()?);
+            if api != "api" || chatsvc != "chatsvc" || !is_region(region) {
+                return None;
+            }
+            Self::Afd {
                 host: afd,
                 region: region.to_owned(),
-            });
-        }
-        let name = host.strip_suffix(REGIONAL_SUFFIX)?;
-        let valid = !name.is_empty()
-            && name.split('.').all(|label| {
-                !label.is_empty() && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            });
-        (valid && segments.next()? == "v1").then_some(Self::Regional { host })
+            }
+        } else {
+            let name = host.strip_suffix(REGIONAL_SUFFIX)?;
+            let valid = !name.is_empty()
+                && name.split('.').all(|label| {
+                    !label.is_empty() && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                });
+            if !valid {
+                return None;
+            }
+            Self::Regional { host }
+        };
+        (segments.next()? == "v1").then(|| (base, segments.collect()))
     }
 
     /// `https://<host>` and the path segments that lead to `v1`.
@@ -86,6 +96,18 @@ impl ChatBase {
             Self::Regional { host } => (format!("https://{host}"), Vec::new()),
         }
     }
+}
+
+/// The chat service path of a request URL after its base, from `v1` on (`v1` itself left out), each segment
+/// percent-decoded: `Some` only for a URL whose base the live read accepts too (see [`ChatCredential::from_request`]).
+/// The browser fence's write mapping reads its targets from it, so the mapping and the live read recognize the chat
+/// service by one check.
+#[must_use]
+pub fn chat_service_path(url: &Url) -> Option<Vec<String>> {
+    let (_, rest) = ChatBase::split(url)?;
+    rest.into_iter()
+        .map(|segment| percent_decode_str(segment).decode_utf8().ok().map(String::from))
+        .collect()
 }
 
 /// A chat service region in a base path: a short lowercase name (`emea`, `amer`, `apac`, …).
@@ -123,7 +145,7 @@ impl ChatCredential {
     /// `Authentication: skypetoken=<token>` or `X-Skypetoken: <token>` (header names in any case). Every other header
     /// is ignored: this crate decides how the token is sent.
     pub fn from_request<'a>(url: &str, headers: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<Self> {
-        let base = ChatBase::of_request(&Url::parse(url).ok()?)?;
+        let (base, _) = ChatBase::split(&Url::parse(url).ok()?)?;
         let token = headers.into_iter().find_map(|(name, value)| {
             if name.eq_ignore_ascii_case("authentication") {
                 value.trim().strip_prefix("skypetoken=")

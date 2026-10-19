@@ -23,10 +23,12 @@ segment.
 Credential: `Authentication: skypetoken=<skypetoken>` (auth.md's service table). A `RegistrationToken` appears once an
 endpoint is registered; whether reads need it is open.
 
-What the fence accepts as the chat service (both the mapping and the live read): `https` only, no port, no user info,
-and either an AFD host of the commercial cloud (`teams.microsoft.com`, `teams.cloud.microsoft`) with
-`/api/chatsvc/<region>/v1/…`, or a host ending in `.msg.teams.microsoft.com` with `/v1/…`. The `.msg` host form is the
-historical regional chat host; the bundle doesn't name it (the GTM value comes at runtime), so it is to confirm.
+What the fence accepts as the chat service (the mapping and the live read share one check,
+`teams_fence::chat_service_path`): `https` only, no port, no user info, and either an AFD host of the commercial cloud
+(`teams.microsoft.com`, `teams.cloud.microsoft`) with `/api/chatsvc/<region>/v1/…`, the region 1–32 lowercase letters,
+digits or `-`, or a host ending in `.msg.teams.microsoft.com` with `/v1/…`, each label of its name before that suffix
+non-empty letters, digits or `-`. The `.msg` host form is the historical regional chat host; the bundle doesn't name it
+(the GTM value comes at runtime), so it is to confirm.
 
 ### Ids
 
@@ -122,9 +124,10 @@ Rules that keep the mapping fail-closed:
 - `load`, `status` and `login` stay fail-closed: the seeded classifier maps no write, and the membership source is
   `FailClosed`.
 - `ab-chat` uses `Classifier::mapped` with `LiveMembershipSource`. The browser fence hands the source the account's
-  skypetoken from the page's own chat service requests (`HttpFence::with_credentials`, from the `Fetch.requestPaused`
-  headers before anything else reads the event). A write to the a–b 1:1 chat passes only when the read confirms its two
-  members are lab accounts.
+  skypetoken from the page's own chat service requests (`HttpFence::with_credentials`: `HttpFence::handle` takes it
+  from the raw `Fetch.requestPaused` event's headers before the event becomes a `PausedRequest`, which holds no
+  header). The event itself, headers included, has already been handed to the run's event watchers
+  (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b 1:1 chat passes only when the read confirms its two members are lab accounts.
 - `ab-chat`'s live enforcement test forces a deny (`ForcedDeny`) on the probe message: the post must fail in the page
   with `net::ERR_BLOCKED_BY_CLIENT`, and b must never see it.
 

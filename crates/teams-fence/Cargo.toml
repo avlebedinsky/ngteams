@@ -14,6 +14,8 @@ publish.workspace = true
 test-support = []
 
 [dependencies]
+# decodes the chat service path the write mapping reads its targets from
+percent-encoding.workspace = true
 # the live membership source's own HTTPS client: it reads member lists from the chat service itself
 reqwest.workspace = true
 serde.workspace = true

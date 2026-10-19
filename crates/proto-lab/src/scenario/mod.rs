@@ -14,16 +14,17 @@ pub mod dsl;
 pub mod load;
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::ValueEnum;
 use url::Url;
 
 use crate::browser::Display;
-use crate::config::LabPaths;
+use crate::config::{Alias, LabPaths};
 use crate::fence_http::{Denial, DenyCause};
-use crate::session::{FenceReport, SessionError};
+use crate::fence_ws::FrameDenial;
+use crate::session::{FenceReport, LabSession, SessionError};
 
 use self::dsl::StepError;
 
@@ -67,7 +68,8 @@ pub enum DenyPolicy {
     /// Every deny is expected: a fail-closed run that records what the client tries (`load`).
     AllExpected,
     /// Only the denies the run forced, and requests to these host suffixes (matched on a dot boundary): telemetry,
-    /// which no scenario needs and the fence keeps denying.
+    /// which no scenario needs and the fence keeps denying. No WebSocket frame deny is expected: a run forces denies
+    /// on requests only, and telemetry goes out as posts.
     ForcedAnd(&'static [&'static str]),
 }
 
@@ -95,6 +97,12 @@ impl DenyPolicy {
     pub fn unexpected(self, denials: &[Denial]) -> Vec<Denial> {
         denials.iter().filter(|denial| !self.expects(denial)).cloned().collect()
     }
+
+    /// Whether this policy expects a WebSocket frame deny: only [`DenyPolicy::AllExpected`] does.
+    #[must_use]
+    pub fn expects_frames(self) -> bool {
+        self == Self::AllExpected
+    }
 }
 
 /// `host` is `suffix` or a subdomain of it.
@@ -109,10 +117,12 @@ fn on_host(host: &str, suffix: &str) -> bool {
 /// What became of one account's browser in a run.
 #[derive(Debug)]
 pub struct AccountRun {
-    pub alias: crate::config::Alias,
+    pub alias: Alias,
     pub fence: FenceReport,
     /// Every request the fence denied.
     pub denials: Vec<Denial>,
+    /// Every WebSocket frame the fence denied.
+    pub frame_denials: Vec<FrameDenial>,
     /// Where the run was recorded, if it was.
     pub capture: Option<PathBuf>,
 }
@@ -145,7 +155,8 @@ impl ScenarioReport {
         !self.failures.is_empty()
     }
 
-    /// Adds an account's run, judged by `policy`: a breach or an unexpected deny fails the scenario.
+    /// Adds an account's run, judged by `policy`: a breach or an unexpected deny, of a request or a WebSocket frame,
+    /// fails the scenario.
     pub fn add_account(&mut self, run: AccountRun, policy: DenyPolicy) {
         let alias = run.alias;
         if run.fence.breached() {
@@ -158,7 +169,46 @@ impl ScenarioReport {
                 denial.method, denial.url, denial.cause
             ));
         }
+        if !policy.expects_frames() {
+            for denial in &run.frame_denials {
+                self.failures.push(format!(
+                    "{alias}: unexpected deny of a WebSocket frame to {} ({:?})",
+                    denial.url, denial.cause
+                ));
+            }
+            // the report's count, taken at another moment, may hold frames the list doesn't
+            let unlisted = run.fence.denied_frames.saturating_sub(run.frame_denials.len());
+            if unlisted > 0 {
+                self.failures.push(format!(
+                    "{alias}: unexpected deny of {unlisted} more WebSocket frame(s)"
+                ));
+            }
+        }
         self.accounts.push(run);
+    }
+
+    /// Closes `session` and adds its run ([`Self::add_account`]), judged by `policy`. A close that fails (the browser
+    /// had to be killed, the capture lost events) fails the run but doesn't end it: the report so far and the other
+    /// accounts' runs are kept.
+    pub async fn close_account(&mut self, alias: Alias, session: LabSession, policy: DenyPolicy) {
+        let denials = session.denials();
+        let frame_denials = session.frame_denials();
+        let fence = session.report();
+        let capture = session.capture_dir().map(Path::to_path_buf);
+        if let Err(error) = session.close().await {
+            self.failures.push(format!("{alias}: {error}"));
+        }
+        self.notes.push(format!("{alias}: {}", fence.summary()));
+        self.add_account(
+            AccountRun {
+                alias,
+                fence,
+                denials,
+                frame_denials,
+                capture,
+            },
+            policy,
+        );
     }
 }
 

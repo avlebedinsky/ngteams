@@ -6,8 +6,9 @@
 //! 1. a and b open the web client; both must load.
 //! 2. a opens the a–b chat (the chat deep link with b's UPN), b the same chat with a's.
 //! 3. **Live enforcement test**: a forced deny ([`ForcedDeny`]) on a's message post holding a probe text; a sends the
-//!    probe. The post must fail in a's page with `net::ERR_BLOCKED_BY_CLIENT`, and b must not see the probe within
-//!    [`PROBE_WATCH`].
+//!    probe. The post must fail in a's page with `net::ERR_BLOCKED_BY_CLIENT`, and b, watched for the whole of
+//!    [`PROBE_WATCH`], must not see the probe. The forced deny stays until the watch ends, so a resent probe is denied
+//!    too.
 //! 4. a sends the real message; b must see it within [`DELIVERY`].
 //! 5. After the run: no deny but the forced one and telemetry ([`DenyPolicy::ForcedAnd`] with [`TELEMETRY_HOSTS`]).
 //!
@@ -23,8 +24,8 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::{DenyCause, ForcedDeny};
 use crate::session::{LabSession, SessionOptions, SessionState, TEAMS_URL};
 
-use super::dsl::{RequestPattern, Selector};
-use super::{AccountRun, DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
+use super::dsl::{RequestPattern, Selector, StepError};
+use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
 
 /// The message compose box: the web client's rich-text editor (unverified on a loaded client).
 pub const COMPOSE: Selector<'static> = Selector::Css(r#"[contenteditable="true"][role="textbox"]"#);
@@ -99,19 +100,9 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     if let Err(error) = outcome {
         report.failures.push(error.to_string());
     }
+    // both browsers go down and both captures are finished, whatever happened to either
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
-        let denials = session.denials();
-        let (fence, capture) = session.close_recorded().await?;
-        report.notes.push(format!("{alias}: {}", fence.summary()));
-        report.add_account(
-            AccountRun {
-                alias,
-                fence,
-                denials,
-                capture,
-            },
-            POLICY,
-        );
+        report.close_account(alias, session, POLICY).await;
     }
     Ok(report)
 }
@@ -162,13 +153,17 @@ impl Steps<'_> {
         if !a.denials().iter().any(|denial| denial.cause == DenyCause::Forced) {
             return Err(setup("the fence has no forced deny of the probe".to_owned()));
         }
-        a.clear_forced();
-        if drive_b
+        // the forced deny stays through the watch: a client resending the failed probe is denied again
+        let watched = drive_b
             .wait_for_text("b must not get the probe", &probe, PROBE_WATCH)
-            .await
-            .is_ok()
-        {
-            return Err(setup("b received the probe the fence denied".to_owned()));
+            .await;
+        a.clear_forced();
+        match watched {
+            Ok(()) => return Err(setup("b received the probe the fence denied".to_owned())),
+            // watched for the whole of PROBE_WATCH, and it never showed
+            Err(StepError::Timeout { .. }) => {}
+            // b wasn't watched to the end: no evidence either way
+            Err(error) => return Err(error.into()),
         }
         report
             .notes

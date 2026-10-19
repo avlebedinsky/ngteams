@@ -4619,7 +4619,6 @@ dependencies = [
  "fixture-guard",
  "flate2",
  "futures-util",
- "percent-encoding",
  "rcgen",
  "regex",
  "reqwest",
@@ -6027,6 +6026,7 @@ name = "teams-fence"
 version = "0.1.0"
 dependencies = [
  "fixture-guard",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
