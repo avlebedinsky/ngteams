@@ -10,13 +10,28 @@
 //! [`HttpFence::handle`] carries a decision out: `Fetch.continueRequest` on allow, `Fetch.failRequest` (`BlockedByClient`)
 //! on deny, so a denied request never reaches the network and the page sees a network error. Every deny is also kept in
 //! memory ([`HttpFence::denials`]), and any deny fails the run.
+//!
+//! **The authorization redirect** (`proto-lab auth` only, [`RedirectCatch`]). The native sign-in takes its code from
+//! Entra's redirect to the registered redirect URI, which must never load: the `nativeclient` page needn't, and Chrome
+//! won't navigate to the `msauth.com.microsoft.teams2://auth` custom scheme at all. A fence given a catch also pauses
+//! the responses of Entra's login origin, on the browser session only ([`HttpFence::fetch_patterns`]). A 3xx whose
+//! `Location` is the registered redirect URI is caught there: the URL goes to the catch's receiver and the response is
+//! failed, so the browser never follows it. A `GET` to the redirect URI that reaches the request stage anyway (a page
+//! that sends the browser there by script) is caught and failed the same way. Every other paused response is continued:
+//! its request was already let through at the request stage, and continuing a response sends nothing. So the catch
+//! only ever fails what would otherwise go on; it lets nothing through that the fence would deny, and a fence without
+//! one pauses no response at all (one paused anyway is failed, and fails the run).
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
+use teams_auth::redirect::{RedirectError, RedirectUri};
+use teams_auth::secrets::Secret;
 use teams_fence::{Channel, Fence, MembershipSource, RequestOutcome, RequestRecord};
+use tokio::sync::mpsc;
+use url::Url;
 
-use crate::cdp::{Cdp, CdpError, Event};
+use crate::cdp::{Cdp, CdpError, Event, SessionId};
 use crate::classify::{Classification, Classifier};
 
 /// One request as `Fetch.requestPaused` shows it.
@@ -83,12 +98,97 @@ pub struct Denial {
     pub cause: DenyCause,
 }
 
+/// What [`HttpFence::handle`] did with one paused request or response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handled {
+    /// A request, decided.
+    Decided(Verdict),
+    /// The authorization redirect: caught, handed to the catch's receiver, and failed.
+    RedirectCaught,
+    /// A paused response of the login origin that isn't the redirect: continued.
+    ResponseContinued,
+}
+
+/// Catches the authorization redirect to one registered redirect URI (see the module docs). Made for one
+/// `proto-lab auth` run; the URL it catches carries the authorization code, so it is handed over as a [`Secret`].
+#[derive(Debug)]
+pub struct RedirectCatch {
+    /// The origin whose responses pause at the response stage: the authorize endpoint's.
+    login_origin: String,
+    redirect: RedirectUri,
+    caught: mpsc::UnboundedSender<Secret>,
+}
+
+impl RedirectCatch {
+    /// A catch for redirects to `redirect_uri` from the origin of `authorize_endpoint`, and the receiver of the URLs it
+    /// catches.
+    ///
+    /// # Errors
+    /// When `redirect_uri` isn't a bare absolute URL ([`RedirectUri::parse`]) or `authorize_endpoint` has no HTTP(S)
+    /// origin.
+    pub fn new(
+        authorize_endpoint: &str,
+        redirect_uri: &str,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Secret>), RedirectError> {
+        let redirect = RedirectUri::parse(redirect_uri)?;
+        let login_origin = Url::parse(authorize_endpoint)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "https" | "http"))
+            .map(|url| url.origin().ascii_serialization())
+            .ok_or(RedirectError::InvalidRedirectUri)?;
+        let (caught, receiver) = mpsc::unbounded_channel();
+        let catch = Self {
+            login_origin,
+            redirect,
+            caught,
+        };
+        Ok((catch, receiver))
+    }
+
+    /// The `Fetch` pattern that pauses the login origin's responses.
+    fn response_pattern(&self) -> Value {
+        json!({"urlPattern": format!("{}/*", self.login_origin), "requestStage": "Response"})
+    }
+
+    /// Whether `url` is the redirect; if it is, it goes to the receiver.
+    fn take(&self, url: &str) -> bool {
+        let caught = self.redirect.matches(url);
+        if caught {
+            // a receiver that is gone has stopped waiting; the redirect is failed all the same
+            let _ = self.caught.send(Secret::new(url));
+        }
+        caught
+    }
+}
+
+/// The URL a paused 3xx response redirects to (its `Location`, resolved against the request's URL).
+fn redirect_target(params: &Value) -> Option<String> {
+    let status = params["responseStatusCode"].as_u64()?;
+    if !(300..400).contains(&status) {
+        return None;
+    }
+    let location = params["responseHeaders"].as_array()?.iter().find(|header| {
+        header["name"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("location"))
+    })?["value"]
+        .as_str()?;
+    let base = Url::parse(params["request"]["url"].as_str()?).ok()?;
+    base.join(location).ok().map(String::from)
+}
+
+/// Whether a `Fetch.requestPaused` event is at the response stage.
+fn at_response_stage(params: &Value) -> bool {
+    params.get("responseStatusCode").is_some() || params.get("responseErrorReason").is_some()
+}
+
 /// The HTTP layer of the browser fence.
 pub struct HttpFence {
     classifier: Classifier,
     fence: Arc<Fence>,
     members: Arc<dyn MembershipSource + Send>,
     denials: Mutex<Vec<Denial>>,
+    catch: Option<RedirectCatch>,
 }
 
 impl HttpFence {
@@ -100,7 +200,24 @@ impl HttpFence {
             fence,
             members,
             denials: Mutex::new(Vec::new()),
+            catch: None,
         }
+    }
+
+    /// The same fence, catching the authorization redirect (see the module docs).
+    #[must_use]
+    pub fn with_redirect_catch(mut self, catch: RedirectCatch) -> Self {
+        self.catch = Some(catch);
+        self
+    }
+
+    /// The `Fetch.enable` params for the browser session: every request at the request stage, plus, with a redirect
+    /// catch, the responses of the login origin.
+    #[must_use]
+    pub fn fetch_patterns(&self) -> Value {
+        let mut patterns = vec![json!({"urlPattern": "*"})];
+        patterns.extend(self.catch.as_ref().map(RedirectCatch::response_pattern));
+        json!({ "patterns": patterns })
     }
 
     /// Classifies a request and decides it. Every deny is logged and kept.
@@ -156,19 +273,28 @@ impl HttpFence {
     }
 
     /// Decides one `Fetch.requestPaused` event and answers it on the session it paused on: continue on allow, fail with
-    /// `BlockedByClient` on deny. A malformed event is denied (and failed, when it names a request id).
+    /// `BlockedByClient` on deny. A malformed event is denied (and failed, when it names a request id). With a redirect
+    /// catch, a `GET` to the redirect URI is caught and failed, and a paused response is handled as the module docs say.
     ///
     /// # Errors
     /// When the browser refuses the answer; a request that is gone (its target closed) can't be answered either.
-    pub async fn handle(&self, cdp: &Cdp, event: &Event) -> Result<Verdict, CdpError> {
+    pub async fn handle(&self, cdp: &Cdp, event: &Event) -> Result<Handled, CdpError> {
         let session = event.session_id.as_ref();
+        if at_response_stage(&event.params) {
+            return self.handle_response(cdp, session, &event.params).await;
+        }
         let Ok(request) = PausedRequest::from_params(&event.params) else {
             self.deny_malformed();
             if let Some(id) = event.params["requestId"].as_str() {
                 fail(cdp, session, id).await?;
             }
-            return Ok(Verdict::Deny(DenyCause::Malformed));
+            return Ok(Handled::Decided(Verdict::Deny(DenyCause::Malformed)));
         };
+        let get = request.method.eq_ignore_ascii_case("GET");
+        if get && self.catch.as_ref().is_some_and(|catch| catch.take(&request.url)) {
+            fail(cdp, session, &request.request_id).await?;
+            return Ok(Handled::RedirectCaught);
+        }
         let verdict = self.decide(&request).await;
         match verdict {
             Verdict::Allow => {
@@ -177,7 +303,30 @@ impl HttpFence {
             }
             Verdict::Deny(_) => fail(cdp, session, &request.request_id).await?,
         }
-        Ok(verdict)
+        Ok(Handled::Decided(verdict))
+    }
+
+    /// A response paused at the response stage: the redirect is caught and failed, anything else continued. Only a
+    /// fence with a catch asks for responses; one paused without a catch is failed and fails the run.
+    async fn handle_response(
+        &self,
+        cdp: &Cdp,
+        session: Option<&SessionId>,
+        params: &Value,
+    ) -> Result<Handled, CdpError> {
+        let id = params["requestId"].as_str().unwrap_or_default();
+        let Some(catch) = &self.catch else {
+            self.deny_malformed();
+            fail(cdp, session, id).await?;
+            return Ok(Handled::Decided(Verdict::Deny(DenyCause::Malformed)));
+        };
+        if redirect_target(params).is_some_and(|target| catch.take(&target)) {
+            fail(cdp, session, id).await?;
+            return Ok(Handled::RedirectCaught);
+        }
+        cdp.call(session, "Fetch.continueResponse", json!({"requestId": id}))
+            .await?;
+        Ok(Handled::ResponseContinued)
     }
 }
 
@@ -215,7 +364,7 @@ pub(crate) fn without_query(url: &str) -> &str {
     &url[..url.find(['?', '#']).unwrap_or(url.len())]
 }
 
-async fn fail(cdp: &Cdp, session: Option<&crate::cdp::SessionId>, request_id: &str) -> Result<(), CdpError> {
+async fn fail(cdp: &Cdp, session: Option<&SessionId>, request_id: &str) -> Result<(), CdpError> {
     let params = json!({"requestId": request_id, "errorReason": "BlockedByClient"});
     cdp.call(session, "Fetch.failRequest", params).await.map(drop)
 }

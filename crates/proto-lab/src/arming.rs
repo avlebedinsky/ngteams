@@ -479,7 +479,8 @@ impl ArmedBrowser {
     /// service-worker cleanup fails. The browser is killed then: it never runs half armed.
     pub async fn arm(browser: Browser, http: HttpFence, ws: WsFence, options: &ArmOptions) -> Result<Self, ArmError> {
         let (cdp, events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
-        cdp.call(None, "Fetch.enable", intercept_all()).await?;
+        // every request; with a redirect catch, also the login origin's responses (`crate::fence_http`)
+        cdp.call(None, "Fetch.enable", http.fetch_patterns()).await?;
         let shared = Arc::new(Shared {
             http,
             ws,

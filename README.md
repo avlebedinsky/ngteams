@@ -49,7 +49,14 @@ binary refuses to run; `cargo build -p proto-lab` or `cargo run -p proto-lab` bu
 ```sh
 cargo run -p proto-lab -- login a     # sign lab account a in (b, c alike) and record its MRI in lab.toml
 cargo run -p proto-lab -- status      # ok / login needed, per account
+cargo run -p proto-lab -- auth a      # native sign-in: Entra tokens and the skypetoken, kept in the Secret Service
 ```
+
+`auth` opens the authorize URL in the account's profile under the armed fence, which catches Entra's redirect and
+hands the code to Rust; nothing is typed. It prints only each token's `aud`, `exp`, scopes and tenant, plus the
+skypetoken's expiry and region (`docs/spikes/auth.md`). `--audiences` also asks for a token for each other Teams
+audience. The live test (`PROTO_LAB_LIVE=1 cargo test -p proto-lab --features live --test auth_live`) does the same for
+a, b and c with the tokens kept in memory; without `PROTO_LAB_LIVE=1` it skips.
 
 Both run the pinned Chrome headless on the account's profile under `~/.local/share/teams-lab/profiles/`, with the fence
 armed before anything loads. Until writes are mapped the fence is fail-closed, so the web client loads with its writes

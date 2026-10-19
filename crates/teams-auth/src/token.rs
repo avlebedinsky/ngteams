@@ -594,7 +594,7 @@ fn scrub(text: &str, secrets: &[&str]) -> String {
 }
 
 /// The leading `AADSTSnnn` number of a description, and the text after it up to `Trace ID:`, capped.
-fn split_description(raw: &str) -> (Option<u32>, String) {
+pub(crate) fn split_description(raw: &str) -> (Option<u32>, String) {
     let text = raw.find("Trace ID:").map_or(raw, |end| &raw[..end]).trim();
     let (code, rest) = text
         .strip_prefix("AADSTS")

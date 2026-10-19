@@ -1,0 +1,176 @@
+//! `proto-lab auth`'s report and the persisted region: what the operator sees (claims and expiries, the refusals) and
+//! what lands on disk (the region, never a token). The browser step is in `tests/auth_redirect.rs`, the live run in
+//! `tests/auth_live.rs`.
+
+use std::collections::BTreeMap;
+use std::os::unix::fs::PermissionsExt as _;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use proto_lab::commands::auth::{AudienceOutcome, AuthReport, SkypetokenSummary, region_file, save_region};
+use proto_lab::config::{Alias, LabPaths};
+use proto_lab::session::FenceReport;
+use serde_json::Value;
+use teams_auth::authz::{AuthzError, Region};
+use teams_auth::claims::TokenSummary;
+use teams_auth::token::{EntraError, TokenError};
+
+const NOW: u64 = 2_000_000_000;
+
+fn at(seconds: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(seconds)
+}
+
+fn spaces_summary() -> TokenSummary {
+    TokenSummary {
+        audience: vec!["https://api.spaces.skype.com".to_owned()],
+        expires_at: Some(at(NOW + 7_800)),
+        scopes: vec!["Authorization.ReadWrite".to_owned(), "user_impersonation".to_owned()],
+        tenant: Some("00000000-0000-4000-8000-0000000000ff".to_owned()),
+    }
+}
+
+fn region() -> Region {
+    Region {
+        name: Some("emea".to_owned()),
+        partition: Some("emea01".to_owned()),
+        endpoints: BTreeMap::from([
+            (
+                "chatServiceAfd".to_owned(),
+                "https://teams.example.test/api/chatsvc/emea/".to_owned(),
+            ),
+            (
+                "middleTier".to_owned(),
+                "https://teams.example.test/api/mt/emea/".to_owned(),
+            ),
+        ]),
+    }
+}
+
+fn blocked() -> TokenError {
+    TokenError::ConditionalAccess(Box::new(EntraError {
+        error: "invalid_grant".to_owned(),
+        codes: vec![53_003],
+        description: "Access has been blocked by Conditional Access policies.".to_owned(),
+        correlation_id: None,
+        suberror: None,
+    }))
+}
+
+fn report(skypetoken: Option<Result<SkypetokenSummary, AuthzError>>) -> AuthReport {
+    AuthReport {
+        fence: FenceReport::default(),
+        signed_in: Some(spaces_summary()),
+        refreshed: Some(spaces_summary()),
+        audiences: vec![
+            AudienceOutcome {
+                resource: "https://graph.microsoft.com".to_owned(),
+                token: Ok(Some(TokenSummary {
+                    audience: vec!["https://graph.microsoft.com".to_owned()],
+                    expires_at: Some(at(NOW - 120)),
+                    scopes: vec!["User.Read".to_owned()],
+                    tenant: None,
+                })),
+            },
+            AudienceOutcome {
+                resource: "https://outlook.office.com".to_owned(),
+                token: Err(blocked()),
+            },
+            AudienceOutcome {
+                resource: "https://ic3.teams.office.com".to_owned(),
+                token: Ok(None),
+            },
+        ],
+        skypetoken,
+    }
+}
+
+#[test]
+fn the_report_shows_claims_expiries_and_refusals() {
+    let skypetoken = SkypetokenSummary {
+        expires_at: at(NOW + 86_400),
+        region: region(),
+    };
+    let lines = report(Some(Ok(skypetoken))).lines(at(NOW));
+    assert_eq!(
+        lines,
+        [
+            "fence denied 0 request(s) [] and 0 frame(s) (fail-closed: expected)",
+            "signed in: aud https://api.spaces.skype.com, exp Wed, 18 May 2033 05:43:20 GMT (in 130 min), scopes \
+             Authorization.ReadWrite user_impersonation, tenant 00000000-0000-4000-8000-0000000000ff",
+            "refreshed: aud https://api.spaces.skype.com, exp Wed, 18 May 2033 05:43:20 GMT (in 130 min), scopes \
+             Authorization.ReadWrite user_impersonation, tenant 00000000-0000-4000-8000-0000000000ff",
+            "https://graph.microsoft.com: aud https://graph.microsoft.com, exp Wed, 18 May 2033 03:31:20 GMT (2 min \
+             ago), scopes User.Read",
+            "https://outlook.office.com: refused: Conditional Access refused the token: invalid_grant AADSTS53003: \
+             Access has been blocked by Conditional Access policies.",
+            "https://ic3.teams.office.com: an opaque token (no claims to show)",
+            "skypetoken: expires Thu, 19 May 2033 03:33:20 GMT (in 1440 min), region emea, partition emea01, 2 \
+             regional endpoint(s)",
+        ]
+    );
+}
+
+#[test]
+fn a_refused_skypetoken_is_reported_with_teams_error_code() {
+    let refused = AuthzError::Refused {
+        status: 403,
+        code: Some("UserLicenseNotPresentTrialEligible".to_owned()),
+    };
+    let lines = report(Some(Err(refused))).lines(at(NOW));
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("skypetoken: Teams refused the account (authz answered 403: UserLicenseNotPresentTrialEligible)")
+    );
+    let entra_only = report(None).lines(at(NOW));
+    assert!(
+        entra_only.iter().all(|line| !line.starts_with("skypetoken")),
+        "{entra_only:?}"
+    );
+}
+
+#[test]
+fn the_region_is_saved_privately_without_the_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(dir.path().join("lab"));
+    let skypetoken = SkypetokenSummary {
+        expires_at: at(NOW + 86_400),
+        region: region(),
+    };
+
+    let file = save_region(&paths, Alias::B, &skypetoken).unwrap();
+
+    assert_eq!(file, region_file(&paths, Alias::B));
+    assert_eq!(file, dir.path().join("lab/auth/b.json"));
+    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&file), 0o600);
+    assert_eq!(mode(file.parent().unwrap()), 0o700);
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(Region::from_json(&saved), Some(region()));
+    assert_eq!(saved["account"], "b");
+    assert_eq!(saved["skypetokenExpiresAt"], NOW + 86_400);
+    // sorted: a workspace build may unify serde_json's `preserve_order`
+    let keys: std::collections::BTreeSet<&str> = saved.as_object().unwrap().keys().map(String::as_str).collect();
+    let expected = [
+        "account",
+        "fetchedAt",
+        "partition",
+        "region",
+        "regionGtms",
+        "skypetokenExpiresAt",
+    ];
+    assert_eq!(keys, expected.into_iter().collect());
+
+    // saved again, it is replaced
+    let later = SkypetokenSummary {
+        expires_at: at(NOW + 90_000),
+        region: Region::default(),
+    };
+    save_region(&paths, Alias::B, &later).unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved["skypetokenExpiresAt"], NOW + 90_000);
+    assert_eq!(
+        std::fs::read_dir(file.parent().unwrap()).unwrap().count(),
+        1,
+        "no partial file left"
+    );
+}

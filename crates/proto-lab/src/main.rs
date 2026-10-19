@@ -7,6 +7,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use proto_lab::bundles::import::{self, Imported};
 use proto_lab::bundles::index::{self, Kind};
+use proto_lab::commands::auth::{self, AuthOptions, KEYRING_APPLICATION};
 use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
 use proto_lab::commands::login::{self, LoginOptions};
 use proto_lab::commands::status::{self, AccountStatus};
@@ -39,6 +40,22 @@ enum Command {
         /// Seconds the sign-in and the web client's load may take.
         #[arg(long, default_value_t = 300)]
         timeout: u64,
+    },
+    /// Sign a lab account in natively: authorize in its profile under the armed fence (no human), redeem the code,
+    /// refresh, and exchange for a skypetoken. Prints only aud, exp, scopes, tenant, the skypetoken's expiry and region.
+    Auth {
+        /// The lab account: a, b or c.
+        alias: Alias,
+        /// Seconds the redirect may take.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+        /// Stop after the Entra tokens; don't ask authz for a skypetoken.
+        #[arg(long)]
+        no_skypetoken: bool,
+        /// Also ask a token for each other audience of the auth notes (chatsvcagg, presence, ic3, Graph, Outlook,
+        /// substrate).
+        #[arg(long)]
+        audiences: bool,
     },
     /// Whether each lab account's session still works: `ok` or `login needed`, per account. Signs nothing in.
     Status {
@@ -106,6 +123,19 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Login { alias, timeout } => run_login(alias, timeout).await,
         Command::Status { aliases, timeout } => run_status(aliases, timeout).await,
+        Command::Auth {
+            alias,
+            timeout,
+            no_skypetoken,
+            audiences,
+        } => {
+            let options = AuthOptions {
+                timeout: Duration::from_secs(timeout),
+                skypetoken: !no_skypetoken,
+                other_audiences: audiences,
+            };
+            run_auth(alias, &options).await
+        }
         // these need only the lab directories, so they run without a lab.toml too
         Command::Chrome { command } => run_chrome(command, &LabLocations::from_env()?.lab_paths()?).await,
         Command::Bundles { command } => run_bundles(command, &LabLocations::from_env()?.lab_paths()?).await,
@@ -135,6 +165,24 @@ async fn run_login(alias: Alias, timeout: u64) -> Result<(), Box<dyn std::error:
     match report.refused {
         None => Ok(()),
         Some(_) => Err(format!("{alias}: Teams refused the account").into()),
+    }
+}
+
+async fn run_auth(alias: Alias, options: &AuthOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let config = LabConfig::load(&LabLocations::from_env()?)?;
+    let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
+    let report = auth::authorize(&config, alias, &store, options).await?;
+    for line in report.lines(std::time::SystemTime::now()) {
+        println!("{alias}: {line}");
+    }
+    match &report.skypetoken {
+        None => Ok(()),
+        Some(Ok(skypetoken)) => {
+            let file = auth::save_region(config.paths(), alias, skypetoken)?;
+            println!("{alias}: region saved to {}", file.display());
+            Ok(())
+        }
+        Some(Err(_)) => Err(format!("{alias}: no skypetoken").into()),
     }
 }
 

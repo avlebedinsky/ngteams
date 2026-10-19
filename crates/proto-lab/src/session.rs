@@ -37,7 +37,7 @@ use crate::cdp::{Cdp, CdpError, Event, SessionId};
 use crate::classify::{Classification, Classifier, OwnKind};
 use crate::commands::chrome::ChromeBuild;
 use crate::config::{Alias, LabPaths};
-use crate::fence_http::HttpFence;
+use crate::fence_http::{HttpFence, RedirectCatch};
 use crate::fence_ws::{FrameClassifier, GuardScript, WsFence};
 
 /// Where the web client starts.
@@ -462,13 +462,30 @@ impl LabSession {
     /// When Chrome isn't installed, the fence can't be opened, or the browser can't be launched or armed (it is killed
     /// then).
     pub async fn open(paths: &LabPaths, alias: Alias, classifier: Classifier) -> Result<Self, SessionError> {
+        Self::open_with(paths, alias, classifier, None).await
+    }
+
+    /// [`Self::open`], with the HTTP layer also catching the authorization redirect when `catch` is given
+    /// ([`RedirectCatch`]; `proto-lab auth` only).
+    ///
+    /// # Errors
+    /// As [`Self::open`].
+    pub async fn open_with(
+        paths: &LabPaths,
+        alias: Alias,
+        classifier: Classifier,
+        catch: Option<RedirectCatch>,
+    ) -> Result<Self, SessionError> {
         let chrome = ChromeBuild::pinned().executable(&paths.chrome_dir());
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
         }
         let fence = Arc::new(Fence::open_lab()?);
         let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-        let http = HttpFence::new(classifier, Arc::clone(&fence), Arc::clone(&members));
+        let mut http = HttpFence::new(classifier, Arc::clone(&fence), Arc::clone(&members));
+        if let Some(catch) = catch {
+            http = http.with_redirect_catch(catch);
+        }
         let guard = GuardScript::generate().map_err(SessionError::Guard)?;
         let ws = WsFence::new(FrameClassifier::seeded(), fence, members, guard);
         let browser = Browser::launch(&chrome, &LaunchOptions::for_profile(paths, alias), LAUNCH_TIMEOUT).await?;

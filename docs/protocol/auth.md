@@ -274,9 +274,11 @@ later if enforcement is turned on.
 
 ## Open questions
 
-1. Does one refresh token really yield every audience in the table for the lab accounts, or does Conditional Access
-   block some of them (Outlook, Graph, SharePoint) for a non-compliant Linux device? Answered by Task 14's per-audience
-   refresh grants.
+1. ~~Does one refresh token really yield every audience in the table for the lab accounts, or does Conditional Access
+   block some of them (Outlook, Graph, SharePoint) for a non-compliant Linux device?~~ **Answered (Task 14,
+   `docs/spikes/auth.md`): yes.** One refresh grant each gave a token for `chatsvcagg`, presence, `ic3`, Graph,
+   Outlook, Outlook search and substrate, for all 3 lab accounts, with no Conditional Access block. SharePoint wasn't
+   asked: it needs a site host.
 2. What is the real `tokens.expiresIn` of a skypetoken (the client defaults to 24 hours only in the authzcore path)?
 3. Which runtime setting makes macOS use `nativeclient` instead of `msauth.com.microsoft.teams2://auth`? It doesn't
    matter while `nativeclient` works for us.
@@ -306,8 +308,9 @@ license, the `load` capture of account A (Task 11) should show:
       `scp` only);
 - [ ] whether any request carries `X-MS-Migration: True` with an IC3 Entra token, and which;
 - [ ] the shape of a 401 claims challenge, if one happens;
-- [ ] the body of the 403 the lab accounts get today: the `errorCode` (expected `UserLicenseNotPresentTrialEligible`).
-      This one is visible without a license, in a `status` run's capture.
+- [x] the body of the 403 the lab accounts get today: the `errorCode` is `UserLicenseNotPresentTrialEligible` for all 3,
+      seen by `proto-lab auth`'s own exchange (Task 14, `docs/spikes/auth.md`). Its JSON layout beyond `errorCode` is
+      still unrecorded.
 
 Then replace the synthetic fixtures below with sanitized ones exported from that capture.
 

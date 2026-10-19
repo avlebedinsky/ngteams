@@ -12,10 +12,9 @@
 //! No error carries the token or a piece of it: a malformed token is reported by kind, a wrong claim by its name and
 //! value (an object id, a tenant id, a UPN or the client ID, none of them secret).
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Map, Value};
 
+use crate::claims::{payload, text};
 use crate::secrets::Secret;
 use crate::token::{Authorization, TokenError};
 
@@ -128,30 +127,6 @@ fn wrong(claim: &'static str, expected: &str, found: &str) -> TokenError {
         expected: expected.to_owned(),
         found: found.to_owned(),
     }
-}
-
-/// The JSON object in a JWS compact token's payload part.
-fn payload(token: &str) -> Option<Map<String, Value>> {
-    let mut parts = token.split('.');
-    let (Some(_header), Some(payload), Some(_signature), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return None;
-    };
-    let bytes = URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
-    match serde_json::from_slice(&bytes).ok()? {
-        Value::Object(claims) => Some(claims),
-        _ => None,
-    }
-}
-
-/// A non-empty string claim.
-fn text(claims: &Map<String, Value>, name: &str) -> Option<String> {
-    claims
-        .get(name)?
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
 }
 
 /// `aud`: one string, or a non-empty array of strings.
