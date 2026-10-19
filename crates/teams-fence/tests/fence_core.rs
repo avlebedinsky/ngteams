@@ -8,7 +8,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use fixture_guard::Guard;
 use teams_fence::{
@@ -303,6 +303,53 @@ async fn a_new_chat_is_judged_by_its_proposed_members_without_a_fetch() {
 }
 
 #[tokio::test]
+async fn only_a_kind_that_creates_a_target_may_name_a_new_one() {
+    let lab = try_lab().unwrap();
+    let creating = [WriteKind::ChatCreate, WriteKind::Call, WriteKind::Meeting];
+    for kind in WriteKind::ALL {
+        let unused = Fixed::complete(&[LAB_A, LAB_B]);
+        let target = Target::new(kind, Scope::New).with_added(mris(&[LAB_A, LAB_B]));
+        let verdict = lab.fence.check(target, &unused).await;
+        assert_eq!(kind.creates_target(), creating.contains(&kind), "{kind:?}");
+        if creating.contains(&kind) {
+            assert!(verdict.is_ok(), "{kind:?} may create a lab-only target: {verdict:?}");
+        } else {
+            let denied = verdict.unwrap_err();
+            assert_eq!(denied.reason(), &DenyReason::NotCreatable, "{kind:?}");
+        }
+        assert_eq!(unused.fetches(), 0, "{kind:?}: a new target is never fetched");
+    }
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert_eq!(entries.len(), WriteKind::ALL.len());
+    let not_creatable = entries
+        .iter()
+        .filter(|entry| entry["reason"] == "not_creatable")
+        .count();
+    assert_eq!(not_creatable, WriteKind::ALL.len() - creating.len());
+}
+
+#[tokio::test]
+async fn a_denied_write_shows_added_participants_only_as_a_count() {
+    let lab = try_lab().unwrap();
+    let target = Target::new(WriteKind::Invite, chat()).with_added(mris(&[COWORKER, OTHER_BOT]));
+    let denied = lab
+        .fence
+        .check(target, &Fixed::complete(&[LAB_A, LAB_B]))
+        .await
+        .unwrap_err();
+    for shown in [
+        format!("{denied}"),
+        format!("{denied:?}"),
+        format!("{:?}", denied.target()),
+    ] {
+        assert!(!shown.contains(COWORKER), "{shown}");
+        assert!(!shown.contains(OTHER_BOT), "{shown}");
+    }
+    assert!(format!("{denied:?}").contains("added: 2"), "{denied:?}");
+    assert_eq!(denied.target().added().len(), 2, "the accessor still gives the MRIs");
+}
+
+#[tokio::test]
 async fn an_invite_counts_the_invitees_and_the_current_members() {
     let lab = try_lab().unwrap();
     let invite = |members: &[&str]| Target::new(WriteKind::Invite, chat()).with_added(mris(members));
@@ -501,5 +548,94 @@ async fn an_allow_that_cannot_be_logged_is_denied() {
         outsider.reason(),
         &DenyReason::Outsiders { count: 1 },
         "the original deny reason is kept"
+    );
+}
+
+/// A writer that takes `budget` bytes, fails once the budget runs out (a full disk), and takes everything after that
+/// failure (the disk has room again).
+struct FillsUp {
+    written: Arc<Mutex<Vec<u8>>>,
+    budget: usize,
+    failed: bool,
+}
+
+impl std::io::Write for FillsUp {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.failed {
+            written.extend_from_slice(buf);
+            return Ok(buf.len());
+        }
+        if self.budget == 0 {
+            self.failed = true;
+            return Err(std::io::Error::other("disk full"));
+        }
+        let taken = buf.len().min(self.budget);
+        self.budget -= taken;
+        written.extend_from_slice(&buf[..taken]);
+        Ok(taken)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn after_a_half_written_entry_the_log_refuses_every_later_one() {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let sink = FillsUp {
+        written: Arc::clone(&written),
+        budget: 20,
+        failed: false,
+    };
+    let fence = Fence::new(roster(), FenceLog::from_writer(sink));
+    let allow = || Target::new(WriteKind::Message, chat());
+    let lab_only = Fixed::complete(&[LAB_A, LAB_B]);
+
+    let first = fence.check(allow(), &lab_only).await.unwrap_err();
+    assert_eq!(first.reason(), &DenyReason::LogUnavailable);
+    let second = fence.check(allow(), &lab_only).await.unwrap_err();
+    assert_eq!(
+        second.reason(),
+        &DenyReason::LogUnavailable,
+        "the writer would take it now, but it would run into the half-written entry"
+    );
+    let bytes = written.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(bytes.len(), 20, "nothing is written after the failed append");
+}
+
+#[tokio::test]
+async fn reopening_terminates_a_half_written_last_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fence.log");
+    let fence = Fence::new(roster(), FenceLog::open(&path).unwrap());
+    let _ = fence
+        .check(Target::new(WriteKind::Reaction, chat()), &Fixed::complete(&[COWORKER]))
+        .await;
+    drop(fence);
+    let fragment = r#"{"ts_ms":1760000000000,"verdict":"al"#;
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut file, fragment.as_bytes()).unwrap();
+    drop(file);
+
+    let fence = Fence::new(roster(), FenceLog::open(&path).unwrap());
+    let _ = fence
+        .check(Target::new(WriteKind::Typing, chat()), &Fixed::complete(&[COWORKER]))
+        .await;
+    let text = fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert_eq!(lines[1], fragment, "the fragment keeps a line of its own");
+    let last: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(last["kind"], "typing");
+    assert!(text.ends_with('\n'));
+
+    drop(fence);
+    let before = fs::read_to_string(&path).unwrap();
+    drop(FenceLog::open(&path).unwrap());
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        before,
+        "a well-formed log is left as it is"
     );
 }

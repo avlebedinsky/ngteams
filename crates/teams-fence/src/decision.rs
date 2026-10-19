@@ -114,6 +114,9 @@ pub enum DenyReason {
     OrgWide,
     /// Participants that are neither lab accounts nor approved services.
     Outsiders { count: usize },
+    /// A [`Scope::New`] target for a kind that doesn't create one: the write lands on something that already exists,
+    /// whose members have to be fetched.
+    NotCreatable,
     /// The write would be allowed, but its decision couldn't be written to `fence.log`.
     LogUnavailable,
 }
@@ -125,12 +128,15 @@ impl fmt::Display for DenyReason {
             Self::NoMembers => f.write_str("no members"),
             Self::OrgWide => f.write_str("an org-wide team or channel"),
             Self::Outsiders { count } => write!(f, "{count} participant(s) outside the lab"),
+            Self::NotCreatable => f.write_str("this kind of write doesn't create a new target"),
             Self::LogUnavailable => f.write_str("fence.log can't be written"),
         }
     }
 }
 
-/// A denied write: the target and the reason. Carries no member identities and no credentials.
+/// A denied write: the target and the reason. Carries no credentials. Its `Display` and `Debug` show the added
+/// participants as a count only, but [`Denied::target`] gives the whole [`Target`], whose [`Target::added`] holds
+/// their MRIs, and the scope ids are shown as they are (a 1:1 chat id holds both members' object ids).
 #[derive(Debug, thiserror::Error)]
 #[error("fence denied {target}: {reason}")]
 pub struct Denied {
@@ -164,12 +170,13 @@ impl Fence {
     }
 
     /// Fetches the target scope's members from `source` (never from a cache) and allows the write only when every
-    /// participant, current or added, is in the roster. Every decision is appended to `fence.log`; an allow that
-    /// can't be logged is denied.
+    /// participant, current or added, is in the roster. A [`Scope::New`] target isn't fetched: it is judged by its
+    /// added participants alone, and only for a kind that [creates a target](crate::WriteKind::creates_target).
+    /// Every decision is appended to `fence.log`; an allow that can't be logged is denied.
     ///
     /// # Errors
-    /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, or
-    /// when an allow can't be logged.
+    /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, when
+    /// a kind that doesn't create a target names [`Scope::New`], or when an allow can't be logged.
     pub async fn check(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
         let membership = match target.scope() {
             Scope::New => Membership::Complete(Vec::new()),
@@ -188,12 +195,15 @@ impl Fence {
     }
 
     fn judge(&self, target: &Target, membership: Membership) -> Verdict {
+        let fetched = !matches!(target.scope(), Scope::New);
+        if !fetched && !target.kind().creates_target() {
+            return Verdict::Deny(DenyReason::NotCreatable);
+        }
         let current = match membership {
             Membership::Complete(members) => members,
             Membership::Partial(reason) => return Verdict::Deny(DenyReason::Partial(reason)),
             Membership::OrgWide => return Verdict::Deny(DenyReason::OrgWide),
         };
-        let fetched = !matches!(target.scope(), Scope::New);
         if fetched && current.is_empty() {
             return Verdict::Deny(DenyReason::NoMembers);
         }

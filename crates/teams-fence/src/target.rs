@@ -66,6 +66,13 @@ impl WriteKind {
             Self::BotReply => "bot_reply",
         }
     }
+
+    /// Whether this kind of write can create its own target ([`Scope::New`]): a new chat, a new call, a new meeting.
+    /// Every other kind lands on something that already exists, whose members the fence has to fetch.
+    #[must_use]
+    pub fn creates_target(self) -> bool {
+        matches!(self, Self::ChatCreate | Self::Call | Self::Meeting)
+    }
 }
 
 impl fmt::Display for WriteKind {
@@ -109,8 +116,9 @@ pub enum Scope {
     Team { id: String },
     /// A call, placed or incoming.
     Call { id: String },
-    /// Something the write creates, such as a new chat. It has no members to fetch yet: its participants are exactly
-    /// the target's added participants.
+    /// Something the write creates: a new chat, call or meeting. It has no members to fetch yet: its participants are
+    /// exactly the target's added participants. Only kinds that [create a target](WriteKind::creates_target) may use
+    /// it; the fence denies any other kind on `New`.
     New,
 }
 
@@ -128,7 +136,10 @@ impl fmt::Display for Scope {
 
 /// One write: its kind, its scope, and the participants the write itself adds (invitees, the members of a new chat,
 /// the callees of a new call). The fence judges the scope's current members together with the added ones.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Debug` and `Display` show the added participants as a count only; [`Target::added`] returns their MRIs. Scope ids
+/// are shown as they are, and a 1:1 chat id (`19:<oid>_<oid>@unq.gbl.spaces`) holds both members' object ids.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Target {
     kind: WriteKind,
     scope: Scope,
@@ -165,6 +176,16 @@ impl Target {
     #[must_use]
     pub fn added(&self) -> &BTreeSet<Mri> {
         &self.added
+    }
+}
+
+impl fmt::Debug for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Target")
+            .field("kind", &self.kind)
+            .field("scope", &self.scope)
+            .field("added", &self.added.len())
+            .finish()
     }
 }
 

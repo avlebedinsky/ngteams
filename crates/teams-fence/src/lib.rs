@@ -4,7 +4,7 @@
 //! [`Fence::check`] takes a [`Target`] (a [`WriteKind`] and a [`Scope`], plus any participants the write adds) and a
 //! [`MembershipSource`], fetches the scope's members on every call, and returns a [`WritePermit`] or [`Denied`].
 //! Anything unknown is denied: a failed, empty, paginated or truncated membership, an org-wide team or channel, an
-//! outside participant. Every decision goes to `fence.log` ([`FenceLog`]).
+//! outside participant, a [`Scope::New`] target for a kind that doesn't create one. Every decision goes to `fence.log` ([`FenceLog`]).
 
 mod decision;
 mod log;
