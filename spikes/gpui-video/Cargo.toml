@@ -7,15 +7,15 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-channel.workspace = true
 gpui-pre.workspace = true
 gpui-pre-platform.workspace = true
-image.workspace = true
-log.workspace = true
-
-[dev-dependencies]
-# the smoke test reads the compositor's screenshot back
+# `png`: the sandbox reads the compositor's screenshots back
 image = { workspace = true, features = ["png"] }
+log.workspace = true
+# the sandbox (src/sandbox.rs) keeps the compositors' runtime dirs in a temp dir
 tempfile.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

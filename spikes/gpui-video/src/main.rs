@@ -1,7 +1,7 @@
-//! M0 Task 15: GPUI on niri/Wayland smoke check.
+//! M0 Tasks 15–16: GPUI on niri/Wayland, the smoke window and the video grid benchmark.
 //!
-//! Opens one window on the Wayland compositor `WAYLAND_DISPLAY` names, draws a line of text and a checkerboard image
-//! uploaded as a GPUI `RenderImage` (the path Task 16 takes for video frames), and once a few frames have been
+//! Without arguments (Task 15's smoke check) it opens one window on the Wayland compositor `WAYLAND_DISPLAY` names,
+//! draws a line of text and a checkerboard image uploaded as a GPUI `RenderImage`, and once a few frames have been
 //! presented prints one line to stdout:
 //!
 //! ```text
@@ -9,26 +9,48 @@
 //! ```
 //!
 //! (`compositor` is what GPUI calls the display server: `Wayland`.) It quits when its window is closed, or after
-//! `--exit-after-ms <N>`. It refuses to start (exit 1) when `WAYLAND_DISPLAY` is unset or empty. The build has no X11
-//! backend and allows only Wayland (`WindowingModes::WAYLAND`), so it never falls back to X11 or to running headless:
-//! a `WAYLAND_DISPLAY` it can't connect to makes GPUI panic at startup. GPUI's log goes to stderr as
-//! `[LEVEL target] message`: GPUI's own records from info up, everyone else's from warn up.
+//! `--exit-after-ms <N>`.
 //!
-//! Run it only against a private compositor (the smoke test starts a headless weston with a nested niri). The GPU is
+//! With `--bench` (Task 16) the window shows a 3×3 grid of synthetic 720p streams at `--fps` (30), each frame handed
+//! to GPUI by `--upload surface` (approach (b), the default: a `PixelFrame` painted with the patched GPUI's
+//! `Window::paint_external_surface`) or `--upload image` (approach (a): a fresh `RenderImage`, stock GPUI's only way);
+//! see `gpui_video::grid`. After the same ready line it warms up for
+//! `--warmup-ms`, prints `measuring`, measures for `--duration-ms`, prints one `summary key=value ...` line, keeps
+//! the streams running for `--hold-ms` (0; the benchmark runner takes its screenshots then, outside the measured
+//! window) and quits. The markers `bench-phase measuring` and `bench-phase done` go to stderr too, so GPUI's own
+//! `frame duration: ...` lines (printed with `ZED_MEASUREMENTS=1`) can be cut to the measured window.
+//!
+//! It refuses to start (exit 1) when `WAYLAND_DISPLAY` is unset or empty. The build has no X11 backend and allows only
+//! Wayland (`WindowingModes::WAYLAND`), so it never falls back to X11 or to running headless: a `WAYLAND_DISPLAY` it
+//! can't connect to makes GPUI panic at startup. GPUI's log goes to stderr as `[LEVEL target] message`: GPUI's own
+//! records from info up, everyone else's from warn up.
+//!
+//! Run it only against a private compositor (the tests start a headless weston with a nested niri). The GPU is
 //! chosen by GPUI itself: `ZED_DEVICE_ID=<pci device id>` puts that adapter first, otherwise the compositor's GPU, then
 //! a discrete one.
 
-use std::{cell::Cell, ffi::OsStr, io::Write as _, process::ExitCode, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::Cell,
+    ffi::OsStr,
+    io::Write as _,
+    process::ExitCode,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, GpuSpecs, IntoElement, ParentElement as _, Render, RenderImage,
+    App, AppContext as _, AsyncApp, Bounds, Context, GpuSpecs, IntoElement, ParentElement as _, Render, RenderImage,
     SharedString, Styled as _, Window, WindowBounds, WindowHandle, WindowOptions, WindowingModes, div, img, px, rgb,
     size,
 };
+use gpui_video::grid::{Grid, Source, TILES, Upload, VideoFrame};
 use image::{Frame, ImageBuffer, Rgba};
 
-/// The window's Wayland app id (the window has no title).
+/// The smoke window's Wayland app id (the window has no title).
 const APP_ID: &str = "ms-teams-gpui-smoke";
+/// The benchmark window's Wayland app id.
+const BENCH_APP_ID: &str = "ms-teams-gpui-video";
 /// The text line the window draws.
 const TEXT: &str = "ms-teams GPUI smoke";
 /// Window background, 0xRRGGBB.
@@ -42,33 +64,85 @@ const IMAGE_SIDE: u32 = 128;
 const TILE_SIDE: u32 = 16;
 /// Frames presented before the window reports ready.
 const READY_FRAMES: usize = 3;
+const USAGE: &str = "usage: gpui-video [--exit-after-ms N] | gpui-video --bench [--upload image|surface] \
+                     [--warmup-ms N] [--duration-ms N] [--hold-ms N] [--fps N]";
+
+/// What `--bench` runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Bench {
+    upload: Upload,
+    warmup: Duration,
+    duration: Duration,
+    /// How long the streams keep running after the summary.
+    hold: Duration,
+    fps: u32,
+}
+
+impl Default for Bench {
+    fn default() -> Self {
+        Self {
+            upload: Upload::Surface,
+            warmup: Duration::from_secs(3),
+            duration: Duration::from_secs(20),
+            hold: Duration::ZERO,
+            fps: 30,
+        }
+    }
+}
 
 /// Command-line options.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Options {
-    /// Quit this long after the window reports ready, unless it's closed first.
+    /// Quit this long after the window reports ready, unless it's closed first (smoke window only).
     exit_after: Option<Duration>,
+    /// Run the video grid benchmark instead of the smoke window.
+    bench: Option<Bench>,
+}
+
+/// The number following `flag`.
+fn number<T: std::str::FromStr>(flag: &str, value: Option<String>) -> Result<T, String>
+where
+    T::Err: std::fmt::Display,
+{
+    let value = value.ok_or_else(|| format!("{flag} needs a value"))?;
+    value.parse().map_err(|error| format!("{flag} {value}: {error}"))
+}
+
+/// The upload path following `--upload`.
+fn upload(value: Option<String>) -> Result<Upload, String> {
+    let value = value.ok_or("--upload needs a value")?;
+    Upload::from_name(&value).ok_or_else(|| format!("--upload {value}: not image or surface"))
 }
 
 fn parse_options(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
     let mut options = Options::default();
+    let mut bench = Bench::default();
+    let (mut wants_bench, mut bench_flags) = (false, false);
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--exit-after-ms" => {
-                let value = args.next().ok_or("--exit-after-ms needs a value")?;
-                let millis = value
-                    .parse::<u64>()
-                    .map_err(|error| format!("--exit-after-ms {value}: {error}"))?;
-                options.exit_after = Some(Duration::from_millis(millis));
+                options.exit_after = Some(Duration::from_millis(number(&arg, args.next())?));
             }
-            other => {
-                return Err(format!(
-                    "unknown argument: {other} (usage: gpui-video [--exit-after-ms N])"
-                ));
-            }
+            "--bench" => wants_bench = true,
+            "--warmup-ms" => bench.warmup = Duration::from_millis(number(&arg, args.next())?),
+            "--duration-ms" => bench.duration = Duration::from_millis(number(&arg, args.next())?),
+            "--hold-ms" => bench.hold = Duration::from_millis(number(&arg, args.next())?),
+            "--fps" => bench.fps = number::<u32>(&arg, args.next())?.max(1),
+            "--upload" => bench.upload = upload(args.next())?,
+            other => return Err(format!("unknown argument: {other} ({USAGE})")),
         }
+        bench_flags |= arg.starts_with("--") && !matches!(arg.as_str(), "--bench" | "--exit-after-ms");
     }
+    if wants_bench && options.exit_after.is_some() {
+        return Err(format!("--exit-after-ms is for the smoke window ({USAGE})"));
+    }
+    if bench_flags && !wants_bench {
+        return Err(format!(
+            "--warmup-ms, --duration-ms, --hold-ms, --fps and --upload need --bench ({USAGE})"
+        ));
+    }
+    options.bench = wants_bench.then_some(bench);
     Ok(options)
 }
 
@@ -167,12 +241,16 @@ fn after_frames(window: &Window, frames: usize, done: impl FnOnce(&mut Window, &
     });
 }
 
-/// Prints the ready line and arms the `exit_after` timer.
-fn report_ready(window: &Window, cx: &mut App, exit_after: Option<Duration>) {
-    let line = ready_line(cx.compositor_name(), window.gpu_specs().as_ref());
+/// Prints `line` to stdout at once.
+fn say(line: &str) {
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{line}");
     let _ = stdout.flush();
+}
+
+/// Prints the ready line and arms the `exit_after` timer.
+fn report_ready(window: &Window, cx: &mut App, exit_after: Option<Duration>) {
+    say(&ready_line(cx.compositor_name(), window.gpu_specs().as_ref()));
     if let Some(delay) = exit_after {
         let timer = cx.background_executor().timer(delay);
         cx.spawn(async move |cx| {
@@ -207,7 +285,68 @@ fn open_window(cx: &mut App, exit_after: Option<Duration>) -> Result<WindowHandl
     .map_err(|error| format!("{error:#}"))
 }
 
-fn run(exit_after: Option<Duration>) -> ExitCode {
+/// Hands every frame the sources send to the grid, a batch per wake-up, and asks for a redraw.
+async fn feed_grid(handle: WindowHandle<Grid>, frames: async_channel::Receiver<VideoFrame>, cx: &mut AsyncApp) {
+    while let Ok(first) = frames.recv().await {
+        let mut batch = vec![first];
+        while let Ok(frame) = frames.try_recv() {
+            batch.push(frame);
+        }
+        let pushed = handle.update(cx, |grid, window, cx| {
+            for frame in batch {
+                if let Err(error) = grid.push(frame, window) {
+                    log::error!("{error}");
+                }
+            }
+            cx.notify();
+        });
+        if pushed.is_err() {
+            return;
+        }
+    }
+}
+
+/// Warms up, measures, prints the summary, stops the sources and quits.
+async fn drive_bench(handle: WindowHandle<Grid>, bench: Bench, source: Source, cx: &mut AsyncApp) {
+    cx.background_executor().timer(bench.warmup).await;
+    let started = handle.update(cx, |grid, _, _| grid.start_measuring(Instant::now()));
+    if started.is_ok() {
+        say("measuring");
+        eprintln!("bench-phase measuring");
+        cx.background_executor().timer(bench.duration).await;
+        if let Ok(summary) = handle.update(cx, |grid, _, _| grid.summary(Instant::now())) {
+            eprintln!("bench-phase done");
+            say(&summary);
+        }
+        cx.background_executor().timer(bench.hold).await;
+    }
+    source.stop();
+    cx.update(|cx| cx.quit());
+}
+
+/// Opens the benchmark window, starts the sources and the driver.
+fn open_bench(cx: &mut App, bench: Bench) -> Result<(), String> {
+    let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        app_id: Some(BENCH_APP_ID.to_owned()),
+        ..WindowOptions::default()
+    };
+    let handle = cx
+        .open_window(options, |window, cx| {
+            after_frames(window, READY_FRAMES, |window, cx| report_ready(window, cx, None));
+            cx.new(|_| Grid::new(bench.upload))
+        })
+        .map_err(|error| format!("{error:#}"))?;
+    let (sender, frames) = async_channel::unbounded();
+    let source = Source::start(TILES, bench.fps, &sender).map_err(|error| format!("starting the sources: {error}"))?;
+    cx.spawn(async move |cx| feed_grid(handle, frames, cx).await).detach();
+    cx.spawn(async move |cx| drive_bench(handle, bench, source, cx).await)
+        .detach();
+    Ok(())
+}
+
+fn run(options: Options) -> ExitCode {
     let failed = Rc::new(Cell::new(false));
     let failed_in_app = Rc::clone(&failed);
     gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
@@ -217,7 +356,11 @@ fn run(exit_after: Option<Duration>) -> ExitCode {
             }
         })
         .detach();
-        if let Err(error) = open_window(cx, exit_after) {
+        let opened = match options.bench {
+            Some(bench) => open_bench(cx, bench),
+            None => open_window(cx, options.exit_after).map(|_| ()),
+        };
+        if let Err(error) = opened {
             log::error!("failed to open the window: {error}");
             failed_in_app.set(true);
             cx.quit();
@@ -244,7 +387,7 @@ fn main() -> ExitCode {
         log::error!("no Wayland compositor: WAYLAND_DISPLAY is unset or empty (this build never uses X11)");
         return ExitCode::FAILURE;
     }
-    run(options.exit_after)
+    run(options)
 }
 
 #[cfg(test)]
@@ -256,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn options_default_to_no_exit_timer() {
+    fn options_default_to_the_smoke_window_without_an_exit_timer() {
         assert_eq!(parse_options(args(&[])), Ok(Options::default()));
     }
 
@@ -264,25 +407,62 @@ mod tests {
     fn exit_after_takes_milliseconds() {
         let options = parse_options(args(&["--exit-after-ms", "1500"])).unwrap();
         assert_eq!(options.exit_after, Some(Duration::from_millis(1500)));
+        assert_eq!(options.bench, None);
+    }
+
+    #[test]
+    fn bench_takes_its_defaults_and_overrides() {
+        let options = parse_options(args(&["--bench"])).unwrap();
+        assert_eq!(options.bench, Some(Bench::default()));
+        let options = parse_options(args(&[
+            "--warmup-ms",
+            "500",
+            "--bench",
+            "--duration-ms",
+            "1500",
+            "--fps",
+            "60",
+            "--hold-ms",
+            "4000",
+            "--upload",
+            "image",
+        ]))
+        .unwrap();
+        assert_eq!(
+            options.bench,
+            Some(Bench {
+                upload: Upload::Image,
+                warmup: Duration::from_millis(500),
+                duration: Duration::from_millis(1500),
+                hold: Duration::from_millis(4000),
+                fps: 60,
+            })
+        );
+        assert_eq!(
+            parse_options(args(&["--bench", "--fps", "0"]))
+                .unwrap()
+                .bench
+                .unwrap()
+                .fps,
+            1
+        );
     }
 
     #[test]
     fn bad_arguments_are_refused() {
-        assert!(
-            parse_options(args(&["--exit-after-ms"]))
-                .unwrap_err()
-                .contains("needs a value")
-        );
-        assert!(
-            parse_options(args(&["--exit-after-ms", "soon"]))
-                .unwrap_err()
-                .contains("soon")
-        );
-        assert!(
-            parse_options(args(&["--x11"]))
-                .unwrap_err()
-                .contains("unknown argument: --x11")
-        );
+        let refused = |list: &[&str], needle: &str| {
+            let error = parse_options(args(list)).unwrap_err();
+            assert!(error.contains(needle), "{list:?}: {error}");
+        };
+        refused(&["--exit-after-ms"], "needs a value");
+        refused(&["--exit-after-ms", "soon"], "soon");
+        refused(&["--x11"], "unknown argument: --x11");
+        refused(&["--duration-ms", "100"], "need --bench");
+        refused(&["--bench", "--exit-after-ms", "100"], "smoke window");
+        refused(&["--bench", "--fps", "-3"], "--fps -3");
+        refused(&["--bench", "--upload", "dmabuf"], "--upload dmabuf");
+        refused(&["--bench", "--upload"], "--upload needs a value");
+        refused(&["--upload", "image"], "need --bench");
     }
 
     #[test]

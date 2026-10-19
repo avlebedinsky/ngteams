@@ -38,3 +38,7 @@ an invalid one is refused; the tests look in the same place.
 The GPUI smoke tests (`spikes/gpui-video/tests/smoke.rs`) start their own headless weston with a niri nested in it and
 never touch the desktop session. They need weston 15.0 or later (for `--fake-seat`) and niri on `PATH`; without them
 they're skipped, unless `GPUI_SMOKE_REQUIRE=1`. They run the window once on every GPU, chosen with `ZED_DEVICE_ID`.
+The video grid benchmark (`spikes/gpui-video/tests/bench.rs`, M0 Task 16) runs in the same sandbox; its measurement is
+ignored by default and run by hand with a release build:
+`cargo test --release -p gpui-video --test bench -- --ignored --nocapture` (`GPUI_BENCH_GPU=<pci device id>`,
+`GPUI_BENCH_SECONDS`, `GPUI_BENCH_OUT=<file>`). Results and the decision are in `docs/spikes/gpui-video.md`.
