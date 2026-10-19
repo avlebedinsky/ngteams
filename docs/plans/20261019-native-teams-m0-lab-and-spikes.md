@@ -191,6 +191,11 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
   - all UPNs in the same tenant domain
   - errors on 0, 2 or 4 accounts, duplicates, or a mixed domain
 - [ ] implement `LabConfig` (accounts, approved service participants, lab dir paths)
+- [ ] ➕ write the real `~/.config/teams-lab/lab.toml` (agent, no human):
+  - a = labbot, b = labbot2, c = labbot3 in the lab.example.com tenant
+  - UPNs taken from the `idTokenUpn` in `~/.local/share/teams-lab/ca-probe-*.json`
+  - the approved service participants list contains the echo service (approved by the user on 2026-10-19); its MRI is filled in from the Task 18 capture
+  - passwords are never stored in `lab.toml`
 - [ ] tests for the `SecretStore` trait: put/get/delete per account and audience; `Debug` never prints secrets
 - [ ] implement `MemorySecretStore` (tests) and `KeyringSecretStore` (`oo7` / Secret Service)
 - [ ] `cargo test --workspace` passes
@@ -233,6 +238,7 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - [ ] a test against a local HTML page with a dedicated worker: a new target is held paused until we explicitly call `runIfWaitingForDebugger`
 - [ ] `cargo test -p proto-lab` passes
 - [ ] note: `login` and `status` are not here; they need the armed fence (Task 8)
+- ➕ the profiles `~/.local/share/teams-lab/profiles/{a,b,c}` already exist and are signed in to Microsoft (2026-10-19, through `tools/lab-login`). They were created by Playwright's bundled Chromium from lab-automation (Playwright 1.62.1). Pin Chrome for Testing **no older** than that Chromium, because an older Chrome can't open a profile from a newer one. Otherwise just run `proto-lab login` again, which is automatic (Task 8).
 
 ### Task 6: Fence layer 2 — HTTP interception (all hosts, all targets)
 **Files:**
@@ -269,7 +275,12 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/proto-lab/tests/login.rs`
 
 - [ ] tests first: detecting that the web client has loaded and that a session has expired (on recorded synthetic CDP events)
-- [ ] `proto-lab login <a|b|c>`: a headed window on the persistent profile, **with the fence armed in fail-closed mode**. It waits for the web client to load, records the account's MRI into `lab.toml`, and closes.
+- [ ] `proto-lab login <a|b|c>`: headless, on the persistent profile, **with the fence armed in fail-closed mode**. Sign-in is automatic, following the proven `tools/lab-login/teams-lab-login.mjs`:
+  - **credentials:** email and password come from `/path/to/lab-automation/lab-accounts.json`, with the same rules as its `loadAccounts` (the file must be mode 0600; `passwordEnv` or `password`). They're never printed or logged.
+  - **sign-in steps:** the email and password fields are typed only when interactive; the password is sent only once, and a rejection stops the run; "Stay signed in" is answered Yes; the run stops if Microsoft asks to register an MFA method.
+  - **if MFA is requested:** none was asked on 2026-10-19. If it ever is, write `status-<alias>.json` with `need-code` and wait for `inbox/<alias>.code`; the agent asks the user for the code.
+  - **finishing:** once the session is ready, the web client loads under the armed fence; then record the account's MRI into `lab.toml` and close.
+- [ ] tests first for the account-file reader: mode 0600 is enforced, `passwordEnv` vs `password` both work, `Debug` and errors never contain the password
 - [ ] `proto-lab status`: headless with the armed fence; prints `ok` / `login needed` per account
 - [ ] `cargo test -p proto-lab` passes
 
@@ -315,10 +326,14 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `docs/protocol/auth.md`
 - Create: `tests/fixtures/auth/*.json` (sanitized)
 
-- [ ] from the bundle and the binaries, determine:
-  - the client ID and **all registered redirect URIs** (`ms-teams.exe`, Mac OneAuth config, web bundle)
-  - the scopes and audiences each service needs
-  - the authz/skypetoken flow and the regional endpoints in its response
+- [x] ➕ already settled by the CA probe (`docs/spikes/ca-probe.md`, 2026-10-19):
+  - native client `1fec8e78-bce4-4aaf-ab1b-5451cc387264` with redirect `https://login.microsoftonline.com/common/oauth2/nativeclient` (OneAuth in `ms-teams.exe`); its refresh token isn't SPA-limited
+  - the web client `5e3ce6c0-…` is a SPA, so it isn't used
+  - skypetoken resource `https://api.spaces.skype.com`; endpoints `…/api/authsvc/v1.0/authz` and `…/authzcore`
+- [ ] from the bundle and the binaries, determine what's still open:
+  - the scopes and audiences of the other services (chatsvc, presence, Graph, Outlook, substrate) and whether one refresh token can get all of them
+  - the authz/skypetoken flow (request, response, regional endpoints), and when the client uses `authz` vs `authzcore`
+  - the Mac OneAuth config, as a cross-check of the redirect
 - [ ] confirm with the `load` capture (account A); export sanitized fixtures
 - [ ] `auth.md`: the flow in our own words, an audience × service table, the redirect decision (native vs SPA and refresh-token lifetime; custom scheme → catch `Location`), open questions
 - [ ] the fixture guard passes on the new fixtures
@@ -342,7 +357,7 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/teams-auth/tests/authz.rs`, `crates/proto-lab/tests/auth_redirect.rs`
 
 - [ ] tests first: extracting `code`/`state`/`error` from a recorded 302 `Location` (https and custom scheme); validating `state`; the skypetoken exchange and parsing the regional endpoints on `wiremock`
-- [ ] the authorize step: CDP opens the URL in profile X with the fence armed; `Fetch` at the response stage catches the redirect to the registered URI, takes the code, and fails the navigation. No human.
+- [ ] the authorize step: CDP opens the URL in profile X with the fence armed; `Fetch` at the response stage catches the redirect to the registered URI, takes the code, and fails the navigation. No human. ➕ The flow itself is proven by `tools/ca-probe/ca-probe.mjs` (Playwright, catching the code on navigation to `nativeclient`): all 3 accounts get a token for `api.spaces.skype.com` with no MFA and no device ID, and refresh works. This task carries it over to Rust/CDP; the Conditional Access question is already answered for the lab accounts.
 - [ ] the skypetoken exchange via authz; persist the regional endpoints
 - [ ] `proto-lab auth <a|b|c>` prints aud, exp, scopes, tenant, skypetoken expiry and region, never the tokens themselves
 - [ ] live test (`--features live`): all 3 accounts get a skypetoken. Write the outcome, including what Conditional Access did, to `docs/spikes/auth.md`.
@@ -430,9 +445,10 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 
 **Manual steps:**
 - Create `~/.config/teams-lab/lab.toml` with the 3 account UPNs, or hand them over and the agent writes it.
-- Run `proto-lab login a|b|c` (after Task 8): MFA once per account, and again only when the tenant's sign-in frequency policy asks.
+- None in the normal case: login is automatic, and no MFA was asked on 2026-10-19. If Microsoft ever asks for a 2FA code, the agent asks the user for it.
+- Before an autonomous run, the user adds permission rules for `proto-lab` and the lab tools, because the auto-mode classifier blocks commands that use lab credentials.
 
-**Decisions for the user:**
-- Approve the Teams echo service as a fence participant (it's a Microsoft bot, not a company member) before Task 18 runs live.
-- If Conditional Access blocks the native client (Task 14), decide how to proceed. This changes the project's direction.
-- Lab accounts show as "Available" while scenarios run and are reachable by coworkers' calls, which are never answered. Confirm that this is acceptable.
+**Decisions made by the user (2026-10-19):**
+- The Teams echo service is approved as a fence participant (only it, by MRI).
+- Lab accounts showing "Available" and being reachable by coworkers' calls (never answered) is acceptable.
+- Conditional Access doesn't block the native client for the lab accounts (CA probe). The user's own account is a separate check, before M2.
