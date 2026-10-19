@@ -6,6 +6,8 @@
 //! is found.
 
 mod common;
+#[path = "common/process.rs"]
+mod process;
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt as _;
@@ -18,7 +20,8 @@ use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TEAMS_ORIGI
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::cdp::{Cdp, SessionId};
 use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, classify, is_mutating};
-use proto_lab::fence_http::{DenyCause, HttpFence, HttpVerdict, MalformedPause, PausedRequest};
+use proto_lab::fence_http::{DenyCause, HttpFence, MalformedPause, PausedRequest, Verdict};
+use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
 use serde_json::{Value, json};
 use teams_fence::{
     DenyReason, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope, Target, WriteKind,
@@ -219,6 +222,17 @@ fn http_fence(lab: &Lab, classifier: Classifier, members: &[&str]) -> HttpFence 
     HttpFence::new(classifier, Arc::clone(&lab.fence), Arc::new(Fixed(members)))
 }
 
+/// The WebSocket layer with the seeded classifier: every frame is denied.
+fn ws_fence(lab: &Lab) -> TestResult<WsFence> {
+    let members = Arc::new(Fixed(Membership::Complete(Vec::new())));
+    Ok(WsFence::new(
+        FrameClassifier::seeded(),
+        Arc::clone(&lab.fence),
+        members,
+        GuardScript::generate()?,
+    ))
+}
+
 fn log_entries(path: &Path) -> TestResult<Vec<Value>> {
     let text = std::fs::read_to_string(path)?;
     Ok(text
@@ -243,7 +257,7 @@ async fn an_unclassified_post_is_denied_kept_and_logged_without_its_query() {
 
     let verdict = fence.decide(&paused("POST", &format!("{CHAT}?secret=planted"))).await;
 
-    assert_eq!(verdict, HttpVerdict::Deny(DenyCause::Unclassified));
+    assert_eq!(verdict, Verdict::Deny(DenyCause::Unclassified));
     let denials = fence.denials();
     assert_eq!(denials.len(), 1);
     assert_eq!(denials[0].method, "POST");
@@ -261,8 +275,8 @@ async fn reads_pass_unlogged_and_own_requests_pass_logged() {
     let lab = lab().unwrap();
     let fence = http_fence(&lab, Classifier::seeded(), &[LAB_A]);
 
-    assert_eq!(fence.decide(&paused("GET", CHAT)).await, HttpVerdict::Allow);
-    assert_eq!(fence.decide(&paused("POST", TOKEN)).await, HttpVerdict::Allow);
+    assert_eq!(fence.decide(&paused("GET", CHAT)).await, Verdict::Allow);
+    assert_eq!(fence.decide(&paused("POST", TOKEN)).await, Verdict::Allow);
 
     assert!(fence.denials().is_empty());
     let entries = log_entries(&lab.log_path).unwrap();
@@ -291,7 +305,7 @@ async fn an_own_request_that_cannot_be_logged_is_denied() {
 
     let verdict = http.decide(&paused("POST", TOKEN)).await;
 
-    assert_eq!(verdict, HttpVerdict::Deny(DenyCause::LogUnavailable));
+    assert_eq!(verdict, Verdict::Deny(DenyCause::LogUnavailable));
     assert_eq!(http.denials().len(), 1);
 }
 
@@ -309,13 +323,13 @@ async fn a_mapped_write_goes_through_the_fence_with_a_fresh_membership() {
 
     let lab_only = http_fence(&lab, Classifier::seeded(), &[LAB_A, LAB_B]);
     let verdict = lab_only.judge(Classification::Write(target()), "POST", CHAT).await;
-    assert_eq!(verdict, HttpVerdict::Allow);
+    assert_eq!(verdict, Verdict::Allow);
 
     let with_coworker = http_fence(&lab, Classifier::seeded(), &[LAB_A, COWORKER]);
     let verdict = with_coworker.judge(Classification::Write(target()), "POST", CHAT).await;
     assert_eq!(
         verdict,
-        HttpVerdict::Deny(DenyCause::Fenced(DenyReason::Outsiders { count: 1 }))
+        Verdict::Deny(DenyCause::Fenced(DenyReason::Outsiders { count: 1 }))
     );
     assert_eq!(with_coworker.denials().len(), 1);
 
@@ -368,6 +382,10 @@ fn every_kind_of_target_is_resumed_last_and_only_dedicated_workers_skip_fetch() 
         assert!(steps.contains(&Step::AutoAttach), "{kind:?} children must be held too");
         let fetch = steps.contains(&Step::Fetch);
         assert_eq!(fetch, kind != TargetKind::Worker, "{kind:?}");
+        assert!(
+            steps.contains(&Step::Network),
+            "{kind:?}: the frame audit reads Network events"
+        );
         let page_like = matches!(kind, TargetKind::Page | TargetKind::Iframe);
         assert_eq!(steps.contains(&Step::BypassServiceWorker), page_like, "{kind:?}");
         if page_like {
@@ -516,6 +534,9 @@ async fn serve_fake(
 /// The session whose target detaches before its resume is answered: a short-lived worker, or a tab closed at once.
 const SHORT_LIVED: &str = "S-short";
 
+/// The session whose WebSocket guard reports that it has no binding to ask through.
+const UNGUARDED: &str = "S-unguarded";
+
 async fn answer_fake(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     command: &Value,
@@ -552,6 +573,11 @@ fn fake_reply(command: &Value, refuse: fn(&str, Option<&str>) -> bool) -> Value 
     let result = match method {
         "Target.createTarget" => json!({"targetId": "T-new"}),
         "Target.closeTarget" => json!({"success": true}),
+        // the WebSocket guard reports itself armed, except where the binding is missing
+        "Runtime.evaluate" if session == Some(UNGUARDED) => {
+            json!({"result": {"type": "string", "value": "no binding"}})
+        }
+        "Runtime.evaluate" => json!({"result": {"type": "string", "value": "armed"}}),
         _ => json!({}),
     };
     json!({"id": id, "result": result})
@@ -573,6 +599,7 @@ async fn arm_fake(fake: &FakeBrowser, origins: &[&str]) -> TestResult<(ArmedBrow
     let armed = ArmedBrowser::arm(
         fake.launch().await?,
         http_fence(&lab, Classifier::seeded(), &[]),
+        ws_fence(&lab)?,
         &options,
     )
     .await?;
@@ -622,6 +649,10 @@ async fn the_browser_is_fenced_then_cleaned_through_a_blank_armed_tab() {
             "Fetch.enable",
             "Network.enable",
             "Network.setBypassServiceWorker",
+            "Runtime.enable",
+            "Page.enable",
+            "Runtime.addBinding",
+            "Page.addScriptToEvaluateOnNewDocument",
             "Target.setAutoAttach",
             "Runtime.runIfWaitingForDebugger",
             "Storage.clearDataForOrigin",
@@ -641,6 +672,25 @@ async fn the_browser_is_fenced_then_cleaned_through_a_blank_armed_tab() {
             json!({"origin": "https://b.example", "storageTypes": "service_workers,cache_storage"}),
         ]
     );
+    let on_tab = |method: &str| {
+        fake.commands()
+            .into_iter()
+            .find(|command| command["sessionId"] == "S-new" && command["method"] == method)
+            .map(|command| command["params"].clone())
+            .unwrap_or_default()
+    };
+    // its children are held too, but a service worker attaches through the browser only, once
+    let held = on_tab("Target.setAutoAttach");
+    assert_eq!(held["waitForDebuggerOnStart"], true);
+    assert_eq!(held["filter"][0], json!({"type": "service_worker", "exclude": true}));
+    // the WebSocket guard runs in its documents to come and in the ones there already
+    let guard = on_tab("Page.addScriptToEvaluateOnNewDocument");
+    assert_eq!(guard["runImmediately"], true);
+    assert!(
+        guard["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("__labFenceWsVerdict"))
+    );
     armed.verdict().unwrap();
 }
 
@@ -653,26 +703,39 @@ async fn every_attached_target_is_armed_on_its_own_session_before_it_runs() {
             "Fetch.enable",
             "Network.enable",
             "Network.setBypassServiceWorker",
+            "Runtime.enable",
+            "Page.enable",
+            "Runtime.addBinding",
+            "Page.addScriptToEvaluateOnNewDocument",
             "Target.setAutoAttach",
         ]
     };
+    let guarded = ["Network.enable", "Runtime.addBinding", "Runtime.evaluate"];
+    let worker_like = || [&["Fetch.enable"][..], &guarded, &["Target.setAutoAttach"]].concat();
     let cases = [
         (None, "S-page", "page", page_like()),
         (Some("S-page"), "S-frame", "iframe", page_like()),
-        (Some("S-page"), "S-worker", "worker", vec!["Target.setAutoAttach"]),
-        (
-            None,
-            "S-shared",
-            "shared_worker",
-            vec!["Fetch.enable", "Target.setAutoAttach"],
-        ),
         (
             Some("S-page"),
-            "S-service",
-            "service_worker",
-            vec!["Fetch.enable", "Target.setAutoAttach"],
+            "S-worker",
+            "worker",
+            [&guarded[..], &["Target.setAutoAttach"]].concat(),
         ),
-        (None, "S-ui", "browser_ui", vec!["Fetch.enable", "Target.setAutoAttach"]),
+        (None, "S-shared", "shared_worker", worker_like()),
+        (Some("S-page"), "S-service", "service_worker", worker_like()),
+        (
+            None,
+            "S-ui",
+            "browser_ui",
+            vec![
+                "Fetch.enable",
+                "Network.enable",
+                "Runtime.enable",
+                "Runtime.addBinding",
+                "Runtime.evaluate",
+                "Target.setAutoAttach",
+            ],
+        ),
     ];
     for (parent, session, kind, _) in &cases {
         fake.event(
@@ -766,11 +829,54 @@ async fn a_target_that_cannot_be_armed_is_closed_and_never_resumed() {
 }
 
 #[tokio::test]
+async fn a_worker_whose_websocket_guard_is_not_armed_is_closed_and_never_resumed() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+
+    fake.event(
+        Some("S-page"),
+        "Target.attachedToTarget",
+        &attached(UNGUARDED, "T-unguarded", "worker"),
+    )
+    .unwrap();
+
+    fake.sent("Target.closeTarget", |command| {
+        command["method"] == "Target.closeTarget" && command["params"]["targetId"] == "T-unguarded"
+    })
+    .await
+    .unwrap();
+    let methods = fake.methods_on(Some(UNGUARDED));
+    assert_eq!(
+        methods.last().map(String::as_str),
+        Some("Runtime.evaluate"),
+        "{methods:?}"
+    );
+    assert!(!methods.contains(&"Runtime.runIfWaitingForDebugger".to_owned()));
+    let failed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Err(failed) = armed.verdict() {
+                return failed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(failed.failures.len(), 1);
+    assert!(
+        failed.failures[0].error.contains("no binding"),
+        "{}",
+        failed.failures[0].error
+    );
+}
+
+#[tokio::test]
 async fn a_session_gone_before_it_is_armed_is_dropped_without_closing_its_target() {
     let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
     let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
 
-    // a service worker attached through a page whose tab closes while the worker is being armed
+    // a target attached through a page whose tab closes while it is being armed, and once more through the browser
+    // (as a service worker was before target-level auto-attach left them out)
     fake.event(
         Some("S-page"),
         "Target.attachedToTarget",
@@ -786,13 +892,13 @@ async fn a_session_gone_before_it_is_armed_is_dropped_without_closing_its_target
 
     armed_target(&armed, "S-sw").await.unwrap();
     fake.sent("the gone session's second step", |command| {
-        command["sessionId"] == "S-gone" && command["method"] == "Target.setAutoAttach"
+        command["sessionId"] == "S-gone" && command["method"] == "Network.enable"
     })
     .await
     .unwrap();
     assert_eq!(
         fake.methods_on(Some("S-gone")),
-        ["Fetch.enable", "Target.setAutoAttach"],
+        ["Fetch.enable", "Network.enable"],
         "nothing after the step that found the session gone"
     );
     let closed: Vec<Value> = fake
@@ -845,11 +951,11 @@ async fn dropping_the_fence_kills_the_browser() {
     let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
     let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
     let helper = fake.helper().unwrap();
-    assert!(common::running(helper));
+    assert!(process::running(helper));
 
     drop(armed);
 
-    assert!(common::gone(helper).await, "the browser outlived its fence");
+    assert!(process::gone(helper).await, "the browser outlived its fence");
 }
 
 fn refuse_browser_auto_attach(method: &str, session: Option<&str>) -> bool {
@@ -864,7 +970,7 @@ async fn a_browser_that_cannot_be_armed_is_killed() {
 
     assert!(armed.is_err(), "the browser refused auto-attach");
     assert!(
-        common::gone(fake.helper().unwrap()).await,
+        process::gone(fake.helper().unwrap()).await,
         "the browser outlived a failed arming"
     );
 }
@@ -878,7 +984,7 @@ async fn closing_the_fence_asks_the_browser_to_close_then_stops_it() {
     armed.close(Duration::from_millis(100)).await.unwrap();
 
     assert!(fake.methods_on(None).contains(&"Browser.close".to_owned()));
-    assert!(common::gone(helper).await, "the browser outlived close");
+    assert!(process::gone(helper).await, "the browser outlived close");
 }
 
 #[tokio::test]
@@ -891,7 +997,7 @@ async fn a_lost_connection_fails_the_run_and_kills_the_browser() {
     fake.hang_up().unwrap();
 
     assert!(
-        common::gone(helper).await,
+        process::gone(helper).await,
         "the browser outlived its fence's connection"
     );
     let failed = armed.verdict().unwrap_err();
@@ -1093,7 +1199,7 @@ async fn start_run(chrome: &Path, server: &MockServer, classifier: Classifier) -
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };
-    let armed = ArmedBrowser::arm(browser, http_fence(&lab, classifier, &[]), &options).await?;
+    let armed = ArmedBrowser::arm(browser, http_fence(&lab, classifier, &[]), ws_fence(&lab)?, &options).await?;
     Ok(Run {
         armed,
         lab,
@@ -1310,7 +1416,13 @@ async fn service_workers_are_neutralized_at_run_start_and_bypassed_during_it() {
         let options = ArmOptions {
             service_worker_origins: vec![server.uri()],
         };
-        let armed = ArmedBrowser::arm(browser, http_fence(&lab, Classifier::seeded(), &[]), &options).await?;
+        let armed = ArmedBrowser::arm(
+            browser,
+            http_fence(&lab, Classifier::seeded(), &[]),
+            ws_fence(&lab)?,
+            &options,
+        )
+        .await?;
         let cdp = armed.cdp().clone();
         let page = armed.open_page(STEP).await?;
         navigate(&cdp, &page, &probe_page).await?;
@@ -1472,7 +1584,13 @@ async fn reports_reaching(chrome: &Path, reporting_on: bool) -> TestResult<(Vec<
     let options = ArmOptions {
         service_worker_origins: vec![],
     };
-    let armed = ArmedBrowser::arm(browser, http_fence(&lab, Classifier::seeded(), &[]), &options).await?;
+    let armed = ArmedBrowser::arm(
+        browser,
+        http_fence(&lab, Classifier::seeded(), &[]),
+        ws_fence(&lab)?,
+        &options,
+    )
+    .await?;
     let page = armed.open_page(STEP).await?;
     navigate(armed.cdp(), &page, &format!("{}/page", server.origin)).await?;
     let reported = async {

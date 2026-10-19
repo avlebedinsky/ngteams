@@ -50,30 +50,28 @@ pub enum Classification {
     Unknown,
 }
 
-/// One entry of the own-state list.
+/// An exact origin and a path matched segment by segment; the query plays no part.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OwnRule {
-    kind: OwnKind,
-    method: String,
+pub struct UrlPattern {
     origin: String,
     path: Vec<String>,
 }
 
-impl OwnRule {
+impl UrlPattern {
     /// `origin` is `scheme://host[:port]` as a browser serializes it (no default port, lowercase host); `path` starts
     /// with `/`, and a `*` segment stands for one non-empty segment.
     #[must_use]
-    pub fn new(kind: OwnKind, method: &str, origin: &str, path: &str) -> Self {
+    pub fn new(origin: &str, path: &str) -> Self {
         Self {
-            kind,
-            method: method.to_ascii_uppercase(),
             origin: origin.to_owned(),
             path: segments(path).map(str::to_owned).collect(),
         }
     }
 
-    fn matches(&self, method: &str, url: &Url) -> bool {
-        if self.method != method || self.origin != url.origin().ascii_serialization() {
+    /// Whether `url` has exactly this origin and a path this pattern matches.
+    #[must_use]
+    pub fn matches(&self, url: &Url) -> bool {
+        if self.origin != url.origin().ascii_serialization() {
             return false;
         }
         let mut path = segments(url.path());
@@ -85,6 +83,30 @@ impl OwnRule {
                 _ => return false,
             }
         }
+    }
+}
+
+/// One entry of the own-state list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnRule {
+    kind: OwnKind,
+    method: String,
+    url: UrlPattern,
+}
+
+impl OwnRule {
+    /// `origin` and `path` as [`UrlPattern::new`] takes them.
+    #[must_use]
+    pub fn new(kind: OwnKind, method: &str, origin: &str, path: &str) -> Self {
+        Self {
+            kind,
+            method: method.to_ascii_uppercase(),
+            url: UrlPattern::new(origin, path),
+        }
+    }
+
+    fn matches(&self, method: &str, url: &Url) -> bool {
+        self.method == method && self.url.matches(url)
     }
 }
 

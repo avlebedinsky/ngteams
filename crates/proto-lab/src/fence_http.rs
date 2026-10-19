@@ -52,7 +52,7 @@ impl PausedRequest {
 #[error("a paused request without {0}")]
 pub struct MalformedPause(pub &'static str);
 
-/// Why a request was denied.
+/// Why a request (or a WebSocket frame) was denied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DenyCause {
     /// Nothing classifies it.
@@ -65,9 +65,9 @@ pub enum DenyCause {
     Malformed,
 }
 
-/// What happens to one request.
+/// What happens to one request (or, in the WebSocket layer, one frame).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HttpVerdict {
+pub enum Verdict {
     Allow,
     Deny(DenyCause),
 }
@@ -101,7 +101,7 @@ impl HttpFence {
     }
 
     /// Classifies a request and decides it. Every deny is logged and kept.
-    pub async fn decide(&self, request: &PausedRequest) -> HttpVerdict {
+    pub async fn decide(&self, request: &PausedRequest) -> Verdict {
         let classification = self
             .classifier
             .classify(&request.method, &request.url, request.body.as_deref());
@@ -109,34 +109,15 @@ impl HttpFence {
     }
 
     /// Decides a request already classified. Every deny is logged and kept.
-    pub async fn judge(&self, classification: Classification, method: &str, url: &str) -> HttpVerdict {
-        let record = |outcome| RequestRecord {
+    pub async fn judge(&self, classification: Classification, method: &str, url: &str) -> Verdict {
+        let request = RequestRecord {
             channel: Channel::Http,
             method,
             url,
-            outcome,
+            outcome: RequestOutcome::Unclassified,
         };
-        let verdict = match classification {
-            Classification::Read => HttpVerdict::Allow,
-            Classification::Own(kind) => match self
-                .fence
-                .log()
-                .record_request(&record(RequestOutcome::Own(kind.as_str())))
-            {
-                Ok(()) => HttpVerdict::Allow,
-                Err(_) => HttpVerdict::Deny(DenyCause::LogUnavailable),
-            },
-            Classification::Write(target) => match self.fence.check(target, self.members.as_ref()).await {
-                Ok(_permit) => HttpVerdict::Allow,
-                Err(denied) => HttpVerdict::Deny(DenyCause::Fenced(*denied.reason())),
-            },
-            Classification::Unknown => {
-                // denied whether or not the log takes it; a log failure fails the run through the deny anyway
-                let _ = self.fence.log().record_request(&record(RequestOutcome::Unclassified));
-                HttpVerdict::Deny(DenyCause::Unclassified)
-            }
-        };
-        if let HttpVerdict::Deny(cause) = verdict {
+        let verdict = judge(&self.fence, self.members.as_ref(), classification, request).await;
+        if let Verdict::Deny(cause) = verdict {
             self.keep(method, url, cause);
         }
         verdict
@@ -155,13 +136,12 @@ impl HttpFence {
     }
 
     fn keep(&self, method: &str, url: &str, cause: DenyCause) {
-        let end = url.find(['?', '#']).unwrap_or(url.len());
         self.denials
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Denial {
                 method: method.to_owned(),
-                url: url[..end].to_owned(),
+                url: without_query(url).to_owned(),
                 cause,
             });
     }
@@ -177,25 +157,59 @@ impl HttpFence {
     ///
     /// # Errors
     /// When the browser refuses the answer; a request that is gone (its target closed) can't be answered either.
-    pub async fn handle(&self, cdp: &Cdp, event: &Event) -> Result<HttpVerdict, CdpError> {
+    pub async fn handle(&self, cdp: &Cdp, event: &Event) -> Result<Verdict, CdpError> {
         let session = event.session_id.as_ref();
         let Ok(request) = PausedRequest::from_params(&event.params) else {
             self.deny_malformed();
             if let Some(id) = event.params["requestId"].as_str() {
                 fail(cdp, session, id).await?;
             }
-            return Ok(HttpVerdict::Deny(DenyCause::Malformed));
+            return Ok(Verdict::Deny(DenyCause::Malformed));
         };
         let verdict = self.decide(&request).await;
         match verdict {
-            HttpVerdict::Allow => {
+            Verdict::Allow => {
                 let params = json!({"requestId": request.request_id});
                 cdp.call(session, "Fetch.continueRequest", params).await?;
             }
-            HttpVerdict::Deny(_) => fail(cdp, session, &request.request_id).await?,
+            Verdict::Deny(_) => fail(cdp, session, &request.request_id).await?,
         }
         Ok(verdict)
     }
+}
+
+/// Decides one request or frame already classified, for either layer of the browser fence: a read passes unlogged, an
+/// own-state one passes logged (denied if the log won't take it), a mapped write passes only with a permit from
+/// [`Fence::check`] (which logs it), and anything else is denied and logged. `request` names the channel, method and
+/// URL for the log; its outcome is set here.
+pub(crate) async fn judge(
+    fence: &Fence,
+    members: &(dyn MembershipSource + Send),
+    classification: Classification,
+    request: RequestRecord<'_>,
+) -> Verdict {
+    let record = |outcome| RequestRecord { outcome, ..request };
+    match classification {
+        Classification::Read => Verdict::Allow,
+        Classification::Own(kind) => match fence.log().record_request(&record(RequestOutcome::Own(kind.as_str()))) {
+            Ok(()) => Verdict::Allow,
+            Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
+        },
+        Classification::Write(target) => match fence.check(target, members).await {
+            Ok(_permit) => Verdict::Allow,
+            Err(denied) => Verdict::Deny(DenyCause::Fenced(*denied.reason())),
+        },
+        Classification::Unknown => {
+            // denied whether or not the log takes it; a log failure fails the run through the deny anyway
+            let _ = fence.log().record_request(&record(RequestOutcome::Unclassified));
+            Verdict::Deny(DenyCause::Unclassified)
+        }
+    }
+}
+
+/// A URL without its query and fragment, where tokens travel.
+pub(crate) fn without_query(url: &str) -> &str {
+    &url[..url.find(['?', '#']).unwrap_or(url.len())]
 }
 
 async fn fail(cdp: &Cdp, session: Option<&crate::cdp::SessionId>, request_id: &str) -> Result<(), CdpError> {

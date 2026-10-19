@@ -663,6 +663,13 @@ fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() 
         outcome: RequestOutcome::Own("entra_token"),
     })
     .unwrap();
+    log.record_request(&RequestRecord {
+        channel: Channel::WebSocket,
+        method: "SEND",
+        url: &format!("wss://trouter.example.com/v4/c?tc={PLANTED_TOKEN}"),
+        outcome: RequestOutcome::SentWithoutAllow,
+    })
+    .unwrap();
 
     let entries = log_entries(&lab.log_path).unwrap();
     let expected: Vec<serde_json::Value> = vec![
@@ -680,6 +687,14 @@ fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() 
             "method": "POST",
             "url": "https://login.example.com/common/oauth2/v2.0/token",
             "own": "entra_token",
+        }),
+        serde_json::json!({
+            "verdict": "breach",
+            "channel": "web_socket",
+            "method": "SEND",
+            "url": "wss://trouter.example.com/v4/c",
+            "reason": "sent_without_allow",
+            "message": "this left the browser without the fence's allow",
         }),
     ];
     for (entry, expected) in entries.iter().zip(&expected) {

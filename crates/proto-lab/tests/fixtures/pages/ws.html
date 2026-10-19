@@ -1,0 +1,26 @@
+<!doctype html>
+<title>ws</title>
+<script src="/pages/ws-scenario.js"></script>
+<script>
+  // Every scope runs the scenario on a socket of its own (/<scope> on the echo server, whose base is ?ws=) and reports
+  // what it saw here.
+  window.results = {};
+  const base = new URLSearchParams(location.search).get('ws');
+  const report = (scope) => (outcome) => { window.results[scope] = outcome; };
+  const failed = (scope) => (error) => report(scope)('error ' + error);
+
+  runScenario(socketUrl(base, 'page')).then(report('page'), failed('page'));
+
+  new Worker('/pages/ws-worker.js' + location.search).onmessage = (event) => report('dedicated-worker')(event.data);
+
+  const shared = new SharedWorker('/pages/ws-shared-worker.js' + location.search);
+  shared.port.onmessage = (event) => report('shared-worker')(event.data);
+  shared.port.start();
+
+  navigator.serviceWorker.onmessage = (event) => report('service-worker')(event.data);
+  navigator.serviceWorker
+    .register('/pages/ws-service-worker.js' + location.search)
+    .then(() => navigator.serviceWorker.ready)
+    .then((registration) => registration.active.postMessage('run'))
+    .catch(failed('service-worker'));
+</script>

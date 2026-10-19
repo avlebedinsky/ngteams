@@ -20,6 +20,9 @@
 //!  "reason":"unclassified","message":"no rule classifies this request"}
 //! ```
 //!
+//! A WebSocket frame the audit saw leave the browser without an allow is logged the same way, with the verdict
+//! `breach` and the reason `sent_without_allow`.
+//!
 //! Every entry ends with a newline. After a failed append the log refuses every later entry (so every later allow is
 //! denied), because a half-written record would run into the next one. When an existing file doesn't end with a
 //! newline, [`FenceLog::open`] terminates that last line first: it stays as one line that isn't JSON (a record whose
@@ -73,6 +76,9 @@ pub enum RequestOutcome {
     Own(&'static str),
     /// Nothing classifies it: denied.
     Unclassified,
+    /// It left the browser without the fence's allow: seen only afterwards, by the audit of what was sent (a WebSocket
+    /// frame that got past the guard). Logged as a breach; it fails the run.
+    SentWithoutAllow,
 }
 
 /// A browser request the fence decided without a membership check. The URL is logged without its query, fragment or
@@ -177,6 +183,12 @@ impl FenceLog {
                 None,
                 Some("unclassified"),
                 Some("no rule classifies this request"),
+            ),
+            RequestOutcome::SentWithoutAllow => (
+                "breach",
+                None,
+                Some("sent_without_allow"),
+                Some("this left the browser without the fence's allow"),
             ),
         };
         self.append(&RequestEntry {

@@ -1,4 +1,5 @@
-//! Arming the lab browser: the fence's HTTP layer on every request, before any target's code runs.
+//! Arming the lab browser: the fence's HTTP layer on every request and its WebSocket guard in every scope, before any
+//! target's code runs.
 //!
 //! [`ArmedBrowser::arm`] takes the browser over and runs on a fresh debugging connection, before any page is opened:
 //! 1. `Fetch.enable` with the pattern `*` on the **browser** session. It pauses every request of every target, and it
@@ -13,17 +14,34 @@
 //!    session it clears any origin.
 //!
 //! Every attached target is then armed ([`arm_target`]) by its type ([`TargetKind::steps`]): `Fetch.enable` with `*`
-//! on its own session (pages, iframes, shared and service workers, and any type we don't know), the service-worker
-//! bypass on pages and iframes (after `Network.enable`, without which Chrome ignores it), auto-attach with `waitForDebuggerOnStart` for its own children (iframes, dedicated
-//! workers), and only then `Runtime.runIfWaitingForDebugger`. A dedicated worker has no `Fetch` domain of its own: its
-//! requests pause on its page's session (and the browser's). If any step fails, the target is closed and never resumed,
-//! and the failure fails the run. The one exception is a session that is gone before its arming finishes (the browser
-//! answers "Session with given id not found"): its tab closed, or the target was attached twice (a service worker
-//! attaches through the browser and through every page in its scope) and the other session is armed on its own. That
-//! session has nothing left to arm or resume, so it is dropped quietly; browser-level `Fetch` stays on regardless.
+//! on its own session (pages, iframes, shared and service workers, and any type we don't know), `Network.enable`
+//! everywhere (the service-worker bypass on pages and iframes needs it, and so does the audit of WebSocket frames,
+//! which Chrome reports on the session of the target that sent them), the service-worker bypass, the WebSocket guard
+//! ([`crate::fence_ws`]), auto-attach with `waitForDebuggerOnStart` for its own children (iframes, dedicated workers),
+//! and only then `Runtime.runIfWaitingForDebugger`. A dedicated worker has no `Fetch` domain of its own: its requests
+//! pause on its page's session (and the browser's).
+//!
+//! The guard goes in through the binding (`Runtime.addBinding`), then: on a page or iframe, with `Runtime.enable` and
+//! `Page.enable` on, `Page.addScriptToEvaluateOnNewDocument` with `runImmediately`, so it runs in every document of
+//! every frame of the target (same-origin `about:blank` iframes included) before the document's own scripts, and in the
+//! contexts there already; on a worker (its only context exists, paused, at attach) `Runtime.evaluate`, which has to
+//! report the guard armed. Chrome 155 installs a binding in new contexts only with `Runtime.enable` on, and runs
+//! new-document scripts only with `Page.enable` on.
+//!
+//! A target's own auto-attach leaves service workers out: each one attaches once, through the browser, and is armed
+//! there. A page in a service worker's scope would attach it too, and on Chrome 155 a service worker attached twice
+//! while paused answers no `Network` or `Runtime` command on either session until it runs, so it could never be armed
+//! before it runs.
+//!
+//! If any step fails, or gets no answer within [`STEP_TIMEOUT`], the target is closed and never resumed, and the
+//! failure fails the run. The one exception is a session that is gone before its arming finishes (the browser answers
+//! "Session with given id not found"): its tab closed, or its worker ended. That session has nothing left to arm or
+//! resume, so it is dropped quietly; browser-level `Fetch` stays on regardless.
 //!
 //! A request therefore pauses on its target's session first and on the browser session after that, and each layer
-//! decides it on its own ([`crate::fence_http::HttpFence`]); a deny at either fails it.
+//! decides it on its own ([`crate::fence_http::HttpFence`]); a deny at either fails it. A WebSocket frame waits in the
+//! guard until [`crate::fence_ws::WsFence`] decides it, and every frame the browser reports sent is audited against
+//! the allows.
 //!
 //! The fence holds only while its connection does: a browser that no longer sees the client drops the browser-level
 //! `Fetch` and the auto-attach hold, and later requests go out unexamined. So the browser lives and dies with the
@@ -43,6 +61,7 @@ use tokio::task::JoinHandle;
 use crate::browser::{Browser, BrowserError};
 use crate::cdp::{Cdp, CdpError, Event, Events, SessionId};
 use crate::fence_http::{Denial, HttpFence};
+use crate::fence_ws::{FrameDenial, GuardScript, UnsanctionedFrame, WsFence};
 
 /// The origins whose service workers are neutralized at the start of every run.
 pub const TEAMS_ORIGINS: [&str; 2] = ["https://teams.microsoft.com", "https://teams.cloud.microsoft"];
@@ -52,10 +71,29 @@ fn intercept_all() -> Value {
     json!({"patterns": [{"urlPattern": "*"}]})
 }
 
-/// Auto-attach that holds every new target until it is armed.
+/// Auto-attach that holds every new target until it is armed: the browser's own.
 fn hold_new_targets() -> Value {
     json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true})
 }
+
+/// A target's auto-attach for its children: held like the browser's, but without service workers, which attach through
+/// the browser only (see the module docs). The rest of the filter is Chrome's default.
+fn hold_children() -> Value {
+    json!({
+        "autoAttach": true,
+        "waitForDebuggerOnStart": true,
+        "flatten": true,
+        "filter": [
+            {"type": "service_worker", "exclude": true},
+            {"type": "browser", "exclude": true},
+            {"type": "tab", "exclude": true},
+            {},
+        ],
+    })
+}
+
+/// How long one arming step may go unanswered before the target is given up on (closed, and the run failed).
+pub const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A target's type, as `TargetInfo.type` names it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -93,12 +131,40 @@ impl TargetKind {
                 Step::Fetch,
                 Step::Network,
                 Step::BypassServiceWorker,
+                Step::Runtime,
+                Step::Page,
+                Step::Binding,
+                Step::GuardNewDocuments,
                 Step::AutoAttach,
                 Step::Resume,
             ],
             // no Fetch domain: the page's session and the browser's pause its requests
-            Self::Worker => &[Step::AutoAttach, Step::Resume],
-            Self::SharedWorker | Self::ServiceWorker | Self::Other(_) => &[Step::Fetch, Step::AutoAttach, Step::Resume],
+            Self::Worker => &[
+                Step::Network,
+                Step::Binding,
+                Step::Guard,
+                Step::AutoAttach,
+                Step::Resume,
+            ],
+            Self::SharedWorker | Self::ServiceWorker => &[
+                Step::Fetch,
+                Step::Network,
+                Step::Binding,
+                Step::Guard,
+                Step::AutoAttach,
+                Step::Resume,
+            ],
+            // the browser's own pages (`browser_ui`, `background_page`) need `Runtime.enable` for the binding to be there
+            // when the guard runs (checked on Chrome 155)
+            Self::Other(_) => &[
+                Step::Fetch,
+                Step::Network,
+                Step::Runtime,
+                Step::Binding,
+                Step::Guard,
+                Step::AutoAttach,
+                Step::Resume,
+            ],
         }
     }
 }
@@ -108,12 +174,26 @@ impl TargetKind {
 pub enum Step {
     /// `Fetch.enable` with the pattern `*` on the target's session.
     Fetch,
-    /// `Network.enable`, which the service-worker bypass needs to take effect.
+    /// `Network.enable`: the service-worker bypass needs it to take effect, and the audit of WebSocket frames reads its
+    /// events.
     Network,
     /// `Network.setBypassServiceWorker(true)`: the page's requests go to the network (and through `Fetch`), never to a
     /// service worker's fetch handler.
     BypassServiceWorker,
-    /// `Target.setAutoAttach` with `waitForDebuggerOnStart` on the target's session, for its children.
+    /// `Runtime.enable`, without which a binding isn't installed in the target's new contexts. Not on workers: a worker
+    /// has its one context at attach already.
+    Runtime,
+    /// `Page.enable`, without which new-document scripts don't run.
+    Page,
+    /// `Runtime.addBinding`: the guard's channel for verdicts.
+    Binding,
+    /// `Page.addScriptToEvaluateOnNewDocument` with `runImmediately`: the guard in every document of every frame of a
+    /// page or iframe target, and in its contexts already there.
+    GuardNewDocuments,
+    /// `Runtime.evaluate` of the guard in a worker's context; the guard has to report itself armed.
+    Guard,
+    /// `Target.setAutoAttach` with `waitForDebuggerOnStart` on the target's session, for its children (service workers
+    /// left out: they attach through the browser).
     AutoAttach,
     /// `Runtime.runIfWaitingForDebugger`: the target's code starts.
     Resume,
@@ -125,18 +205,43 @@ impl Step {
             Self::Fetch => "Fetch.enable",
             Self::Network => "Network.enable",
             Self::BypassServiceWorker => "Network.setBypassServiceWorker",
+            Self::Runtime => "Runtime.enable",
+            Self::Page => "Page.enable",
+            Self::Binding => "Runtime.addBinding",
+            Self::GuardNewDocuments => "Page.addScriptToEvaluateOnNewDocument",
+            Self::Guard => "Runtime.evaluate",
             Self::AutoAttach => "Target.setAutoAttach",
             Self::Resume => "Runtime.runIfWaitingForDebugger",
         }
     }
 
-    fn params(self) -> Value {
+    fn params(self, guard: &GuardScript) -> Value {
         match self {
             Self::Fetch => intercept_all(),
             Self::BypassServiceWorker => json!({"bypass": true}),
-            Self::AutoAttach => hold_new_targets(),
-            Self::Network | Self::Resume => Value::Null,
+            Self::Binding => json!({"name": crate::fence_ws::BINDING}),
+            Self::GuardNewDocuments => json!({"source": guard.source(), "runImmediately": true}),
+            Self::Guard => json!({"expression": guard.source(), "returnByValue": true}),
+            Self::AutoAttach => hold_children(),
+            Self::Network | Self::Runtime | Self::Page | Self::Resume => Value::Null,
         }
+    }
+
+    /// Runs this step on a target's session.
+    async fn run(self, cdp: &Cdp, session: &SessionId, guard: &GuardScript) -> Result<(), ArmError> {
+        let call = cdp.call(Some(session), self.method(), self.params(guard));
+        let result = tokio::time::timeout(STEP_TIMEOUT, call)
+            .await
+            .map_err(|_| ArmError::StepTimeout(self))?
+            .map_err(|source| ArmError::Step { step: self, source })?;
+        if self == Self::Guard && result["result"]["value"] != "armed" {
+            let outcome = match &result["exceptionDetails"]["exception"]["description"] {
+                Value::String(description) => description.clone(),
+                _ => result["result"]["value"].to_string(),
+            };
+            return Err(ArmError::Guard(outcome));
+        }
+        Ok(())
     }
 }
 
@@ -149,6 +254,10 @@ pub enum ArmError {
         #[source]
         source: CdpError,
     },
+    #[error("arming step {0:?} got no answer within {STEP_TIMEOUT:?}")]
+    StepTimeout(Step),
+    #[error("the WebSocket guard isn't armed: {0}")]
+    Guard(String),
     #[error("an attach event without {0}")]
     Malformed(&'static str),
     #[error("no armed page within {0:?}")]
@@ -182,12 +291,16 @@ impl ArmError {
 /// isn't fully armed is never resumed.
 ///
 /// # Errors
-/// [`ArmError::Step`] naming the step that failed.
-pub async fn arm_target(cdp: &Cdp, session: &SessionId, kind: &TargetKind) -> Result<(), ArmError> {
+/// [`ArmError::Step`] naming the step that failed, [`ArmError::StepTimeout`] naming one that got no answer, or
+/// [`ArmError::Guard`] when the guard didn't report itself armed.
+pub async fn arm_target(
+    cdp: &Cdp,
+    session: &SessionId,
+    kind: &TargetKind,
+    guard: &GuardScript,
+) -> Result<(), ArmError> {
     for &step in kind.steps() {
-        cdp.call(Some(session), step.method(), step.params())
-            .await
-            .map_err(|source| ArmError::Step { step, source })?;
+        step.run(cdp, session, guard).await?;
     }
     Ok(())
 }
@@ -245,16 +358,23 @@ pub struct ArmingFailure {
     pub closed: bool,
 }
 
-/// Why a run failed: a denied request, a target that couldn't be armed, or a fence that lost its connection.
+/// Why a run failed: a denied request or frame, a frame sent without an allow, a target that couldn't be armed, or a
+/// fence that lost its connection.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "the run failed: {} request(s) denied, {} target(s) not armed{}",
+    "the run failed: {} request(s) denied, {} frame(s) denied, {} frame(s) sent without an allow, {} target(s) not \
+     armed{}",
     denials.len(),
+    frame_denials.len(),
+    unsanctioned.len(),
     failures.len(),
     if *connection_lost { ", and the fence lost its connection to the browser" } else { "" }
 )]
 pub struct RunFailed {
     pub denials: Vec<Denial>,
+    pub frame_denials: Vec<FrameDenial>,
+    /// Frames the browser reported sent that no allow covered: they got out.
+    pub unsanctioned: Vec<UnsanctionedFrame>,
     pub failures: Vec<ArmingFailure>,
     /// The connection's events ended while the fence was up: nothing was decided after that, and the browser was
     /// killed.
@@ -272,6 +392,7 @@ struct Targets {
 
 struct Shared {
     http: HttpFence,
+    ws: WsFence,
     targets: Mutex<Targets>,
     changed: Notify,
     /// The browser, until the fence is closed or dropped, or its connection is lost.
@@ -320,16 +441,18 @@ impl Drop for ArmedBrowser {
 
 impl ArmedBrowser {
     /// Takes `browser` over, arms it on a fresh connection (see the module docs) and handles that connection's events
-    /// from then on: every paused request goes through `http`, every attached target is armed before it runs.
+    /// from then on: every paused request goes through `http`, every WebSocket frame through `ws`, and every attached
+    /// target is armed before it runs.
     ///
     /// # Errors
     /// When the connection can't be opened, the browser refuses browser-level `Fetch` or auto-attach, or the
     /// service-worker cleanup fails. The browser is killed then: it never runs half armed.
-    pub async fn arm(browser: Browser, http: HttpFence, options: &ArmOptions) -> Result<Self, ArmError> {
+    pub async fn arm(browser: Browser, http: HttpFence, ws: WsFence, options: &ArmOptions) -> Result<Self, ArmError> {
         let (cdp, events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
         cdp.call(None, "Fetch.enable", intercept_all()).await?;
         let shared = Arc::new(Shared {
             http,
+            ws,
             targets: Mutex::new(Targets::default()),
             changed: Notify::new(),
             browser: Mutex::new(Some(browser)),
@@ -424,22 +547,37 @@ impl ArmedBrowser {
         self.shared.http.denials()
     }
 
-    /// The run's verdict so far: any denied request or unarmed target fails it, and so does a lost connection.
+    /// Every WebSocket frame denied so far.
+    #[must_use]
+    pub fn frame_denials(&self) -> Vec<FrameDenial> {
+        self.shared.ws.denials()
+    }
+
+    /// Every WebSocket frame the browser sent without an allow so far.
+    #[must_use]
+    pub fn unsanctioned_frames(&self) -> Vec<UnsanctionedFrame> {
+        self.shared.ws.unsanctioned()
+    }
+
+    /// The run's verdict so far: any denied request or frame, frame sent without an allow or unarmed target fails it,
+    /// and so does a lost connection.
     ///
     /// # Errors
     /// [`RunFailed`] listing them.
     pub fn verdict(&self) -> Result<(), RunFailed> {
-        let denials = self.denials();
-        let failures = self.failures();
-        let connection_lost = self.shared.lost();
-        if denials.is_empty() && failures.is_empty() && !connection_lost {
-            return Ok(());
-        }
-        Err(RunFailed {
-            denials,
-            failures,
-            connection_lost,
-        })
+        let failed = RunFailed {
+            denials: self.denials(),
+            frame_denials: self.frame_denials(),
+            unsanctioned: self.unsanctioned_frames(),
+            failures: self.failures(),
+            connection_lost: self.shared.lost(),
+        };
+        let clean = failed.denials.is_empty()
+            && failed.frame_denials.is_empty()
+            && failed.unsanctioned.is_empty()
+            && failed.failures.is_empty()
+            && !failed.connection_lost;
+        if clean { Ok(()) } else { Err(failed) }
     }
 }
 
@@ -456,31 +594,49 @@ async fn handle_events(cdp: Cdp, events: Events, shared: Arc<Shared>) {
 
 async fn dispatch_events(cdp: Cdp, mut events: Events, shared: &Arc<Shared>) {
     while let Some(event) = events.recv().await {
-        match event.method.as_str() {
-            "Fetch.requestPaused" => {
-                let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
-                // a request whose target is gone can't be answered; it was never sent either
-                tokio::spawn(async move {
-                    let _ = shared.http.handle(&cdp, &event).await;
-                });
-            }
-            "Target.attachedToTarget" => {
-                // recorded here, in event order, so the arming sees a detach that comes before it finishes
-                if let Some(session) = event.params["sessionId"].as_str() {
-                    shared.targets().attached.insert(SessionId::new(session));
-                }
-                tokio::spawn(on_attached(cdp.clone(), Arc::clone(shared), event));
-            }
-            "Target.detachedFromTarget" => {
-                if let Some(session) = event.params["sessionId"].as_str() {
-                    let session = SessionId::new(session);
-                    let mut targets = shared.targets();
-                    targets.attached.remove(&session);
-                    targets.armed.remove(&session);
-                }
-            }
-            _ => {}
+        dispatch(&cdp, shared, event);
+    }
+}
+
+/// Handles one event. The audit's events are handled here, in arrival order: an allow is recorded before the guard
+/// hears of it, so the frame it lets out is always reported after it.
+fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
+    match event.method.as_str() {
+        "Fetch.requestPaused" => {
+            let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
+            // a request whose target is gone can't be answered; it was never sent either
+            tokio::spawn(async move {
+                let _ = shared.http.handle(&cdp, &event).await;
+            });
         }
+        "Runtime.bindingCalled" => {
+            let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
+            // a frame whose context is gone can't be answered; it was never sent either
+            tokio::spawn(async move {
+                let _ = shared.ws.handle_binding(&cdp, &event).await;
+            });
+        }
+        "Network.webSocketCreated" | "Network.webSocketClosed" | "Network.webSocketFrameSent" => {
+            shared.ws.observe(&event);
+        }
+        "Target.attachedToTarget" => {
+            // recorded here, in event order, so the arming sees a detach that comes before it finishes
+            if let Some(session) = event.params["sessionId"].as_str() {
+                shared.targets().attached.insert(SessionId::new(session));
+            }
+            tokio::spawn(on_attached(cdp.clone(), Arc::clone(shared), event));
+        }
+        "Target.detachedFromTarget" => {
+            if let Some(session) = event.params["sessionId"].as_str() {
+                let session = SessionId::new(session);
+                let mut targets = shared.targets();
+                targets.attached.remove(&session);
+                targets.armed.remove(&session);
+                drop(targets);
+                shared.ws.forget(&session);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -492,12 +648,14 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
     let outcome = match (&target_id, &session) {
         (Some(target_id), Some(session)) => {
             let kind = TargetKind::from_type(&kind_name);
-            arm_target(&cdp, session, &kind).await.map(|()| ArmedTarget {
-                target_id: target_id.clone(),
-                session: session.clone(),
-                kind,
-                parent: event.session_id.clone(),
-            })
+            arm_target(&cdp, session, &kind, shared.ws.script())
+                .await
+                .map(|()| ArmedTarget {
+                    target_id: target_id.clone(),
+                    session: session.clone(),
+                    kind,
+                    parent: event.session_id.clone(),
+                })
         }
         (None, _) => Err(ArmError::Malformed("targetInfo.targetId")),
         (_, None) => Err(ArmError::Malformed("sessionId")),

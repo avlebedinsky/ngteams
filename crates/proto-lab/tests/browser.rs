@@ -7,6 +7,8 @@
 //! `PROTO_LAB_REQUIRE_CHROME=1`.
 
 mod common;
+#[path = "common/process.rs"]
+mod process;
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -210,10 +212,10 @@ async fn the_endpoint_is_read_from_the_profile_and_dropping_the_browser_kills_it
         browser.endpoint().ws_url(),
         "ws://127.0.0.1:40123/devtools/browser/fake"
     );
-    assert!(common::running(helper));
+    assert!(process::running(helper));
     drop(browser);
 
-    assert!(common::gone(helper).await, "the helper outlived the browser");
+    assert!(process::gone(helper).await, "the helper outlived the browser");
 }
 
 #[tokio::test]
@@ -226,7 +228,7 @@ async fn a_browser_that_does_not_exit_gets_sigterm_and_its_group_goes_with_it() 
     let status = browser.wait_or_kill(Duration::from_millis(100)).await.unwrap();
 
     assert_eq!(status.signal(), Some(15));
-    assert!(common::gone(helper).await, "the helper outlived the browser");
+    assert!(process::gone(helper).await, "the helper outlived the browser");
 }
 
 // --- checksum and install ---

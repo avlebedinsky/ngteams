@@ -8,3 +8,4 @@ pub mod classify;
 pub mod commands;
 pub mod config;
 pub mod fence_http;
+pub mod fence_ws;

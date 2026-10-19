@@ -278,15 +278,21 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/proto-lab/assets/ws_guard.js`, `crates/proto-lab/src/fence_ws.rs`
 - Create: `crates/proto-lab/tests/fence_ws.rs`
 
-- [ ] tests first on a local WS echo server:
+- [x] tests first on a local WS echo server:
   - a denied frame never reaches the server
   - an allowed frame arrives
   - order is preserved across a mix of allow and deny within one socket
   - this works the same in the page, a dedicated worker and a shared worker
-- [ ] `ws_guard.js`: wraps `WebSocket.prototype.send` with a per-socket queue, requests the verdict through `Runtime.addBinding`, replays the original `send` only on allow, drops and reports on deny. Installed before any target's code runs (through arming from Task 6).
-- [ ] the classifier for WS frames (`Unknown` → deny), with tests on synthetic frames
-- [ ] an audit: `Network.webSocketFrameSent` is compared with the guard's verdicts, and any frame sent without an allow fails the run
-- [ ] `cargo test -p proto-lab --test fence_ws` passes
+  - ➕ and in a service worker. Each scope also checks: a `send` before `open` throws `InvalidStateError`, the binding and `WebSocketStream` aren't reachable, the resolver ignores a call without the token, a poisoned `JSON.stringify` can't change what is asked, and a `Blob` is read before it is decided (the frames after it wait). A direct guard test in an unfenced throwaway browser answers out of order and checks frames leave in send order, only on allow, decided once, with bytes copied at `send`. Mutation-checked: a guard that sends at once, replays as decided, uses the page's `JSON.stringify` or leaves the binding on the global, a worker without the guard, and a page without `Network.enable` all fail the tests.
+- [x] `ws_guard.js`: wraps `WebSocket.prototype.send` with a per-socket queue, requests the verdict through `Runtime.addBinding`, replays the original `send` only on allow, drops and reports on deny. Installed before any target's code runs (through arming from Task 6).
+  - ➕ the fence answers by calling a non-writable, non-configurable global resolver with a per-run random token in the frame's context (`Runtime.evaluate` with its `contextId`); the guard takes the binding off the global before page code runs, captures every built-in it uses, copies `ArrayBuffer`/view bytes at `send`, and removes `WebSocketStream`. Arming steps: pages and iframes `Runtime.enable`, `Page.enable`, `Runtime.addBinding`, `Page.addScriptToEvaluateOnNewDocument` with `runImmediately`; workers `Network.enable`, `Runtime.addBinding`, `Runtime.evaluate` (must report `armed`); unknown types the same with `Runtime.enable` (the browser's own pages need it). Every arming step now times out after 10 s (the target is closed and the run fails).
+  - ➕ ⚠️ found on Chrome 155: a service worker attached twice while paused (through the browser and through a page in its scope) answers no `Network` or `Runtime` command on either session until it runs, so it could not be guarded before its code. Target-level auto-attach now leaves service workers out (`filter`), so each attaches once, through the browser, and is armed there. A binding reaches a page's new contexts only with `Runtime.enable` on, and new-document scripts run only with `Page.enable` on.
+  - ➕ known differences from the plain `send`: a waiting frame doesn't count towards `bufferedAmount`, and frames still waiting when `close()` is called are dropped.
+- [x] the classifier for WS frames (`Unknown` → deny), with tests on synthetic frames
+  - ➕ `FrameClassifier`: own rules match the socket URL (origin + segment path, as HTTP) and a text prefix; binary and unreadable frames match none; the seeded list is empty, so every frame is denied until writes are mapped (Task 11). Frames go through the same decision as HTTP (`fence_http::judge`, `Verdict` renamed from `HttpVerdict`), logged as channel `web_socket`, method `SEND`, URL without query, never the content.
+- [x] an audit: `Network.webSocketFrameSent` is compared with the guard's verdicts, and any frame sent without an allow fails the run
+  - ➕ each allow covers one frame with the same opcode and content on the same session; a frame no allow covers is a breach: `fence.log` gets `verdict: breach`, `reason: sent_without_allow` (new `RequestOutcome::SentWithoutAllow` in teams-fence), and `RunFailed` lists it. Tested live: a frame sent from an isolated world (where the guard isn't) reaches the server and fails the run.
+- [x] `cargo test -p proto-lab --test fence_ws` passes
 
 ### Task 8: Lab login and status under the armed fence
 **Files:**
