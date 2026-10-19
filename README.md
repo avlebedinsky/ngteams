@@ -15,6 +15,7 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
 | `crates/proto-lab` | the lab harness CLI |
 | `crates/fixture-guard` | scans `tests/fixtures/` and `docs/` for tokens, emails and real MRIs |
+| `spikes/gpui-video` | GPUI spike: the Wayland smoke window (M0 Task 15), then video rendering |
 | `tests/fixtures/` | sanitized captures |
 | `docs/protocol/`, `docs/spikes/` | protocol notes and spike write-ups |
 | `tools/` | interim Node tools (lab sign-in, Conditional Access probe) |
@@ -33,3 +34,7 @@ The browser tests run headless Chrome for Testing on throwaway profiles. Install
 unless `PROTO_LAB_REQUIRE_CHROME=1`. The build goes into the lab's `chrome/` dir: under `data_dir` when
 `~/.config/teams-lab/lab.toml` sets one, else `~/.local/share/teams-lab/chrome/`. No lab config is needed for this, but
 an invalid one is refused; the tests look in the same place.
+
+The GPUI smoke tests (`spikes/gpui-video/tests/smoke.rs`) start their own headless weston with a niri nested in it and
+never touch the desktop session. They need weston 15.0 or later (for `--fake-seat`) and niri on `PATH`; without them
+they're skipped, unless `GPUI_SMOKE_REQUIRE=1`. They run the window once on every GPU, chosen with `ZED_DEVICE_ID`.
