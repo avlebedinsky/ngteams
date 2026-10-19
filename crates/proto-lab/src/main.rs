@@ -1,4 +1,5 @@
 //! `proto-lab`: the protocol lab harness CLI. See `docs/plans/20261019-native-teams-m0-lab-and-spikes.md`.
+//! `export` turns a capture into a sanitized fixture.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -8,9 +9,11 @@ use clap::{Parser, Subcommand};
 use proto_lab::bundles::import::{self, Imported};
 use proto_lab::bundles::index::{self, Kind};
 use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
+use proto_lab::commands::export;
 use proto_lab::commands::login::{self, LoginOptions};
 use proto_lab::commands::status::{self, AccountStatus};
-use proto_lab::config::{Alias, LabConfig, LabLocations, LabPaths, MriRecord};
+use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord};
+use proto_lab::sanitize::Identities;
 
 #[derive(Parser)]
 #[command(name = "proto-lab", about = "The Teams protocol lab harness")]
@@ -47,6 +50,19 @@ enum Command {
         /// Seconds the web client may take to load, per account.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
+    },
+    /// Sanitize a capture into a fixture under tests/fixtures; nothing is written unless the fixture guard passes it.
+    Export {
+        /// The capture: its directory (or its events.jsonl), as a path or relative to the lab's captures dir
+        /// (`<scenario>/<ts>`).
+        capture: PathBuf,
+        /// The fixture's path under tests/fixtures, such as `auth/authz`; `.jsonl` is added without an extension,
+        /// and a `.json` name gets one JSON array.
+        fixture_name: String,
+        /// The fixtures dir; by default the `tests/fixtures` of the cargo workspace around the current directory (the
+        /// repository's, never a member crate's own).
+        #[arg(long)]
+        fixtures_dir: Option<PathBuf>,
     },
 }
 
@@ -109,6 +125,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // these need only the lab directories, so they run without a lab.toml too
         Command::Chrome { command } => run_chrome(command, &LabLocations::from_env()?.lab_paths()?).await,
         Command::Bundles { command } => run_bundles(command, &LabLocations::from_env()?.lab_paths()?).await,
+        Command::Export {
+            capture,
+            fixture_name,
+            fixtures_dir,
+        } => {
+            let locations = LabLocations::from_env()?;
+            let paths = locations.lab_paths()?;
+            run_export(&locations, &paths, &capture, &fixture_name, fixtures_dir)
+        }
     }
 }
 
@@ -161,6 +186,36 @@ async fn run_status(aliases: Vec<Alias>, timeout: u64) -> Result<(), Box<dyn std
     } else {
         Err("not every account is ok".into())
     }
+}
+
+fn run_export(
+    locations: &LabLocations,
+    paths: &LabPaths,
+    capture: &Path,
+    fixture_name: &str,
+    fixtures_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // the lab's own accounts get their alias as placeholder label; without a lab.toml every identity gets a number
+    let identities = match LabConfig::load(locations) {
+        Ok(config) => Identities::from_lab(&config),
+        Err(ConfigError::Read { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("no lab.toml: the lab accounts get numbered placeholders too");
+            Identities::default()
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let capture = if capture.exists() {
+        capture.to_owned()
+    } else {
+        paths.captures_dir().join(capture)
+    };
+    let fixtures_dir = match fixtures_dir {
+        Some(dir) => dir,
+        None => export::find_fixtures_dir(&std::env::current_dir()?)?,
+    };
+    let exported = export::export(&capture, fixture_name, &fixtures_dir, &identities)?;
+    println!("exported {} event(s) to {}", exported.events, exported.path.display());
+    Ok(())
 }
 
 async fn run_chrome(command: ChromeCommand, paths: &LabPaths) -> Result<(), Box<dyn std::error::Error>> {

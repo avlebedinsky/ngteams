@@ -322,15 +322,21 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 **Files:**
 - Create: `crates/proto-lab/src/{capture.rs,sanitize.rs,commands/export.rs}`, `crates/proto-lab/assets/rtc_hooks.js`
 - Create: `crates/proto-lab/tests/sanitize.rs`
+- ➕ also `crates/proto-lab/tests/capture.rs` and `crates/proto-lab/tests/fixtures/pages/{capture,rtc}.html`; `arming.rs` gets the capture steps; `base64` 0.23.1 joins the workspace dependencies
 
-- [ ] tests first for the sanitizer:
+- [x] tests first for the sanitizer:
   - JWTs, skypetokens, cookies and `Authorization` are removed
   - emails, MRIs, names and GUIDs become stable placeholders, consistent within one capture
   - sanitizing is idempotent
-- [ ] recorder: `Network.*` events plus WS frames plus the fence verdicts → JSONL under `captures/<scenario>/<ts>/` (outside the repo)
-- [ ] `rtc_hooks.js` (SDP/ICE/`getStats` capture), installed through the same arming. Write a test on a local page with a loopback `RTCPeerConnection`.
-- [ ] `proto-lab export <capture> <fixture-name>`: sanitize, write to `tests/fixtures/`, then run the fixture guard. Nothing is written if the guard fails.
-- [ ] `cargo test --workspace` passes
+  - ➕ secrets become `<token:N>` (a scheme and a cookie's name are kept: `Bearer <token:1>`), found by JWT shape, `Bearer`/`Basic`, any value under a secret-looking key (`*token*`, `*secret*`, `*password*`, `*cookie*`, `*credential*`, `authorization`, `sig`, ICE `pwd`/`ufrag`, TURN `username`, …) in JSON, form/query strings and text, a long value under `code`/`key`/`state`, and any long high-entropy run left; `headersText` is dropped and binary content becomes `<binary:LEN>`. Identities: emails `<user:N>`, MRIs `<mri:N>` (also `28:`, `4:`, `tel:`), conversation ids `19:<thread:N>@…`, GUIDs `<guid:N>` (an MRI shares its GUID's number), tenant domains (`*.onmicrosoft.com`, `*.sharepoint.com`, the lab's) `<domain:N>`, IPs other than loopback `<ip:N>`, names `<name:N>` (learned from name fields across the whole capture, then replaced in every text, any case, as whole words), other personal fields (titles, topics, phones) `<pii:N>`; percent-encoded forms too. The lab's accounts get their alias (`<user:a>`, `<mri:b>`, `<guid:c>`) and approved services their name (`<mri:echo>`) from `lab.toml`. JSON inside strings (bodies, frames, after a `3:::` prefix) is sanitized as JSON. Tests: `crates/proto-lab/tests/sanitize.rs` (also checks the fixture guard finds nothing in a sanitized capture that trips every one of its rules raw)
+- [x] recorder: `Network.*` events plus WS frames plus the fence verdicts → JSONL under `captures/<scenario>/<ts>/` (outside the repo)
+  - ➕ format (`crates/proto-lab/src/capture.rs`): `events.jsonl`, entries with `seq`, `ts_ms`, `type`, `session`: `cdp` (every `Network.*` event and `Target.attachedToTarget`/`detachedFromTarget`, raw), `request_body` / `response_body` (fetched; not for scripts, styles, images, media, fonts, manifests, or over 8 MiB), `verdict` (`http`: both layers' decisions, a deny with the whole paused request incl. body; `web_socket`: socket, frame and verdict, denied frames' content included), `rtc`. `<ts>` is UTC `YYYYMMDDTHHMMSSZ` (`-2`, … if taken); dir `0700`, file `0600`. A run records when armed with `ArmedBrowser::arm_capturing(…, Capture)`; `arm` is unchanged
+  - ➕ live test `crates/proto-lab/tests/capture.rs` (not in the plan's file list) on a local page and echo server: GET allowed on both layers with its body, POST denied on the page's layer with its request, frames allowed/denied in order with sent/received frames
+- [x] `rtc_hooks.js` (SDP/ICE/`getStats` capture), installed through the same arming. Write a test on a local page with a loopback `RTCPeerConnection`.
+  - ➕ new arming steps `CaptureBinding` (`Runtime.addBinding` `__labCaptureRtc`) and `CaptureHooks` (`Page.addScriptToEvaluateOnNewDocument`, `runImmediately`) on pages and iframes after the guard, skipped when the run doesn't record. The hooks wrap the constructor (proxy) and `createOffer`/`createAnswer`/`setLocalDescription`/`setRemoteDescription` (reporting the description as applied, so an implicit `setLocalDescription()` shows its SDP)/`addIceCandidate`/`close`, listen to `icecandidate` and the state changes, and report `getStats()` every interval (1 s by default) until closed; they only observe. Tested live (loopback data channel between two connections made on the page's first line; mutation-checked: without the step, or without the constructor hook, the test fails)
+- [x] `proto-lab export <capture> <fixture-name>`: sanitize, write to `tests/fixtures/`, then run the fixture guard. Nothing is written if the guard fails.
+  - ➕ the guard scans the text before anything touches the disk (and once more where the file lands); a refusal names lines and kinds, never values, and leaves an existing fixture as it was. `<fixture-name>` is a relative path (`auth/authz` → `.jsonl` added; a `.json` name gets one pretty JSON array); `<capture>` is a capture dir or its `events.jsonl`, or a path relative to the captures dir; `--fixtures-dir` overrides the repo's `tests/fixtures`. Without `lab.toml` every identity is numbered
+- [x] `cargo test --workspace` passes
 
 ### Task 10: Bundle import and index
 **Files:**

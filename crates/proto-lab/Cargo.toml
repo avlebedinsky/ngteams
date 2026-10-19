@@ -10,6 +10,7 @@ publish.workspace = true
 # reads the claims of the bearer tokens the lab page sends (its identity), never the tokens themselves
 base64.workspace = true
 clap.workspace = true
+fixture-guard.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 regex.workspace = true

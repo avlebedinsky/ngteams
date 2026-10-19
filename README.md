@@ -40,6 +40,16 @@ The GPUI smoke tests (`spikes/gpui-video/tests/smoke.rs`) start their own headle
 never touch the desktop session. They need weston 15.0 or later (for `--fake-seat`) and niri on `PATH`; without them
 they're skipped, unless `GPUI_SMOKE_REQUIRE=1`. They run the window once on every GPU, chosen with `ZED_DEVICE_ID`.
 
+## Captures and fixtures
+
+A recorded run writes `captures/<scenario>/<ts>/events.jsonl` under the lab's data dir, never into the repo (the format
+is described in `crates/proto-lab/src/capture.rs`). `cargo run -p proto-lab -- export <capture> <fixture-name>`
+sanitizes one into the repository's `tests/fixtures/<fixture-name>.jsonl` (or one JSON array for a `.json` name; the
+workspace root is found from the current directory, even inside a crate, or `--fixtures-dir` names another) and writes
+nothing unless the fixture guard passes the result.
+
+## Test-only builds
+
 The tests enable `teams-fence`'s `test-support` feature through dev-dependencies, and cargo unifies it into everything
 built together with them (`cargo test`, `--all-targets`, `--all-features`), the `proto-lab` binary included. Such a
 binary refuses to run; `cargo build -p proto-lab` or `cargo run -p proto-lab` builds one without it.
