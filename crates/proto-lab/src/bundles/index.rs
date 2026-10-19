@@ -6,7 +6,8 @@
 //! What counts as what:
 //! - **url**: a string literal starting with `http://`, `https://`, `ws://` or `wss://`
 //! - **host**: the host of such a URL (port and user info dropped), or a literal that is a bare lowercase domain
-//!   name such as `notifications.skype.net`
+//!   name such as `notifications.skype.net` or `*.teams.cloud.microsoft` whose top-level domain is one of
+//!   [`HOST_TLDS`] (so that property paths such as `window.location` are left out)
 //! - **route**: a literal path such as `/v1/users/ME/conversations` (two segments at least), or a template that
 //!   appends a path to a computed base, such as `` `${base}/threads/${id}/members` `` (indexed as
 //!   `{}/threads/{}/members`)
@@ -24,7 +25,7 @@ use std::fs;
 use std::io::{BufRead as _, BufReader, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 use super::literals::{Literal, literals, markup_literals};
@@ -41,8 +42,26 @@ const MAX_VALUE_LEN: usize = 2048;
 const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 const URL_SCHEMES: [&str; 4] = ["https://", "http://", "wss://", "ws://"];
 /// The top-level domains a bare host literal may end in; anything else (`window.location`) is a property path.
-const HOST_TLDS: [&str; 12] = [
-    "com", "net", "org", "io", "ms", "us", "cn", "de", "gov", "mil", "cloud", "edu",
+/// `microsoft` carries much of Teams (`teams.cloud.microsoft`, `*.teams.core.microsoft`), `scloud`, `fr` and `sg`
+/// its sovereign clouds, `ai` Cortana.
+pub const HOST_TLDS: [&str; 17] = [
+    "com",
+    "net",
+    "org",
+    "io",
+    "ms",
+    "us",
+    "cn",
+    "de",
+    "gov",
+    "mil",
+    "cloud",
+    "edu",
+    "microsoft",
+    "scloud",
+    "fr",
+    "sg",
+    "ai",
 ];
 const INDEXED_EXTENSIONS: [&str; 6] = ["js", "mjs", "cjs", "json", "html", "htm"];
 /// How many sites [`render`] lists.
@@ -452,7 +471,8 @@ impl Index {
         Ok(Self { entries })
     }
 
-    /// The entries whose value or paired url matches `pattern`, of `kind` if one is given, in index order.
+    /// The entries whose value or paired url matches `pattern`, of `kind` if one is given, in index order. Build the
+    /// pattern with [`search_pattern`] to match the way `bundles search` does.
     pub fn search<'a>(&'a self, pattern: &'a Regex, kind: Option<Kind>) -> impl Iterator<Item = &'a Entry> + 'a {
         self.entries
             .iter()
@@ -527,6 +547,14 @@ pub fn versions(bundles_dir: &Path) -> Result<Vec<String>, IndexError> {
     }
     found.sort();
     Ok(found.into_iter().map(|(_, name)| name).collect())
+}
+
+/// The regex `bundles search` matches with: `pattern`, ignoring case.
+///
+/// # Errors
+/// When `pattern` isn't a valid regex.
+pub fn search_pattern(pattern: &str) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern).case_insensitive(true).build()
 }
 
 /// Loads the index of `version`, or of the newest imported bundle; returns the version with it.

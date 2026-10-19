@@ -136,7 +136,7 @@ fn search(
     kind: Option<Kind>,
     version: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let pattern = regex::RegexBuilder::new(pattern).case_insensitive(true).build()?;
+    let pattern = index::search_pattern(pattern)?;
     let (version, index) = index::load(bundles_dir, version)?;
     let mut matches = 0usize;
     for entry in index.search(&pattern, kind) {

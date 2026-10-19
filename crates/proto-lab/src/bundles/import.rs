@@ -88,7 +88,8 @@ pub fn import(msix: &Path, bundles_dir: &Path) -> Result<Imported, ImportError> 
     let staging = bundles_dir.join(format!("{version}.staging"));
     remove_dir_if_present(&staging)?;
     if let Err(error) = unpack_and_index(&mut archive, &staging) {
-        remove_dir_if_present(&staging)?;
+        // the cause of the failure is what matters; a staging dir left behind is removed by the next import
+        let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
     remove_dir_if_present(&dir)?;

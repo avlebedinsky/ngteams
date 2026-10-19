@@ -141,9 +141,11 @@ fn index_extracts_url_templates_and_hosts() {
     assert_eq!(
         hosts,
         [
+            "*.teams.cloud.microsoft",
             "after-division.example.com",
             "api.spaces.skype.com",
             "chatsvcagg.teams.microsoft.com",
+            "chatuxmanager.svc.cloud.microsoft",
             "nested.teams.microsoft.com",
             "notifications.skype.net",
             "pubsub.trouter.teams.microsoft.com",
@@ -296,9 +298,27 @@ fn import_unpacks_the_two_dirs_gunzipped_and_builds_the_index() {
 fn unpacked_files_are_never_executable() {
     let dir = tempfile::tempdir().unwrap();
     let msix = pack_msix(dir.path(), &[]).unwrap();
+    // an entry the archive marks executable, which an extractor restoring modes would leave executable
+    let tool = "desktop-assets/tools/run.sh";
+    let mut writer =
+        zip::ZipWriter::new_append(fs::OpenOptions::new().read(true).write(true).open(&msix).unwrap()).unwrap();
+    writer
+        .start_file(tool, SimpleFileOptions::default().unix_permissions(0o755))
+        .unwrap();
+    writer.write_all(b"#!/bin/sh\necho synthetic\n").unwrap();
+    writer.finish().unwrap();
+    let mode_in_archive = zip::ZipArchive::new(fs::File::open(&msix).unwrap())
+        .unwrap()
+        .by_name(tool)
+        .unwrap()
+        .unix_mode()
+        .unwrap();
+    assert_eq!(mode_in_archive & 0o111, 0o111, "the archive entry should be executable");
+
     let Imported::Fresh(bundle) = import::import(&msix, &dir.path().join("bundles")).unwrap() else {
         panic!("expected a fresh import");
     };
+    assert!(bundle.dir.join(tool).is_file(), "{tool} not unpacked");
     for relative in files_under(&bundle.dir).unwrap() {
         let mode = fs::metadata(bundle.dir.join(&relative)).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0, "{relative} is executable");
@@ -449,10 +469,7 @@ fn search_matches_values_and_paired_urls_case_insensitively() {
 
     let (version, index) = index::load(&bundles, None).unwrap();
     assert_eq!(version, VERSION);
-    let pattern = regex::RegexBuilder::new("MEMBERS")
-        .case_insensitive(true)
-        .build()
-        .unwrap();
+    let pattern = index::search_pattern("MEMBERS").unwrap();
     let hits: Vec<(Kind, &str)> = index
         .search(&pattern, None)
         .map(|entry| (entry.kind, entry.value.as_str()))
