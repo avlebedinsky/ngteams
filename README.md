@@ -11,7 +11,7 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | path | contents |
 |---|---|
 | `crates/teams-fence` | the write fence: a write is allowed only within the 3 lab accounts; the lab config (`lab.toml`) |
-| `crates/fence-seal` | compile-fail checks that no other crate can mint a `WritePermit` |
+| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, and a lab binary has a membership source (`FailClosed`) |
 | `crates/teams-auth` | PKCE code exchange, token refresh and storage, skypetoken |
 | `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
 | `crates/proto-lab` | the lab harness CLI |

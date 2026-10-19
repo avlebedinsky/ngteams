@@ -1,6 +1,6 @@
 [package]
 name = "fence-seal"
-description = "Compile-fail checks, against teams-fence without its test-support feature, that no other crate can mint a WritePermit"
+description = "Compile checks against teams-fence without its test-support feature: no other crate can mint a WritePermit, and a lab binary has a membership source"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

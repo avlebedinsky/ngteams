@@ -83,6 +83,8 @@ pub enum PartialReason {
     Paginated,
     /// The list was cut short (a member count above the listed members, a size cap).
     Truncated,
+    /// Nothing was fetched: the fence runs fail-closed, without a live source ([`FailClosed`]).
+    NoSource,
 }
 
 impl fmt::Display for PartialReason {
@@ -92,6 +94,7 @@ impl fmt::Display for PartialReason {
             Self::FetchFailed(failure) => write!(f, "the fetch failed ({failure:?})"),
             Self::Paginated => f.write_str("the list is paginated"),
             Self::Truncated => f.write_str("the list is truncated"),
+            Self::NoSource => f.write_str("no membership source (the fence runs fail-closed)"),
         }
     }
 }
@@ -113,19 +116,36 @@ pub type MembershipFuture<'a> = Pin<Box<dyn Future<Output = Membership> + Send +
 /// Fetches a scope's participants. Implementations fetch on every call and never answer from a cache; anything they
 /// can't confirm in full is [`Membership::Partial`].
 ///
-/// The trait is sealed: what the fence is told about a scope's members decides the permit, so the source a lab binary
-/// uses is defined in this crate, and no other crate can hand the fence a member list of its own making. With the
-/// `test-support` feature (tests only, never a lab binary) any type may implement it.
+/// The trait is sealed: what the fence is told about a scope's members decides the permit, so every source a lab
+/// binary can use is defined in this crate ([`FailClosed`] for now), and no other crate can hand the fence a member
+/// list of its own making. With the `test-support` feature (tests only, never a lab binary) any type may implement it.
 pub trait MembershipSource: Sync + sealed::Sealed {
     fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a>;
+}
+
+/// The source of a fence that runs fail-closed: it fetches nothing and answers every scope with
+/// [`PartialReason::NoSource`], so [`Fence::check`] denies every write whose scope has to be fetched. A lab binary
+/// arms the browser fence with it until the live source exists (M0 Task 11). A [`Scope::New`] target isn't fetched, so
+/// it is still judged by its added participants alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FailClosed;
+
+impl MembershipSource for FailClosed {
+    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
+        Box::pin(std::future::ready(Membership::Partial(PartialReason::NoSource)))
+    }
 }
 
 mod sealed {
     /// The seal on [`MembershipSource`](super::MembershipSource): a public trait no other crate can name.
     pub trait Sealed {}
 
-    /// Tests only: any type may be a membership source. A source defined in this crate implements `Sealed` under
-    /// `cfg(not(feature = "test-support"))`, so its impl never overlaps this one.
+    /// The sources this crate defines. Under `test-support` the blanket impl below covers them, so these impls exist
+    /// only without it and never overlap it; `crates/fence-seal` checks that a build without it can use them.
+    #[cfg(not(feature = "test-support"))]
+    impl Sealed for super::FailClosed {}
+
+    /// Tests only: any type may be a membership source.
     #[cfg(feature = "test-support")]
     impl<T: ?Sized> Sealed for T {}
 }

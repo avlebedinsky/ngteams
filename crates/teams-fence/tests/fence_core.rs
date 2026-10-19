@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use fixture_guard::Guard;
 use teams_fence::lab::LabConfig;
 use teams_fence::{
-    Channel, DenyReason, Fence, FenceLog, FetchFailure, Membership, MembershipFuture, MembershipSource, Mri, OpenError,
-    PartialReason, RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind,
+    Channel, DenyReason, FailClosed, Fence, FenceLog, FetchFailure, Membership, MembershipFuture, MembershipSource,
+    Mri, OpenError, PartialReason, RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -503,6 +503,37 @@ async fn deny_reasons_are_logged_by_name() {
         assert_eq!(entry["reason"], expected, "{entry}");
         assert_eq!(entry["kind"], "typing");
     }
+}
+
+#[tokio::test]
+async fn the_fail_closed_source_denies_every_write_that_needs_a_fetch() {
+    let lab = try_lab().unwrap();
+    let call = Scope::Call {
+        id: "call-from-lab-b".to_owned(),
+    };
+    for kind in WriteKind::ALL {
+        for scope in [chat(), call.clone()] {
+            let denied = lab
+                .fence
+                .check(Target::new(kind, scope), &FailClosed)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                denied.reason(),
+                &DenyReason::Partial(PartialReason::NoSource),
+                "{kind:?}"
+            );
+        }
+    }
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert_eq!(entries.len(), WriteKind::ALL.len() * 2);
+    for entry in &entries {
+        assert_eq!(entry["reason"], serde_json::json!({"partial": "no_source"}), "{entry}");
+    }
+
+    // a new chat isn't fetched: it is still judged by its proposed members alone
+    let create = Target::new(WriteKind::ChatCreate, Scope::New).with_added(mris(&[LAB_A, LAB_B]));
+    assert!(lab.fence.check(create, &FailClosed).await.is_ok());
 }
 
 #[tokio::test]

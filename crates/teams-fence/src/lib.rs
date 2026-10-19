@@ -9,8 +9,9 @@
 //! ([`RequestRecord`]).
 //!
 //! Nothing outside this crate can bend a decision: a lab binary builds its fence only with [`Fence::open_lab`] (the
-//! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed. The `test-support`
-//! feature lifts both for tests (`Fence::new` over any `Roster::new`, `FenceLog::from_writer`, any type as a
+//! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed, so its sources are
+//! the ones this crate defines ([`FailClosed`], which denies every write whose scope has to be fetched, until the live
+//! source exists). The `test-support` feature lifts both for tests (`Fence::new` over any `Roster::new`, `FenceLog::from_writer`, any type as a
 //! membership source); only dev-dependencies enable it, and a lab binary refuses to run when a build turned it on
 //! ([`test_support_enabled`]).
 
@@ -20,8 +21,8 @@ mod log;
 mod target;
 
 pub use decision::{
-    Denied, DenyReason, Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, OpenError, PartialReason,
-    Roster, WritePermit,
+    Denied, DenyReason, FailClosed, Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, OpenError,
+    PartialReason, Roster, WritePermit,
 };
 pub use log::{Channel, FenceLog, RequestOutcome, RequestRecord};
 pub use target::{Mri, Scope, Target, WriteKind};
