@@ -30,12 +30,16 @@ clap = { version = "4.6.7", features = ["derive"] }
 # gzip only, on the zlib-rs backend zip already uses
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+# the system random source: PKCE verifiers and OAuth state
+getrandom = "0.4.3"
 # GPUI as agterm-rs takes it: the crates.io `gpui-pre` snapshot, pinned exactly so agterm-rs's patches apply as they
 # are. Wayland only: without `x11`, GPUI's Linux platform has no X11 backend to fall back to.
 gpui-pre = { version = "=0.3.9", default-features = false, features = ["wayland"] }
 gpui-pre-platform = { version = "=0.3.9", default-features = false, features = ["wayland"] }
 # GPUI's `RenderImage` frames are `image` buffers: the version GPUI already links.
 image = { version = "0.25.10", default-features = false }
+# a Retry-After given as an HTTP date
+httpdate = "1.0.3"
 log = "0.4.34"
 # The async-io flavour GPUI's Linux platform takes too: its ashpd and zbus refuse to build with both `async-io` and
 # `tokio` on, and workspace builds unify features, so oo7's default `tokio` would break every workspace build with

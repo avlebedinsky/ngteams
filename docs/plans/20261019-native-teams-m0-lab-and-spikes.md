@@ -383,13 +383,13 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/teams-auth/src/{pkce.rs,token.rs,refresh.rs}`
 - Create: `crates/teams-auth/tests/{pkce.rs,token.rs}`
 
-- [ ] tests first:
+- [x] tests first:
   - PKCE verifier/challenge against RFC 7636 test vectors
   - building the authorize URL
   - code → token and refresh → token on `wiremock`, using the Task 12 fixtures
   - error paths: `invalid_grant`, `AADSTS50011`, a Conditional Access block (`AADSTS53003` and similar), 429 with `Retry-After`
-- [ ] implement PKCE, token exchange and refresh, storing into `SecretStore`
-- [ ] `cargo test -p teams-auth` passes
+- [x] implement PKCE, token exchange and refresh, storing into `SecretStore`
+- [x] `cargo test -p teams-auth` passes
 
 ### Task 14: Authorize via the lab profile, skypetoken, CLI (spike 1)
 **Files:**

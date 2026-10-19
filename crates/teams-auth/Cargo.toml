@@ -7,12 +7,21 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
+getrandom.workspace = true
+httpdate.workspace = true
 oo7.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+# form encoding of the token requests and of the authorize URL's query
+url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock.workspace = true
 
 [lints]
 workspace = true
