@@ -8,16 +8,21 @@ publish.workspace = true
 
 [features]
 # Tests only, through dev-dependencies: `Fence::new` over any `Roster::new`, `FenceLog::from_writer`, `Fence::open`
-# from any config, and any type as a `MembershipSource`. A lab binary never enables it, and refuses to run when a
-# build that unified it in (`cargo test`, `--all-targets`, `--all-features`) produced it.
+# from any config, any type as a `MembershipSource`, and `LiveMembershipSource::with_mock_origin` (reads from a local
+# mock). A lab binary never enables it, and refuses to run when a build that unified it in (`cargo test`,
+# `--all-targets`, `--all-features`) produced it.
 test-support = []
 
 [dependencies]
+# the live membership source's own HTTPS client: it reads member lists from the chat service itself
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+url.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 fixture-guard.workspace = true
@@ -25,6 +30,7 @@ tempfile.workspace = true
 # this crate's own integration tests build fences over test rosters and fake sources
 teams-fence = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock.workspace = true
 
 [lints]
 workspace = true

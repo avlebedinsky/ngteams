@@ -9,16 +9,20 @@ help: the trait `teams_fence::decision::sealed::Sealed` is not implemented for `
   |
 5 | struct LabOnly;
   | ^^^^^^^^^^^^^^
-help: the trait `teams_fence::decision::sealed::Sealed` is implemented for `FailClosed`
+help: the following other types implement trait `teams_fence::decision::sealed::Sealed`
  --> $WORKSPACE/crates/teams-fence/src/decision.rs
   |
   |     impl Sealed for super::FailClosed {}
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FailClosed`
+  |     #[cfg(not(feature = "test-support"))]
+  |     impl Sealed for crate::membership::LiveMembershipSource {}
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `LiveMembershipSource`
 note: required by a bound in `MembershipSource`
  --> $WORKSPACE/crates/teams-fence/src/decision.rs
   |
   | pub trait MembershipSource: Sync + sealed::Sealed {
   |                                    ^^^^^^^^^^^^^^ required by this bound in `MembershipSource`
   = note: `MembershipSource` is a "sealed trait", because to implement it you also need to implement `teams_fence::decision::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
-  = help: the following type implements the trait:
+  = help: the following types implement the trait:
             teams_fence::FailClosed
+            teams_fence::LiveMembershipSource

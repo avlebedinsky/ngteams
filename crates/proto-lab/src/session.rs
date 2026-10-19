@@ -16,29 +16,35 @@
 //! - and who the page is signed in as ([`Identity`]): the claims of the bearer tokens its requests carry. Only the
 //!   object id, tenant and UPN claims are kept; the token itself never leaves the event.
 //!
-//! [`LabSession`] runs one: the pinned Chrome on the account's profile, headless, armed fail-closed (`FailClosed`: every
-//! mapped write is denied, and nothing is mapped yet), one armed tab, and the events watched.
+//! [`LabSession`] runs one: the pinned Chrome on the account's profile, headless unless asked otherwise, one armed tab,
+//! and the events watched. By default it is armed fail-closed (`FailClosed`: every write whose target has to be
+//! fetched is denied); a run that writes ([`SessionOptions::live_members`]) reads its targets' members live instead
+//! (`LiveMembershipSource`, fed the account's chat service credential from the page's own requests). A run can also be
+//! recorded as a capture ([`SessionOptions::capture`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
-use teams_fence::{FailClosed, Fence, MembershipSource, OpenError};
+use teams_fence::{FailClosed, Fence, LiveMembershipSource, LiveSourceError, MembershipSource, OpenError};
 use tokio::sync::mpsc;
 use url::Url;
 
 use crate::arming::{ArmError, ArmOptions, ArmedBrowser, ArmingFailure, TEAMS_ORIGINS};
-use crate::browser::{Browser, BrowserError, LaunchOptions};
+use crate::browser::{Browser, BrowserError, Display, LaunchOptions};
+use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
 use crate::classify::{Classification, Classifier, OwnKind};
 use crate::commands::chrome::ChromeBuild;
 use crate::config::{Alias, LabPaths};
-use crate::fence_http::HttpFence;
+use crate::fence_http::{Denial, ForcedDeny, HttpFence};
 use crate::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use crate::scenario::dsl::Driver;
 
 /// Where the web client starts.
 pub const TEAMS_URL: &str = "https://teams.microsoft.com/v2/";
@@ -436,6 +442,36 @@ pub enum SessionError {
     Arm(#[from] ArmError),
     #[error(transparent)]
     Cdp(#[from] CdpError),
+    #[error("can't record the run: {0}")]
+    Capture(#[from] CaptureError),
+    #[error(transparent)]
+    LiveSource(#[from] LiveSourceError),
+}
+
+/// How a lab session runs.
+#[derive(Clone, Debug)]
+pub struct SessionOptions {
+    /// What the fence makes of each request.
+    pub classifier: Classifier,
+    /// Read write targets' members live ([`LiveMembershipSource`]), for a run that writes; otherwise every write whose
+    /// target has to be fetched is denied ([`FailClosed`]).
+    pub live_members: bool,
+    /// Record the run as a capture of this scenario (`captures/<scenario>/<ts>/` in the lab's data dir).
+    pub capture: Option<String>,
+    pub display: Display,
+}
+
+impl SessionOptions {
+    /// Fail-closed, headless, not recorded.
+    #[must_use]
+    pub fn fail_closed(classifier: Classifier) -> Self {
+        Self {
+            classifier,
+            live_members: false,
+            capture: None,
+            display: Display::Headless,
+        }
+    }
 }
 
 /// How long the browser gets to put its debugging endpoint up.
@@ -445,34 +481,66 @@ const PAGE_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the browser gets to exit after closing.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
-/// One lab account's browser, armed fail-closed, with one tab and its events watched.
+/// One lab account's browser, armed, with one tab and its events watched.
 pub struct LabSession {
     armed: ArmedBrowser,
     page: SessionId,
     events: mpsc::UnboundedReceiver<Event>,
     watch: SessionWatch,
+    /// The run's capture, if it records.
+    recorder: Option<Arc<Recorder>>,
 }
 
 impl LabSession {
-    /// Launches the pinned Chrome headless on `alias`'s profile and arms it before any page loads: the fence from
-    /// `lab.toml` ([`Fence::open_lab`]), no membership source ([`FailClosed`]), `classifier` for requests and the seeded
-    /// frame list. Then opens one armed tab on `about:blank`.
+    /// [`Self::open_with`] fail-closed, headless and not recorded ([`SessionOptions::fail_closed`]).
     ///
     /// # Errors
-    /// When Chrome isn't installed, the fence can't be opened, or the browser can't be launched or armed (it is killed
-    /// then).
+    /// As [`Self::open_with`].
     pub async fn open(paths: &LabPaths, alias: Alias, classifier: Classifier) -> Result<Self, SessionError> {
+        Self::open_with(paths, alias, SessionOptions::fail_closed(classifier)).await
+    }
+
+    /// Launches the pinned Chrome on `alias`'s profile and arms it before any page loads: the fence from `lab.toml`
+    /// ([`Fence::open_lab`]), the membership source and request classifier `options` name, and the seeded frame list;
+    /// recording into a new capture when asked. Then opens one armed tab on `about:blank`.
+    ///
+    /// # Errors
+    /// When Chrome isn't installed, the fence, the live source or the capture can't be made, or the browser can't be
+    /// launched or armed (it is killed then).
+    pub async fn open_with(paths: &LabPaths, alias: Alias, options: SessionOptions) -> Result<Self, SessionError> {
         let chrome = ChromeBuild::pinned().executable(&paths.chrome_dir());
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
         }
         let fence = Arc::new(Fence::open_lab()?);
-        let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-        let http = HttpFence::new(classifier, Arc::clone(&fence), Arc::clone(&members));
+        let (members, http): (Arc<dyn MembershipSource + Send>, _) = if options.live_members {
+            let live = Arc::new(LiveMembershipSource::new()?);
+            let http =
+                HttpFence::new(options.classifier, Arc::clone(&fence), live.clone()).with_credentials(live.clone());
+            (live, http)
+        } else {
+            let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
+            let http = HttpFence::new(options.classifier, Arc::clone(&fence), Arc::clone(&members));
+            (members, http)
+        };
         let guard = GuardScript::generate().map_err(SessionError::Guard)?;
         let ws = WsFence::new(FrameClassifier::seeded(), fence, members, guard);
-        let browser = Browser::launch(&chrome, &LaunchOptions::for_profile(paths, alias), LAUNCH_TIMEOUT).await?;
-        let armed = ArmedBrowser::arm(browser, http, ws, &ArmOptions::default()).await?;
+        let recorder = match &options.capture {
+            Some(scenario) => Some(Arc::new(Recorder::create(&paths.captures_dir(), scenario)?)),
+            None => None,
+        };
+        let launch = LaunchOptions {
+            display: options.display,
+            ..LaunchOptions::for_profile(paths, alias)
+        };
+        let browser = Browser::launch(&chrome, &launch, LAUNCH_TIMEOUT).await?;
+        let armed = match &recorder {
+            Some(recorder) => {
+                let capture = Capture::new(Arc::clone(recorder), RtcHooks::default());
+                ArmedBrowser::arm_capturing(browser, http, ws, &ArmOptions::default(), capture).await?
+            }
+            None => ArmedBrowser::arm(browser, http, ws, &ArmOptions::default()).await?,
+        };
         let events = armed.watch();
         let page = armed.open_page(PAGE_TIMEOUT).await?.session;
         Ok(Self {
@@ -480,7 +548,36 @@ impl LabSession {
             armed,
             page,
             events,
+            recorder,
         })
+    }
+
+    /// A scenario driver on the tab, with its own watch of the events from now on.
+    #[must_use]
+    pub fn driver(&self) -> Driver {
+        Driver::new(self.armed.cdp().clone(), self.page.clone(), self.armed.watch())
+    }
+
+    /// Where the run is recorded, if it is.
+    #[must_use]
+    pub fn capture_dir(&self) -> Option<&Path> {
+        self.recorder.as_deref().map(Recorder::dir)
+    }
+
+    /// Denies every request `rule` matches from now on (an enforcement test).
+    pub fn force_deny(&self, rule: ForcedDeny) {
+        self.armed.force_deny(rule);
+    }
+
+    /// Stops every forced deny.
+    pub fn clear_forced(&self) {
+        self.armed.clear_forced();
+    }
+
+    /// Every request denied so far.
+    #[must_use]
+    pub fn denials(&self) -> Vec<Denial> {
+        self.armed.denials()
     }
 
     /// Navigates the tab.
@@ -551,13 +648,27 @@ impl LabSession {
         FenceReport::of(&self.armed)
     }
 
-    /// Closes the browser (killing it unless it confirms) and says what the fence did.
+    /// Closes the browser (killing it unless it confirms), finishes the capture, and says what the fence did and
+    /// where the capture is.
     ///
     /// # Errors
-    /// When the browser had to be killed or couldn't be reaped.
+    /// When the browser had to be killed or couldn't be reaped, or the capture lost events.
     pub async fn close(self) -> Result<FenceReport, SessionError> {
         let report = self.report();
-        self.armed.close(CLOSE_GRACE).await?;
+        let closed = self.armed.close(CLOSE_GRACE).await;
+        if let Some(recorder) = &self.recorder {
+            recorder.finish()?;
+        }
+        closed?;
         Ok(report)
+    }
+
+    /// [`Self::close`], also giving the capture's directory.
+    ///
+    /// # Errors
+    /// As [`Self::close`].
+    pub async fn close_recorded(self) -> Result<(FenceReport, Option<PathBuf>), SessionError> {
+        let dir = self.capture_dir().map(Path::to_path_buf);
+        Ok((self.close().await?, dir))
     }
 }

@@ -1,11 +1,12 @@
 //! `proto-lab`: the protocol lab harness CLI. See `docs/plans/20261019-native-teams-m0-lab-and-spikes.md`.
-//! `export` turns a capture into a sanitized fixture.
+//! `export` turns a capture into a sanitized fixture; `run` runs a scenario.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use proto_lab::browser::Display;
 use proto_lab::bundles::import::{self, Imported};
 use proto_lab::bundles::index::{self, Kind};
 use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
@@ -14,6 +15,7 @@ use proto_lab::commands::login::{self, LoginOptions};
 use proto_lab::commands::status::{self, AccountStatus};
 use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord};
 use proto_lab::sanitize::Identities;
+use proto_lab::scenario::{self, RunOptions, ScenarioName};
 
 #[derive(Parser)]
 #[command(name = "proto-lab", about = "The Teams protocol lab harness")]
@@ -63,6 +65,19 @@ enum Command {
         /// repository's, never a member crate's own).
         #[arg(long)]
         fixtures_dir: Option<PathBuf>,
+    },
+    /// Run a scenario in the lab profiles under the armed fence; exits non-zero when its goal isn't reached, the fence
+    /// was breached, or the fence denied anything the scenario doesn't expect.
+    Run {
+        /// The scenario.
+        #[arg(value_enum)]
+        scenario: ScenarioName,
+        /// No browser window (agents always pass it); without it the browsers are visible, for a human watching.
+        #[arg(long)]
+        headless: bool,
+        /// Seconds the web client may take to load, per account.
+        #[arg(long, default_value_t = 180)]
+        timeout: u64,
     },
 }
 
@@ -125,6 +140,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // these need only the lab directories, so they run without a lab.toml too
         Command::Chrome { command } => run_chrome(command, &LabLocations::from_env()?.lab_paths()?).await,
         Command::Bundles { command } => run_bundles(command, &LabLocations::from_env()?.lab_paths()?).await,
+        Command::Run {
+            scenario,
+            headless,
+            timeout,
+        } => run_scenario(scenario, headless, timeout).await,
         Command::Export {
             capture,
             fixture_name,
@@ -185,6 +205,27 @@ async fn run_status(aliases: Vec<Alias>, timeout: u64) -> Result<(), Box<dyn std
         Ok(())
     } else {
         Err("not every account is ok".into())
+    }
+}
+
+async fn run_scenario(scenario: ScenarioName, headless: bool, timeout: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let paths = LabLocations::from_env()?.lab_paths()?;
+    let options = RunOptions {
+        display: if headless { Display::Headless } else { Display::Headed },
+        load_timeout: Duration::from_secs(timeout),
+    };
+    let report = scenario::run(scenario, &paths, options).await?;
+    for note in &report.notes {
+        println!("{note}");
+    }
+    for failure in &report.failures {
+        eprintln!("{scenario}: {failure}");
+    }
+    if report.failed() {
+        Err(format!("{scenario} failed").into())
+    } else {
+        println!("{scenario}: ok");
+        Ok(())
     }
 }
 

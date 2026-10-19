@@ -11,7 +11,7 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | path | contents |
 |---|---|
 | `crates/teams-fence` | the write fence: a write is allowed only within the 3 lab accounts; the lab config (`lab.toml`) |
-| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, and a lab binary has a membership source (`FailClosed`) |
+| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, and a lab binary has its membership sources (`FailClosed`, `LiveMembershipSource`) |
 | `crates/teams-auth` | PKCE code exchange, token refresh and storage, skypetoken |
 | `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
 | `crates/proto-lab` | the lab harness CLI |
@@ -68,3 +68,15 @@ session has expired, with the password from lab-automation's `lab-accounts.json`
 prompt (a one-time code, a method to pick, an approval in an app, registering a method) stops it: multi-factor
 requests aren't on the fence's reviewed list. Each step goes to `status-<alias>.json` in the lab's data dir, and a stop
 leaves `failed` there with the reason.
+
+## Scenarios
+
+```sh
+cargo run -p proto-lab -- run load --headless      # account a loads the web client, fail-closed; recorded
+cargo run -p proto-lab -- run ab-chat --headless   # a messages b in their 1:1 chat, after a live enforcement test
+```
+
+`run` exits non-zero when the scenario's goal isn't reached, the fence was breached, or the fence denied anything the
+scenario doesn't expect (`load` expects every deny; `ab-chat` only its forced probe and telemetry). Runs are recorded
+under `captures/<scenario>/<ts>/`. `ab-chat` maps the chat service's writes and reads each target's members live
+(`docs/protocol/fence-targets.md`); everything else stays fail-closed. Without `--headless` the browsers are visible.

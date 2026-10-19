@@ -1,0 +1,37 @@
+{
+  "_synthetic": "Made up, not captured: the chat service's thread read as the web bundle builds it (GET v1/threads/<id>?view=msnp24Equivalent) and the members array it reads. To be replaced by a sanitized export of the load/ab-chat capture once the lab accounts have a Teams license. <guid:a> and <guid:b> stand for the two lab accounts' object ids; tests fill in made-up GUIDs.",
+  "request": {
+    "method": "GET",
+    "path": "/api/chatsvc/<region>/v1/threads/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "query": "view=msnp24Equivalent",
+    "headers": {
+      "Authentication": "skypetoken=<token:1>",
+      "Accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "type": "Thread",
+      "properties": {
+        "threadType": "chat",
+        "createdat": "1760000000000",
+        "uniquerosterthread": "true"
+      },
+      "members": [
+        {
+          "id": "8:orgid:<guid:a>",
+          "role": "Admin",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:a>"
+        },
+        {
+          "id": "8:orgid:<guid:b>",
+          "role": "Admin",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:b>"
+        }
+      ],
+      "version": 1760000000000
+    }
+  }
+}

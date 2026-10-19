@@ -8,14 +8,20 @@
 //! - [`Classification::Write`]: a mapped write with its [`Target`], judged by [`teams_fence::Fence::check`];
 //! - [`Classification::Unknown`]: everything else, denied.
 //!
-//! Until the write-target mapping exists (M0 Task 11) nothing maps to [`Classification::Write`], so the fence is
-//! fail-closed: every mutating request outside the own-state list is [`Classification::Unknown`]. Any method other than
-//! the three reading ones counts as mutating, including ones the classifier has never heard of.
+//! The seeded classifier ([`Classifier::seeded`], and [`Classifier::sign_in`] for `login`) maps no writes, so a run
+//! that uses it is fail-closed: every mutating request outside the own-state list is [`Classification::Unknown`]. A
+//! run that writes uses [`Classifier::mapped`], which also maps the chat service's writes on chats
+//! (`docs/protocol/fence-targets.md`): messages, typing, edits, deletes, reactions, read receipts, new chats and member
+//! changes, each to its [`Target`]. Anything the mapping doesn't recognize, a channel or team among them, stays
+//! [`Classification::Unknown`]. Any method other than the three reading ones counts as mutating, including ones the
+//! classifier has never heard of.
 //!
 //! An own-state rule matches the method, the exact origin (scheme, host and port) and the path segment by segment; a
 //! `*` segment stands for exactly one non-empty segment (an Entra tenant). The query plays no part.
 
-use teams_fence::Target;
+use percent_encoding::percent_decode_str;
+use serde_json::Value;
+use teams_fence::{AFD_HOSTS, Mri, REGIONAL_SUFFIX, Scope, Target, WriteKind};
 use url::Url;
 
 /// A reviewed kind of own-state request: it changes only the signed-in account's own session state.
@@ -135,10 +141,12 @@ const AUTHZ: [(&str, &str); 4] = [
 /// never been captured, so `login` stops at any multi-factor prompt instead.
 const SIGN_IN: [&str; 4] = ["/*/GetCredentialType", "/*/login", "/kmsi", "/*/kmsi"];
 
-/// The classifier: the own-state list (and, from M0 Task 11, the write mapping).
+/// The classifier: the own-state list, and for a run that writes, the write mapping.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Classifier {
     own: Vec<OwnRule>,
+    /// Whether the chat service's writes are mapped ([`Classifier::mapped`]).
+    writes: bool,
 }
 
 impl Classifier {
@@ -157,7 +165,17 @@ impl Classifier {
                 .iter()
                 .map(|(origin, path)| OwnRule::new(OwnKind::Authz, "POST", origin, path)),
         );
-        Self { own }
+        Self { own, writes: false }
+    }
+
+    /// The seeded list plus the write mapping (see the module docs): what a run that writes uses, together with a
+    /// membership source that can read the targets' members (`teams_fence::LiveMembershipSource`).
+    #[must_use]
+    pub fn mapped() -> Self {
+        Self {
+            writes: true,
+            ..Self::seeded()
+        }
     }
 
     /// The seeded list plus Entra's sign-in form ([`OwnKind::EntraSignIn`]): what `proto-lab login` needs to type a
@@ -181,9 +199,10 @@ impl Classifier {
         self
     }
 
-    /// Classifies one request. The body is unused until writes are mapped (M0 Task 11).
+    /// Classifies one request: a read, an own-state request, a mapped write (with [`Classifier::mapped`]; the body
+    /// names what some writes are), or unknown.
     #[must_use]
-    pub fn classify(&self, method: &str, url: &str, _body: Option<&[u8]>) -> Classification {
+    pub fn classify(&self, method: &str, url: &str, body: Option<&[u8]>) -> Classification {
         let method = method.to_ascii_uppercase();
         if !is_mutating(&method) {
             return Classification::Read;
@@ -191,11 +210,118 @@ impl Classifier {
         let Ok(url) = Url::parse(url) else {
             return Classification::Unknown;
         };
-        self.own
-            .iter()
-            .find(|rule| rule.matches(&method, &url))
-            .map_or(Classification::Unknown, |rule| Classification::Own(rule.kind))
+        if let Some(rule) = self.own.iter().find(|rule| rule.matches(&method, &url)) {
+            return Classification::Own(rule.kind);
+        }
+        if self.writes
+            && let Some(target) = map_write(&method, &url, body)
+        {
+            return Classification::Write(target);
+        }
+        Classification::Unknown
     }
+}
+
+/// The chat service path of `url` after its base, from `v1` on, each segment percent-decoded: `Some` for
+/// `https://<AFD host>/api/chatsvc/<region>/v1/…` and `https://<name>.msg.teams.microsoft.com/v1/…` only (no port, no
+/// user info).
+#[must_use]
+pub fn chat_service_path(url: &Url) -> Option<Vec<String>> {
+    if url.scheme() != "https" || url.port().is_some() || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    let segments: Vec<&str> = url.path_segments()?.collect();
+    let rest = if AFD_HOSTS.contains(&host.as_str()) {
+        match segments.as_slice() {
+            ["api", "chatsvc", region, rest @ ..] if !region.is_empty() => rest,
+            _ => return None,
+        }
+    } else if host.strip_suffix(REGIONAL_SUFFIX).is_some_and(|name| !name.is_empty()) {
+        segments.as_slice()
+    } else {
+        return None;
+    };
+    if rest.first() != Some(&"v1") {
+        return None;
+    }
+    rest[1..]
+        .iter()
+        .map(|segment| percent_decode_str(segment).decode_utf8().ok().map(String::from))
+        .collect()
+}
+
+/// The write a chat service request makes, if the mapping knows it (`docs/protocol/fence-targets.md`).
+fn map_write(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
+    let path = chat_service_path(url)?;
+    let path: Vec<&str> = path.iter().map(String::as_str).collect();
+    let name = || {
+        url.query_pairs()
+            .find(|(key, _)| key == "name")
+            .map(|(_, value)| value.into_owned())
+    };
+    let on = |kind, chat: &str| chat_scope(chat).map(|scope| Target::new(kind, scope));
+    match (method, path.as_slice()) {
+        ("POST", ["users", "ME", "conversations", chat, "messages"]) => on(message_kind(body?)?, chat),
+        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Edit, chat),
+        ("DELETE", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Delete, chat),
+        ("PUT" | "DELETE", ["users", "ME", "conversations", chat, "messages", _, "properties"])
+            if name()? == "emotions" =>
+        {
+            on(WriteKind::Reaction, chat)
+        }
+        ("PUT", ["users", "ME", "conversations", chat, "properties"]) if name()? == "consumptionhorizon" => {
+            on(WriteKind::ReadReceipt, chat)
+        }
+        ("POST", ["threads"]) => Some(Target::new(WriteKind::ChatCreate, Scope::New).with_added(body_members(body?)?)),
+        ("PUT", ["threads", chat, "members"]) => {
+            Some(on(WriteKind::MemberChange, chat)?.with_added(body_members(body?)?))
+        }
+        ("PUT", ["threads", chat, "members", member]) if is_member(member) => {
+            Some(on(WriteKind::MemberChange, chat)?.with_added([Mri::new(*member)]))
+        }
+        ("DELETE", ["threads", chat, "members", member]) if is_member(member) => on(WriteKind::MemberChange, chat),
+        _ => None,
+    }
+}
+
+/// A chat's conversation id: `19:…@unq.gbl.spaces` (1:1) or `19:…@thread.v2` (group and meeting chats), never a
+/// channel or team (`@thread.tacv2`, `@thread.skype`) or a reply chain within one (`;messageid=`).
+fn chat_scope(id: &str) -> Option<Scope> {
+    let chat = id.starts_with("19:")
+        && (id.ends_with("@unq.gbl.spaces") || id.ends_with("@thread.v2"))
+        && !id.contains([';', '/', '?', '#']);
+    chat.then(|| Scope::Conversation { id: id.to_owned() })
+}
+
+/// What a message post is, by its `messagetype`: typing (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`,
+/// `RichText`, `RichText/…`). Any other type, or a body that isn't a JSON object with one, is unknown.
+fn message_kind(body: &[u8]) -> Option<WriteKind> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    match body.get("messagetype")?.as_str()? {
+        "Control/Typing" | "Control/ClearTyping" => Some(WriteKind::Typing),
+        "Text" | "RichText" => Some(WriteKind::Message),
+        kind if kind.starts_with("RichText/") => Some(WriteKind::Message),
+        _ => None,
+    }
+}
+
+/// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the list is
+/// missing, empty, or has a member without a string id.
+fn body_members(body: &[u8]) -> Option<Vec<Mri>> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let members: Vec<Mri> = body
+        .get("members")?
+        .as_array()?
+        .iter()
+        .map(|member| member.get("id")?.as_str().map(Mri::new))
+        .collect::<Option<_>>()?;
+    (!members.is_empty()).then_some(members)
+}
+
+/// One member named in a path: an MRI, not the `ALL` every-member form.
+fn is_member(segment: &str) -> bool {
+    segment.contains(':') && !segment.eq_ignore_ascii_case("ALL")
 }
 
 /// Whether a method can change anything: every method but `GET`, `HEAD` and `OPTIONS` (in any case).

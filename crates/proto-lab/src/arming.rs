@@ -71,7 +71,7 @@ use tokio::task::JoinHandle;
 use crate::browser::{Browser, BrowserError};
 use crate::capture::{Capture, RTC_BINDING};
 use crate::cdp::{Cdp, CdpError, Event, Events, SessionId};
-use crate::fence_http::{Denial, HttpFence};
+use crate::fence_http::{Denial, ForcedDeny, HttpFence};
 use crate::fence_ws::{FrameDenial, GuardScript, UnsanctionedFrame, WsFence};
 
 /// The origins whose service workers are neutralized at the start of every run.
@@ -660,6 +660,16 @@ impl ArmedBrowser {
     #[must_use]
     pub fn denials(&self) -> Vec<Denial> {
         self.shared.http.denials()
+    }
+
+    /// Denies every request `rule` matches from now on ([`HttpFence::force_deny`]).
+    pub fn force_deny(&self, rule: ForcedDeny) {
+        self.shared.http.force_deny(rule);
+    }
+
+    /// Stops every forced deny ([`HttpFence::clear_forced`]).
+    pub fn clear_forced(&self) {
+        self.shared.http.clear_forced();
     }
 
     /// Every WebSocket frame denied so far.

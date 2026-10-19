@@ -79,6 +79,9 @@ pub enum RequestOutcome {
     /// It left the browser without the fence's allow: seen only afterwards, by the audit of what was sent (a WebSocket
     /// frame that got past the guard). Logged as a breach; it fails the run.
     SentWithoutAllow,
+    /// Denied on purpose, whatever it is: the run forced a deny on it to check that a denied request never leaves the
+    /// browser (an enforcement test).
+    Forced,
 }
 
 /// A browser request the fence decided without a membership check. The URL is logged without its query, fragment or
@@ -194,6 +197,12 @@ impl FenceLog {
                 None,
                 Some("sent_without_allow"),
                 Some("this left the browser without the fence's allow"),
+            ),
+            RequestOutcome::Forced => (
+                "deny",
+                None,
+                Some("forced"),
+                Some("denied on purpose by the run (an enforcement test)"),
             ),
         };
         self.append(&RequestEntry {

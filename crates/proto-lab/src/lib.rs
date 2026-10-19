@@ -13,4 +13,5 @@ pub mod config;
 pub mod fence_http;
 pub mod fence_ws;
 pub mod sanitize;
+pub mod scenario;
 pub mod session;
