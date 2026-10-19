@@ -1,0 +1,22 @@
+{
+  "_synthetic": "Made-up values shaped like Teams authz refusing a signed-in user who has no Teams license (what Task 8 saw live as a bare 403); errorCode is one of the values the web bundle 26260.1717.5229.7049 checks for, the body layout is a guess; not from a capture. See docs/protocol/auth.md.",
+  "request": {
+    "method": "POST",
+    "url": "https://teams.microsoft.com/api/authsvc/v1.0/authz",
+    "headers": {
+      "authorization": "Bearer <token:1>",
+      "claimsChallengeCapable": "true",
+      "content-length": "0"
+    }
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "errorCode": "UserLicenseNotPresentTrialEligible",
+      "message": "(synthetic) the user has no Teams license"
+    }
+  }
+}

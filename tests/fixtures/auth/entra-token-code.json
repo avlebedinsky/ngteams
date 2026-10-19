@@ -1,0 +1,35 @@
+{
+  "_synthetic": "Made-up values shaped like an Entra v2 code redemption for the native Teams client; not from a capture. See docs/protocol/auth.md.",
+  "request": {
+    "method": "POST",
+    "url": "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
+    "headers": {
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    "form": {
+      "client_id": "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
+      "grant_type": "authorization_code",
+      "code": "<code:1>",
+      "redirect_uri": "https://login.microsoftonline.com/common/oauth2/nativeclient",
+      "code_verifier": "<verifier:1>",
+      "scope": "https://api.spaces.skype.com/.default openid profile offline_access"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store, no-cache"
+    },
+    "body": {
+      "token_type": "Bearer",
+      "scope": "https://api.spaces.skype.com/Authorization.ReadWrite https://api.spaces.skype.com/Region.ReadWrite https://api.spaces.skype.com/user_impersonation",
+      "expires_in": 8000,
+      "ext_expires_in": 8000,
+      "access_token": "<token:1>",
+      "refresh_token": "<token:2>",
+      "id_token": "<token:3>",
+      "client_info": "<token:4>"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "_synthetic": "Made-up values shaped like a throttled Entra v2 token request; not from a capture. See docs/protocol/auth.md.",
+  "request": {
+    "method": "POST",
+    "url": "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
+    "form": {
+      "client_id": "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
+      "grant_type": "refresh_token",
+      "refresh_token": "<token:2>",
+      "scope": "https://api.spaces.skype.com/.default openid profile offline_access"
+    }
+  },
+  "response": {
+    "status": 429,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "retry-after": "30"
+    },
+    "body": {
+      "error": "temporarily_unavailable",
+      "error_description": "AADSTS50196: (synthetic) too many requests from this client. Trace ID: <guid:7> Correlation ID: <guid:8> Timestamp: 2026-01-01 00:00:00Z",
+      "error_codes": [50196],
+      "timestamp": "2026-01-01 00:00:00Z",
+      "trace_id": "<guid:7>",
+      "correlation_id": "<guid:8>"
+    }
+  }
+}

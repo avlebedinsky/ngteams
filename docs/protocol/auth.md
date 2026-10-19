@@ -1,0 +1,307 @@
+# Auth: Entra tokens, authz and the skypetoken
+
+Status: 2026-10-19, M0 Task 12. Written from static analysis only, with no live traffic:
+
+- the web bundle of the Windows MSIX, version `26260.1717.5229.7049` (imported with `proto-lab bundles import`; the
+  production cloud config, the auth service chunks and the discover/authz code);
+- `ms-teams.exe` from the same MSIX (strings);
+- the macOS app `Microsoft Teams.app` `26261.303.5165.1465` from `MicrosoftTeams.pkg` (Info.plist, strings, and the
+  x86_64 disassembly of `OneAuthProvider::Initialize`);
+- the CA probe of 2026-10-19 (`docs/spikes/ca-probe.md`), the only live result so far.
+
+The capture confirmation the plan asks for is blocked: the lab accounts have no Teams license, so authz answers 403 and
+the web client never loads (`docs/backlog/lab-accounts-have-no-teams-license.md`). Everything below that isn't from the
+CA probe is what the client code says it does. The points that need a capture are listed in
+[To confirm by capture](#to-confirm-by-capture).
+
+## The two layers
+
+Teams auth has two layers.
+
+1. **Entra (AAD) access tokens**, one per audience (resource). The client gets them from
+   `login.microsoftonline.com` and keeps one refresh token per account.
+2. **The skypetoken**, a Teams-issued token. The client gets it by POSTing an Entra token for
+   `https://api.spaces.skype.com` to Teams' **authz** endpoint. The same response gives the per-region base URLs of the
+   Teams services (the "region GTMs").
+
+Each Teams service accepts one of the two, or both. The service table is [below](#audience--service-table).
+
+## Client and redirect
+
+| Client | ID | Kind | Redirect | Used by us |
+|---|---|---|---|---|
+| Teams desktop (OneAuth) | `1fec8e78-bce4-4aaf-ab1b-5451cc387264` | public native client | `https://login.microsoftonline.com/common/oauth2/nativeclient`; on macOS also `msauth.com.microsoft.teams2://auth` | yes |
+| Teams web | `5e3ce6c0-2b1f-4285-8d4b-75ee78787346` | SPA | the Teams web origin | no |
+
+Where each redirect comes from:
+
+- **Windows** (`ms-teams.exe`): the client ID and the `nativeclient` URI sit together in the data that
+  `OneAuthProvider::Initialize` (`oneauth_provider_win.cpp`) uses. The shell can also go through the Windows broker
+  (WAM, `msauth://Microsoft.AAD.BrokerPlugin`, with a `wamDisabled` switch) and knows nested app auth
+  (`child_client_id`, `brk_redirect_uri`). Neither matters on Linux.
+- **macOS** (`MSTeams`, `oneauth_provider_mac.mm`): `OneAuthProvider::Initialize` builds the OneAuth AAD
+  configuration (`initWithClientId:redirectUri:defaultSignInResource:capabilities:`) with the same client ID, the
+  default sign-in resource `https://api.spaces.skype.com`, and a redirect picked by a runtime setting:
+  `msauth.com.microsoft.teams2://auth` by default, `https://login.microsoftonline.com/common/oauth2/nativeclient` when
+  the setting is on. The app doesn't register the `msauth.com.microsoft.teams2` scheme in `CFBundleURLTypes` (it only
+  queries `msauth`/`msauthv3`, the Authenticator broker), so the custom-scheme redirect is consumed inside OneAuth's
+  own web view. Both URIs are therefore registered on the Teams client; the Mac config cross-checks the redirect we
+  use.
+- The MSA (consumer) side of the same configuration uses client `8ec6bc83-69c8-4392-8f08-b3c986009232` with resource
+  `service::api.fl.teams.microsoft.com::MBI_SSL`. It's out of scope: the lab is a work tenant.
+
+**Decision: native client `1fec8e78-…` with the `nativeclient` redirect.**
+
+- It's a public native client, so the refresh token is a regular one with a sliding lifetime and no
+  `refresh_token_expires_in`. The CA probe saw exactly that for all 3 accounts, and a refresh grant worked. A SPA
+  redirect would cap the refresh token at 24 hours and force a daily silent re-login through the lab profile.
+- `nativeclient` is a page on Microsoft's login host. The code can be taken on navigation to it (as the CA probe did)
+  or from the `Location` header at the CDP `Fetch` response stage. The browser never touches a Teams host for this.
+- **Fallback:** `msauth.com.microsoft.teams2://auth`. Chrome won't navigate to a custom scheme, so the code has to be
+  taken from the 302 `Location` at the `Fetch` response stage, and the navigation failed. Task 14 implements this
+  path in any case, because it's the same code.
+
+## Flow
+
+1. **Authorize** (browser, lab profile, fence armed): PKCE (S256) at
+   `https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize` with `client_id` = the native client,
+   `response_type=code`, the `nativeclient` redirect, `login_hint` = the account's UPN, and
+   `scope=https://api.spaces.skype.com/.default openid profile offline_access`. The profile's SSO cookie signs the user
+   in without interaction.
+2. **Code → tokens**: POST `…/organizations/oauth2/v2.0/token` as a public client (`grant_type=authorization_code`,
+   `code`, `redirect_uri`, `code_verifier`, `scope`). The answer has an access token for `api.spaces.skype.com`, a
+   refresh token, an ID token and `client_info`.
+3. **Other audiences**: POST the same endpoint with `grant_type=refresh_token`, the one refresh token and
+   `scope=<resource>/.default` (plus `openid profile offline_access`). Store the newest refresh token each time; Entra
+   may rotate it.
+4. **Skypetoken**: POST to authz with `Authorization: Bearer <api.spaces.skype.com token>` and no body. Keep the
+   skypetoken, its expiry and the region GTMs.
+5. **Service calls**: each request gets the credential its service wants (table below), against the base URL that
+   the region GTMs give for that service.
+6. **Renewal**: Entra tokens are refreshed before `expires_in` runs out, or when a service answers 401 with a claims
+   challenge (`WWW-Authenticate: Bearer … error="insufficient_claims", claims="…"`): the client retries with the
+   claims passed to Entra, up to 3 times (`claimsChallenge401RetryMax`). The skypetoken is renewed before its expiry,
+   or when a service answers 401; the renewal POST carries `ms-teams-authz-type: TokenRefresh`.
+
+### Scope rule
+
+The web client turns a resource into a scope by appending `/.default`. A few resources are passed as they are, because
+they already name a scope: `https://substrate.office.com/M365.Access`, `https://graph.microsoft.com/.default`,
+`https://graph.microsoft.com/Files.ReadWrite`, the consent-service scopes, and the consumer (`*.fl.teams…`) ones. The
+desktop shell instead hands the bare resource to OneAuth, which is the v1 "resource" form of the same request. For us
+the v2 endpoint with `<resource>/.default` is equivalent.
+
+### One refresh token for every audience?
+
+**Yes, by design; to be proven live.** The evidence:
+
+- The desktop client asks OneAuth for every audience silently, from one signed-in account and one client ID. At
+  startup it pre-fetches ("token warming", `enableTokenWarming` on in prod) all of: `api.spaces.skype.com`,
+  `chatsvcagg.teams.microsoft.com`, `outlook.office.com/`, `outlook.office.com/search`, `substrate.office.com`,
+  `ic3.teams.office.com`, `graph.microsoft.com`, and the meeting-artifacts app `6bc3b958-689b-49f5-9006-36d165f30e00`.
+  There is no second login or second client for any of them.
+- Entra refresh tokens issued to a public client are multi-resource: one can be redeemed for any resource the client
+  is pre-authorized for. The Teams native client is first-party, so its pre-authorizations cover its own services.
+
+What is not known: whether Conditional Access treats the other audiences (Outlook, Graph, SharePoint) as strictly as
+`api.spaces.skype.com`, which passed. A CA block shows up as `AADSTS53003` on that one refresh grant, and the other
+audiences keep working. Task 14 checks this with a refresh grant per audience (the Entra token endpoint is already on
+the fence's own-state list).
+
+## authz: the skypetoken exchange
+
+### Endpoints
+
+| Cloud | authz (v1, skypetoken) | authzcore (v2, no skypetoken) |
+|---|---|---|
+| commercial (prod) | `https://teams.microsoft.com/api/authsvc/v1.0/authz` | `https://teams.microsoft.com/api/authsvc/v1.0/authzcore` |
+| commercial, old host | `https://authsvc.teams.microsoft.com/v1.0/authz` | `https://authsvc.teams.microsoft.com/v1.0/authzcore` |
+| GCC High | `https://gov.teams.microsoft.us/api/authsvc/v1.0/…` | same path |
+| DoD | `https://dod.teams.microsoft.us/api/authsvc/v1.0/…` | same path |
+| China (21Vianet) | `https://teams.microsoftonline.cn/api/authsvc/v1.0/…` | same path |
+| France / Germany sovereign | `https://teams.sovcloud.fr/…`, `https://teams.sovcloud.de/…` | same path |
+| consumer (Teams free) | `https://teams.live.com/api/auth/v1.0/authz/consumer` | `…/authzcore/consumer` |
+
+The old `authsvc.teams.microsoft.com` host is used only when a "deprecated default URL" switch is on. authz is global,
+not regional: the region comes back in its answer. An optional `region_gtms_env` query parameter selects a test
+environment; prod doesn't set it.
+
+### authz vs authzcore
+
+- **authz** is the default. It returns the skypetoken plus the region GTMs, region, partition and license details.
+- **authzcore** is the "AuthZ V2" flow. The client uses it only when the `enableAuthzV2` setting is on and the user
+  isn't anonymous. The setting isn't set in the shipped prod config, so it's off by default and a remote flight turns
+  it on. authzcore returns no skypetoken: the client logs that "the response is from authzcore and has no Skype
+  token", takes the MRI and Skype ID from the `mri` and `skypeId` fields, and sets the expiry to 24 hours unless told
+  otherwise. It re-polls authzcore about every 23 hours (`authzV2PollingInterval`). In that mode the middle tier
+  gets an Entra token only, every middle-tier request is forced into token migration (`X-MS-Migration: True`), and
+  the IC3-backed services (broadcast and calling are visible in the bundle) use Entra tokens for
+  `https://ic3.teams.office.com`. How chat authenticates without a skypetoken in this mode isn't clear from the
+  bundle.
+- **For us:** use authz. It's what prod does by default, it gives us the skypetoken that chat needs, and authzcore
+  would only matter if Microsoft flips the flight for the whole tenant. Both are on the fence's own-state list.
+- **Never call `…/authz/signuptrial`** (or `…/authzcore/signuptrial`). It's the "start a Teams trial" variant of the
+  same POST, a write that changes the account's licensing. The fence's own-state rules match `authz` and `authzcore`
+  as whole paths, so `signuptrial` stays denied; keep it that way.
+
+### Request
+
+`POST <authz URL>`, no body for a normal (non-guest, non-anonymous) user. Headers:
+
+| Header | Value |
+|---|---|
+| `Authorization` | `Bearer <Entra token for https://api.spaces.skype.com>` |
+| `claimsChallengeCapable` | `true` (always, unless the client disables claims challenges) |
+| `X-MS-Migration` | `True` (prod sets `enableSTMHeaderForAuthZ`) |
+| `ms-teams-authz-type` | `ExplicitLogin` on first sign-in, `TokenRefresh` on renewal |
+| `clientRequestId`, `x-ms-request-id` | a fresh correlation GUID |
+| `x-ms-client-type`, `x-ms-client-version` | the client type (`web` when unset) and version |
+| `X-Client-UI-Language` | the UI locale, when known |
+| `ConsistencyLevel` | `Organization;ScenarioId=<id>` only in a license-refresh scenario |
+
+Anonymous and guest users post to `…/visitor` or `…/guest` with a JSON body (tenant ID or meeting URL). Not our case.
+
+### Response
+
+The client reads these top-level fields:
+
+- `tokens.skypeToken` (also accepted as `skypetoken`) and `tokens.expiresIn` in seconds. Expiry = time of the
+  request + `expiresIn`. The skypetoken is itself a JWT whose `skypeid` claim gives the user's MRI as `8:<skypeid>`.
+- `regionGtms`: an object from service name to base URL (below).
+- `region`, `partition`, `userRegion`, `userPartition`, `regionOverride`, `regionSettings`.
+- `licenseDetails` (flags such as `isFreemium`, `isCopilot`, `isTeamsSmb`), `consumerLicenseDetails`.
+- `skypeGuestUserToken`, `ocdiRedirect`: guest and redirect cases, not ours.
+- authzcore only: `mri`, `skypeId` instead of `tokens`.
+
+The client treats a GTM table shorter than a minimum length as missing and refuses to cache it.
+
+### Errors
+
+- **403**: the user may not use Teams. The body is JSON with `errorCode` and `message`. The codes the client knows
+  include `UserLicenseNotPresentTrialEligible`, `UserLicenseNotPresentTrialExpired`,
+  `UserLicenseNotPresentTrialHardBlocked`, `TeamsDisabledForTenantForbidden`, `TrialLicenseDisabledForTenantForbidden`,
+  `UserNotFoundInSkypeTeam`, `UserChatDisabled`, and admin variants. The lab accounts get this today; the "start
+  trial" page Task 8 saw points to `UserLicenseNotPresentTrialEligible`.
+- **401**: the Entra token was refused; refresh it (with claims, if challenged) and retry.
+- **Retries** (`enableAuthzRetriesAndThrottleClients` on in prod): retryable statuses (throttling, 5xx) are retried with
+  exponential backoff and jitter, and the failure is cached for a short TTL so callers don't hammer authz. 403 and
+  proxy-auth errors aren't retried.
+
+### Region GTMs
+
+The client looks up every regional service by name in `regionGtms` and resolves request paths against that base URL.
+Names it uses, most-used first: `middleTier`, `mtImageService`, `groupsServiceV2`, `urlpV2`, `urlp`, `amsV2`,
+`presenceUPS`, `ams`, `userIntelligenceService`, `unifiedPresence`, `peopleProfileService`, `chatService`,
+`chatServiceAfd`, `chatSvcAggAfd`, `virtualEventsService`, `userProfileService`, `teamsPushServiceAfd`, `mcpService`,
+`iC3LocationService`, `consumerLicenses`, `authService`, `appsSuggestionService`, `searchService`, `graphService`, and a
+few rarer ones. We persist the whole object as returned, not a fixed list.
+
+Chat specifics: prod sets `useChatServiceAfd`, so the chat base URL is `chatServiceAfd` (falling back to `chatService`
+if absent). Chat and presence requests carry `BehaviorOverride: redirectAs404`; a wrong region answers 404 with a
+`Location`, and the client re-bases on it and retries, up to 10 times for chat and 3 for presence. On an AFD host
+(`teams.microsoft.com`, `teams.cloud.microsoft`, …) the new base is the origin plus the `/api/chatsvc/<region>/`
+prefix of that `Location`.
+
+## Audience × service table
+
+"Entra (aud X)" means `Authorization: Bearer <Entra access token for X>`.
+
+| Service | Base URL from | Credential (prod defaults) | Entra audience |
+|---|---|---|---|
+| authz | fixed (table above) | Entra | `https://api.spaces.skype.com` |
+| Middle tier (`/api/mt/…`) | GTM `middleTier` | Entra **and** `x-skypetoken: <skypetoken>` (`requireSkypetokenForMT` on) | `https://api.spaces.skype.com` |
+| MT image service | GTM `mtImageService` | none added by this binding; the client sets a separate image auth cookie (to confirm) | — |
+| Chat service (chatsvc, messages, threads, endpoints) | GTM `chatServiceAfd` | `Authentication: skypetoken=<skypetoken>`, then `RegistrationToken` once an endpoint is registered | — |
+| Chat service aggregator (CSA) | GTM `chatSvcAggAfd` / `csaResource` | Entra only (`disableSkypeTokenOnCsa` on); CSA rejects tokens for `teams.microsoft.com`, `api.spaces.skype.com` and `ic3` | `https://chatsvcagg.teams.microsoft.com` |
+| Presence (`unifiedPresence`) | GTM `unifiedPresence` | Entra, unless the presence settings ask for `x-skypetoken` | the GTM base URL itself (likely `https://presence.teams.microsoft.com`) |
+| AMS / URL preview (`ams`, `amsV2`, `urlp`, `urlpV2`) | GTMs | `Authorization: skype_token <skypetoken>` | — |
+| User profile service | GTM `userProfileService` | Entra | `https://api.spaces.skype.com` |
+| Other regional services (default binding) | their GTM | Entra | the GTM base URL (origin) |
+| IC3 gateway in "token migration" mode (chat, trouter, calling) | — | Entra with `X-MS-Migration: True`; falls back to the skypetoken when the service says so | `https://ic3.teams.office.com` (CAE) or `https://ic3-non-cae.teams.office.com` |
+| Microsoft Graph | `graphEndpointBaseUrl` | Entra | `https://graph.microsoft.com` |
+| Outlook / EWS / mail and calendar | `ewsResource` | Entra | `https://outlook.office.com` |
+| Substrate search | `substrateBaseUrl` | Entra | `https://outlook.office.com/search` (`substrateTokenUrl`); some calls use the scope `https://substrate.office.com/M365.Access` |
+| Substrate (other) | `substrateBaseUrl` | Entra | `https://substrate.office.com` |
+| SharePoint / OneDrive files | per site | Entra | the SharePoint host |
+| Office roaming settings | — | Entra | `https://api.office.net` |
+| Meeting artifacts, attendance, templates | `teams.microsoft.com/api/…` | Entra | app ID `6bc3b958-689b-49f5-9006-36d165f30e00` |
+| App Studio / developer portal | — | Entra | `https://dev.teams.microsoft.com` |
+
+CAE: prod lists `api.spaces.skype.com`, `chatsvcagg`, `outlook.office.com`, `ic3.teams.office.com`, SharePoint and
+presence as CAE-capable audiences. A CAE client advertises the capability when it asks Entra for a token (the
+`xms_cc` claim, `cp1`) and must then handle claims challenges. We don't advertise it in M0 (the CA probe didn't
+either), so our tokens are ordinary ones.
+
+### Skype token migration (STM)
+
+Microsoft is moving IC3 services from the skypetoken to Entra tokens. In prod `skypeTokenMigrationEnabled`,
+`enableSkypeTokenMigrationForMT` and `enableSkypeTokenMigrationForTrouter` are on, and enforcement
+(`enableSTMEnforcement`) is off. What the client does:
+
+- Requests marked for migration carry `X-MS-Migration: True` and an Entra token for the IC3 gateway audience (CAE or
+  non-CAE).
+- A 401 whose `WWW-Authenticate` names the highest protocol the service accepts (CAE, AAD or Skype) makes the client
+  retry with that credential, falling back CAE → AAD → skypetoken. It remembers the fallback for 24 hours
+  (`stmFallbackMapTimerInHr`).
+- For the middle tier, which requests are migrated comes from a remote `stmSourceList`; it's empty in the shipped
+  config, so the middle tier still gets both the Entra token and `x-skypetoken`.
+
+For M0/M1 the skypetoken path is the default and works everywhere; STM matters later if enforcement is turned on.
+
+## Open questions
+
+1. Does one refresh token really yield every audience in the table for the lab accounts, or does Conditional Access
+   block some of them (Outlook, Graph, SharePoint) for a non-compliant Linux device? Answered by Task 14's per-audience
+   refresh grants.
+2. What is the real `tokens.expiresIn` of a skypetoken (the client defaults to 24 hours only in the authzcore path)?
+3. Which runtime setting makes macOS use `nativeclient` instead of `msauth.com.microsoft.teams2://auth`? It doesn't
+   matter while `nativeclient` works for us.
+4. Does presence accept a token whose audience is the presence origin, or does it want `api.spaces.skype.com`? The
+   client passes the GTM base URL as the resource; the resulting audience needs a capture.
+5. Is the `RegistrationToken` (from the chat service's `Set-RegistrationToken` response header after registering an
+   endpoint) needed for reads, or only for the event channel? Belongs to the chat notes, not here.
+6. Will the user's own account (the product, not the lab) face stricter Conditional Access (MFA, device compliance)
+   than the bot accounts? Not testable in M0 without that account.
+7. Trouter's credential under STM (skypetoken vs IC3 Entra token): needs a capture.
+
+## To confirm by capture
+
+Blocked until the lab accounts get a Teams license (`docs/backlog/lab-accounts-have-no-teams-license.md`). With a
+license, the `load` capture of account A (Task 11) should show:
+
+- [ ] the authz POST: URL (authz, not authzcore), the headers above, an empty body, status 200;
+- [ ] the authz response: `tokens.skypeToken`, `tokens.expiresIn`, `region`, `partition`, the `regionGtms` names and
+      their hosts for our tenant, `licenseDetails`;
+- [ ] that `api.spaces.skype.com` is the authz audience (the CA probe already showed this audience works for the
+      native client);
+- [ ] the chat service host the client really uses (`chatServiceAfd` vs `chatService`) and whether a 404 `Location`
+      region hop happens;
+- [ ] middle-tier requests carrying both `Authorization: Bearer` and `x-skypetoken`;
+- [ ] the audiences of the Bearer tokens the page sends to presence, CSA, Graph, Outlook and substrate (log `aud` and
+      `scp` only);
+- [ ] whether any request carries `X-MS-Migration: True` with an IC3 Entra token, and which;
+- [ ] the shape of a 401 claims challenge, if one happens;
+- [ ] the body of the 403 the lab accounts get today: the `errorCode` (expected `UserLicenseNotPresentTrialEligible`).
+      This one is visible without a license, in a `status` run's capture.
+
+Then replace the synthetic fixtures below with sanitized ones exported from that capture.
+
+## Fixtures
+
+`tests/fixtures/auth/*.json` are **synthetic**: every value is made up, every placeholder is in the sanitizer's form
+(`<token:N>`, `<guid:N>`, `<mri:a>`), and every regional host is under `example.test`. Each file has a `_synthetic`
+note and holds one exchange as `{request, response}`; `response` has `status`, `headers` and `body`. The shapes come
+from the bundle (authz) and from Entra's documented v2 token endpoint (the rest). They exist so that Tasks 13 and 14
+can test against wiremock now.
+
+| File | Exchange |
+|---|---|
+| `entra-token-code.json` | code → tokens for `api.spaces.skype.com` |
+| `entra-token-refresh.json` | refresh grant for a second audience (Graph) with the same refresh token |
+| `entra-error-invalid-grant.json` | expired refresh token (`invalid_grant`, `AADSTS700082`) |
+| `entra-error-aadsts50011.json` | unregistered redirect URI |
+| `entra-error-aadsts53003.json` | Conditional Access block |
+| `entra-error-429.json` | throttled, with `Retry-After` |
+| `authz-ok.json` | authz with a skypetoken and region GTMs |
+| `authzcore-ok.json` | authzcore: MRI and GTMs, no skypetoken |
+| `authz-403-no-license.json` | authz refusing an unlicensed user |
