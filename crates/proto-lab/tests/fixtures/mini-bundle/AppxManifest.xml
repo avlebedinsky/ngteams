@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- synthetic manifest for the proto-lab tests -->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity Name="SyntheticTeams" Version="1.2.3.4" Publisher="CN=Synthetic" ProcessorArchitecture="x64" />
+</Package>

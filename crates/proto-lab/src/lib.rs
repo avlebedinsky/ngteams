@@ -3,6 +3,7 @@
 
 pub mod arming;
 pub mod browser;
+pub mod bundles;
 pub mod cdp;
 pub mod classify;
 pub mod commands;

@@ -1,0 +1,1 @@
+synthetic placeholder outside desktop-assets and client-bindings

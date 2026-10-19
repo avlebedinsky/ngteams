@@ -327,11 +327,13 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 **Files:**
 - Create: `crates/proto-lab/src/bundles/{import.rs,index.rs}`
 - Create: `crates/proto-lab/tests/bundles.rs`, `crates/proto-lab/tests/fixtures/mini-bundle/`
+- ➕ also `crates/proto-lab/src/bundles.rs` (module file) and `crates/proto-lab/src/bundles/literals.rs` (a small string-literal lexer: strings, templates with nested `${…}`, comments, regex vs division)
 
-- [ ] tests first on a small synthetic bundle: extract URL templates, hosts, HTTP methods and route constants into an index
-- [ ] `proto-lab bundles import <msix>`: unpack `desktop-assets` and `client-bindings` into `bundles/<version>/` (gunzip only, nothing executed) and build the index
-- [ ] `proto-lab bundles search <pattern>`: search the index, to help with classification and protocol notes. The agent uses rea (`analyze_javascript_application`, `trace_javascript_semantics`) for deeper analysis.
-- [ ] `cargo test -p proto-lab` passes
+- [x] tests first on a small synthetic bundle: extract URL templates, hosts, HTTP methods and route constants into an index
+- [x] `proto-lab bundles import <msix>`: unpack `desktop-assets` and `client-bindings` into `bundles/<version>/` (gunzip only, nothing executed) and build the index
+  - ➕ the version is the manifest's `<Identity Version>`; the index is `bundles/<version>/index.jsonl`; a method is paired with the nearest url/route literal by proximity (a guess, not data flow); strings holding JSON or HTML are looked into. Imported 26260.1717.5229.7049 from `MSTeams-x64.msix` (7,043 files, 908 MB, 6,709 entries; misses 1 of 2,187 quoted https literals a naive grep finds). A debug build inflates very slowly; use `--release` for a real import
+- [x] `proto-lab bundles search <pattern>`: search the index, to help with classification and protocol notes. The agent uses rea (`analyze_javascript_application`, `trace_javascript_semantics`) for deeper analysis.
+- [x] `cargo test -p proto-lab` passes
 
 ### Task 11: Scenario runner, `load`, and the fence target mapping
 **Files:**
