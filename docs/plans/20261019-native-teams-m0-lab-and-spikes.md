@@ -240,12 +240,16 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/proto-lab/src/{browser.rs,cdp.rs,commands/chrome.rs}`
 - Create: `crates/proto-lab/tests/browser.rs`
 
-- [ ] tests first: building Chromium launch args per profile (user-data-dir, remote-debugging-port, headless/headed, fake-media flags) and verifying a download's checksum
-- [ ] `proto-lab chrome install`: downloads a pinned Chrome for Testing build into `~/.local/share/teams-lab/chrome/` and verifies its checksum. No root needed.
-- [ ] choose the CDP client: `chromiumoxide`, or a thin `tokio-tungstenite` client of our own. It must support flat-mode auto-attach with `waitForDebuggerOnStart` and `Fetch` on worker targets. Record the choice in this plan.
-- [ ] a test against a local HTML page with a dedicated worker: a new target is held paused until we explicitly call `runIfWaitingForDebugger`
-- [ ] `cargo test -p proto-lab` passes
-- [ ] note: `login` and `status` are not here; they need the armed fence (Task 8)
+- [x] tests first: building Chromium launch args per profile (user-data-dir, remote-debugging-port, headless/headed, fake-media flags) and verifying a download's checksum
+- [x] `proto-lab chrome install`: downloads a pinned Chrome for Testing build into `~/.local/share/teams-lab/chrome/` and verifies its checksum. No root needed.
+  - ➕ pinned: Chrome for Testing Stable **155.0.8059.84** linux64 (2026-10-19), SHA-256 `cf0f0498…f8bafcbc`. The CfT JSON endpoints carry no checksums, so the hash was taken at pin time from a download whose MD5 matched GCS's `x-goog-hash`. Installed and verified on the workstation.
+- [x] choose the CDP client: `chromiumoxide`, or a thin `tokio-tungstenite` client of our own. It must support flat-mode auto-attach with `waitForDebuggerOnStart` and `Fetch` on worker targets. Record the choice in this plan.
+  - ➕ **choice: a thin `tokio-tungstenite` client of our own** (`crates/proto-lab/src/cdp.rs`: one browser websocket, flat sessions, untyped JSON commands and events, nothing done on its own). `chromiumoxide` 0.9.1 is ruled out: its handler answers every `Target.attachedToTarget` with `waitingForDebugger` by sending `runIfWaitingForDebugger` itself, before the caller can arm the target, and it detaches service workers — the opposite of what the fence needs.
+  - ➕ found by the test: a **dedicated worker has no `Fetch` domain** (`Fetch.enable` on its session: "wasn't found"); its requests pause on its **page's** session. Task 6 arms dedicated workers through the page's `Fetch`; whether shared and service workers take `Fetch` on their own sessions is for Task 6 to check.
+- [x] a test against a local HTML page with a dedicated worker: a new target is held paused until we explicitly call `runIfWaitingForDebugger`
+- [x] `cargo test -p proto-lab` passes
+- [x] note: `login` and `status` are not here; they need the armed fence (Task 8)
+- ➕ every browser leads its own process group (killed whole on drop; `SIGTERM` then `SIGKILL` on close), so the crash handler doesn't outlive it; crash dumps go to the profile (`BREAKPAD_DUMP_LOCATION`). The Chrome test needs Chrome at `$PROTO_LAB_CHROME` or the pinned install, and is skipped without one unless `PROTO_LAB_REQUIRE_CHROME=1`.
 - ➕ the profiles `~/.local/share/teams-lab/profiles/{a,b,c}` already exist and are signed in to Microsoft (2026-10-19, through `tools/lab-login`). They were created by Playwright's bundled Chromium from lab-automation (Playwright 1.62.1). Pin Chrome for Testing **no older** than that Chromium, because an older Chrome can't open a profile from a newer one. Otherwise just run `proto-lab login` again, which is automatic (Task 8).
 
 ### Task 6: Fence layer 2 — HTTP interception (all hosts, all targets)

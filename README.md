@@ -27,3 +27,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 scripts/lint-report.sh
 cargo test --workspace
 ```
+
+The browser tests run headless Chrome for Testing on throwaway profiles. Install the pinned build once with
+`cargo run -p proto-lab -- chrome install` (into `~/.local/share/teams-lab/chrome/`), or point `PROTO_LAB_CHROME` at a
+Chrome binary; without one they're skipped, unless `PROTO_LAB_REQUIRE_CHROME=1`.
