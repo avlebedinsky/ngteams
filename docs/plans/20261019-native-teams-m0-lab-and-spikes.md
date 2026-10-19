@@ -1,0 +1,418 @@
+# Native Teams for Linux — M0: Lab and Risk Spikes
+
+## Overview
+- A native Microsoft Teams client for Linux in Rust + GPUI, aiming at full parity including large meetings. Work/school accounts in the commercial cloud; personal use in a private repo.
+- Neither official client has native UI code to port. Both the Windows MSIX and the macOS pkg are a native shell around the same React web app plus the closed SlimCore media stack. So this is a new client written against Teams' internal APIs, with the web client as the reference implementation.
+- This plan covers **M0**: an autonomous protocol lab with a hard write fence, plus three spikes on the riskiest assumptions (native auth against the real tenant, video rendering in GPUI, an audio call through Teams media). M1–M5 are listed as a roadmap at the end; each gets its own plan.
+- Hard requirement: autonomy. The only manual step is MFA once per lab account. Browser scenarios, captures and tests run without a human.
+
+## Context (from discovery)
+- Project dir `/home/nick/develop/projects/my/ms-teams`: not a git repo; it contains only `MicrosoftTeams.pkg` (~348 MB) and `MSTeams-x64.msix` (~287 MB).
+- Windows MSIX (analyzed with rea, 2026-10-19):
+  - `ms-teams.exe` (C++, WebView2 host)
+  - `desktop-assets/`: the offline React web app, ~6,900 `.js.gz` chunks, 213 MB, plus `serve-configs/*.json` and `maglev-configs/*.json`
+  - `client-bindings/`: `scwv2_bundle.js`, `calling_electron_bundle.js`, `rt_js_bindings_bundle.js`, `bundle.js`. These are the JS bindings to the native media stack: `skypert.dll`, `Rtm*.dll`, `SlimCoreWebview2.dll`, `SlimCV.dll`.
+  - `ic3rustcore.dll`: Microsoft's own Rust code, DTLS 1.2/1.3 on `str0m-wincrypto` + `dimpl`
+  - `onnxruntime.dll`: video effects
+- macOS pkg:
+  - the `MSTeams` shell, `MSWebView2.framework`, and the `Microsoft Teams WebView.app` helper (854 MB, Chromium)
+  - the same SlimCore dylibs
+  - no bundled web assets
+  - the payload is pbzx (xz chunks) wrapping a cpio archive
+- Backend hosts seen in the bundles:
+  - `chatsvcagg.teams.microsoft.com`
+  - `notifications.skype.net` (Trouter)
+  - `*.presence.teams.microsoft.com`
+  - `*.asm.skype.com`
+  - `api.spaces.skype.com`
+  - `config.teams.microsoft.com`
+  - `calling.web.skype.com`
+  - Microsoft Graph
+  - more regional hosts are handed out at runtime by the authz response
+- Host machine:
+  - niri (Wayland), PipeWire 1.6.9, xdg-desktop-portal-gnome
+  - Intel Iris Xe + RTX 4070 Mobile
+  - ffmpeg 9, openh264 2.6, libvpx, opus, libva, webkit2gtk-4.1
+  - rustc 1.98.1
+  - **no Chromium/Chrome installed**
+- Lab: 3 dedicated test accounts (no human uses them) in the user's real company tenant, which has other members.
+
+## Development Approach
+- **testing approach**: TDD (tests first)
+- complete each task fully before moving to the next
+- make small, focused changes
+- **CRITICAL: every task MUST include new/updated tests** for code changes in that task
+  - tests are not optional - they are a required part of the checklist
+  - write unit tests for new functions/methods
+  - write unit tests for modified functions/methods
+  - add new test cases for new code paths
+  - update existing test cases if behavior changes
+  - tests cover both success and error scenarios
+- **CRITICAL: all tests must pass before starting next task** - no exceptions
+- **CRITICAL: update this plan file when scope changes during implementation**
+- run tests after each change
+- **nothing runs live against the tenant before the fence's browser layer is armed (Tasks 6–7).** Until the write-target mapping exists (Task 11), the fence runs **fail-closed**: every mutating request is denied except a minimal seeded own-state list (Entra token endpoint, authz).
+- spikes (Tasks 15–19) end with a decision write-up in `docs/spikes/`. Spike code lives in `spikes/` and doesn't need production polish, but its measurement code and helpers are tested.
+
+## Testing Strategy
+- **unit / replay**: `cargo test --workspace`, offline. HTTP is mocked with `wiremock`. Fixtures in `tests/fixtures/` are sanitized captures.
+- **fence suite**: `cargo test -p teams-fence -p proto-lab --test 'fence_*'`. It covers both the **decision** (`Fence::check` denies) and the **enforcement** (the denied request never leaves the browser: `failRequest` fired and the page saw a network error; a denied WS frame was dropped).
+- **fixture guard**: a test scans `tests/fixtures/**` and `docs/**` for JWTs, `Bearer`, skypetokens, email addresses and real MRIs, and fails on any hit.
+- **live lab**: `cargo test --features live` and `proto-lab` commands against the 3 lab accounts. Opt-in; requires a valid lab session.
+- **UI e2e**: there's no UI in M0. From M2 on: GPUI's test harness plus screenshots.
+
+## Progress Tracking
+- mark completed items with `[x]` immediately when done
+- add newly discovered tasks with ➕ prefix
+- document issues/blockers with ⚠️ prefix
+- update plan if implementation deviates from original scope
+- keep plan in sync with actual work done
+
+## Solution Overview
+
+**Approach A: native protocol-first.** We learn each protocol from the Teams web client. Static bundle analysis comes first; an automated CDP capture then confirms the live variant and produces fixtures. Protocol notes are written in our own words in `docs/protocol/`. Meetings stay in the browser until native calls exist. No CEF, no headless web core. An embedded WebKitGTK is used only for tabs, Loop and Whiteboard (M5).
+
+**Target workspace architecture** (M0 creates only what it needs):
+```
+teams-ui (gpui) ──commands──▶ teams-core ──▶ teams-auth / teams-proto / teams-trouter / teams-call / teams-media
+       ▲                                                   │ writes
+       └──── observes ──── teams-store (SQLite) ◀──────────┘
+teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-lab (lab harness CLI)
+```
+- The UI never touches the network: it reads the store and dispatches commands.
+- tokio runs on its own thread and is bridged to the GPUI executor through channels.
+- GPUI is pinned to a Zed git revision.
+
+### The write fence (core safety mechanism)
+
+**What counts as a write.** Anything others could notice:
+- messages, edits, deletes, reactions, mentions
+- typing indicators, read receipts / consumption horizon
+- calls, **answering an incoming call**, invites, meetings
+- member changes, chat creation, channel posts, bot replies
+
+**The rule.** A write is allowed only if every participant of the target is one of the 3 lab accounts, or a Microsoft service participant the user has explicitly approved (such as the echo bot). Membership is fetched fresh, and anything unknown is denied, including a membership list that is paginated or truncated.
+
+**Layer 1, type-level in Rust:**
+- Mutating `teams-proto` methods require a `WritePermit`, which only `Fence::check` can construct.
+- Lab binaries have no other way to get one.
+- A personal build would use a separate permit provider in its own binary crate. Agents never build or run it, and it isn't part of M0.
+
+**Layer 2, in the lab browser.** Deny by default, armed before any page code runs.
+- **HTTP: every host is intercepted.** `Fetch.enable` uses the pattern `*`, and the host list is only an input to the classifier, never an interception filter. Every mutating request (POST, PUT, PATCH, DELETE, including `sendBeacon` and `fetch(keepalive)`) is classified as one of:
+  - `Own`: a seeded and reviewed list
+  - `Write(target)`: goes through `Fence::check`
+  - `Unknown`: denied
+- **Targets and workers.** `Target.setAutoAttach({autoAttach: true, waitForDebuggerOnStart: true, flatten: true})`. On every new target (pages, iframes, dedicated, shared and service workers):
+  1. enable `Fetch`
+  2. install the WS guard with `Runtime.evaluate`
+  3. only then `Runtime.runIfWaitingForDebugger`
+
+  If arming fails, the target is closed.
+- **The service worker is neutralized.** At the start of every run, unregister the Teams SW and clear its storage (no Background Sync or queued-write replay), and set `Network.setBypassServiceWorker(true)`.
+- **WebSocket guard.** Wrappers around `WebSocket.prototype.send` in every scope, including workers:
+  - nothing is sent synchronously; the frame is buffered in that socket's queue
+  - the verdict is requested through `Runtime.addBinding`
+  - the original `send` is replayed **only on an explicit allow**
+  - on deny, the frame is dropped and the run fails
+
+  Order within a socket is preserved. `Network.webSocketFrameSent` events only observe traffic and are used for auditing, not enforcement.
+- Every deny is appended to `fence.log` (JSONL) and fails the run.
+
+**Account-level side effects.** These are side effects of signing in, not conversation writes:
+- **Presence:** signed-in clients report activity on their own, so lab accounts show "Available" during runs. The lab never sets presence or a status message.
+- **Trouter and calling-endpoint registration:** makes a lab account reachable by coworkers. An incoming call is **never answered**: the native client ignores it, and in the browser, answering is a write that the fence blocks.
+
+**Native login with no clicks.** Each lab account's session lives in a persistent Chromium profile, created once with `proto-lab login` and MFA. `teams-auth` opens the authorize URL in that profile over CDP. The authorization code is taken from the redirect's `Location` header at the `Fetch` response stage, before navigation. This also works when the registered redirect is a custom scheme Chrome won't navigate to.
+
+## Technical Details
+- **Lab directories (outside the repo):**
+  - `~/.config/teams-lab/lab.toml`: the 3 accounts (alias `a|b|c`, UPN; MRIs filled in after first login) and approved service participants
+  - `~/.local/share/teams-lab/`: `chrome/` (pinned Chrome for Testing), `profiles/{a,b,c}/`, `captures/<scenario>/<ts>/`, `bundles/<version>/`, `fence.log`
+- **Secrets:** refresh tokens and skypetokens are stored in Secret Service (gnome-keyring) via the `oo7` crate; tests use an in-memory backend. Tokens never reach logs or stdout. Commands print only aud, exp, scopes and tenant.
+- **Capture format:** JSONL events (request/response metadata and bodies, WS frames).
+  - For calls: injected hooks on `RTCPeerConnection` (`createOffer`/`createAnswer`, `setLocalDescription`/`setRemoteDescription`, `onicecandidate`) plus periodic `getStats()`. `chrome://webrtc-internals` can't be exported over CDP.
+  - The sanitizer replaces tokens, emails, MRIs, display names and GUIDs with stable placeholders (`<user:a>`, `<mri:b>`, `<guid:1>`).
+  - A fixture is exported only after sanitizing.
+- **Redirect URI:** we enumerate the URIs registered for the official client ID (strings and config in `ms-teams.exe`, the Mac OneAuth config, the web bundle). An unregistered URI gives `AADSTS50011`.
+  - We prefer a native-client redirect, because a SPA redirect only issues 24-hour refresh tokens.
+  - If only a SPA redirect works, we accept a daily silent re-login through the lab profile.
+- **Skypetoken:** we exchange the Teams access token through the authz endpoint, which we confirm from the bundle and a capture. The response gives us the regional service endpoints, which we persist.
+- **str0m:** it's sans-IO, so the spike owns the UDP/TCP sockets and the clock itself. `str0m` handles ICE, DTLS, SRTP and RTP/RTCP but not codecs, so Opus goes through a separate crate (`opus`/`audiopus`).
+- **Spike metrics:**
+  - GPUI video: fps, frame time p50/p95, CPU% and VRAM for a 3×3 grid of 1280×720 streams at 30 fps, on the iGPU and the dGPU.
+  - Audio: round-trip delay and the detected tone frequency (Goertzel) through the echo service.
+
+## What Goes Where
+- **Implementation Steps**: code, tests and docs in this repo, plus lab commands the agent runs on its own.
+- **Post-Completion**: steps that need a human (MFA) or a decision.
+
+## Implementation Steps
+
+### Task 1: Bootstrap repo and workspace
+**Files:**
+- Create: `.gitignore`, `Cargo.toml` (workspace), `rust-toolchain.toml`, `CLAUDE.md`, `README.md`
+- Create: `crates/teams-fence/`, `crates/teams-auth/`, `crates/teams-proto/`, `crates/proto-lab/` (skeletons)
+- Create: `tests/fixture_guard.rs`, `tests/fixtures/.gitkeep`, `docs/protocol/.gitkeep`, `docs/spikes/.gitkeep`
+
+- [ ] `git init`; `.gitignore` covers `/target`, `*.pkg`, `*.msix`, `*.har`, `captures/`, `.env*`. The installers stay on disk but are never committed.
+- [ ] workspace `Cargo.toml` with shared lints (`unsafe_code = "deny"` outside `spikes/`, clippy pedantic as warnings) and shared dependency versions; `rust-toolchain.toml` pinned to stable
+- [ ] `CLAUDE.md` with the hard rules:
+  - writes go only through the fence and only within the 3 lab accounts
+  - nothing runs live before the browser fence is armed
+  - raw captures and tokens never enter the repo
+  - agents never build or run a personal build and never receive the user's tokens
+  - protocol notes are written in our own words; Microsoft JS is never copied in
+- [ ] write the failing fixture-guard test first (a planted JWT in a temp directory must be detected), then implement the scanner
+- [ ] `cargo test --workspace` passes
+
+### Task 2: Lab config and secret storage
+**Files:**
+- Create: `crates/proto-lab/src/config.rs`, `crates/teams-auth/src/secrets.rs`
+- Create: `crates/proto-lab/tests/config.rs`, `crates/teams-auth/tests/secrets.rs`
+
+- [ ] tests first for parsing `lab.toml`:
+  - exactly 3 accounts with unique aliases
+  - all UPNs in the same tenant domain
+  - errors on 0, 2 or 4 accounts, duplicates, or a mixed domain
+- [ ] implement `LabConfig` (accounts, approved service participants, lab dir paths)
+- [ ] tests for the `SecretStore` trait: put/get/delete per account and audience; `Debug` never prints secrets
+- [ ] implement `MemorySecretStore` (tests) and `KeyringSecretStore` (`oo7` / Secret Service)
+- [ ] `cargo test --workspace` passes
+
+### Task 3: teams-fence decision engine
+**Files:**
+- Create: `crates/teams-fence/src/{lib.rs,target.rs,decision.rs,log.rs}`
+- Create: `crates/teams-fence/tests/fence_core.rs`
+
+- [ ] tests first, as a table of `WriteKind` × participant sets:
+  - only lab accounts → allow
+  - lab accounts + an approved service → allow
+  - any outside member → deny
+  - membership fetch failed, empty, or paginated/truncated → deny
+  - org-wide team or channel → deny
+  - answering an inbound call from a non-lab caller → deny
+- [ ] implement `WriteKind` (message, edit, delete, reaction, typing, read receipt, call, call answer, invite, meeting, member change, chat create, channel post, bot reply) and `Target`
+- [ ] implement `Fence::check(target, &dyn MembershipSource) -> Result<WritePermit, Denied>`. `WritePermit` has a private constructor, and membership is always fetched, never cached. `MembershipSource` returns `Complete(members)` or `Partial`, and `Partial` → deny.
+- [ ] implement the `fence.log` JSONL writer; a test checks that every deny produces an entry with the reason and no tokens
+- [ ] `cargo test -p teams-fence` passes
+
+### Task 4: Type-level enforcement in teams-proto
+**Files:**
+- Create: `crates/teams-proto/src/{lib.rs,client.rs,write.rs}`
+- Create: `crates/teams-proto/tests/fence_types.rs`, `crates/teams-proto/tests/ui/*.rs` (trybuild)
+
+- [ ] tests first with `trybuild`: calling a mutating method without a `WritePermit` doesn't compile, and `WritePermit` can't be constructed outside `teams-fence`
+- [ ] a `Mutating` request trait in `teams-proto`: every mutating call takes a `WritePermit` bound to one `Target`, and a runtime check verifies the permit's target matches the request's target
+- [ ] a test checks that a permit issued for conversation X is rejected on a request for conversation Y
+- [ ] `cargo test -p teams-proto` passes
+
+### Task 5: Chrome for Testing and lab profiles
+**Files:**
+- Create: `crates/proto-lab/src/{browser.rs,cdp.rs,commands/chrome.rs}`
+- Create: `crates/proto-lab/tests/browser.rs`
+
+- [ ] tests first: building Chromium launch args per profile (user-data-dir, remote-debugging-port, headless/headed, fake-media flags) and verifying a download's checksum
+- [ ] `proto-lab chrome install`: downloads a pinned Chrome for Testing build into `~/.local/share/teams-lab/chrome/` and verifies its checksum. No root needed.
+- [ ] choose the CDP client: `chromiumoxide`, or a thin `tokio-tungstenite` client of our own. It must support flat-mode auto-attach with `waitForDebuggerOnStart` and `Fetch` on worker targets. Record the choice in this plan.
+- [ ] a test against a local HTML page with a dedicated worker: a new target is held paused until we explicitly call `runIfWaitingForDebugger`
+- [ ] `cargo test -p proto-lab` passes
+- [ ] note: `login` and `status` are not here; they need the armed fence (Task 8)
+
+### Task 6: Fence layer 2 — HTTP interception (all hosts, all targets)
+**Files:**
+- Create: `crates/proto-lab/src/{fence_http.rs,classify.rs,arming.rs}`
+- Create: `crates/proto-lab/tests/fence_http.rs`, `crates/proto-lab/tests/fixtures/pages/*` (local test pages)
+
+- [ ] tests first for `classify(method, url, body) -> Own(kind) | Write(kind, target) | Unknown`. The `Own` list is seeded minimally (Entra token endpoint, authz). All other mutating requests are `Unknown` and denied.
+- [ ] arming: `Fetch.enable` with pattern `*` on every target. Auto-attach with `waitForDebuggerOnStart`: Fetch + WS guard (Task 7) → `runIfWaitingForDebugger`. If arming fails, close the target.
+- [ ] neutralizing the SW at run start: unregister service workers and clear SW storage for Teams origins, plus `Network.setBypassServiceWorker(true)`
+- [ ] **enforcement** tests on a local page with a mock server:
+  - a POST from the page, from a dedicated worker, from a service worker, a `sendBeacon` and a `fetch(keepalive)` fired during `pagehide`
+  - all are denied: the mock server receives **nothing**, and the page sees a network error
+- [ ] a test that a GET passes and an allowed `Own` POST reaches the mock server
+- [ ] `cargo test -p proto-lab --test fence_http` passes
+
+### Task 7: Fence layer 2 — WebSocket guard (buffer and replay)
+**Files:**
+- Create: `crates/proto-lab/assets/ws_guard.js`, `crates/proto-lab/src/fence_ws.rs`
+- Create: `crates/proto-lab/tests/fence_ws.rs`
+
+- [ ] tests first on a local WS echo server:
+  - a denied frame never reaches the server
+  - an allowed frame arrives
+  - order is preserved across a mix of allow and deny within one socket
+  - this works the same in the page, a dedicated worker and a shared worker
+- [ ] `ws_guard.js`: wraps `WebSocket.prototype.send` with a per-socket queue, requests the verdict through `Runtime.addBinding`, replays the original `send` only on allow, drops and reports on deny. Installed before any target's code runs (through arming from Task 6).
+- [ ] the classifier for WS frames (`Unknown` → deny), with tests on synthetic frames
+- [ ] an audit: `Network.webSocketFrameSent` is compared with the guard's verdicts, and any frame sent without an allow fails the run
+- [ ] `cargo test -p proto-lab --test fence_ws` passes
+
+### Task 8: Lab login and status under the armed fence
+**Files:**
+- Create: `crates/proto-lab/src/commands/{login.rs,status.rs}`
+- Create: `crates/proto-lab/tests/login.rs`
+
+- [ ] tests first: detecting that the web client has loaded and that a session has expired (on recorded synthetic CDP events)
+- [ ] `proto-lab login <a|b|c>`: a headed window on the persistent profile, **with the fence armed in fail-closed mode**. It waits for the web client to load, records the account's MRI into `lab.toml`, and closes.
+- [ ] `proto-lab status`: headless with the armed fence; prints `ok` / `login needed` per account
+- [ ] `cargo test -p proto-lab` passes
+
+### Task 9: Capture recorder and sanitizer
+**Files:**
+- Create: `crates/proto-lab/src/{capture.rs,sanitize.rs,commands/export.rs}`, `crates/proto-lab/assets/rtc_hooks.js`
+- Create: `crates/proto-lab/tests/sanitize.rs`
+
+- [ ] tests first for the sanitizer:
+  - JWTs, skypetokens, cookies and `Authorization` are removed
+  - emails, MRIs, names and GUIDs become stable placeholders, consistent within one capture
+  - sanitizing is idempotent
+- [ ] recorder: `Network.*` events plus WS frames plus the fence verdicts → JSONL under `captures/<scenario>/<ts>/` (outside the repo)
+- [ ] `rtc_hooks.js` (SDP/ICE/`getStats` capture), installed through the same arming. Write a test on a local page with a loopback `RTCPeerConnection`.
+- [ ] `proto-lab export <capture> <fixture-name>`: sanitize, write to `tests/fixtures/`, then run the fixture guard. Nothing is written if the guard fails.
+- [ ] `cargo test --workspace` passes
+
+### Task 10: Bundle import and index
+**Files:**
+- Create: `crates/proto-lab/src/bundles/{import.rs,index.rs}`
+- Create: `crates/proto-lab/tests/bundles.rs`, `crates/proto-lab/tests/fixtures/mini-bundle/`
+
+- [ ] tests first on a small synthetic bundle: extract URL templates, hosts, HTTP methods and route constants into an index
+- [ ] `proto-lab bundles import <msix>`: unpack `desktop-assets` and `client-bindings` into `bundles/<version>/` (gunzip only, nothing executed) and build the index
+- [ ] `proto-lab bundles search <pattern>`: search the index, to help with classification and protocol notes. The agent uses rea (`analyze_javascript_application`, `trace_javascript_semantics`) for deeper analysis.
+- [ ] `cargo test -p proto-lab` passes
+
+### Task 11: Scenario runner, `load`, and the fence target mapping
+**Files:**
+- Create: `crates/proto-lab/src/scenario/{mod.rs,dsl.rs,load.rs,ab_chat.rs}`, `crates/proto-lab/src/membership.rs`, `docs/protocol/fence-targets.md`
+- Create: `crates/proto-lab/tests/{scenario_dsl.rs,membership.rs,fence_targets.rs}`
+
+- [ ] tests first for scenario helpers against a local page: wait for a `data-tid` selector, wait for a request matching a pattern, and a timeout gives a clear error naming the step
+- [ ] scenario `load` (account A, fail-closed fence): open the web client, wait for it to load, record the traffic. Every denied write goes into the capture as data for mapping.
+- [ ] from the bundle index and the `load` capture: find the read-only endpoint for a conversation's/call's member list (including pagination) and the table of write endpoints → `WriteKind` + how to extract the `Target` from the URL or body. Write it up in `docs/protocol/fence-targets.md`.
+- [ ] tests first, then the implementation: `LiveMembershipSource` (a read-only request from the same profile; anything paginated or truncated → `Partial`) and the classifier extended with the mapping. Tests use sanitized fixtures.
+- [ ] scenario `ab-chat`: A sends a message in the A–B chat (create or open, inside the fence) and B receives it. Before the run, a **live enforcement test**: one A–B request with a forced deny verdict must not reach the server (B doesn't receive it), and the page gets an error. After the run, `fence.log` has no unexpected denies.
+- [ ] `proto-lab run <scenario> [--headless]`; any unexpected deny → non-zero exit
+- [ ] `cargo test -p proto-lab` passes, including `fence_*`
+
+### Task 12: Auth protocol notes from bundle and capture
+**Files:**
+- Create: `docs/protocol/auth.md`
+- Create: `tests/fixtures/auth/*.json` (sanitized)
+
+- [ ] from the bundle and the binaries, determine:
+  - the client ID and **all registered redirect URIs** (`ms-teams.exe`, Mac OneAuth config, web bundle)
+  - the scopes and audiences each service needs
+  - the authz/skypetoken flow and the regional endpoints in its response
+- [ ] confirm with the `load` capture (account A); export sanitized fixtures
+- [ ] `auth.md`: the flow in our own words, an audience × service table, the redirect decision (native vs SPA and refresh-token lifetime; custom scheme → catch `Location`), open questions
+- [ ] the fixture guard passes on the new fixtures
+
+### Task 13: teams-auth token core (offline)
+**Files:**
+- Create: `crates/teams-auth/src/{pkce.rs,token.rs,refresh.rs}`
+- Create: `crates/teams-auth/tests/{pkce.rs,token.rs}`
+
+- [ ] tests first:
+  - PKCE verifier/challenge against RFC 7636 test vectors
+  - building the authorize URL
+  - code → token and refresh → token on `wiremock`, using the Task 12 fixtures
+  - error paths: `invalid_grant`, `AADSTS50011`, a Conditional Access block (`AADSTS53003` and similar), 429 with `Retry-After`
+- [ ] implement PKCE, token exchange and refresh, storing into `SecretStore`
+- [ ] `cargo test -p teams-auth` passes
+
+### Task 14: Authorize via the lab profile, skypetoken, CLI (spike 1)
+**Files:**
+- Create: `crates/teams-auth/src/authz.rs`, `crates/proto-lab/src/commands/auth.rs`, `docs/spikes/auth.md`
+- Create: `crates/teams-auth/tests/authz.rs`, `crates/proto-lab/tests/auth_redirect.rs`
+
+- [ ] tests first: extracting `code`/`state`/`error` from a recorded 302 `Location` (https and custom scheme); validating `state`; the skypetoken exchange and parsing the regional endpoints on `wiremock`
+- [ ] the authorize step: CDP opens the URL in profile X with the fence armed; `Fetch` at the response stage catches the redirect to the registered URI, takes the code, and fails the navigation. No human.
+- [ ] the skypetoken exchange via authz; persist the regional endpoints
+- [ ] `proto-lab auth <a|b|c>` prints aud, exp, scopes, tenant, skypetoken expiry and region, never the tokens themselves
+- [ ] live test (`--features live`): all 3 accounts get a skypetoken. Write the outcome, including what Conditional Access did, to `docs/spikes/auth.md`.
+- [ ] `cargo test -p teams-auth -p proto-lab` passes
+
+### Task 15: GPUI on niri smoke check
+**Files:**
+- Create: `spikes/gpui-video/{Cargo.toml,src/main.rs}`
+
+- [ ] stock GPUI (pinned Zed rev) opens a window on niri/Wayland and renders text plus an image on the iGPU and the dGPU (`DRI_PRIME` / Vulkan device selection)
+- [ ] a test (with `#[ignore]` when there's no Wayland session): the window starts and closes within N seconds without errors
+- [ ] if there's a windowing blocker, add ⚠️ to the plan and stop before Task 16
+
+### Task 16: GPUI video rendering spike (spike 2)
+**Files:**
+- Create: `spikes/gpui-video/src/{frames.rs,bench.rs,grid.rs}`, `docs/spikes/gpui-video.md`
+- Create: `spikes/gpui-video/tests/frames.rs`
+
+- [ ] tests first for the synthetic frame generator (1280×720 NV12/BGRA, with a burned-in frame counter that can be read back from the pixels) and the stats aggregator (p50/p95, fps)
+- [ ] approach (a): stock GPUI, uploading each frame as an image into a 3×3 grid; measure on the iGPU and the dGPU
+- [ ] approach (b), only if (a) misses the target: patch GPUI's Linux renderer to add an external texture with NV12→RGB conversion in a shader, on a fork pinned to a revision; measure
+- [ ] `docs/spikes/gpui-video.md`: the numbers, the chosen approach, the cost of maintaining the patch
+- [ ] target: 9 × 720p at 30 fps with p95 frame time under 33 ms. If we miss it, add ⚠️ and the decision to this plan.
+
+### Task 17: Offline str0m media loop (spike 3a)
+**Files:**
+- Create: `spikes/media-loop/{Cargo.toml,src/lib.rs,src/tone.rs,src/goertzel.rs,src/peer.rs}`
+- Create: `spikes/media-loop/tests/loopback.rs`
+
+- [ ] tests first: the tone generator → Goertzel detects its frequency; an Opus encode/decode round trip (`opus`/`audiopus`) keeps the tone within tolerance
+- [ ] two `str0m` peers in one process. We drive the UDP sockets and the clock ourselves (sans-IO), and Opus payloads go out as RTP through `str0m` (ICE, DTLS, SRTP).
+- [ ] the loopback test checks that the received frequency equals the sent one and records the latency
+- [ ] `cargo test -p media-loop` passes
+
+### Task 18: Echo call signaling capture and notes (spike 3b, part 1)
+**Files:**
+- Create: `docs/protocol/calling-echo.md`, `crates/proto-lab/src/scenario/echo_call.rs`
+- Create: `tests/fixtures/calling/echo/*.json` (sanitized)
+
+- [ ] gate: if the echo service participant isn't approved in `lab.toml`, stop and ask the user (see Post-Completion)
+- [ ] scenario `echo-call`: account A's lab Chromium places the test call with fake audio (a WAV tone). The fence must allow the call (A + approved echo bot). The capture records the HTTP/WS signaling and the `rtc_hooks` data (SDP, ICE, codecs, `getStats`).
+- [ ] `calling-echo.md`: the order of signaling steps, SDP details (codecs, extensions, BUNDLE, rtcp-mux), the TURN credential flow, and how the endpoint is registered. Document that incoming calls are never answered.
+- [ ] export sanitized fixtures; the fixture guard passes
+
+### Task 19: Native echo call (spike 3b, part 2)
+**Files:**
+- Create: `spikes/echo-call/{Cargo.toml,src/main.rs,src/signaling.rs,src/turn.rs}`, `docs/spikes/echo-call.md`
+- Create: `spikes/echo-call/tests/{signaling.rs,turn.rs}`
+
+- [ ] tests first: parse and build the signaling messages from the fixtures; parse TURN allocate/refresh/channel-bind exchanges (RFC 8656) on recorded and synthetic packets; an incoming-call event is ignored, never answered
+- [ ] native client: skypetoken (Task 14) → start the echo call through the fence (`WriteKind::Call`, a permit for A + echo) → `str0m` + our own TURN client over TCP 443 when UDP fails → send an Opus tone → detect it in the echo
+- [ ] `docs/spikes/echo-call.md`: whether it worked, the round-trip delay, which transport was used, open questions for M3
+- [ ] `cargo test --workspace` passes
+
+### Task 20: Verify M0 acceptance criteria
+- [ ] `proto-lab status` is `ok` for a, b and c; `proto-lab auth` gets a skypetoken for all 3
+- [ ] the fence suite (decision + enforcement, HTTP + WS, page + workers + SW + beacon) passes; `proto-lab run ab-chat` passes, including the live enforcement test
+- [ ] GPUI runs on niri and meets 9×720p30, or the decision and patch are documented
+- [ ] the echo call returns our tone, or the blocker and next step are documented
+- [ ] `cargo test --workspace` and `cargo clippy --workspace -- -D warnings` pass; the fixture guard is green
+
+### Task 21: [Final] Update documentation
+- [ ] README.md: what this is, the lab layout, `proto-lab` commands, how to run tests
+- [ ] CLAUDE.md: patterns discovered during M0 (fence arming, fixtures, scenarios)
+- [ ] write the M1 plan (headless chat core), informed by the spike results
+- [ ] move this plan to `docs/plans/completed/`
+
+## Roadmap after M0 (each milestone gets its own plan)
+- **M1 — headless chat core:** `teams-store` (SQLite), `teams-trouter`, chatsvc (conversations, messages, send/edit/delete/react, rich text, mentions, attachments), an outbox with `clientmessageid` dedupe, catch-up sync, `teams-mock`. *Exit:* A→B delivery in under 2 s, covering edits, reactions and a 3-person group chat, automated.
+- **M2 — GPUI daily driver:** chat list, chat view and compose, desktop notifications, presence, search, teams and channels, files and calendar (Graph), Adaptive Cards, tray. *Exit:* GPUI UI tests plus screenshots against the live lab. From here the user can switch to a personal build.
+- **M3 — calls:** 1:1 and group audio, video and screen share (portal ScreenCast), TURN/TCP, `webrtc-audio-processing`, jitter buffer + PLC, H.264 via VA-API/NVENC + openh264. *Exit:* A↔B media assertions pass; a 3-way video call is stable for 10 minutes.
+- **M4 — meetings:** joining scheduled meetings, lobby, roster, raise hand, meeting chat, simulcast for large meetings, content sharing. *Exit:* A schedules with B and C, all three join natively, roster and media assertions pass.
+- **M5 — long tail:** breakout rooms, live captions, recording indicator, background blur (ONNX), PSTN, `teams-webhost` (WebKitGTK + JS SDK shim).
+- **Cross-cutting:**
+  - resilience: proactive refresh, 401 → refresh + retry, 429 handling, Trouter reconnect + catch-up, `Unknown(String)` + `serde(flatten)` tolerance, an "open in browser" fallback
+  - drift detection: scheduled `bundles fetch` + a `bundles diff` report (deferred from M0)
+
+## Post-Completion
+*Items requiring a human or a decision — informational only.*
+
+**Manual steps:**
+- Create `~/.config/teams-lab/lab.toml` with the 3 account UPNs, or hand them over and the agent writes it.
+- Run `proto-lab login a|b|c` (after Task 8): MFA once per account, and again only when the tenant's sign-in frequency policy asks.
+
+**Decisions for the user:**
+- Approve the Teams echo service as a fence participant (it's a Microsoft bot, not a company member) before Task 18 runs live.
+- If Conditional Access blocks the native client (Task 14), decide how to proceed. This changes the project's direction.
+- Lab accounts show as "Available" while scenarios run and are reachable by coworkers' calls, which are never answered. Confirm that this is acceptable.
