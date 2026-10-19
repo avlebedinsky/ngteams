@@ -1,0 +1,10 @@
+[package]
+name = "teams-proto"
+description = "Teams internal API requests; every mutating one takes a WritePermit from teams-fence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

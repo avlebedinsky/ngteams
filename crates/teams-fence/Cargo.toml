@@ -1,0 +1,10 @@
+[package]
+name = "teams-fence"
+description = "The write fence: allows a write only when every participant of its target is a lab account or an approved service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

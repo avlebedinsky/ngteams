@@ -157,7 +157,7 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/teams-fence/`, `crates/teams-auth/`, `crates/teams-proto/`, `crates/proto-lab/` (skeletons)
 - Create: `tests/fixture_guard.rs`, `tests/fixtures/.gitkeep`, `docs/protocol/.gitkeep`, `docs/spikes/.gitkeep`
 
-- [ ] `git init`; `.gitignore` covers `/target`, `*.pkg`, `*.msix`, `*.har`, `captures/`, `.env*`. The installers stay on disk but are never committed.
+- [x] `git init` (already a repository); `.gitignore` covers `/target`, `*.pkg`, `*.msix`, `*.har`, `captures/`, `.env*`. The installers stay on disk but are never committed.
 - [x] ➕ lint setup identical to agterm-rs, already in the repo:
   - `clippy.toml` (complexity thresholds, unwrap/expect/panic allowed only in tests)
   - `[workspace.lints]` in `Cargo.toml` (`all` + `pedantic` deny, unwrap/expect/panic/todo/dbg deny, unsafe-block lints, `allow_attributes` deny)
@@ -165,8 +165,8 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
   - `rust-toolchain.toml` (1.98.1)
   - `scripts/lint-report.sh` (refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s; scans `crates/` and `spikes/`)
   - `members` is an explicit list, because cargo refuses a glob that matches nothing
-- [ ] every crate, spikes included, gets `[lints] workspace = true`; add each crate to `members` as it's created; add shared dependency versions to `[workspace.dependencies]`
-- [ ] `CLAUDE.md` with the hard rules:
+- [x] every crate, spikes included, gets `[lints] workspace = true`; add each crate to `members` as it's created; add shared dependency versions to `[workspace.dependencies]`
+- [x] `CLAUDE.md` with the hard rules:
   - writes go only through the fence and only within the 3 lab accounts
   - nothing runs live before the browser fence is armed
   - raw captures and tokens never enter the repo
@@ -178,8 +178,9 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
     - `clippy.toml` thresholds are lowered, never raised
     - a toolchain bump is a separate change
   - the gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test --workspace`
-- [ ] write the failing fixture-guard test first (a planted JWT in a temp directory must be detected), then implement the scanner
-- [ ] `cargo test --workspace` passes
+- [x] write the failing fixture-guard test first (a planted JWT in a temp directory must be detected), then implement the scanner
+  - the scanner is a library crate, `crates/fixture-guard`, so `proto-lab export` (Task 9) can reuse it. The repo-wide check is `crates/fixture-guard/tests/fixture_guard.rs` rather than a root `tests/fixture_guard.rs`, which would need the workspace root to be a package. Fixtures stay in the root `tests/fixtures/`.
+- [x] `cargo test --workspace` passes
 
 ### Task 2: Lab config and secret storage
 **Files:**

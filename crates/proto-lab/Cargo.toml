@@ -1,0 +1,10 @@
+[package]
+name = "proto-lab"
+description = "Protocol lab harness: lab browser profiles, the armed browser fence, captures and scenarios"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

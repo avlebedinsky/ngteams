@@ -1,0 +1,29 @@
+# ms-teams
+
+A native Microsoft Teams client for Linux in Rust + GPUI, for work/school accounts. Neither official client has native
+UI code to port, so this one is written against Teams' internal APIs, with the web client as the reference.
+
+Status: M0, the protocol lab and risk spikes (`docs/plans/20261019-native-teams-m0-lab-and-spikes.md`). Hard rules for
+contributors and agents are in [CLAUDE.md](CLAUDE.md).
+
+## Layout
+
+| path | contents |
+|---|---|
+| `crates/teams-fence` | the write fence: a write is allowed only within the 3 lab accounts |
+| `crates/teams-auth` | PKCE code exchange, token refresh and storage, skypetoken |
+| `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
+| `crates/proto-lab` | the lab harness CLI |
+| `crates/fixture-guard` | scans `tests/fixtures/` and `docs/` for tokens, emails and real MRIs |
+| `tests/fixtures/` | sanitized captures |
+| `docs/protocol/`, `docs/spikes/` | protocol notes and spike write-ups |
+| `tools/` | interim Node tools (lab sign-in, Conditional Access probe) |
+
+## Test
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+scripts/lint-report.sh
+cargo test --workspace
+```
