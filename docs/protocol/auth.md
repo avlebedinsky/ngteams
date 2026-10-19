@@ -72,7 +72,11 @@ Where each redirect comes from:
    `code`, `redirect_uri`, `code_verifier`, `scope`). The answer has an access token for `api.spaces.skype.com`, a
    refresh token and an ID token. Entra adds `client_info` (the account's uid/utid) only when the request sends
    `client_info=1`, as MSAL does; we don't send it (nor did the CA probe), so we don't get it. The ID token's `oid`
-   and `tid` identify the account instead.
+   and `tid` identify the account instead. `login_hint` doesn't decide who signs in (the profile's SSO session does),
+   so `teams-auth` stores the refresh token only when the ID token's `aud` is the client and its `preferred_username`
+   (and `upn`, if present) is the requested account; an answer without a readable ID token stores nothing. The claims
+   are decoded without a signature check: the ID token comes straight from the token endpoint over TLS, in answer to
+   our own PKCE-bound redemption (OpenID Connect Core 3.1.3.7).
 3. **Other audiences**: POST the same endpoint with `grant_type=refresh_token`, the one refresh token and
    `scope=<resource>/.default` (plus `openid profile offline_access`). Store the newest refresh token each time; Entra
    may rotate it.
