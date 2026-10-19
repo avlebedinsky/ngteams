@@ -167,8 +167,16 @@ fn rtc_events() -> [Value; 2] {
     ]
 }
 
-/// A response's headers, its raw header text, a binary frame and a base64 body.
-fn transport_events() -> [Value; 4] {
+/// What a binary WebSocket frame the page sent holds: an email, a name and an MRI, as raw bytes.
+fn binary_frame_bytes() -> Vec<u8> {
+    let mut bytes = vec![0x82, 0x00];
+    bytes.extend(format!("{COWORKER_UPN}\0{COWORKER_NAME}\08:orgid:{COWORKER_GUID}").bytes());
+    bytes
+}
+
+/// A response's headers, its raw header text, a binary frame, a base64 body, and the fence's verdicts on a request and
+/// on a binary frame.
+fn transport_events() -> [Value; 5] {
     let base64_body = base64::engine::general_purpose::STANDARD.encode(format!(r#"{{"owner":"{COWORKER_UPN}"}}"#));
     [
         cdp(
@@ -187,6 +195,9 @@ fn transport_events() -> [Value; 4] {
         json!({"type": "verdict", "channel": "http", "session": null, "method": "POST", "verdict": "deny", "cause": "unclassified",
             "url": format!("https://go.trouter.teams.microsoft.com/v4/a?sr=x&sig={SAS_SIG}&epid={BOT_GUID}"),
             "request": {"url": format!("https://example.invalid/v1/token/{OPAQUE_PATH_TOKEN}"), "headers": {}}}),
+        json!({"type": "verdict", "channel": "web_socket", "session": "S1", "url": "wss://pub.example.invalid/v1",
+            "socket": 1, "frame_seq": 3, "verdict": "deny", "cause": "unclassified",
+            "frame": {"kind": "binary", "data": base64::engine::general_purpose::STANDARD.encode(binary_frame_bytes())}}),
     ]
 }
 
@@ -432,6 +443,30 @@ fn binary_content_is_dropped_and_base64_text_is_read() {
 }
 
 #[test]
+fn a_binary_frame_in_a_verdict_is_dropped() {
+    let events = sanitized().unwrap();
+    let verdict = &events[11];
+    assert_eq!(verdict["channel"], "web_socket");
+    assert_eq!(verdict["frame"]["kind"], "binary");
+    assert_eq!(
+        verdict["frame"]["data"],
+        format!("<binary:{}>", binary_frame_bytes().len())
+    );
+    // no piece of the frame's base64 is left anywhere
+    let encoded = base64::engine::general_purpose::STANDARD.encode(binary_frame_bytes());
+    let text = as_jsonl(&events);
+    for piece in encoded.split(['+', '/', '=']).filter(|piece| piece.len() >= 8) {
+        assert!(!text.contains(piece), "{piece} survived");
+    }
+    // a text frame is read through the text rules
+    let text_frame = json!({"type": "verdict", "channel": "web_socket", "frame": {"kind": "text", "data": format!("hello {COWORKER_UPN}")}});
+    let out = sanitize_events(&[text_frame], &Identities::default())
+        .unwrap()
+        .remove(0);
+    assert_eq!(out["frame"]["data"], "hello <user:1>");
+}
+
+#[test]
 fn sanitizing_is_idempotent() {
     let once = sanitized().unwrap();
     let twice = sanitize_events(&once, &identities()).unwrap();
@@ -531,6 +566,88 @@ fn a_name_is_learned_from_any_event_and_replaced_in_every_other() {
 }
 
 #[test]
+fn a_name_in_a_base64_body_is_learned_too() {
+    let profile = json!({"value": [{"displayName": "Marguerite Fakename"}]}).to_string();
+    let body = json!({"type": "response_body", "body": base64::engine::general_purpose::STANDARD.encode(profile), "base64Encoded": true});
+    let message = json!({"text": "Hi Marguerite Fakename, and marguerite again"});
+    for events in [[body.clone(), message.clone()], [message, body]] {
+        let out = sanitize_events(&events, &Identities::default()).unwrap();
+        let text = as_jsonl(&out).to_lowercase();
+        assert!(!text.contains("marguerite") && !text.contains("fakename"), "{text}");
+    }
+}
+
+#[test]
+fn a_name_after_an_encoded_separator_is_replaced() {
+    let events = [
+        json!({"displayName": "Jane Doe"}),
+        json!({
+            "url": "https://x.example.invalid/send?message=Hello%20Jane%20Doe&to=Doe",
+            "twice": "https://x.example.invalid/r?u=%2Fsend%3Fm%3DHello%2520Jane%2520Doe",
+            "escaped": r#"a frame that isn't JSON: {\"text\":\"Hi\nJane\tDoe\u0020Jane\""#,
+        }),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    let text = as_jsonl(&out).to_lowercase();
+    assert!(!text.contains("jane") && !text.contains("doe"), "{text}");
+    assert_eq!(
+        out[1]["url"],
+        "https://x.example.invalid/send?message=Hello%20<name:1>&to=<name:1>"
+    );
+    // a name inside a longer word is still no name
+    let word = sanitize_events(
+        &[
+            json!({"displayName": "Ann"}),
+            json!({"text": "Annual planning, by Ann"}),
+        ],
+        &Identities::default(),
+    )
+    .unwrap();
+    assert_eq!(word[1]["text"], "Annual planning, by <name:1>");
+}
+
+#[test]
+fn an_encoded_email_keeps_what_comes_before_it() {
+    let events = [json!({
+        "plain": "sip:jane@contoso.com",
+        "encoded": "sip%3Ajane%40contoso.com",
+        "redirect": "?url=https%3A%2F%2Fteams.microsoft.com%2Fl%3Fusers%3Djane%2540contoso.com",
+        "quoted": "%22jane%40contoso.com%22",
+        "lab": "to%3Alab-a%40contoso-lab.com",
+        "plus": "jane%2Bteams%40contoso.com",
+    })];
+    let out = sanitize_events(&events, &identities()).unwrap().remove(0);
+    assert_eq!(out["plain"], "sip:<user:1>");
+    assert_eq!(out["encoded"], "sip%3A<user:1>");
+    assert_eq!(
+        out["redirect"],
+        "?url=https%3A%2F%2Fteams.microsoft.com%2Fl%3Fusers%3D<user:1>"
+    );
+    assert_eq!(out["quoted"], "%22<user:1>%22");
+    assert_eq!(out["lab"], "to%3A<user:a>");
+    // an encoded character that belongs in an address stays part of it
+    let plus = out["plus"].as_str().unwrap();
+    assert!(plus.starts_with("<user:") && !plus.contains("jane"), "{plus}");
+}
+
+#[test]
+fn an_ice_username_fragment_is_a_token_like_the_ufrag_it_is() {
+    let candidate = json!({"type": "rtc", "payload": {"event": "icecandidate", "data": {
+        "candidate": "candidate:1 1 udp 2122260223 127.0.0.1 54321 typ host generation 0 ufrag Qx7Zk network-id 1",
+        "usernameFragment": "Qx7Zk",
+    }}});
+    let out = sanitize_events(&[candidate], &Identities::default()).unwrap().remove(0);
+    assert!(!out.to_string().contains("Qx7Zk"), "{out}");
+    let data = &out["payload"]["data"];
+    let token = data["usernameFragment"].as_str().unwrap();
+    assert!(token.starts_with("<token:"), "{token}");
+    assert!(
+        data["candidate"].as_str().unwrap().contains(&format!("ufrag {token}")),
+        "{data}"
+    );
+}
+
+#[test]
 fn one_sanitizer_keeps_its_labels_across_events() {
     let mut sanitizer = Sanitizer::new(&Identities::default()).unwrap();
     let first = sanitizer.sanitize(&json!({"to": COWORKER_UPN})).unwrap();
@@ -614,6 +731,23 @@ fn a_fixture_the_guard_refuses_is_not_written() {
 }
 
 #[test]
+fn a_fixture_that_cant_be_put_in_place_leaves_no_staging_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // a non-empty directory where the fixture should go: the rename fails
+    let path = dir.path().join("taken.jsonl");
+    fs::create_dir_all(path.join("inside")).unwrap();
+    let error = export::write_fixture(&path, "{\"ok\":1}\n").unwrap_err();
+    assert!(matches!(error, ExportError::Io { .. }), "{error}");
+    let mut names: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["taken.jsonl"]);
+    assert!(path.join("inside").is_dir());
+}
+
+#[test]
 fn fixture_names_stay_inside_the_fixtures_dir() {
     let fixtures = Path::new("/repo/tests/fixtures");
     let ok = [
@@ -654,11 +788,22 @@ fn a_malformed_capture_is_refused_with_its_line() {
 #[test]
 fn the_fixtures_dir_is_found_from_inside_the_repository() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/x\"]\n").unwrap();
     fs::create_dir_all(dir.path().join("tests/fixtures")).unwrap();
+    // a member crate with test fixtures of its own is not where exports go
     fs::create_dir_all(dir.path().join("crates/x/src")).unwrap();
-    let found = export::find_fixtures_dir(&dir.path().join("crates/x/src")).unwrap();
-    assert_eq!(found, dir.path().join("tests/fixtures"));
+    fs::create_dir_all(dir.path().join("crates/x/tests/fixtures")).unwrap();
+    fs::write(dir.path().join("crates/x/Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    for start in ["crates/x/src", "crates/x", "crates/x/tests/fixtures", "", "tests"] {
+        let found = export::find_fixtures_dir(&dir.path().join(start)).unwrap();
+        assert_eq!(found, dir.path().join("tests/fixtures"), "from {start:?}");
+    }
+    // a workspace without tests/fixtures has none, even when a member does
+    fs::remove_dir_all(dir.path().join("tests")).unwrap();
+    assert!(matches!(
+        export::find_fixtures_dir(&dir.path().join("crates/x/src")),
+        Err(ExportError::NoFixturesDir(_))
+    ));
     let elsewhere = tempfile::tempdir().unwrap();
     assert!(matches!(
         export::find_fixtures_dir(elsewhere.path()),

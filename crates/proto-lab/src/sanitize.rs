@@ -5,11 +5,12 @@
 //! capture: the same email, MRI, GUID or name gets the same placeholder in every event.
 //! - **Secrets are removed**: JWTs, skypetokens, `Bearer`/`Basic` credentials, cookie values, and any value under a
 //!   secret-looking key (`*token*`, `*secret*`, `*password*`, `*cookie*`, `*credential*`, `authorization`, `sig`, the
-//!   ICE `pwd`/`ufrag`, the TURN `username`, …), in JSON, in form and query strings, and in text. Each becomes
-//!   `<token:N>`; a scheme is kept (`Bearer <token:1>`, `skypetoken=<token:2>`), and so is a cookie's name. A long value
-//!   under a generic key (`code`, `key`, `state`) is a secret too, as is any long high-entropy run of letters and
-//!   digits nothing else recognized. Raw header text (`headersText`) is dropped, and binary content (base64 bodies
-//!   that aren't UTF-8 text, binary WebSocket frames) becomes `<binary:LEN>`.
+//!   ICE `pwd`/`ufrag`/`usernameFragment`, the TURN `username`, …), in JSON, in form and query strings, and in text.
+//!   Each becomes `<token:N>`; a scheme is kept (`Bearer <token:1>`, `skypetoken=<token:2>`), and so is a cookie's
+//!   name. A long value under a generic key (`code`, `key`, `state`) is a secret too, as is any long high-entropy run
+//!   of letters and digits nothing else recognized. Raw header text (`headersText`) is dropped, and binary content
+//!   (base64 bodies that aren't UTF-8 text, binary WebSocket frames in CDP events and in the fence's verdicts, `bytes`)
+//!   becomes `<binary:LEN>`.
 //! - **Identifiers become placeholders**: emails `<user:N>`, MRIs `<mri:N>` (`8:orgid:…`, `8:live:…`, `28:…`, phone
 //!   `4:…`, `tel:`), conversation ids `19:<thread:N>@thread.v2`, GUIDs `<guid:N>`, tenant domains
 //!   (`*.onmicrosoft.com`, `*.sharepoint.com`, the lab's own) `<domain:N>`, IP addresses other than loopback `<ip:N>`,
@@ -18,9 +19,11 @@
 //!   `<mri:3>` and `<guid:3>` are the same object. The lab's own accounts get their alias instead of a number
 //!   (`<user:a>`, `<mri:b>`, `<guid:c>`), and an approved service participant its name (`<mri:echo>`).
 //! - **Names** are learned from name fields (`displayName`, `givenName`, `surname`, `imdisplayname`, …) across the whole
-//!   capture first; then every occurrence of a learned name, or of a word of it with 3 letters or more, in any case and
-//!   as a whole word (`_` separates words too), is replaced in every text (a message body that says "Hi Jane", a
-//!   `OneDrive` path with `jane_doe`). A name only ever seen under a generic key such as `name` isn't learned.
+//!   capture first, base64 bodies and JSON inside strings included; then every occurrence of a learned name, or of a
+//!   word of it with 3 letters or more, in any case and as a whole word (`_` and a percent or backslash escape such as
+//!   `%20` or `\n` separate words too), is replaced in every text (a message body that says "Hi Jane", a `OneDrive`
+//!   path with `jane_doe`, a query with `Hello%20Jane`). A name only ever seen under a generic key such as `name` isn't
+//!   learned.
 //!
 //! JSON inside a string (a request or response body, a WebSocket frame, also after a text prefix such as Trouter's
 //! `3:::`) is sanitized as JSON and written back compactly, so keys are seen wherever they are; object keys go through
@@ -45,9 +48,13 @@ const KINDS: &str = "token|user|mri|guid|thread|domain|ip|name|pii|binary|omitte
 const COLON: &str = "(?::|%3[aA]|%253[aA])";
 const AT: &str = "(?:@|%40|%2540)";
 const GUID: &str = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+/// A percent escape (single or double) of a character an email's local part may hold: `!`, `$`, `*`, `+`, `-`, `.`,
+/// `^`, `_`, a backtick, `{`, `|`, `}`, `~`. Never of a URL delimiter (`:`, `/`, `=`, `?`, `&`, `#`), a quote, `%` or a
+/// space, so an encoded email doesn't take in the encoded text before it.
+const LOCAL_ESCAPE: &str = "%(?:25)?(?:2[14ABDEabde]|5[EFef]|60|7[B-Eb-e])";
 
 /// Key fragments whose values are always secrets (keys are compared lowercased).
-const SECRET_PARTS: [&str; 21] = [
+const SECRET_PARTS: [&str; 22] = [
     "token",
     "secret",
     "password",
@@ -69,6 +76,8 @@ const SECRET_PARTS: [&str; 21] = [
     "canary",
     "pwd",
     "ufrag",
+    // the ICE `usernameFragment` of a candidate: the same value as the `ufrag` in the SDP
+    "usernamefragment",
 ];
 
 /// Whole keys whose values are always secrets.
@@ -229,6 +238,7 @@ struct Rules {
     ipv6_run: Regex,
     ufrag: Regex,
     opaque_run: Regex,
+    escape_end: Regex,
 }
 
 impl Rules {
@@ -252,8 +262,10 @@ impl Rules {
             thread: Regex::new(&format!(
                 r"(^|[^0-9])(19{COLON})([A-Za-z0-9_\-.=]+)({AT}[A-Za-z0-9][A-Za-z0-9.]*)"
             ))?,
+            // the escapes before the address (`%3A` of `sip%3Ajane%40…`) are captured to be kept, and not taken for
+            // part of its local part, which holds only the escapes of characters an address may have
             email: Regex::new(&format!(
-                r"([A-Za-z0-9._%+\-]+){AT}([A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{{2,}})\b"
+                r"((?:%(?:25)?[0-9A-Fa-f]{{2}})*?)((?:[A-Za-z0-9._+\-]|{LOCAL_ESCAPE})+){AT}([A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{{2,}})\b"
             ))?,
             tenant: tenant_domain
                 .map(|domain| Regex::new(&format!(r"(?i)\b{}\b", regex::escape(domain))))
@@ -265,6 +277,7 @@ impl Rules {
             ipv6_run: Regex::new(r"[0-9A-Fa-f:.]+")?,
             ufrag: Regex::new(r"(?i)(\bufrag\s+)([^\s<>]+)")?,
             opaque_run: Regex::new(r"[A-Za-z0-9_\-]+")?,
+            escape_end: Regex::new(r"(?:%(?:25)?[0-9A-Fa-f]{2}|\\[nrtbfv]|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2})$")?,
         })
     }
 }
@@ -384,15 +397,14 @@ impl Sanitizer {
         Ok(Self { rules, state })
     }
 
-    /// Learns the names in one event (see the module docs), so that every event sanitized after replaces them.
+    /// Learns the names in one event (see the module docs), so that every event sanitized after replaces them. It reads
+    /// the event the way [`Self::sanitize`] does: base64 bodies decoded, JSON inside strings parsed.
     pub fn learn(&mut self, event: &Value) {
         match event {
             Value::Object(map) => {
+                let base64 = is_base64(map);
                 for (key, value) in map {
-                    match (key_mode(key), value) {
-                        (Mode::Name, Value::String(name)) if !self.is_placeholder(name) => self.state.learn_name(name),
-                        _ => self.learn(value),
-                    }
+                    self.learn_entry(key, value, base64);
                 }
             }
             Value::Array(items) => items.iter().for_each(|item| self.learn(item)),
@@ -404,6 +416,28 @@ impl Sanitizer {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// One entry of a map; `base64` when the map's body is base64.
+    fn learn_entry(&mut self, key: &str, value: &Value, base64: bool) {
+        match (key_mode(key), value) {
+            (Mode::Name, _) => self.learn_names_in(value),
+            (_, Value::String(text)) if base64 && is_body_key(key) => {
+                if let Some(text) = base64_text(text) {
+                    self.learn(&Value::String(text));
+                }
+            }
+            _ => self.learn(value),
+        }
+    }
+
+    /// The value under a name key: a name, or a list of them (sanitizing makes each string in a list a `<name:N>`).
+    fn learn_names_in(&mut self, value: &Value) {
+        match value {
+            Value::String(name) if !self.is_placeholder(name) => self.state.learn_name(name),
+            Value::Array(items) => items.iter().for_each(|item| self.learn_names_in(item)),
+            other => self.learn(other),
         }
     }
 
@@ -430,8 +464,7 @@ impl Sanitizer {
     }
 
     fn object(&mut self, map: &Map<String, Value>, mode: Mode) -> Map<String, Value> {
-        let base64 = map.get("base64Encoded") == Some(&Value::Bool(true));
-        let binary_frame = map.get("opcode").and_then(Value::as_u64) == Some(2);
+        let base64 = is_base64(map);
         let mut out = Map::new();
         for (key, value) in map {
             let lower = key.to_lowercase();
@@ -440,8 +473,8 @@ impl Sanitizer {
                 _ => key_mode(key),
             };
             let sanitized = match value {
-                Value::String(text) if base64 && (key == "body" || key == "postData") => self.base64_body(text, child),
-                Value::String(text) if (binary_frame && key == "payloadData") || key == "bytes" => {
+                Value::String(text) if base64 && is_body_key(key) => self.base64_body(text, child),
+                Value::String(text) if is_binary(map, key) => {
                     if self.is_placeholder(text) {
                         Value::String(text.clone())
                     } else {
@@ -461,11 +494,9 @@ impl Sanitizer {
 
     /// A base64 body: its text, sanitized, if it is UTF-8 text, else `<binary:LEN>`.
     fn base64_body(&mut self, encoded: &str, mode: Mode) -> Value {
-        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded.trim());
-        match decoded.map(String::from_utf8) {
-            Ok(Ok(text)) => Value::String(self.string(&text, mode)),
-            Ok(Err(error)) => binary(error.into_bytes().len()),
-            Err(_) => binary(encoded.len()),
+        match base64_text(encoded) {
+            Some(text) => Value::String(self.string(&text, mode)),
+            None => binary(decoded_len(encoded)),
         }
     }
 
@@ -577,6 +608,33 @@ fn normalize_mri(mri: &str) -> String {
 
 fn binary(len: usize) -> Value {
     Value::String(format!("<binary:{len}>"))
+}
+
+/// Whether a map holds a body in base64 (`"base64Encoded": true`, CDP's bodies and the recorder's).
+fn is_base64(map: &Map<String, Value>) -> bool {
+    map.get("base64Encoded") == Some(&Value::Bool(true))
+}
+
+/// The keys a base64 body sits under.
+fn is_body_key(key: &str) -> bool {
+    key == "body" || key == "postData"
+}
+
+/// Whether the string under `key` is binary content: a CDP frame's `payloadData` with opcode 2, the data of a frame
+/// the recorder marked `"kind": "binary"` (a fence verdict on a binary WebSocket frame), or any `bytes`.
+fn is_binary(map: &Map<String, Value>, key: &str) -> bool {
+    match key {
+        "payloadData" => map.get("opcode").and_then(Value::as_u64) == Some(2),
+        "data" => map.get("kind").and_then(Value::as_str) == Some("binary"),
+        "bytes" => true,
+        _ => false,
+    }
+}
+
+/// Base64 text decoded, when it is base64 of UTF-8 text.
+fn base64_text(encoded: &str) -> Option<String> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// The byte length of base64 text, or its own length when it isn't base64.
@@ -748,15 +806,16 @@ fn threads(rules: &Rules, state: &mut State, text: &str) -> String {
 
 fn emails(rules: &Rules, state: &mut State, text: &str) -> String {
     replace_each(&rules.email, text, |captures| {
-        let domain = captures[2].to_lowercase();
+        let domain = captures[3].to_lowercase();
         let reserved = ["example.com", "example.org", "example.net"]
             .iter()
             .any(|reserved| domain == *reserved || domain.ends_with(&format!(".{reserved}")));
         if reserved {
             return None;
         }
-        let key = format!("{}@{domain}", percent_decode(&captures[1]).to_lowercase());
-        Some(format!("<user:{}>", state.users.label(&key)))
+        let local = percent_decode(&percent_decode(&captures[2])).to_lowercase();
+        let label = state.users.label(&format!("{local}@{domain}"));
+        Some(format!("{}<user:{label}>", &captures[1]))
     })
 }
 
@@ -820,16 +879,23 @@ fn ufrags(rules: &Rules, state: &mut State, text: &str) -> String {
 }
 
 /// Learned names, in any case, as whole words: neither the character before a match nor the one after it may be a
-/// letter or a digit.
-fn names(_rules: &Rules, state: &mut State, text: &str) -> String {
+/// letter or a digit, unless the one before ends an escape (`Hello%20Jane`, `%2520Jane`, `\nJane`, `\u0020Jane`): an
+/// escape stands for a separator as often as not, and a name is redacted when unsure.
+fn names(rules: &Rules, state: &mut State, text: &str) -> String {
     let Some(regex) = &state.names_regex else {
         return text.to_owned();
     };
     replace_each(regex, text, |captures| {
         let whole = captures.get(0)?;
-        let before = text[..whole.start()].chars().next_back();
+        let prefix = &text[..whole.start()];
+        let before = prefix.chars().next_back();
         let after = text[whole.end()..].chars().next();
-        if before.is_some_and(char::is_alphanumeric) || after.is_some_and(char::is_alphanumeric) {
+        let escaped = || {
+            // the longest escape is 6 characters (`%2520`, `\u0020`)
+            let tail = prefix.char_indices().rev().nth(5).map_or(0, |(index, _)| index);
+            rules.escape_end.is_match(&prefix[tail..])
+        };
+        if (before.is_some_and(char::is_alphanumeric) && !escaped()) || after.is_some_and(char::is_alphanumeric) {
             return None;
         }
         state

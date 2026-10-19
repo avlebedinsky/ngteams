@@ -41,7 +41,8 @@ enum Command {
         /// The fixture's path under tests/fixtures, such as `auth/authz`; `.jsonl` is added without an extension,
         /// and a `.json` name gets one JSON array.
         fixture_name: String,
-        /// The fixtures dir; by default the `tests/fixtures` of the repository around the current directory.
+        /// The fixtures dir; by default the `tests/fixtures` of the cargo workspace around the current directory (the
+        /// repository's, never a member crate's own).
         #[arg(long)]
         fixtures_dir: Option<PathBuf>,
     },

@@ -4,8 +4,12 @@
 //! `tests/fixtures/<fixture-name>`: JSONL by default (`.jsonl` is added to a name without an extension), or one
 //! pretty-printed JSON array for a name ending in `.json`. The fixture guard scans the text before anything is written:
 //! if it finds anything, nothing is written (an existing fixture of that name stays as it was) and the export fails,
-//! naming the lines and what was found, never the values. The file is written next to its final name and renamed into
-//! place, then scanned once more where it lies.
+//! naming the lines and what was found, never the values. The file is written next to its final name, scanned once more
+//! as it lies on disk, and only then renamed into place, so a refusal at either scan leaves an existing fixture as it
+//! was.
+//!
+//! By default fixtures go to the `tests/fixtures` of the cargo workspace around the current directory (the nearest
+//! `Cargo.toml` above it with a `[workspace]` table), never to a member crate's own `tests/fixtures`.
 
 use std::fs;
 use std::io;
@@ -33,10 +37,12 @@ pub enum ExportError {
     #[error("{}:{line}: not a JSON event", path.display())]
     Malformed { path: PathBuf, line: usize },
     #[error("the sanitizer's patterns don't compile: {0}")]
-    Pattern(#[from] regex::Error),
+    Pattern(#[source] regex::Error),
+    #[error("the fixture guard's patterns don't compile: {0}")]
+    GuardPattern(#[source] regex::Error),
     #[error("the fixture guard refused the export, nothing was written: {}", findings(.0))]
     Refused(Vec<(usize, Kind)>),
-    #[error("no {FIXTURES_DIR} in {} or above it; pass --fixtures-dir", .0.display())]
+    #[error("no cargo workspace with a {FIXTURES_DIR} in {} or above it; pass --fixtures-dir", .0.display())]
     NoFixturesDir(PathBuf),
 }
 
@@ -140,14 +146,14 @@ pub fn render(events: &[Value], layout: Layout) -> String {
 }
 
 /// Writes `text` to `path` only if the fixture guard finds nothing in it: scanned before anything touches the disk,
-/// written beside `path` and renamed into place, then scanned again where it lies (and removed if that finds
-/// anything).
+/// written to a staging file beside `path`, scanned again as it lies there, and only then renamed into place. Whatever
+/// fails, the staging file is removed and an existing fixture at `path` stays as it was.
 ///
 /// # Errors
 /// [`ExportError::Refused`] listing what the guard found, with nothing written; [`ExportError::Io`] when the file
-/// can't be written.
+/// can't be written; [`ExportError::GuardPattern`] when the guard can't be built.
 pub fn write_fixture(path: &Path, text: &str) -> Result<(), ExportError> {
-    let guard = Guard::new()?;
+    let guard = Guard::new().map_err(ExportError::GuardPattern)?;
     let found = guard.scan_text(text);
     if !found.is_empty() {
         return Err(ExportError::Refused(found));
@@ -158,19 +164,24 @@ pub fn write_fixture(path: &Path, text: &str) -> Result<(), ExportError> {
     fs::create_dir_all(parent).map_err(io_at(parent))?;
     let file_name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
     let staging = parent.join(format!(".{file_name}.export-{}", std::process::id()));
-    fs::write(&staging, text).map_err(io_at(&staging))?;
-    if let Err(error) = fs::rename(&staging, path) {
+    let placed = stage(&guard, &staging, text).and_then(|()| fs::rename(&staging, path).map_err(io_at(path)));
+    if placed.is_err() {
         let _ = fs::remove_file(&staging);
-        return Err(io_at(path)(error));
     }
-    let found = guard.scan_paths(&[path]).map_err(io_at(path))?;
-    if !found.is_empty() {
-        let _ = fs::remove_file(path);
-        return Err(ExportError::Refused(
+    placed
+}
+
+/// Writes the staging file and scans it as it lies on disk.
+fn stage(guard: &Guard, staging: &Path, text: &str) -> Result<(), ExportError> {
+    fs::write(staging, text).map_err(io_at(staging))?;
+    let found = guard.scan_paths(&[staging]).map_err(io_at(staging))?;
+    if found.is_empty() {
+        Ok(())
+    } else {
+        Err(ExportError::Refused(
             found.into_iter().map(|finding| (finding.line, finding.kind)).collect(),
-        ));
+        ))
     }
-    Ok(())
 }
 
 /// Exports a capture: reads it, sanitizes it as one capture, and writes it as fixture `name` under `fixtures_dir`
@@ -186,7 +197,7 @@ pub fn export(
 ) -> Result<Exported, ExportError> {
     let (path, layout) = fixture_path(fixtures_dir, name)?;
     let events = read_capture(capture)?;
-    let sanitized = sanitize_events(&events, identities)?;
+    let sanitized = sanitize_events(&events, identities).map_err(ExportError::Pattern)?;
     write_fixture(&path, &render(&sanitized, layout))?;
     Ok(Exported {
         path,
@@ -194,15 +205,26 @@ pub fn export(
     })
 }
 
-/// The repository's `tests/fixtures`: in `start` or the nearest directory above it that has a `Cargo.toml` and
-/// `tests/fixtures`.
+/// The repository's `tests/fixtures`: that of the cargo workspace around `start`, the nearest directory at or above it
+/// whose `Cargo.toml` has a `[workspace]` table. A member crate's own `tests/fixtures` is never picked.
 ///
 /// # Errors
-/// [`ExportError::NoFixturesDir`] when there is none.
+/// [`ExportError::NoFixturesDir`] when there is no workspace above `start`, or it has no `tests/fixtures`.
 pub fn find_fixtures_dir(start: &Path) -> Result<PathBuf, ExportError> {
     start
         .ancestors()
-        .find(|dir| dir.join("Cargo.toml").is_file() && dir.join(FIXTURES_DIR).is_dir())
+        .find(|dir| is_workspace_root(dir))
         .map(|dir| dir.join(FIXTURES_DIR))
+        .filter(|fixtures| fixtures.is_dir())
         .ok_or_else(|| ExportError::NoFixturesDir(start.to_owned()))
+}
+
+/// Whether `dir` has a `Cargo.toml` with a `[workspace]` table (or a `[workspace.*]` one, which implies it).
+fn is_workspace_root(dir: &Path) -> bool {
+    fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|manifest| {
+        manifest.lines().any(|line| {
+            let line = line.trim();
+            line == "[workspace]" || line.starts_with("[workspace.")
+        })
+    })
 }

@@ -44,8 +44,9 @@ they're skipped, unless `GPUI_SMOKE_REQUIRE=1`. They run the window once on ever
 
 A recorded run writes `captures/<scenario>/<ts>/events.jsonl` under the lab's data dir, never into the repo (the format
 is described in `crates/proto-lab/src/capture.rs`). `cargo run -p proto-lab -- export <capture> <fixture-name>`
-sanitizes one into `tests/fixtures/<fixture-name>.jsonl` (or one JSON array for a `.json` name) and writes nothing
-unless the fixture guard passes the result.
+sanitizes one into the repository's `tests/fixtures/<fixture-name>.jsonl` (or one JSON array for a `.json` name; the
+workspace root is found from the current directory, even inside a crate, or `--fixtures-dir` names another) and writes
+nothing unless the fixture guard passes the result.
 
 ## Test-only builds
 

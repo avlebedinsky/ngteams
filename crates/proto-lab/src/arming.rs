@@ -13,8 +13,8 @@
 //!    replays. Chrome 155 answers `Storage.clearDataForOrigin` on the browser session with an internal error; on a page
 //!    session it clears any origin.
 //!
-//! Every attached target is then armed ([`arm_target`]) by its type ([`TargetKind::steps`]): `Fetch.enable` with `*`
-//! on its own session (pages, iframes, shared and service workers, and any type we don't know), `Network.enable`
+//! Every attached target is then armed by the auto-attach handler (`arm_target`, the only place the steps run) by its
+//! type ([`TargetKind::steps`]): `Fetch.enable` with `*` on its own session (pages, iframes, shared and service workers, and any type we don't know), `Network.enable`
 //! everywhere (the service-worker bypass on pages and iframes needs it, and so does the audit of WebSocket frames,
 //! which Chrome reports on the session of the target that sent them), the service-worker bypass, the WebSocket guard
 //! ([`crate::fence_ws`]), auto-attach with `waitForDebuggerOnStart` for its own children (iframes, dedicated workers),
@@ -329,16 +329,7 @@ struct Scripts<'a> {
 /// # Errors
 /// [`ArmError::Step`] naming the step that failed, [`ArmError::StepTimeout`] naming one that got no answer, or
 /// [`ArmError::Guard`] when the guard didn't report itself armed.
-pub async fn arm_target(
-    cdp: &Cdp,
-    session: &SessionId,
-    kind: &TargetKind,
-    guard: &GuardScript,
-) -> Result<(), ArmError> {
-    arm_with(cdp, session, kind, &Scripts { guard, capture: None }).await
-}
-
-async fn arm_with(cdp: &Cdp, session: &SessionId, kind: &TargetKind, scripts: &Scripts<'_>) -> Result<(), ArmError> {
+async fn arm_target(cdp: &Cdp, session: &SessionId, kind: &TargetKind, scripts: &Scripts<'_>) -> Result<(), ArmError> {
     for &step in kind.steps() {
         step.run(cdp, session, scripts).await?;
     }
@@ -760,7 +751,7 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
                 guard: shared.ws.script(),
                 capture: shared.capture.as_ref(),
             };
-            arm_with(&cdp, session, &kind, &scripts).await.map(|()| ArmedTarget {
+            arm_target(&cdp, session, &kind, &scripts).await.map(|()| ArmedTarget {
                 target_id: target_id.clone(),
                 session: session.clone(),
                 kind,
