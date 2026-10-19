@@ -14,7 +14,7 @@ use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::format::Codec;
 use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use crate::Error;
 
@@ -24,10 +24,14 @@ const MAX_DATAGRAM: usize = 2_000;
 /// What a [`Peer`] reports to the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerEvent {
-    /// ICE and DTLS are up: media can flow.
+    /// ICE and DTLS are up: media can flow. Comes again when ICE recovers after a [`PeerEvent::Disconnected`].
     Connected,
-    /// ICE lost the remote side.
+    /// ICE lost the remote side and media can't flow. This may be transient: while the remote still sends checks,
+    /// ICE rebuilds the pair and a later [`PeerEvent::Connected`] means the link is back. (Once both sides have
+    /// pruned the pair, str0m sends nothing more and only an ICE restart would help.)
     Disconnected,
+    /// The remote closed the session (DTLS close or SCTP loss). Final: nothing flows after it.
+    Closed,
     /// One audio frame (an Opus packet) arrived.
     Audio(AudioFrame),
 }
@@ -60,7 +64,10 @@ pub struct Datagram {
 pub struct Peer {
     rtc: Rtc,
     mid: Option<Mid>,
-    connected: bool,
+    /// The state last reported through [`PeerEvent::Connected`] / [`PeerEvent::Disconnected`].
+    reported_connected: bool,
+    closed: bool,
+    dropped: u64,
     deadline: Instant,
     outgoing: VecDeque<Datagram>,
     events: VecDeque<PeerEvent>,
@@ -80,7 +87,9 @@ impl Peer {
         let mut peer = Self {
             rtc,
             mid: None,
-            connected: false,
+            reported_connected: false,
+            closed: false,
+            dropped: 0,
             deadline: now,
             outgoing: VecDeque::new(),
             events: VecDeque::new(),
@@ -123,10 +132,17 @@ impl Peer {
         self.drain()
     }
 
-    /// Whether ICE and DTLS are up.
+    /// Whether ICE, DTLS and SRTP are up right now: false while ICE is disconnected, true again once it recovers,
+    /// false for good after the remote closed the session.
     #[must_use]
     pub fn is_connected(&self) -> bool {
-        self.connected
+        !self.closed && self.rtc.is_connected()
+    }
+
+    /// How many datagrams were dropped because str0m can't classify them (see [`Peer::handle_datagram`]).
+    #[must_use]
+    pub fn dropped_datagrams(&self) -> u64 {
+        self.dropped
     }
 
     /// When the peer next wants [`Peer::handle_timeout`].
@@ -135,10 +151,12 @@ impl Peer {
         self.deadline
     }
 
-    /// Feeds a datagram that arrived at `destination` from `source`.
+    /// Feeds a datagram that arrived at `destination` from `source`. A datagram str0m can't classify (empty, short or
+    /// malformed STUN, a first byte outside the STUN/DTLS/RTP ranges such as TURN `ChannelData`) is dropped and counted
+    /// in [`Peer::dropped_datagrams`]: a stray packet must not end the call.
     ///
     /// # Errors
-    /// [`Error::Rtc`] if the datagram can't be parsed or str0m fails.
+    /// [`Error::Rtc`] if str0m fails on a datagram it did classify.
     pub fn handle_datagram(
         &mut self,
         now: Instant,
@@ -147,7 +165,10 @@ impl Peer {
         destination: SocketAddr,
         contents: &[u8],
     ) -> Result<(), Error> {
-        let contents = contents.try_into().map_err(rtc_error)?;
+        let Ok(contents) = contents.try_into() else {
+            self.dropped += 1;
+            return Ok(());
+        };
         self.rtc
             .handle_input(Input::Receive(
                 now,
@@ -171,12 +192,22 @@ impl Peer {
         self.drain()
     }
 
-    /// Sends one Opus frame with RTP media time `rtp_time` (48 kHz units), sampled at `wallclock`.
+    /// Sends one Opus frame with RTP media time `rtp_time` (48 kHz units), sampled at `wallclock`. str0m only queues a
+    /// written frame and packetizes it on its next timeout, so this also advances the peer's clock to `now`: when it
+    /// returns, the frame's RTP datagrams wait in [`Peer::poll_datagram`].
     ///
     /// # Errors
-    /// [`Error::NotConnected`] before the audio m-line is negotiated and connected, [`Error::Rtc`] if str0m fails.
-    pub fn write_audio(&mut self, wallclock: Instant, rtp_time: u64, payload: &[u8]) -> Result<(), Error> {
-        let mid = self.mid.filter(|_| self.connected).ok_or(Error::NotConnected)?;
+    /// [`Error::NotConnected`] before the audio m-line is negotiated or while the peer is not connected,
+    /// [`Error::Rtc`] if str0m fails.
+    pub fn write_audio(
+        &mut self,
+        now: Instant,
+        wallclock: Instant,
+        rtp_time: u64,
+        payload: &[u8],
+    ) -> Result<(), Error> {
+        let connected = self.is_connected();
+        let mid = self.mid.filter(|_| connected).ok_or(Error::NotConnected)?;
         let writer = self.rtc.writer(mid).ok_or(Error::NotConnected)?;
         let pt = writer
             .payload_params()
@@ -185,6 +216,19 @@ impl Peer {
             .ok_or_else(|| Error::Rtc("Opus was not negotiated".into()))?;
         let time = MediaTime::new(rtp_time, Frequency::FORTY_EIGHT_KHZ);
         writer.write(pt, wallclock, time, payload.to_vec()).map_err(rtc_error)?;
+        self.rtc.handle_input(Input::Timeout(now)).map_err(rtc_error)?;
+        self.drain()
+    }
+
+    /// Hangs up: queues the RTCP BYE and DTLS close for [`Peer::poll_datagram`]; the remote then reports
+    /// [`PeerEvent::Closed`]. The peer is not connected afterwards.
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if str0m fails.
+    pub fn close(&mut self) -> Result<(), Error> {
+        self.rtc.close().map_err(rtc_error)?;
+        self.closed = true;
+        self.reported_connected = false;
         self.drain()
     }
 
@@ -219,13 +263,13 @@ impl Peer {
 
     fn on_event(&mut self, event: Event) {
         match event {
-            Event::Connected => {
-                self.connected = true;
-                self.events.push_back(PeerEvent::Connected);
-            }
-            Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
-                self.connected = false;
-                self.events.push_back(PeerEvent::Disconnected);
+            Event::Connected | Event::IceConnectionStateChange(_) => self.report_connection(),
+            Event::Closed => {
+                if !self.closed {
+                    self.closed = true;
+                    self.reported_connected = false;
+                    self.events.push_back(PeerEvent::Closed);
+                }
             }
             Event::MediaAdded(added) => self.mid = Some(added.mid),
             Event::MediaData(data) => self.events.push_back(PeerEvent::Audio(AudioFrame {
@@ -235,6 +279,21 @@ impl Peer {
             })),
             _ => {}
         }
+    }
+
+    /// Reports a change of [`Peer::is_connected`]. ICE can drop and come back while DTLS stays up, and str0m's own
+    /// `Event::Connected` fires only once per session, so every ICE state change is checked against the live state.
+    fn report_connection(&mut self) {
+        let connected = self.is_connected();
+        if self.closed || connected == self.reported_connected {
+            return;
+        }
+        self.reported_connected = connected;
+        self.events.push_back(if connected {
+            PeerEvent::Connected
+        } else {
+            PeerEvent::Disconnected
+        });
     }
 }
 
@@ -275,8 +334,9 @@ impl UdpPeer {
         &mut self.peer
     }
 
-    /// One turn of the run loop: feeds every datagram waiting on the socket, fires the timeout if it is due, and sends
-    /// everything the peer queued. Returns whether any datagram arrived.
+    /// One turn of the run loop: feeds every datagram waiting on the socket (one str0m can't classify is dropped, see
+    /// [`Peer::handle_datagram`]), fires the timeout if it is due, and sends everything the peer queued. Returns whether
+    /// any datagram arrived.
     ///
     /// # Errors
     /// [`Error::Io`] if the socket fails, [`Error::Rtc`] if str0m does.

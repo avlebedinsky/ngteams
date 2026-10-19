@@ -34,7 +34,8 @@ rustix = { version = "1.1.5", features = ["process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-# sans-IO WebRTC; pure-Rust crypto (no aws-lc/openssl C build) and no example web server
+# sans-IO WebRTC; rust-crypto does DTLS and SRTP in pure Rust (no OpenSSL), but dimpl generates its certificate with
+# rcgen on aws-lc-rs, so the aws-lc-sys C build stays; no example web server
 str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto"] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"

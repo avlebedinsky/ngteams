@@ -244,17 +244,20 @@ fn echo(b: &mut UdpPeer, received: &mut Listener, sent_at: &HashMap<u64, Instant
     while let Some(event) = b.peer().poll_event() {
         if let Some(frame) = audio(event)? {
             received.on_frame(&frame, sent_at)?;
-            b.peer().write_audio(now, frame.rtp_time, &frame.payload)?;
+            b.peer()
+                .write_audio(Instant::now(), now, frame.rtp_time, &frame.payload)?;
         }
     }
     b.flush()
 }
 
-/// The audio frame of an event; a disconnect fails the run.
+/// The audio frame of an event. A disconnect fails the run even though ICE may recover from it: on loopback it means
+/// something broke, and the gap would skew the latency figures.
 fn audio(event: PeerEvent) -> Result<Option<AudioFrame>, Error> {
     match event {
         PeerEvent::Audio(frame) => Ok(Some(frame)),
         PeerEvent::Disconnected => Err(Error::Rtc("ICE disconnected mid-loop".into())),
+        PeerEvent::Closed => Err(Error::Rtc("the session closed mid-loop".into())),
         PeerEvent::Connected => Ok(None),
     }
 }
@@ -298,7 +301,7 @@ impl Sender {
         let encode_start = Instant::now();
         let packet = self.encoder.encode(&frame)?;
         self.sent_at.insert(rtp_time, encode_start);
-        a.peer().write_audio(encode_start, rtp_time, &packet)?;
+        a.peer().write_audio(Instant::now(), encode_start, rtp_time, &packet)?;
         a.flush()?;
         self.index += 1;
         Ok(Some(encode_start))
