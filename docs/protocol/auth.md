@@ -70,7 +70,9 @@ Where each redirect comes from:
    in without interaction.
 2. **Code → tokens**: POST `…/organizations/oauth2/v2.0/token` as a public client (`grant_type=authorization_code`,
    `code`, `redirect_uri`, `code_verifier`, `scope`). The answer has an access token for `api.spaces.skype.com`, a
-   refresh token, an ID token and `client_info`.
+   refresh token and an ID token. Entra adds `client_info` (the account's uid/utid) only when the request sends
+   `client_info=1`, as MSAL does; we don't send it (nor did the CA probe), so we don't get it. The ID token's `oid`
+   and `tid` identify the account instead.
 3. **Other audiences**: POST the same endpoint with `grant_type=refresh_token`, the one refresh token and
    `scope=<resource>/.default` (plus `openid profile offline_access`). Store the newest refresh token each time; Entra
    may rotate it.
@@ -165,8 +167,14 @@ Anonymous and guest users post to `…/visitor` or `…/guest` with a JSON body 
 
 The client reads these top-level fields:
 
-- `tokens.skypeToken` (also accepted as `skypetoken`) and `tokens.expiresIn` in seconds. Expiry = time of the
-  request + `expiresIn`. The skypetoken is itself a JWT whose `skypeid` claim gives the user's MRI as `8:<skypeid>`.
+- `tokens.skypeToken` (also accepted as `skypetoken`) and `tokens.expiresIn` in seconds. The token object can also
+  come as a top-level `skypeToken` object (checked first) or `skypeGuestUserToken`, with the same two fields inside.
+- The skypetoken is itself a JWT. Its `skypeid` claim gives the user's MRI as `8:<skypeid>`, and its `rgn` claim is
+  the fallback when the response has no `region`.
+- **Expiry** comes from the JWT's `exp` claim (seconds, so ×1000 for milliseconds). Only when the token has no `exp`
+  does the client fall back to the time it parsed the response + `expiresIn` × 1000. When the `expiresIn`-based time is
+  more than a minute later than `exp`, the client logs an `IncorrectExpiry` mark and still uses `exp`. We schedule
+  renewal the same way, from `exp` first, so a token is never used past its own `exp` even if `expiresIn` says more.
 - `regionGtms`: an object from service name to base URL (below).
 - `region`, `partition`, `userRegion`, `userPartition`, `regionOverride`, `regionSettings`.
 - `licenseDetails` (flags such as `isFreemium`, `isCopilot`, `isTeamsSmb`), `consumerLicenseDetails`.
@@ -209,7 +217,7 @@ prefix of that `Location`.
 | Service | Base URL from | Credential (prod defaults) | Entra audience |
 |---|---|---|---|
 | authz | fixed (table above) | Entra | `https://api.spaces.skype.com` |
-| Middle tier (`/api/mt/…`) | GTM `middleTier` | Entra **and** `x-skypetoken: <skypetoken>` (`requireSkypetokenForMT` on) | `https://api.spaces.skype.com` |
+| Middle tier (`/api/mt/…`) | GTM `middleTier` | Entra **and** `x-skypetoken: <skypetoken>` (`requireSkypetokenForMT` on), except calls whose source is on the STM list, which get Entra only ([STM](#skype-token-migration-stm)) | `https://api.spaces.skype.com` |
 | MT image service | GTM `mtImageService` | none added by this binding; the client sets a separate image auth cookie (to confirm) | — |
 | Chat service (chatsvc, messages, threads, endpoints) | GTM `chatServiceAfd` | `Authentication: skypetoken=<skypetoken>`, then `RegistrationToken` once an endpoint is registered | — |
 | Chat service aggregator (CSA) | GTM `chatSvcAggAfd` / `csaResource` | Entra only (`disableSkypeTokenOnCsa` on); CSA rejects tokens for `teams.microsoft.com`, `api.spaces.skype.com` and `ic3` | `https://chatsvcagg.teams.microsoft.com` |
@@ -243,10 +251,22 @@ Microsoft is moving IC3 services from the skypetoken to Entra tokens. In prod `s
 - A 401 whose `WWW-Authenticate` names the highest protocol the service accepts (CAE, AAD or Skype) makes the client
   retry with that credential, falling back CAE → AAD → skypetoken. It remembers the fallback for 24 hours
   (`stmFallbackMapTimerInHr`).
-- For the middle tier, which requests are migrated comes from a remote `stmSourceList`; it's empty in the shipped
-  config, so the middle tier still gets both the Entra token and `x-skypetoken`.
+- For the middle tier, which requests are migrated comes from `stmSourceList`, matched against the "source" tag each
+  middle-tier call is made with. The shipped prod config already lists 20 sources, every one with
+  `disableSkypeTokenInHeader` on: among them `userProfileService`, `teamsAndChannels`, `files`, `people`,
+  `peoplePhase2`, `policyService`, `userFeatureSettingsService`, `tenants-service-endpoints`, `safelinks`,
+  `appsPlatform`, `invite` and the sensitivity-label ones. A remote flight can change the list.
+  - A middle-tier request whose source is listed gets the migration headers (`X-MS-Migration: True` and a companion
+    header) and the Entra token only, with no `x-skypetoken`.
+  - Any other middle-tier request still gets both the Entra token and `x-skypetoken` (`requireSkypetokenForMT`),
+    unless `enableAuthzV2` is on, which forces every middle-tier request into the Entra-only form.
 
-For M0/M1 the skypetoken path is the default and works everywhere; STM matters later if enforcement is turned on.
+  For us this means both forms exist on the middle tier at once. Which form a given endpoint gets depends on the
+  source tag of the calling feature, which isn't visible on the wire; the capture shows which requests come without
+  `x-skypetoken`, and whether a listed endpoint still accepts a request that carries both also needs a capture.
+
+For M0/M1 the skypetoken path stays the default for chat and the unlisted middle-tier calls; the rest of STM matters
+later if enforcement is turned on.
 
 ## Open questions
 
@@ -276,7 +296,8 @@ license, the `load` capture of account A (Task 11) should show:
       native client);
 - [ ] the chat service host the client really uses (`chatServiceAfd` vs `chatService`) and whether a 404 `Location`
       region hop happens;
-- [ ] middle-tier requests carrying both `Authorization: Bearer` and `x-skypetoken`;
+- [ ] which middle-tier requests carry both `Authorization: Bearer` and `x-skypetoken`, and which carry
+      `X-MS-Migration: True` with no `x-skypetoken` (the STM-listed sources);
 - [ ] the audiences of the Bearer tokens the page sends to presence, CSA, Graph, Outlook and substrate (log `aud` and
       `scp` only);
 - [ ] whether any request carries `X-MS-Migration: True` with an IC3 Entra token, and which;
@@ -288,11 +309,19 @@ Then replace the synthetic fixtures below with sanitized ones exported from that
 
 ## Fixtures
 
-`tests/fixtures/auth/*.json` are **synthetic**: every value is made up, every placeholder is in the sanitizer's form
-(`<token:N>`, `<guid:N>`, `<mri:a>`), and every regional host is under `example.test`. Each file has a `_synthetic`
-note and holds one exchange as `{request, response}`; `response` has `status`, `headers` and `body`. The shapes come
-from the bundle (authz) and from Entra's documented v2 token endpoint (the rest). They exist so that Tasks 13 and 14
-can test against wiremock now.
+`tests/fixtures/auth/*.json` are **synthetic**: every value is made up, every secret or identifier is an
+angle-bracket placeholder, and every regional host is under `example.test`. Each file has a `_synthetic` note and
+holds one exchange as `{request, response}`; `response` has `status`, `headers` and `body`. The shapes come from the
+bundle (authz) and from Entra's documented v2 token endpoint (the rest). They exist so that Tasks 13 and 14 can test
+against wiremock now.
+
+Most placeholders have the sanitizer's `<kind:id>` shape (`<token:N>`, `<guid:N>`, `<mri:a>`). A few are written by
+hand with kinds the sanitizer convention doesn't define: `<code:1>` and `<verifier:1>` (the authorization code and
+PKCE verifier), `<token:skype>` (the skypetoken), `<skypeid:a>`, and `<client-version>`, which has no id at all. The
+skypetoken placeholder isn't a JWT, so a test of the `exp` expiry rule has to build an unsigned JWT at run time (the
+fixture guard rejects committed ones). Tests should treat every placeholder as an opaque string, never match on its
+text: sanitized captures exported by `proto-lab export` will replace these files and may name or number the
+placeholders differently.
 
 | File | Exchange |
 |---|---|

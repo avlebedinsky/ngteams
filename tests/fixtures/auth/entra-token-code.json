@@ -28,8 +28,7 @@
       "ext_expires_in": 8000,
       "access_token": "<token:1>",
       "refresh_token": "<token:2>",
-      "id_token": "<token:3>",
-      "client_info": "<token:4>"
+      "id_token": "<token:3>"
     }
   }
 }

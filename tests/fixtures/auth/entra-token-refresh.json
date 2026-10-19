@@ -26,8 +26,7 @@
       "ext_expires_in": 4500,
       "access_token": "<token:5>",
       "refresh_token": "<token:6>",
-      "id_token": "<token:7>",
-      "client_info": "<token:4>"
+      "id_token": "<token:7>"
     }
   }
 }

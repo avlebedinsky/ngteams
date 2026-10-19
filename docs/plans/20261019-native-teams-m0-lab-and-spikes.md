@@ -374,7 +374,7 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
   - the scopes and audiences of the other services (chatsvc, presence, Graph, Outlook, substrate) and whether one refresh token can get all of them
   - the authz/skypetoken flow (request, response, regional endpoints), and when the client uses `authz` vs `authzcore`
   - the Mac OneAuth config, as a cross-check of the redirect
-- [x] confirm with the `load` capture (account A); export sanitized fixtures (blocked: lab accounts have no Teams license — see docs/backlog/lab-accounts-have-no-teams-license.md; `auth.md` lists what to confirm by capture, and `tests/fixtures/auth/` holds clearly-labelled synthetic fixtures until a capture replaces them)
+- [x] confirm with the `load` capture (account A); export sanitized fixtures (⚠️ blocked, not done: lab accounts have no Teams license — see docs/backlog/lab-accounts-have-no-teams-license.md; `auth.md` lists what to confirm by capture, and `tests/fixtures/auth/` holds clearly-labelled synthetic fixtures until a capture replaces them)
 - [x] `auth.md`: the flow in our own words, an audience × service table, the redirect decision (native vs SPA and refresh-token lifetime; custom scheme → catch `Location`), open questions
 - [x] the fixture guard passes on the new fixtures
 
