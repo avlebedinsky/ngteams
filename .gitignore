@@ -4,3 +4,4 @@
 *.har
 captures/
 .env*
+.claude/settings.local.json
