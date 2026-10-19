@@ -54,6 +54,7 @@ cargo run -p proto-lab -- status      # ok / login needed, per account
 Both run the pinned Chrome headless on the account's profile under `~/.local/share/teams-lab/profiles/`, with the fence
 armed before anything loads. Until writes are mapped the fence is fail-closed, so the web client loads with its writes
 denied; the denies are logged to `fence.log` and expected. `login` signs in on Microsoft's page by itself when the
-session has expired, with the password from lab-automation's `lab-accounts.json` (mode `0600`); if Microsoft asks for
-a one-time code, `status-<alias>.json` in the lab's data dir says `need-code`, and the code goes into
-`inbox/<alias>.code` there.
+session has expired, with the password from lab-automation's `lab-accounts.json` (mode `0600`). Any multi-factor
+prompt (a one-time code, a method to pick, an approval in an app, registering a method) stops it: multi-factor
+requests aren't on the fence's reviewed list. Each step goes to `status-<alias>.json` in the lab's data dir, and a stop
+leaves `failed` there with the reason.

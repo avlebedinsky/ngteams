@@ -432,10 +432,21 @@ impl Shared {
         self.lost.load(Ordering::SeqCst)
     }
 
+    fn taps(&self) -> MutexGuard<'_, Vec<mpsc::UnboundedSender<Event>>> {
+        self.taps.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Hands a copy of `event` to every watcher still listening.
     fn tap(&self, event: &Event) {
-        let mut taps = self.taps.lock().unwrap_or_else(PoisonError::into_inner);
-        taps.retain(|tap| tap.send(event.clone()).is_ok());
+        self.taps().retain(|tap| tap.send(event.clone()).is_ok());
+    }
+
+    /// Marks the connection lost and ends every watch: their senders go, under the same lock [`ArmedBrowser::watch`]
+    /// checks the mark with, so no watch outlives the connection.
+    fn mark_lost(&self) {
+        let mut taps = self.taps();
+        self.lost.store(true, Ordering::SeqCst);
+        taps.clear();
     }
 }
 
@@ -528,15 +539,15 @@ impl ArmedBrowser {
 
     /// A copy of every event of the connection from now on, in arrival order, for watching what the targets do. The
     /// fence handles the events whether or not anyone watches; a watcher only observes (answering a paused request or a
-    /// held target is the fence's job), and the channel ends with the connection.
+    /// held target is the fence's job), and the channel ends with the connection: once it is gone, the receiver reports
+    /// the channel closed after the last event, and a watch asked for after that is closed from the start.
     #[must_use]
     pub fn watch(&self) -> mpsc::UnboundedReceiver<Event> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        self.shared
-            .taps
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(sender);
+        let mut taps = self.shared.taps();
+        if !self.shared.lost() {
+            taps.push(sender);
+        }
         receiver
     }
 
@@ -640,7 +651,7 @@ impl ArmedBrowser {
 /// still does keeps its paused requests and held targets waiting forever.
 async fn handle_events(cdp: Cdp, events: Events, shared: Arc<Shared>) {
     dispatch_events(cdp, events, &shared).await;
-    shared.lost.store(true, Ordering::SeqCst);
+    shared.mark_lost();
     // while closing, `ArmedBrowser::close` kills it unless the browser confirmed it is shutting down
     if !shared.closing.load(Ordering::SeqCst) {
         shared.kill_browser();

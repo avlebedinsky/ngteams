@@ -1034,6 +1034,28 @@ async fn a_lost_connection_fails_the_run_and_kills_the_browser() {
 }
 
 #[tokio::test]
+async fn a_watch_ends_with_the_connection() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let mut events = armed.watch();
+    fake.event(Some("S1"), "Page.frameStoppedLoading", &json!({"frameId": "F"}))
+        .unwrap();
+
+    fake.hang_up().unwrap();
+
+    // the event that came before the loss is still delivered, then the channel ends, while the fence is still alive
+    let wait = Duration::from_secs(5);
+    let first = tokio::time::timeout(wait, events.recv()).await.unwrap().unwrap();
+    assert_eq!(first.method, "Page.frameStoppedLoading");
+    let end = tokio::time::timeout(wait, events.recv()).await;
+    assert!(matches!(end, Ok(None)), "the watch outlived the connection");
+    // and a watch asked for afterwards is closed from the start
+    let mut late = armed.watch();
+    assert!(late.recv().await.is_none());
+    assert!(armed.verdict().unwrap_err().connection_lost);
+}
+
+#[tokio::test]
 async fn a_paused_request_is_answered_on_the_session_it_paused_on() {
     let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
     let (armed, lab) = arm_fake(&fake, &[]).await.unwrap();

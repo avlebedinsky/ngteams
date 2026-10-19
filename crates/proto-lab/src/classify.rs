@@ -130,7 +130,9 @@ const AUTHZ: [(&str, &str); 4] = [
 
 /// Entra's sign-in form on `login.microsoftonline.com`, as the sign-in page posts it (`*` is `common`,
 /// `organizations` or a tenant): the username lookup, the password, and the answer to "Stay signed in?". Nothing
-/// of multi-factor sign-in (`SAS/*`) or of the account's security info is on it.
+/// of multi-factor sign-in (`SAS/*`) or of the account's security info is on it: what those requests set off (a code
+/// sent by text or call, a push to a phone) and whether verifying a method can be told apart from registering one has
+/// never been captured, so `login` stops at any multi-factor prompt instead.
 const SIGN_IN: [&str; 4] = ["/*/GetCredentialType", "/*/login", "/kmsi", "/*/kmsi"];
 
 /// The classifier: the own-state list (and, from M0 Task 11, the write mapping).

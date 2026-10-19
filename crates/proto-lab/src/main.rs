@@ -39,9 +39,6 @@ enum Command {
         /// Seconds the sign-in and the web client's load may take.
         #[arg(long, default_value_t = 300)]
         timeout: u64,
-        /// Seconds to wait for a one-time code in inbox/<alias>.code once Microsoft asks for one (0: stop at once).
-        #[arg(long, default_value_t = 900)]
-        code_wait: u64,
     },
     /// Whether each lab account's session still works: `ok` or `login needed`, per account. Signs nothing in.
     Status {
@@ -107,11 +104,7 @@ fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Login {
-            alias,
-            timeout,
-            code_wait,
-        } => run_login(alias, timeout, code_wait).await,
+        Command::Login { alias, timeout } => run_login(alias, timeout).await,
         Command::Status { aliases, timeout } => run_status(aliases, timeout).await,
         // these need only the lab directories, so they run without a lab.toml too
         Command::Chrome { command } => run_chrome(command, &LabLocations::from_env()?.lab_paths()?).await,
@@ -119,10 +112,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn run_login(alias: Alias, timeout: u64, code_wait: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_login(alias: Alias, timeout: u64) -> Result<(), Box<dyn std::error::Error>> {
     let options = LoginOptions {
         timeout: Duration::from_secs(timeout),
-        code_wait: Duration::from_secs(code_wait),
     };
     let report = login::login(alias, options).await?;
     let how = if report.signed_in {

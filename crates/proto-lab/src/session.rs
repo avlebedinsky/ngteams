@@ -7,8 +7,8 @@
 //!   with a working session;
 //! - **refused**: the main frame is on Teams, but Teams forbade the exchange (403) and hasn't allowed one since: a
 //!   signed-in account Teams won't serve, such as one without a Teams license (the web client then offers a trial). An
-//!   expired token (401) isn't a refusal: the client refreshes it and asks again. [`LabSession::settle`] gives a
-//!   refusal [`REFUSAL_GRACE`] to turn into a session before it believes it;
+//!   expired token (401) isn't a refusal: the client refreshes it and asks again. [`Settling`] gives a refusal
+//!   [`REFUSAL_GRACE`] to turn into a session before it is believed ([`LabSession::settle`] and `login` both use it);
 //! - **sign-in shown**: the main frame finished loading on a Microsoft sign-in host. The sign-in host also passes a
 //!   signed-in browser straight back with a redirect, which never commits a document there, so a page that stays
 //!   means the session has expired (or was never there);
@@ -148,8 +148,11 @@ pub struct SessionWatch {
     authz_forbidden: bool,
     /// The status of the last answer to an authz exchange.
     last_authz: Option<u16>,
-    /// The method of every authz request seen, by session and request id.
+    /// The method of every authz request seen since the main frame's last navigation, by session and request id. An
+    /// answer to a request from before it belongs to the document that went away, and doesn't count.
     authz_requests: HashMap<(Option<SessionId>, String), String>,
+    /// How many documents the main frame has committed.
+    documents: u64,
     identities: Vec<Identity>,
 }
 
@@ -166,6 +169,7 @@ impl SessionWatch {
             authz_forbidden: false,
             last_authz: None,
             authz_requests: HashMap::new(),
+            documents: 0,
             identities: Vec::new(),
         }
     }
@@ -202,6 +206,8 @@ impl SessionWatch {
         self.stopped = false;
         self.authz_ok = false;
         self.authz_forbidden = false;
+        self.authz_requests.clear();
+        self.documents += 1;
     }
 
     fn request(&mut self, event: &Event) {
@@ -256,6 +262,14 @@ impl SessionWatch {
         }
     }
 
+    /// Which document the main frame is on: it counts the main frame's navigations (`0` before the first), and goes up
+    /// whenever a new document commits there, a reload of the same URL included. Changes within a document (a history
+    /// push, the page changing its content) leave it alone.
+    #[must_use]
+    pub fn document(&self) -> u64 {
+        self.documents
+    }
+
     /// The status of the last answer to the web client's authz exchange, for a report on a session that didn't load.
     #[must_use]
     pub fn last_authz_status(&self) -> Option<u16> {
@@ -274,6 +288,30 @@ impl SessionWatch {
         matching
             .all(|other| other.oid == first.oid && other.tenant == first.tenant)
             .then_some(first)
+    }
+}
+
+/// Holds a refusal back until it has stood for [`REFUSAL_GRACE`]: until then the client may still retry its way into a
+/// session.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Settling {
+    refused_since: Option<tokio::time::Instant>,
+}
+
+impl Settling {
+    /// What `state`, seen at `now`, counts as: [`SessionState::Loading`] for a refusal that hasn't stood unbroken for
+    /// [`REFUSAL_GRACE`] since it was first seen, `state` itself otherwise. Any other state ends the refusal's stand.
+    pub fn judge(&mut self, state: SessionState, now: tokio::time::Instant) -> SessionState {
+        let SessionState::Refused(_) = state else {
+            self.refused_since = None;
+            return state;
+        };
+        let since = *self.refused_since.get_or_insert(now);
+        if now.saturating_duration_since(since) >= REFUSAL_GRACE {
+            state
+        } else {
+            SessionState::Loading
+        }
     }
 }
 
@@ -474,27 +512,21 @@ impl LabSession {
         }
     }
 
-    /// Pumps until the session is anything but [`SessionState::Loading`], or `timeout` passes (then `Loading`). A
-    /// refusal counts once it has stood for [`REFUSAL_GRACE`].
+    /// Pumps until the session is anything but [`SessionState::Loading`] ([`Settling`]: a refusal counts once it has
+    /// stood for [`REFUSAL_GRACE`]). `Loading` when `timeout` passes first, or the connection is lost, a refusal that
+    /// hasn't stood its grace by then included.
     pub async fn settle(&mut self, timeout: Duration) -> SessionState {
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut refused_at = None;
-        while tokio::time::Instant::now() < deadline {
-            match self.watch.state() {
-                SessionState::Loading => refused_at = None,
-                SessionState::Refused(status) => {
-                    let since = *refused_at.get_or_insert_with(tokio::time::Instant::now);
-                    if since.elapsed() >= REFUSAL_GRACE {
-                        return SessionState::Refused(status);
-                    }
-                }
-                state => return state,
+        let mut settling = Settling::default();
+        loop {
+            let state = settling.judge(self.watch.state(), tokio::time::Instant::now());
+            if state != SessionState::Loading || tokio::time::Instant::now() >= deadline {
+                return state;
             }
             if !self.pump(Duration::from_millis(500)).await {
-                break;
+                return SessionState::Loading;
             }
         }
-        self.watch.state()
     }
 
     #[must_use]

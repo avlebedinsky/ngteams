@@ -1,6 +1,6 @@
 //! `proto-lab login` and `status`: the lab accounts' credentials file, telling from recorded (synthetic) CDP events
 //! whether the web client loaded or the session has expired, the identity the page signs in as, the sign-in steps, and
-//! the status and code-inbox files. With Chrome installed, the sign-in driver runs on a local stand-in for Microsoft's
+//! the status file. With Chrome installed, the sign-in driver runs on a local stand-in for Microsoft's
 //! sign-in page, in a headless browser on a throwaway profile with the fence armed.
 //!
 //! Nothing here touches a lab profile, the real accounts file or the network beyond 127.0.0.1.
@@ -20,13 +20,13 @@ use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::cdp::{Event, SessionId};
 use proto_lab::classify::{Classification, Classifier, OwnKind};
 use proto_lab::commands::login::{
-    Action, Progress, SignInProbe, SignInStop, StatusFile, next_action, perform, probe, take_code,
+    Action, Clicks, Progress, SignInProbe, SignInStop, StatusFile, next_action, perform, probe,
 };
 use proto_lab::commands::status::{AccountStatus, account_status};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::HttpFence;
 use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
-use proto_lab::session::{Identity, SessionState, SessionWatch};
+use proto_lab::session::{Identity, REFUSAL_GRACE, SessionState, SessionWatch, Settling};
 use serde_json::{Value, json};
 use teams_fence::{FailClosed, Fence, FenceLog, Roster};
 use wiremock::matchers::{method, path};
@@ -231,6 +231,8 @@ fn debug_output_never_shows_the_password() -> TestResult {
 
 const PAGE: &str = "PAGE-SESSION";
 const MAIN: &str = "MAIN-FRAME";
+/// A worker's session: its events don't come on the page's.
+const WORKER: &str = "WORKER";
 const AUTHZ: &str = "https://teams.microsoft.com/api/authsvc/v1.0/authz";
 const OID_A: &str = "00000000-0000-4000-8000-00000000000a";
 const TENANT: &str = "00000000-0000-4000-8000-0000000000ff";
@@ -408,6 +410,93 @@ fn an_authz_before_the_page_reached_teams_does_not_count() {
     let mut events = loaded_events();
     events.push(navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/?reload"));
     assert_eq!(watch(&events).state(), SessionState::Loading);
+}
+
+#[test]
+fn an_answer_to_an_authz_sent_by_an_earlier_document_does_not_count() {
+    // sent from a worker of the first document, answered after the main frame moved on to a new one
+    for status in [200, 403] {
+        let events = [
+            navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+            request(WORKER, "w1", "POST", AUTHZ, &bearer(&claims_a())),
+            navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/?reload"),
+            response(WORKER, "w1", AUTHZ, status),
+        ];
+        assert_eq!(watch(&events).state(), SessionState::Loading, "{status}");
+        // nor is it the last answer of the new document
+        assert_eq!(watch(&events).last_authz_status(), None, "{status}");
+    }
+    // the new document's own exchange counts as ever
+    let events = [
+        navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+        request(WORKER, "w1", "POST", AUTHZ, &json!({})),
+        navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/?reload"),
+        request(WORKER, "w2", "POST", AUTHZ, &json!({})),
+        response(WORKER, "w1", AUTHZ, 403),
+        response(WORKER, "w2", AUTHZ, 200),
+    ];
+    assert_eq!(watch(&events).state(), SessionState::Loaded);
+}
+
+#[test]
+fn the_document_counts_main_frame_navigations_only() {
+    let mut seen = SessionWatch::new(SessionId::new(PAGE));
+    assert_eq!(seen.document(), 0);
+    seen.observe(&navigated(
+        PAGE,
+        MAIN,
+        None,
+        "https://login.microsoftonline.com/common/oauth2/authorize",
+    ));
+    assert_eq!(seen.document(), 1);
+    // a child frame, another tab and the page's own requests leave it alone
+    seen.observe(&navigated(PAGE, "child", Some(MAIN), "https://example.com/"));
+    seen.observe(&navigated("S-other", "F-other", None, "https://example.com/"));
+    seen.observe(&request(PAGE, "r1", "POST", AUTHZ, &json!({})));
+    assert_eq!(seen.document(), 1);
+    // the form's post commits the next document, on the same URL too
+    seen.observe(&navigated(
+        PAGE,
+        MAIN,
+        None,
+        "https://login.microsoftonline.com/common/oauth2/authorize",
+    ));
+    assert_eq!(seen.document(), 2);
+}
+
+#[test]
+fn a_refusal_is_believed_only_once_it_has_stood_for_its_grace() {
+    let start = tokio::time::Instant::now();
+    let refused = SessionState::Refused(403);
+    let mut settling = Settling::default();
+    assert_eq!(settling.judge(refused.clone(), start), SessionState::Loading);
+    assert_eq!(
+        settling.judge(refused.clone(), start + REFUSAL_GRACE / 2),
+        SessionState::Loading
+    );
+    assert_eq!(settling.judge(refused.clone(), start + REFUSAL_GRACE), refused);
+    // a retry in between starts the stand over
+    let mut settling = Settling::default();
+    settling.judge(refused.clone(), start);
+    assert_eq!(
+        settling.judge(SessionState::Loading, start + REFUSAL_GRACE / 2),
+        SessionState::Loading
+    );
+    assert_eq!(
+        settling.judge(refused.clone(), start + REFUSAL_GRACE),
+        SessionState::Loading,
+        "the refusal stood only since it came back"
+    );
+    assert_eq!(settling.judge(refused.clone(), start + REFUSAL_GRACE * 2), refused);
+    // every other state counts at once
+    for state in [
+        SessionState::Loaded,
+        SessionState::SignInShown,
+        SessionState::Elsewhere("example.com".to_owned()),
+        SessionState::Loading,
+    ] {
+        assert_eq!(Settling::default().judge(state.clone(), start), state);
+    }
 }
 
 #[test]
@@ -640,9 +729,17 @@ fn login_lets_entras_sign_in_form_through_and_nothing_more() {
         Classification::Own(OwnKind::EntraToken)
     );
     for (method, url) in [
-        // multi-factor sign-in and security info
+        // multi-factor sign-in (never captured: what it sets off and how verifying is told from registering is
+        // unknown, so login stops at a multi-factor prompt instead) and security info
         ("POST", "https://login.microsoftonline.com/common/SAS/BeginAuth"),
+        ("POST", "https://login.microsoftonline.com/common/SAS/EndAuth"),
         ("POST", "https://login.microsoftonline.com/common/SAS/ProcessAuth"),
+        ("POST", "https://login.microsoftonline.com/organizations/SAS/BeginAuth"),
+        (
+            "POST",
+            "https://login.microsoftonline.com/00000000-0000-4000-8000-0000000000ff/SAS/ProcessAuth",
+        ),
+        ("POST", "https://login.microsoftonline.com/SAS/ProcessAuth"),
         (
             "POST",
             "https://mysignins.microsoft.com/api/authentication/registration",
@@ -740,7 +837,7 @@ fn another_account_tile_is_picked_before_the_email() {
 }
 
 #[test]
-fn mfa_stops_or_asks_for_a_code() {
+fn every_mfa_prompt_stops_the_run() {
     let after = Progress {
         email_sent: true,
         password_sent: true,
@@ -750,11 +847,17 @@ fn mfa_stops_or_asks_for_a_code() {
         next_action(&registration, after),
         Action::Stop(SignInStop::MfaRegistration)
     );
+    // a one-time code can't be submitted under the fence (its requests aren't on the list): stop, don't ask for one
     let code = probe_of(&json!({"otc": r#"input[name="otc"]"#, "next": true}));
+    assert_eq!(next_action(&code, after), Action::Stop(SignInStop::MfaCode));
     assert_eq!(
-        next_action(&code, after),
-        Action::NeedCode(r#"input[name="otc"]"#.to_owned())
+        next_action(&code, Progress::default()),
+        Action::Stop(SignInStop::MfaCode)
     );
+    // registration wins when both show
+    let both = probe_of(&json!({"otc": r#"input[name="otc"]"#, "registration": true, "next": true}));
+    assert_eq!(next_action(&both, after), Action::Stop(SignInStop::MfaRegistration));
+    assert!(SignInStop::MfaCode.to_string().contains("one-time code"));
     let choice = probe_of(&json!({"proofs": true, "next": true}));
     assert_eq!(next_action(&choice, after), Action::Stop(SignInStop::MfaChoice));
     let approval = probe_of(&json!({"approval": true, "next": true}));
@@ -772,35 +875,46 @@ fn a_probe_with_nothing_in_it_waits() {
     );
 }
 
-// --- the status file and the code inbox ---
+#[test]
+fn a_click_is_not_repeated_on_the_same_document() {
+    let mut clicks = Clicks::default();
+    let kmsi = Action::AcceptKmsi("#KmsiCheckboxField".to_owned());
+    assert_eq!(clicks.admit(kmsi.clone(), 3), kmsi);
+    // the post is on its way and the page still shows the button: don't submit again
+    assert_eq!(clicks.admit(kmsi.clone(), 3), Action::Wait);
+    assert_eq!(clicks.admit(kmsi.clone(), 3), Action::Wait);
+    // the next document may ask again
+    assert_eq!(clicks.admit(kmsi.clone(), 4), kmsi);
+    // another click on the same document goes ahead, and so does the first one again after it
+    assert_eq!(clicks.admit(Action::ClickNext, 4), Action::ClickNext);
+    assert_eq!(clicks.admit(Action::ClickNext, 4), Action::Wait);
+    let tile = Action::ClickOtherTile("#otherTile".to_owned());
+    assert_eq!(clicks.admit(tile.clone(), 4), tile);
+    assert_eq!(clicks.admit(tile, 4), Action::Wait);
+    // typing is kept to once by the progress, not here; waits and stops pass through
+    let email = Action::TypeEmail("#email".to_owned());
+    assert_eq!(clicks.admit(email.clone(), 4), email);
+    assert_eq!(clicks.admit(email.clone(), 4), email);
+    let stop = Action::Stop(SignInStop::MfaCode);
+    assert_eq!(clicks.admit(stop.clone(), 4), stop);
+    assert_eq!(clicks.admit(Action::Wait, 4), Action::Wait);
+}
+
+// --- the status file ---
 
 #[test]
 fn the_status_file_is_private_and_replaced_on_each_state() -> TestResult {
     let dir = tempfile::tempdir()?;
     let status = StatusFile::new(dir.path(), Alias::B);
     status.write("starting", &json!({}))?;
-    status.write("need-code", &json!({"prompt": "Enter the code"}))?;
+    status.write("failed", &json!({"error": "the password was rejected"}))?;
     let file = dir.path().join("status-b.json");
     assert_eq!(std::fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
     let record: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
     assert_eq!(record["alias"], "b");
-    assert_eq!(record["state"], "need-code");
-    assert_eq!(record["prompt"], "Enter the code");
+    assert_eq!(record["state"], "failed");
+    assert_eq!(record["error"], "the password was rejected");
     assert!(record["at_unix_ms"].as_u64().is_some_and(|at| at > 0));
-    Ok(())
-}
-
-#[test]
-fn a_code_is_taken_from_the_inbox_once() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let inbox = dir.path().join("inbox");
-    assert_eq!(take_code(&inbox, Alias::C)?, None);
-    std::fs::create_dir(&inbox)?;
-    std::fs::write(inbox.join("c.code"), " 123456\n")?;
-    assert_eq!(take_code(&inbox, Alias::A)?, None);
-    assert_eq!(take_code(&inbox, Alias::C)?, Some("123456".to_owned()));
-    assert_eq!(take_code(&inbox, Alias::C)?, None);
-    assert!(!inbox.join("c.code").exists());
     Ok(())
 }
 
@@ -808,7 +922,9 @@ fn a_code_is_taken_from_the_inbox_once() -> TestResult {
 
 /// A stand-in for Microsoft's sign-in page: an email pane, a password pane and a "Stay signed in?" pane behind one
 /// `#idSIButton9`, plus an invisible password field that must never be typed into. `?reject` refuses the password,
-/// `?register` asks to register an MFA method after it. It records what was submitted in `window.lab`.
+/// `?register` asks to register an MFA method after it, `?slow` submits "Stay signed in?" from the page (a GET, which
+/// the fail-closed fence lets through) with an answer that takes [`SLOW_ANSWER`] to come, and leaves for `/done` only
+/// then. It records what was submitted in `window.lab`.
 const SIGN_IN_PAGE: &str = r#"<!doctype html><html><body>
 <style>input{width:300px;height:30px} .pane{display:none} .on{display:block}</style>
 <input name="passwd" type="password" id="trap" style="opacity:0;position:absolute;left:0;top:0">
@@ -831,7 +947,13 @@ document.getElementById('idSIButton9').addEventListener('click', () => {
     if (q.has('register')) { pane = 'register'; show('register'); return; }
     pane = 'kmsi'; show('kmsi'); return;
   }
-  if (pane === 'kmsi') { location.href = '/done?kmsi=' + document.getElementById('KmsiCheckboxField').checked; }
+  if (pane === 'kmsi') {
+    const done = '/done?kmsi=' + document.getElementById('KmsiCheckboxField').checked;
+    if (!q.has('slow')) { location.href = done; return; }
+    // submitted from the page, which keeps showing "Stay signed in?" until the answer comes
+    window.lab.kmsi = (window.lab.kmsi ?? 0) + 1;
+    fetch('/kmsi-slow?n=' + window.lab.kmsi).then(() => { location.href = done; });
+  }
 });
 </script></body></html>"#;
 
@@ -876,11 +998,20 @@ async fn serve_sign_in() -> MockServer {
         .respond_with(ResponseTemplate::new(200).set_body_raw("<!doctype html><p>done</p>", "text/html"))
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/kmsi-slow"))
+        .respond_with(ResponseTemplate::new(204).set_delay(SLOW_ANSWER))
+        .mount(&server)
+        .await;
     server
 }
 
-/// Runs the driver on the stand-in page until it stops, the page leaves for `/done`, or 40 steps pass. Returns the
-/// last action, the page's record and the page's URL.
+/// How long the stand-in's slow answer to "Stay signed in?" takes: several of the driver's looks at the page.
+const SLOW_ANSWER: Duration = Duration::from_secs(3);
+
+/// Runs the driver on the stand-in page until it stops, the page leaves for `/done`, or 40 steps pass, a look every
+/// 250 ms (faster than `login`'s, so a repeated click would show). Returns the last action, the page's record and the
+/// page's URL.
 async fn drive(run: &SignInRun, url: &str, password: &str) -> TestResult<(Action, Value, String)> {
     let text = format!(r#"[{{"profile": "labbot", "email": "{UPN_A}", "password": "{password}"}}]"#);
     let accounts = AccountsFile::parse(&text, no_env)?;
@@ -890,6 +1021,7 @@ async fn drive(run: &SignInRun, url: &str, password: &str) -> TestResult<(Action
     cdp.call(Some(&run.page), "Page.navigate", json!({"url": url})).await?;
     let mut seen = SessionWatch::new(run.page.clone());
     let mut progress = Progress::default();
+    let mut clicks = Clicks::default();
     let mut last = Action::Wait;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -900,9 +1032,9 @@ async fn drive(run: &SignInRun, url: &str, password: &str) -> TestResult<(Action
             break;
         }
         let found = probe(cdp, &run.page).await?;
-        last = next_action(&found, progress);
+        last = clicks.admit(next_action(&found, progress), seen.document());
         assert!(!format!("{found:?} {last:?}").contains(password));
-        if matches!(last, Action::Stop(_) | Action::NeedCode(_)) {
+        if matches!(last, Action::Stop(_)) {
             break;
         }
         perform(cdp, &run.page, &last, credentials, &mut progress).await?;
@@ -954,6 +1086,23 @@ async fn the_driver_signs_in_through_email_password_and_stay_signed_in() -> Test
         assert_eq!(record, Value::Null, "the done page has no record");
         // the run never saw a deny of its own: typing and clicking are not requests
         assert!(run.armed.denials().is_empty(), "{:?}", run.armed.denials());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn the_driver_answers_stay_signed_in_once_while_its_answer_is_on_the_way() -> TestResult {
+    with_sign_in(async |run, server| {
+        let (last, _, url) = drive(run, &format!("{}/signin?slow", server.uri()), SECRET).await?;
+        assert!(url.ends_with("/done?kmsi=true"), "{url} after {last:?}");
+        // the page showed "Stay signed in?" for several looks while the answer was coming: one submit all the same
+        let requests = server.received_requests().await.unwrap_or_default();
+        let submits = requests
+            .iter()
+            .filter(|request| request.url.path() == "/kmsi-slow")
+            .count();
+        assert_eq!(submits, 1, "\"Stay signed in?\" submitted {submits} times");
         Ok(())
     })
     .await

@@ -8,12 +8,18 @@
 //!   a field a person could type into (shown, sized, enabled);
 //! - the password is sent once; a rejection stops the run;
 //! - "Stay signed in?" is answered yes;
-//! - a request to register an MFA method stops the run, and so does a prompt to pick a method or approve in an app;
-//! - a request for a one-time code writes `status-<alias>.json` with `need-code` and waits for the code in
-//!   `inbox/<alias>.code` (in the lab's data dir), up to `--code-wait`.
+//! - a button is pressed once per page: the same click isn't repeated until the main frame has committed another
+//!   document ([`Clicks`]), so a form whose post is still on its way isn't submitted twice, and the page is looked at
+//!   at most every [`TICK`];
+//! - a request to register an MFA method stops the run, and so does any other multi-factor prompt: one to pick a
+//!   method, to approve in an app, or to enter a one-time code.
 //!
 //! The fence lets Entra's sign-in form through for this command only ([`Classifier::sign_in`]); everything else
 //! mutating is denied as in every run, and the denies are expected (the web client loads in a reduced state).
+//! Multi-factor sign-in (Entra's `SAS/*` requests) isn't on that list: no such exchange has been captured, so what its
+//! requests set off (a code sent by text or call, a push to a phone, as soon as the page shows the prompt) and whether
+//! verifying a method can be told apart from registering one are unknown. A one-time code could never be submitted
+//! under the fence, so the run stops instead of asking for one.
 //!
 //! Once the web client has loaded, the account's MRI is made from the object id in the claims of a bearer token the
 //! page sent for that account's UPN, and recorded in `lab.toml` ([`record_account_mri`]). An account that is signed
@@ -31,7 +37,7 @@ use crate::accounts::{ACCOUNTS_FILE, AccountsError, AccountsFile, Credentials};
 use crate::cdp::{Cdp, CdpError, SessionId};
 use crate::classify::Classifier;
 use crate::config::{Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri};
-use crate::session::{FenceReport, LabSession, NotAGuid, REFUSAL_GRACE, SessionError, SessionState, TEAMS_URL};
+use crate::session::{FenceReport, LabSession, NotAGuid, SessionError, SessionState, Settling, TEAMS_URL};
 
 /// What a sign-in page shows, as [`probe`] finds it. A field is the selector of the one element of its kind a person
 /// could type into (the probe marks it), or `None`.
@@ -46,8 +52,6 @@ pub struct SignInProbe {
     /// The "Stay signed in?" / "Don't show this again" checkbox.
     pub kmsi: Option<String>,
     pub signals: BTreeSet<Signal>,
-    /// The first lines of the page's text, for the `need-code` status.
-    pub prompt: String,
 }
 
 /// Something else a sign-in page shows.
@@ -99,7 +103,6 @@ impl SignInProbe {
                 .filter(|(_, name)| value[*name].as_bool() == Some(true))
                 .map(|(signal, _)| *signal)
                 .collect(),
-            prompt: value["prompt"].as_str().unwrap_or_default().to_owned(),
         }
     }
 
@@ -127,6 +130,8 @@ pub enum SignInStop {
     MfaChoice,
     #[error("Microsoft asks to approve the sign-in in an app; not proceeding")]
     MfaApproval,
+    #[error("Microsoft asks for a one-time code; not proceeding (MFA requests aren't on the fence's reviewed list)")]
+    MfaCode,
 }
 
 /// The next step on a sign-in page.
@@ -140,9 +145,42 @@ pub enum Action {
     /// Tick the checkbox and press the primary button.
     AcceptKmsi(String),
     ClickNext,
-    /// A one-time code goes into this field.
-    NeedCode(String),
     Stop(SignInStop),
+}
+
+impl Action {
+    /// Whether the step presses something on the page (and so may submit a form).
+    fn clicks(&self) -> bool {
+        matches!(self, Self::ClickOtherTile(_) | Self::AcceptKmsi(_) | Self::ClickNext)
+    }
+}
+
+/// Keeps the sign-in from pressing the same thing twice on one page. A click sends the form's post, and until the reply
+/// commits the next document the page still shows what was clicked; pressing it again would submit the form a second
+/// time while the first post is under way. The email and the password are kept to once each by [`Progress`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Clicks {
+    /// The last click and the main-frame document ([`crate::session::SessionWatch::document`]) it was made on.
+    last: Option<(Action, u64)>,
+}
+
+impl Clicks {
+    /// `action` as it may be carried out on main-frame document `document`: [`Action::Wait`] for the click made last,
+    /// on the same document; the action itself otherwise, a click then counting as made.
+    pub fn admit(&mut self, action: Action, document: u64) -> Action {
+        if !action.clicks() {
+            return action;
+        }
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|(last, on)| *last == action && *on == document)
+        {
+            return Action::Wait;
+        }
+        self.last = Some((action.clone(), document));
+        action
+    }
 }
 
 /// The next step for what the page shows, in the order the proven script takes them. The password goes in once; after
@@ -172,8 +210,8 @@ fn mfa_or_confirm(probe: &SignInProbe, progress: Progress) -> Action {
     if probe.shows(Signal::Registration) {
         return Action::Stop(SignInStop::MfaRegistration);
     }
-    if let Some(otc) = &probe.otc {
-        return Action::NeedCode(otc.clone());
+    if probe.otc.is_some() {
+        return Action::Stop(SignInStop::MfaCode);
     }
     if probe.shows(Signal::Proofs) {
         return Action::Stop(SignInStop::MfaChoice);
@@ -222,13 +260,12 @@ const PROBE: &str = r#"(() => {
     registration: /more information required|keep your account secure|set up your account/i.test(text),
     approval: /approve sign.in|open your authenticator|enter the number/i.test(text),
     proofs: any(['[data-value][role="button"]', 'div.table[role="button"]', '#idDiv_SAOTCS_Proofs [role="button"]']),
-    prompt: text.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 8).join(' | ').slice(0, 400),
   };
 })()"#;
 
 /// Presses the first primary button shown.
 const PRESS_NEXT: &str = r#"(() => {
-  for (const selector of ['#idSubmit_SAOTCC_Continue', '#idSIButton9', 'input[type="submit"]', 'button[type="submit"]']) {
+  for (const selector of ['#idSIButton9', 'input[type="submit"]', 'button[type="submit"]']) {
     for (const el of document.querySelectorAll(selector)) {
       const box = el.getBoundingClientRect();
       if (box.width > 0 && box.height > 0 && getComputedStyle(el).visibility !== 'hidden') { el.click(); return true; }
@@ -256,8 +293,6 @@ pub enum LoginError {
     UnexpectedHost(String),
     #[error("the web client didn't load within {timeout:?} ({})", authz.map_or_else(|| "no authz answer".to_owned(), |status| format!("authz answered {status}")))]
     Timeout { timeout: Duration, authz: Option<u16> },
-    #[error("no one-time code arrived in {} within {wait:?}", inbox.display())]
-    NoCode { inbox: PathBuf, wait: Duration },
     #[error("the web client loaded, but no request showed the account's identity")]
     NoIdentity,
     #[error("the account's {0}")]
@@ -283,7 +318,7 @@ async fn evaluate(cdp: &Cdp, page: &SessionId, expression: &str) -> Result<Value
     Ok(result["result"]["value"].clone())
 }
 
-/// Carries out one step on the page. [`Action::NeedCode`], [`Action::Wait`] and [`Action::Stop`] do nothing here.
+/// Carries out one step on the page. [`Action::Wait`] and [`Action::Stop`] do nothing here.
 ///
 /// # Errors
 /// When the page can't be driven, or a field it named is gone.
@@ -318,7 +353,7 @@ pub async fn perform(
             press_next(cdp, page).await?;
         }
         Action::ClickNext => press_next(cdp, page).await?,
-        Action::NeedCode(_) | Action::Wait | Action::Stop(_) => {}
+        Action::Wait | Action::Stop(_) => {}
     }
     Ok(())
 }
@@ -413,28 +448,11 @@ impl StatusFile {
     }
 }
 
-/// Takes the one-time code someone left in `inbox/<alias>.code`: read, trimmed and removed. `None` while there is none.
-///
-/// # Errors
-/// When the file is there but can't be read or removed.
-pub fn take_code(inbox: &Path, alias: Alias) -> std::io::Result<Option<String>> {
-    let path = inbox.join(format!("{alias}.code"));
-    let code = match std::fs::read_to_string(&path) {
-        Ok(code) => code.trim().to_owned(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    std::fs::remove_file(&path)?;
-    Ok(Some(code))
-}
-
 /// How a login runs.
 #[derive(Clone, Copy, Debug)]
 pub struct LoginOptions {
     /// How long the whole sign-in and load may take.
     pub timeout: Duration,
-    /// How long to wait for a one-time code once one is asked for.
-    pub code_wait: Duration,
 }
 
 /// What a login did.
@@ -474,11 +492,9 @@ pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, L
         status.write("starting", &json!({})).map_err(LoginError::Status)?;
         let mut session = LabSession::open(&paths, alias, Classifier::sign_in()).await?;
         let run = Run {
-            alias,
             upn: &upn,
             credentials,
             status: &status,
-            inbox: paths.data_dir().join("inbox"),
             options,
         };
         let signed = run.drive(&mut session).await;
@@ -515,29 +531,34 @@ pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, L
 
 /// One login's moving parts.
 struct Run<'a> {
-    alias: Alias,
     upn: &'a str,
     credentials: &'a Credentials,
     status: &'a StatusFile,
-    inbox: PathBuf,
     options: LoginOptions,
 }
 
-/// How often the sign-in page is looked at.
-const TICK: Duration = Duration::from_millis(700);
-/// How long the page gets after a code before it is looked at again.
-const CODE_SETTLE: Duration = Duration::from_secs(3);
+/// How often the sign-in page is looked at, at most: a click's post makes events at once, and the page is only looked
+/// at again once this has passed (a click isn't repeated on one document anyway: [`Clicks`]).
+pub const TICK: Duration = Duration::from_millis(700);
 /// How long the identity may take to show once the web client has loaded.
 const IDENTITY_WAIT: Duration = Duration::from_secs(30);
+
+/// Where the sign-in is: what was sent, the last click, and when the page may be looked at next.
+#[derive(Default)]
+struct SignIn {
+    progress: Progress,
+    clicks: Clicks,
+    next_look: Option<tokio::time::Instant>,
+}
 
 impl Run<'_> {
     /// Opens Teams and signs in where asked, until the web client loads (or Teams refuses the signed-in account); then
     /// waits for the identity.
     async fn drive(&self, session: &mut LabSession) -> Result<BrowserOutcome, LoginError> {
         session.navigate(TEAMS_URL).await?;
-        let mut progress = Progress::default();
-        let refused = self.until_loaded(session, &mut progress).await?;
-        let signed_in = progress.email_sent || progress.password_sent;
+        let mut sign_in = SignIn::default();
+        let refused = self.until_loaded(session, &mut sign_in).await?;
+        let signed_in = sign_in.progress.email_sent || sign_in.progress.password_sent;
         let state = if refused.is_some() {
             "signed-in-teams-refused"
         } else {
@@ -549,7 +570,7 @@ impl Run<'_> {
         let identity_deadline = tokio::time::Instant::now() + IDENTITY_WAIT;
         while session.watch().identity_for(self.upn).is_none() && tokio::time::Instant::now() < identity_deadline {
             if !session.pump(TICK).await {
-                break;
+                return Err(LoginError::Breach(session.report().summary()));
             }
         }
         let identity = session.watch().identity_for(self.upn).ok_or(LoginError::NoIdentity)?;
@@ -561,10 +582,10 @@ impl Run<'_> {
     }
 
     /// Signs in where asked until the web client loads (`None`) or Teams refuses the account (its authz status),
-    /// a refusal counting once it has stood for [`REFUSAL_GRACE`].
-    async fn until_loaded(&self, session: &mut LabSession, progress: &mut Progress) -> Result<Option<u16>, LoginError> {
+    /// a refusal counting once it has stood for [`crate::session::REFUSAL_GRACE`] ([`Settling`]). A lost connection is a breach.
+    async fn until_loaded(&self, session: &mut LabSession, sign_in: &mut SignIn) -> Result<Option<u16>, LoginError> {
         let deadline = tokio::time::Instant::now() + self.options.timeout;
-        let mut refused_at = None;
+        let mut settling = Settling::default();
         loop {
             if tokio::time::Instant::now() >= deadline {
                 return Err(LoginError::Timeout {
@@ -575,31 +596,33 @@ impl Run<'_> {
             if !session.pump(TICK).await {
                 return Err(LoginError::Breach(session.report().summary()));
             }
-            match session.watch().state() {
+            match settling.judge(session.watch().state(), tokio::time::Instant::now()) {
                 SessionState::Loaded => return Ok(None),
-                SessionState::Refused(status) => {
-                    if refused_at.get_or_insert_with(tokio::time::Instant::now).elapsed() >= REFUSAL_GRACE {
-                        return Ok(Some(status));
-                    }
-                }
-                SessionState::Loading => refused_at = None,
+                SessionState::Refused(status) => return Ok(Some(status)),
+                SessionState::Loading => {}
                 SessionState::Elsewhere(host) => return Err(LoginError::UnexpectedHost(host)),
-                SessionState::SignInShown => self.sign_in_step(session, progress).await?,
+                SessionState::SignInShown => self.sign_in_step(session, sign_in).await?,
             }
         }
     }
 
-    /// One look at the sign-in page and the step it calls for.
-    async fn sign_in_step(&self, session: &LabSession, progress: &mut Progress) -> Result<(), LoginError> {
+    /// One look at the sign-in page and the step it calls for, unless the page was looked at less than [`TICK`] ago.
+    async fn sign_in_step(&self, session: &LabSession, sign_in: &mut SignIn) -> Result<(), LoginError> {
+        let now = tokio::time::Instant::now();
+        if sign_in.next_look.is_some_and(|next| now < next) {
+            return Ok(());
+        }
+        sign_in.next_look = Some(now + TICK);
         let (cdp, page) = (session.cdp(), session.page());
         let found = probe(cdp, page).await?;
-        let action = next_action(&found, *progress);
-        let before = *progress;
-        match &action {
-            Action::Stop(stop) => return Err((*stop).into()),
-            Action::NeedCode(field) => return self.enter_code(cdp, page, field, &found.prompt).await,
-            _ => perform(cdp, page, &action, self.credentials, progress).await?,
+        let action = sign_in
+            .clicks
+            .admit(next_action(&found, sign_in.progress), session.watch().document());
+        let before = sign_in.progress;
+        if let Action::Stop(stop) = action {
+            return Err(stop.into());
         }
+        perform(cdp, page, &action, self.credentials, &mut sign_in.progress).await?;
         let state = match action {
             Action::TypeEmail(_) if !before.email_sent => "email-submitted",
             Action::TypePassword(_) => "password-submitted",
@@ -607,31 +630,5 @@ impl Run<'_> {
             _ => return Ok(()),
         };
         self.status.write(state, &json!({})).map_err(LoginError::Status)
-    }
-
-    /// Asks for a one-time code through the status file and waits for it in the inbox.
-    async fn enter_code(&self, cdp: &Cdp, page: &SessionId, field: &str, prompt: &str) -> Result<(), LoginError> {
-        let status = |error| LoginError::Status(error);
-        self.status
-            .write("need-code", &json!({"prompt": prompt}))
-            .map_err(status)?;
-        let deadline = tokio::time::Instant::now() + self.options.code_wait;
-        loop {
-            if let Some(code) = take_code(&self.inbox, self.alias).map_err(status)? {
-                type_into(cdp, page, field, &code).await?;
-                press_next(cdp, page).await?;
-                self.status.write("code-submitted", &json!({})).map_err(status)?;
-                // the page moves on, or shows the field again for another code
-                tokio::time::sleep(CODE_SETTLE).await;
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(LoginError::NoCode {
-                    inbox: self.inbox.clone(),
-                    wait: self.options.code_wait,
-                });
-            }
-            tokio::time::sleep(TICK).await;
-        }
     }
 }
