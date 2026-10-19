@@ -7,6 +7,7 @@ members = [
     "crates/teams-auth",
     "crates/teams-fence",
     "crates/teams-proto",
+    "spikes/media-loop",
 ]
 
 [workspace.package]
@@ -21,9 +22,12 @@ fixture-guard = { path = "crates/fixture-guard" }
 teams-auth = { path = "crates/teams-auth" }
 teams-fence = { path = "crates/teams-fence" }
 teams-proto = { path = "crates/teams-proto" }
+media-loop = { path = "spikes/media-loop" }
 clap = { version = "4.6.7", features = ["derive"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 oo7 = "0.6.0"
+# libopus, built from source by opusic-sys (its default `bundled` feature)
+opus = "0.4.0"
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
@@ -31,6 +35,9 @@ rustix = { version = "1.1.5", features = ["process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+# sans-IO WebRTC; rust-crypto does DTLS and SRTP in pure Rust (no OpenSSL), but dimpl generates its certificate with
+# rcgen on aws-lc-rs, so the aws-lc-sys C build stays; no example web server
+str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto"] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = "1.53.3"

@@ -1,0 +1,15 @@
+[package]
+name = "media-loop"
+description = "Spike 3a: two str0m peers over loopback UDP carry an Opus tone; Goertzel checks the frequency"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+opus.workspace = true
+str0m.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
