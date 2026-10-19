@@ -1,4 +1,18 @@
 //! The write fence: a write is allowed only when every participant of its target, fetched fresh, is one of the 3 lab
 //! accounts or an approved service participant.
 //!
-//! Skeleton: the decision engine arrives in M0 Task 3 (`docs/plans/20261019-native-teams-m0-lab-and-spikes.md`).
+//! [`Fence::check`] takes a [`Target`] (a [`WriteKind`] and a [`Scope`], plus any participants the write adds) and a
+//! [`MembershipSource`], fetches the scope's members on every call, and returns a [`WritePermit`] or [`Denied`].
+//! Anything unknown is denied: a failed, empty, paginated or truncated membership, an org-wide team or channel, an
+//! outside participant. Every decision goes to `fence.log` ([`FenceLog`]).
+
+mod decision;
+mod log;
+mod target;
+
+pub use decision::{
+    Denied, DenyReason, Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, PartialReason, Roster,
+    WritePermit,
+};
+pub use log::FenceLog;
+pub use target::{Mri, Scope, Target, WriteKind};

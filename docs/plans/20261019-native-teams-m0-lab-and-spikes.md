@@ -208,17 +208,20 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/teams-fence/src/{lib.rs,target.rs,decision.rs,log.rs}`
 - Create: `crates/teams-fence/tests/fence_core.rs`
 
-- [ ] tests first, as a table of `WriteKind` × participant sets:
+- [x] tests first, as a table of `WriteKind` × participant sets:
   - only lab accounts → allow
   - lab accounts + an approved service → allow
   - any outside member → deny
   - membership fetch failed, empty, or paginated/truncated → deny
   - org-wide team or channel → deny
   - answering an inbound call from a non-lab caller → deny
-- [ ] implement `WriteKind` (message, edit, delete, reaction, typing, read receipt, call, call answer, invite, meeting, member change, chat create, channel post, bot reply) and `Target`
-- [ ] implement `Fence::check(target, &dyn MembershipSource) -> Result<WritePermit, Denied>`. `WritePermit` has a private constructor, and membership is always fetched, never cached. `MembershipSource` returns `Complete(members)` or `Partial`, and `Partial` → deny.
-- [ ] implement the `fence.log` JSONL writer; a test checks that every deny produces an entry with the reason and no tokens
-- [ ] `cargo test -p teams-fence` passes
+- [x] implement `WriteKind` (message, edit, delete, reaction, typing, read receipt, call, call answer, invite, meeting, member change, chat create, channel post, bot reply) and `Target`
+- [x] implement `Fence::check(target, &dyn MembershipSource) -> Result<WritePermit, Denied>`. `WritePermit` has a private constructor, and membership is always fetched, never cached. `MembershipSource` returns `Complete(members)` or `Partial`, and `Partial` → deny.
+- [x] implement the `fence.log` JSONL writer; a test checks that every deny produces an entry with the reason and no tokens
+- [x] `cargo test -p teams-fence` passes
+  - ➕ `MembershipSource` is dyn-compatible but async: `fn members(&self, &Scope) -> Pin<Box<dyn Future<Output = Membership> + Send>>`, so `Fence::check` is `async` (the live source in Task 11 fetches over the network). `Membership` has a third variant, `OrgWide`, besides `Complete`/`Partial`; `Partial` carries `FetchFailed(Network|Timeout|Status|Malformed)`, `Paginated` or `Truncated`, with no free text, so nothing from a response can reach the log
+  - ➕ `Target` = `WriteKind` + `Scope` (`Conversation`, `Channel`, `Team`, `Call`, `New`) + the participants the write adds (invitees, a new chat's members). The fence judges the fetched members together with the added ones; `Scope::New` isn't fetched, its participants are exactly the added ones; an empty fetch is denied even when lab members are added
+  - ➕ the `Roster` (lab and service MRIs) matches MRIs exactly; an account or service without an MRI in `lab.toml` is left out and matches nobody. `fence.log` also records allows (no reason), as the run's audit; an allow that can't be logged is denied. Entries carry kind, scope ids, the added count and the reason, never member identities or tokens; the file is created 0600
 
 ### Task 4: Type-level enforcement in teams-proto
 **Files:**
