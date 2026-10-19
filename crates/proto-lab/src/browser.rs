@@ -166,6 +166,8 @@ pub enum BrowserError {
     BadActivePort(String),
     #[error("can't stop the browser: {0}")]
     Stop(#[source] std::io::Error),
+    #[error("the browser didn't confirm closing ({0}); it was killed")]
+    CloseUnconfirmed(String),
 }
 
 const ACTIVE_PORT: &str = "DevToolsActivePort";
@@ -258,6 +260,15 @@ impl Browser {
         if let Ok(status) = tokio::time::timeout(TERM_GRACE, self.child.wait()).await {
             return status.map_err(BrowserError::Stop);
         }
+        self.group.signal(Signal::KILL);
+        self.child.wait().await.map_err(BrowserError::Stop)
+    }
+
+    /// Kills the browser and every process it started at once, and reaps it.
+    ///
+    /// # Errors
+    /// [`BrowserError::Stop`] when the process can't be reaped.
+    pub async fn kill(mut self) -> Result<ExitStatus, BrowserError> {
         self.group.signal(Signal::KILL);
         self.child.wait().await.map_err(BrowserError::Stop)
     }

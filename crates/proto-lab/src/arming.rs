@@ -28,6 +28,12 @@
 //! report the guard armed. Chrome 155 installs a binding in new contexts only with `Runtime.enable` on, and runs
 //! new-document scripts only with `Page.enable` on.
 //!
+//! A popup (`window.open`, the three-argument `document.open`) is a page target of its own, whose initial
+//! `about:blank` document its opener can script at once. Chrome 155 holds the opener inside `open` while the popup,
+//! attached and held, is armed: `open('')` returned after about 100 ms, with the guard already in the popup. So the
+//! opener never reaches an unguarded `send` through it. Checked live by
+//! `tests/fence_ws.rs`, which would see the frame reach the server if a later Chrome stopped holding the opener.
+//!
 //! A target's own auto-attach leaves service workers out: each one attaches once, through the browser, and is armed
 //! there. A page in a service worker's scope would attach it too, and on Chrome 155 a service worker attached twice
 //! while paused answers no `Network` or `Runtime` command on either session until it runs, so it could never be armed
@@ -48,6 +54,8 @@
 //! fence: [`ArmedBrowser`] owns the [`Browser`], dropping it (or a failed [`ArmedBrowser::arm`]) kills the browser
 //! before the connection closes, and if the connection's events end while the fence is up (the browser closed the
 //! websocket, or the reader stopped on a message it couldn't read) the browser is killed at once and the run fails.
+//! [`ArmedBrowser::close`] lets the browser exit on its own only once the browser has confirmed `Browser.close`;
+//! without that, it kills the browser too.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -399,6 +407,8 @@ struct Shared {
     browser: Mutex<Option<Browser>>,
     /// The connection's events ended while the fence was up.
     lost: AtomicBool,
+    /// [`ArmedBrowser::close`] has asked the browser to close, and decides from its answer whether to kill it.
+    closing: AtomicBool,
 }
 
 impl Shared {
@@ -420,11 +430,11 @@ impl Shared {
     }
 }
 
-/// A browser with the fence's HTTP layer armed. It owns the browser, and handles the connection's events until it is
-/// closed or dropped.
+/// A browser with the fence armed: its HTTP layer and its WebSocket guard. It owns the browser, and handles the
+/// connection's events until it is closed or dropped.
 ///
 /// Dropping it kills the browser (with every process the browser started) before the connection closes, so the browser
-/// never runs without the fence; [`Self::close`] lets the browser exit on its own first.
+/// never runs without the fence; [`Self::close`] lets the browser exit on its own once it has confirmed closing.
 pub struct ArmedBrowser {
     cdp: Cdp,
     shared: Arc<Shared>,
@@ -457,6 +467,7 @@ impl ArmedBrowser {
             changed: Notify::new(),
             browser: Mutex::new(Some(browser)),
             lost: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
         });
         let task = tokio::spawn(handle_events(cdp.clone(), events, Arc::clone(&shared)));
         // from here on, an early return drops `armed`, and that kills the browser
@@ -470,21 +481,33 @@ impl ArmedBrowser {
         Ok(armed)
     }
 
-    /// Asks the browser to close (`Browser.close`), waits up to `grace` for it to exit, and stops it the way
-    /// [`Browser::wait_or_kill`] does if it doesn't. A browser killed already (its connection was lost) needs nothing
-    /// more.
+    /// Asks the browser to close (`Browser.close`). Once the browser has confirmed it, waits up to `grace` for it to
+    /// exit and stops it the way [`Browser::wait_or_kill`] does if it doesn't.
+    ///
+    /// The connection closes as the browser exits, so while closing, the end of the connection doesn't kill the browser
+    /// (it would cut a profile's shutdown short); this decides instead, from the browser's answer. Without the browser's
+    /// confirmation that it is shutting down (the connection is gone, the browser refused, or no answer came within
+    /// `grace`) the browser may still be running and no longer see the fence, so it is killed at once; a lost
+    /// connection fails the waiting call at once, so that takes no longer than the loss.
     ///
     /// # Errors
-    /// [`BrowserError::Stop`] when the browser process can't be reaped.
+    /// [`BrowserError::CloseUnconfirmed`] when the browser was killed instead (or had been already, its connection
+    /// lost), and [`BrowserError::Stop`] when the browser process can't be reaped.
     pub async fn close(self, grace: Duration) -> Result<(), BrowserError> {
-        // taken first, so the connection closing as the browser exits isn't taken for a lost one
+        self.shared.closing.store(true, Ordering::SeqCst);
+        let closing = tokio::time::timeout(grace, self.cdp.call(None, "Browser.close", Value::Null)).await;
         let Some(browser) = self.shared.take_browser() else {
-            return Ok(());
+            return Err(BrowserError::CloseUnconfirmed(
+                "the fence had lost its connection".to_owned(),
+            ));
         };
-        // best effort: the connection may drop before the reply, or never answer if its reader is gone
-        let _ = tokio::time::timeout(grace, self.cdp.call(None, "Browser.close", Value::Null)).await;
-        browser.wait_or_kill(grace).await?;
-        Ok(())
+        let unconfirmed = match closing {
+            Ok(Ok(_)) => return browser.wait_or_kill(grace).await.map(drop),
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => format!("no answer within {grace:?}"),
+        };
+        browser.kill().await?;
+        Err(BrowserError::CloseUnconfirmed(unconfirmed))
     }
 
     /// The connection, for driving the armed targets.
@@ -559,6 +582,12 @@ impl ArmedBrowser {
         self.shared.ws.unsanctioned()
     }
 
+    /// How many allowed WebSocket frames the browser hasn't reported sent yet ([`WsFence::allows_not_seen_sent`]).
+    #[must_use]
+    pub fn allows_not_seen_sent(&self) -> usize {
+        self.shared.ws.allows_not_seen_sent()
+    }
+
     /// The run's verdict so far: any denied request or frame, frame sent without an allow or unarmed target fails it,
     /// and so does a lost connection.
     ///
@@ -588,7 +617,10 @@ impl ArmedBrowser {
 async fn handle_events(cdp: Cdp, events: Events, shared: Arc<Shared>) {
     dispatch_events(cdp, events, &shared).await;
     shared.lost.store(true, Ordering::SeqCst);
-    shared.kill_browser();
+    // while closing, `ArmedBrowser::close` kills it unless the browser confirmed it is shutting down
+    if !shared.closing.load(Ordering::SeqCst) {
+        shared.kill_browser();
+    }
     shared.changed.notify_waiters();
 }
 

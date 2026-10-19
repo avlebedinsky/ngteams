@@ -110,28 +110,51 @@ fn an_own_rule_matches_its_origin_path_and_text_prefix_only() {
 
 // --- the guard script and its requests ---
 
+/// The token of the tests' guard scripts.
+const TOKEN: &str = "5eed0123";
+
+/// What the guard sends for one frame of socket 3.
+fn request(seq: u64, kind: &str, data: &str) -> Value {
+    json!({"token": TOKEN, "socket": 3, "seq": seq, "url": LOCAL, "kind": kind, "data": data})
+}
+
 #[test]
-fn a_guard_request_is_read_from_the_binding_payload() {
-    let request =
-        |kind: &str, data: &str| json!({"socket": 3, "seq": 7, "url": LOCAL, "kind": kind, "data": data}).to_string();
-    let read = GuardRequest::from_payload(&request("text", "allow:1")).unwrap();
-    assert_eq!((read.socket, read.seq), (3, 7));
-    assert_eq!(read.frame, text(LOCAL, "allow:1"));
-    let binary = GuardRequest::from_payload(&request("binary", "AQID")).unwrap();
+fn a_guard_request_is_read_from_the_binding_payload_with_the_runs_token_only() {
+    let script = GuardScript::with_token(TOKEN).unwrap();
+    let read = |payload: &Value| GuardRequest::from_payload(&payload.to_string(), &script);
+    let text_request = read(&request(7, "text", "allow:1")).unwrap();
+    assert_eq!((text_request.socket, text_request.seq), (3, 7));
+    assert_eq!(text_request.frame, text(LOCAL, "allow:1"));
+    let binary = read(&request(7, "binary", "AQID")).unwrap();
     assert_eq!(binary.frame.payload, Payload::Binary("AQID".to_owned()));
-    let unreadable = GuardRequest::from_payload(&request("unreadable", "")).unwrap();
+    let unreadable = read(&request(7, "unreadable", "")).unwrap();
     assert_eq!(unreadable.frame.payload, Payload::Unreadable);
 
+    let with = |field: &str, value: Value| {
+        let mut payload = request(7, "text", "");
+        payload[field] = value;
+        payload.to_string()
+    };
+    let without_token = {
+        let mut payload = request(7, "text", "");
+        payload.as_object_mut().unwrap().remove("token");
+        payload.to_string()
+    };
     let malformed = [
         String::new(),
         "not json".to_owned(),
-        request("blob", "x"),
-        json!({"socket": 3, "seq": 7, "url": LOCAL, "kind": "text"}).to_string(),
-        json!({"socket": -1, "seq": 7, "url": LOCAL, "kind": "text", "data": ""}).to_string(),
-        json!({"socket": 3, "seq": 7, "url": LOCAL, "kind": "text", "data": "", "extra": 1}).to_string(),
+        request(7, "blob", "x").to_string(),
+        json!({"token": TOKEN, "socket": 3, "seq": 7, "url": LOCAL, "kind": "text"}).to_string(),
+        with("socket", json!(-1)),
+        with("extra", json!(1)),
+        without_token,
+        with("token", json!("")),
+        with("token", json!("5eed0124")),
+        with("token", json!(TOKEN.to_uppercase())),
     ];
     for payload in &malformed {
-        assert!(GuardRequest::from_payload(payload).is_err(), "{payload}");
+        let error = GuardRequest::from_payload(payload, &script).unwrap_err();
+        assert!(!error.to_string().contains("5eed"), "{error}");
     }
 }
 
@@ -174,23 +197,30 @@ fn every_kind_of_target_gets_the_guard_and_the_audit_before_it_runs() {
     ];
     for kind in kinds {
         let steps = kind.steps();
-        let position = |wanted| steps.iter().position(|step| *step == wanted);
+        let find = |wanted| steps.iter().position(|step| *step == wanted);
+        // a step that must be there: its position (comparing `Option`s would let a missing step pass, `None` < `Some`)
+        let position = |wanted| find(wanted).unwrap_or_else(|| panic!("{kind:?} has no {wanted:?} step"));
         let resume = position(Step::Resume);
-        let binding = position(Step::Binding).unwrap_or_else(|| panic!("{kind:?} has no binding"));
+        assert_eq!(resume, steps.len() - 1, "{kind:?}: resuming is the last step");
+        let binding = position(Step::Binding);
         let page_like = matches!(kind, TargetKind::Page | TargetKind::Iframe);
         let guard = if page_like {
-            assert!(position(Step::Guard).is_none(), "{kind:?}");
+            assert_eq!(find(Step::Guard), None, "{kind:?}");
             assert!(
-                position(Step::Runtime) < Some(binding),
+                position(Step::Runtime) < binding,
                 "{kind:?}: new contexts need Runtime on"
             );
-            assert!(position(Step::Page) < position(Step::GuardNewDocuments), "{kind:?}");
-            position(Step::GuardNewDocuments)
+            let guard = position(Step::GuardNewDocuments);
+            assert!(
+                position(Step::Page) < guard,
+                "{kind:?}: new-document scripts need Page on"
+            );
+            guard
         } else {
-            assert!(position(Step::GuardNewDocuments).is_none(), "{kind:?}");
+            assert_eq!(find(Step::GuardNewDocuments), None, "{kind:?}");
             position(Step::Guard)
         };
-        assert!(Some(binding) < guard, "{kind:?}: the guard needs its binding");
+        assert!(binding < guard, "{kind:?}: the guard needs its binding");
         assert!(guard < resume, "{kind:?}: the guard goes in before the target runs");
         assert!(position(Step::Network) < resume, "{kind:?}: the audit needs Network on");
     }
@@ -240,7 +270,7 @@ fn ws_fence(fence: &Arc<Fence>, classifier: FrameClassifier, member_list: &[&str
         classifier,
         Arc::clone(fence),
         members(member_list),
-        GuardScript::generate()?,
+        GuardScript::with_token(TOKEN)?,
     ))
 }
 
@@ -420,7 +450,7 @@ async fn the_verdict_goes_back_to_the_context_that_asked_and_an_allow_covers_one
     .unwrap();
     let (url, commands) = recording_endpoint().await.unwrap();
     let (cdp, _events) = Cdp::connect(&url).await.unwrap();
-    let ask = |seq: u64, data: &str| json!({"socket": 2, "seq": seq, "url": LOCAL, "kind": "text", "data": data});
+    let ask = |seq: u64, data: &str| request(seq, "text", data);
 
     let allowed = ws
         .handle_binding(&cdp, &binding_called("S1", 4, &ask(1, "allow:1")))
@@ -436,11 +466,16 @@ async fn the_verdict_goes_back_to_the_context_that_asked_and_an_allow_covers_one
     let malformed = ws
         .handle_binding(&cdp, &binding_called("S1", 4, &json!({"socket": 2})))
         .await;
+    // a call from a context the guard isn't in can't name the run's token, and gets no answer to read it from
+    let mut forged = ask(3, "allow:forged");
+    forged["token"] = json!("00");
+    let unauthenticated = ws.handle_binding(&cdp, &binding_called("S1", 5, &forged)).await;
 
     assert_eq!(allowed.unwrap(), Some(Verdict::Allow));
     assert_eq!(denied.unwrap(), Some(Verdict::Deny(DenyCause::Unclassified)));
     assert_eq!(ignored.unwrap(), None);
     assert_eq!(malformed.unwrap(), Some(Verdict::Deny(DenyCause::Malformed)));
+    assert_eq!(unauthenticated.unwrap(), Some(Verdict::Deny(DenyCause::Malformed)));
     let commands = commands.lock().unwrap_or_else(PoisonError::into_inner).clone();
     assert_eq!(
         commands.len(),
@@ -453,7 +488,7 @@ async fn the_verdict_goes_back_to_the_context_that_asked_and_an_allow_covers_one
         assert_eq!(command["params"]["contextId"], 4);
         assert_eq!(
             command["params"]["expression"],
-            ws.script().verdict_expression(2, seq, allow)
+            ws.script().verdict_expression(3, seq, allow)
         );
     }
 
@@ -524,7 +559,7 @@ async fn a_detached_session_takes_its_allows_with_it() {
     .unwrap();
     let (url, _commands) = recording_endpoint().await.unwrap();
     let (cdp, _events) = Cdp::connect(&url).await.unwrap();
-    let ask = json!({"socket": 1, "seq": 1, "url": LOCAL, "kind": "text", "data": "allow:1"});
+    let ask = request(1, "text", "allow:1");
     ws.handle_binding(&cdp, &binding_called("S1", 1, &ask)).await.unwrap();
     ws.handle_binding(&cdp, &binding_called("S2", 1, &ask)).await.unwrap();
 
@@ -794,6 +829,15 @@ async fn frames_leave_only_on_allow_and_in_order_in_every_scope() {
         assert_eq!(count("allow"), ALLOWED.len() * SCOPES.len(), "and every allow");
 
         assert_eq!(run.armed.unsanctioned_frames(), [], "every frame sent had an allow");
+        // and the audit saw every allowed frame go out, the workers' included: one it can't see would stay unused
+        let poll = async {
+            while run.armed.allows_not_seen_sent() > 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(STEP, poll)
+            .await
+            .map_err(|_| format!("{} allowed frame(s) never seen sent", run.armed.allows_not_seen_sent()))?;
         assert!(run.armed.denials().is_empty(), "{:?}", run.armed.denials());
         assert!(run.armed.failures().is_empty(), "{:?}", run.armed.failures());
         let failed = run.armed.verdict().unwrap_err();
@@ -831,6 +875,46 @@ const SEND_FOUR: &str = r"
         };
     })";
 
+/// Three more frames on the same socket from a page that tries to keep the bytes the fence decides on: a buffer whose
+/// `constructor[Symbol.species]` stores every buffer `slice` builds from it, and two Blobs whose read a `then` on
+/// ArrayBuffer.prototype swaps for a buffer the page keeps (`evil`) and for an object that is no buffer at all.
+const KEEP_THE_BYTES: &str = r"
+    (() => {
+        window.kept = [];
+        class Keeper extends ArrayBuffer {
+            constructor(...args) {
+                super(...args);
+                window.kept.push(this);
+            }
+        }
+        const buffer = new Uint8Array([4, 5]).buffer;
+        buffer.constructor = { [Symbol.species]: Keeper };
+        window.socket.send(buffer);
+
+        const evil = new Uint8Array([6, 7]).buffer;
+        window.evil = evil;
+        const swaps = { 'blob-1': evil, 'blob-2': { toString: () => 'swapped' } };
+        Object.defineProperty(ArrayBuffer.prototype, 'then', {
+            configurable: true,
+            get() {
+                const swap = this === evil ? undefined : swaps[new TextDecoder().decode(this)];
+                return swap === undefined ? undefined : (ok) => ok(swap);
+            },
+        });
+        window.socket.send(new Blob(['blob-1']));
+        window.socket.send(new Blob(['blob-2']));
+    })()";
+
+/// Changes every buffer the page kept, once the fence was asked about them.
+const CHANGE_THE_KEPT: &str = r"
+    (() => {
+        for (const buffer of window.kept) {
+            new Uint8Array(buffer).fill(0);
+        }
+        new Uint8Array(window.evil).fill(1);
+        return window.kept.length;
+    })()";
+
 #[tokio::test]
 async fn the_guard_replays_in_order_only_what_the_fence_allowed() {
     let Some(chrome) = common::chrome_or_skip() else {
@@ -852,7 +936,7 @@ async fn the_guard_replays_in_order_only_what_the_fence_allowed() {
         let page = SessionId::new(attached["sessionId"].as_str().ok_or("no sessionId")?);
         loaded(&cdp, &page, "/pages/blank.html").await?;
         evaluate_in(&cdp, &page, PLAY_FENCE, None).await?;
-        let script = GuardScript::with_token("0123abcd")?;
+        let script = GuardScript::with_token(TOKEN)?;
         assert_eq!(evaluate_in(&cdp, &page, script.source(), None).await?, "armed");
         let send = SEND_FOUR.replace("BASE", &format!("'{}'", echo.origin));
         assert_eq!(
@@ -863,10 +947,10 @@ async fn the_guard_replays_in_order_only_what_the_fence_allowed() {
         let asked = evaluate_in(&cdp, &page, "window.asked", None).await?;
         let url = format!("{}/guard", echo.origin);
         let expected = [
-            json!({"socket": 1, "seq": 1, "url": url, "kind": "text", "data": "first"}),
-            json!({"socket": 1, "seq": 2, "url": url, "kind": "text", "data": "second"}),
-            json!({"socket": 1, "seq": 3, "url": url, "kind": "binary", "data": "AgM="}),
-            json!({"socket": 1, "seq": 4, "url": url, "kind": "text", "data": "fourth"}),
+            json!({"token": TOKEN, "socket": 1, "seq": 1, "url": url, "kind": "text", "data": "first"}),
+            json!({"token": TOKEN, "socket": 1, "seq": 2, "url": url, "kind": "text", "data": "second"}),
+            json!({"token": TOKEN, "socket": 1, "seq": 3, "url": url, "kind": "binary", "data": "AgM="}),
+            json!({"token": TOKEN, "socket": 1, "seq": 4, "url": url, "kind": "text", "data": "fourth"}),
         ];
         assert_eq!(asked, json!(expected));
 
@@ -894,6 +978,26 @@ async fn the_guard_replays_in_order_only_what_the_fence_allowed() {
         answer(&script.verdict_expression(1, 2, true)).await?;
         settle().await;
         assert_eq!(echo.received_on("/guard").len(), 3);
+
+        // what goes out is what was decided, whatever the page kept or swapped in
+        answer(KEEP_THE_BYTES).await?;
+        let asked = evaluate_until(&cdp, &page, "window.asked.length === 7 ? window.asked.slice(4) : null").await?;
+        let expected = [
+            json!({"token": TOKEN, "socket": 1, "seq": 5, "url": url, "kind": "binary", "data": "BAU="}),
+            json!({"token": TOKEN, "socket": 1, "seq": 6, "url": url, "kind": "binary", "data": "Bgc="}),
+            json!({"token": TOKEN, "socket": 1, "seq": 7, "url": url, "kind": "unreadable", "data": ""}),
+        ];
+        assert_eq!(asked, json!(expected));
+        assert_eq!(answer(CHANGE_THE_KEPT).await?, 0, "the page kept the guard's copy");
+        for seq in 5..=7 {
+            answer(&script.verdict_expression(1, seq, true)).await?;
+        }
+        assert_eq!(
+            echo.received_once("/guard", 5).await,
+            ["first", "bytes 2,3", "fourth", "bytes 4,5", "bytes 6,7"]
+        );
+        settle().await;
+        assert_eq!(echo.received_on("/guard").len(), 5, "an unreadable frame is dropped");
         // best effort: the connection may drop before the reply
         let _ = cdp.call(None, "Browser.close", Value::Null).await;
         browser.wait_or_kill(Duration::from_secs(5)).await?;
@@ -915,6 +1019,21 @@ const BYPASS: &str = r"
         };
         socket.onmessage = (event) => { if (event.data === 'bypass:done') resolve('sent'); };
     })";
+
+/// What an isolated world tries next: the binding is there too, so it defines a resolver of its own and asks for a
+/// verdict, without the run's token and with a guess, hoping to be answered with the token.
+const ASK_FOR_THE_TOKEN: &str = r"
+    (() => {
+        window.answers = [];
+        window.__labFenceWsVerdict = (...args) => {
+            window.answers.push(args);
+            return true;
+        };
+        const ask = { socket: 1, seq: 1, url: BASE + '/bypass', kind: 'text', data: 'bypass:text' };
+        __labFenceWs(JSON.stringify(ask));
+        __labFenceWs(JSON.stringify({ token: '00', ...ask }));
+        return typeof __labFenceWs;
+    })()";
 
 #[tokio::test]
 async fn a_frame_that_gets_past_the_guard_is_caught_by_the_audit_and_fails_the_run() {
@@ -963,6 +1082,107 @@ async fn a_frame_that_gets_past_the_guard_is_caught_by_the_audit_and_fails_the_r
             failed.to_string().contains("3 frame(s) sent without an allow"),
             "{failed}"
         );
+
+        // nor does the world get the token: its requests are denied and never answered
+        let ask = ASK_FOR_THE_TOKEN.replace("BASE", &format!("'{}'", echo.origin));
+        assert_eq!(evaluate_in(cdp, &page.session, &ask, Some(context)).await?, "function");
+        let poll = async {
+            while run.armed.frame_denials().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(STEP, poll)
+            .await
+            .map_err(|_| format!("not denied: {:?}", run.armed.frame_denials()))?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let denials = run.armed.frame_denials();
+        assert!(
+            denials.len() == 2 && denials.iter().all(|denial| denial.cause == DenyCause::Malformed),
+            "{denials:?}"
+        );
+        let answers = evaluate_in(cdp, &page.session, "window.answers", Some(context)).await?;
+        assert_eq!(answers, json!([]), "the world was answered");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Opens a socket to `/cross-realm` and defines `sendThrough(window, data)`: a send on that socket through another
+/// window's `WebSocket.prototype.send` (Blink's brand check takes a socket from any realm).
+const CROSS_REALM: &str = r"
+    new Promise((resolve, reject) => {
+        const socket = new WebSocket(BASE + '/cross-realm');
+        socket.onerror = () => reject(new Error('the socket failed'));
+        socket.onopen = () => {
+            window.sendThrough = (other, data) => {
+                if (other === null) {
+                    return 'no window';
+                }
+                other.WebSocket.prototype.send.call(socket, data);
+                return 'called';
+            };
+            resolve('open');
+        };
+    })";
+
+/// Windows the page opens and sends through in the same task, before anything else could run: popups (a separate
+/// target each, its initial `about:blank` document scriptable by the opener at once) and a same-origin `about:blank`
+/// iframe. None of the frames starts with `allow:`.
+const OTHER_WINDOWS: [(&str, &str); 6] = [
+    ("popup", "sendThrough(open(''), 'popup')"),
+    (
+        "about:blank popup",
+        "sendThrough(open('about:blank'), 'popup about:blank')",
+    ),
+    (
+        "same-origin popup",
+        "sendThrough(open('/pages/blank.html'), 'popup same-origin')",
+    ),
+    ("named popup", "sendThrough(open('', 'lab-named'), 'popup named')"),
+    (
+        "document.open popup",
+        "sendThrough(document.open('', '_blank', ''), 'popup document.open')",
+    ),
+    (
+        "about:blank iframe",
+        "sendThrough(document.body.appendChild(document.createElement('iframe')).contentWindow, 'iframe')",
+    ),
+];
+
+#[tokio::test]
+async fn a_window_the_page_opens_lends_it_no_unguarded_send() {
+    let pages = serve_pages().await;
+    let echo = EchoServer::start().await.unwrap();
+    with_run(&pages, &echo, async |run| {
+        let cdp = run.armed.cdp();
+        let page = run.armed.open_page(STEP).await?;
+        navigate(cdp, &page, &format!("{}/pages/blank.html", pages.uri())).await?;
+        loaded(cdp, &page.session, "/pages/blank.html").await?;
+        let script = CROSS_REALM.replace("BASE", &format!("'{}'", echo.origin));
+        assert_eq!(evaluate_in(cdp, &page.session, &script, None).await?, "open");
+        for (name, attempt) in OTHER_WINDOWS {
+            // a gesture each: one gesture lets one popup open
+            let params = json!({"expression": attempt, "returnByValue": true, "userGesture": true});
+            let result = cdp.call(Some(&page.session), "Runtime.evaluate", params).await?;
+            assert_eq!(result["result"]["value"], "called", "{name}: {result}");
+        }
+
+        // Chrome 155 holds the opener inside `open` until the popup is armed, so every frame went through a guard
+        let poll = async {
+            while run.armed.frame_denials().len() < OTHER_WINDOWS.len() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(STEP, poll)
+            .await
+            .map_err(|_| format!("not every frame was asked for: {:?}", run.armed.frame_denials()))?;
+        // what must not arrive gets this long to show up anyway
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(echo.received_on("/cross-realm"), Vec::<String>::new());
+        assert_eq!(run.armed.unsanctioned_frames(), []);
+        assert_eq!(run.armed.frame_denials().len(), OTHER_WINDOWS.len());
+        assert!(run.armed.failures().is_empty(), "{:?}", run.armed.failures());
         Ok(())
     })
     .await

@@ -6,11 +6,7 @@
 const socketUrl = (base, scope) => `${base}/${scope}?tc=planted-query`;
 
 async function runScenario(url) {
-  const hidden = {
-    binding: typeof self.__labFenceWs,
-    stream: typeof self.WebSocketStream,
-    forged: typeof self.__labFenceWsVerdict === 'function' ? self.__labFenceWsVerdict('00', 1, 1, true) : 'missing',
-  };
+  const hidden = { binding: typeof self.__labFenceWs, stream: typeof self.WebSocketStream };
   const socket = new WebSocket(url);
   socket.binaryType = 'arraybuffer';
   let early = 'sent';
@@ -43,6 +39,10 @@ async function runScenario(url) {
   } finally {
     JSON.stringify = stringify;
   }
+  // the denied frame is still waiting (the fence can't answer before this task ends): an allow for it without the run's
+  // token must neither be taken nor let it out
+  const resolver = self.__labFenceWsVerdict;
+  hidden.forged = typeof resolver === 'function' ? resolver('00', 1, 2, true) : 'missing';
   socket.send(new Uint8Array([1, 2, 3]));
   socket.send('allow:3');
   // a Blob is read before it is decided; the frames after it wait for it

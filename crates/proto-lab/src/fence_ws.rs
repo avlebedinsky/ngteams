@@ -8,6 +8,10 @@
 //! answers by calling the resolver [`RESOLVER`] in the frame's context with the run's token; the guard replays the
 //! original `send` only on an allow, and drops a denied frame. A socket's frames leave in the order they were sent.
 //!
+//! The token goes both ways: the guard puts it in every request, and a binding call without it is denied and never
+//! answered. The binding is in every context of a target, isolated worlds the guard isn't in included, and answering a
+//! call from one would hand the token to whatever that world defined as the resolver.
+//!
 //! **The decision** classifies a frame ([`FrameClassifier`]): an own-state frame on the reviewed list passes (logged),
 //! a mapped write goes through [`Fence::check`] (from M0 Task 11), anything else is denied and logged. Nothing is on
 //! the seeded list, so until writes are mapped every frame is denied, and every deny fails the run. `fence.log` gets the
@@ -102,6 +106,11 @@ impl GuardScript {
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    /// Whether a request carries this run's token.
+    fn authenticates(&self, token: &str) -> bool {
+        self.token == token
     }
 
     /// The expression that hands a verdict to the guard in one context.
@@ -228,6 +237,7 @@ pub struct MalformedRequest(String);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRequest {
+    token: String,
     socket: u64,
     seq: u64,
     url: String,
@@ -236,12 +246,16 @@ struct RawRequest {
 }
 
 impl GuardRequest {
-    /// Reads the payload of a binding call.
+    /// Reads the payload of a binding call, made by the guard of `script`.
     ///
     /// # Errors
-    /// [`MalformedRequest`] when it isn't the JSON the guard sends.
-    pub fn from_payload(payload: &str) -> Result<Self, MalformedRequest> {
+    /// [`MalformedRequest`] when it isn't the JSON the guard sends, or doesn't carry the script's token (the error
+    /// doesn't show either token).
+    pub fn from_payload(payload: &str, script: &GuardScript) -> Result<Self, MalformedRequest> {
         let raw: RawRequest = serde_json::from_str(payload).map_err(|error| MalformedRequest(error.to_string()))?;
+        if !script.authenticates(&raw.token) {
+            return Err(MalformedRequest("not the run's token".to_owned()));
+        }
         let payload = match raw.kind.as_str() {
             "text" => Payload::Text(raw.data),
             "binary" => Payload::Binary(raw.data),
@@ -386,9 +400,17 @@ impl WsFence {
         self.audit().unsanctioned.clone()
     }
 
+    /// How many allowed frames the browser hasn't reported sent yet. Once every allowed frame is out, any left over
+    /// means the audit doesn't see the frames of the target that sent them.
+    #[must_use]
+    pub fn allows_not_seen_sent(&self) -> usize {
+        self.audit().allowed.values().sum()
+    }
+
     /// Decides one `Runtime.bindingCalled` event of the guard's binding and answers the guard in the context that asked.
     /// An allow is recorded for the audit before the guard hears of it. Calls of other bindings are ignored (`None`);
-    /// a malformed request is denied and left unanswered, so its frame waits forever and is never sent.
+    /// a malformed request, or one without the run's token (not the guard's: see the module docs), is denied and left
+    /// unanswered, so its frame waits forever and is never sent, and the token goes to no context that didn't show it.
     ///
     /// # Errors
     /// When the answer can't be delivered (the context is gone: its frame went with it).
@@ -399,7 +421,7 @@ impl WsFence {
         let request = event.params["payload"]
             .as_str()
             .ok_or_else(|| MalformedRequest("no payload".to_owned()))
-            .and_then(GuardRequest::from_payload);
+            .and_then(|payload| GuardRequest::from_payload(payload, &self.script));
         let (Ok(request), Some(context)) = (request, event.params["executionContextId"].as_i64()) else {
             self.deny_malformed();
             return Ok(Some(Verdict::Deny(DenyCause::Malformed)));

@@ -12,6 +12,8 @@
 // - the binding is taken off the global before any page code runs, so only the guard can ask for a verdict;
 // - the resolver is a non-writable, non-configurable global that does nothing without the token, which only this
 //   closure holds (a function's source shows the name TOKEN, never its value);
+// - every request carries the token too, and the fence answers none without it: the binding is also in isolated worlds
+//   the guard isn't in, and an answer there would hand the token to whatever that world called the resolver;
 // - every built-in the guard calls later is captured here, before page code can replace it; the guard's own records
 //   have no prototype, and its code past this point uses no array iteration, destructuring or spread, so nothing the
 //   page defines on Object.prototype or Array.prototype is consulted;
@@ -75,7 +77,7 @@
   const dataViewParts = partsOf(DataView.prototype);
   const isView = ArrayBuffer.isView;
   const bufferLength = getter(ArrayBuffer.prototype, 'byteLength');
-  const sliceBuffer = ArrayBuffer.prototype.slice;
+  const setBytes = TypedArray.set;
   const toBase64 = Bytes.prototype.toBase64;
   const Blob_ = scope.Blob;
   const blobSize = Blob_ === undefined ? undefined : getter(Blob_.prototype, 'size');
@@ -99,14 +101,24 @@
     }
   };
 
-  // A copy of an ArrayBuffer or a view's bytes; throws a TypeError for a shared buffer, as `send` does.
+  // `length` bytes of `buffer` from `offset`, copied into a buffer the guard allocates itself and never hands out.
+  // `ArrayBuffer.prototype.slice` would build its result through the buffer's `constructor[Symbol.species]`, which the
+  // page controls, and so could keep a reference to the copy and change it after the decision. The byte-length getter
+  // throws a TypeError for a shared buffer, as `send` does.
+  const ownCopy = (buffer, offset, length) => {
+    apply(bufferLength, buffer, []);
+    const copy = new Bytes(length);
+    apply(setBytes, copy, [new Bytes(buffer, offset, length)]);
+    return apply(typedParts.buffer, copy, []);
+  };
+
+  // A copy of an ArrayBuffer's or a view's bytes.
   const copyBytes = (data) => {
     if (!isView(data)) {
-      return apply(sliceBuffer, data, [0, apply(bufferLength, data, [])]);
+      return ownCopy(data, 0, apply(bufferLength, data, []));
     }
     const parts = branded(typedParts.buffer, data) ? typedParts : dataViewParts;
-    const start = apply(parts.offset, data, []);
-    return apply(sliceBuffer, apply(parts.buffer, data, []), [start, start + apply(parts.length, data, [])]);
+    return ownCopy(apply(parts.buffer, data, []), apply(parts.offset, data, []), apply(parts.length, data, []));
   };
 
   const base64 = (buffer) => apply(toBase64, new Bytes(buffer), []);
@@ -158,7 +170,7 @@
 
   const ask = (state, frame, kind, payload) => {
     const url = apply(urlOf, state.socket, []);
-    binding(stringify({ __proto__: null, socket: state.id, seq: frame.seq, url, kind, data: payload }));
+    binding(stringify({ __proto__: null, token: TOKEN, socket: state.id, seq: frame.seq, url, kind, data: payload }));
   };
 
   const resolve = (token, socket, seq, allow) => {
@@ -200,15 +212,25 @@
       ask(state, frame, sent.kind, sent.payload);
       return;
     }
-    const read = (bytes) => {
-      frame.data = bytes;
-      ask(state, frame, 'binary', base64(bytes));
-    };
     const unreadable = () => {
       // asked anyway, so the fence logs it; the frame is dropped whatever it answers
       frame.verdict = false;
       ask(state, frame, 'unreadable', '');
       flush(state);
+    };
+    // The promise settles with whatever a `then` the page defines on ArrayBuffer.prototype or Object.prototype hands
+    // it, so the value is checked to be a buffer and copied before it is decided: the page may keep what it handed in.
+    // Anything that fails here makes the frame unreadable; a throw would leave it, and its socket, waiting forever.
+    const read = (value) => {
+      let bytes;
+      try {
+        bytes = ownCopy(value, 0, apply(bufferLength, value, []));
+      } catch {
+        unreadable();
+        return;
+      }
+      frame.data = bytes;
+      ask(state, frame, 'binary', base64(bytes));
     };
     apply(then, apply(blobBytes, sent.data, []), [read, unreadable]);
   }

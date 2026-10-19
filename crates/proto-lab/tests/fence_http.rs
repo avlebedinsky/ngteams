@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TEAMS_ORIGINS, TargetKind};
-use proto_lab::browser::{Browser, LaunchOptions};
+use proto_lab::browser::{Browser, BrowserError, LaunchOptions};
 use proto_lab::cdp::{Cdp, SessionId};
 use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, classify, is_mutating};
 use proto_lab::fence_http::{DenyCause, HttpFence, MalformedPause, PausedRequest, Verdict};
@@ -521,6 +521,10 @@ async fn serve_fake(
                 let Some(Ok(Message::Text(text))) = message else { return Ok(()) };
                 let command: Value = serde_json::from_str(text.as_str())?;
                 commands.lock().unwrap_or_else(PoisonError::into_inner).push(command.clone());
+                // a refused Browser.close hangs up unanswered: the connection lost while the browser is still running
+                if command["method"] == "Browser.close" && refuse("Browser.close", None) {
+                    return Ok(());
+                }
                 answer_fake(&mut socket, &command, refuse).await?;
             }
             event = pushed.recv() => {
@@ -985,6 +989,28 @@ async fn closing_the_fence_asks_the_browser_to_close_then_stops_it() {
 
     assert!(fake.methods_on(None).contains(&"Browser.close".to_owned()));
     assert!(process::gone(helper).await, "the browser outlived close");
+}
+
+fn hang_up_on_close(method: &str, session: Option<&str>) -> bool {
+    method == "Browser.close" && session.is_none()
+}
+
+#[tokio::test]
+async fn a_connection_lost_while_closing_kills_the_browser_at_once() {
+    let fake = FakeBrowser::start(hang_up_on_close).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let helper = fake.helper().unwrap();
+    let started = std::time::Instant::now();
+
+    let closed = armed.close(Duration::from_secs(30)).await;
+
+    assert!(matches!(closed, Err(BrowserError::CloseUnconfirmed(_))), "{closed:?}");
+    // not left running unfenced for the grace period
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    assert!(
+        process::gone(helper).await,
+        "the browser outlived its fence's connection"
+    );
 }
 
 #[tokio::test]
