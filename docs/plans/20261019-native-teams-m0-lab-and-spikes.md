@@ -404,10 +404,13 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `spikes/media-loop/{Cargo.toml,src/lib.rs,src/tone.rs,src/goertzel.rs,src/peer.rs}`
 - Create: `spikes/media-loop/tests/loopback.rs`
 
-- [ ] tests first: the tone generator → Goertzel detects its frequency; an Opus encode/decode round trip (`opus`/`audiopus`) keeps the tone within tolerance
-- [ ] two `str0m` peers in one process. We drive the UDP sockets and the clock ourselves (sans-IO), and Opus payloads go out as RTP through `str0m` (ICE, DTLS, SRTP).
-- [ ] the loopback test checks that the received frequency equals the sent one and records the latency
-- [ ] `cargo test -p media-loop` passes
+- [x] tests first: the tone generator → Goertzel detects its frequency; an Opus encode/decode round trip (`opus`/`audiopus`) keeps the tone within tolerance
+- [x] two `str0m` peers in one process. We drive the UDP sockets and the clock ourselves (sans-IO), and Opus payloads go out as RTP through `str0m` (ICE, DTLS, SRTP).
+- [x] the loopback test checks that the received frequency equals the sent one and records the latency
+- [x] `cargo test -p media-loop` passes
+- ➕ crates: `str0m` 0.24.1 with `default-features = false, features = ["rust-crypto"]` (pure-Rust DTLS via dimpl, no aws-lc C build, no example web server) and `opus` 0.4.0 (libopus 1.x built from source by `opusic-sys`; `audiopus` is unmaintained since 2021). Two extra modules beside the planned ones: `src/codec.rs` (Opus 48 kHz mono, 20 ms frames) and `src/loopback.rs` (the harness and `LatencyStats`).
+- ➕ shape for Task 19: `peer::Peer` is sans-IO (datagrams, `now` and SDP in; datagrams, events and its deadline out), so a TURN/TCP transport can drive it; `peer::UdpPeer` puts it on a UDP socket. The loop passes the SDP through its text form, A sends a 440 Hz tone in real time, B decodes it and echoes each Opus packet back, and A decodes the echo.
+- ➕ measured on loopback (debug build, 100 frames of 20 ms, latency = A's encode start → decode end): 100/100 frames received and echoed, 440 Hz detected at both ends; ICE + DTLS connect 25–32 ms; one-way p50 2.9–3.1 ms, p95 3.8–6.5 ms; round trip p50 5.1–5.8 ms, p95 6.3–11.4 ms, max 12.9–20.8 ms (two runs). The test bounds round-trip p95 under 100 ms.
 
 ### Task 18: Echo call signaling capture and notes (spike 3b, part 1)
 **Files:**
