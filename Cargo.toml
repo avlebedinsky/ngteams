@@ -21,8 +21,14 @@ fixture-guard = { path = "crates/fixture-guard" }
 teams-auth = { path = "crates/teams-auth" }
 teams-fence = { path = "crates/teams-fence" }
 teams-proto = { path = "crates/teams-proto" }
+oo7 = "0.6.0"
 regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = "1.53.3"
+toml = "1.1.8"
+zeroize = "1.9.1"
 
 # Same lint set as agterm-rs. Every crate opts in with `[lints] workspace = true`, spikes included; only generated
 # -sys crates may set their own (scripts/lint-report.sh). A function over a complexity limit (clippy.toml) is split,

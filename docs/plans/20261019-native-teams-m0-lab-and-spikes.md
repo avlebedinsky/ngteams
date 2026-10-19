@@ -187,19 +187,21 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/proto-lab/src/config.rs`, `crates/teams-auth/src/secrets.rs`
 - Create: `crates/proto-lab/tests/config.rs`, `crates/teams-auth/tests/secrets.rs`
 
-- [ ] tests first for parsing `lab.toml`:
+- [x] tests first for parsing `lab.toml`:
   - exactly 3 accounts with unique aliases
   - all UPNs in the same tenant domain
   - errors on 0, 2 or 4 accounts, duplicates, or a mixed domain
-- [ ] implement `LabConfig` (accounts, approved service participants, lab dir paths)
-- [ ] ➕ write the real `~/.config/teams-lab/lab.toml` (agent, no human):
+- [x] implement `LabConfig` (accounts, approved service participants, lab dir paths)
+- [x] ➕ write the real `~/.config/teams-lab/lab.toml` (agent, no human):
   - a = labbot, b = labbot2, c = labbot3 in the lab.example.com tenant
   - UPNs taken from the `idTokenUpn` in `~/.local/share/teams-lab/ca-probe-*.json`
   - the approved service participants list contains the echo service (approved by the user on 2026-10-19); its MRI is filled in from the Task 18 capture
   - passwords are never stored in `lab.toml`
-- [ ] tests for the `SecretStore` trait: put/get/delete per account and audience; `Debug` never prints secrets
-- [ ] implement `MemorySecretStore` (tests) and `KeyringSecretStore` (`oo7` / Secret Service)
-- [ ] `cargo test --workspace` passes
+- [x] tests for the `SecretStore` trait: put/get/delete per account and audience; `Debug` never prints secrets
+- [x] implement `MemorySecretStore` (tests) and `KeyringSecretStore` (`oo7` / Secret Service)
+- [x] `cargo test --workspace` passes
+  - ➕ `crates/proto-lab/src/lib.rs` added so the integration tests can reach `config`; the binary stays a thin CLI over it
+  - ➕ `SecretStore` is async (`fn -> impl Future + Send`), because `oo7` has no blocking API; callers use it as a generic, not `dyn`. Items carry the attributes `application`, `account`, `audience`; the real-keyring test (`#[ignore]`) uses `application = teams-lab-test` and removes its items
 
 ### Task 3: teams-fence decision engine
 **Files:**
