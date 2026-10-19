@@ -15,7 +15,7 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-auth` | PKCE code exchange, token refresh and storage, skypetoken |
 | `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
 | `crates/proto-lab` | the lab harness CLI |
-| `crates/fixture-guard` | scans `tests/fixtures/` and `docs/` for tokens, emails and real MRIs |
+| `crates/fixture-guard` | scans `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs |
 | `spikes/gpui-video` | GPUI spike: the Wayland smoke window (M0 Task 15), then video rendering |
 | `tests/fixtures/` | sanitized captures |
 | `docs/protocol/`, `docs/spikes/` | protocol notes and spike write-ups |

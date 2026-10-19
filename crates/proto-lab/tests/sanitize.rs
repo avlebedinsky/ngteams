@@ -494,9 +494,11 @@ fn the_fixture_guard_finds_nothing_in_a_sanitized_capture() {
         [
             Kind::Bearer,
             Kind::Email,
+            Kind::Guid,
             Kind::Jwt,
             Kind::Mri,
             Kind::OauthToken,
+            Kind::Signature,
             Kind::Skypetoken
         ]
     );
@@ -658,6 +660,222 @@ fn one_sanitizer_keeps_its_labels_across_events() {
     assert_eq!(second["cc"], "<user:1>");
     // reserved documentation domains stay
     assert_eq!(second["to"], "x@contoso.example.com");
+}
+
+// --- encoded text ---
+
+/// A signed URL's signature, as storage services hand them out.
+const SIGNATURE: &str = "abCD12+efGH34/ijKL56+mnOP78/qrST90+uvWX123A=";
+const AMZ_SIGNATURE: &str = "3f1a9c0b7e2d4f6a8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a";
+/// A name with non-ASCII letters, learned from a plain `displayName`.
+const ACCENTED_NAME: &str = "José García";
+/// A name only ever seen percent-encoded, in a query.
+const CYRILLIC_NAME: &str = "Дмитрий Иванов";
+
+/// Percent-encodes every byte but the unreserved ones (as `encodeURIComponent` does, and a little more).
+fn enc(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+/// `text` percent-encoded `times` times.
+fn enc_times(text: &str, times: usize) -> String {
+    (0..times).fold(text.to_owned(), |text, _| enc(&text))
+}
+
+/// Form encoding: a space is `+`.
+fn form_enc(text: &str) -> String {
+    enc(text).replace("%20", "+")
+}
+
+/// `inner` as the target of `depth` redirects, each one encoding it once more.
+fn wrapped(inner: &str, depth: usize) -> String {
+    (1..=depth).fold(inner.to_owned(), |url, level| {
+        format!("https://outer{level}.example.invalid/r?target={}&x=1", enc(&url))
+    })
+}
+
+/// What is planted, under which key, and every text that may not survive in any encoding.
+fn planted() -> Vec<(&'static str, String, Vec<String>)> {
+    let pieces = |value: &str| -> Vec<String> {
+        let mut all = vec![value.to_owned()];
+        all.extend(
+            value
+                .split(['+', '/', '=', ' ', ',', '.', '@', ':'])
+                .filter(|piece| piece.chars().count() >= 3)
+                .map(str::to_owned),
+        );
+        all
+    };
+    let coworker_mri = format!("8:orgid:{COWORKER_GUID}");
+    let thread = format!("19:{THREAD_BODY}@thread.v2");
+    vec![
+        ("sig", SIGNATURE.to_owned(), pieces(SIGNATURE)),
+        ("X-Amz-Signature", AMZ_SIGNATURE.to_owned(), pieces(AMZ_SIGNATURE)),
+        ("access_token", REFRESH.to_owned(), vec![REFRESH.to_owned()]),
+        ("skypetoken", SKYPETOKEN.to_owned(), vec![SKYPETOKEN.to_owned()]),
+        ("code", AUTH_CODE.to_owned(), vec![AUTH_CODE.to_owned()]),
+        ("tid", TENANT_GUID.to_owned(), vec![TENANT_GUID.to_owned()]),
+        (
+            "mri",
+            coworker_mri.clone(),
+            vec![coworker_mri, COWORKER_GUID.to_owned()],
+        ),
+        (
+            "upn",
+            COWORKER_UPN.to_owned(),
+            vec![COWORKER_UPN.to_owned(), "jane.doe".to_owned()],
+        ),
+        ("thread", thread.clone(), vec![thread, THREAD_BODY.to_owned()]),
+        ("ip", PUBLIC_IP.to_owned(), vec![PUBLIC_IP.to_owned()]),
+        ("q", format!("Hola {ACCENTED_NAME}"), pieces(ACCENTED_NAME)),
+        ("displayName", CYRILLIC_NAME.to_owned(), pieces(CYRILLIC_NAME)),
+        ("text", "Привет, Дмитрий".to_owned(), pieces(CYRILLIC_NAME)),
+    ]
+}
+
+/// Every planted value in a query, in JSON in a query, and in a form, each as is and behind one and two redirects
+/// that encode it again, plus the event a name is learned from.
+fn encoded_capture() -> Vec<Value> {
+    let mut events = vec![json!({"type": "response_body", "body": json!({"displayName": ACCENTED_NAME}).to_string()})];
+    for (key, value, _) in planted() {
+        let query = format!("https://svc.example.invalid/p?{key}={}&next=1", enc(&value));
+        let in_json = format!(
+            "https://svc.example.invalid/p?context={}",
+            enc(&json!({ key: value }).to_string())
+        );
+        let form = format!("{key}={}&next=1", form_enc(&value));
+        for depth in 0..=2 {
+            events.push(cdp(
+                "Network.requestWillBeSent",
+                &json!({"request": {"url": wrapped(&query, depth), "postData": wrapped(&form, depth)}}),
+            ));
+            events.push(cdp(
+                "Network.requestWillBeSent",
+                &json!({"request": {"url": wrapped(&in_json, depth)}}),
+            ));
+        }
+    }
+    events
+}
+
+/// `original` in every encoding a capture may hold it in, lowercased.
+fn encodings(original: &str) -> Vec<String> {
+    let forms = [
+        original.to_owned(),
+        enc(original),
+        enc_times(original, 2),
+        enc_times(original, 3),
+        form_enc(original),
+        enc(&form_enc(original)),
+    ];
+    forms.iter().map(|form| form.to_lowercase()).collect()
+}
+
+#[test]
+fn nothing_planted_survives_in_any_encoding() {
+    let out = sanitize_events(&encoded_capture(), &identities()).unwrap();
+    let text = as_jsonl(&out).to_lowercase();
+    for (key, _, originals) in planted() {
+        for original in originals {
+            for form in encodings(&original) {
+                assert!(!text.contains(&form), "{key}: {form} survived");
+            }
+        }
+    }
+    assert_eq!(Guard::new().unwrap().scan_text(&as_jsonl(&out)), []);
+    let again = sanitize_events(&out, &identities()).unwrap();
+    assert_eq!(as_jsonl(&again), as_jsonl(&out), "sanitizing is idempotent here too");
+}
+
+#[test]
+fn encoded_secrets_names_and_guids_become_placeholders_in_place() {
+    let events = [
+        json!({"displayName": ACCENTED_NAME}),
+        json!({
+            // a signed URL inside a query value, its signature encoded twice
+            "signed": "?target=https%3A%2F%2Fstorage.example.invalid%2Fblob%3Fsig%3DabCD12%252BefGH34%252FijKL56%252BmnOP78%252FqrST90%252BuvWX123A%253D",
+            // a GUID right after a percent escape
+            "context": format!("context=%7B%22Tid%22%3A%22{TENANT_GUID}%22%7D"),
+            // a learned name with its non-ASCII letters encoded
+            "search": "?text=Jos%C3%A9%20Garc%C3%ADa",
+            "legacy": "?text=Jos%E9",
+        }),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap().remove(1);
+    assert_eq!(
+        out["signed"],
+        "?target=https%3A%2F%2Fstorage.example.invalid%2Fblob%3Fsig%3D<token:1>"
+    );
+    assert_eq!(out["context"], "context=%7B%22Tid%22%3A%22<guid:1>%22%7D");
+    assert_eq!(out["search"], "?text=<name:1>");
+    assert_eq!(out["legacy"], "?text=<name:1>");
+}
+
+#[test]
+fn every_kind_of_escape_is_seen_through_and_the_rest_kept_as_it_came() {
+    let events = [
+        json!({"displayName": ACCENTED_NAME}),
+        json!({
+            "unicode": r"Hola Jos\u00e9 Garc\u00eda",
+            "twice": r"Hola Jos\\u00e9",
+            "html": "<p>Hola Jos&#233;&nbsp;Garc&#xED;a &amp; co</p>",
+            "pair": r"\ud83d\ude00 Garc\u00EDa",
+            "lone": r"\ud83d Garc\u00EDa",
+            "path": r"C:\new\table\José",
+            "untouched": "https://x.example.invalid/?q=caf%C3%A9%20au%20lait&r=%2Fhome%3Fa%3D1&e=%E9&s=\\u00e9\\n&h=&amp;",
+            // placeholder-shaped text that came from escapes is no placeholder
+            "fake": "%3Cname:%5Aebediah%3E",
+        }),
+        json!({"displayName": "Zebediah"}),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap().remove(1);
+    assert_eq!(out["unicode"], "Hola <name:1>");
+    assert_eq!(out["twice"], "Hola <name:1>");
+    assert_eq!(out["html"], "<p>Hola <name:1> &amp; co</p>");
+    assert_eq!(out["pair"], r"\ud83d\ude00 <name:1>");
+    assert_eq!(out["lone"], r"\ud83d <name:1>");
+    assert_eq!(out["path"], r"C:\new\table\<name:1>");
+    assert_eq!(
+        out["untouched"],
+        "https://x.example.invalid/?q=caf%C3%A9%20au%20lait&r=%2Fhome%3Fa%3D1&e=%E9&s=\\u00e9\\n&h=&amp;"
+    );
+    assert_eq!(out["fake"], "%3Cname:<name:2>%3E");
+}
+
+#[test]
+fn an_encoded_delimiter_never_cuts_a_secret_short() {
+    let event =
+        json!({"url": "https://x.example.invalid/p?access_token=PartOneSecret%26PartTwoSecret%3DPartThreeSecret&n=1"});
+    let out = sanitize_events(&[event], &Identities::default()).unwrap().remove(0);
+    let url = out["url"].as_str().unwrap();
+    for piece in ["PartOneSecret", "PartTwoSecret", "PartThreeSecret"] {
+        assert!(!url.contains(piece), "{piece} survived: {url}");
+    }
+    assert!(url.ends_with("access_token=<token:1>&n=1"), "{url}");
+}
+
+#[test]
+fn a_name_seen_only_in_an_encoded_field_is_learned() {
+    let events = [
+        json!({"url": format!("https://x.example.invalid/people?displayName={}", enc(CYRILLIC_NAME))}),
+        json!({"text": "Привет, Дмитрий!"}),
+        json!({"body": format!("q={}", form_enc(&json!({"givenName": "Zebulon"}).to_string()))}),
+        json!({"text": "zebulon called"}),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    assert_eq!(out[1]["text"], "Привет, <name:1>!");
+    let text = as_jsonl(&out).to_lowercase();
+    for gone in ["дмитрий", "иванов", "zebulon", &enc("Дмитрий").to_lowercase()] {
+        assert!(!text.contains(gone), "{gone} survived: {text}");
+    }
 }
 
 // --- export ---

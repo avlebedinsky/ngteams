@@ -1,5 +1,7 @@
 //! The fixture guard: scans files meant for the repository (sanitized fixtures, docs) for what must never be committed,
-//! such as JWTs, `Bearer` and skypetoken values, OAuth tokens, email addresses and real MRIs.
+//! such as JWTs, `Bearer` and skypetoken values, OAuth tokens, email addresses, real MRIs, GUIDs (other than
+//! Microsoft's public app ids) and signed URLs' signatures. It is the backstop behind the sanitizer: what the sanitizer
+//! misses fails the export instead of being committed.
 //!
 //! Each line is scanned twice: as written, and decoded the way captures hide text, with `%XX` percent escapes decoded
 //! (`8%3Aorgid%3A…`, `someone%40contoso.com`) and backslash escapes of a JSON string body removed
@@ -34,7 +36,27 @@ pub enum Kind {
     Email,
     /// A real user or bot MRI (`8:orgid:<guid>`, `8:live:<name>`, `28:<guid>`, …).
     Mri,
+    /// A GUID (a tenant, user, object or conversation id) other than Microsoft's own public app ids
+    /// ([`PUBLIC_GUIDS`]); the sanitizer makes every GUID `<guid:N>`.
+    Guid,
+    /// A signed URL's signature (`sig=`, `signature=`, `X-Amz-Signature:`, …) of 16 characters or more.
+    Signature,
 }
+
+/// GUIDs that may appear anywhere: Microsoft's first-party app ids, the same in every tenant and published in
+/// Microsoft's own documentation and clients (the protocol notes name them), and the nil GUID. Nothing else: a tenant,
+/// user or object id is never public.
+pub const PUBLIC_GUIDS: [&str; 5] = [
+    // Teams, native (desktop and mobile) client
+    "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
+    // Teams, web client
+    "5e3ce6c0-2b1f-4285-8d4b-75ee78787346",
+    // Teams, consumer (MSA) client
+    "8ec6bc83-69c8-4392-8f08-b3c986009232",
+    // Teams meeting artifacts app
+    "6bc3b958-689b-49f5-9006-36d165f30e00",
+    "00000000-0000-0000-0000-000000000000",
+];
 
 /// One hit: a file, a 1-based line, and what was found there. It never carries the matched text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +111,12 @@ impl Guard {
             (
                 Kind::Mri,
                 format!(r"\b(?:8:(?:orgid|teamsvisitor|acs|gcch|dod):{GUID}|8:live:[A-Za-z0-9._\-]+|28:{GUID})"),
+            ),
+            // any GUID-shaped run, even inside a longer hex run: [`PUBLIC_GUIDS`] are let through in `matches_line`
+            (Kind::Guid, GUID.to_owned()),
+            (
+                Kind::Signature,
+                r#"(?i)(?:^|[^A-Za-z0-9])(?:sig|signature)["']?\s*[:=]\s*["']?[A-Za-z0-9+/=_.%\-]{16,}"#.to_owned(),
             ),
         ];
         let rules = patterns
@@ -222,12 +250,15 @@ fn hex(byte: Option<&u8>) -> Option<u8> {
 }
 
 fn matches_line(kind: Kind, regex: &Regex, line: &str) -> bool {
-    if kind != Kind::Email {
-        return regex.is_match(line);
+    match kind {
+        Kind::Email => regex
+            .captures_iter(line)
+            .any(|captures| captures.get(1).is_some_and(|domain| !is_reserved(domain.as_str()))),
+        Kind::Guid => regex
+            .find_iter(line)
+            .any(|guid| !PUBLIC_GUIDS.contains(&guid.as_str().to_ascii_lowercase().as_str())),
+        _ => regex.is_match(line),
     }
-    regex
-        .captures_iter(line)
-        .any(|captures| captures.get(1).is_some_and(|domain| !is_reserved(domain.as_str())))
 }
 
 fn is_reserved(domain: &str) -> bool {

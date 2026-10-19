@@ -104,6 +104,27 @@ fn every_kind_of_secret_is_detected() {
             r#"{"body":"line one\n8:orgid:1fec8e78-bce4-4aaf-ab1b-5451cc387264"}"#,
             Kind::Mri,
         ),
+        // A tenant or object id, as written, right after a percent escape, and encoded twice.
+        ("tid=72f988bf-86f1-41af-91ab-2d7cd011db47", Kind::Guid),
+        (
+            "context=%7B%22Tid%22%3A%2272f988bf-86f1-41af-91ab-2d7cd011db47%22%7D",
+            Kind::Guid,
+        ),
+        ("x=72F988BF%252D86F1%252D41AF%252D91AB%252D2D7CD011DB47", Kind::Guid),
+        // A signed URL's signature: in a query, as a header, inside an encoded redirect, in JSON.
+        (
+            "blob?sv=2024-01-01&sig=abCD12%2BefGH34%2FijKL56%2BmnOP78%3D",
+            Kind::Signature,
+        ),
+        (
+            "X-Amz-Signature: 3f1a9c0b7e2d4f6a8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a",
+            Kind::Signature,
+        ),
+        (
+            "?target=https%3A%2F%2Fstorage.example.invalid%2Fblob%3Fsig%3DabCD12%252BefGH34%252FijKL56%252BmnOP78%253D",
+            Kind::Signature,
+        ),
+        (r#"{"signature":"c2lnbmF0dXJlLXZhbHVlLXBsYW50ZWQ"}"#, Kind::Signature),
     ];
     let guard = Guard::new().unwrap();
     for (text, kind) in cases {
@@ -130,6 +151,10 @@ fn placeholders_and_prose_pass() {
         "/v1/users/%3Cmri%3Ab%3E/properties?login_hint=%3Cuser%3Aa%3E",
         r#"{"body":"{\"refreshToken\":\"<token:1>\",\"to\":\"ops%40example.com\"}"}"#,
         "100% done, a stray backslash \\ and 50%3",
+        // Microsoft's first-party app ids, the same in every tenant, and the nil GUID.
+        "web client `5e3ce6c0-2b1f-4285-8d4b-75ee78787346`, MSA client `8ec6bc83-69c8-4392-8f08-b3c986009232`",
+        "meeting artifacts `6BC3B958-689B-49F5-9006-36D165F30E00`, nil 00000000-0000-0000-0000-000000000000",
+        "sig=<token:1>&X-Amz-Signature=<token:2>, a `sig` parameter, signature=short",
     ];
     let guard = Guard::new().unwrap();
     for text in clean {

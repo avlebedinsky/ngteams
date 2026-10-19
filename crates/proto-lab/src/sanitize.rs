@@ -14,16 +14,24 @@
 //! - **Identifiers become placeholders**: emails `<user:N>`, MRIs `<mri:N>` (`8:orgid:…`, `8:live:…`, `28:…`, phone
 //!   `4:…`, `tel:`), conversation ids `19:<thread:N>@thread.v2`, GUIDs `<guid:N>`, tenant domains
 //!   (`*.onmicrosoft.com`, `*.sharepoint.com`, the lab's own) `<domain:N>`, IP addresses other than loopback `<ip:N>`,
-//!   names `<name:N>` and other personal fields (titles, topics, phones, departments) `<pii:N>`. Percent-encoded forms
-//!   (`8%3Aorgid%3A…`, `someone%40…`) are recognized too. An MRI that holds a GUID shares the GUID's number, so
-//!   `<mri:3>` and `<guid:3>` are the same object. The lab's own accounts get their alias instead of a number
-//!   (`<user:a>`, `<mri:b>`, `<guid:c>`), and an approved service participant its name (`<mri:echo>`).
+//!   names `<name:N>` and other personal fields (titles, topics, phones, departments) `<pii:N>`, under a JSON key or a
+//!   `key=value`/`"key":"value"` in text. An MRI that holds a GUID shares the GUID's number, so `<mri:3>` and
+//!   `<guid:3>` are the same object. The lab's own accounts get their alias instead of a number (`<user:a>`,
+//!   `<mri:b>`, `<guid:c>`), and an approved service participant its name (`<mri:echo>`).
 //! - **Names** are learned from name fields (`displayName`, `givenName`, `surname`, `imdisplayname`, …) across the whole
-//!   capture first, base64 bodies and JSON inside strings included; then every occurrence of a learned name, or of a
-//!   word of it with 3 letters or more, in any case and as a whole word (`_` and a percent or backslash escape such as
-//!   `%20` or `\n` separate words too), is replaced in every text (a message body that says "Hi Jane", a `OneDrive`
-//!   path with `jane_doe`, a query with `Hello%20Jane`). A name only ever seen under a generic key such as `name` isn't
-//!   learned.
+//!   capture first, base64 bodies, JSON inside strings and `displayName=…` in (encoded) text included; then every
+//!   occurrence of a learned name, or of a word of it with 3 letters or more, in any case and as a whole word (`_`
+//!   separates words too), is replaced in every text (a message body that says "Hi Jane", a `OneDrive` path with
+//!   `jane_doe`, a query with `Hello%20Jane`). A name only ever seen under a generic key such as `name` isn't learned.
+//!
+//! **Every rule sees every layer of encoding** (`sanitize/layers.rs`). Text rules run on a text as written, then again
+//! with one layer of escapes decoded (percent escapes, `%25XX` being one more layer, as UTF-8; backslash escapes; HTML
+//! character references), and so on for up to 4 layers: a signature in a signed URL that is itself a query value
+//! (`target=https%3A…%3Fsig%3Dab%252Bcd`) is seen as `sig=ab+cd`, a GUID after `%22` as one after `"`, an encoded name
+//! (`Jos%C3%A9`) as the name. Only the ranges a rule replaces change; the rest is written back as it came, so the
+//! replaced range of an encoded value is the whole of its encoding (`sig%3D<token:1>`). Checking the text as written
+//! first keeps a value whole when an escape inside it decodes to a delimiter (`token=a%26b`). Identities are compared
+//! decoded, so an email, a name or a token gets the same placeholder in every encoding.
 //!
 //! JSON inside a string (a request or response body, a WebSocket frame, also after a text prefix such as Trouter's
 //! `3:::`) is sanitized as JSON and written back compactly, so keys are seen wherever they are; object keys go through
@@ -32,13 +40,17 @@
 //! Sanitizing is idempotent: placeholders are never matched again, so a sanitized capture comes out unchanged.
 //! Whatever this misses, the fixture guard is the last check before a fixture is written.
 
+mod layers;
+
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::ops::Range;
 
 use base64::Engine as _;
 use regex::{Captures, Regex};
 use serde_json::{Map, Value};
 
+use self::layers::{DECODE_ROUNDS, Layered, decode_all};
 use crate::config::{Alias, LabConfig};
 
 /// Every kind of placeholder the sanitizer writes.
@@ -237,8 +249,9 @@ struct Rules {
     ipv4_run: Regex,
     ipv6_run: Regex,
     ufrag: Regex,
+    field: Regex,
+    field_value: Regex,
     opaque_run: Regex,
-    escape_end: Regex,
 }
 
 impl Rules {
@@ -276,8 +289,11 @@ impl Rules {
             ipv4_run: Regex::new(r"[0-9.]+")?,
             ipv6_run: Regex::new(r"[0-9A-Fa-f:.]+")?,
             ufrag: Regex::new(r"(?i)(\bufrag\s+)([^\s<>]+)")?,
+            // the key of a `key=value` or `"key": "value"` in text (group 1), up to its value ...
+            field: Regex::new(r#"(?:^|[^A-Za-z0-9_\-])([A-Za-z][A-Za-z0-9_\-]*)["']?\s*[:=]\s*"#)?,
+            // ... and the value: quoted (group 1, 2) or bare (3), up to the next delimiter
+            field_value: Regex::new(r#"^(?:"([^"<>]*)"|'([^'<>]*)'|([^"'&#\r\n;,{}\[\]<>\s][^"'&#\r\n;,{}\[\]<>]*))"#)?,
             opaque_run: Regex::new(r"[A-Za-z0-9_\-]+")?,
-            escape_end: Regex::new(r"(?:%(?:25)?[0-9A-Fa-f]{2}|\\[nrtbfv]|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2})$")?,
         })
     }
 }
@@ -302,12 +318,22 @@ struct State {
 }
 
 impl State {
+    /// A secret's placeholder; the same secret in any encoding gets the same one.
     fn token(&mut self, value: &str) -> String {
-        format!("<token:{}>", self.tokens.label(value))
+        format!("<token:{}>", self.tokens.label(&decode_all(value)))
+    }
+
+    fn name(&mut self, name: &str) -> String {
+        format!("<name:{}>", self.names.label(&identity_text(name)))
+    }
+
+    fn pii(&mut self, value: &str) -> String {
+        format!("<pii:{}>", self.pii.label(&identity_text(value)))
     }
 
     fn learn_name(&mut self, name: &str) {
-        let name = name.trim();
+        let name = identity_text(name);
+        let name = name.as_str();
         if name.chars().count() < 2 || self.names.labels.contains_key(name) {
             return;
         }
@@ -413,9 +439,28 @@ impl Sanitizer {
                     self.learn(&json);
                 } else if let Some((_, json)) = json_suffix(text) {
                     self.learn(&json);
+                } else {
+                    self.learn_text(text);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The name fields in text (`displayName=…`, `"givenName":"…"`), at every layer of its encoding.
+    fn learn_text(&mut self, text: &str) {
+        let mut layered = Layered::new(text);
+        for round in 0..=DECODE_ROUNDS {
+            let plain = layered.plain();
+            let names = fields_in(&self.rules, &plain)
+                .into_iter()
+                .filter(|(mode, _)| *mode == Mode::Name);
+            for (_, range) in names {
+                self.state.learn_name(&plain[range]);
+            }
+            if round == DECODE_ROUNDS || !layered.decode() {
+                break;
+            }
         }
     }
 
@@ -501,10 +546,7 @@ impl Sanitizer {
     }
 
     fn key(&mut self, key: &str) -> String {
-        let (rules, state) = (&self.rules, &mut self.state);
-        KEY_RULES.iter().fold(key.to_owned(), |text, rule| {
-            outside_placeholders(rules, &text, |gap| rule(rules, state, gap))
-        })
+        layered(&self.rules, &mut self.state, &KEY_RULES, key)
     }
 
     fn string(&mut self, text: &str, mode: Mode) -> String {
@@ -515,8 +557,8 @@ impl Sanitizer {
             Mode::Secret => self.credential(text),
             Mode::Cookie => self.cookie(text),
             Mode::Weak if text.len() >= WEAK_MIN => self.state.token(text),
-            Mode::Name if !text.trim().is_empty() => format!("<name:{}>", self.state.names.label(text.trim())),
-            Mode::Pii if !text.trim().is_empty() => format!("<pii:{}>", self.state.pii.label(text.trim())),
+            Mode::Name if !text.trim().is_empty() => self.state.name(text),
+            Mode::Pii if !text.trim().is_empty() => self.state.pii(text),
             _ => self.text(text),
         }
     }
@@ -575,10 +617,7 @@ impl Sanitizer {
     }
 
     fn text_rules(&mut self, text: &str) -> String {
-        let (rules, state) = (&self.rules, &mut self.state);
-        TEXT_RULES.iter().fold(text.to_owned(), |text, rule| {
-            outside_placeholders(rules, &text, |gap| rule(rules, state, gap))
-        })
+        layered(&self.rules, &mut self.state, &TEXT_RULES, text)
     }
 }
 
@@ -603,7 +642,12 @@ fn seed_mri(rules: &Rules, state: &mut State, mri: &str, label: &str) {
 }
 
 fn normalize_mri(mri: &str) -> String {
-    mri.to_lowercase().replace("%253a", ":").replace("%3a", ":")
+    decode_all(mri).to_lowercase()
+}
+
+/// What an identity is compared by: decoded, without the spaces around it.
+fn identity_text(text: &str) -> String {
+    decode_all(text.trim()).trim().to_owned()
 }
 
 fn binary(len: usize) -> Value {
@@ -685,11 +729,14 @@ fn json_suffix(text: &str) -> Option<(&str, Value)> {
     value.is_object().then_some((prefix, value))
 }
 
-type Rule = fn(&Rules, &mut State, &str) -> String;
+/// Ranges of a text, each with the placeholder it becomes; in order, not overlapping.
+type Edits = Vec<(Range<usize>, String)>;
 
-/// The rules for free text, in order: secrets first (so a token is never taken apart), then identifiers, then names,
-/// then whatever still looks like a token.
-const TEXT_RULES: [Rule; 13] = [
+type Rule = fn(&Rules, &mut State, &str) -> Edits;
+
+/// The rules for free text, in order: secrets first (so a token is never taken apart), then identifiers, then personal
+/// fields, names, and whatever still looks like a token.
+const TEXT_RULES: [Rule; 15] = [
     bearer,
     secret_values,
     jwts,
@@ -697,218 +744,316 @@ const TEXT_RULES: [Rule; 13] = [
     guids,
     threads,
     emails,
-    domains,
+    tenant_domains,
+    hosted_domains,
     ipv4s,
     ipv6s,
     ufrags,
+    fields,
     names,
     opaque,
 ];
 
 /// The rules for object keys: identifiers only (a key is never a secret's name to redact, and never a name).
-const KEY_RULES: [Rule; 9] = [jwts, mris, guids, threads, emails, domains, ipv4s, ipv6s, opaque];
+const KEY_RULES: [Rule; 10] = [
+    jwts,
+    mris,
+    guids,
+    threads,
+    emails,
+    tenant_domains,
+    hosted_domains,
+    ipv4s,
+    ipv6s,
+    opaque,
+];
 
-/// Applies `rule` to the text between placeholders, so no rule ever matches a placeholder (or part of one).
-fn outside_placeholders(rules: &Rules, text: &str, mut rule: impl FnMut(&str) -> String) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for placeholder in rules.placeholder.find_iter(text) {
-        out.push_str(&rule(&text[last..placeholder.start()]));
-        out.push_str(placeholder.as_str());
-        last = placeholder.end();
-    }
-    out.push_str(&rule(&text[last..]));
-    out
-}
-
-/// Replaces each match `replace` gives a replacement for; a match it gives `None` stays as it is.
-fn replace_each(regex: &Regex, text: &str, mut replace: impl FnMut(&Captures<'_>) -> Option<String>) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for captures in regex.captures_iter(text) {
-        let Some(whole) = captures.get(0) else {
-            continue;
-        };
-        if let Some(replacement) = replace(&captures) {
-            out.push_str(&text[last..whole.start()]);
-            out.push_str(&replacement);
-            last = whole.end();
+/// Runs `list` over `text` at every layer of its encoding (see the module docs): each rule in turn on the text as
+/// written, then each again with one more layer of escapes decoded, until none is left.
+fn layered(rules: &Rules, state: &mut State, list: &[Rule], text: &str) -> String {
+    let mut layered = Layered::new(text);
+    for round in 0..=DECODE_ROUNDS {
+        for rule in list {
+            let edits = rule_edits(rules, state, *rule, &layered);
+            layered.replace(edits);
+        }
+        if round == DECODE_ROUNDS || !layered.decode() {
+            break;
         }
     }
-    out.push_str(&text[last..]);
-    out
+    layered.source()
 }
 
-fn bearer(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.bearer, text, |captures| {
-        Some(format!("{}{}{}", &captures[1], &captures[2], state.token(&captures[3])))
+/// What `rule` replaces in the text as the rules see it now, applied only between placeholders, so no rule ever
+/// matches a placeholder or a part of one. Placeholder-shaped text that came from escapes (`%3Ctoken:1%3E`) is no
+/// placeholder: it goes through the rules like any other text.
+fn rule_edits(rules: &Rules, state: &mut State, rule: Rule, layered: &Layered) -> Edits {
+    let plain = layered.plain();
+    let mut edits = Vec::new();
+    let mut gaps = Vec::new();
+    let mut last = 0;
+    let escaped = layered.escaped();
+    let literal = |range: &Range<usize>| {
+        let first = escaped.partition_point(|escape| escape.end <= range.start);
+        escaped.get(first).is_none_or(|escape| escape.start >= range.end)
+    };
+    let placeholders = rules
+        .placeholder
+        .find_iter(&plain)
+        .map(|found| found.range())
+        .filter(|range| literal(range));
+    for range in placeholders {
+        gaps.push(last..range.start);
+        last = range.end;
+    }
+    gaps.push(last..plain.len());
+    for gap in gaps.into_iter().filter(|gap| !gap.is_empty()) {
+        let found = rule(rules, state, &plain[gap.clone()]);
+        edits.extend(
+            found
+                .into_iter()
+                .map(|(range, with)| (range.start + gap.start..range.end + gap.start, with)),
+        );
+    }
+    edits
+}
+
+/// One edit per match `edit` gives one for; a match it gives `None` stays as it is.
+fn edits_each(
+    regex: &Regex,
+    text: &str,
+    mut edit: impl FnMut(&Captures<'_>) -> Option<(Range<usize>, String)>,
+) -> Edits {
+    regex
+        .captures_iter(text)
+        .filter_map(|captures| edit(&captures))
+        .collect()
+}
+
+fn bearer(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.bearer, text, |captures| {
+        let token = captures.get(3)?;
+        Some((token.range(), state.token(token.as_str())))
     })
 }
 
-fn secret_values(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.secret_value, text, |captures| {
-        let (key, value) = (captures[2].to_lowercase(), &captures[4]);
+fn secret_values(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.secret_value, text, |captures| {
+        let (key, value) = (captures[2].to_lowercase(), captures.get(4)?);
         let weak = WEAK_KEYS.contains(&key.as_str());
-        if SCHEMES.contains(&value.to_lowercase().as_str()) || (weak && value.len() < WEAK_MIN) {
+        let plain = value.as_str();
+        if SCHEMES.contains(&plain.to_lowercase().as_str()) || (weak && plain.len() < WEAK_MIN) {
             return None;
         }
-        Some(format!(
-            "{}{}{}{}",
-            &captures[1],
-            &captures[2],
-            &captures[3],
-            state.token(value)
-        ))
+        Some((value.range(), state.token(plain)))
     })
 }
 
-fn jwts(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.jwt, text, |captures| Some(state.token(&captures[0])))
+fn jwts(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.jwt, text, |captures| {
+        let jwt = captures.get(0)?;
+        Some((jwt.range(), state.token(jwt.as_str())))
+    })
 }
 
-fn mris(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.mri, text, |captures| {
-        let normalized = normalize_mri(&captures[2]);
+fn mris(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.mri, text, |captures| {
+        let mri = captures.get(2)?;
+        let normalized = normalize_mri(mri.as_str());
         let label = match rules.guid.find(&normalized) {
             Some(guid) => state.ids.label(&guid.as_str().to_lowercase()),
             None => state.ids.label(&format!("mri:{normalized}")),
         };
-        Some(format!("{}<mri:{label}>", &captures[1]))
+        Some((mri.range(), format!("<mri:{label}>")))
     })
 }
 
-fn guids(rules: &Rules, state: &mut State, text: &str) -> String {
+fn guids(rules: &Rules, state: &mut State, text: &str) -> Edits {
     let bytes = text.as_bytes();
     let hex_at = |index: Option<usize>| {
         index
             .and_then(|index| bytes.get(index))
             .is_some_and(u8::is_ascii_hexdigit)
     };
-    replace_each(&rules.guid, text, |captures| {
+    edits_each(&rules.guid, text, |captures| {
         let whole = captures.get(0)?;
-        // a GUID-shaped piece of a longer hex run isn't one
+        // a GUID-shaped piece of a longer hex run isn't one (one right after a percent escape is seen once the escape
+        // is decoded)
         if hex_at(whole.start().checked_sub(1)) || hex_at(Some(whole.end())) {
             return None;
         }
-        Some(format!("<guid:{}>", state.ids.label(&whole.as_str().to_lowercase())))
+        let label = state.ids.label(&whole.as_str().to_lowercase());
+        Some((whole.range(), format!("<guid:{label}>")))
     })
 }
 
-fn threads(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.thread, text, |captures| {
-        let label = state.threads.label(&captures[3]);
-        Some(format!(
-            "{}{}<thread:{label}>{}",
-            &captures[1], &captures[2], &captures[4]
-        ))
+fn threads(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.thread, text, |captures| {
+        let id = captures.get(3)?;
+        let label = state.threads.label(&decode_all(id.as_str()));
+        Some((id.range(), format!("<thread:{label}>")))
     })
 }
 
-fn emails(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.email, text, |captures| {
-        let domain = captures[3].to_lowercase();
+fn emails(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.email, text, |captures| {
+        let (local, domain) = (captures.get(2)?, captures.get(3)?);
+        let domain_name = domain.as_str().to_lowercase();
         let reserved = ["example.com", "example.org", "example.net"]
             .iter()
-            .any(|reserved| domain == *reserved || domain.ends_with(&format!(".{reserved}")));
+            .any(|reserved| domain_name == *reserved || domain_name.ends_with(&format!(".{reserved}")));
         if reserved {
             return None;
         }
-        let local = percent_decode(&percent_decode(&captures[2])).to_lowercase();
-        let label = state.users.label(&format!("{local}@{domain}"));
-        Some(format!("{}<user:{label}>", &captures[1]))
+        let address = decode_all(local.as_str()).to_lowercase();
+        let label = state.users.label(&format!("{address}@{domain_name}"));
+        Some((local.start()..domain.end(), format!("<user:{label}>")))
     })
 }
 
-fn domains(rules: &Rules, state: &mut State, text: &str) -> String {
-    let text = match &rules.tenant {
-        Some(tenant) => replace_each(tenant, text, |captures| {
-            Some(format!("<domain:{}>", state.domains.label(&captures[0].to_lowercase())))
-        }),
-        None => text.to_owned(),
+fn tenant_domains(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    let Some(tenant) = &rules.tenant else {
+        return Vec::new();
     };
-    replace_each(&rules.hosted_domain, &text, |captures| {
+    edits_each(tenant, text, |captures| {
+        let domain = captures.get(0)?;
+        let label = state.domains.label(&domain.as_str().to_lowercase());
+        Some((domain.range(), format!("<domain:{label}>")))
+    })
+}
+
+fn hosted_domains(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.hosted_domain, text, |captures| {
         // the `-my` left of a domain placeholder (`<domain:1>-my.sharepoint.com`) is no tenant
         if text[..captures.get(0)?.start()].ends_with('-') {
             return None;
         }
-        let label = state.domains.label(&captures[1].to_lowercase());
-        let suffix = captures.get(2).map_or("", |suffix| suffix.as_str());
-        Some(format!("<domain:{label}>{suffix}{}", &captures[3]))
+        let tenant = captures.get(1)?;
+        let label = state.domains.label(&tenant.as_str().to_lowercase());
+        Some((tenant.range(), format!("<domain:{label}>")))
     })
 }
 
-fn ipv4s(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.ipv4_run, text, |captures| {
-        let run = &captures[0];
-        let canonical = run.split('.').all(|octet| octet == "0" || !octet.starts_with('0'));
-        let address: Ipv4Addr = run.parse().ok().filter(|_| canonical)?;
+fn ipv4s(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.ipv4_run, text, |captures| {
+        let run = captures.get(0)?;
+        let canonical = run
+            .as_str()
+            .split('.')
+            .all(|octet| octet == "0" || !octet.starts_with('0'));
+        let address: Ipv4Addr = run.as_str().parse().ok().filter(|_| canonical)?;
         if address.is_loopback() || address.is_unspecified() {
             return None;
         }
-        Some(format!("<ip:{}>", state.ips.label(&address.to_string())))
+        Some((run.range(), format!("<ip:{}>", state.ips.label(&address.to_string()))))
     })
 }
 
-fn ipv6s(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.ipv6_run, text, |captures| {
-        let run = &captures[0];
+fn ipv6s(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.ipv6_run, text, |captures| {
+        let found = captures.get(0)?;
+        let run = found.as_str();
         if run.matches(':').count() < 2 {
             return None;
         }
         let trimmed = run.trim_matches('.');
-        let (lead, candidate) = match trimmed.parse::<Ipv6Addr>() {
-            Ok(_) => ("", trimmed),
-            Err(_) if trimmed.starts_with(':') && !trimmed.starts_with("::") => (":", &trimmed[1..]),
+        // a `:` before the address that only the run took in (`port:2001:db8::1`) stays
+        let lead = match trimmed.parse::<Ipv6Addr>() {
+            Ok(_) => 0,
+            Err(_) if trimmed.starts_with(':') && !trimmed.starts_with("::") => 1,
             Err(_) => return None,
         };
-        let address: Ipv6Addr = candidate.parse().ok()?;
+        let address: Ipv6Addr = trimmed[lead..].parse().ok()?;
         if address.is_loopback() || address.is_unspecified() {
             return None;
         }
-        let start = run.find(trimmed).unwrap_or_default();
-        let (before, after) = (&run[..start], &run[start + trimmed.len()..]);
-        let label = state.ips.label(&address.to_string());
-        Some(format!("{before}{lead}<ip:{label}>{after}"))
+        let start = found.start() + run.find(trimmed).unwrap_or_default() + lead;
+        let end = found.start() + run.find(trimmed).unwrap_or_default() + trimmed.len();
+        Some((start..end, format!("<ip:{}>", state.ips.label(&address.to_string()))))
     })
 }
 
-fn ufrags(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.ufrag, text, |captures| {
-        Some(format!("{}{}", &captures[1], state.token(&captures[2])))
+fn ufrags(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.ufrag, text, |captures| {
+        let ufrag = captures.get(2)?;
+        Some((ufrag.range(), state.token(ufrag.as_str())))
     })
+}
+
+/// The values of name and other personal fields in text (`displayName=Jane`, `"jobTitle":"Engineer"`), with their
+/// mode ([`Mode::Name`] or [`Mode::Pii`]); in order, not overlapping.
+fn fields_in(rules: &Rules, text: &str) -> Vec<(Mode, Range<usize>)> {
+    let mut found = Vec::new();
+    let mut done = 0;
+    for captures in rules.field.captures_iter(text) {
+        let (Some(key), Some(whole)) = (captures.get(1), captures.get(0)) else {
+            continue;
+        };
+        let mode = key_mode(key.as_str());
+        if key.start() < done || !matches!(mode, Mode::Name | Mode::Pii) {
+            continue;
+        }
+        let Some(range) = field_value(rules, text, whole.end()) else {
+            continue;
+        };
+        done = range.end;
+        found.push((mode, range));
+    }
+    found
+}
+
+/// The value of a field that starts at `at`, without the quotes and the spaces around it; `None` for an empty one or
+/// `null`, `true`, `false`.
+fn field_value(rules: &Rules, text: &str, at: usize) -> Option<Range<usize>> {
+    let captures = rules.field_value.captures(&text[at..])?;
+    let value = (1..=3).find_map(|group| captures.get(group))?;
+    let raw = value.as_str();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || ["null", "true", "false"].contains(&trimmed) {
+        return None;
+    }
+    let start = at + value.start() + (raw.len() - raw.trim_start().len());
+    Some(start..start + trimmed.len())
+}
+
+fn fields(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    fields_in(rules, text)
+        .into_iter()
+        .map(|(mode, range)| {
+            let value = &text[range.clone()];
+            let placeholder = match mode {
+                Mode::Name => state.name(value),
+                _ => state.pii(value),
+            };
+            (range, placeholder)
+        })
+        .collect()
 }
 
 /// Learned names, in any case, as whole words: neither the character before a match nor the one after it may be a
-/// letter or a digit, unless the one before ends an escape (`Hello%20Jane`, `%2520Jane`, `\nJane`, `\u0020Jane`): an
-/// escape stands for a separator as often as not, and a name is redacted when unsure.
-fn names(rules: &Rules, state: &mut State, text: &str) -> String {
+/// letter or a digit (a name behind an escape, `Hello%20Jane`, is found once the escape is decoded).
+fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
     let Some(regex) = &state.names_regex else {
-        return text.to_owned();
+        return Vec::new();
     };
-    replace_each(regex, text, |captures| {
-        let whole = captures.get(0)?;
-        let prefix = &text[..whole.start()];
-        let before = prefix.chars().next_back();
-        let after = text[whole.end()..].chars().next();
-        let escaped = || {
-            // the longest escape is 6 characters (`%2520`, `\u0020`)
-            let tail = prefix.char_indices().rev().nth(5).map_or(0, |(index, _)| index);
-            rules.escape_end.is_match(&prefix[tail..])
-        };
-        if (before.is_some_and(char::is_alphanumeric) && !escaped()) || after.is_some_and(char::is_alphanumeric) {
-            return None;
+    let mut edits = Vec::new();
+    for found in regex.find_iter(text) {
+        let before = text[..found.start()].chars().next_back();
+        let after = text[found.end()..].chars().next();
+        if before.is_some_and(char::is_alphanumeric) || after.is_some_and(char::is_alphanumeric) {
+            continue;
         }
-        state
-            .variants
-            .get(&whole.as_str().to_lowercase())
-            .map(|label| format!("<name:{label}>"))
-    })
+        if let Some(label) = state.variants.get(&found.as_str().to_lowercase()) {
+            edits.push((found.range(), format!("<name:{label}>")));
+        }
+    }
+    edits
 }
 
-fn opaque(rules: &Rules, state: &mut State, text: &str) -> String {
-    replace_each(&rules.opaque_run, text, |captures| {
-        let run = &captures[0];
-        looks_random(run).then(|| state.token(run))
+fn opaque(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.opaque_run, text, |captures| {
+        let run = captures.get(0)?;
+        looks_random(run.as_str()).then(|| (run.range(), state.token(run.as_str())))
     })
 }
 
@@ -938,25 +1083,4 @@ fn entropy(text: &str) -> f64 {
             -share * share.log2()
         })
         .sum()
-}
-
-/// `%XX` escapes decoded (lossily, for comparing identities).
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while let Some(&byte) = bytes.get(index) {
-        let hex = bytes
-            .get(index + 1..index + 3)
-            .and_then(|digits| std::str::from_utf8(digits).ok())
-            .and_then(|digits| u8::from_str_radix(digits, 16).ok());
-        if let (b'%', Some(decoded)) = (byte, hex) {
-            out.push(decoded);
-            index += 3;
-        } else {
-            out.push(byte);
-            index += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
