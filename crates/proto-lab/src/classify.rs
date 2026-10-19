@@ -3,7 +3,8 @@
 //! [`classify`] sorts a request into:
 //! - [`Classification::Read`]: `GET`, `HEAD` or `OPTIONS`, which change nothing anyone else sees;
 //! - [`Classification::Own`]: a mutating request on the seeded, reviewed own-state list (the Entra token endpoint and
-//!   Teams' authz exchange), which changes only the signed-in account's own session;
+//!   Teams' authz exchange), which changes only the signed-in account's own session; `proto-lab login` adds Entra's
+//!   sign-in form ([`Classifier::sign_in`]);
 //! - [`Classification::Write`]: a mapped write with its [`Target`], judged by [`teams_fence::Fence::check`];
 //! - [`Classification::Unknown`]: everything else, denied.
 //!
@@ -24,6 +25,9 @@ pub enum OwnKind {
     EntraToken,
     /// Teams' authz exchange: an access token for a skypetoken and the regional endpoints.
     Authz,
+    /// Entra's sign-in form: the username lookup, the password and "Stay signed in?". Only `proto-lab login` allows
+    /// it ([`Classifier::sign_in`]).
+    EntraSignIn,
 }
 
 impl OwnKind {
@@ -33,6 +37,7 @@ impl OwnKind {
         match self {
             Self::EntraToken => "entra_token",
             Self::Authz => "authz",
+            Self::EntraSignIn => "entra_sign_in",
         }
     }
 }
@@ -123,6 +128,11 @@ const AUTHZ: [(&str, &str); 4] = [
     ("https://authsvc.teams.microsoft.com", "/v1.0/authzcore"),
 ];
 
+/// Entra's sign-in form on `login.microsoftonline.com`, as the sign-in page posts it (`*` is `common`,
+/// `organizations` or a tenant): the username lookup, the password, and the answer to "Stay signed in?". Nothing
+/// of multi-factor sign-in (`SAS/*`) or of the account's security info is on it.
+const SIGN_IN: [&str; 4] = ["/*/GetCredentialType", "/*/login", "/kmsi", "/*/kmsi"];
+
 /// The classifier: the own-state list (and, from M0 Task 11, the write mapping).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Classifier {
@@ -146,6 +156,20 @@ impl Classifier {
                 .map(|(origin, path)| OwnRule::new(OwnKind::Authz, "POST", origin, path)),
         );
         Self { own }
+    }
+
+    /// The seeded list plus Entra's sign-in form ([`OwnKind::EntraSignIn`]): what `proto-lab login` needs to type a
+    /// lab account's password into Microsoft's sign-in page under the fence. The form changes only that account's own
+    /// sign-in session. Nothing else uses it: `status` and the scenarios never sign in.
+    #[must_use]
+    pub fn sign_in() -> Self {
+        let mut classifier = Self::seeded();
+        classifier.own.extend(
+            SIGN_IN
+                .iter()
+                .map(|path| OwnRule::new(OwnKind::EntraSignIn, "POST", "https://login.microsoftonline.com", path)),
+        );
+        classifier
     }
 
     /// The same list plus one more own-state rule. Tests use it to stand a local endpoint in for a Microsoft one.

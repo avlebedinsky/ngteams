@@ -16,11 +16,15 @@
 //! # mri = "..."                   # filled in from a capture; without it the participant matches nothing
 //! ```
 //!
-//! Passwords never go in this file.
+//! Passwords never go in this file. An account's MRI is written into it by [`record_account_mri`] after the account's
+//! first login; nothing else here writes the file.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
+use std::fs;
+use std::io::Write as _;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -231,6 +235,14 @@ pub enum ConfigError {
     MixedDomain { expected: String, found: String },
     #[error("an empty mri for {0}; leave the field out until it is known")]
     EmptyMri(String),
+    #[error("lab.toml gives {0}'s mri to another participant too")]
+    DuplicateMri(String),
+    #[error("lab.toml already records another mri for account {0}; it isn't replaced")]
+    MriConflict(Alias),
+    #[error("can't edit lab.toml: {0}")]
+    Edit(String),
+    #[error("can't write {}: {source}", path.display())]
+    Write { path: PathBuf, source: std::io::Error },
     #[error("a service participant without a name")]
     EmptyServiceName,
     #[error("service participant {0} is listed more than once")]
@@ -280,7 +292,8 @@ impl LabConfig {
     ///
     /// # Errors
     /// On invalid TOML or unknown fields, a count other than 3 accounts, a duplicate alias or UPN, a malformed UPN, UPNs
-    /// in more than one domain, an empty MRI, a duplicate or empty service name, or a relative `data_dir`.
+    /// in more than one domain, an empty MRI or one given to two participants, a duplicate or empty service name, or a
+    /// relative `data_dir`.
     pub fn parse(text: &str, default_data_dir: &Path) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text)?;
         let data_dir = match raw.data_dir {
@@ -290,6 +303,7 @@ impl LabConfig {
         };
         let (accounts, tenant_domain) = validate_accounts(raw.accounts)?;
         validate_services(&raw.service_participants)?;
+        validate_unique_mris(&accounts, &raw.service_participants)?;
         Ok(Self {
             accounts,
             tenant_domain,
@@ -371,6 +385,113 @@ fn validate_services(services: &[ServiceParticipant]) -> Result<(), ConfigError>
         check_mri(service.mri.as_deref(), || service.name.clone())?;
     }
     Ok(())
+}
+
+/// One MRI names one participant: an account and a service, or two accounts, can't share it.
+fn validate_unique_mris(accounts: &[Account], services: &[ServiceParticipant]) -> Result<(), ConfigError> {
+    let owners = accounts
+        .iter()
+        .map(|account| (account.mri.as_deref(), account.alias.to_string()))
+        .chain(
+            services
+                .iter()
+                .map(|service| (service.mri.as_deref(), service.name.clone())),
+        );
+    let mut seen = BTreeSet::new();
+    for (mri, owner) in owners {
+        if let Some(mri) = mri
+            && !seen.insert(mri)
+        {
+            return Err(ConfigError::DuplicateMri(owner));
+        }
+    }
+    Ok(())
+}
+
+/// What [`record_account_mri`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MriRecord {
+    /// The MRI was written into `lab.toml`.
+    Recorded,
+    /// `lab.toml` held that MRI for the account already; the file wasn't touched.
+    AlreadyRecorded,
+}
+
+/// Records `mri` as account `alias`'s MRI in the `lab.toml` at `locations.config_file`, once the account's first login
+/// has shown it. Everything else in the file (comments included) stays as it is, and so does the file's mode. The new
+/// text has to pass [`LabConfig::parse`]; it replaces the file in one rename, so a reader sees the old file or the new
+/// one, never half of either.
+///
+/// An MRI is recorded only for an account without one: a different MRI already there is refused, not replaced (the
+/// roster of the fence comes from these MRIs).
+///
+/// # Errors
+/// When the file can't be read, isn't valid, records another MRI for the account ([`ConfigError::MriConflict`]), or
+/// would become invalid with this one (an empty MRI, one another participant has); or when it can't be written.
+pub fn record_account_mri(locations: &LabLocations, alias: Alias, mri: &str) -> Result<MriRecord, ConfigError> {
+    let path = &locations.config_file;
+    let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let config = LabConfig::parse(&text, &locations.data_dir)?;
+    check_mri(Some(mri), || alias.to_string())?;
+    match config.account(alias).mri.as_deref() {
+        Some(recorded) if recorded == mri => return Ok(MriRecord::AlreadyRecorded),
+        Some(_) => return Err(ConfigError::MriConflict(alias)),
+        None => {}
+    }
+    let edited = with_account_mri(&text, alias, mri)?;
+    LabConfig::parse(&edited, &locations.data_dir)?;
+    replace_file(path, &edited)?;
+    Ok(MriRecord::Recorded)
+}
+
+/// `text` with `mri = "<mri>"` set in the `[[accounts]]` table of `alias`.
+fn with_account_mri(text: &str, alias: Alias, mri: &str) -> Result<String, ConfigError> {
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error: toml_edit::TomlError| ConfigError::Edit(error.to_string()))?;
+    let account = document
+        .get_mut("accounts")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+        .and_then(|accounts| {
+            accounts
+                .iter_mut()
+                .find(|table| table.get("alias").and_then(toml_edit::Item::as_str) == Some(alias.as_str()))
+        })
+        .ok_or_else(|| ConfigError::Edit(format!("no [[accounts]] table with alias {alias}")))?;
+    account.insert("mri", toml_edit::value(mri));
+    Ok(document.to_string())
+}
+
+/// Replaces `path` with `text` through a new file beside it, renamed over it, with the old file's mode.
+fn replace_file(path: &Path, text: &str) -> Result<(), ConfigError> {
+    let write_error = |source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mode = fs::metadata(path).map_err(write_error)?.permissions().mode() & 0o7777;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}.new", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let written = (|| {
+        // owner-only until it has the old file's mode, which may be stricter still
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if written.is_err() {
+        // whatever was left of the new file; the old one is untouched
+        let _ = fs::remove_file(&temporary);
+    }
+    written.map_err(write_error)
 }
 
 fn check_mri(mri: Option<&str>, owner: impl FnOnce() -> String) -> Result<(), ConfigError> {

@@ -43,3 +43,17 @@ they're skipped, unless `GPUI_SMOKE_REQUIRE=1`. They run the window once on ever
 The tests enable `teams-fence`'s `test-support` feature through dev-dependencies, and cargo unifies it into everything
 built together with them (`cargo test`, `--all-targets`, `--all-features`), the `proto-lab` binary included. Such a
 binary refuses to run; `cargo build -p proto-lab` or `cargo run -p proto-lab` builds one without it.
+
+## Lab accounts
+
+```sh
+cargo run -p proto-lab -- login a     # sign lab account a in (b, c alike) and record its MRI in lab.toml
+cargo run -p proto-lab -- status      # ok / login needed, per account
+```
+
+Both run the pinned Chrome headless on the account's profile under `~/.local/share/teams-lab/profiles/`, with the fence
+armed before anything loads. Until writes are mapped the fence is fail-closed, so the web client loads with its writes
+denied; the denies are logged to `fence.log` and expected. `login` signs in on Microsoft's page by itself when the
+session has expired, with the password from lab-automation's `lab-accounts.json` (mode `0600`); if Microsoft asks for
+a one-time code, `status-<alias>.json` in the lab's data dir says `need-code`, and the code goes into
+`inbox/<alias>.code` there.

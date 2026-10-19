@@ -3,5 +3,6 @@
 //! ([`teams_fence::Fence::open_lab`]); the harness uses it from here.
 
 pub use teams_fence::lab::{
-    ACCOUNT_COUNT, Account, Alias, ConfigError, LabConfig, LabLocations, LabPaths, ServiceParticipant,
+    ACCOUNT_COUNT, Account, Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, ServiceParticipant,
+    record_account_mri,
 };

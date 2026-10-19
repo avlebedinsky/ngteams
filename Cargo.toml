@@ -25,6 +25,7 @@ teams-auth = { path = "crates/teams-auth" }
 teams-fence = { path = "crates/teams-fence" }
 teams-proto = { path = "crates/teams-proto" }
 media-loop = { path = "spikes/media-loop" }
+base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 # gzip only, on the zlib-rs backend zip already uses
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
@@ -58,6 +59,8 @@ tokio = "1.53.3"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
 tokio-tungstenite = "0.30.0"
 toml = "1.1.8"
+# edits lab.toml in place (the MRI of an account after its first login), keeping its comments
+toml_edit = "0.25.17"
 trybuild = "1.0.122"
 url = "2.5.8"
 wiremock = "0.6.5"

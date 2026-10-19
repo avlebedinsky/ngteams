@@ -1,16 +1,16 @@
-//! `proto-lab`: the protocol lab harness CLI.
-//!
-//! `login` and `status` arrive with the armed fence (M0 Task 8); see
-//! `docs/plans/20261019-native-teams-m0-lab-and-spikes.md`.
+//! `proto-lab`: the protocol lab harness CLI. See `docs/plans/20261019-native-teams-m0-lab-and-spikes.md`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use proto_lab::bundles::import::{self, Imported};
 use proto_lab::bundles::index::{self, Kind};
 use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
-use proto_lab::config::{LabLocations, LabPaths};
+use proto_lab::commands::login::{self, LoginOptions};
+use proto_lab::commands::status::{self, AccountStatus};
+use proto_lab::config::{Alias, LabConfig, LabLocations, LabPaths, MriRecord};
 
 #[derive(Parser)]
 #[command(name = "proto-lab", about = "The Teams protocol lab harness")]
@@ -30,6 +30,26 @@ enum Command {
     Bundles {
         #[command(subcommand)]
         command: BundlesCommand,
+    },
+    /// Sign a lab account into the Teams web client in its profile, headless, under the armed fence, and record its MRI
+    /// in lab.toml.
+    Login {
+        /// The lab account: a, b or c.
+        alias: Alias,
+        /// Seconds the sign-in and the web client's load may take.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+        /// Seconds to wait for a one-time code in inbox/<alias>.code once Microsoft asks for one (0: stop at once).
+        #[arg(long, default_value_t = 900)]
+        code_wait: u64,
+    },
+    /// Whether each lab account's session still works: `ok` or `login needed`, per account. Signs nothing in.
+    Status {
+        /// The accounts to check; all three by default.
+        aliases: Vec<Alias>,
+        /// Seconds the web client may take to load, per account.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
     },
 }
 
@@ -86,11 +106,68 @@ fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    // these commands need only the lab directories, so they run without a lab.toml too
-    let paths = LabLocations::from_env()?.lab_paths()?;
     match cli.command {
-        Command::Chrome { command } => run_chrome(command, &paths).await,
-        Command::Bundles { command } => run_bundles(command, &paths).await,
+        Command::Login {
+            alias,
+            timeout,
+            code_wait,
+        } => run_login(alias, timeout, code_wait).await,
+        Command::Status { aliases, timeout } => run_status(aliases, timeout).await,
+        // these need only the lab directories, so they run without a lab.toml too
+        Command::Chrome { command } => run_chrome(command, &LabLocations::from_env()?.lab_paths()?).await,
+        Command::Bundles { command } => run_bundles(command, &LabLocations::from_env()?.lab_paths()?).await,
+    }
+}
+
+async fn run_login(alias: Alias, timeout: u64, code_wait: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let options = LoginOptions {
+        timeout: Duration::from_secs(timeout),
+        code_wait: Duration::from_secs(code_wait),
+    };
+    let report = login::login(alias, options).await?;
+    let how = if report.signed_in {
+        "signed in"
+    } else {
+        "already signed in"
+    };
+    let mri = match report.mri {
+        MriRecord::Recorded => "MRI recorded in lab.toml",
+        MriRecord::AlreadyRecorded => "MRI already in lab.toml",
+    };
+    let teams = match report.refused {
+        None => "the web client loaded".to_owned(),
+        Some(status) => format!("but Teams refused the account (authz answered {status}; no Teams license?)"),
+    };
+    println!("{alias}: {how}, {teams}; {mri}");
+    eprintln!("{alias}: {} (fail-closed: expected)", report.fence.summary());
+    match report.refused {
+        None => Ok(()),
+        Some(_) => Err(format!("{alias}: Teams refused the account").into()),
+    }
+}
+
+async fn run_status(aliases: Vec<Alias>, timeout: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let config = LabConfig::load(&LabLocations::from_env()?)?;
+    let aliases = if aliases.is_empty() {
+        Alias::ALL.to_vec()
+    } else {
+        aliases
+    };
+    let timeout = Duration::from_secs(timeout);
+    let mut all_ok = true;
+    for alias in aliases {
+        let (state, fence) = status::check(config.paths(), alias, timeout).await?;
+        println!("{alias}: {state}");
+        eprintln!("{alias}: {} (fail-closed: expected)", fence.summary());
+        if fence.breached() {
+            return Err(format!("{alias}: the fence was breached").into());
+        }
+        all_ok &= state == AccountStatus::Ok;
+    }
+    if all_ok {
+        Ok(())
+    } else {
+        Err("not every account is ok".into())
     }
 }
 

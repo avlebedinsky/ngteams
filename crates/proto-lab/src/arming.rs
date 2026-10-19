@@ -64,7 +64,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::browser::{Browser, BrowserError};
@@ -410,6 +410,8 @@ struct Shared {
     lost: AtomicBool,
     /// [`ArmedBrowser::close`] has asked the browser to close, and decides from its answer whether to kill it.
     closing: AtomicBool,
+    /// Where a copy of every event goes ([`ArmedBrowser::watch`]).
+    taps: Mutex<Vec<mpsc::UnboundedSender<Event>>>,
 }
 
 impl Shared {
@@ -428,6 +430,12 @@ impl Shared {
 
     fn lost(&self) -> bool {
         self.lost.load(Ordering::SeqCst)
+    }
+
+    /// Hands a copy of `event` to every watcher still listening.
+    fn tap(&self, event: &Event) {
+        let mut taps = self.taps.lock().unwrap_or_else(PoisonError::into_inner);
+        taps.retain(|tap| tap.send(event.clone()).is_ok());
     }
 }
 
@@ -469,6 +477,7 @@ impl ArmedBrowser {
             browser: Mutex::new(Some(browser)),
             lost: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            taps: Mutex::new(Vec::new()),
         });
         let task = tokio::spawn(handle_events(cdp.clone(), events, Arc::clone(&shared)));
         // from here on, an early return drops `armed`, and that kills the browser
@@ -515,6 +524,20 @@ impl ArmedBrowser {
     #[must_use]
     pub fn cdp(&self) -> &Cdp {
         &self.cdp
+    }
+
+    /// A copy of every event of the connection from now on, in arrival order, for watching what the targets do. The
+    /// fence handles the events whether or not anyone watches; a watcher only observes (answering a paused request or a
+    /// held target is the fence's job), and the channel ends with the connection.
+    #[must_use]
+    pub fn watch(&self) -> mpsc::UnboundedReceiver<Event> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.shared
+            .taps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(sender);
+        receiver
     }
 
     /// Opens a new tab on `about:blank` and waits up to `timeout` for it to be armed.
@@ -634,6 +657,7 @@ async fn dispatch_events(cdp: Cdp, mut events: Events, shared: &Arc<Shared>) {
 /// Handles one event. The audit's events are handled here, in arrival order: an allow is recorded before the guard
 /// hears of it, so the frame it lets out is always reported after it.
 fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
+    shared.tap(&event);
     match event.method.as_str() {
         "Fetch.requestPaused" => {
             let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
