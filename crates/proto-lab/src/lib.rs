@@ -4,9 +4,11 @@
 pub mod arming;
 pub mod browser;
 pub mod bundles;
+pub mod capture;
 pub mod cdp;
 pub mod classify;
 pub mod commands;
 pub mod config;
 pub mod fence_http;
 pub mod fence_ws;
+pub mod sanitize;

@@ -4614,7 +4614,9 @@ dependencies = [
 name = "proto-lab"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "clap",
+ "fixture-guard",
  "flate2",
  "futures-util",
  "rcgen",
