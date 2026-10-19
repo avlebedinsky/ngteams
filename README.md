@@ -29,5 +29,7 @@ cargo test --workspace
 ```
 
 The browser tests run headless Chrome for Testing on throwaway profiles. Install the pinned build once with
-`cargo run -p proto-lab -- chrome install` (into `~/.local/share/teams-lab/chrome/`), or point `PROTO_LAB_CHROME` at a
-Chrome binary; without one they're skipped, unless `PROTO_LAB_REQUIRE_CHROME=1`.
+`cargo run -p proto-lab -- chrome install`, or point `PROTO_LAB_CHROME` at a Chrome binary; without one they're skipped,
+unless `PROTO_LAB_REQUIRE_CHROME=1`. The build goes into the lab's `chrome/` dir: under `data_dir` when
+`~/.config/teams-lab/lab.toml` sets one, else `~/.local/share/teams-lab/chrome/`. No lab config is needed for this, but
+an invalid one is refused; the tests look in the same place.

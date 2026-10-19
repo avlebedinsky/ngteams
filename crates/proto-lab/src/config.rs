@@ -188,6 +188,22 @@ impl LabLocations {
             data_dir: base(data_home, ".local/share")?.join("teams-lab"),
         })
     }
+
+    /// The lab directories in effect: those of `lab.toml` (whose `data_dir` overrides the default) when the file exists,
+    /// else those under the default data dir. Whatever needs only the directories, such as the pinned Chrome, finds them
+    /// this way with or without a lab config.
+    ///
+    /// # Errors
+    /// When `lab.toml` exists but can't be read or is invalid (see [`LabConfig::load`]).
+    pub fn lab_paths(&self) -> Result<LabPaths, ConfigError> {
+        match LabConfig::load(self) {
+            Ok(config) => Ok(config.paths().clone()),
+            Err(ConfigError::Read { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                Ok(LabPaths::new(self.data_dir.clone()))
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn absolute(value: Option<OsString>) -> Option<PathBuf> {

@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
-use proto_lab::config::{LabConfig, LabLocations};
+use proto_lab::config::LabLocations;
 
 #[derive(Parser)]
 #[command(name = "proto-lab", about = "The Teams protocol lab harness")]
@@ -52,8 +52,8 @@ fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let config = LabConfig::load(&LabLocations::from_env()?)?;
-    let chrome_dir = config.paths().chrome_dir();
+    // the chrome commands need only the lab directories, so they run without a lab.toml too
+    let chrome_dir = LabLocations::from_env()?.lab_paths()?.chrome_dir();
     let build = ChromeBuild::pinned();
     match cli.command {
         Command::Chrome {

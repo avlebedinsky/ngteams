@@ -22,6 +22,8 @@ zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# a local websocket server for the CDP client tests
+tokio = { workspace = true, features = ["net"] }
 wiremock.workspace = true
 
 [lints]

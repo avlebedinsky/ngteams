@@ -6,6 +6,9 @@
 //! target that auto-attaches with `waitForDebuggerOnStart` stays paused until the caller resumes it with
 //! `Runtime.runIfWaitingForDebugger`, which is what the browser fence needs to arm a target before its code runs.
 //!
+//! The connection lives as long as a [`Cdp`] or [`Session`] handle does: dropping the last one closes the websocket, so
+//! the browser sees the client detach (and releases whatever it held for it), and [`Events`] then ends.
+//!
 //! Commands and events are untyped JSON (`serde_json::Value`): the lab uses a handful of methods and needs whatever
 //! fields the browser sends, including ones newer than any generated protocol crate.
 
@@ -135,15 +138,13 @@ struct Pending {
     closed: bool,
 }
 
-struct Inner {
-    outgoing: mpsc::UnboundedSender<String>,
-    pending: Mutex<Pending>,
-    next_id: AtomicU64,
-}
+/// The commands waiting for a reply. The reader task holds only this, never the outgoing sender, so the connection
+/// closes once every client handle is gone.
+struct Replies(Mutex<Pending>);
 
-impl Inner {
+impl Replies {
     fn pending(&self) -> std::sync::MutexGuard<'_, Pending> {
-        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Delivers a response; an id nobody waits for (a dropped caller) is ignored.
@@ -162,7 +163,16 @@ impl Inner {
     }
 }
 
-/// The events of one connection, in arrival order. It ends when the connection closes.
+/// What the client handles share. Dropping the last handle drops `outgoing`, which ends the writer task and closes the
+/// websocket.
+struct Inner {
+    outgoing: mpsc::UnboundedSender<String>,
+    replies: Arc<Replies>,
+    next_id: AtomicU64,
+}
+
+/// The events of one connection, in arrival order. It ends when the connection closes, which happens once every
+/// [`Cdp`] and [`Session`] handle is dropped.
 pub struct Events {
     receiver: mpsc::UnboundedReceiver<Event>,
 }
@@ -174,7 +184,8 @@ impl Events {
     }
 }
 
-/// A handle to one debugging connection. Clones share the connection.
+/// A handle to one debugging connection. Clones (and [`Session`]s) share the connection, which closes when the last of
+/// them is dropped.
 #[derive(Clone)]
 pub struct Cdp {
     inner: Arc<Inner>,
@@ -192,24 +203,26 @@ impl Cdp {
         let (mut sink, mut source) = stream.split();
         let (outgoing, mut to_send) = mpsc::unbounded_channel::<String>();
         let (events, receiver) = mpsc::unbounded_channel();
+        let replies = Arc::new(Replies(Mutex::new(Pending {
+            replies: HashMap::new(),
+            closed: false,
+        })));
         let inner = Arc::new(Inner {
             outgoing,
-            pending: Mutex::new(Pending {
-                replies: HashMap::new(),
-                closed: false,
-            }),
+            replies: Arc::clone(&replies),
             next_id: AtomicU64::new(1),
         });
+        // ends when the last handle (the only holder of `outgoing`) is dropped, or when the socket breaks
         tokio::spawn(async move {
             while let Some(text) = to_send.recv().await {
                 if sink.send(Message::text(text)).await.is_err() {
                     break;
                 }
             }
-            // the sender side is gone or the socket broke; closing is best effort
+            // closing is best effort; the browser answers with its own close frame, which ends the reader
             let _ = sink.close().await;
         });
-        let reader = Arc::clone(&inner);
+        let reader = replies;
         tokio::spawn(async move {
             while let Some(Ok(message)) = source.next().await {
                 if !dispatch(&reader, &events, &message) {
@@ -229,7 +242,7 @@ impl Cdp {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply, response) = oneshot::channel();
         {
-            let mut pending = self.inner.pending();
+            let mut pending = self.inner.replies.pending();
             if pending.closed {
                 return Err(CdpError::Closed);
             }
@@ -241,7 +254,7 @@ impl Cdp {
             .send(encode_command(id, session, method, params))
             .is_err()
         {
-            self.inner.pending().replies.remove(&id);
+            self.inner.replies.pending().replies.remove(&id);
             return Err(CdpError::Closed);
         }
         match response.await {
@@ -262,14 +275,14 @@ impl Cdp {
 }
 
 /// Routes one WebSocket message; `false` once the connection is over.
-fn dispatch(inner: &Inner, events: &mpsc::UnboundedSender<Event>, message: &Message) -> bool {
+fn dispatch(replies: &Replies, events: &mpsc::UnboundedSender<Event>, message: &Message) -> bool {
     let text = match message {
         Message::Text(text) => text.as_str(),
         Message::Close(_) => return false,
         _ => return true,
     };
     match parse_incoming(text) {
-        Ok(Incoming::Response { id, outcome }) => inner.resolve(id, outcome),
+        Ok(Incoming::Response { id, outcome }) => replies.resolve(id, outcome),
         Ok(Incoming::Event(event)) => {
             // nobody listens any more; the responses still matter
             let _ = events.send(event);

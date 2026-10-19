@@ -1,8 +1,9 @@
 //! Launching the lab browser: Chrome for Testing with one user-data-dir, a remote-debugging port, headless or headed, and
 //! optionally fake media devices.
 //!
-//! The debugging endpoint is read from the `DevToolsActivePort` file Chrome writes into its user-data-dir, so the port
-//! can be left to Chrome (`--remote-debugging-port=0`) and tests never collide on a fixed one.
+//! The port is always left to Chrome (`--remote-debugging-port=0`), so browsers never collide on one, and the endpoint is
+//! read from the `DevToolsActivePort` file Chrome writes into its user-data-dir. Chrome writes that file only for port
+//! `0`; a fixed port would need the endpoint from `http://127.0.0.1:<port>/json/version` instead, so there is none.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -40,23 +41,6 @@ pub enum Display {
     Headed,
 }
 
-/// The remote-debugging port.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DebugPort {
-    /// Chrome picks a free port (`0`) and reports it in `DevToolsActivePort`.
-    Auto,
-    Fixed(u16),
-}
-
-impl DebugPort {
-    fn number(self) -> u16 {
-        match self {
-            Self::Auto => 0,
-            Self::Fixed(port) => port,
-        }
-    }
-}
-
 /// Camera and microphone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Media {
@@ -71,18 +55,16 @@ pub enum Media {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchOptions {
     pub user_data_dir: PathBuf,
-    pub port: DebugPort,
     pub display: Display,
     pub media: Media,
 }
 
 impl LaunchOptions {
-    /// Headless, on an automatic port, with system media.
+    /// Headless, with system media.
     #[must_use]
     pub fn new(user_data_dir: PathBuf) -> Self {
         Self {
             user_data_dir,
-            port: DebugPort::Auto,
             display: Display::Headless,
             media: Media::System,
         }
@@ -99,7 +81,8 @@ impl LaunchOptions {
     pub fn args(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = BASE_ARGS.iter().map(OsString::from).collect();
         args.push(flag("--user-data-dir=", self.user_data_dir.as_os_str()));
-        args.push(format!("--remote-debugging-port={}", self.port.number()).into());
+        // Chrome picks a free port and reports it in DevToolsActivePort
+        args.push("--remote-debugging-port=0".into());
         if self.display == Display::Headless {
             args.push("--headless=new".into());
         }

@@ -2,8 +2,9 @@
 //! checksum, the CDP message codec, and (with Chrome installed) a new worker target held paused until we resume it.
 //!
 //! The Chrome test runs headless on a throwaway user-data-dir and a local page. It finds Chrome at
-//! `$PROTO_LAB_CHROME`, else at the pinned build under the lab data dir (`proto-lab chrome install`); without either it
-//! says so on stderr and passes, unless `PROTO_LAB_REQUIRE_CHROME=1`.
+//! `$PROTO_LAB_CHROME`, else at the pinned build in the lab's chrome dir, found as `proto-lab chrome install` finds it
+//! (lab.toml's `data_dir` when set); without either it says so on stderr and passes, unless
+//! `PROTO_LAB_REQUIRE_CHROME=1`.
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -11,9 +12,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use proto_lab::browser::{
-    BASE_ARGS, Browser, BrowserError, DebugPort, DevToolsEndpoint, Display, LaunchOptions, Media,
-};
+use futures_util::StreamExt as _;
+use proto_lab::browser::{BASE_ARGS, Browser, BrowserError, DevToolsEndpoint, Display, LaunchOptions, Media};
 use proto_lab::cdp::{Cdp, CdpError, Event, Events, Incoming, RemoteError, SessionId, encode_command, parse_incoming};
 use proto_lab::commands::chrome::{self, ChecksumError, ChromeBuild, InstallError, Installed};
 use proto_lab::config::{Alias, LabLocations, LabPaths};
@@ -23,6 +23,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Helpers return errors; the tests unwrap them.
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+/// The same, for what a spawned task returns.
+type SendResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn strings(args: &[OsString]) -> Vec<String> {
     args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect()
@@ -60,17 +62,17 @@ fn every_lab_browser_keeps_off_the_keyring_and_google_background_traffic() {
 }
 
 #[test]
-fn headed_on_a_fixed_port_with_fake_media() {
+fn headed_with_fake_media_still_leaves_the_port_to_chrome() {
     let options = LaunchOptions {
         user_data_dir: PathBuf::from("/tmp/profile with space"),
-        port: DebugPort::Fixed(9333),
         display: Display::Headed,
         media: Media::Fake { audio: None },
     };
     let args = strings(&options.args());
 
     assert!(args.contains(&"--user-data-dir=/tmp/profile with space".to_owned()));
-    assert!(args.contains(&"--remote-debugging-port=9333".to_owned()));
+    // Chrome writes DevToolsActivePort only for port 0
+    assert!(args.contains(&"--remote-debugging-port=0".to_owned()));
     assert!(!args.iter().any(|arg| arg.starts_with("--headless")));
     assert!(args.contains(&"--use-fake-ui-for-media-stream".to_owned()));
     assert!(args.contains(&"--use-fake-device-for-media-stream".to_owned()));
@@ -546,19 +548,66 @@ async fn connecting_to_nothing_fails() {
     assert!(matches!(result, Err(CdpError::Connect(_))));
 }
 
+/// A one-client websocket server that reads until the client goes away; true when the client sent a close frame.
+async fn close_watching_server() -> TestResult<(String, tokio::task::JoinHandle<SendResult<bool>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("ws://{}/devtools/browser/x", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        let mut closed = false;
+        // reading on after the close frame sends the server's answer, which ends the client's reader
+        while let Some(message) = socket.next().await {
+            closed |= message?.is_close();
+        }
+        Ok(closed)
+    });
+    Ok((url, server))
+}
+
+#[tokio::test]
+async fn dropping_every_handle_closes_the_connection() {
+    let (url, server) = close_watching_server().await.unwrap();
+    let (cdp, events) = Cdp::connect(&url).await.unwrap();
+    let session = cdp.session(SessionId::new("S1"));
+
+    drop((cdp, session, events));
+
+    let closed = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("the connection stayed open after every handle was dropped");
+    assert!(closed.unwrap().unwrap(), "no close frame");
+}
+
+#[tokio::test]
+async fn events_end_once_the_last_command_handle_is_dropped() {
+    let (url, server) = close_watching_server().await.unwrap();
+    let (cdp, mut events) = Cdp::connect(&url).await.unwrap();
+
+    drop(cdp);
+
+    let end = tokio::time::timeout(Duration::from_secs(5), events.recv()).await;
+    assert!(matches!(end, Ok(None)), "the events went on");
+    assert!(server.await.unwrap().unwrap(), "no close frame");
+}
+
 // --- a real browser: a new worker target is held until we resume it ---
 
 const PAGE: &str = r"<!doctype html>
 <title>worker</title>
 <script>
-  window.workerSaid = 'nothing';
+  window.workerSaid = [];
   const worker = new Worker('/worker.js');
-  worker.onmessage = (event) => { window.workerSaid = event.data; };
+  worker.onmessage = (event) => { window.workerSaid.push(event.data); };
 </script>";
 
-const WORKER: &str = r"fetch('/from-worker')
+// The first line is something Fetch can't hold: if the worker ran before we resumed it, the page would hear 'started'.
+const WORKER: &str = r"postMessage('started');
+fetch('/from-worker')
   .then((response) => response.text())
   .then((text) => postMessage('ran:' + text), () => postMessage('fetch failed'));";
+
+const HOLD: Duration = Duration::from_millis(700);
 
 const STEP: Duration = Duration::from_secs(15);
 
@@ -566,9 +615,43 @@ fn find_chrome() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PROTO_LAB_CHROME") {
         return Some(PathBuf::from(path));
     }
-    let data_dir = LabLocations::from_env().ok()?.data_dir;
-    let executable = ChromeBuild::pinned().executable(&LabPaths::new(data_dir).chrome_dir());
+    // the same dir `proto-lab chrome install` installs into
+    let paths = match LabLocations::from_env().and_then(|locations| locations.lab_paths()) {
+        Ok(paths) => paths,
+        Err(error) => {
+            eprintln!("can't find the lab's chrome dir: {error}");
+            return None;
+        }
+    };
+    let executable = ChromeBuild::pinned().executable(&paths.chrome_dir());
     executable.is_file().then_some(executable)
+}
+
+fn is_worker_request(event: &Event) -> bool {
+    event.method == "Fetch.requestPaused"
+        && event.params["request"]["url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/from-worker"))
+}
+
+/// Takes every event for `window`, letting paused requests through, and fails if the worker's request turns up: a held
+/// worker sends nothing.
+async fn hold_for(cdp: &Cdp, events: &mut Events, window: Duration) -> TestResult {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let Ok(next) = tokio::time::timeout_at(deadline, events.recv()).await else {
+            return Ok(());
+        };
+        let event = next.ok_or("the connection closed while the worker was held")?;
+        if is_worker_request(&event) {
+            return Err("the worker's request went out before runIfWaitingForDebugger".into());
+        }
+        if event.method == "Fetch.requestPaused" {
+            let request = json!({"requestId": event.params["requestId"]});
+            cdp.call(event.session_id.as_ref(), "Fetch.continueRequest", request)
+                .await?;
+        }
+    }
 }
 
 /// Waits for an event, letting through every paused request it passes over (Fetch is on for the page).
@@ -683,26 +766,22 @@ async fn release_worker(
     assert!(matches!(no_fetch, Err(CdpError::Remote { .. })), "{no_fetch:?}");
     cdp.call(Some(worker), "Runtime.runIfWaitingForDebugger", Value::Null)
         .await?;
-    let paused = next_event(cdp, events, "the worker's paused request", |event| {
-        event.method == "Fetch.requestPaused"
-            && event.params["request"]["url"]
-                .as_str()
-                .is_some_and(|url| url.ends_with("/from-worker"))
-    })
-    .await?;
+    let paused = next_event(cdp, events, "the worker's paused request", is_worker_request).await?;
     assert_eq!(paused.session_id.as_ref(), Some(page), "paused on the page's session");
+    // the worker runs now, and its request is held by Fetch alone
+    assert_eq!(worker_messages(cdp, page, 1).await?, json!(["started"]));
     assert_eq!(served(server, "/from-worker").await, 0, "held by Fetch");
     let request = json!({"requestId": paused.params["requestId"]});
     cdp.call(Some(page), "Fetch.continueRequest", request).await?;
     Ok(())
 }
 
-/// What the worker posted to the page, once it has posted anything.
-async fn worker_message(cdp: &Cdp, page: &SessionId) -> TestResult<Value> {
+/// What the worker posted to the page, once it has posted at least `count` messages.
+async fn worker_messages(cdp: &Cdp, page: &SessionId, count: usize) -> TestResult<Value> {
     let poll = async {
         loop {
             let said = page_value(cdp, page, "window.workerSaid").await?;
-            if said != json!("nothing") {
+            if said.as_array().is_some_and(|messages| messages.len() >= count) {
                 return Ok(said);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -710,7 +789,7 @@ async fn worker_message(cdp: &Cdp, page: &SessionId) -> TestResult<Value> {
     };
     tokio::time::timeout(STEP, poll)
         .await
-        .map_err(|_| format!("the worker posted nothing within {STEP:?}"))?
+        .map_err(|_| format!("the worker posted under {count} messages within {STEP:?}"))?
 }
 
 async fn held_worker(browser: &Browser, server: &MockServer) -> TestResult {
@@ -718,13 +797,13 @@ async fn held_worker(browser: &Browser, server: &MockServer) -> TestResult {
     let page = open_held_page(&cdp).await?;
     let worker = load_with_held_worker(&cdp, &mut events, &page, server).await?;
 
-    // held: the page is up, the worker's code hasn't run
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    assert_eq!(page_value(&cdp, &page, "window.workerSaid").await?, json!("nothing"));
+    // held: the page is up, the worker's code hasn't run, not even its first line
+    hold_for(&cdp, &mut events, HOLD).await?;
+    assert_eq!(page_value(&cdp, &page, "window.workerSaid").await?, json!([]));
     assert_eq!(served(server, "/from-worker").await, 0);
 
     release_worker(&cdp, &mut events, &page, &worker, server).await?;
-    assert_eq!(worker_message(&cdp, &page).await?, json!("ran:hello"));
+    assert_eq!(worker_messages(&cdp, &page, 2).await?, json!(["started", "ran:hello"]));
     assert_eq!(served(server, "/from-worker").await, 1);
 
     // closing is best effort: the connection may drop before the reply

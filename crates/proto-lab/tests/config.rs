@@ -237,6 +237,35 @@ fn load_reads_the_file_and_names_it_on_error() {
     assert!(error.to_string().contains("lab.toml"), "{error}");
 }
 
+#[test]
+fn lab_paths_follow_lab_toml_and_need_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("lab.toml");
+    let locations = LabLocations {
+        config_file: file.clone(),
+        data_dir: dir.path().join("default"),
+    };
+
+    // no lab.toml: the default data dir
+    assert_eq!(
+        locations.lab_paths().unwrap().chrome_dir(),
+        dir.path().join("default/chrome")
+    );
+
+    // the file's data_dir wins, as for every command that loads the config
+    let elsewhere = dir.path().join("elsewhere");
+    fs::write(&file, format!("data_dir = {elsewhere:?}\n{}", three())).unwrap();
+    assert_eq!(locations.lab_paths().unwrap().chrome_dir(), elsewhere.join("chrome"));
+    assert_eq!(
+        locations.lab_paths().unwrap(),
+        LabConfig::load(&locations).unwrap().paths().clone()
+    );
+
+    // a broken lab.toml isn't skipped over
+    fs::write(&file, format!("data_dir = {elsewhere:?}\n")).unwrap();
+    assert!(matches!(locations.lab_paths(), Err(ConfigError::AccountCount(0))));
+}
+
 fn os(value: &str) -> OsString {
     OsString::from(value)
 }
