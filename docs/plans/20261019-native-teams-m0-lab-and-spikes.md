@@ -257,14 +257,21 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `crates/proto-lab/src/{fence_http.rs,classify.rs,arming.rs}`
 - Create: `crates/proto-lab/tests/fence_http.rs`, `crates/proto-lab/tests/fixtures/pages/*` (local test pages)
 
-- [ ] tests first for `classify(method, url, body) -> Own(kind) | Write(kind, target) | Unknown`. The `Own` list is seeded minimally (Entra token endpoint, authz). All other mutating requests are `Unknown` and denied.
-- [ ] arming: `Fetch.enable` with pattern `*` on every target. Auto-attach with `waitForDebuggerOnStart`: Fetch + WS guard (Task 7) → `runIfWaitingForDebugger`. If arming fails, close the target.
-- [ ] neutralizing the SW at run start: unregister service workers and clear SW storage for Teams origins, plus `Network.setBypassServiceWorker(true)`
-- [ ] **enforcement** tests on a local page with a mock server:
+- [x] tests first for `classify(method, url, body) -> Own(kind) | Write(kind, target) | Unknown`. The `Own` list is seeded minimally (Entra token endpoint, authz). All other mutating requests are `Unknown` and denied.
+  - ➕ `Classification` also has `Read` (`GET`/`HEAD`/`OPTIONS`; every other method, unknown ones included, counts as mutating), and `Write(Target)` carries the kind inside the `Target`. Own rules match method, exact origin and path segment by segment (`*` = one non-empty segment). Seeded: `POST https://login.microsoftonline.com/*/oauth2/v2.0/token`, and `POST` to `authz` and `authzcore` on `teams.microsoft.com/api/authsvc/v1.0/` and `authsvc.teams.microsoft.com/v1.0/` (the commercial-cloud URLs the web bundle names). `Classifier::with_own` adds a rule; the tests use it for a local stand-in.
+  - ➕ every request the browser fence decides without a membership check goes to `fence.log` too: `FenceLog::record_request` (teams-fence) logs channel, method and the URL without query, fragment or user info; own allows are logged, and an own allow that can't be logged is denied. Writes are logged by `Fence::check` as before.
+- [x] arming: `Fetch.enable` with pattern `*` on every target. Auto-attach with `waitForDebuggerOnStart`: Fetch + WS guard (Task 7) → `runIfWaitingForDebugger`. If arming fails, close the target.
+  - ➕ checked on Chrome 155: **shared and service workers take `Fetch` on their own sessions** and their requests pause there; a dedicated worker has none (its requests pause on its page's session); a shared worker can't start a nested worker (`Worker` is undefined there). Page-level auto-attach also attaches every service worker in the page's scope, so a service worker gets one session per page plus the browser's; each is armed.
+  - ➕ ⚠️ found by the test: with per-target `Fetch` alone, a `sendBeacon` / `fetch(keepalive)` fired from `pagehide` **when the tab closes reaches the network**, because the tab's session is gone. So arming also enables `Fetch` with `*` on the **browser** session first, which pauses every request of every target (after the target's own session). Both layers run the same decision; a deny at either fails the request.
+  - ➕ arming steps per type: page/iframe `Fetch.enable`, `Network.enable`, `Network.setBypassServiceWorker`, `Target.setAutoAttach`; dedicated worker only `Target.setAutoAttach`; shared/service worker and any unknown type `Fetch.enable`, `Target.setAutoAttach`; then `Runtime.runIfWaitingForDebugger`. A failed step closes the target and fails the run; a session that is gone mid-arming ("Session with given id not found": its tab closed, or a duplicate session of a service worker) is dropped without closing the target. The WS guard (Task 7) slots in as one more step before the resume.
+- [x] neutralizing the SW at run start: unregister service workers and clear SW storage for Teams origins, plus `Network.setBypassServiceWorker(true)`
+  - ➕ Chrome 155 answers `Storage.clearDataForOrigin` on the browser session with "Internal error", so arming opens a blank armed tab, clears `service_workers,cache_storage` for `https://teams.microsoft.com` and `https://teams.cloud.microsoft` through it, and closes it. `Network.setBypassServiceWorker` has no effect without `Network.enable` on the same session (checked: the page's fetch was still answered by the service worker).
+- [x] **enforcement** tests on a local page with a mock server:
   - a POST from the page, from a dedicated worker, from a service worker, a `sendBeacon` and a `fetch(keepalive)` fired during `pagehide`
   - all are denied: the mock server receives **nothing**, and the page sees a network error
-- [ ] a test that a GET passes and an allowed `Own` POST reaches the mock server
-- [ ] `cargo test -p proto-lab --test fence_http` passes
+  - ➕ also a shared worker, and `pagehide` both on navigating away and on closing the tab. Plus a test that leftover service workers and caches are gone at run start and that a service worker registered during the run doesn't answer the page's requests, and fake-browser tests for the arming order, closing an unarmable target, and answering each paused request on its own session. Mutation-checked: without the browser-level `Fetch`, the tab-close beacon reaches the server and the test fails.
+- [x] a test that a GET passes and an allowed `Own` POST reaches the mock server
+- [x] `cargo test -p proto-lab --test fence_http` passes
 
 ### Task 7: Fence layer 2 — WebSocket guard (buffer and replay)
 **Files:**

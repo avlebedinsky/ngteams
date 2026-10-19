@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use fixture_guard::Guard;
 use teams_fence::{
-    DenyReason, Fence, FenceLog, FetchFailure, Membership, MembershipFuture, MembershipSource, Mri, PartialReason,
-    Roster, Scope, Target, WriteKind,
+    Channel, DenyReason, Fence, FenceLog, FetchFailure, Membership, MembershipFuture, MembershipSource, Mri,
+    PartialReason, RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -638,4 +638,78 @@ async fn reopening_terminates_a_half_written_last_line() {
         before,
         "a well-formed log is left as it is"
     );
+}
+
+// --- browser requests decided without a membership check ---
+
+#[test]
+fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() {
+    let lab = try_lab().unwrap();
+    let log = lab.fence.log();
+    let url = format!(
+        "https://user:{PLANTED_TOKEN}@chat.example.com:8443/v1/users/ME/conversations?token={PLANTED_TOKEN}#{PLANTED_TOKEN}"
+    );
+    log.record_request(&RequestRecord {
+        channel: Channel::Http,
+        method: "POST",
+        url: &url,
+        outcome: RequestOutcome::Unclassified,
+    })
+    .unwrap();
+    log.record_request(&RequestRecord {
+        channel: Channel::Http,
+        method: "POST",
+        url: "https://login.example.com/common/oauth2/v2.0/token?x=1",
+        outcome: RequestOutcome::Own("entra_token"),
+    })
+    .unwrap();
+
+    let entries = log_entries(&lab.log_path).unwrap();
+    let expected: Vec<serde_json::Value> = vec![
+        serde_json::json!({
+            "verdict": "deny",
+            "channel": "http",
+            "method": "POST",
+            "url": "https://chat.example.com:8443/v1/users/ME/conversations",
+            "reason": "unclassified",
+            "message": "no rule classifies this request",
+        }),
+        serde_json::json!({
+            "verdict": "allow",
+            "channel": "http",
+            "method": "POST",
+            "url": "https://login.example.com/common/oauth2/v2.0/token",
+            "own": "entra_token",
+        }),
+    ];
+    for (entry, expected) in entries.iter().zip(&expected) {
+        let mut entry = entry.clone();
+        let ts = entry.as_object_mut().unwrap().remove("ts_ms").unwrap();
+        assert!(ts.as_u64().is_some_and(|ts| ts > 0));
+        assert_eq!(&entry, expected);
+    }
+    assert_eq!(entries.len(), expected.len());
+    let text = fs::read_to_string(&lab.log_path).unwrap();
+    assert!(!text.contains(PLANTED_TOKEN), "{text}");
+}
+
+#[test]
+fn request_entries_share_the_log_with_write_decisions_and_its_failure_mode() {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let sink = FillsUp {
+        written: Arc::clone(&written),
+        budget: 30,
+        failed: false,
+    };
+    let log = FenceLog::from_writer(sink);
+    let record = RequestRecord {
+        channel: Channel::WebSocket,
+        method: "SEND",
+        url: "wss://trouter.example.com/v4/c",
+        outcome: RequestOutcome::Unclassified,
+    };
+    assert!(log.record_request(&record).is_err(), "a half-written entry fails");
+    assert!(log.record_request(&record).is_err(), "and so does every later one");
+    let text = written.lock().unwrap().clone();
+    assert!(!text.contains(&b'\n'), "nothing after the half-written entry");
 }

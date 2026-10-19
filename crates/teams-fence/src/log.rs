@@ -11,6 +11,15 @@
 //! material: it stays local (0600) and goes through the fixture guard and a manual review before any of it is copied
 //! into the repo. Allows are logged too (without a reason), so the log is the full audit of a run.
 //!
+//! The browser fence logs the requests it decides without a membership check ([`RequestRecord`]): an own-state request
+//! let through, or one that nothing classifies, denied. Such an entry holds the channel, the method and the URL without
+//! its query, fragment or user info (where tokens travel), never a body:
+//!
+//! ```json
+//! {"ts_ms":1760000000000,"verdict":"deny","channel":"http","method":"POST","url":"https://host/path",
+//!  "reason":"unclassified","message":"no rule classifies this request"}
+//! ```
+//!
 //! Every entry ends with a newline. After a failed append the log refuses every later entry (so every later allow is
 //! denied), because a half-written record would run into the next one. When an existing file doesn't end with a
 //! newline, [`FenceLog::open`] terminates that last line first: it stays as one line that isn't JSON (a record whose
@@ -47,6 +56,48 @@ struct Entry<'a> {
     reason: Option<DenyReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+/// The channel a browser request went over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    Http,
+    WebSocket,
+}
+
+/// How the browser fence decided a request it didn't need a membership check for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestOutcome {
+    /// An own-state request on the reviewed list (its kind's name), let through.
+    Own(&'static str),
+    /// Nothing classifies it: denied.
+    Unclassified,
+}
+
+/// A browser request the fence decided without a membership check. The URL is logged without its query, fragment or
+/// user info.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestRecord<'a> {
+    pub channel: Channel,
+    pub method: &'a str,
+    pub url: &'a str,
+    pub outcome: RequestOutcome,
+}
+
+#[derive(Serialize)]
+struct RequestEntry<'a> {
+    ts_ms: u64,
+    verdict: &'static str,
+    channel: Channel,
+    method: &'a str,
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    own: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'static str>,
 }
 
 /// The append-only decision log.
@@ -110,7 +161,38 @@ impl FenceLog {
             reason,
             message: reason.map(|reason| reason.to_string()),
         };
-        let mut line = serde_json::to_vec(&entry)?;
+        self.append(&entry)
+    }
+
+    /// Appends one browser request decided without a membership check, as a single line, and flushes it. Once an
+    /// append has failed, every later one fails too.
+    ///
+    /// # Errors
+    /// When the entry can't be written, or an earlier append failed.
+    pub fn record_request(&self, request: &RequestRecord<'_>) -> io::Result<()> {
+        let (verdict, own, reason, message) = match request.outcome {
+            RequestOutcome::Own(kind) => ("allow", Some(kind), None, None),
+            RequestOutcome::Unclassified => (
+                "deny",
+                None,
+                Some("unclassified"),
+                Some("no rule classifies this request"),
+            ),
+        };
+        self.append(&RequestEntry {
+            ts_ms: now_ms(),
+            verdict,
+            channel: request.channel,
+            method: request.method,
+            url: redact_url(request.url),
+            own,
+            reason,
+            message,
+        })
+    }
+
+    fn append(&self, entry: &impl Serialize) -> io::Result<()> {
+        let mut line = serde_json::to_vec(entry)?;
         line.push(b'\n');
         let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
         if sink.broken {
@@ -121,6 +203,21 @@ impl FenceLog {
             sink.broken = true;
         }
         appended
+    }
+}
+
+/// The URL without its query, fragment and user info: what's left names the endpoint, not the credentials sent to it.
+fn redact_url(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    let url = &url[..end];
+    let Some(scheme_end) = url.find("://").map(|index| index + 3) else {
+        return url.to_owned();
+    };
+    let rest = &url[scheme_end..];
+    let authority = &rest[..rest.find('/').unwrap_or(rest.len())];
+    match authority.rfind('@') {
+        Some(at) => format!("{}{}", &url[..scheme_end], &rest[at + 1..]),
+        None => url.to_owned(),
     }
 }
 

@@ -14,10 +14,12 @@ rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+teams-fence.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-tungstenite.workspace = true
 toml.workspace = true
+url.workspace = true
 zip.workspace = true
 
 [dev-dependencies]

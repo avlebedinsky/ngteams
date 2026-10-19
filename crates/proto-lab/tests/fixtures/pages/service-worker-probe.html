@@ -1,0 +1,25 @@
+<!doctype html>
+<title>service worker probe</title>
+<script>
+  // What the tests ask a page about service workers.
+  window.controlled = () => new Promise((resolve) => {
+    if (navigator.serviceWorker.controller) {
+      resolve('controlled');
+    } else {
+      navigator.serviceWorker.addEventListener('controllerchange', () => resolve('controlled'), { once: true });
+    }
+  });
+  window.probe = async () => (await fetch('/probe')).text();
+  window.leftovers = async () => ({
+    registrations: (await navigator.serviceWorker.getRegistrations()).length,
+    caches: await caches.keys(),
+  });
+  // A service worker that answers /probe, controlling this page, and a filled cache: what an earlier, unfenced session
+  // would leave behind (or what a page registers during a run).
+  window.setUp = async () => {
+    await navigator.serviceWorker.register('/pages/answering-worker.js');
+    await navigator.serviceWorker.ready;
+    await (await caches.open('lab')).put('/cached', new Response('cached'));
+    return window.controlled();
+  };
+</script>

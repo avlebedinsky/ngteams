@@ -36,6 +36,7 @@ tokio = "1.53.3"
 tokio-tungstenite = "0.30.0"
 toml = "1.1.8"
 trybuild = "1.0.122"
+url = "2.5.8"
 wiremock = "0.6.5"
 zeroize = "1.9.1"
 zip = { version = "9.0.5", default-features = false, features = ["deflate"] }

@@ -1,0 +1,11 @@
+<!doctype html>
+<title>pagehide</title>
+<script>
+  // Fired as the page goes away: nothing on it is left to see the outcome. The fragment tags the scenario.
+  const tag = location.hash.slice(1);
+  addEventListener('pagehide', () => {
+    navigator.sendBeacon('/sink/beacon-' + tag, 'lab');
+    fetch('/sink/keepalive-' + tag, { method: 'POST', body: 'lab', keepalive: true });
+  });
+  window.ready = true;
+</script>

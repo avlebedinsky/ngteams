@@ -1,0 +1,12 @@
+<!doctype html>
+<title>own</title>
+<script>
+  window.results = {};
+  const outcome = (request) =>
+    request.then(async (response) => response.status + ' ' + (await response.text()), (error) => 'error ' + error.name);
+  (async () => {
+    window.results.get = await outcome(fetch('/data'));
+    window.results.own = await outcome(fetch('/own/authz', { method: 'POST', body: 'lab' }));
+    window.results.other = await outcome(fetch('/own/other', { method: 'POST', body: 'lab' }));
+  })();
+</script>

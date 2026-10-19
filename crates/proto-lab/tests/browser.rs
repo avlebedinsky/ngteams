@@ -6,6 +6,8 @@
 //! (lab.toml's `data_dir` when set); without either it says so on stderr and passes, unless
 //! `PROTO_LAB_REQUIRE_CHROME=1`.
 
+mod common;
+
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
@@ -16,7 +18,7 @@ use futures_util::StreamExt as _;
 use proto_lab::browser::{BASE_ARGS, Browser, BrowserError, DevToolsEndpoint, Display, LaunchOptions, Media};
 use proto_lab::cdp::{Cdp, CdpError, Event, Events, Incoming, RemoteError, SessionId, encode_command, parse_incoming};
 use proto_lab::commands::chrome::{self, ChecksumError, ChromeBuild, InstallError, Installed};
-use proto_lab::config::{Alias, LabLocations, LabPaths};
+use proto_lab::config::{Alias, LabPaths};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -611,22 +613,6 @@ const HOLD: Duration = Duration::from_millis(700);
 
 const STEP: Duration = Duration::from_secs(15);
 
-fn find_chrome() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("PROTO_LAB_CHROME") {
-        return Some(PathBuf::from(path));
-    }
-    // the same dir `proto-lab chrome install` installs into
-    let paths = match LabLocations::from_env().and_then(|locations| locations.lab_paths()) {
-        Ok(paths) => paths,
-        Err(error) => {
-            eprintln!("can't find the lab's chrome dir: {error}");
-            return None;
-        }
-    };
-    let executable = ChromeBuild::pinned().executable(&paths.chrome_dir());
-    executable.is_file().then_some(executable)
-}
-
 fn is_worker_request(event: &Event) -> bool {
     event.method == "Fetch.requestPaused"
         && event.params["request"]["url"]
@@ -813,12 +799,7 @@ async fn held_worker(browser: &Browser, server: &MockServer) -> TestResult {
 
 #[tokio::test]
 async fn a_new_worker_target_is_held_until_run_if_waiting_for_debugger() {
-    let Some(chrome) = find_chrome() else {
-        assert!(
-            std::env::var_os("PROTO_LAB_REQUIRE_CHROME").is_none(),
-            "PROTO_LAB_REQUIRE_CHROME is set, but there's no Chrome (run `proto-lab chrome install`)"
-        );
-        eprintln!("skipped: no Chrome (set PROTO_LAB_CHROME or run `proto-lab chrome install`)");
+    let Some(chrome) = common::chrome_or_skip() else {
         return;
     };
     let profile = tempfile::tempdir().unwrap();

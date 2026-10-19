@@ -169,6 +169,12 @@ impl Fence {
         Self { roster, log }
     }
 
+    /// The log every decision goes to; the browser fence records its own request decisions there too.
+    #[must_use]
+    pub fn log(&self) -> &FenceLog {
+        &self.log
+    }
+
     /// Fetches the target scope's members from `source` (never from a cache) and allows the write only when every
     /// participant, current or added, is in the roster. A [`Scope::New`] target isn't fetched: it is judged by its
     /// added participants alone, and only for a kind that [creates a target](crate::WriteKind::creates_target).

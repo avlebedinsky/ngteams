@@ -1,0 +1,20 @@
+<!doctype html>
+<title>fence</title>
+<script>
+  // Every source posts to its own /sink/<source> path and reports what it saw.
+  window.results = {};
+  const report = (source) => (outcome) => { window.results[source] = outcome; };
+  const post = (path) =>
+    fetch(path, { method: 'POST', body: 'lab' }).then((response) => 'ok ' + response.status, (error) => 'error ' + error.name);
+
+  post('/sink/page').then(report('page'));
+
+  new Worker('/pages/dedicated-worker.js').onmessage = (event) => report('dedicated-worker')(event.data);
+
+  const shared = new SharedWorker('/pages/shared-worker.js');
+  shared.port.onmessage = (event) => report('shared-worker')(event.data);
+  shared.port.start();
+
+  navigator.serviceWorker.onmessage = (event) => report('service-worker')(event.data);
+  navigator.serviceWorker.register('/pages/service-worker.js').catch((error) => report('service-worker')('register ' + error));
+</script>

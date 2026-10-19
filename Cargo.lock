@@ -1460,11 +1460,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "teams-fence",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "url",
  "wiremock",
  "zip",
 ]
