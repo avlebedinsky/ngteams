@@ -10,7 +10,8 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
 | path | contents |
 |---|---|
-| `crates/teams-fence` | the write fence: a write is allowed only within the 3 lab accounts |
+| `crates/teams-fence` | the write fence: a write is allowed only within the 3 lab accounts; the lab config (`lab.toml`) |
+| `crates/fence-seal` | compile-fail checks that no other crate can mint a `WritePermit` |
 | `crates/teams-auth` | PKCE code exchange, token refresh and storage, skypetoken |
 | `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
 | `crates/proto-lab` | the lab harness CLI |
@@ -33,3 +34,7 @@ The browser tests run headless Chrome for Testing on throwaway profiles. Install
 unless `PROTO_LAB_REQUIRE_CHROME=1`. The build goes into the lab's `chrome/` dir: under `data_dir` when
 `~/.config/teams-lab/lab.toml` sets one, else `~/.local/share/teams-lab/chrome/`. No lab config is needed for this, but
 an invalid one is refused; the tests look in the same place.
+
+The tests enable `teams-fence`'s `test-support` feature through dev-dependencies, and cargo unifies it into everything
+built together with them (`cargo test`, `--all-targets`, `--all-features`), the `proto-lab` binary included. Such a
+binary refuses to run; `cargo build -p proto-lab` or `cargo run -p proto-lab` builds one without it.

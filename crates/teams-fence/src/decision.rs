@@ -4,15 +4,21 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
+use std::io;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use serde::Serialize;
 
+use crate::lab::{ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
 use crate::target::{Mri, Scope, Target};
 
 /// Who may take part in a write: the lab accounts and the approved service participants, by exact MRI. A lab account
 /// or service whose MRI isn't known yet is simply left out, so it matches nobody.
+///
+/// A lab binary's roster comes only from `lab.toml`, through [`Fence::open_lab`]. [`Roster::new`], which takes any
+/// MRIs, exists only with the `test-support` feature.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Roster {
     lab: BTreeSet<Mri>,
@@ -20,12 +26,34 @@ pub struct Roster {
 }
 
 impl Roster {
+    /// A roster of any MRIs. Tests only (`test-support`).
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn new(lab: impl IntoIterator<Item = Mri>, services: impl IntoIterator<Item = Mri>) -> Self {
+        Self::of(lab, services)
+    }
+
+    fn of(lab: impl IntoIterator<Item = Mri>, services: impl IntoIterator<Item = Mri>) -> Self {
         Self {
             lab: lab.into_iter().collect(),
             services: services.into_iter().collect(),
         }
+    }
+
+    /// The MRIs `lab.toml` gives its accounts and approved service participants; one without an MRI is left out.
+    fn from_lab(config: &LabConfig) -> Self {
+        Self::of(
+            config
+                .accounts()
+                .iter()
+                .filter_map(|account| account.mri.as_deref())
+                .map(Mri::new),
+            config
+                .service_participants()
+                .iter()
+                .filter_map(|service| service.mri.as_deref())
+                .map(Mri::new),
+        )
     }
 
     #[must_use]
@@ -84,8 +112,22 @@ pub type MembershipFuture<'a> = Pin<Box<dyn Future<Output = Membership> + Send +
 
 /// Fetches a scope's participants. Implementations fetch on every call and never answer from a cache; anything they
 /// can't confirm in full is [`Membership::Partial`].
-pub trait MembershipSource: Sync {
+///
+/// The trait is sealed: what the fence is told about a scope's members decides the permit, so the source a lab binary
+/// uses is defined in this crate, and no other crate can hand the fence a member list of its own making. With the
+/// `test-support` feature (tests only, never a lab binary) any type may implement it.
+pub trait MembershipSource: Sync + sealed::Sealed {
     fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a>;
+}
+
+mod sealed {
+    /// The seal on [`MembershipSource`](super::MembershipSource): a public trait no other crate can name.
+    pub trait Sealed {}
+
+    /// Tests only: any type may be a membership source. A source defined in this crate implements `Sealed` under
+    /// `cfg(not(feature = "test-support"))`, so its impl never overlaps this one.
+    #[cfg(feature = "test-support")]
+    impl<T: ?Sized> Sealed for T {}
 }
 
 /// The proof that one write passed the fence. Only [`Fence::check`] makes one: it has no public constructor, is not
@@ -156,7 +198,22 @@ impl Denied {
     }
 }
 
+/// Why the lab's fence couldn't be built.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// `lab.toml` can't be found, read or validated.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// `fence.log` can't be opened.
+    #[error("can't open {}: {source}", path.display())]
+    Log { path: PathBuf, source: io::Error },
+}
+
 /// The write fence: the roster it admits and the log every decision goes to.
+///
+/// A lab binary builds it only with [`Fence::open_lab`]: the roster from `lab.toml`, the log at the lab's
+/// `fence.log`. [`Fence::new`] (any roster, any log) and [`Fence::open`] (any config) exist only with the
+/// `test-support` feature.
 #[derive(Debug)]
 pub struct Fence {
     roster: Roster,
@@ -164,6 +221,36 @@ pub struct Fence {
 }
 
 impl Fence {
+    /// The lab's fence. Its roster is the MRIs `lab.toml` gives the lab accounts and the approved service participants,
+    /// and its decisions go to `<data_dir>/fence.log`; both files are found from the environment, as
+    /// [`LabLocations::from_env`] finds them.
+    ///
+    /// # Errors
+    /// When `lab.toml` can't be found, read or validated, or `fence.log` can't be opened.
+    pub fn open_lab() -> Result<Self, OpenError> {
+        Self::from_config(&LabConfig::load(&LabLocations::from_env()?)?)
+    }
+
+    /// The fence [`Fence::open_lab`] builds, from a given config. Tests only (`test-support`).
+    ///
+    /// # Errors
+    /// When `fence.log` can't be opened.
+    #[cfg(feature = "test-support")]
+    pub fn open(config: &LabConfig) -> Result<Self, OpenError> {
+        Self::from_config(config)
+    }
+
+    fn from_config(config: &LabConfig) -> Result<Self, OpenError> {
+        let path = config.paths().fence_log();
+        let log = FenceLog::open(&path).map_err(|source| OpenError::Log { path, source })?;
+        Ok(Self {
+            roster: Roster::from_lab(config),
+            log,
+        })
+    }
+
+    /// A fence over any roster and any log. Tests only (`test-support`).
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn new(roster: Roster, log: FenceLog) -> Self {
         Self { roster, log }

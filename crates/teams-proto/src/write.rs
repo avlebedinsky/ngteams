@@ -4,9 +4,21 @@ use teams_fence::{Scope, Target, WriteKind, WritePermit};
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
 /// [`Authorized`], next to a [`WritePermit`] issued for exactly that target.
-pub trait Mutating {
+///
+/// The trait is sealed: only this crate's own requests implement it. The permit check in [`Authorized::new`] holds
+/// only as far as `target()` describes what the request really writes, so `target()` is computed from the request's
+/// own immutable fields, and the wire request a transport sends must be built from those same fields.
+pub trait Mutating: sealed::Sealed {
     /// The target this request writes to: what the fence must have judged for the permit to cover it.
     fn target(&self) -> Target;
+}
+
+mod sealed {
+    /// The seal on [`Mutating`](super::Mutating): a public trait no other crate can name, implemented for this crate's
+    /// requests only.
+    pub trait Sealed {}
+
+    impl Sealed for super::SendMessage {}
 }
 
 /// A mutating request together with the permit for its target. The only way to make one is [`Authorized::new`],

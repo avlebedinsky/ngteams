@@ -2,6 +2,7 @@
 resolver = "3"
 # Explicit list: cargo refuses a glob that matches nothing. Every new crate is added here.
 members = [
+    "crates/fence-seal",
     "crates/fixture-guard",
     "crates/proto-lab",
     "crates/teams-auth",

@@ -1,0 +1,16 @@
+[package]
+name = "fence-seal"
+description = "Compile-fail checks, against teams-fence without its test-support feature, that no other crate can mint a WritePermit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The checks need teams-fence as a lab binary sees it. trybuild builds its cases with this crate's dev-dependencies
+# and features, and the other crates' dev-dependencies enable test-support, so the cases live here, where nothing does.
+[dev-dependencies]
+teams-fence.workspace = true
+trybuild.workspace = true
+
+[lints]
+workspace = true

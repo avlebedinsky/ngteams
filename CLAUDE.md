@@ -19,7 +19,9 @@ These hold for every agent and every change, with no exceptions.
   fixtures are committed only after sanitizing, and the fixture guard (`crates/fixture-guard`) must pass on
   `tests/fixtures/` and `docs/`. Tokens never reach logs or stdout: print only aud, exp, scopes and tenant.
 - **Agents never build or run a personal build and never receive the user's tokens.** Lab binaries get a
-  `WritePermit` only from `teams-fence`.
+  `WritePermit` only from `teams-fence`: their fence comes from `Fence::open_lab` (roster from `lab.toml`, the lab's
+  `fence.log`), and `teams-fence`'s `test-support` feature (any roster, any log, fake membership sources) is enabled
+  only under `[dev-dependencies]`, never as a normal dependency.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
 
 ## Lint rules

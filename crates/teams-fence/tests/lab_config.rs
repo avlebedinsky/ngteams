@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations};
+use teams_fence::lab::{Alias, ConfigError, LabConfig, LabLocations};
 
 const DATA: &str = "/lab/data";
 
