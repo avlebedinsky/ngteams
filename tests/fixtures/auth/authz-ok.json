@@ -1,0 +1,59 @@
+{
+  "_synthetic": "Made-up values shaped like a successful POST to Teams authz (v1, skypetoken flow) as the web bundle reads it; field names from bundle 26260.1717.5229.7049, every value invented and every host under example.test; not from a capture. See docs/protocol/auth.md.",
+  "request": {
+    "method": "POST",
+    "url": "https://teams.microsoft.com/api/authsvc/v1.0/authz",
+    "headers": {
+      "authorization": "Bearer <token:1>",
+      "claimsChallengeCapable": "true",
+      "X-MS-Migration": "True",
+      "clientRequestId": "<guid:10>",
+      "x-ms-request-id": "<guid:10>",
+      "x-ms-client-type": "web",
+      "x-ms-client-version": "<client-version>",
+      "ms-teams-authz-type": "ExplicitLogin",
+      "content-length": "0"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "tokens": {
+        "skypeToken": "<token:skype>",
+        "expiresIn": 86400
+      },
+      "region": "emea",
+      "partition": "emea01",
+      "userRegion": "emea",
+      "userPartition": "emea01",
+      "regionGtms": {
+        "ams": "https://ams.emea.example.test",
+        "amsV2": "https://ams-v2.emea.example.test",
+        "appsSuggestionService": "https://apps.emea.example.test",
+        "authService": "https://authsvc.example.test",
+        "chatService": "https://chatsvc.emea.example.test",
+        "chatServiceAfd": "https://teams.example.test/api/chatsvc/emea/",
+        "chatSvcAggAfd": "https://teams.example.test/api/csa/emea/",
+        "middleTier": "https://teams.example.test/api/mt/emea/",
+        "mtImageService": "https://teams.example.test/api/mt/emea/",
+        "peopleProfileService": "https://people.emea.example.test",
+        "presenceUPS": "https://presence.example.test/v1/",
+        "searchService": "https://search.emea.example.test",
+        "teamsPushServiceAfd": "https://teams.example.test/api/push/emea/",
+        "unifiedPresence": "https://presence.example.test",
+        "urlp": "https://urlp.emea.example.test",
+        "urlpV2": "https://urlp-v2.emea.example.test",
+        "userProfileService": "https://teams.example.test/api/userprofile/emea/"
+      },
+      "regionSettings": {},
+      "licenseDetails": {
+        "isFreemium": false,
+        "isTrial": false,
+        "isCopilot": false
+      }
+    }
+  }
+}

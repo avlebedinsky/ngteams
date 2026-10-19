@@ -371,13 +371,13 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
   - native client `1fec8e78-bce4-4aaf-ab1b-5451cc387264` with redirect `https://login.microsoftonline.com/common/oauth2/nativeclient` (OneAuth in `ms-teams.exe`); its refresh token isn't SPA-limited
   - the web client `5e3ce6c0-…` is a SPA, so it isn't used
   - skypetoken resource `https://api.spaces.skype.com`; endpoints `…/api/authsvc/v1.0/authz` and `…/authzcore`
-- [ ] from the bundle and the binaries, determine what's still open:
+- [x] from the bundle and the binaries, determine what's still open (done statically from bundle 26260.1717.5229.7049, `ms-teams.exe` and the macOS `MSTeams` 26261.303.5165.1465; see `docs/protocol/auth.md`):
   - the scopes and audiences of the other services (chatsvc, presence, Graph, Outlook, substrate) and whether one refresh token can get all of them
   - the authz/skypetoken flow (request, response, regional endpoints), and when the client uses `authz` vs `authzcore`
   - the Mac OneAuth config, as a cross-check of the redirect
-- [ ] confirm with the `load` capture (account A); export sanitized fixtures
-- [ ] `auth.md`: the flow in our own words, an audience × service table, the redirect decision (native vs SPA and refresh-token lifetime; custom scheme → catch `Location`), open questions
-- [ ] the fixture guard passes on the new fixtures
+- [x] confirm with the `load` capture (account A); export sanitized fixtures (⚠️ blocked, not done: lab accounts have no Teams license — see docs/backlog/lab-accounts-have-no-teams-license.md; `auth.md` lists what to confirm by capture, and `tests/fixtures/auth/` holds clearly-labelled synthetic fixtures until a capture replaces them)
+- [x] `auth.md`: the flow in our own words, an audience × service table, the redirect decision (native vs SPA and refresh-token lifetime; custom scheme → catch `Location`), open questions
+- [x] the fixture guard passes on the new fixtures
 
 ### Task 13: teams-auth token core (offline)
 **Files:**

@@ -1,0 +1,30 @@
+{
+  "_synthetic": "Made-up values shaped like an Entra v2 token-endpoint error for a redirect URI the client has not registered; not from a capture. See docs/protocol/auth.md.",
+  "request": {
+    "method": "POST",
+    "url": "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
+    "form": {
+      "client_id": "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
+      "grant_type": "authorization_code",
+      "code": "<code:1>",
+      "redirect_uri": "http://localhost:8400/unregistered",
+      "code_verifier": "<verifier:1>",
+      "scope": "https://api.spaces.skype.com/.default openid profile offline_access"
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "error": "invalid_request",
+      "error_description": "AADSTS50011: (synthetic) the redirect URI in the request does not match the ones registered for the application. Trace ID: <guid:3> Correlation ID: <guid:4> Timestamp: 2026-01-01 00:00:00Z",
+      "error_codes": [50011],
+      "timestamp": "2026-01-01 00:00:00Z",
+      "trace_id": "<guid:3>",
+      "correlation_id": "<guid:4>",
+      "error_uri": "https://login.microsoftonline.com/error?code=50011"
+    }
+  }
+}

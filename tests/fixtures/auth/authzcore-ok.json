@@ -1,0 +1,35 @@
+{
+  "_synthetic": "Made-up values shaped like a successful POST to Teams authzcore (v2 flow, no skypetoken) as the web bundle reads it; field names from bundle 26260.1717.5229.7049, every value invented and every host under example.test; not from a capture. See docs/protocol/auth.md.",
+  "request": {
+    "method": "POST",
+    "url": "https://teams.microsoft.com/api/authsvc/v1.0/authzcore",
+    "headers": {
+      "authorization": "Bearer <token:1>",
+      "claimsChallengeCapable": "true",
+      "clientRequestId": "<guid:11>",
+      "x-ms-client-type": "web",
+      "content-length": "0"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    },
+    "body": {
+      "mri": "<mri:a>",
+      "skypeId": "<skypeid:a>",
+      "region": "emea",
+      "partition": "emea01",
+      "regionGtms": {
+        "chatServiceAfd": "https://teams.example.test/api/chatsvc/emea/",
+        "middleTier": "https://teams.example.test/api/mt/emea/",
+        "unifiedPresence": "https://presence.example.test"
+      },
+      "regionSettings": {},
+      "licenseDetails": {
+        "isFreemium": false
+      }
+    }
+  }
+}
