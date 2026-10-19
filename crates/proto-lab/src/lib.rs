@@ -2,6 +2,7 @@
 //! `proto-lab` binary is the CLI over this library.
 
 pub mod browser;
+pub mod bundles;
 pub mod cdp;
 pub mod commands;
 pub mod config;

@@ -1,0 +1,1 @@
+{"name":"synthetic","endpoints":{"chatService":"https://emea.ng.msg.teams.microsoft.com","authz":"https://teams.microsoft.com/api/authsvc/v1.0/authz","presence":"presence.teams.microsoft.com"}}
