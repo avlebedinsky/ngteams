@@ -187,6 +187,7 @@ fn seen(method: &str, url: &str, status: Option<u16>, failed: Option<&str>) -> S
         url: url.to_owned(),
         status,
         failed: failed.map(str::to_owned),
+        body: None,
     }
 }
 
