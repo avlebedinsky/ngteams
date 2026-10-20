@@ -35,7 +35,7 @@ Found in review round 6 (`~/.local/state/plan-exec-revmux/20261019-native-teams-
 Known limits, documented since earlier rounds:
 
 - **Ordinary-word over-redaction**: a name word that is also an ordinary word (or a JSON key, enum value or path
-  segment) is replaced everywhere, damaging structure. Export refuses only when it lands in a host.
+  segment) is replaced everywhere, damaging structure, apart from inside a host: there it is left, and export warns.
 - **Names never seen under a name field** are not learned, so they are neither replaced nor caught by the backstop.
 - **Words under 3 characters** are outside the name backstop.
 

@@ -15,7 +15,7 @@
 //!
 //! The repo-wide checks are in `tests/fixture_guard.rs` (the scan on every `tests/fixtures/` of the workspace and on
 //! `docs/`, the synthetic marker on those fixture dirs: [`synthetic::fixture_dirs`]); `proto-lab export` (M0 Task 9)
-//! runs the same scan before it writes a reference copy.
+//! runs the same scan on a reference copy and warns about what it finds (it refuses the copy only under `--strict`).
 
 use std::fmt;
 use std::fs;

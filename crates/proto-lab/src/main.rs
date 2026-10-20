@@ -73,7 +73,8 @@ enum Command {
         timeout: u64,
     },
     /// Sanitize a capture into a reference copy under the lab's reference/ dir, outside any repository, to read when
-    /// writing a synthetic fixture; nothing is written unless every check and the fixture guard pass it.
+    /// writing a synthetic fixture. What the name check and the fixture guard find is printed as warnings (kinds and
+    /// positions, never a value), and the copy is written whole; a destination inside a git work tree is refused.
     Export {
         /// The capture: its directory (or its events.jsonl), as a path or relative to the lab's captures dir
         /// (`<scenario>/<ts>`).
@@ -81,6 +82,9 @@ enum Command {
         /// The copy's path under the reference dir, such as `auth/authz`; `.jsonl` is added without an extension, and
         /// a `.json` name gets one JSON array.
         name: String,
+        /// Refuse the export, writing nothing, on anything the checks find, instead of warning about it.
+        #[arg(long)]
+        strict: bool,
     },
     /// Run a scenario in the lab profiles under the armed fence; exits non-zero when its goal isn't reached, the fence
     /// was breached, or the fence denied anything the scenario doesn't expect.
@@ -174,9 +178,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             headless,
             timeout,
         } => run_scenario(scenario, headless, timeout).await,
-        Command::Export { capture, name } => {
+        Command::Export { capture, name, strict } => {
             let locations = LabLocations::from_env()?;
-            run_export(&locations, &locations.lab_paths()?, &capture, &name)
+            let checks = if strict {
+                export::Checks::Strict
+            } else {
+                export::Checks::Warn
+            };
+            run_export(&locations, &locations.lab_paths()?, &capture, &name, checks)
         }
     }
 }
@@ -276,6 +285,7 @@ fn run_export(
     paths: &LabPaths,
     capture: &Path,
     name: &str,
+    checks: export::Checks,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // the lab's own accounts get their alias as placeholder label; without a lab.toml every identity gets a number
     let identities = match LabConfig::load(locations) {
@@ -292,7 +302,13 @@ fn run_export(
         paths.captures_dir().join(capture)
     };
     let reference_dir = export::reference_dir(paths.data_dir());
-    let exported = export::export(&capture, name, &reference_dir, &identities)?;
+    let exported = export::export(&capture, name, &reference_dir, &identities, checks)?;
+    if exported.warnings.is_empty() {
+        eprintln!("the checks found nothing");
+    }
+    for line in exported.warnings.summary() {
+        eprintln!("warning: {line}");
+    }
     println!(
         "wrote a sanitized reference copy of {} event(s) to {}; it stays outside the repository: read it to write a \
          synthetic fixture (same shape, made-up values, a \"_synthetic\" marker)",
