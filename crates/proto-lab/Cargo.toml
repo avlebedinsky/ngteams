@@ -7,11 +7,14 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-# reads the claims of the bearer tokens the lab page sends (its identity), never the tokens themselves
+# reads the claims of the bearer tokens the lab page sends (its identity), never the tokens themselves; decodes base64
+# bodies and frames in captures for the sanitizer
 base64.workspace = true
 clap.workspace = true
+fixture-guard.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
+psl.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rustix.workspace = true

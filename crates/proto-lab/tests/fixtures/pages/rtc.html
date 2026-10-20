@@ -1,0 +1,31 @@
+<!doctype html>
+<title>rtc</title>
+<script>
+  // Two connections made at once, before anything else of the page runs: the hooks have to be in already. They talk
+  // over loopback through a data channel; the answer is made by the implicit setLocalDescription(). Only the constructor
+  // sees the configuration, so its report shows the hooks were in before this line.
+  const offerer = new RTCPeerConnection({ bundlePolicy: 'max-bundle' });
+  const answerer = new RTCPeerConnection();
+  window.bindingVisible = typeof __labCaptureRtc;
+  window.constructorKept = RTCPeerConnection.prototype.constructor === RTCPeerConnection && offerer instanceof RTCPeerConnection;
+  offerer.onicecandidate = (event) => event.candidate && answerer.addIceCandidate(event.candidate);
+  answerer.onicecandidate = (event) => event.candidate && offerer.addIceCandidate(event.candidate);
+  const channel = offerer.createDataChannel('lab');
+  window.outcome = (async () => {
+    const offer = await offerer.createOffer();
+    await offerer.setLocalDescription(offer);
+    await answerer.setRemoteDescription(offer);
+    await answerer.setLocalDescription();
+    await offerer.setRemoteDescription(answerer.localDescription);
+    await new Promise((resolve, reject) => {
+      channel.onopen = resolve;
+      setTimeout(() => reject(new Error('the channel never opened')), 15000);
+    });
+    return 'open';
+  })().then((outcome) => outcome, (error) => 'error ' + error);
+  window.closeAll = () => {
+    offerer.close();
+    answerer.close();
+    return 'closed';
+  };
+</script>

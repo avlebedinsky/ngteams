@@ -30,6 +30,7 @@ teams-proto = { path = "crates/teams-proto" }
 media-loop = { path = "spikes/media-loop" }
 # The video source hands frames to GPUI's foreground executor: the version GPUI already links.
 async-channel = "2.5.0"
+# base64 bodies and frames in captures, decoded by the sanitizer
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 # STUN FINGERPRINT (CRC-32) for the echo call's TURN client
@@ -58,6 +59,8 @@ md-5 = "0.11.0"
 oo7 = { version = "0.6.0", default-features = false, features = ["async-std", "native_crypto"] }
 # libopus, built from source by opusic-sys (its default `bundled` feature)
 opus = "0.4.0"
+# the Public Suffix List, compiled in: which dotted part of a display name ends in a real top-level domain
+psl = "2.1.243"
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }

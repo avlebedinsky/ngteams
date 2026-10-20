@@ -15,10 +15,10 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-auth` | PKCE code exchange, token refresh and storage, skypetoken |
 | `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
 | `crates/proto-lab` | the lab harness CLI |
-| `crates/fixture-guard` | scans `tests/fixtures/` and `docs/` for tokens, emails and real MRIs |
+| `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs |
 | `spikes/gpui-video` | GPUI spike: the Wayland smoke window (M0 Task 15), then video rendering |
 | `spikes/echo-call` | echo call spike (M0 Task 19): TURN client, `str0m` through the relay, unconfirmed signaling, the call through the fence |
-| `tests/fixtures/` | sanitized captures |
+| `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike |
 | `docs/protocol/`, `docs/spikes/` | protocol notes and spike write-ups |
 | `tools/` | interim Node tools (lab sign-in, Conditional Access probe) |
 
@@ -46,6 +46,37 @@ The video grid benchmark (`spikes/gpui-video/tests/bench.rs`, M0 Task 16) runs i
 ignored by default and run by hand with a release build:
 `cargo test --release -p gpui-video --test bench -- --ignored --nocapture` (`GPUI_BENCH_GPU=<pci device id>`,
 `GPUI_BENCH_SECONDS`, `GPUI_BENCH_OUT=<file>`). Results and the decision are in `docs/spikes/gpui-video.md`.
+
+## Captures and fixtures
+
+A recorded run writes `captures/<scenario>/<ts>/events.jsonl` under the lab's data dir, never into the repo (the format
+is described in `crates/proto-lab/src/capture.rs`). Captures never enter the repo, not even sanitized.
+
+`cargo run -p proto-lab -- export <capture> <name>` sanitizes one into a local **reference copy**,
+`reference/<name>.jsonl` under the lab's data dir (`~/.local/share/teams-lab/reference/` by default; one JSON array for
+a `.json` name; the file `0600`, its directories `0700`). It refuses any destination inside a git work tree (checked
+with `..` and symlinks resolved), a destination that is a symlink, and a `..` after a directory not yet created. It writes
+nothing unless no word (3 characters or more) of a name found in the capture is left in the result, at any layer of
+encoding, and the fixture guard passes it. A word of a name that is also an ordinary word left anywhere refuses the
+export too; a name never seen under a name field, or a shorter word, is outside that check. A word of a name that is
+also a label of a host (other than a public Microsoft protocol host such as `teams.microsoft.com`, which is never taken
+for a name) refuses it as well, rather than writing the host destroyed. Teams meeting codes and join passcodes (of
+letters only too) become `<meeting:N>` and `<token:N>` wherever they show, invitations read in every language the web
+client has locale strings for, and the fixture guard refuses a join link, a meeting id or a passcode left in the clear.
+The sanitizer is defence in depth, with known gaps (`docs/backlog/sanitizer-defence-in-depth-known-gaps.md`).
+
+Committed fixtures are written **synthetic-from-capture**: an agent reads the reference copy locally and writes a
+fixture of the same shape with made-up values. Fixtures live in any `tests/fixtures/` of the workspace: the top-level
+one, a crate's, a spike's (`spikes/*/tests/fixtures/`). Every fixture declares itself synthetic: a JSON file has a
+top-level `"_synthetic"` note (what it is shaped like, that the values are made up), a JSONL file has one on its first
+line (a header line of its own, or on every line), and any other text file starts with a `_synthetic: …` line, bare or
+after its own comment opener. Only an empty `.gitkeep` is not a fixture. `cargo test -p fixture-guard` fails on an
+unmarked fixture (`committed_fixtures_are_marked_synthetic`) and on anything the guard finds in any `tests/fixtures/`
+or `docs/` (`committed_fixtures_and_docs_are_clean`). The only directories exempt from the marker are test inputs that
+are not shaped like anything Teams sends, listed in `fixture_guard::synthetic::TEST_INPUTS` (proto-lab's test pages
+and mini bundle); the guard still scans them.
+
+## Test-only builds
 
 The tests enable `teams-fence`'s `test-support` feature through dev-dependencies, and cargo unifies it into everything
 built together with them (`cargo test`, `--all-targets`, `--all-features`), the `proto-lab` binary included. Such a

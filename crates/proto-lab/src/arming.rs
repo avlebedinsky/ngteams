@@ -13,13 +13,14 @@
 //!    replays. Chrome 155 answers `Storage.clearDataForOrigin` on the browser session with an internal error; on a page
 //!    session it clears any origin.
 //!
-//! Every attached target is then armed ([`arm_target`]) by its type ([`TargetKind::steps`]): `Fetch.enable` with `*`
-//! on its own session (pages, iframes, shared and service workers, and any type we don't know), `Network.enable`
+//! Every attached target is then armed by the auto-attach handler (`arm_target`, the only place the steps run) by its
+//! type ([`TargetKind::steps`]): `Fetch.enable` with `*` on its own session (pages, iframes, shared and service workers, and any type we don't know), `Network.enable`
 //! everywhere (the service-worker bypass on pages and iframes needs it, and so does the audit of WebSocket frames,
 //! which Chrome reports on the session of the target that sent them), the service-worker bypass, the WebSocket guard
 //! ([`crate::fence_ws`]), auto-attach with `waitForDebuggerOnStart` for its own children (iframes, dedicated workers),
 //! and only then `Runtime.runIfWaitingForDebugger`. A dedicated worker has no `Fetch` domain of its own: its requests
-//! pause on its page's session (and the browser's).
+//! pause on its page's session (and the browser's). When the run records ([`ArmedBrowser::arm_capturing`]), pages and
+//! iframes also get the WebRTC hooks of [`crate::capture`] the same way as the guard, right after it.
 //!
 //! The guard goes in through the binding (`Runtime.addBinding`), then: on a page or iframe, with `Runtime.enable` and
 //! `Page.enable` on, `Page.addScriptToEvaluateOnNewDocument` with `runImmediately`, so it runs in every document of
@@ -68,6 +69,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::browser::{Browser, BrowserError};
+use crate::capture::{Capture, RTC_BINDING};
 use crate::cdp::{Cdp, CdpError, Event, Events, SessionId};
 use crate::fence_http::{Denial, HttpFence};
 use crate::fence_ws::{FrameDenial, GuardScript, UnsanctionedFrame, WsFence};
@@ -144,6 +146,8 @@ impl TargetKind {
                 Step::Page,
                 Step::Binding,
                 Step::GuardNewDocuments,
+                Step::CaptureBinding,
+                Step::CaptureHooks,
                 Step::AutoAttach,
                 Step::Resume,
             ],
@@ -201,6 +205,12 @@ pub enum Step {
     GuardNewDocuments,
     /// `Runtime.evaluate` of the guard in a worker's context; the guard has to report itself armed.
     Guard,
+    /// `Runtime.addBinding` for the WebRTC hooks' reports; only when the run records ([`crate::capture`]), else
+    /// skipped.
+    CaptureBinding,
+    /// `Page.addScriptToEvaluateOnNewDocument` with `runImmediately`: the WebRTC hooks in every document of every frame
+    /// of a page or iframe target, after the guard; only when the run records, else skipped.
+    CaptureHooks,
     /// `Target.setAutoAttach` with `waitForDebuggerOnStart` on the target's session, for its children (service workers
     /// left out: they attach through the browser).
     AutoAttach,
@@ -216,29 +226,40 @@ impl Step {
             Self::BypassServiceWorker => "Network.setBypassServiceWorker",
             Self::Runtime => "Runtime.enable",
             Self::Page => "Page.enable",
-            Self::Binding => "Runtime.addBinding",
-            Self::GuardNewDocuments => "Page.addScriptToEvaluateOnNewDocument",
+            Self::Binding | Self::CaptureBinding => "Runtime.addBinding",
+            Self::GuardNewDocuments | Self::CaptureHooks => "Page.addScriptToEvaluateOnNewDocument",
             Self::Guard => "Runtime.evaluate",
             Self::AutoAttach => "Target.setAutoAttach",
             Self::Resume => "Runtime.runIfWaitingForDebugger",
         }
     }
 
-    fn params(self, guard: &GuardScript) -> Value {
-        match self {
+    /// The step's parameters, or `None` when the run has nothing for it to do (the capture steps of a run that doesn't
+    /// record).
+    fn params(self, scripts: &Scripts<'_>) -> Option<Value> {
+        let guard = scripts.guard;
+        Some(match self {
             Self::Fetch => intercept_all(),
             Self::BypassServiceWorker => json!({"bypass": true}),
             Self::Binding => json!({"name": crate::fence_ws::BINDING}),
             Self::GuardNewDocuments => json!({"source": guard.source(), "runImmediately": true}),
             Self::Guard => json!({"expression": guard.source(), "returnByValue": true}),
+            Self::CaptureBinding => {
+                scripts.capture?;
+                json!({"name": RTC_BINDING})
+            }
+            Self::CaptureHooks => json!({"source": scripts.capture?.hooks().source(), "runImmediately": true}),
             Self::AutoAttach => hold_children(),
             Self::Network | Self::Runtime | Self::Page | Self::Resume => Value::Null,
-        }
+        })
     }
 
     /// Runs this step on a target's session.
-    async fn run(self, cdp: &Cdp, session: &SessionId, guard: &GuardScript) -> Result<(), ArmError> {
-        let call = cdp.call(Some(session), self.method(), self.params(guard));
+    async fn run(self, cdp: &Cdp, session: &SessionId, scripts: &Scripts<'_>) -> Result<(), ArmError> {
+        let Some(params) = self.params(scripts) else {
+            return Ok(());
+        };
+        let call = cdp.call(Some(session), self.method(), params);
         let result = tokio::time::timeout(STEP_TIMEOUT, call)
             .await
             .map_err(|_| ArmError::StepTimeout(self))?
@@ -296,20 +317,21 @@ impl ArmError {
     }
 }
 
+/// What arming installs in a target: the WebSocket guard, and the WebRTC hooks when the run records.
+struct Scripts<'a> {
+    guard: &'a GuardScript,
+    capture: Option<&'a Capture>,
+}
+
 /// Runs a target's arming steps on its session, resuming it last. Stops at the first step that fails, so a target that
 /// isn't fully armed is never resumed.
 ///
 /// # Errors
 /// [`ArmError::Step`] naming the step that failed, [`ArmError::StepTimeout`] naming one that got no answer, or
 /// [`ArmError::Guard`] when the guard didn't report itself armed.
-pub async fn arm_target(
-    cdp: &Cdp,
-    session: &SessionId,
-    kind: &TargetKind,
-    guard: &GuardScript,
-) -> Result<(), ArmError> {
+async fn arm_target(cdp: &Cdp, session: &SessionId, kind: &TargetKind, scripts: &Scripts<'_>) -> Result<(), ArmError> {
     for &step in kind.steps() {
-        step.run(cdp, session, guard).await?;
+        step.run(cdp, session, scripts).await?;
     }
     Ok(())
 }
@@ -402,6 +424,8 @@ struct Targets {
 struct Shared {
     http: HttpFence,
     ws: WsFence,
+    /// What the run records, if it does.
+    capture: Option<Capture>,
     targets: Mutex<Targets>,
     changed: Notify,
     /// The browser, until the fence is closed or dropped, or its connection is lost.
@@ -478,12 +502,39 @@ impl ArmedBrowser {
     /// When the connection can't be opened, the browser refuses browser-level `Fetch` or auto-attach, or the
     /// service-worker cleanup fails. The browser is killed then: it never runs half armed.
     pub async fn arm(browser: Browser, http: HttpFence, ws: WsFence, options: &ArmOptions) -> Result<Self, ArmError> {
+        Self::arm_inner(browser, http, ws, options, None).await
+    }
+
+    /// [`Self::arm`], recording the run into `capture` (see [`crate::capture`]): every page and iframe target also
+    /// gets the WebRTC hooks before it runs, and the capture sees the connection's `Network` and target events, the
+    /// hooks' reports and every verdict of the fence.
+    ///
+    /// # Errors
+    /// As [`Self::arm`].
+    pub async fn arm_capturing(
+        browser: Browser,
+        http: HttpFence,
+        ws: WsFence,
+        options: &ArmOptions,
+        capture: Capture,
+    ) -> Result<Self, ArmError> {
+        Self::arm_inner(browser, http, ws, options, Some(capture)).await
+    }
+
+    async fn arm_inner(
+        browser: Browser,
+        http: HttpFence,
+        ws: WsFence,
+        options: &ArmOptions,
+        capture: Option<Capture>,
+    ) -> Result<Self, ArmError> {
         let (cdp, events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
         // every request; with a redirect catch, also the login origin's responses (`crate::fence_http`)
         cdp.call(None, "Fetch.enable", http.fetch_patterns()).await?;
         let shared = Arc::new(Shared {
             http,
             ws,
+            capture,
             targets: Mutex::new(Targets::default()),
             changed: Notify::new(),
             browser: Mutex::new(Some(browser)),
@@ -550,6 +601,12 @@ impl ArmedBrowser {
             taps.push(sender);
         }
         receiver
+    }
+
+    /// What the run records, if it does.
+    #[must_use]
+    pub fn capture(&self) -> Option<&Capture> {
+        self.shared.capture.as_ref()
     }
 
     /// Opens a new tab on `about:blank` and waits up to `timeout` for it to be armed.
@@ -670,19 +727,28 @@ async fn dispatch_events(cdp: Cdp, mut events: Events, shared: &Arc<Shared>) {
 /// hears of it, so the frame it lets out is always reported after it.
 fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
     shared.tap(&event);
+    if let Some(capture) = &shared.capture {
+        capture.observe(cdp, &event);
+    }
     match event.method.as_str() {
         "Fetch.requestPaused" => {
             let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
             // a request whose target is gone can't be answered; it was never sent either
             tokio::spawn(async move {
-                let _ = shared.http.handle(&cdp, &event).await;
+                let verdict = shared.http.handle(&cdp, &event).await;
+                if let (Some(capture), Ok(verdict)) = (&shared.capture, verdict) {
+                    capture.http_verdict(&event, verdict);
+                }
             });
         }
         "Runtime.bindingCalled" => {
             let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
             // a frame whose context is gone can't be answered; it was never sent either
             tokio::spawn(async move {
-                let _ = shared.ws.handle_binding(&cdp, &event).await;
+                let verdict = shared.ws.handle_binding(&cdp, &event).await;
+                if let (Some(capture), Ok(Some(verdict))) = (&shared.capture, verdict) {
+                    capture.ws_verdict(&event, shared.ws.script(), verdict);
+                }
             });
         }
         "Network.webSocketCreated" | "Network.webSocketClosed" | "Network.webSocketFrameSent" => {
@@ -717,14 +783,16 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
     let outcome = match (&target_id, &session) {
         (Some(target_id), Some(session)) => {
             let kind = TargetKind::from_type(&kind_name);
-            arm_target(&cdp, session, &kind, shared.ws.script())
-                .await
-                .map(|()| ArmedTarget {
-                    target_id: target_id.clone(),
-                    session: session.clone(),
-                    kind,
-                    parent: event.session_id.clone(),
-                })
+            let scripts = Scripts {
+                guard: shared.ws.script(),
+                capture: shared.capture.as_ref(),
+            };
+            arm_target(&cdp, session, &kind, &scripts).await.map(|()| ArmedTarget {
+                target_id: target_id.clone(),
+                session: session.clone(),
+                kind,
+                parent: event.session_id.clone(),
+            })
         }
         (None, _) => Err(ArmError::Malformed("targetInfo.targetId")),
         (_, None) => Err(ArmError::Malformed("sessionId")),

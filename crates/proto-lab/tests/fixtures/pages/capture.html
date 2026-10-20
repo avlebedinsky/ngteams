@@ -1,0 +1,19 @@
+<!doctype html>
+<title>capture</title>
+<script>
+  // A GET the fence lets through, a POST it denies, and three frames on one socket: two it allows, one it denies.
+  window.results = { echo: [] };
+  const echo = new URLSearchParams(location.search).get('ws');
+  fetch('/pages/data.json')
+    .then((response) => response.json())
+    .then((data) => { results.get = data.hello; }, (error) => { results.get = 'error ' + error; });
+  fetch('/sink', { method: 'POST', body: 'lab-post' })
+    .then(() => { results.post = 'ok'; }, (error) => { results.post = 'error ' + error.name; });
+  const socket = new WebSocket(echo + '/capture');
+  socket.onopen = () => {
+    socket.send('allow:1');
+    socket.send('deny:1');
+    socket.send('allow:2');
+  };
+  socket.onmessage = (event) => { results.echo.push(event.data); };
+</script>
