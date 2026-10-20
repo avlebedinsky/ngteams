@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt as _;
 
 use teams_fence::lab::{
-    Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_account_mri, record_service_mri,
+    Alias, ChatRecord, ChatsError, ConfigError, LabChats, LabConfig, LabLocations, LabPaths, MriRecord,
+    record_abc_chat, record_account_mri, record_service_mri,
 };
 
 const DATA: &str = "/lab/data";
@@ -520,4 +521,55 @@ fn a_service_mri_another_participant_has_is_refused() {
     let taken = record_service_mri(&locations, "echo", BOT).unwrap_err();
     assert!(matches!(taken, ConfigError::DuplicateMri(_)), "{taken:?}");
     assert_eq!(fs::read_to_string(&locations.config_file).unwrap(), before);
+}
+
+const GROUP: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
+
+#[test]
+fn no_chats_file_is_no_chats_and_the_a_b_c_chat_is_recorded_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(dir.path().to_path_buf());
+    assert_eq!(paths.chats_file(), dir.path().join("chats.toml"));
+    assert_eq!(LabChats::load(&paths).unwrap(), LabChats::default());
+
+    assert_eq!(record_abc_chat(&paths, GROUP).unwrap(), ChatRecord::Recorded);
+    assert_eq!(LabChats::load(&paths).unwrap().abc.as_deref(), Some(GROUP));
+    let mode = fs::metadata(paths.chats_file()).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "lab data, owner only");
+    assert_eq!(names_in(dir.path()).unwrap(), ["chats.toml"], "no temporary file left");
+
+    // the same id again changes nothing; another one isn't put in its place
+    let before = fs::read_to_string(paths.chats_file()).unwrap();
+    assert_eq!(record_abc_chat(&paths, GROUP).unwrap(), ChatRecord::AlreadyRecorded);
+    let other = "19:fedcba9876543210fedcba9876543210@thread.v2";
+    assert!(matches!(
+        record_abc_chat(&paths, other).unwrap_err(),
+        ChatsError::Conflict
+    ));
+    assert_eq!(fs::read_to_string(paths.chats_file()).unwrap(), before);
+}
+
+#[test]
+fn only_a_group_chat_id_is_recorded_or_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(dir.path().to_path_buf());
+    for id in [
+        "19:meeting_0123456789abcdef@thread.v2",
+        "19:Meeting_0123456789abcdef@thread.v2",
+        "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces",
+        "19:0123456789abcdef@thread.tacv2",
+        "19:0123@thread.v2;messageid=1",
+        "19:@thread.v2",
+        "19:01 23@thread.v2",
+        "48:notes",
+        "",
+    ] {
+        let error = record_abc_chat(&paths, id).unwrap_err();
+        assert!(matches!(error, ChatsError::NotAGroupChat(_)), "{id:?}: {error:?}");
+        assert!(!paths.chats_file().exists(), "{id:?}");
+    }
+    let meeting = LabChats::parse("abc = \"19:meeting_0123@thread.v2\"\n").unwrap_err();
+    assert!(matches!(meeting, ChatsError::NotAGroupChat(_)), "{meeting:?}");
+    let unknown = LabChats::parse("ab = \"19:0123@thread.v2\"\n").unwrap_err();
+    assert!(matches!(unknown, ChatsError::Parse(_)), "{unknown:?}");
 }

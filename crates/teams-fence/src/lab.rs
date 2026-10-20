@@ -31,6 +31,8 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
+use crate::membership::is_group_chat_id;
+
 /// The number of lab accounts, fixed by the lab's design.
 pub const ACCOUNT_COUNT: usize = 3;
 
@@ -163,6 +165,127 @@ impl LabPaths {
     pub fn region_file(&self, alias: Alias) -> PathBuf {
         self.data_dir.join("auth").join(format!("{}.json", alias.as_str()))
     }
+
+    /// The lab's own chats whose ids no account's MRIs give (the a–b–c group chat), `<data_dir>/chats.toml`
+    /// ([`LabChats`]): lab data, never in the repo.
+    #[must_use]
+    pub fn chats_file(&self) -> PathBuf {
+        self.data_dir.join("chats.toml")
+    }
+}
+
+/// The lab's chats whose ids can't be derived (`<data_dir>/chats.toml`, [`LabPaths::chats_file`]): today the group
+/// chat of a, b and c, which `proto-lab run abc-chat` creates once and records here.
+///
+/// ```toml
+/// abc = "19:<id>@thread.v2"
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabChats {
+    /// The group chat of a, b and c: a group chat id ([`is_group_chat_id`]).
+    #[serde(default)]
+    pub abc: Option<String>,
+}
+
+impl LabChats {
+    /// Reads `paths`' chats file; no file is no chats.
+    ///
+    /// # Errors
+    /// When the file can't be read, isn't valid TOML of this shape, or records an id that isn't a group chat's
+    /// ([`ChatsError::NotAGroupChat`]).
+    pub fn load(paths: &LabPaths) -> Result<Self, ChatsError> {
+        let path = paths.chats_file();
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(source) => return Err(ChatsError::Read { path, source }),
+        };
+        Self::parse(&text)
+    }
+
+    /// Parses a chats file's text (see [`LabChats::load`]).
+    ///
+    /// # Errors
+    /// As [`LabChats::load`], but for reading.
+    pub fn parse(text: &str) -> Result<Self, ChatsError> {
+        let chats: Self = toml::from_str(text)?;
+        match chats.abc.as_deref() {
+            Some(id) if !is_group_chat_id(id) => Err(ChatsError::NotAGroupChat(id.to_owned())),
+            _ => Ok(chats),
+        }
+    }
+}
+
+/// What [`record_abc_chat`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatRecord {
+    /// The id was written to the chats file.
+    Recorded,
+    /// The chats file held that id already; it wasn't touched.
+    AlreadyRecorded,
+}
+
+/// Why the chats file was refused or not written.
+#[derive(Debug, thiserror::Error)]
+pub enum ChatsError {
+    #[error("can't read {}: {source}", path.display())]
+    Read { path: PathBuf, source: std::io::Error },
+    #[error("chats.toml: {0}")]
+    Parse(#[from] toml::de::Error),
+    #[error("not a group chat id (19:<id>@thread.v2, not a meeting's): {0:?}")]
+    NotAGroupChat(String),
+    #[error("chats.toml already records another a–b–c chat; it isn't replaced")]
+    Conflict,
+    #[error("can't write {}: {source}", path.display())]
+    Write { path: PathBuf, source: std::io::Error },
+}
+
+/// Records `id` as the a–b–c group chat in `paths`' chats file (mode `0600`), once `abc-chat` has created it. Only a
+/// group chat id, and only when the file records none: another id already there is refused, not replaced. The file
+/// is written whole through a new file renamed over it.
+///
+/// # Errors
+/// When the file can't be read or written, isn't valid, records another chat ([`ChatsError::Conflict`]), or `id`
+/// isn't a group chat's ([`ChatsError::NotAGroupChat`]).
+pub fn record_abc_chat(paths: &LabPaths, id: &str) -> Result<ChatRecord, ChatsError> {
+    if !is_group_chat_id(id) {
+        return Err(ChatsError::NotAGroupChat(id.to_owned()));
+    }
+    match LabChats::load(paths)?.abc.as_deref() {
+        Some(recorded) if recorded == id => return Ok(ChatRecord::AlreadyRecorded),
+        Some(_) => return Err(ChatsError::Conflict),
+        None => {}
+    }
+    let path = paths.chats_file();
+    let text = format!(
+        "# The lab's chats whose ids no MRI gives (written by `proto-lab run abc-chat`). Lab data: never in the repo.\n\
+         abc = {}\n",
+        toml::Value::String(id.to_owned())
+    );
+    write_new_or_replace(&path, &text).map_err(|source| ChatsError::Write { path, source })?;
+    Ok(ChatRecord::Recorded)
+}
+
+/// Writes `text` to `path` through `<path>.<pid>.new` (mode `0600`) renamed over it.
+fn write_new_or_replace(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}.new", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let written = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }
 
 /// Where the config file and the default data dir are.

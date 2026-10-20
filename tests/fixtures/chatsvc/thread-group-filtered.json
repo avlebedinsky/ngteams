@@ -1,0 +1,24 @@
+{
+  "_synthetic": "Written by hand, synthetic-from-capture: the chat service's answer to a group chat member's filtered thread read (GET v1/threads/<id>/filtered?view=msnp24Equivalent) as the lab's reference copies chat/thread-group-{a,b,c} (proto-lab probe thread, 2026-10-20, M1 Task 8) show it: refused for every member, whose Admin role lacks the GetFilteredThread capability in a chat. Same shape, the message text in our own words. <group> stands for the chat's 32-hex id.",
+  "request": {
+    "method": "GET",
+    "path": "/api/chatsvc/<region>/v1/threads/19:<group>@thread.v2/filtered",
+    "query": "view=msnp24Equivalent",
+    "headers": {
+      "Authorization": "Bearer <token:1>",
+      "Accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 403,
+    "body": {
+      "errorCode": 209,
+      "message": "{\"details\":\"the member's role lacks the GetFilteredThread capability in a chat\",\"errorCode\":null,\"errorSubCode\":null,\"subCode\":\"AclCheckFailed\"}",
+      "standardizedError": {
+        "errorCode": 209,
+        "errorDescription": "AclCheckFailed - the member's role lacks the GetFilteredThread capability in a chat",
+        "errorSubCode": 1
+      }
+    }
+  }
+}

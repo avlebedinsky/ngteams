@@ -1,0 +1,59 @@
+{
+  "_synthetic": "Written by hand, synthetic-from-capture: the shape of the chat service's member list of a 3-member group chat (GET v1/threads/<id>/members?view=msnp24Equivalent&pageSize=<n>) as the lab's reference copies chat/thread-group-{a,b,c} (proto-lab probe thread, 2026-10-20, M1 Task 8) show it, every value made up. pageSize 100 and pageSize 1 got this same answer: all members, no next link. Its rosterVersion was 0 while the thread read's was the chat's creation time; its eTag was the thread read's. <guid:a>, <guid:b>, <guid:c> stand for the members' object ids, <group> for the chat's 32-hex id; tests fill them in.",
+  "request": {
+    "method": "GET",
+    "path": "/api/chatsvc/<region>/v1/threads/19:<group>@thread.v2/members",
+    "query": "view=msnp24Equivalent&pageSize=100",
+    "headers": {
+      "Authorization": "Bearer <token:1>",
+      "Accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "eTag": "\"1760000000000\"",
+      "isDeleted": false,
+      "members": [
+        {
+          "capabilities": ["kickMember"],
+          "cid": "0",
+          "hidden": false,
+          "id": "8:orgid:<guid:a>",
+          "interest": "Interested",
+          "isFollowing": false,
+          "linkedMri": "",
+          "role": "Admin",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:a>"
+        },
+        {
+          "capabilities": ["kickMember"],
+          "cid": "0",
+          "hidden": false,
+          "id": "8:orgid:<guid:b>",
+          "interest": "Interested",
+          "isFollowing": false,
+          "linkedMri": "",
+          "role": "Admin",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:b>"
+        },
+        {
+          "capabilities": ["kickMember"],
+          "cid": "0",
+          "hidden": false,
+          "id": "8:orgid:<guid:c>",
+          "interest": "Interested",
+          "isFollowing": false,
+          "linkedMri": "",
+          "role": "Admin",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:c>"
+        }
+      ],
+      "rosterVersion": 0,
+      "totalMemberCount": 3
+    }
+  }
+}

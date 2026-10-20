@@ -144,6 +144,8 @@ pub enum ProbeError {
     NoMri(Alias),
     #[error("{0} and {1} have no 1:1 chat (one account twice, or an MRI that isn't 8:orgid:<object id>)")]
     NoChat(Alias, Alias),
+    #[error("no a-b-c group chat to read: {0}")]
+    NoGroupChat(String),
     #[error("can't read the region record {path} (run `proto-lab auth`): {source}")]
     Region { path: String, source: std::io::Error },
     #[error("{0} isn't a region record (run `proto-lab auth`)")]
@@ -304,6 +306,13 @@ pub struct Answer {
     kept: Kept,
 }
 
+impl Answer {
+    /// The answer's body, kept for a reference copy; never shown.
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.kept.body
+    }
+}
+
 /// Why a read got no answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadFailure {
@@ -401,7 +410,7 @@ fn chat_id(config: &LabConfig, alias: Alias, partner: Alias) -> Result<String, P
     one_to_one_id(&own, &other).ok_or(ProbeError::NoChat(alias, partner))
 }
 
-fn read_region(config: &LabConfig, alias: Alias) -> Result<Region, ProbeError> {
+pub(crate) fn read_region(config: &LabConfig, alias: Alias) -> Result<Region, ProbeError> {
     let file = region_file(config.paths(), alias);
     let shown = file.display().to_string();
     let text = std::fs::read_to_string(&file).map_err(|source| ProbeError::Region {
@@ -417,7 +426,7 @@ fn read_region(config: &LabConfig, alias: Alias) -> Result<Region, ProbeError> {
 
 /// The chat base from the region's GTMs ([`CHAT_BASE_GTM`], else its fallback, trimmed: [`Region::base`]) without a
 /// trailing slash; it must be a base the write mapping takes a chat service request under, with nothing after it.
-fn chat_base(region: &Region) -> Result<String, ProbeError> {
+pub(crate) fn chat_base(region: &Region) -> Result<String, ProbeError> {
     let trimmed = region.base(CHAT_BASE_GTM).ok_or(ProbeError::NoChatBase)?;
     let base = trimmed.strip_suffix('/').unwrap_or(trimmed);
     let refused = || ProbeError::NotAChatBase(base.to_owned());
@@ -432,7 +441,7 @@ fn chat_base(region: &Region) -> Result<String, ProbeError> {
 }
 
 /// `url` as sent: as it is to the chat service, or with a mock's origin in place of its own.
-fn at_origin(url: &str, origin: &Origin) -> Option<Url> {
+pub(crate) fn at_origin(url: &str, origin: &Origin) -> Option<Url> {
     let url = Url::parse(url).ok()?;
     match origin {
         Origin::ChatService => Some(url),
@@ -447,7 +456,7 @@ fn at_origin(url: &str, origin: &Origin) -> Option<Url> {
 }
 
 /// The probe's HTTPS client: no proxy, no redirects, `https` only unless it serves a mock.
-fn client(origin: &Origin) -> Result<reqwest::Client, ProbeError> {
+pub(crate) fn client(origin: &Origin) -> Result<reqwest::Client, ProbeError> {
     reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -459,7 +468,12 @@ fn client(origin: &Origin) -> Result<reqwest::Client, ProbeError> {
 }
 
 /// One `GET` of `url` with the token and the form's headers.
-async fn read(client: &reqwest::Client, url: Url, token: &str, form: HeaderForm) -> Result<Answer, ReadFailure> {
+pub(crate) async fn read(
+    client: &reqwest::Client,
+    url: Url,
+    token: &str,
+    form: HeaderForm,
+) -> Result<Answer, ReadFailure> {
     let mut builder = client
         .get(url)
         .header("Authorization", format!("Bearer {token}"))
@@ -577,7 +591,7 @@ impl ChatProbe {
     }
 }
 
-fn response_headers(answer: &Answer) -> Map<String, Value> {
+pub(crate) fn response_headers(answer: &Answer) -> Map<String, Value> {
     let mut map = Map::new();
     for (name, value) in &answer.kept.headers {
         map.insert(name.clone(), json!(value));
@@ -585,11 +599,11 @@ fn response_headers(answer: &Answer) -> Map<String, Value> {
     map
 }
 
-fn body_value(body: &[u8]) -> Value {
+pub(crate) fn body_value(body: &[u8]) -> Value {
     serde_json::from_slice(body).unwrap_or_else(|_| json!(String::from_utf8_lossy(body)))
 }
 
-fn outcome_line(outcome: &Result<Answer, ReadFailure>) -> String {
+pub(crate) fn outcome_line(outcome: &Result<Answer, ReadFailure>) -> String {
     let answer = match outcome {
         Ok(answer) => answer,
         Err(failure) => return format!("no answer ({failure:?})"),
@@ -612,7 +626,7 @@ fn outcome_line(outcome: &Result<Answer, ReadFailure>) -> String {
     line
 }
 
-fn membership_line(membership: &Membership) -> String {
+pub(crate) fn membership_line(membership: &Membership) -> String {
     match membership {
         Membership::Complete(members) => {
             format!("complete: the {} members the chat id names", members.len())
