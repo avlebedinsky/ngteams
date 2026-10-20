@@ -26,6 +26,18 @@ Acceptable ways forward, any one of them:
 - protocol evidence that a test call's membership is fixed except for the caller's own `add`;
 - an ordered, complete roster stream with evidence of its guarantees.
 
+**Tried 2026-10-20: `getAllParticipants` isn't that read.** Settled with Codex (`call-follow-ups` discussion): a
+sealed call source in `teams-fence` sends it itself (`POST …/conv/<id>/getAllParticipants?i=&e=`, body `{from, scope,
+scenario: 0}`, the page's `X-Skypetoken`), reads both `call` and `lobby`, and counts an answer as complete only when
+it is strict, unpaged, unmasked, small and lists the requester. The follow-ups were mapped behind it (`add` only for
+the `lab.toml` echo, with its callbacks at an endpoint the fence let this run register). In one live diagnostic run,
+with writes still denied, every `call` read answered `200 {"participants":[]}` while a was in the call. That is not a
+membership, so everything stayed denied and the code wasn't committed. Codex also held two more conditions before any
+read could grant a permit: evidence that the read can't silently leave participants out (an independent check, as
+the 1:1 chat's id gives), and provenance that the conversation is the test call this page started (the start's
+answer). The call controller's operations (`acknowledge`, `applyChannelParameters`) also need their call id bound to
+the conversation, and that binding shows only in a delivered `conversationUpdate`.
+
 Then map the follow-ups (strict bodies; `add` as an invite with its `to[].id` added; `leave`, acknowledgements and
 channel parameters as call writes on the call's scope, the call id correlated with the conversation through the start's
 answer and the acceptance callback) and run `echo-call` until the tone comes back.

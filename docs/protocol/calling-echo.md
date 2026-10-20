@@ -176,6 +176,15 @@ server-reflexive candidate to the controller's relay candidate.
    (method and answer not captured), or protocol evidence that a test call's membership can only change through the
    caller's own fenced `add` (Codex and Claude, 2026-10-20: the evidence so far doesn't establish it). Backlog:
    `docs/backlog/fence-call-follow-ups.md`.
+
+   `getAllParticipants`, tried on 2026-10-20 (one live run, account a, fence armed, writes still denied). The web
+   bundle's client sends it as a `POST` to the conversation's link with `{"from": <the caller's own participant>,
+   "scope": "call" | "lobby", "scenario": 0}`, keeps only `participants` from the answer, and uses it for the large
+   meeting lobby panel. Sent from inside the fence for the test call's `call` scope, it answered `200` and
+   `{"participants":[]}` at every follow-up, although a was in the call. So in this call it doesn't list the
+   caller, and it can't serve as the call's membership. The fence denied the follow-ups as partial. Also seen: the
+   call controller's call id (`callAcceptance/<id>`, `mcProxy/<id>`) is tied to the conversation only in a delivered
+   `conversationUpdate` (`activeModalities.call.links.participants`, `…/cc/v1/callHub/<same id>/…/participantLegs`).
 2. **Whether the echo answers.** With `add` allowed the echo service should join, record and play back; its timing
    (spike 3b question 6) is still unseen.
 3. **Headless Chrome.** The runs set a normal Chrome `User-Agent`; whether `HeadlessChrome` alone would keep the
