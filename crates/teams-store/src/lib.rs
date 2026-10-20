@@ -5,7 +5,8 @@
 //! - [`messages`]: messages by id and version (an edit or a soft delete is a newer version), reactions per user, pages
 //!   of a conversation, the unread count;
 //! - [`state`]: read horizons and where each conversation's sync stands;
-//! - [`outbox`]: writes waiting to go out, keyed by `clientmessageid`; a run sends only its own rows;
+//! - [`outbox`]: writes waiting to go out, keyed by `clientmessageid`; a run sends only its own rows, and adopts only
+//!   rows of runs that have ended (each open run holds a lock of its own, `runs`);
 //! - [`schema`]: the migrations, applied in order on open.
 //!
 //! Every versioned write is an upsert that never lets an older version overwrite a newer one, so a Trouter delivery
@@ -18,9 +19,11 @@ pub mod conversations;
 mod file;
 pub mod messages;
 pub mod outbox;
+mod runs;
 pub mod schema;
 pub mod state;
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -58,6 +61,8 @@ pub enum StoreError {
     UnknownOutboxEntry(i64),
     #[error("outbox row {id} is {} and not this run's to send", state.as_str())]
     OutboxNotSendable { id: i64, state: OutboxState },
+    #[error("outbox row {id} is {} in run {run_id}, whose store is still open", state.as_str())]
+    OutboxRunOpen { id: i64, run_id: i64, state: OutboxState },
 }
 
 /// What a versioned write did.
@@ -72,20 +77,28 @@ pub enum Applied {
 }
 
 /// One account's store. Writes take `&mut self`; the core owns it on one thread.
+///
+/// Several stores may be open on one file (two processes on the same account): each is a run of its own, and holds
+/// its run's lock until it is dropped. The core keeps its store open until every attempt it began has finished: once
+/// the store is dropped, another run may adopt the rows.
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
     run_id: i64,
+    /// Where the runs' locks are.
+    runs: PathBuf,
+    /// This run's lock, held while the store is open.
+    _run_lock: File,
 }
 
 impl Store {
     /// Opens the store at `path`, creating it (and its directory, mode `0700`) when missing, with the file `0600`
     /// (a looser existing file is tightened); turns on WAL and foreign keys, applies the pending migrations, and starts
-    /// a new run (see [`Store::run_id`]).
+    /// a new run (see [`Store::run_id`]) holding its lock in `<path>-runs/` (lock files of ended runs are removed).
     ///
     /// # Errors
     ///
-    /// [`StoreError::File`] when the file or its directory can't be made private, [`StoreError::NotWal`] when SQLite
+    /// [`StoreError::File`] when the file or its directory can't be made private or the run's lock can't be taken, [`StoreError::NotWal`] when SQLite
     /// keeps another journal mode, [`StoreError::SchemaTooNew`] for a store written by a newer build,
     /// [`StoreError::Sqlite`] when SQLite refuses it.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
@@ -102,12 +115,37 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         schema::migrate(&mut conn)?;
-        conn.execute("INSERT INTO runs (started_at) VALUES (?1)", [now_ms()])?;
-        let run_id = conn.last_insert_rowid();
-        Ok(Self { conn, run_id })
+        let runs_dir = runs::dir(path);
+        let (run_id, run_lock) = Self::start_run(&mut conn, &runs_dir)?;
+        Ok(Self {
+            conn,
+            run_id,
+            runs: runs_dir,
+            _run_lock: run_lock,
+        })
     }
 
-    /// This process's run: the outbox rows it made or adopted. Rows of earlier runs are never sent on their own.
+    /// Adds a run and takes its lock in one write transaction, removing the locks of ended runs first (see `runs`).
+    fn start_run(conn: &mut Connection, runs_dir: &Path) -> Result<(i64, File), StoreError> {
+        let tx = conn.transaction()?;
+        runs::sweep(runs_dir)?;
+        tx.execute("INSERT INTO runs (started_at) VALUES (?1)", [now_ms()])?;
+        let run_id = tx.last_insert_rowid();
+        // declared after `tx`, so a failed commit drops the lock before the rollback
+        let lock = runs::hold(runs_dir, run_id)?;
+        tx.commit()?;
+        Ok((run_id, lock))
+    }
+
+    /// Whether another run's store is still open (this run's always is).
+    fn run_is_open(&self, run_id: i64) -> Result<bool, StoreError> {
+        if run_id == self.run_id {
+            return Ok(true);
+        }
+        runs::is_open(&self.runs, run_id)
+    }
+
+    /// This process's run: the outbox rows it made or adopted. Rows of other runs are never sent on their own.
     #[must_use]
     pub fn run_id(&self) -> i64 {
         self.run_id

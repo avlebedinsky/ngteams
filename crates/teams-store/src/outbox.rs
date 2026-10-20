@@ -1,21 +1,24 @@
 //! Writes waiting to go out. One row per command, keyed by the `clientmessageid` it keeps across every attempt; the
 //! core serializes the command into `payload` and the store doesn't read it.
 //!
-//! A row belongs to the run that made it ([`Store::run_id`]): only that run can begin an attempt on it. Rows an
-//! earlier process left pending or in flight are listed by [`Store::outbox_left_by_earlier_runs`] and go out again
-//! only through [`Store::resend`], an explicit command; nothing is resent on start (the web client's late resend of a
-//! failed send, seen in M0, is what this rules out).
+//! A row belongs to the run that made it ([`Store::run_id`]): only that run can begin an attempt on it. Rows a run
+//! that has ended (its store dropped, or its process gone) left pending or in flight are listed by
+//! [`Store::outbox_left_by_earlier_runs`] and go out again only through [`Store::resend`], an explicit command; nothing
+//! is resent on start (the web client's late resend of a failed send, seen in M0, is what this rules out). A pending
+//! or in-flight row of a run whose store is still open (a second process on the account) is never adopted: its
+//! attempt may not have reached the service yet, so no sync could tell whether a second attempt sends it twice.
 //!
 //! States: `pending` → [`Store::begin_attempt`] → `sending` → [`Store::finish_attempt`] → `sent`, `denied`, `failed`
 //! (all final) or back to `pending` for a retry after `not_before`. Our message coming back (Trouter or a sync) marks
 //! its row `sent` whatever state it is in ([`Store::outbox_arrived`]).
 
+use std::collections::HashMap;
 use std::fmt;
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
 
-use crate::{Store, StoreError, now_ms};
+use crate::{Store, StoreError, now_ms, runs};
 
 /// What a row asks the service to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,17 +269,33 @@ impl Store {
         )
     }
 
-    /// Rows an earlier run left pending or in flight: never sent on their own, only through [`Store::resend`].
+    /// Rows a run that has ended left pending or in flight: never sent on their own, only through [`Store::resend`].
+    /// Rows of another run whose store is still open aren't listed.
     ///
     /// # Errors
     ///
-    /// [`StoreError::Sqlite`] when the read fails.
+    /// [`StoreError::Sqlite`] when the read fails, [`StoreError::File`] when a run's lock can't be checked.
     pub fn outbox_left_by_earlier_runs(&self) -> Result<Vec<OutboxEntry>, StoreError> {
-        entries(
+        let rows = entries(
             &self.conn,
             "run_id <> ?1 AND state IN (?2, ?3)",
             params![self.run_id, OutboxState::Pending, OutboxState::Sending],
-        )
+        )?;
+        let mut open_runs: HashMap<i64, bool> = HashMap::new();
+        let mut left = Vec::with_capacity(rows.len());
+        for row in rows {
+            let run_open = if let Some(&known) = open_runs.get(&row.run_id) {
+                known
+            } else {
+                let checked = self.run_is_open(row.run_id)?;
+                open_runs.insert(row.run_id, checked);
+                checked
+            };
+            if !run_open {
+                left.push(row);
+            }
+        }
+        Ok(left)
     }
 
     /// Begins an attempt on one of this run's pending rows: it becomes `sending` and its attempt count goes up.
@@ -333,23 +352,33 @@ impl Store {
         Ok(updated)
     }
 
-    /// Adopts a row into this run as pending, with its `clientmessageid` unchanged: the explicit resend of a row an
-    /// earlier run left, or of one that was denied or failed. For a row left `sending`, the caller first looks for its
-    /// `clientmessageid` in a sync: the earlier attempt may have arrived. This run's own pending or sending row is
-    /// refused: it is waiting for its attempt (and its `not_before`) or has one in flight, and a second attempt
-    /// beside it could send the command twice.
+    /// Adopts a row into this run as pending, with its `clientmessageid` unchanged: the explicit resend of a row a run
+    /// that has ended left, or of one that was denied or failed. For a row left `sending`, the caller first looks for
+    /// its `clientmessageid` in a sync: the ended run's attempt may have arrived. A pending or sending row of a run
+    /// whose store is open, this one or another, is refused: it is waiting for its attempt (and its `not_before`) or
+    /// has one in flight that may not have reached the service yet, and a second attempt beside it could send the
+    /// command twice. The check is made under the store's write lock, so two runs can't both adopt a row.
     ///
     /// # Errors
     ///
     /// [`StoreError::UnknownOutboxEntry`] for no such row, [`StoreError::OutboxNotSendable`] for a row already sent or
-    /// one of this run still pending or sending, [`StoreError::Sqlite`] when the write fails.
+    /// one of this run still pending or sending, [`StoreError::OutboxRunOpen`] for one of another open run still
+    /// pending or sending, [`StoreError::File`] when its run's lock can't be checked, [`StoreError::Sqlite`] when the
+    /// write fails.
     pub fn resend(&mut self, id: i64) -> Result<OutboxEntry, StoreError> {
         let tx = self.conn.transaction()?;
         let row = entry(&tx, id)?;
-        let ours_in_progress =
-            row.run_id == self.run_id && matches!(row.state, OutboxState::Pending | OutboxState::Sending);
-        if row.state == OutboxState::Sent || ours_in_progress {
+        let in_progress = matches!(row.state, OutboxState::Pending | OutboxState::Sending);
+        if row.state == OutboxState::Sent || (in_progress && row.run_id == self.run_id) {
             return Err(StoreError::OutboxNotSendable { id, state: row.state });
+        }
+        // another run's row here: this run's own in-progress rows were refused above
+        if in_progress && runs::is_open(&self.runs, row.run_id)? {
+            return Err(StoreError::OutboxRunOpen {
+                id,
+                run_id: row.run_id,
+                state: row.state,
+            });
         }
         tx.execute(
             "UPDATE outbox SET run_id = ?2, state = ?3, not_before = NULL, updated_at = ?4 WHERE id = ?1",

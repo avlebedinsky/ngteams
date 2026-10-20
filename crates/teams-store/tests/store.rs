@@ -935,6 +935,77 @@ fn rows_left_by_an_earlier_run_are_not_sent_until_resent_explicitly() {
 }
 
 #[test]
+fn a_row_of_another_open_store_is_not_adopted_until_that_store_is_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut first = open(&dir).expect("open the store");
+    let pending = first.enqueue(&send("1")).expect("pending").id;
+    let in_flight = first.enqueue(&send("2")).expect("in flight").id;
+    first.begin_attempt(in_flight).expect("begin");
+    let failed = first.enqueue(&send("3")).expect("failed").id;
+    first.begin_attempt(failed).expect("begin");
+    let refused = AttemptOutcome::Failed {
+        error: "400".to_owned(),
+    };
+    first.finish_attempt(failed, &refused).expect("failed");
+
+    // a second process on the account, while the first one's attempt hasn't reached the service yet
+    let mut second = open(&dir).expect("open the store again");
+    assert!(
+        second.outbox_left_by_earlier_runs().expect("left").is_empty(),
+        "nothing is left by a run whose store is open"
+    );
+    for (id, state) in [(pending, OutboxState::Pending), (in_flight, OutboxState::Sending)] {
+        let error = second.resend(id).expect_err("its run is open");
+        assert!(
+            matches!(error, StoreError::OutboxRunOpen { id: found, run_id, state: s }
+                if found == id && run_id == first.run_id() && s == state),
+            "{error}"
+        );
+    }
+    assert!(
+        second.outbox_due(i64::MAX).expect("due").is_empty(),
+        "no second attempt"
+    );
+    // a failed row has no attempt in flight: it can be resent
+    let adopted = second.resend(failed).expect("resend the failed row");
+    assert_eq!(adopted.run_id, second.run_id());
+
+    // the first run finishes its own attempt: the row is still its own
+    let done = first
+        .finish_attempt(in_flight, &AttemptOutcome::Sent { message_id: None })
+        .expect("finish the first run's attempt");
+    assert_eq!((done.state, done.run_id), (OutboxState::Sent, first.run_id()));
+
+    drop(first);
+    let left: Vec<i64> = second
+        .outbox_left_by_earlier_runs()
+        .expect("left")
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(left, [pending], "left once its store is closed");
+    let adopted = second.resend(pending).expect("explicit resend");
+    assert_eq!((adopted.state, adopted.run_id), (OutboxState::Pending, second.run_id()));
+}
+
+#[test]
+fn each_open_store_holds_a_private_run_lock_and_ended_runs_locks_are_removed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runs = PathBuf::from(format!("{}-runs", store_path(&dir).display()));
+    let lock = |store: &Store| runs.join(format!("{}.lock", store.run_id()));
+    let first = open(&dir).expect("open the store");
+    let first_lock = lock(&first);
+    assert_eq!(mode(&runs).expect("mode"), 0o700);
+    assert_eq!(mode(&first_lock).expect("mode"), 0o600);
+    let second = open(&dir).expect("open the store again");
+    assert!(first_lock.exists(), "an open run's lock is kept");
+    drop(first);
+    let third = open(&dir).expect("open the store a third time");
+    assert!(!first_lock.exists(), "an ended run's lock is removed");
+    assert!(lock(&second).exists() && lock(&third).exists());
+}
+
+#[test]
 fn this_runs_own_pending_or_in_flight_row_cant_be_resent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = open(&dir).expect("open the store");
