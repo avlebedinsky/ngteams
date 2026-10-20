@@ -12,7 +12,7 @@ use crate::{CHAT_BASE, REGION, TENANT};
 
 /// The mock's sync token: what changed after a time.
 const SINCE: &str = "mock-since-";
-/// The mock's backward-page token: the messages before a `sequenceId`.
+/// The mock's backward-page token: the messages before a `sequenceId`, then `-` and its first page's sync time.
 const BEFORE: &str = "mock-before-";
 /// The largest page a read asks for and gets (the web client asks for 200).
 const MAX_PAGE: usize = 200;
@@ -50,45 +50,40 @@ pub(crate) fn conversations(state: &State, call: &Call<'_>, owner: &str) -> Resp
 
 /// `GET …/conversations/<chat>/messages`: newest first, a page of `pageSize`; with the mock's `syncState` the messages
 /// changed since it was handed out (all of them), or the page before a backward link's message. Every answer carries
-/// the next sync link, and a `backwardLink` (the bundle's name; never captured) while older messages remain.
+/// a sync link, and a `backwardLink` (the bundle's name; never captured) while older messages remain. A backward
+/// page's sync link is the one its first page handed out (the backward token carries its time), so a client keeping
+/// the latest sync link it got while paging back still gets what changed after the first page.
 pub(crate) fn messages(state: &State, call: &Call<'_>, chat: &str) -> ResponseTemplate {
     let conversation = match member_of(state, chat, &call.caller) {
         Ok(conversation) => conversation,
         Err(code) => return status(code),
     };
     let size = page_size(call);
-    let newest_first = conversation.messages.iter().rev();
-    let (page, older) = match call.query("syncState") {
-        None => page_of(newest_first, size),
-        Some(token) => match (token_value(token, SINCE), token_value(token, BEFORE)) {
-            (Some(since), _) => page_of(
-                newest_first.filter(|message| number(&message["version"]) > since),
-                usize::MAX,
-            ),
-            (None, Some(before)) => page_of(
-                newest_first.filter(|message| message["sequenceId"].as_u64().is_some_and(|seq| seq < before)),
-                size,
-            ),
-            (None, None) => return status(400),
-        },
+    let Some((page, older, watermark)) = message_page(state, conversation, call.query("syncState"), size) else {
+        return status(400);
     };
     let first = conversation
         .messages
         .first()
         .map_or(1, |message| number(&message["id"]));
+    let last_version = conversation
+        .messages
+        .iter()
+        .map(|message| number(&message["version"]))
+        .max()
+        .unwrap_or(0);
     let mut metadata = json!({
         "lastCompleteSegmentStartTime": 1,
-        "lastCompleteSegmentEndTime": conversation.messages.iter().map(|message| number(&message["version"])).max(),
+        "lastCompleteSegmentEndTime": last_version,
         "syncState": format!(
-            "{CHAT_BASE}/v1/users/ME/conversations/{chat}/messages?startTime={first}&syncState={SINCE}{}&pageSize=200&view=msnp24Equivalent",
-            state.now()
+            "{CHAT_BASE}/v1/users/ME/conversations/{chat}/messages?startTime={first}&syncState={SINCE}{watermark}&pageSize=200&view=msnp24Equivalent"
         ),
     });
     if let (true, Some(oldest)) = (older, page.last().and_then(|message| message["sequenceId"].as_u64())) {
         object(&mut metadata).insert(
             "backwardLink".to_owned(),
             json!(format!(
-                "{CHAT_BASE}/v1/users/ME/conversations/{chat}/messages?syncState={BEFORE}{oldest}&pageSize={size}&view=msnp24Equivalent"
+                "{CHAT_BASE}/v1/users/ME/conversations/{chat}/messages?syncState={BEFORE}{oldest}-{watermark}&pageSize={size}&view=msnp24Equivalent"
             )),
         );
     }
@@ -96,6 +91,31 @@ pub(crate) fn messages(state: &State, call: &Call<'_>, chat: &str) -> ResponseTe
         200,
         &json!({"messages": page, "tenantId": TENANT, "_metadata": metadata}),
     )
+}
+
+/// The messages a read with `token` (its `syncState`) gets, newest first and at most `size` of them (all of them for a
+/// sync), whether older ones remain, and the time its sync link starts from: now, or a backward token's first page's
+/// time. `None` for a token the mock didn't hand out.
+fn message_page(
+    state: &State,
+    conversation: &Conversation,
+    token: Option<&str>,
+    size: usize,
+) -> Option<(Vec<Value>, bool, u64)> {
+    let newest_first = conversation.messages.iter().rev();
+    let Some(token) = token else {
+        let (page, older) = page_of(newest_first, size);
+        return Some((page, older, state.now()));
+    };
+    if let Some(since) = token_value(token, SINCE) {
+        let changed = newest_first.filter(|message| number(&message["version"]) > since);
+        let (page, older) = page_of(changed, usize::MAX);
+        return Some((page, older, state.now()));
+    }
+    let (before, watermark) = backward_token(token)?;
+    let earlier = newest_first.filter(|message| message["sequenceId"].as_u64().is_some_and(|seq| seq < before));
+    let (page, older) = page_of(earlier, size);
+    Some((page, older, watermark))
 }
 
 /// `GET …/messages/epochTimeStamp/<ms>`: as the web client read it around the time the reader joined, a page newest
@@ -163,7 +183,9 @@ pub(crate) fn member_of<'s>(state: &'s State, id: &str, caller: &str) -> Result<
     }
 }
 
-/// The thread read of `conversation` (`thread-group.json`'s shape; a 1:1 chat's wasn't kept, so it takes the same).
+/// The thread read of `conversation` (`thread-group.json`'s shape; a 1:1 chat's wasn't kept, so it takes the same, with
+/// the `uniquerosterthread` its conversation list entry gives it: the live 1:1 read carried that key, the value is the
+/// list's).
 pub(crate) fn thread_body(state: &State, conversation: &Conversation) -> Value {
     let mut thread = state.fixtures.thread.clone();
     let template = thread["members"][0].clone();
@@ -188,6 +210,10 @@ pub(crate) fn thread_body(state: &State, conversation: &Conversation) -> Value {
     let properties = object(fields.entry("properties").or_insert(Value::Null));
     properties.insert("createdat".to_owned(), json!(conversation.created.to_string()));
     properties.insert("creator".to_owned(), json!(conversation.creator));
+    let unique = &conversation.entry["threadProperties"]["uniquerosterthread"];
+    if conversation.kind == Kind::OneToOne && !unique.is_null() {
+        properties.insert("uniquerosterthread".to_owned(), unique.clone());
+    }
     thread
 }
 
@@ -278,6 +304,13 @@ fn page_size(call: &Call<'_>) -> usize {
 /// A mock token's value: `<prefix><number>`.
 fn token_value(token: &str, prefix: &str) -> Option<u64> {
     token.strip_prefix(prefix)?.parse().ok()
+}
+
+/// A backward token's values, `<BEFORE><sequenceId>-<time>`: the messages before that `sequenceId`, and the time the
+/// first page's sync link started from.
+fn backward_token(token: &str) -> Option<(u64, u64)> {
+    let (before, watermark) = token.strip_prefix(BEFORE)?.split_once('-')?;
+    Some((before.parse().ok()?, watermark.parse().ok()?))
 }
 
 /// A number the service writes as a string (a message's `id` and `version`), or 0.

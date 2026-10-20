@@ -510,8 +510,8 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
       `messages.json`'s messages, empty a–c and a–x chats, the a–b–c group chat of `thread-group.json`, and a's
       channel and notifications stream (read-only). Reads: the list and its sync link (it names the caller's MRI),
       first page, sync and backward links (`backwardLink`, the bundle's name; the mock's link tokens are its own),
-      the read around a time, thread read, member list, filtered view (403). Writes: posts and typing (201 with
-      `OriginalArrivalTime` and a `Location` on the regional host), edits, soft deletes, reactions, read receipts,
+      the read around a time, thread read, member list, filtered view (403). Writes: posts (201 with
+      `OriginalArrivalTime` and a `Location` on the regional host) and typing (201 with `OriginalArrivalTime`), edits, soft deletes, reactions, read receipts,
       and chat creation (`POST v1/threads`, for Task 12), each read back as its fixture recorded; events are typed
       `ChatEvent`s (`take_events(mri)`), the Trouter wire form waiting for Tasks 14/16. Headers: the `ic3` bearer
       token with `X-MS-Migration: True` and `BehaviorOverride: redirectAs404`, else 401; the thread read takes the

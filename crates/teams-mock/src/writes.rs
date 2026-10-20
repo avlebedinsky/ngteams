@@ -117,7 +117,9 @@ pub(crate) fn delete(state: &mut State, call: &Call<'_>, chat: &str, id: &str) -
 
 /// `PUT`/`DELETE …/messages/<id>/properties?name=emotions` (`reaction.json`): the caller's reaction under its key,
 /// with the service's time and the value sent as a string; taken back, the key stays with the users left. The
-/// message's `version` moves, and `annotationsSummary` counts the standing reactions per key.
+/// message's `version` moves, and `annotationsSummary` counts the standing reactions per key. Taking back a reaction
+/// the caller doesn't have (a retry) changes nothing and tells nobody, answered as a take-back: the captures only
+/// showed one of a standing reaction.
 pub(crate) fn reaction(state: &mut State, call: &Call<'_>, chat: &str, id: &str, remove: bool) -> ResponseTemplate {
     if let Err(code) = writable(state, chat, &call.caller) {
         return status(code);
@@ -129,6 +131,13 @@ pub(crate) fn reaction(state: &mut State, call: &Call<'_>, chat: &str, id: &str,
         return status(400);
     };
     let caller = call.caller.as_str();
+    if remove {
+        match has_reaction(state, chat, id, &key, caller) {
+            Ok(true) => {}
+            Ok(false) => return state.fixtures.unreacted.template(),
+            Err(code) => return status(code),
+        }
+    }
     let changed = change(state, chat, id, caller, EventKind::Reaction, |message, time| {
         if is_deleted(message) {
             return Err(404);
@@ -253,6 +262,34 @@ fn own_and_standing(message: &Value, caller: &str) -> Result<(), u16> {
     }
     let from = message["from"].as_str().unwrap_or_default();
     if from == contact(caller) { Ok(()) } else { Err(403) }
+}
+
+/// Whether `caller` has a standing reaction under `key` on message `id` of `chat`: 404 for no such message, or a
+/// deleted one.
+fn has_reaction(state: &State, chat: &str, id: &str, key: &str, caller: &str) -> Result<bool, u16> {
+    let message = state
+        .conversation(chat)
+        .and_then(|conversation| {
+            conversation
+                .messages
+                .iter()
+                .find(|message| message["id"].as_str() == Some(id))
+        })
+        .ok_or(404_u16)?;
+    if is_deleted(message) {
+        return Err(404);
+    }
+    let emotions = message["properties"]["emotions"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let reacted = |entry: &Value| {
+        entry["users"]
+            .as_array()
+            .is_some_and(|users| users.iter().any(|user| user["mri"].as_str() == Some(caller)))
+    };
+    Ok(emotions
+        .iter()
+        .any(|entry| entry["key"].as_str() == Some(key) && reacted(entry)))
 }
 
 fn is_deleted(message: &Value) -> bool {
@@ -420,12 +457,13 @@ fn react(message: &mut Value, key: &str, caller: &str, user: Option<Value>) {
 }
 
 /// A chat create's members (distinct, in the body's order) and whether it asks for the unique-roster (1:1) thread;
-/// `None` unless its body is `{members: [{id}, …two or more…], properties: {threadType: "chat"}}`.
+/// `None` unless its body is `{members: [{id}, …two or more…], properties: {threadType: "chat"}}` with every `id` a
+/// work account's MRI (`8:orgid:<oid>`).
 fn chat_members(call: &Call<'_>) -> Option<(Vec<String>, bool)> {
     let body = call.object()?;
     let mut members: Vec<String> = Vec::new();
     for member in body.get("members")?.as_array()? {
-        let id = member.get("id")?.as_str()?;
+        let id = member.get("id")?.as_str().filter(|id| is_orgid_mri(id))?;
         if !members.iter().any(|known| known == id) {
             members.push(id.to_owned());
         }
@@ -436,6 +474,18 @@ fn chat_members(call: &Call<'_>) -> Option<(Vec<String>, bool)> {
     }
     let unique = properties.get("uniquerosterthread").and_then(Value::as_bool) == Some(true);
     Some((members, unique))
+}
+
+/// Whether `mri` is `8:orgid:` and an object id (a GUID, `8-4-4-4-12` hex digits).
+fn is_orgid_mri(mri: &str) -> bool {
+    let Some(oid) = mri.strip_prefix("8:orgid:") else {
+        return false;
+    };
+    let groups: Vec<&str> = oid.split('-').collect();
+    groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12])
+        && groups
+            .iter()
+            .all(|group| group.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// The 1:1 chat id of two `8:orgid:` members: `19:<oid>_<oid>@unq.gbl.spaces`, lowercase and sorted.

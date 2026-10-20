@@ -373,6 +373,46 @@ async fn message_pages_go_back_through_backward_links_and_forward_through_sync_l
 }
 
 #[tokio::test]
+async fn a_backward_page_hands_out_its_first_pages_sync_link() -> TestResult {
+    let lab = Lab::start().await?;
+    let path = format!(
+        "users/ME/conversations/{}/messages?view=msnp24Equivalent&pageSize=2",
+        segment(AB_CHAT)
+    );
+    let first = lab.get(LAB_B, &path).await?;
+    let back = first["_metadata"]["backwardLink"].as_str().ok_or("no backward link")?;
+    // a posts while b pages back: the older page leaves it out, and its sync link still covers it
+    let id = lab
+        .post(LAB_A, AB_CHAT, &text_message("<p>while paging</p>", "5"))
+        .await?;
+    let older = lab.follow(LAB_B, back).await?;
+    assert_eq!(older["_metadata"]["syncState"], first["_metadata"]["syncState"]);
+    let older_ids: Vec<Value> = older["messages"]
+        .as_array()
+        .map(|messages| messages.iter().map(|message| message["id"].clone()).collect())
+        .unwrap_or_default();
+    assert!(!older_ids.contains(&json!(id)), "{older_ids:?}");
+    let latest = older["_metadata"]["syncState"].as_str().ok_or("no sync link")?;
+    let changed = lab.follow(LAB_B, latest).await?;
+    assert_eq!(changed["messages"][0]["id"], id);
+
+    // a backward token the mock didn't hand out
+    let forged = format!("{path}&syncState=mock-before-3");
+    assert_eq!(lab.send(LAB_B, Method::GET, &forged, None).await?.status, 400);
+    // an empty chat's page has no messages and a number, not null, for its last segment's end
+    let empty = lab
+        .get(
+            LAB_A,
+            &format!("users/ME/conversations/{}/messages?pageSize=2", segment(AC_CHAT)),
+        )
+        .await?;
+    assert_eq!(empty["messages"], json!([]));
+    assert_eq!(empty["_metadata"]["lastCompleteSegmentEndTime"], 0);
+    assert!(empty["_metadata"].get("backwardLink").is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_reads_are_the_group_chat_fixtures() -> TestResult {
     let lab = Lab::start().await?;
     let thread = lab
@@ -404,6 +444,9 @@ async fn thread_reads_are_the_group_chat_fixtures() -> TestResult {
         .map(|members| members.iter().map(|member| member["id"].clone()).collect())
         .unwrap_or_default();
     assert_eq!(listed, [json!(LAB_A), json!(LAB_B)]);
+    // with the unique-roster key the live 1:1 read carried, valued as the conversation list gives it
+    assert_eq!(one_to_one["properties"]["uniquerosterthread"], "True");
+    assert!(thread["properties"].get("uniquerosterthread").is_none());
     let refused = lab
         .send(LAB_C, Method::GET, &format!("threads/{}", segment(AB_CHAT)), None)
         .await?;
@@ -627,9 +670,15 @@ async fn a_soft_delete_reads_back_as_the_delete_fixture() -> TestResult {
         [EventKind::Message, EventKind::Delete]
     );
 
-    // a deleted message isn't edited or deleted again
+    // a deleted message isn't edited or deleted again, and nobody is told
     let edit = text_message("<p>back</p>", "7777777777777777777");
     assert_eq!(lab.send(LAB_A, Method::PUT, &path, Some(&edit)).await?.status, 404);
+    let again = lab
+        .send(LAB_A, Method::DELETE, &format!("{path}?behavior=softDelete"), None)
+        .await?;
+    assert_eq!(again.status, 404);
+    assert!(lab.mock.take_events(LAB_B).is_empty());
+    assert_eq!(lab.message(LAB_B, AB_CHAT, &id).await?, read);
     Ok(())
 }
 
@@ -671,6 +720,27 @@ async fn reactions_read_back_as_the_reaction_fixture() -> TestResult {
     let taken_back = &recorded["read_back_taken_back"];
     assert_eq!(read["annotationsSummary"], taken_back["annotationsSummary"]);
     assert_eq!(read["properties"]["emotions"], taken_back["properties"]["emotions"]);
+
+    // taking it back again (a retry), or one never there, is answered the same and changes nothing
+    let plain = "1760000005000";
+    let plain_before = lab.message(LAB_B, AB_CHAT, plain).await?;
+    let plain_path = format!(
+        "users/ME/conversations/{}/messages/{plain}/properties?name=emotions",
+        segment(AB_CHAT)
+    );
+    for retry in [&path, &plain_path] {
+        let answer = lab
+            .send(
+                LAB_A,
+                Method::DELETE,
+                retry,
+                Some(&recorded["remove"]["request"]["body"]),
+            )
+            .await?;
+        assert_eq!((answer.status, answer.text.as_str()), (200, "null"), "{retry}");
+    }
+    assert_eq!(lab.message(LAB_B, AB_CHAT, "1760000050000").await?, read);
+    assert_eq!(lab.message(LAB_B, AB_CHAT, plain).await?, plain_before);
     assert_eq!(
         kinds(&lab.mock.take_events(LAB_B)),
         [EventKind::Reaction, EventKind::Reaction]
@@ -748,6 +818,10 @@ async fn a_chat_create_makes_the_one_to_one_chat_or_a_new_group_chat() -> TestRe
     assert_eq!(created.status, 201);
     let bc = format!("19:{}_{}@unq.gbl.spaces", oid(LAB_B), oid(LAB_C));
     assert_eq!(created.json()?["threadResource"]["id"], bc);
+    assert_eq!(
+        created.json()?["threadResource"]["properties"]["uniquerosterthread"],
+        "True"
+    );
     assert_eq!(created.location, Some(format!("{REGIONAL_HOST}/v1/threads/{bc}")));
     assert!(ids(&lab.list(LAB_C).await?).contains(&bc));
     assert_eq!(kinds(&lab.mock.take_events(LAB_C)), [EventKind::ChatCreated]);
@@ -764,6 +838,7 @@ async fn a_chat_create_makes_the_one_to_one_chat_or_a_new_group_chat() -> TestRe
         "{id}"
     );
     assert_eq!(made["threadResource"]["members"].as_array().map(Vec::len), Some(3));
+    assert!(made["threadResource"]["properties"].get("uniquerosterthread").is_none());
     for member in [LAB_B, LAB_C] {
         assert_eq!(kinds(&lab.mock.take_events(member)), [EventKind::ChatCreated]);
     }
@@ -1022,22 +1097,68 @@ async fn requests_the_mock_does_not_model_or_cannot_read_change_nothing() -> Tes
             404,
         ),
     ];
-    refused(&lab, refusals).await
+    refused(&lab, refusals).await?;
+
+    // a chat create naming a member that isn't a work account's MRI makes no chat (and no header out of its id)
+    let one_to_one = json!({
+        "members": [{"id": LAB_A, "role": "Admin"}, {"id": "8:orgid:bad\nid", "role": "Admin"}],
+        "properties": {"threadType": "chat", "uniquerosterthread": true},
+    });
+    let group = json!({
+        "members": [{"id": LAB_A}, {"id": LAB_B}, {"id": "8:orgid:not-a-guid"}],
+        "properties": {"threadType": "chat"},
+    });
+    for body in [one_to_one, group] {
+        let answer = lab.send(LAB_A, Method::POST, "threads", Some(&body)).await?;
+        assert_eq!((answer.status, answer.location), (400, None), "{body}");
+    }
+    assert_eq!(ids(&lab.list(LAB_A).await?).len(), 6);
+    for member in [LAB_A, LAB_B, LAB_C] {
+        assert!(lab.mock.take_events(member).is_empty(), "{member}");
+    }
+    Ok(())
 }
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Whether `manifest` names `teams-mock` in a dependency table other than `[dev-dependencies]` (target-specific
-/// tables included).
-fn normal_dependency(manifest: &toml::Table) -> bool {
+/// Whether the dependency `name = spec` is `teams-mock`: by its name, its `package` (a renamed key), its `path`, or as
+/// a workspace dependency named in `aliases`.
+fn is_mock(name: &str, spec: &toml::Value, aliases: &[String]) -> bool {
+    let package = spec.get("package").and_then(toml::Value::as_str);
+    let path = spec.get("path").and_then(toml::Value::as_str);
+    let inherited = spec.get("workspace").and_then(toml::Value::as_bool) == Some(true);
+    name == "teams-mock"
+        || package == Some("teams-mock")
+        || path.is_some_and(|path| Path::new(path).file_name().is_some_and(|dir| dir == "teams-mock"))
+        || (inherited && aliases.iter().any(|alias| alias == name))
+}
+
+/// The keys `[workspace.dependencies]` of `workspace` takes `teams-mock` under.
+fn mock_aliases(workspace: &toml::Table) -> Vec<String> {
+    workspace
+        .get("workspace")
+        .and_then(|table| table.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .map(|deps| {
+            deps.iter()
+                .filter(|(name, spec)| is_mock(name, spec, &[]))
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `manifest` takes `teams-mock` (under any key, `aliases` being the workspace's keys for it) in a dependency
+/// table other than `[dev-dependencies]` (target-specific tables included).
+fn normal_dependency(manifest: &toml::Table, aliases: &[String]) -> bool {
     let names = |table: Option<&toml::Value>| {
         ["dependencies", "build-dependencies"].iter().any(|kind| {
             table
                 .and_then(|table| table.get(*kind))
-                .and_then(|deps| deps.get("teams-mock"))
-                .is_some()
+                .and_then(toml::Value::as_table)
+                .is_some_and(|deps| deps.iter().any(|(name, spec)| is_mock(name, spec, aliases)))
         })
     };
     let root = Some(toml::Value::Table(manifest.clone()));
@@ -1050,6 +1171,8 @@ fn the_mock_is_never_a_normal_dependency_of_any_crate() -> TestResult {
     let root = workspace_root();
     let workspace: toml::Table = std::fs::read_to_string(root.join("Cargo.toml"))?.parse()?;
     let members = workspace["workspace"]["members"].as_array().ok_or("no members")?;
+    let aliases = mock_aliases(&workspace);
+    assert_eq!(aliases, ["teams-mock"]);
     assert!(
         members
             .iter()
@@ -1060,7 +1183,7 @@ fn the_mock_is_never_a_normal_dependency_of_any_crate() -> TestResult {
         let path = root.join(member.as_str().ok_or("not a path")?).join("Cargo.toml");
         let manifest: toml::Table = std::fs::read_to_string(&path)?.parse()?;
         assert!(
-            !normal_dependency(&manifest),
+            !normal_dependency(&manifest, &aliases),
             "{} takes teams-mock as a normal dependency",
             path.display()
         );
@@ -1069,9 +1192,23 @@ fn the_mock_is_never_a_normal_dependency_of_any_crate() -> TestResult {
     assert!(checked >= 10);
     // the check itself sees one
     let planted: toml::Table = "[target.'cfg(unix)'.dependencies]\nteams-mock.workspace = true\n".parse()?;
-    assert!(normal_dependency(&planted));
+    assert!(normal_dependency(&planted, &aliases));
     let dev_only: toml::Table = "[dev-dependencies]\nteams-mock.workspace = true\n".parse()?;
-    assert!(!normal_dependency(&dev_only));
+    assert!(!normal_dependency(&dev_only, &aliases));
+    // under a renamed key: by its package, by its path, or through a renamed workspace dependency
+    let renamed: toml::Table =
+        "[dependencies]\nmock = { package = \"teams-mock\", path = \"../teams-mock\" }\n".parse()?;
+    assert!(normal_dependency(&renamed, &aliases));
+    let by_path: toml::Table = "[build-dependencies]\nmock = { path = \"../teams-mock/\" }\n".parse()?;
+    assert!(normal_dependency(&by_path, &aliases));
+    let renamed_workspace: toml::Table =
+        "[workspace.dependencies]\nmock = { package = \"teams-mock\", path = \"crates/teams-mock\" }\n".parse()?;
+    let inherited: toml::Table = "[dependencies]\nmock.workspace = true\n".parse()?;
+    assert!(normal_dependency(&inherited, &mock_aliases(&renamed_workspace)));
+    assert!(!normal_dependency(&inherited, &aliases));
+    let renamed_dev: toml::Table =
+        "[dev-dependencies]\nmock = { package = \"teams-mock\", path = \"../teams-mock\" }\n".parse()?;
+    assert!(!normal_dependency(&renamed_dev, &aliases));
     Ok(())
 }
 

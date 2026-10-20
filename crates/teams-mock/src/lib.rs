@@ -45,7 +45,9 @@
 //! models a 400, a write by someone who isn't a member (or to a read-only conversation, or an edit or delete of
 //! someone else's message) a 403, all with no body. The service's answers to those weren't captured. Its own links
 //! (`syncState`, `backwardLink`) carry opaque tokens of its own: the real ones are opaque too, and a client follows
-//! them as full URLs.
+//! them as full URLs. A 1:1 chat's thread read wasn't kept: it takes the group chat's (`thread-group.json`, its
+//! `capabilities` among them) with the `uniquerosterthread` the conversation list gives the chat; its `fixedRoster`
+//! and its own capabilities aren't known, so they aren't made up.
 
 mod chatsvc;
 mod fixtures;
