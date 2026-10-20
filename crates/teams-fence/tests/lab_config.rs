@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt as _;
 
 use teams_fence::lab::{
-    Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri, record_service_mri,
+    Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_account_mri, record_service_mri,
 };
 
 const DATA: &str = "/lab/data";
@@ -72,6 +72,12 @@ fn lab_directories_derive_from_the_data_dir() {
     assert_eq!(paths.captures_dir(), data.join("captures"));
     assert_eq!(paths.bundles_dir(), data.join("bundles"));
     assert_eq!(paths.fence_log(), data.join("fence.log"));
+    assert_eq!(paths.region_file(Alias::B), data.join("auth/b.json"));
+}
+
+#[test]
+fn the_lab_s_secrets_live_under_its_own_keyring_application() {
+    assert_eq!(LabPaths::KEYRING_APPLICATION, "teams-lab");
 }
 
 #[test]

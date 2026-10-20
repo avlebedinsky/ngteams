@@ -9,10 +9,7 @@ use clap::Parser;
 use echo_call::call::{CallError, authorize, echo_call, skypetoken, start};
 use teams_auth::secrets::KeyringSecretStore;
 use teams_fence::Fence;
-use teams_fence::lab::{Alias, LabConfig, LabLocations};
-
-/// The Secret Service application `proto-lab auth` stores the lab's tokens under.
-const KEYRING_APPLICATION: &str = "teams-lab";
+use teams_fence::lab::{Alias, LabConfig, LabLocations, LabPaths};
 
 /// Place the Teams echo call from a lab account (spike 3b).
 #[derive(Parser)]
@@ -57,7 +54,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     })?;
     println!("fence: the call is allowed");
     // the keyring is opened only once the fence allowed the call
-    let store = KeyringSecretStore::new(KEYRING_APPLICATION)
+    let store = KeyringSecretStore::new(LabPaths::KEYRING_APPLICATION)
         .await
         .map_err(|e| e.to_string())?;
     let token = skypetoken(&store, &config.account(caller).upn)

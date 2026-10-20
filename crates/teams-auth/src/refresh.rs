@@ -14,6 +14,7 @@
 
 use crate::id_token::{Account, IdTokenClaims, IdTokenError};
 use crate::secrets::{SecretKey, SecretStore};
+use crate::session::{Clock, SystemClock};
 use crate::token::{Authorization, Scope, TokenClient, TokenError, Tokens};
 
 /// The audience name the refresh token is stored under.
@@ -71,11 +72,22 @@ impl TokenClient {
     /// ([`TokenError::InvalidGrant`], [`TokenError::ConditionalAccess`], [`TokenError::Throttled`], …), or a store
     /// failure.
     pub async fn refresh<S: SecretStore>(&self, store: &S, account: &str, scope: &Scope) -> Result<Tokens, TokenError> {
+        self.refresh_at(store, account, scope, &SystemClock).await
+    }
+
+    /// [`Self::refresh`], with the token's expiry counted from `clock`'s time of the request.
+    pub(crate) async fn refresh_at<S: SecretStore>(
+        &self,
+        store: &S,
+        account: &str,
+        scope: &Scope,
+        clock: &dyn Clock,
+    ) -> Result<Tokens, TokenError> {
         let key = refresh_token_key(account);
         let current = store.get(&key).await?.ok_or_else(|| TokenError::NotSignedIn {
             account: account.to_owned(),
         })?;
-        let grant = self.redeem_refresh_token(&current, scope).await?;
+        let grant = self.redeem_refresh_token(&current, scope, clock).await?;
         if let Some(rotated) = grant.refresh_token
             && rotated.expose() != current.expose()
         {

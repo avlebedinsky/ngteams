@@ -15,6 +15,8 @@ reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# the session: one refresh per audience however many callers wait on it, and its renewal notifications
+tokio = { workspace = true, features = ["sync"] }
 # form encoding of the token requests and of the authorize URL's query
 url.workspace = true
 zeroize.workspace = true

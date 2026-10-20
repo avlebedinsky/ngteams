@@ -38,8 +38,8 @@ use crate::config::{Alias, LabConfig, LabPaths};
 use crate::fence_http::{CatchError, RedirectCatch};
 use crate::session::{FenceReport, LabSession, SessionError, SessionState};
 
-/// The `application` attribute of the lab's items in the Secret Service.
-pub const KEYRING_APPLICATION: &str = "teams-lab";
+/// The `application` attribute of the lab's items in the Secret Service ([`LabPaths::KEYRING_APPLICATION`]).
+pub const KEYRING_APPLICATION: &str = LabPaths::KEYRING_APPLICATION;
 
 /// The audiences `--audiences` asks a token for, besides `api.spaces.skype.com` (the auth notes' table).
 pub const OTHER_AUDIENCES: [&str; 7] = [
@@ -264,10 +264,10 @@ async fn wait_for_redirect(
     }
 }
 
-/// Where [`save_region`] keeps an account's region.
+/// Where [`save_region`] keeps an account's region ([`LabPaths::region_file`]).
 #[must_use]
 pub fn region_file(paths: &LabPaths, alias: Alias) -> PathBuf {
-    paths.data_dir().join("auth").join(format!("{}.json", alias.as_str()))
+    paths.region_file(alias)
 }
 
 /// Persists the account's region (`regionGtms` and all) and the skypetoken's expiry to [`region_file`]: the directory

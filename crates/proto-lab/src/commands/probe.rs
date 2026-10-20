@@ -52,8 +52,9 @@ pub const CONVERSATIONS_PATH: &str = "v1/users/ME/conversations";
 /// the start (`startTime=1`), every kind (`targetType=All`).
 pub const CONVERSATIONS_QUERY: &str = "view=msnp24Equivalent&pageSize=200&startTime=1&targetType=All";
 
-/// The GTMs the chat base comes from, in order: the web client's (`useChatServiceAfd`), then its fallback.
-pub const CHAT_BASE_GTMS: [&str; 2] = ["chatServiceAfd", "chatService"];
+/// The GTM the chat base comes from: the web client's (`useChatServiceAfd`); [`Region::base`] falls back to
+/// `chatService` when the region lacks it.
+pub const CHAT_BASE_GTM: &str = "chatServiceAfd";
 
 /// How long one read may take, end to end.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -414,15 +415,10 @@ fn read_region(config: &LabConfig, alias: Alias) -> Result<Region, ProbeError> {
         .ok_or(ProbeError::BadRegion(shown))
 }
 
-/// The chat base from the region's GTMs ([`CHAT_BASE_GTMS`]), trimmed (GTM values may carry stray whitespace) and
-/// without a trailing slash; it must be a base the write mapping takes a chat service request under, with nothing
-/// after it.
+/// The chat base from the region's GTMs ([`CHAT_BASE_GTM`], else its fallback, trimmed: [`Region::base`]) without a
+/// trailing slash; it must be a base the write mapping takes a chat service request under, with nothing after it.
 fn chat_base(region: &Region) -> Result<String, ProbeError> {
-    let raw = CHAT_BASE_GTMS
-        .iter()
-        .find_map(|name| region.endpoint(name))
-        .ok_or(ProbeError::NoChatBase)?;
-    let trimmed = raw.trim();
+    let trimmed = region.base(CHAT_BASE_GTM).ok_or(ProbeError::NoChatBase)?;
     let base = trimmed.strip_suffix('/').unwrap_or(trimmed);
     let refused = || ProbeError::NotAChatBase(base.to_owned());
     if base.contains(['?', '#']) {

@@ -296,19 +296,24 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Modify: `crates/teams-auth/src/{lib.rs,authz.rs,token.rs}`, `crates/teams-fence/src/lab.rs` (keyring application
   name and region file path on `LabPaths`), `crates/proto-lab/src/commands/auth.rs` (uses them)
 
-- [ ] move `KEYRING_APPLICATION` and `region_file` to `teams-fence::lab::LabPaths`; `proto-lab auth` and `status` keep
+- [x] move `KEYRING_APPLICATION` and `region_file` to `teams-fence::lab::LabPaths`; `proto-lab auth` and `status` keep
       working (their tests unchanged)
-- [ ] tests first (wiremock, synthetic fixtures, a fake clock): an access token per audience, cached in memory,
+      (`LabPaths::KEYRING_APPLICATION`, `LabPaths::region_file`; `proto-lab`'s names stay as thin aliases of them, and
+      `spikes/echo-call` uses `LabPaths` too)
+- [x] tests first (wiremock, synthetic fixtures, a fake clock): an access token per audience, cached in memory,
       refreshed a margin before `exp`; a rotated refresh token is stored; concurrent callers share one refresh
-- [ ] the skypetoken is renewed only after refreshing `api.spaces.skype.com` (`AuthzKind::TokenRefresh`), never
+- [x] the skypetoken is renewed only after refreshing `api.spaces.skype.com` (`AuthzKind::TokenRefresh`), never
       outlives that token, and a renewal with an old Entra token is refused by our code before it is sent
-- [ ] the session's part of the retry table (Technical Details): a forced refresh on request (for a caller's 401); a
+- [x] the session's part of the retry table (Technical Details): a forced refresh on request (for a caller's 401); a
       claims challenge (if Task 3 enabled CAE) passed to Entra up to 3 times; 429/503 → `TokenError::Throttled` with
       `Retry-After`, no hidden retry loop
-- [ ] a renewal notification callers can subscribe to (Trouter re-authenticates on it, Task 16)
-- [ ] the region GTMs come from the stored `Region` (trimmed), with a fallback for absent names
-- [ ] tokens never reach `Debug`, errors or logs (tests check every fixture secret)
-- [ ] `cargo test -p teams-auth -p teams-fence -p proto-lab` and the gate pass
+      (`Session::refresh_rejected` and `Session::skypetoken_rejected`; no claims-challenge handling, since Task 3 left
+      CAE off; authz's 429/503 during a renewal are `Throttled` too)
+- [x] a renewal notification callers can subscribe to (Trouter re-authenticates on it, Task 16)
+- [x] the region GTMs come from the stored `Region` (trimmed), with a fallback for absent names
+      (`Region::base`: `chatServiceAfd` → `chatService`, `mtImageService` → `middleTier`; `proto-lab probe` uses it)
+- [x] tokens never reach `Debug`, errors or logs (tests check every fixture secret)
+- [x] `cargo test -p teams-auth -p teams-fence -p proto-lab` and the gate pass
 
 ### Task 5: Native request policy and the HTTP transport
 **Files:**

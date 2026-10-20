@@ -14,9 +14,11 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use serde_json::{Map, Value};
 use url::form_urlencoded;
 
+use crate::authz::AuthzError;
 use crate::id_token::IdTokenError;
 use crate::pkce::{Pkce, PkceError, random_state};
 use crate::secrets::{Secret, SecretError};
+use crate::session::{Clock, SystemClock};
 
 /// The Teams desktop client (OneAuth): a public native client, so its refresh tokens have a sliding lifetime.
 pub const TEAMS_NATIVE_CLIENT_ID: &str = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
@@ -330,9 +332,10 @@ pub enum TokenError {
     /// Entra wants the user in front of a sign-in page (MFA, consent).
     #[error("Entra needs user interaction: {0}")]
     InteractionRequired(Box<EntraError>),
-    /// 429 or 503: wait `retry_after` (when Entra gave one) before asking again. Not retried here.
+    /// 429 or 503 from Entra, or from authz during a [`Session`](crate::session::Session)'s skypetoken renewal: wait
+    /// `retry_after` (when given) before asking again. Not retried here, nor by the session.
     #[error(
-        "Entra is throttling token requests{}",
+        "the token service is throttling requests{}",
         .retry_after.map_or_else(String::new, |wait| format!(", retry after {} s", wait.as_secs()))
     )]
     Throttled {
@@ -366,6 +369,32 @@ pub enum TokenError {
     Http(#[source] reqwest::Error),
     #[error(transparent)]
     Store(#[from] SecretError),
+    /// A [`Session`](crate::session::Session)'s skypetoken renewal was refused by authz (other than throttling).
+    #[error("the skypetoken renewal failed: {0}")]
+    Authz(#[source] Box<AuthzError>),
+    /// A skypetoken renewal would have exchanged an Entra token that runs out within the session's margin: authz copies
+    /// that token's expiry, so the renewal would give a skypetoken due for renewal at once. Refused by our code before
+    /// anything is sent.
+    #[error("the Entra token for the skypetoken renewal is too old; nothing was sent to authz")]
+    StaleEntraToken,
+}
+
+impl From<AuthzError> for TokenError {
+    /// Authz's throttling (429, 503) is [`TokenError::Throttled`], as Entra's is; a store failure is
+    /// [`TokenError::Store`]; anything else is [`TokenError::Authz`].
+    fn from(error: AuthzError) -> Self {
+        match error {
+            AuthzError::Unavailable {
+                status: 429 | 503,
+                retry_after,
+            } => Self::Throttled {
+                retry_after,
+                error: None,
+            },
+            AuthzError::Store(error) => Self::Store(error),
+            error => Self::Authz(Box::new(error)),
+        }
+    }
 }
 
 /// Talks to Entra's token endpoint for one client.
@@ -406,14 +435,16 @@ impl TokenClient {
             ("code_verifier", verifier),
             ("scope", authorization.scope().as_str()),
         ];
-        self.grant(&form, &[code, verifier]).await
+        self.grant(&form, &[code, verifier], &SystemClock).await
     }
 
-    /// Redeems a refresh token for `scope` (`grant_type=refresh_token`).
+    /// Redeems a refresh token for `scope` (`grant_type=refresh_token`); the expiry counts from `clock`'s time of the
+    /// request.
     pub(crate) async fn redeem_refresh_token(
         &self,
         refresh_token: &Secret,
         scope: &Scope,
+        clock: &dyn Clock,
     ) -> Result<Grant, TokenError> {
         let form = [
             ("client_id", self.config.client_id()),
@@ -421,15 +452,16 @@ impl TokenClient {
             ("refresh_token", refresh_token.expose()),
             ("scope", scope.as_str()),
         ];
-        self.grant(&form, &[refresh_token.expose()]).await
+        self.grant(&form, &[refresh_token.expose()], clock).await
     }
 
-    /// POSTs one grant. `secrets` are the sent values an error text must never echo.
-    async fn grant(&self, form: &[(&str, &str)], secrets: &[&str]) -> Result<Grant, TokenError> {
+    /// POSTs one grant. `secrets` are the sent values an error text must never echo; `clock` dates the request, which
+    /// the answer's `expires_in` counts from.
+    async fn grant(&self, form: &[(&str, &str)], secrets: &[&str], clock: &dyn Clock) -> Result<Grant, TokenError> {
         let body = form_urlencoded::Serializer::new(String::new())
             .extend_pairs(form)
             .finish();
-        let sent = SystemTime::now();
+        let sent = clock.now();
         let response = self
             .http
             .post(self.config.token_endpoint())

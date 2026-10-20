@@ -109,6 +109,10 @@ pub struct LabPaths {
 }
 
 impl LabPaths {
+    /// The `application` attribute of the lab's items in the Secret Service: each lab account's refresh token and
+    /// skypetoken, stored by `proto-lab auth` and read by every lab binary.
+    pub const KEYRING_APPLICATION: &'static str = "teams-lab";
+
     #[must_use]
     pub fn new(data_dir: PathBuf) -> Self {
         Self { data_dir }
@@ -151,6 +155,13 @@ impl LabPaths {
     #[must_use]
     pub fn fence_log(&self) -> PathBuf {
         self.data_dir.join("fence.log")
+    }
+
+    /// Where `proto-lab auth` keeps an account's region (`regionGtms` and all) and its skypetoken's expiry, never the
+    /// token: `<data_dir>/auth/<alias>.json`.
+    #[must_use]
+    pub fn region_file(&self, alias: Alias) -> PathBuf {
+        self.data_dir.join("auth").join(format!("{}.json", alias.as_str()))
     }
 }
 

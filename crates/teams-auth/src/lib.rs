@@ -8,9 +8,11 @@
 //! - [`id_token`]: the account an ID token names, checked before a code exchange stores anything;
 //! - [`redirect`]: the registered redirect URI, and the code (or error) its redirect carries;
 //! - [`refresh`]: the code exchange and refresh with the refresh token kept in a [`secrets::SecretStore`];
-//! - [`secrets`]: the store itself.
+//! - [`secrets`]: the store itself;
+//! - [`session`]: one signed-in account's tokens while a client runs: an access token per audience, refreshed before it
+//!   runs out, and the skypetoken renewed after its Entra token.
 //!
-//! Filled in by M0 Tasks 2, 13 and 14 (`docs/plans/20261019-native-teams-m0-lab-and-spikes.md`).
+//! Filled in by M0 Tasks 2, 13 and 14 (`docs/plans/20261019-native-teams-m0-lab-and-spikes.md`) and M1 Task 4.
 
 pub mod authz;
 pub mod claims;
@@ -19,4 +21,5 @@ pub mod pkce;
 pub mod redirect;
 pub mod refresh;
 pub mod secrets;
+pub mod session;
 pub mod token;

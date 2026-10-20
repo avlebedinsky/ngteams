@@ -21,6 +21,7 @@ use url::Url;
 
 use crate::claims::{payload, text, time};
 use crate::secrets::{Secret, SecretError, SecretKey, SecretStore};
+use crate::session::{Clock, SystemClock};
 use crate::token::{retry_after, seconds};
 
 /// Teams' authz endpoint in the commercial cloud.
@@ -31,6 +32,10 @@ pub const SKYPETOKEN: &str = "skypetoken";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest `errorCode` kept from a refusal; Teams' codes are short identifiers.
 const ERROR_CODE_LIMIT: usize = 100;
+/// GTMs a service falls back to when the region has none of its own name: the web client's chat fallback
+/// (`chatServiceAfd` → `chatService`), and the image service, which has the middle tier's base
+/// (`docs/protocol/auth.md`).
+const GTM_FALLBACKS: [(&str, &str); 2] = [("chatServiceAfd", "chatService"), ("mtImageService", "middleTier")];
 
 /// Where `account`'s skypetoken lives in a [`SecretStore`].
 #[must_use]
@@ -92,10 +97,27 @@ impl Region {
         })
     }
 
-    /// The base URL of one regional service, such as `chatServiceAfd` or `middleTier`.
+    /// The base URL of one regional service, such as `chatServiceAfd` or `middleTier`, as returned.
     #[must_use]
     pub fn endpoint(&self, service: &str) -> Option<&str> {
         self.endpoints.get(service).map(String::as_str)
+    }
+
+    /// The base URL to use for a regional service: its GTM, else its fallback's ([`GTM_FALLBACKS`]: `chatServiceAfd`
+    /// falls back to `chatService`, `mtImageService` to `middleTier`), trimmed (authz returns some values with stray
+    /// whitespace). `None` when neither is there or the value is blank.
+    #[must_use]
+    pub fn base(&self, service: &str) -> Option<&str> {
+        let fallback = GTM_FALLBACKS
+            .iter()
+            .find(|(name, _)| *name == service)
+            .map(|(_, fallback)| *fallback);
+        [Some(service), fallback]
+            .into_iter()
+            .flatten()
+            .filter_map(|name| self.endpoint(name))
+            .map(str::trim)
+            .find(|base| !base.is_empty())
     }
 }
 
@@ -108,6 +130,20 @@ pub struct Skypetoken {
     /// The token's `skypeid` claim; the account's MRI is `8:` and this.
     pub skype_id: Option<String>,
     pub region: Region,
+}
+
+impl Skypetoken {
+    /// A skypetoken read back from a [`SecretStore`], with `region` (stored apart from it): `None` unless it is a JWT
+    /// with an `exp`, since an expiry that can't be read can't be trusted.
+    pub(crate) fn from_stored(token: Secret, region: Region) -> Option<Self> {
+        let claims = payload(token.expose())?;
+        Some(Self {
+            expires_at: time(&claims, "exp")?,
+            skype_id: text(&claims, "skypeid"),
+            region,
+            token,
+        })
+    }
 }
 
 /// Why the exchange gave no skypetoken. Never carries a token.
@@ -194,6 +230,17 @@ impl AuthzClient {
     /// [`AuthzError::UnexpectedResponse`] by status; [`AuthzError::MissingField`] for a success without a skypetoken,
     /// an expiry or the region GTMs; [`AuthzError::Http`] when no answer came.
     pub async fn exchange(&self, spaces_token: &Secret, kind: AuthzKind) -> Result<Skypetoken, AuthzError> {
+        self.exchange_at(spaces_token, kind, &SystemClock).await
+    }
+
+    /// [`Self::exchange`], with an `expiresIn` (used only when the token has no `exp`) counted from `clock`'s time of
+    /// the answer.
+    pub(crate) async fn exchange_at(
+        &self,
+        spaces_token: &Secret,
+        kind: AuthzKind,
+        clock: &dyn Clock,
+    ) -> Result<Skypetoken, AuthzError> {
         let correlation = correlation_id()?;
         let response = self
             .http
@@ -212,7 +259,7 @@ impl AuthzClient {
         let headers = response.headers().clone();
         let answer = response.bytes().await.map_err(http_error)?;
         if status.is_success() {
-            parse_answer(&answer, SystemTime::now())
+            parse_answer(&answer, clock.now())
         } else {
             Err(refusal(status, &headers, &answer))
         }
