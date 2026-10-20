@@ -153,8 +153,9 @@ Rules that keep the mapping fail-closed:
 - Whoever a message or an edit mentions is an added participant of its target, so the fence judges them as it judges
   the chat's members, and a mention of an outsider is denied. The mentions are `properties.mentions`, a JSON string of
   a list whose entries each name an `mri` (the bundle's form; the captures only had the empty `"[]"`). No
-  `properties` or no `mentions` is no mention; `properties` that aren't an object, or `mentions` in any other form,
-  are `Unknown`.
+  `properties` or no `mentions` is no mention; `properties` that aren't an object, `mentions` in any other form, and
+  either key in another case (`Properties`, `Mentions`, which a service binding keys in any case may read) are
+  `Unknown`.
 - A new chat's participants are exactly the body's `members`; a body without them is `Unknown`. The fence judges a
   `New` target by those participants without a read.
 - Only chat ids map: channels (`@thread.tacv2`, `@thread.skype`) and reply chains (`;messageid=`) are `Unknown`,
@@ -235,16 +236,19 @@ captures stay outside the repository and no fixture was exported from them.
       async gateway instead). Still not on the own-state list.
 - [x] `RegistrationToken`: never sent; reads work without it.
 - [x] Denied in every run, all `Unknown`, expected by `load` and, through the reviewed expected-deny list that keeps
-      them denied (`crates/proto-lab/src/scenario/expected.rs`), by `ab-chat` and `echo-call`: telemetry
+      them denied (`crates/proto-lab/src/scenario/expected.rs`), by `ab-chat`, `ab-chat-full` and `echo-call`: telemetry
       (`*.events.data.microsoft.com`, `browser.pipe.aria.microsoft.com`, `admin.microsoft.com/api/instrument`), the
       middle tier's lookups by `POST` (`users/fetchShortProfile` with a JSON array of MRIs, `users/fetch`,
       `effectivePolicies`, `useraggregatesettings`, `fetchfeaturesettings`, `apps/aggregatedEntitlements`,
       `apps/eligibilities`, `apps/batchedDefinitions`, `me/files/availability`, `users/<oid>/cookiev2`,
       `mcps/initArtifactFolder`), CSA's `chatsAndChannelsByIds`, presence (`ups/<region>/v1/presence/getpresence`), the
-      team push updates (`api/tps/…/pushupdates`), the async gateway's and media service's token exchanges, the
-      editor service (`editor.svc.cloud.microsoft`), Substrate search suggestions, and every frame sent on the
+      team push updates (`api/tps/…/pushupdates`), the async gateway's and media service's token exchanges, the editor
+      service (`editor.svc.cloud.microsoft`), Substrate search suggestions, and every frame sent on the
       `augloop.office.com` and `go.trouter.teams.microsoft.com` sockets. The chat works without them, though a chat
-      partner shows as "Unknown User" (no profile lookup).
+      partner shows as "Unknown User" (no profile lookup). Two classes on the list were first seen in `ab-chat-full`'s
+      runs of 2026-10-20: the bot invokes an opening editor sends (`POST v1/agents/<bot>/invoke`,
+      `composeExtension/fetchCommands`) and the own activity feed's item read (`PUT
+      v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread`).
 
 The synthetic fixtures in `tests/fixtures/chatsvc/` stay until they are rewritten synthetic-from-capture: written by
 hand from a local reference copy of these captures, with the same shape and made-up values. Captures never enter the

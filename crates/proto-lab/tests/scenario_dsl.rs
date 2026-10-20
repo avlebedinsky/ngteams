@@ -971,3 +971,37 @@ fn ab_chat_full_texts_are_this_runs_and_apart() {
     }
     assert_eq!(ScenarioName::AbChatFull.as_str(), "ab-chat-full");
 }
+
+/// b's copy of the chat, as the web client shows it once it has read the history: a's message, and no probe.
+const B_CHAT_PAGE: &str = r#"<!doctype html><html><body>
+<div data-tid="chat-pane-message"><p>lab full n1 first, edited</p></div>
+</body></html>"#;
+
+#[tokio::test]
+async fn the_enforcement_test_fails_when_bs_copy_of_the_chat_has_the_probe() -> TestResult {
+    with_html(B_CHAT_PAGE, async |run| {
+        let drive = &mut run.driver;
+        let probe = probe_text("n1");
+        // ab-chat-full checks once b shows a's first message, as sent or as edited
+        drive
+            .wait_for_text("a's message", &Texts::new("n1").first, Duration::from_secs(5))
+            .await?;
+        ab_chat::not_received(drive, &probe).await?;
+        let arrives = format!(
+            "(document.body.insertAdjacentHTML('beforeend', '<div data-tid=\"chat-pane-message\"><p>{probe}</p></div>'), \
+             true)"
+        );
+        drive
+            .wait_until_true("the probe arrives", &arrives, "the probe added", Duration::from_secs(1))
+            .await?;
+        let received = ab_chat::not_received(drive, &probe).await;
+        assert!(
+            received
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("b received the probe")),
+            "{received:?}"
+        );
+        Ok(())
+    })
+    .await
+}

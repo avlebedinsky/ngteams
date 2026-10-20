@@ -10,10 +10,11 @@
 //!    reacts to it and takes the reaction back, replies to the first message with a quote, reacts to the reply and
 //!    leaves the reaction there (so b's read of the chat shows a reaction with its user), and sends a last message and
 //!    deletes it ([`Texts`]).
-//! 4. b opens the chat (it reads the chat's history: message pages and their sync state), shows a's edited message,
-//!    goes to its compose box (whether the client then sends a read receipt is noted, not required), and reacts to a's
-//!    first message.
-//! 5. The run is judged as `ab-chat` is.
+//! 4. b opens the chat (it reads the chat's history: message pages and their sync state) and, once it shows a's first
+//!    message, the enforcement test's other half: b's copy of the chat must not have the probe
+//!    (`ab_chat::not_received`). b then shows a's edited message, goes to its compose box (whether the client then
+//!    sends a read receipt is noted, not required), and reacts to a's first message.
+//! 5. The run is judged as `ab-chat` is: a probe in b's copy fails it like any failed step.
 //!
 //! No mention: under the fence the web client's mention picker can't offer b. The chat partner shows as "Unknown User"
 //! because the profile lookups behind the picker are middle-tier `POST`s the fence denies, and the picker's only
@@ -44,7 +45,7 @@ use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
     self, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_in_url, chat_link, chat_requests, chat_url, deny_probes, enforce,
-    load, nonce, one_to_one_id, probe_text, save_screenshot_as, setup,
+    load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, setup,
 };
 use super::dsl::{Driver, Key, RequestPattern, SeenRequest, Selector, StepError};
 use super::expected::Review;
@@ -225,13 +226,15 @@ impl Full {
             .navigate("a opens the chat with b", &chat_link(&self.mri_b))
             .await?;
         drive_a.wait_for("a's compose box", COMPOSE, CHAT_OPEN).await?;
-        enforce(a, &mut drive_a, &probe_text(&self.nonce), &names_chat).await?;
+        let probe = probe_text(&self.nonce);
+        enforce(a, &mut drive_a, &probe, &names_chat).await?;
         report
             .notes
             .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
         let mut steps = Steps {
             writes: &writes,
             texts: &self.texts,
+            probe: &probe,
             report,
         };
         steps.a(a, &mut drive_a).await;
@@ -245,6 +248,8 @@ impl Full {
 struct Steps<'a> {
     writes: &'a Writes,
     texts: &'a Texts,
+    /// This run's probe, which b's copy of the chat must not have ([`not_received`]).
+    probe: &'a str,
     report: &'a mut ScenarioReport,
 }
 
@@ -267,8 +272,8 @@ impl Steps<'_> {
         self.settle(Alias::A, a, drive, "delete", outcome).await;
     }
 
-    /// b's steps: it opens the chat, shows a's edited message, goes to its compose box (its read receipt is noted if
-    /// it sends one) and reacts to the message.
+    /// b's steps: it opens the chat, shows a's first message without the probe, then a's edit, goes to its compose
+    /// box (its read receipt is noted if it sends one) and reacts to the message.
     async fn b(&mut self, b: &LabSession, mri_a: &str, opened: &RequestPattern) {
         let mut drive = b.driver();
         drive.set_call_timeout(PAGE_CALL);
@@ -350,7 +355,9 @@ impl Steps<'_> {
         answered("a's delete", &seen)
     }
 
-    /// b opens the chat with a, shows a's edited message and goes to its compose box. Whether b then sends a read
+    /// b opens the chat with a and, once it shows a's first message (as sent or as edited: the edit holds its text),
+    /// the other half of the enforcement test: b's copy of the chat, read from the service, must not have the probe
+    /// ([`not_received`]). Then it shows a's edited message and goes to its compose box. Whether b then sends a read
     /// receipt within [`STEP`] is noted, not required: in the headless run of 2026-10-20 b's page sent none while a's
     /// did, after a typed in it. A receipt that is sent and refused fails the step.
     async fn b_reads(&mut self, drive: &mut Driver, mri_a: &str, opened: &RequestPattern) -> Result<(), ScenarioError> {
@@ -358,6 +365,13 @@ impl Steps<'_> {
         drive
             .wait_for_request("b reads the a–b chat", opened, CHAT_OPEN)
             .await?;
+        drive
+            .wait_for_text("b shows a's first message", &self.texts.first, DELIVERY)
+            .await?;
+        not_received(drive, self.probe).await?;
+        self.report
+            .notes
+            .push("enforcement: b's copy of the chat has a's message and not the probe".to_owned());
         drive
             .wait_for_text("b shows a's edited message", &self.texts.edited, DELIVERY)
             .await?;

@@ -118,7 +118,8 @@ lookups behind it are denied (`docs/backlog/mention-not-captured-under-the-fence
   `community`, `nearby`, `share-contact`. Reading, the client takes `mentions` as a string or a list.
 
 The fence's mapping takes the `mri` of each entry as an added participant of the message's (or edit's) target, so a
-mention of anyone outside the lab is denied like adding them to the chat; any other form of `mentions` is unknown.
+mention of anyone outside the lab is denied like adding them to the chat; any other form of `mentions`, or the key in
+another case, is unknown.
 
 ## Read horizons
 

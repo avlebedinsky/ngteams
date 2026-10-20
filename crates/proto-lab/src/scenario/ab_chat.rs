@@ -284,14 +284,25 @@ impl Steps<'_> {
             .wait_for_text("b receives the message", &message, DELIVERY)
             .await?;
         report.notes.push("a's message reached b".to_owned());
-        if drive_b.shows_text("b must not have the probe", &probe).await? {
-            return Err(setup("b received the probe the fence denied".to_owned()));
-        }
+        not_received(&mut drive_b, &probe).await?;
         report
             .notes
             .push("enforcement: b's copy of the chat has the message and not the probe".to_owned());
         Ok(())
     }
+}
+
+/// The other half of the live enforcement test, on b's page once it has read the chat's history from the service and
+/// shows a's message there: the probe the fence denied in a's page ([`enforce`]) must not show. A probe there reached
+/// the service, so the fence let it out.
+///
+/// # Errors
+/// When b's page shows `probe`, or doesn't answer.
+pub async fn not_received(drive_b: &mut Driver, probe: &str) -> Result<(), ScenarioError> {
+    if drive_b.shows_text("b must not have the probe", probe).await? {
+        return Err(setup("b received the probe the fence denied".to_owned()));
+    }
+    Ok(())
 }
 
 /// Forces a deny ([`ForcedDeny`]) on every `POST` or `PUT` of `session` whose body holds [`PROBE_MARKER`], whatever

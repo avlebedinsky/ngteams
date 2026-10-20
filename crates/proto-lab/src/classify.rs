@@ -353,12 +353,12 @@ fn message_kind(body: &Value) -> Option<WriteKind> {
 /// bundle's). They are the write's added participants, so the fence judges whoever is mentioned as it judges the
 /// chat's members. No `properties`, or no `mentions` in them, is no mention. Anything else is `None` (unknown):
 /// `properties` that aren't an object, `mentions` that aren't a string holding a JSON list read by [`strict_json`],
-/// an entry that isn't an object with a string `mri`.
+/// an entry that isn't an object with a string `mri`, and either key in another case ([`optional`]).
 fn mentioned(body: &Value) -> Option<Vec<Mri>> {
-    let Some(properties) = body.get("properties") else {
+    let Some(properties) = optional(body.as_object()?, "properties").ok()? else {
         return Some(Vec::new());
     };
-    let Some(mentions) = properties.as_object()?.get("mentions") else {
+    let Some(mentions) = optional(properties.as_object()?, "mentions").ok()? else {
         return Some(Vec::new());
     };
     strict_json(mentions.as_str()?.as_bytes())?
@@ -367,6 +367,24 @@ fn mentioned(body: &Value) -> Option<Vec<Mri>> {
         .map(|mention| mention.as_object()?.get("mri")?.as_str().map(Mri::new))
         .collect()
 }
+
+/// A key a body may leave out, in an object read by [`strict_json`]: the value under `name` exactly, `None` when no
+/// key of its [`fold`] is there, and [`OtherCase`] (unknown) for a key of its fold in another case (`Mentions` for
+/// `mentions`). An exact lookup alone would read that key as missing, and a missing optional key means the body asks
+/// nothing of that kind, while a service binding keys in any case would act on it.
+fn optional<'v>(object: &'v Map<String, Value>, name: &str) -> Result<Option<&'v Value>, OtherCase> {
+    if let Some(value) = object.get(name) {
+        return Ok(Some(value));
+    }
+    let folded = fold(name);
+    if object.keys().any(|key| fold(key) == folded) {
+        return Err(OtherCase);
+    }
+    Ok(None)
+}
+
+/// [`optional`]'s key, there only in another case.
+struct OtherCase;
 
 /// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the body
 /// isn't read by [`strict_json`], or the list is missing, empty, or has a member that isn't an object with a string id.

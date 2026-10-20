@@ -129,6 +129,27 @@
       "expect": "unknown"
     },
     {
+      "name": "mentions under a key in another case (a case-insensitive service may bind it)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"Mentions": "[{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\"}]"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "properties under a key in another case, mentioning an outsider",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "Properties": {"mentions": "[{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\"}]"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "an edit whose mentions are under a key in another case",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "<p>edited</p>", "messagetype": "RichText/Html", "properties": {"MENTIONS": "[{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\"}]"}},
+      "expect": "unknown"
+    },
+    {
       "name": "a soft delete",
       "method": "DELETE",
       "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000?behavior=softDelete",
