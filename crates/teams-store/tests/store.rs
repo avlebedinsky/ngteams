@@ -78,31 +78,114 @@ fn a_new_store_is_migrated_to_the_latest_schema_in_wal_mode() {
     drop(store);
 }
 
+/// Opens the store at `path` from `count` threads at once (each a store of its own, as a second process would open).
+fn open_at_once(path: &Path, count: usize) -> Vec<Result<Store, StoreError>> {
+    let barrier = std::sync::Barrier::new(count);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..count)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    Store::open(path)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+            .collect()
+    })
+}
+
+/// Opens the store at `path` from 4 threads at once: every one must open it, at the latest schema, as a run of its own.
+fn four_open_at_once(path: &Path) -> Result<(), StoreError> {
+    let mut runs = Vec::new();
+    for store in open_at_once(path, 4) {
+        let store = store?;
+        assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+        runs.push(store.run_id());
+    }
+    runs.sort_unstable();
+    runs.dedup();
+    assert_eq!(runs.len(), 4, "a run of its own each");
+    Ok(())
+}
+
 #[test]
 fn two_processes_opening_a_new_store_at_once_both_open_it() {
+    // SQLite can't wait while it turns a new file into WAL: without the open lock one of them gets SQLITE_BUSY
     let dir = tempfile::tempdir().expect("tempdir");
     let path = store_path(&dir);
     for _ in 0..8 {
         if let Some(parent) = path.parent() {
             drop(std::fs::remove_dir_all(parent));
         }
-        let barrier = std::sync::Barrier::new(2);
-        let opened: Vec<Result<Store, StoreError>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..2)
-                .map(|_| {
-                    scope.spawn(|| {
-                        barrier.wait();
-                        Store::open(&path)
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().expect("join")).collect()
-        });
-        for store in opened {
-            let store = store.expect("both open the new store");
-            assert_eq!(store.schema_version().expect("schema version"), SCHEMA_VERSION);
-        }
+        four_open_at_once(&path).expect("every one opens the new store");
     }
+}
+
+#[test]
+fn opening_an_existing_file_not_in_wal_mode_at_once_all_open_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    for _ in 0..8 {
+        if let Some(parent) = path.parent() {
+            drop(std::fs::remove_dir_all(parent));
+            std::fs::create_dir_all(parent).expect("dir");
+        }
+        // an empty file, as a rollback journal store starts
+        std::fs::File::create(&path).expect("an empty file");
+        four_open_at_once(&path).expect("every one opens the file");
+    }
+}
+
+#[test]
+fn opening_an_existing_store_at_once_all_open_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    drop(Store::open(&path).expect("open the store"));
+    for _ in 0..8 {
+        four_open_at_once(&path).expect("every one opens the store");
+    }
+}
+
+/// The POSIX locks this process holds on the file at `path`, from `/proc/locks` (SQLite locks with POSIX locks).
+fn posix_locks_held_on(path: &Path) -> std::io::Result<usize> {
+    use std::os::unix::fs::MetadataExt;
+    let inode = std::fs::metadata(path)?.ino().to_string();
+    let pid = std::process::id().to_string();
+    let locks = std::fs::read_to_string("/proc/locks")?;
+    Ok(locks
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| !fields.contains(&"->") && fields.contains(&"POSIX") && fields.contains(&pid.as_str()))
+        .filter(|fields| {
+            fields
+                .iter()
+                .any(|field| field.matches(':').count() == 2 && field.rsplit(':').next() == Some(inode.as_str()))
+        })
+        .count())
+}
+
+#[test]
+fn opening_a_second_store_in_the_process_leaves_the_first_ones_sqlite_locks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    let shm = PathBuf::from(format!("{}-shm", path.display()));
+    let held = || -> std::io::Result<(usize, usize)> { Ok((posix_locks_held_on(&path)?, posix_locks_held_on(&shm)?)) };
+    let first = Store::open(&path).expect("open the store");
+    // a WAL connection keeps a read lock on the file and its hold on the -shm while it is open
+    let before = held().expect("locks");
+    assert!(before.0 > 0 && before.1 > 0, "{before:?}");
+    let second = Store::open(&path).expect("open the store again");
+    assert_eq!(
+        held().expect("locks"),
+        before,
+        "a second open closes no descriptor of the store's files"
+    );
+    drop(second);
+    assert_eq!(held().expect("locks"), before);
+    drop(first);
 }
 
 #[test]

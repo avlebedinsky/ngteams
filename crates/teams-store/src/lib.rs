@@ -95,16 +95,37 @@ impl Store {
     /// Opens the store at `path`, creating it (and its directory, mode `0700`) when missing, with the file `0600`
     /// (a looser existing file is tightened); turns on WAL and foreign keys, applies the pending migrations, and starts
     /// a new run (see [`Store::run_id`]) holding its lock in `<path>-runs/` (lock files of ended runs are removed).
+    /// Any number of stores may open the same file at once, in one process or several, a new file too: they wait for
+    /// each other (the open lock in `<path>-runs/` until the file is in WAL mode, SQLite's write lock after).
     ///
     /// # Errors
     ///
-    /// [`StoreError::File`] when the file or its directory can't be made private or the run's lock can't be taken, [`StoreError::NotWal`] when SQLite
-    /// keeps another journal mode, [`StoreError::SchemaTooNew`] for a store written by a newer build,
-    /// [`StoreError::Sqlite`] when SQLite refuses it.
+    /// [`StoreError::File`] when the file or its directory can't be made private or the open lock or the run's lock
+    /// can't be taken, [`StoreError::NotWal`] when SQLite keeps another journal mode, [`StoreError::SchemaTooNew`] for
+    /// a store written by a newer build, [`StoreError::Sqlite`] when SQLite refuses it.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        file::prepare(path)?;
+        let runs_dir = runs::dir(path);
+        let mut conn = {
+            // concurrent opens wait here until the file is in WAL mode, which SQLite can't wait for (see `runs`)
+            let _open_lock = runs::open_lock(&runs_dir)?;
+            file::prepare(path)?;
+            Self::connect(path)?
+        };
+        schema::migrate(&mut conn)?;
+        let (run_id, run_lock) = Self::start_run(&mut conn, &runs_dir)?;
+        Ok(Self {
+            conn,
+            run_id,
+            runs: runs_dir,
+            _run_lock: run_lock,
+        })
+    }
+
+    /// Opens a connection to the prepared file and puts the file in WAL mode. Called under the open lock.
+    fn connect(path: &Path) -> Result<Connection, StoreError> {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let mut conn = Connection::open_with_flags(path, flags)?;
+        // before the first statement that touches the file
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.set_transaction_behavior(TransactionBehavior::Immediate);
         // SQLite answers with the mode it took: the old one when it can't switch
@@ -114,15 +135,7 @@ impl Store {
         }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        schema::migrate(&mut conn)?;
-        let runs_dir = runs::dir(path);
-        let (run_id, run_lock) = Self::start_run(&mut conn, &runs_dir)?;
-        Ok(Self {
-            conn,
-            run_id,
-            runs: runs_dir,
-            _run_lock: run_lock,
-        })
+        Ok(conn)
     }
 
     /// Adds a run and takes its lock in one write transaction, removing the locks of ended runs first (see `runs`).

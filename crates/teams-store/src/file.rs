@@ -1,9 +1,15 @@
 //! The store file is the account's chat history: private to the user from the moment it exists. SQLite gives its
 //! `-wal` and `-shm` files the main file's mode when it creates them, so making the main file `0600` before SQLite
 //! opens it covers them; ones left over from before are tightened too.
+//!
+//! None of these files is ever opened here once it exists: SQLite's locks are POSIX locks, which belong to the process,
+//! and closing any descriptor of a file drops all of them, so a check that opened and closed the file would take the
+//! locks of another store open on it in this process (its read lock and its hold on the `-shm`). Modes are read and
+//! set by path, and the file is created only when missing, under the open lock (`runs::open_lock`), before SQLite has
+//! it open anywhere.
 
 use std::ffi::OsString;
-use std::fs::{DirBuilder, File, OpenOptions, Permissions};
+use std::fs::{DirBuilder, OpenOptions, Permissions};
 use std::io::ErrorKind;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -15,42 +21,55 @@ const DIR_MODE: u32 = 0o700;
 /// The files SQLite keeps next to the database.
 const SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
-/// Creates the store's directory (`0700`) and file (`0600`) when missing, and tightens an existing file (or side file)
-/// that others can read or write.
-pub(crate) fn prepare(path: &Path) -> Result<(), StoreError> {
-    let failed = |path: &Path| {
-        let path = path.to_owned();
-        move |source| StoreError::File { path, source }
-    };
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(DIR_MODE)
-            .create(parent)
-            .map_err(failed(parent))?;
+fn failed(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError {
+    let path = path.to_owned();
+    move |source| StoreError::File { path, source }
+}
+
+/// Creates `dir` (and the directories above it) with mode `0700` when missing.
+pub(crate) fn private_dir(dir: &Path) -> Result<(), StoreError> {
+    if dir.as_os_str().is_empty() {
+        return Ok(());
     }
-    let file = OpenOptions::new()
+    DirBuilder::new()
+        .recursive(true)
+        .mode(DIR_MODE)
+        .create(dir)
+        .map_err(failed(dir))
+}
+
+/// Creates the store's directory (`0700`) and file (`0600`) when missing, and tightens an existing file (or side file)
+/// that others can read or write. Called under the open lock.
+pub(crate) fn prepare(path: &Path) -> Result<(), StoreError> {
+    if let Some(parent) = path.parent() {
+        private_dir(parent)?;
+    }
+    let created = OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(false)
+        .create_new(true)
         .mode(FILE_MODE)
         .open(path);
-    tighten(&file.map_err(failed(path))?).map_err(failed(path))?;
+    match created {
+        // a new file: no connection has it open yet, so closing it here drops nobody's locks
+        Ok(file) => drop(file),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => tighten(path).map_err(failed(path))?,
+        Err(error) => return Err(failed(path)(error)),
+    }
     for suffix in SIDE_FILES {
         let side = side_file(path, suffix);
-        match File::open(&side) {
-            Ok(file) => tighten(&file).map_err(failed(&side))?,
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(failed(&side)(error)),
+        match tighten(&side) {
+            Err(error) if error.kind() != ErrorKind::NotFound => return Err(failed(&side)(error)),
+            _ => {}
         }
     }
     Ok(())
 }
 
-fn tighten(file: &File) -> std::io::Result<()> {
-    if file.metadata()?.permissions().mode() & 0o077 != 0 {
-        file.set_permissions(Permissions::from_mode(FILE_MODE))?;
+/// Takes away the group's and others' access to the file at `path`, by path (see the module docs).
+fn tighten(path: &Path) -> std::io::Result<()> {
+    if std::fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(path, Permissions::from_mode(FILE_MODE))?;
     }
     Ok(())
 }

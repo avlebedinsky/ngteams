@@ -6,17 +6,27 @@
 //! A run takes its lock, and lock files of ended runs are removed, only inside the `BEGIN IMMEDIATE` transaction that
 //! adds the run: the store's write lock serializes them with each other and with a resend's check, so no check finds a
 //! file removed under a run that is taking it.
+//!
+//! The same directory holds the open lock, `open.lock` (never swept: it names no run). An open holds it, blocking, from
+//! before the store file is made until the file is in WAL mode. SQLite gives that step no way to wait: turning a file
+//! into WAL rewrites its header in a transaction that begins as a read and then upgrades to a write, and SQLite never
+//! calls the busy handler for an upgrade from a read (it could deadlock), so of two connections making the same new
+//! file WAL at once, one gets `SQLITE_BUSY` at once, busy timeout or not. A `BEGIN IMMEDIATE` can't stand in, as the
+//! journal mode can't change inside a transaction. The lock is held only while the open checks the file's modes and
+//! SQLite opens it and switches it to WAL, each step bounded (SQLite's own waits by the busy timeout); everything
+//! after, the migrations included, waits on SQLite's write lock instead.
 
-use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::StoreError;
 
 const FILE_MODE: u32 = 0o600;
-const DIR_MODE: u32 = 0o700;
 const SUFFIX: &str = ".lock";
+/// The open lock's file name: no run id, so [`sweep`] leaves it.
+const OPEN_LOCK: &str = "open.lock";
 
 /// The directory of a store's run locks, next to it: `<store>-runs`.
 pub(crate) fn dir(store: &Path) -> PathBuf {
@@ -34,15 +44,10 @@ fn lock_file(dir: &Path, run_id: i64) -> PathBuf {
     dir.join(format!("{run_id}{SUFFIX}"))
 }
 
-/// Creates the directory (`0700`) and takes the run's lock, held until the returned file is dropped. Called inside
-/// the transaction that adds the run.
-pub(crate) fn hold(dir: &Path, run_id: i64) -> Result<File, StoreError> {
-    DirBuilder::new()
-        .recursive(true)
-        .mode(DIR_MODE)
-        .create(dir)
-        .map_err(failed(dir))?;
-    let path = lock_file(dir, run_id);
+/// Creates the directory (`0700`) when missing and opens (creating, `0600`) the lock file `name` in it, unlocked.
+fn lock_file_in(dir: &Path, name: &str) -> Result<(File, PathBuf), StoreError> {
+    crate::file::private_dir(dir)?;
+    let path = dir.join(name);
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -51,6 +56,21 @@ pub(crate) fn hold(dir: &Path, run_id: i64) -> Result<File, StoreError> {
         .mode(FILE_MODE)
         .open(&path)
         .map_err(failed(&path))?;
+    Ok((file, path))
+}
+
+/// Takes the open lock (see the module docs), waiting for another open to finish its first steps; held until the
+/// returned file is dropped.
+pub(crate) fn open_lock(dir: &Path) -> Result<File, StoreError> {
+    let (file, path) = lock_file_in(dir, OPEN_LOCK)?;
+    file.lock().map_err(failed(&path))?;
+    Ok(file)
+}
+
+/// Creates the directory (`0700`) and takes the run's lock, held until the returned file is dropped. Called inside
+/// the transaction that adds the run.
+pub(crate) fn hold(dir: &Path, run_id: i64) -> Result<File, StoreError> {
+    let (file, path) = lock_file_in(dir, &format!("{run_id}{SUFFIX}"))?;
     // only a check holds it, and only for a moment: no open run has this id
     file.lock().map_err(failed(&path))?;
     Ok(file)
