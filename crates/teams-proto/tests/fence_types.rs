@@ -11,7 +11,9 @@ use teams_fence::{
     Denied, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope, Target, WriteKind,
     WritePermit,
 };
-use teams_proto::{AddToCall, Authorized, Client, Mutating, SendMessage, StartCall, Transport, WriteError};
+use teams_proto::{
+    AddToCall, Authorized, Client, ConversationUrl, Mutating, SendMessage, StartCall, Transport, WriteError,
+};
 
 const LAB_A: &str = "8:orgid:lab-a";
 const LAB_B: &str = "8:orgid:lab-b";
@@ -19,6 +21,13 @@ const CHAT_X: &str = "19:lab-chat-x@thread.v2";
 const CHAT_Y: &str = "19:lab-chat-y@thread.v2";
 const ECHO: &str = "28:echo-service";
 const OUTSIDER: &str = "8:orgid:outsider";
+/// Placeholder conversation controllers: calls X and Y on one conversation host, and a call on another host whose
+/// conversation id is X's.
+const CALL_X: &str = "https://proxy.example.com/api/v2/ep/conv-1.example.com/conv/CallX?i=1&e=1";
+const CALL_Y: &str = "https://proxy.example.com/api/v2/ep/conv-1.example.com/conv/CallY?i=1&e=1";
+const CALL_X_ELSEWHERE: &str = "https://proxy.example.com/api/v2/ep/conv-2.example.com/conv/CallX?i=1&e=1";
+/// Where an `add` on call X is posted.
+const ADD_X: &str = "https://proxy.example.com/api/v2/ep/conv-1.example.com/conv/CallX/add?i=1&e=1";
 
 /// Answers every fetch with lab accounts only, so every check on an existing scope passes.
 struct LabOnly;
@@ -269,24 +278,65 @@ async fn a_call_from_outside_the_lab_is_denied() {
     assert_eq!(denied.reason(), &teams_fence::DenyReason::Outsiders { count: 1 });
 }
 
+/// A placeholder call's conversation.
+#[cfg(test)]
+fn call(url: &str) -> ConversationUrl {
+    ConversationUrl::parse(url).unwrap()
+}
+
 #[test]
-fn adding_to_a_call_is_an_invite_on_that_call() {
-    let request = AddToCall::new("conversation-1", Mri::new(ECHO));
+fn adding_to_a_call_is_an_invite_on_that_calls_conversation_url() {
+    let request = AddToCall::new(call(CALL_X), Mri::new(ECHO));
     assert_eq!(
         request.target(),
-        Target::new(
-            WriteKind::Invite,
-            Scope::Call {
-                id: "conversation-1".into()
-            }
-        )
-        .with_added([Mri::new(ECHO)])
+        Target::new(WriteKind::Invite, Scope::Call { id: CALL_X.into() }).with_added([Mri::new(ECHO)])
+    );
+    assert_eq!(
+        request.url().as_str(),
+        ADD_X,
+        "posted to the URL the target names, plus /add"
+    );
+    assert_eq!(request.conversation().id(), "CallX");
+}
+
+#[test]
+fn a_conversation_url_is_https_with_a_host_and_a_conversation_id() {
+    assert_eq!(call(CALL_X).as_str(), CALL_X);
+    for url in [
+        "https://proxy.example.com",
+        "https://proxy.example.com/",
+        "https://proxy.example.com/conv/",
+        "https://proxy.example.com/conv/?i=1",
+        "http://proxy.example.com/conv/CallX",
+        "https://proxy.example.com/conv/CallX#fragment",
+        "https://user:secret@proxy.example.com/conv/CallX",
+        "proxy.example.com:443",
+        "CallX",
+        "",
+    ] {
+        assert_eq!(ConversationUrl::parse(url), None, "{url:?}");
+    }
+}
+
+#[test]
+fn calls_on_other_hosts_or_routes_are_other_targets() {
+    let target = |url: &str| AddToCall::new(call(url), Mri::new(ECHO)).target();
+    assert_ne!(target(CALL_X), target(CALL_Y));
+    assert_ne!(
+        target(CALL_X),
+        target(CALL_X_ELSEWHERE),
+        "the same conversation id on another conversation host"
+    );
+    assert_ne!(
+        target(CALL_X),
+        target("https://proxy.example.com/api/v2/ep/conv-1.example.com/conv/CallX?i=2&e=1"),
+        "the same path routed elsewhere"
     );
 }
 
 #[tokio::test]
 async fn adding_the_echo_to_a_call_is_denied_while_no_source_reads_a_call() {
-    let request = AddToCall::new("conversation-1", Mri::new(ECHO));
+    let request = AddToCall::new(call(CALL_X), Mri::new(ECHO));
     let denied = fence_with_echo()
         .check(request.target(), &teams_fence::FailClosed)
         .await
@@ -301,14 +351,29 @@ async fn adding_the_echo_to_a_call_is_denied_while_no_source_reads_a_call() {
 #[tokio::test]
 async fn with_the_call_read_in_full_adding_the_echo_gets_a_permit_that_covers_it() {
     // what the fence would need: a complete read of the call's members (LabOnly stands in for one)
-    let request = AddToCall::new("conversation-1", Mri::new(ECHO));
+    let request = AddToCall::new(call(CALL_X), Mri::new(ECHO));
     let permit = fence_with_echo()
         .check(request.target(), &LabOnly)
         .await
         .expect("lab accounts + approved service");
-    let other = AddToCall::new("conversation-2", Mri::new(ECHO));
-    assert!(
-        Authorized::new(other, permit).is_err(),
-        "a permit covers its own call only"
+    let authorized = Authorized::new(request, permit).expect("the permit covers the add");
+    assert_eq!(
+        authorized.request().url().as_str(),
+        ADD_X,
+        "the add goes to the call the permit was issued for"
     );
+}
+
+#[tokio::test]
+async fn a_permit_for_one_call_does_not_cover_an_add_to_another() {
+    for other in [CALL_Y, CALL_X_ELSEWHERE] {
+        let permit = fence_with_echo()
+            .check(AddToCall::new(call(CALL_X), Mri::new(ECHO)).target(), &LabOnly)
+            .await
+            .expect("lab accounts + approved service");
+        let mismatch = Authorized::new(AddToCall::new(call(other), Mri::new(ECHO)), permit)
+            .expect_err("a permit covers its own call only");
+        assert_eq!(mismatch.permitted().scope(), &Scope::Call { id: CALL_X.into() });
+        assert_eq!(mismatch.requested().scope(), &Scope::Call { id: other.into() });
+    }
 }

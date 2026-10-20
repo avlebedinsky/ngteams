@@ -1,11 +1,12 @@
 //! Placing the echo call, step by step, as far as it can go today:
 //!
 //! 1. the call: lab account A (its MRI from `lab.toml`) places the test call for the approved echo service (the
-//!    `echo` service participant's MRI from `lab.toml`, recorded from the Task 18 capture, or an MRI given on the
-//!    command line). The call start names no callee; the echo is counted in because the caller adds it next;
+//!    `echo` service participant's MRI from `lab.toml`, recorded from the Task 18 capture; nothing else can name it,
+//!    because the call start names no callee and the strict classifier counts in that same MRI). The echo is counted
+//!    in because the caller adds it next;
 //! 2. the fence: [`teams_fence::Fence::check`] on the call's target (`WriteKind::Call`, a new scope, the caller and
-//!    the echo), and [`Authorized::new`] pairs the request with its permit. An echo given on the command line that
-//!    `lab.toml` doesn't approve is denied here: only `lab.toml` approves;
+//!    the echo), and [`Authorized::new`] pairs the request with its permit. An echo MRI the roster doesn't approve is
+//!    denied here;
 //! 3. A's skypetoken from the secret store (`proto-lab auth a`);
 //! 4. the call start: refused here on purpose ([`CallError::FollowUpsUnfenced`]). The echo joins only when the caller
 //!    adds it to the started call ([`echo_invite`], an [`AddToCall`]), and that, the acceptance's acknowledgement and
@@ -19,7 +20,7 @@ use teams_auth::authz::skypetoken_key;
 use teams_auth::secrets::{Secret, SecretError, SecretStore};
 use teams_fence::lab::{Alias, LabConfig};
 use teams_fence::{Denied, FailClosed, Fence, MembershipSource, Mri};
-use teams_proto::{AddToCall, Authorized, Mutating as _, StartCall, TargetMismatch};
+use teams_proto::{AddToCall, Authorized, ConversationUrl, Mutating as _, StartCall, TargetMismatch};
 
 /// The name of the echo service among `lab.toml`'s service participants.
 pub const ECHO_SERVICE: &str = "echo";
@@ -47,28 +48,25 @@ pub enum CallError {
     FollowUpsUnfenced,
 }
 
-/// The test call of lab account `alias` for the echo service: `echo_override` when given, else the `echo` service MRI
-/// from `config`.
+/// The test call of lab account `alias` for the `echo` service of `config`. There is no other echo: the call start
+/// doesn't name it, so a target counting in any other MRI would describe a call the body doesn't place (the strict
+/// classifier, `proto_lab::calling::call_start`, counts in `lab.toml`'s echo too).
 ///
 /// # Errors
 /// [`CallError::NoCallerMri`] or [`CallError::NoEchoMri`] when an MRI is missing.
-pub fn echo_call(config: &LabConfig, alias: Alias, echo_override: Option<Mri>) -> Result<StartCall, CallError> {
+pub fn echo_call(config: &LabConfig, alias: Alias) -> Result<StartCall, CallError> {
     let from = config
         .account(alias)
         .mri
         .as_deref()
         .ok_or(CallError::NoCallerMri(alias))?;
-    let echo = match echo_override {
-        Some(echo) => echo,
-        None => config
-            .service_participants()
-            .iter()
-            .find(|service| service.name == ECHO_SERVICE)
-            .and_then(|service| service.mri.as_deref())
-            .map(Mri::new)
-            .ok_or(CallError::NoEchoMri)?,
-    };
-    Ok(StartCall::test_call(Mri::new(from), echo))
+    let echo = config
+        .service_participants()
+        .iter()
+        .find(|service| service.name == ECHO_SERVICE)
+        .and_then(|service| service.mri.as_deref())
+        .ok_or(CallError::NoEchoMri)?;
+    Ok(StartCall::test_call(Mri::new(from), Mri::new(echo)))
 }
 
 /// Asks the fence for the call. A new call has no members to fetch, so the fail-closed source is all it needs.
@@ -80,11 +78,11 @@ pub async fn authorize(fence: &Fence, call: StartCall) -> Result<Authorized<Star
     Ok(Authorized::new(call, permit)?)
 }
 
-/// The `add` that brings `call`'s echo into the conversation the start opened (`conversation`: its id from the
-/// start's answer).
+/// The `add` that brings the echo of the permitted `call` into the conversation the start opened (`conversation`: the
+/// controller URL from the start's answer). The invitee is always the echo the call start was permitted for.
 #[must_use]
-pub fn echo_invite(call: &StartCall, conversation: &str) -> AddToCall {
-    AddToCall::new(conversation, call.echo().clone())
+pub fn echo_invite(call: &Authorized<StartCall>, conversation: ConversationUrl) -> AddToCall {
+    AddToCall::new(conversation, call.request().echo().clone())
 }
 
 /// Asks the fence for the `add`, which judges the call's members as `source` reads them. With the sources a lab binary
@@ -123,16 +121,15 @@ pub fn start(_call: &Authorized<StartCall>, _skypetoken: &Secret) -> Result<(), 
 /// Steps 1–4 in order.
 ///
 /// # Errors
-/// The first step that stops: a missing MRI, the fence's denial of an echo `lab.toml` doesn't approve, the missing
-/// skypetoken, then the call start that isn't sent ([`CallError::FollowUpsUnfenced`]).
+/// The first step that stops: a missing MRI, the fence's denial, the missing skypetoken, then the call start that
+/// isn't sent ([`CallError::FollowUpsUnfenced`]).
 pub async fn place_echo_call(
     config: &LabConfig,
     fence: &Fence,
     store: &impl SecretStore,
     alias: Alias,
-    echo_override: Option<Mri>,
 ) -> Result<(), CallError> {
-    let call = authorize(fence, echo_call(config, alias, echo_override)?).await?;
+    let call = authorize(fence, echo_call(config, alias)?).await?;
     let token = skypetoken(store, &config.account(alias).upn).await?;
     start(&call, &token)
 }

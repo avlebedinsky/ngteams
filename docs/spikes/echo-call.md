@@ -103,9 +103,10 @@ on both.
 - **Callback links**: `CallbackLinks` builds each link as the web client does, `<Trouter push URL>callAgent/<agent
   id>/<8 hex digits of its own>/<call|conversation>/<name>/`, and `OutgoingCall` acts only on deliveries at its own
   links' paths: another call's delivery changes nothing.
-- **The answer**: `Conversation` reads the start's answer: the conversation id (the call's scope for the fence), its
-  controller and its operation links (`leave`, `getAllParticipants`, …); `add_url` is where the client posts the
-  `add` (the controller plus `/add`, not the answer's `addParticipant` link).
+- **The answer**: `Conversation` reads the start's answer: its controller URL (`teams_proto::ConversationUrl`: https,
+  a host, a non-empty conversation id as the last path segment; anything else is no conversation) and its operation
+  links (`leave`, `getAllParticipants`, …). The client posts the `add` to the controller plus `/add`, query kept, not
+  to the answer's `addParticipant` link.
 - **The acceptance**: the call controller calls back at the `acceptance` link with `callAcceptance.mediaContent`, the
   media controller's SDP answer, and `callAcceptance.links` (`acknowledgement`, `callLeg`, `mediaRenegotiation`, …).
   `Inbound::Accepted` carries the answer and the two links; `OutgoingCall` asks to apply and acknowledge it once (the
@@ -115,7 +116,8 @@ on both.
   `RTP/SAVP` on real ports with the candidates inline, `a=rtcp:<port>`, `b=CT`, `a=x-ssrc-range`, `a=x-signaling-fb`,
   `a=label`, and in the answer an `m=x-data` line. `NgcSdp` only tells it apart from a browser's (or str0m's) SDP and
   refuses the latter; converting between the two is not built.
-- **The `add`**: `add_body`, built only from an `Authorized<AddToCall>`, matches the captured `add` (the invitee with
+- **The `add`**: `add_request`, built only from an `Authorized<AddToCall>` (its URL is `AddToCall::url`, its
+  invitee the request's), is posted where the client posts it and matches the captured `add` (the invitee with
   a fresh participant id, the 1:1 chat with the bot, the caller as organizer, the `add`'s callbacks). Tested with a
   stand-in membership source, because no real one can permit it.
 - **The incoming-call policy**: a payload with a `callNotification` is an incoming call whatever its path, and
@@ -128,15 +130,19 @@ on both.
 `teams_proto::StartCall::test_call(caller, echo)` is the call start: target `WriteKind::Call` on `Scope::New` with
 the caller and the echo. The start doesn't name the echo; it is counted in so that the fence lets a test call start
 only when it would admit the echo too, the same target the browser fence gives the web client's start.
-`teams_proto::AddToCall` is the `add`: `WriteKind::Invite` on `Scope::Call { id: <conversation> }` with the invitee
-added, so the fence must read the call's members, which no source can (`FailClosed` reads nothing,
+`teams_proto::AddToCall` is the `add`: `WriteKind::Invite` on `Scope::Call { id: <controller URL> }` with the
+invitee added. The id is the whole controller URL (host, path, query), and the `add` is posted to that same URL plus
+`/add`, so a permit for one call never carries an `add` to another, not even one with the same conversation id on
+another conversation host. The fence must read the call's members, which no source can (`FailClosed` reads nothing,
 `LiveMembershipSource` reads chats only): it is denied as partial (`tests/call.rs`,
 `crates/teams-proto/tests/fence_types.rs`).
 
 `src/call.rs` runs the flow: A's MRI and the echo's MRI from `lab.toml` → `Fence::check` + `Authorized::new` → A's
 skypetoken from the Secret Service → the call start, which `call::start` refuses (`CallError::FollowUpsUnfenced`). The
-fence comes first, so no token is read for a call that isn't allowed. An echo given with `--callee` that `lab.toml`
-doesn't approve is denied (`Outsiders`, logged to `fence.log`).
+fence comes first, so no token is read for a call that isn't allowed. The echo is always `lab.toml`'s `echo` service
+(there is no flag for another: the start doesn't name the echo, so the target would describe a call the body doesn't
+place), the `add` invites the echo of the permitted start, and a test call for an echo the roster doesn't approve is
+denied (`Outsiders`, logged to `fence.log`).
 
 ## Blocked, and what unblocks it
 

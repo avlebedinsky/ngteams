@@ -1,6 +1,6 @@
 //! Call signaling for the echo call, as the Task 18 capture of the web client's test call shows it (2026-10-20,
 //! `docs/protocol/calling-echo.md`; fixtures `tests/fixtures/calling/echo/*.json`). Nothing in this module sends
-//! anything: it builds request bodies and reads what comes back.
+//! anything: it builds requests and reads what comes back.
 //!
 //! The test call, step by step:
 //! 1. **TURN credentials**: `GET` [`TRAP_TOKENS_URL`] answers `{"tokens":[{realm, username, password}], "expires"}`
@@ -11,12 +11,13 @@
 //!    Teams dialect [`SDP_NGC`] ([`NgcSdp`]), not as the browser's SDP. Every callback link is the endpoint's Trouter
 //!    push URL, `callAgent/<agent id>/`, a random segment of its own, and `call/<name>/` or `conversation/<name>/`
 //!    ([`CallbackLinks`]).
-//! 3. **The answer** is the conversation ([`Conversation`]): its controller URL and operation links.
+//! 3. **The answer** is the conversation ([`Conversation`]): its controller URL ([`ConversationUrl`], what the fence
+//!    knows the call by) and operation links.
 //! 4. **The acceptance**: the call controller calls back at the `acceptance` link with the media controller's answer
 //!    (the remote SDP, Teams dialect) and the call leg's links ([`Acceptance`]); the client acknowledges it with a
 //!    `POST` to its `acknowledgement` link. No `mediaAnswer` delivery was seen.
-//! 5. **The echo joins** when the caller invites it: `POST <conversation>/add` ([`add_body`]), from a permitted
-//!    [`AddToCall`]. That, the acknowledgement and the `leave` are writes on a call that exists, which the fence can't
+//! 5. **The echo joins** when the caller invites it: `POST <conversation>/add` ([`add_request`]: the URL and the body,
+//!    both from a permitted [`AddToCall`]). That, the acknowledgement and the `leave` are writes on a call that exists, which the fence can't
 //!    permit yet (`docs/backlog/fence-call-follow-ups.md`), so [`crate::call::start`] places no call.
 //!
 //! **Incoming calls are never answered**: a payload with a `callNotification` is an incoming call whatever its path
@@ -27,7 +28,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 use teams_fence::Mri;
-use teams_proto::{AddToCall, Authorized, StartCall, TEST_CALL_SCENARIO};
+use teams_proto::{AddToCall, Authorized, ConversationUrl, StartCall, TEST_CALL_SCENARIO};
 
 use crate::turn::Credentials;
 
@@ -278,25 +279,20 @@ pub fn call_start_body(call: &Authorized<StartCall>, me: &Endpoint, offer: &NgcS
 /// The call start's answer: the conversation the call opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {
-    /// The last path segment of its controller URL: the call's id for the fence ([`teams_fence::Scope::Call`]).
-    pub id: String,
-    /// `conversationController`: its URL on the conversation service, behind the flight proxy.
-    pub controller: String,
+    /// `conversationController`: its URL on the conversation service, behind the flight proxy. The call's id for the
+    /// fence ([`teams_fence::Scope::Call`]) and where an [`AddToCall`] on it is posted.
+    pub controller: ConversationUrl,
     pub scenario: Option<String>,
     /// Its operations by name (`leave`, `addParticipant`, `getAllParticipants`, …).
     pub links: BTreeMap<String, String>,
 }
 
 impl Conversation {
-    /// Reads the answer; `None` without a controller URL that has a path.
+    /// Reads the answer; `None` unless its `conversationController` is a [`ConversationUrl`] (`https`, a host, no user
+    /// info or fragment, and a non-empty last path segment: the conversation id).
     #[must_use]
     pub fn from_answer(answer: &Value) -> Option<Self> {
-        let controller = answer.get("conversationController")?.as_str()?.to_owned();
-        let path = controller.split(['?', '#']).next()?;
-        let id = path
-            .rsplit('/')
-            .next()
-            .filter(|id| !id.is_empty() && !id.contains(':'))?;
+        let controller = ConversationUrl::parse(answer.get("conversationController")?.as_str()?)?;
         let links = answer
             .get("links")
             .and_then(Value::as_object)
@@ -308,9 +304,8 @@ impl Conversation {
             })
             .unwrap_or_default();
         Some(Self {
-            id: id.to_owned(),
+            controller,
             scenario: answer.get("scenario").and_then(Value::as_str).map(str::to_owned),
-            controller: controller.clone(),
             links,
         })
     }
@@ -319,16 +314,6 @@ impl Conversation {
     #[must_use]
     pub fn link(&self, name: &str) -> Option<&str> {
         self.links.get(name).map(String::as_str)
-    }
-
-    /// Where the web client posts the `add` that brings the echo in: the controller's path plus `/add`, its query kept
-    /// (not the answer's `addParticipant` link).
-    #[must_use]
-    pub fn add_url(&self) -> String {
-        match self.controller.split_once('?') {
-            Some((path, query)) => format!("{path}/add?{query}"),
-            None => format!("{}/add", self.controller),
-        }
     }
 }
 
@@ -342,19 +327,27 @@ pub struct Invitation {
     pub tenant_id: String,
 }
 
+/// A request ready for a transport: where it is posted and its body.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WireRequest {
+    pub url: String,
+    pub body: Value,
+}
+
 /// The `add` that invites the echo into the call, from an invitation the fence permitted (today none: see
-/// [`AddToCall`]). `caller` is our own MRI (`8:orgid:<object id>`, the object id naming the organizer); `None` for any
-/// other kind of MRI.
+/// [`AddToCall`]). Its URL is [`AddToCall::url`] of the permitted request and its invitee that request's, so it lands
+/// on the call the permit was issued for. `caller` is our own MRI (`8:orgid:<object id>`, the object id naming the
+/// organizer); `None` for any other kind of MRI.
 #[must_use]
-pub fn add_body(
+pub fn add_request(
     add: &Authorized<AddToCall>,
     caller: &Mri,
     me: &Endpoint,
     invitation: &Invitation,
     links: &CallbackLinks,
-) -> Option<Value> {
+) -> Option<WireRequest> {
     let organizer = caller.as_str().strip_prefix("8:orgid:")?;
-    Some(json!({
+    let body = json!({
         "disableUnmute": false,
         "participants": {
             "from": me.participant(caller),
@@ -370,7 +363,11 @@ pub fn add_body(
             "addParticipantSuccess": links.url(Callback::AddParticipantSuccess),
             "addParticipantFailure": links.url(Callback::AddParticipantFailure),
         },
-    }))
+    });
+    Some(WireRequest {
+        url: add.request().url().into(),
+        body,
+    })
 }
 
 /// The call controller's acceptance of our call: the remote SDP and the call leg's links.

@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 
 use echo_call::signaling::{
     Acceptance, Action, CALL_START_URL, CallState, Callback, CallbackLinks, Conversation, Endpoint, Inbound,
-    Invitation, NgcSdp, OutgoingCall, SDP_NGC, TrapTokens, add_body, call_start_body,
+    Invitation, NgcSdp, OutgoingCall, SDP_NGC, TrapTokens, WireRequest, add_request, call_start_body,
 };
 use fixture_guard::Guard;
 use serde_json::{Value, json};
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
-use teams_proto::{AddToCall, Authorized, Mutating as _, StartCall, TEST_CALL_SCENARIO};
+use teams_proto::{AddToCall, Authorized, ConversationUrl, Mutating as _, StartCall, TEST_CALL_SCENARIO};
 
 /// The fixtures' placeholders for lab account a and the echo bot.
 const LAB_A: &str = "8:orgid:<guid:a>";
@@ -254,11 +254,13 @@ fn a_browser_sdp_is_not_the_teams_dialect() {
 #[test]
 fn the_start_answer_names_the_conversation_its_add_and_its_leave() {
     let conversation = Conversation::from_answer(&answers().unwrap()["call_start_answer"]).unwrap();
-    assert_eq!(conversation.id, "SyntheticConversation0");
+    assert_eq!(conversation.controller.id(), "SyntheticConversation0");
     assert_eq!(conversation.scenario.as_deref(), Some(TEST_CALL_SCENARIO));
     let (add_url, _) = request(ADD).unwrap();
     assert_eq!(
-        conversation.add_url(),
+        AddToCall::new(conversation.controller.clone(), Mri::new(ECHO))
+            .url()
+            .as_str(),
         add_url,
         "the client posts to …/add, not to the addParticipant link"
     );
@@ -273,20 +275,49 @@ fn the_start_answer_names_the_conversation_its_add_and_its_leave() {
     );
 }
 
-#[tokio::test]
-async fn the_add_is_the_web_clients_add_once_the_fence_could_permit_it() {
-    let conversation = Conversation::from_answer(&answers().unwrap()["call_start_answer"]).unwrap();
-    let add = AddToCall::new(conversation.id.clone(), Mri::new(ECHO));
-    let permit = fence().check(add.target(), &CallOfLabA).await.unwrap();
-    let add = Authorized::new(add, permit).unwrap();
-    let invitation = Invitation {
+#[test]
+fn an_answer_whose_controller_has_no_conversation_id_is_not_a_conversation() {
+    for controller in [
+        "https://api.flightproxy.teams.microsoft.com",
+        "https://api.flightproxy.teams.microsoft.com/",
+        "https://api.flightproxy.teams.microsoft.com/conv/?i=0-0-0-0&e=1",
+        "https://api.flightproxy.teams.microsoft.com:443",
+        "http://api.flightproxy.teams.microsoft.com/conv/SyntheticConversation0",
+        "https://api.flightproxy.teams.microsoft.com/conv/SyntheticConversation0#x",
+        "SyntheticConversation0",
+    ] {
+        let answer = json!({ "conversationController": controller, "links": {} });
+        assert_eq!(Conversation::from_answer(&answer), None, "{controller}");
+    }
+}
+
+/// The invitation of the fixtures' `add`.
+fn invitation() -> Invitation {
+    Invitation {
         participant_id: "<guid:6>".into(),
         chat_thread: "19:<guid:a>_<guid:echo>@unq.gbl.spaces".into(),
         tenant_id: "<guid:7>".into(),
-    };
-    let body = add_body(&add, &Mri::new(LAB_A), &me(), &invitation, &fixture_links().unwrap()).unwrap();
+    }
+}
 
-    let (_, mut captured) = request(ADD).unwrap();
+async fn permitted_add(conversation: &ConversationUrl) -> TestResult<Authorized<AddToCall>> {
+    let add = AddToCall::new(conversation.clone(), Mri::new(ECHO));
+    let permit = fence().check(add.target(), &CallOfLabA).await?;
+    Ok(Authorized::new(add, permit)?)
+}
+
+fn add_of(add: &Authorized<AddToCall>) -> TestResult<WireRequest> {
+    add_request(add, &Mri::new(LAB_A), &me(), &invitation(), &fixture_links()?).ok_or_else(|| "no add".into())
+}
+
+#[tokio::test]
+async fn the_add_is_the_web_clients_add_once_the_fence_could_permit_it() {
+    let conversation = Conversation::from_answer(&answers().unwrap()["call_start_answer"]).unwrap();
+    let add = permitted_add(&conversation.controller).await.unwrap();
+    let WireRequest { url, body } = add_of(&add).unwrap();
+
+    let (captured_url, mut captured) = request(ADD).unwrap();
+    assert_eq!(url, captured_url, "posted where the client posts it");
     assert_eq!(
         body["links"]["addParticipantSuccess"],
         captured["links"]["addParticipantSuccess"]
@@ -296,6 +327,44 @@ async fn the_add_is_the_web_clients_add_once_the_fence_could_permit_it() {
     ours.as_object_mut().unwrap().remove("links");
     captured.as_object_mut().unwrap().remove("links");
     assert_eq!(ours, captured);
+}
+
+#[tokio::test]
+async fn an_add_goes_only_to_the_call_its_permit_was_issued_for() {
+    let call_x = ConversationUrl::parse(
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01.example.com/conv/CallX?i=0-0-0-0&e=1",
+    )
+    .unwrap();
+    // the same conversation id on another conversation host
+    let call_y = ConversationUrl::parse(
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-02.example.com/conv/CallX?i=0-0-0-0&e=1",
+    )
+    .unwrap();
+    let add_x = permitted_add(&call_x).await.unwrap();
+    assert_eq!(
+        add_of(&add_x).unwrap().url,
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01.example.com/conv/CallX/add?i=0-0-0-0&e=1"
+    );
+
+    // the permit for call X, offered for an add to call Y
+    let permit_x = fence()
+        .check(AddToCall::new(call_x.clone(), Mri::new(ECHO)).target(), &CallOfLabA)
+        .await
+        .unwrap();
+    let mismatch = Authorized::new(AddToCall::new(call_y.clone(), Mri::new(ECHO)), permit_x)
+        .expect_err("a permit for call X carries no add to call Y");
+    assert_eq!(
+        mismatch.permitted().scope(),
+        &Scope::Call {
+            id: call_x.as_str().into()
+        }
+    );
+    assert_eq!(
+        mismatch.requested().scope(),
+        &Scope::Call {
+            id: call_y.as_str().into()
+        }
+    );
 }
 
 #[test]

@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 teams-fence.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 # the tests mint permits from a fence over a test roster and a fake membership source; the trybuild cases here see it

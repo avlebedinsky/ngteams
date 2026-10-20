@@ -1,6 +1,7 @@
 //! Mutating requests ([`Mutating`]) and the pairing of one with the permit issued for its target ([`Authorized`]).
 
 use teams_fence::{Mri, Scope, Target, WriteKind, WritePermit};
+use url::Url;
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
 /// [`Authorized`], next to a [`WritePermit`] issued for exactly that target.
@@ -166,30 +167,71 @@ impl Mutating for StartCall {
     }
 }
 
+/// A call's conversation on the conversation service: the URL the call start's answer gives as its
+/// `conversationController` (`https://<proxy>/…/conv/<conversation id>?<routing query>`). Writes on the call go to
+/// this URL plus an operation, so it is also what the fence knows the call by: [`Scope::Call`]'s id is this URL as is,
+/// host, path and query, and two calls on different hosts or routes never share an id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationUrl(Url);
+
+impl ConversationUrl {
+    /// `None` unless `url` is an `https` URL with a host, no user info, no fragment and a non-empty last path segment
+    /// (the conversation id).
+    #[must_use]
+    pub fn parse(url: &str) -> Option<Self> {
+        let url = Url::parse(url).ok()?;
+        let has_id = url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|id| !id.is_empty());
+        let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
+        (url.scheme() == "https" && url.host_str().is_some() && plain && has_id).then_some(Self(url))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// The conversation id: the last path segment.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.0
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .unwrap_or_default()
+    }
+
+    /// The URL of the operation `name` on this conversation: its path plus `/<name>`, its query kept.
+    fn operation(&self, name: &str) -> Url {
+        let mut url = self.0.clone();
+        url.set_path(&format!("{}/{name}", self.0.path()));
+        url
+    }
+}
+
 /// Invites someone into a call that exists (the conversation's `add`; how the test call brings the echo in). Its
-/// target is [`WriteKind::Invite`] on [`Scope::Call`] (the conversation id from the call start's answer) with the
-/// invitee added, so the fence judges the call's current members, read fresh and in full, together with the invitee.
-/// No membership source can read a call yet (`docs/backlog/fence-call-follow-ups.md`): today the fence denies this
-/// request as partial, whoever the invitee is.
+/// target is [`WriteKind::Invite`] on [`Scope::Call`] (the call's [`ConversationUrl`] as is) with the invitee added,
+/// so the fence judges the call's current members, read fresh and in full, together with the invitee. The request is
+/// posted to [`AddToCall::url`], which comes from the same conversation URL, so a permit for one call never carries an
+/// `add` to another. No membership source can read a call yet (`docs/backlog/fence-call-follow-ups.md`): today the
+/// fence denies this request as partial, whoever the invitee is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddToCall {
-    call: String,
+    conversation: ConversationUrl,
     invitee: Mri,
 }
 
 impl AddToCall {
     #[must_use]
-    pub fn new(call: impl Into<String>, invitee: Mri) -> Self {
-        Self {
-            call: call.into(),
-            invitee,
-        }
+    pub fn new(conversation: ConversationUrl, invitee: Mri) -> Self {
+        Self { conversation, invitee }
     }
 
-    /// The conversation id of the call.
+    /// The call's conversation.
     #[must_use]
-    pub fn call(&self) -> &str {
-        &self.call
+    pub fn conversation(&self) -> &ConversationUrl {
+        &self.conversation
     }
 
     /// Who is invited.
@@ -197,10 +239,23 @@ impl AddToCall {
     pub fn invitee(&self) -> &Mri {
         &self.invitee
     }
+
+    /// Where the `add` is posted, as the web client posts it: the conversation's path plus `/add`, its query kept (not
+    /// the answer's `addParticipant` link). A transport posts the request here and nowhere else.
+    #[must_use]
+    pub fn url(&self) -> Url {
+        self.conversation.operation("add")
+    }
 }
 
 impl Mutating for AddToCall {
     fn target(&self) -> Target {
-        Target::new(WriteKind::Invite, Scope::Call { id: self.call.clone() }).with_added([self.invitee.clone()])
+        Target::new(
+            WriteKind::Invite,
+            Scope::Call {
+                id: self.conversation.as_str().to_owned(),
+            },
+        )
+        .with_added([self.invitee.clone()])
     }
 }
