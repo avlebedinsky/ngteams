@@ -1,0 +1,72 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: a's edit of its own message in the a-b 1:1 chat, ab-chat-full run of 2026-10-20 (capture ab-chat-full/20261020T194153Z, reference copy reference/chat/ab-chat-full-a.jsonl, read locally), and the edited message as b's read gave it back (ab-chat-full/20261020T194156Z). The edit puts the whole message again: its id, the new content, version as an ISO time and properties.edittime. Read back the message keeps its id and clientmessageid; its version and properties.edittime move, and it carries no skypeeditedid. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md.",
+  "request": {
+    "method": "PUT",
+    "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000",
+    "body": {
+      "id": "1760000010000",
+      "type": "Message",
+      "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "conversationLink": "conversation/19:<guid:a>_<guid:b>@unq.gbl.spaces;messageid=1760000010000",
+      "from": "worker/8:orgid:<guid:a>",
+      "fromUserId": "8:orgid:<guid:a>",
+      "composetime": "2026-01-01T00:00:10.000Z",
+      "originalarrivaltime": "2026-01-01T00:00:10.000Z",
+      "content": "<p>a made-up message, edited</p>",
+      "messagetype": "RichText/Html",
+      "contenttype": "Text",
+      "imdisplayname": "Lab A",
+      "clientmessageid": "1111111111111111111",
+      "callId": "",
+      "state": 0,
+      "version": "2026-01-01T00:00:20.000Z",
+      "amsreferences": [],
+      "properties": {
+        "importance": "",
+        "subject": "",
+        "title": "",
+        "cards": "[]",
+        "links": "[]",
+        "mentions": "[]",
+        "onbehalfof": null,
+        "files": "[]",
+        "policyViolation": null,
+        "formatVariant": "TEAMS",
+        "edittime": 1760000020000
+      },
+      "crossPostChannels": []
+    }
+  },
+  "response": {
+    "status": 200,
+    "body_text": ""
+  },
+  "read_back": {
+    "sequenceId": 3,
+    "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "fromDisplayNameInToken": "Lab A",
+    "id": "1760000010000",
+    "clientmessageid": "1111111111111111111",
+    "version": "1760000020900",
+    "messagetype": "RichText/Html",
+    "content": "<p>a made-up message, edited</p>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "imdisplayname": "Lab A",
+    "composetime": "2026-01-01T00:00:10.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:00:10.0000000Z",
+    "properties": {
+      "mentions": "[]",
+      "cards": "[]",
+      "links": "[]",
+      "files": "[]",
+      "formatVariant": "TEAMS",
+      "edittime": 1760000020900,
+      "composetime": "2026-01-01T00:00:10.000Z",
+      "languageStamp": "languages=en:100;length:30;&detector=Bling"
+    }
+  }
+}

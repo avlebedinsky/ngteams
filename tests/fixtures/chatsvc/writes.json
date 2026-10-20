@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, not captured: chat service requests as the web bundle builds them (docs/protocol/fence-targets.md), each with the write the fence maps it to, or unknown. To be checked against, and joined by, synthetic requests (same shape, made-up values) written from the reference copy of a load/ab-chat capture, read locally; captures never enter the repo, not even sanitized. <guid:a>, <guid:b> are lab accounts' object ids, <guid:x> an outsider's; ids are percent-encoded in paths as the client encodes them. Tests fill in made-up GUIDs.",
+  "_synthetic": "Made up, not captured: chat service requests as the web bundle builds them (docs/protocol/fence-targets.md), each with the write the fence maps it to, or unknown. The cases named after ab-chat-full are written synthetic-from-capture: the shape of the requests in the reference copies of that run's capture (2026-10-20, read locally), with made-up values; the mention cases follow the web bundle, since no mention was captured (docs/protocol/chat.md). Captures never enter the repo, not even sanitized. <guid:a>, <guid:b> are lab accounts' object ids, <guid:x> an outsider's; ids are percent-encoded in paths as the client encodes them. Tests fill in made-up GUIDs.",
   "base": "https://teams.microsoft.com/api/chatsvc/emea/v1",
   "cases": [
     {
@@ -36,6 +36,167 @@
       "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
       "body": {"content": "<p>edited</p>", "messagetype": "RichText/Html"},
       "expect": {"kind": "edit", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "an edit as the web client sends it: the whole message again (shape of ab-chat-full, 2026-10-20)",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"id": "1760000000000", "type": "Message", "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces", "conversationLink": "conversation/19:<guid:a>_<guid:b>@unq.gbl.spaces;messageid=1760000000000", "from": "worker/8:orgid:<guid:a>", "fromUserId": "8:orgid:<guid:a>", "composetime": "2026-01-01T00:00:00.000Z", "originalarrivaltime": "2026-01-01T00:00:00.000Z", "content": "<p>made-up text, edited</p>", "messagetype": "RichText/Html", "contenttype": "Text", "imdisplayname": "Lab A", "clientmessageid": "1111111111111111111", "callId": "", "state": 0, "version": "2026-01-01T00:00:09.000Z", "amsreferences": [], "properties": {"importance": "", "subject": "", "title": "", "cards": "[]", "links": "[]", "mentions": "[]", "onbehalfof": null, "files": "[]", "policyViolation": null, "formatVariant": "TEAMS", "edittime": 1760000009000}, "crossPostChannels": []},
+      "expect": {"kind": "edit", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "an edit whose body Chrome didn't inline (its mentions can't be read)",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": null,
+      "expect": "unknown"
+    },
+    {
+      "name": "an edit that isn't a message (typing put on a message)",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "", "messagetype": "Control/Typing"},
+      "expect": "unknown"
+    },
+    {
+      "name": "an edit that adds a mention of an outsider",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Someone</span> edited</p>", "messagetype": "RichText/Html", "properties": {"mentions": "[{\"@type\":\"http://schema.skype.com/Mention\",\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\",\"mentionType\":\"person\",\"displayName\":\"Someone\"}]"}},
+      "expect": {"kind": "edit", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces", "added": ["8:orgid:<guid:x>"]}
+    },
+    {
+      "name": "a message as the web client sends it, no mention (shape of ab-chat-full, 2026-10-20)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"id": "-1", "type": "Message", "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces", "conversationLink": "blah/19:<guid:a>_<guid:b>@unq.gbl.spaces", "from": "8:orgid:<guid:a>", "fromUserId": "8:orgid:<guid:a>", "composetime": "2026-01-01T00:00:00.000Z", "originalarrivaltime": "2026-01-01T00:00:00.000Z", "content": "<p>made-up text</p>", "messagetype": "RichText/Html", "contenttype": "Text", "imdisplayname": "Lab A", "clientmessageid": "1111111111111111111", "callId": "", "state": 0, "version": "0", "amsreferences": [], "properties": {"importance": "", "subject": "", "title": "", "cards": "[]", "links": "[]", "mentions": "[]", "onbehalfof": null, "files": "[]", "policyViolation": null, "formatVariant": "TEAMS"}, "crossPostChannels": []},
+      "expect": {"kind": "message", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "a quoted reply (shape of ab-chat-full, 2026-10-20)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"1760000000000\"><strong itemprop=\"mri\" itemid=\"8:orgid:<guid:a>\">Lab A</strong><span itemprop=\"time\" itemid=\"1760000000000\"></span><p itemprop=\"preview\">made-up text</p></blockquote><p>a made-up reply</p>", "messagetype": "RichText/Html", "contenttype": "Text", "clientmessageid": "2222222222222222222", "properties": {"mentions": "[]", "files": "[]", "qtdMsgs": "[{\"messageId\":\"1760000000000\",\"sender\":\"8:orgid:<guid:a>\",\"time\":1760000000000}]"}},
+      "expect": {"kind": "message", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "a message mentioning the other member (mention form from the web bundle, not captured)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Lab B</span> hello</p>", "messagetype": "RichText/Html", "contenttype": "Text", "properties": {"mentions": "[{\"@type\":\"http://schema.skype.com/Mention\",\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:b>\",\"mentionType\":\"person\",\"displayName\":\"Lab B\"}]"}},
+      "expect": {"kind": "message", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces", "added": ["8:orgid:<guid:b>"]}
+    },
+    {
+      "name": "a message mentioning an outsider: the outsider is added, so the fence judges them too",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>two mentions</p>", "messagetype": "RichText/Html", "properties": {"mentions": "[{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:b>\"},{\"itemid\":\"1\",\"mri\":\"8:orgid:<guid:x>\"}]"}},
+      "expect": {"kind": "message", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces", "added": ["8:orgid:<guid:b>", "8:orgid:<guid:x>"]}
+    },
+    {
+      "name": "mentions as a JSON array rather than the string the client sends",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"mentions": [{"itemid": "0", "mri": "8:orgid:<guid:x>"}]}},
+      "expect": "unknown"
+    },
+    {
+      "name": "a mention without an MRI",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"mentions": "[{\"itemid\":\"0\",\"displayName\":\"Someone\"}]"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "mentions that aren't a JSON list",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"mentions": "8:orgid:<guid:x>"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "a mention list with two keys alike in case",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"mentions": "[{\"mri\":\"8:orgid:<guid:b>\",\"MRI\":\"8:orgid:<guid:x>\"}]"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "properties that aren't an object",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": "{\"mentions\":\"[]\"}"},
+      "expect": "unknown"
+    },
+    {
+      "name": "mentions under a key in another case (a case-insensitive service may bind it)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"Mentions": "[{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\"}]"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "properties under a key in another case, mentioning an outsider",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "Properties": {"mentions": "[{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\"}]"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "an edit whose mentions are under a key in another case",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "<p>edited</p>", "messagetype": "RichText/Html", "properties": {"MENTIONS": "[{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\"}]"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "a message cross-posted to a channel (not captured: the captures only had an empty crossPostChannels)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"mentions": "[]"}, "crossPostChannels": ["19:channel0001@thread.tacv2"]},
+      "expect": "unknown"
+    },
+    {
+      "name": "an edit cross-posted to a channel",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "<p>edited</p>", "messagetype": "RichText/Html", "crossPostChannels": [{"id": "19:channel0001@thread.tacv2"}]},
+      "expect": "unknown"
+    },
+    {
+      "name": "crossPostChannels in a form the captures didn't show (null)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "crossPostChannels": null},
+      "expect": "unknown"
+    },
+    {
+      "name": "crossPostChannels under a key in another case",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "CrossPostChannels": ["19:channel0001@thread.tacv2"]},
+      "expect": "unknown"
+    },
+    {
+      "name": "a message on behalf of someone (not captured: the captures only had onbehalfof null)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"mentions": "[]", "onbehalfof": "{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\"}"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "an edit on behalf of someone",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "<p>edited</p>", "messagetype": "RichText/Html", "properties": {"onbehalfof": {"mri": "8:orgid:<guid:x>"}}},
+      "expect": "unknown"
+    },
+    {
+      "name": "onbehalfof under a key in another case",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"onBehalfOf": "8:orgid:<guid:x>"}},
+      "expect": "unknown"
     },
     {
       "name": "a soft delete",

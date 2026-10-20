@@ -127,6 +127,53 @@ fn every_class_the_backlog_item_named_is_expected() -> TestResult {
 }
 
 #[test]
+fn the_compose_boxs_bot_invokes_are_expected_and_nothing_like_them() -> TestResult {
+    // seen in ab-chat-full (2026-10-20): `composeExtension/fetchCommands` to two bots when an editor opened
+    let policies = [ab_chat_policy()?, echo_call::policy()];
+    let invoke =
+        "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000b0/invoke";
+    for policy in &policies {
+        assert!(policy.expects(&denial("POST", invoke, DenyCause::Unclassified)));
+    }
+    assert_unlisted(&[
+        ("PUT", invoke),
+        (
+            "POST",
+            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000b0/invoke/x",
+        ),
+        (
+            "POST",
+            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/invoke",
+        ),
+        ("POST", "https://example.test/api/chatsvc/amer/v1/agents/28:x/invoke"),
+    ])
+}
+
+#[test]
+fn marking_an_own_feed_item_read_is_expected_and_nothing_like_it() -> TestResult {
+    // seen in ab-chat-full (2026-10-20): `?name=isread` with `{"isread":"true"}` once b's reaction reached a's feed
+    let policies = [ab_chat_policy()?, echo_call::policy()];
+    let feed = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Anotifications/messages";
+    let isread = format!("{feed}/1760000000000/properties");
+    for policy in &policies {
+        assert!(policy.expects(&denial("PUT", &isread, DenyCause::Unclassified)));
+    }
+    assert_unlisted(&[
+        ("POST", &isread),
+        ("PUT", &format!("{feed}/1760000000000")),
+        ("POST", feed),
+        (
+            "PUT",
+            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Acalllogs/messages/1/properties",
+        ),
+        (
+            "PUT",
+            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/19%3Aother%40thread.v2/messages/1/properties",
+        ),
+    ])
+}
+
+#[test]
 fn frames_are_expected_by_their_socket_host() -> TestResult {
     let policy = ab_chat_policy()?;
     for url in [

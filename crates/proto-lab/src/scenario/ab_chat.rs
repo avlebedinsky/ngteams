@@ -69,9 +69,10 @@ pub const EXPECTED_FORCED: [&str; 2] = [THIS_RUN_PROBE, EARLIER_RUN_PROBE];
 /// How long the failure's diagnosis (the compose box's state, a screenshot) may wait for a page.
 const DIAGNOSIS_WAIT: Duration = Duration::from_secs(10);
 
-/// How many times [`send`] presses Enter before it gives up, and how long it waits after each press.
+/// How many times [`send`] presses Enter before it gives up, and how long it waits after each press: on a loaded
+/// machine (load average 50, 2026-10-20) the client took longer than three 5 s waits to let a sent text go.
 const SEND_TRIES: u32 = 3;
-const SEND_WAIT: Duration = Duration::from_secs(5);
+const SEND_WAIT: Duration = Duration::from_secs(15);
 
 /// A message post to the chat service: `POST …/v1/users/ME/conversations/<chat>/messages`.
 pub const MESSAGE_POST: &str = r"/v1/users/ME/conversations/[^/?]+/messages(\?|$)";
@@ -127,8 +128,15 @@ pub fn chat_link(mri: &str) -> String {
 /// # Errors
 /// Never for an id from [`one_to_one_id`]; when the pattern doesn't compile.
 pub fn chat_url(chat_id: &str) -> Result<Regex, regex::Error> {
+    Regex::new(&format!("(?i){}", chat_in_url(chat_id)))
+}
+
+/// The regular expression of the chat id `chat_id` in a URL, plain or percent-encoded, as one group (without a case
+/// flag): what [`chat_url`] and the patterns of the writes on the chat are made of.
+#[must_use]
+pub fn chat_in_url(chat_id: &str) -> String {
     let encoded = chat_id.replace(':', "%3A").replace('@', "%40");
-    Regex::new(&format!("(?i)({}|{})", regex::escape(chat_id), regex::escape(&encoded)))
+    format!("({}|{})", regex::escape(chat_id), regex::escape(&encoded))
 }
 
 /// A `GET` whose URL names the chat `chat_id` ([`chat_url`]): the evidence that a page opened that chat.
@@ -276,14 +284,25 @@ impl Steps<'_> {
             .wait_for_text("b receives the message", &message, DELIVERY)
             .await?;
         report.notes.push("a's message reached b".to_owned());
-        if drive_b.shows_text("b must not have the probe", &probe).await? {
-            return Err(setup("b received the probe the fence denied".to_owned()));
-        }
+        not_received(&mut drive_b, &probe).await?;
         report
             .notes
             .push("enforcement: b's copy of the chat has the message and not the probe".to_owned());
         Ok(())
     }
+}
+
+/// The other half of the live enforcement test, on b's page once it has read the chat's history from the service and
+/// shows a's message there: the probe the fence denied in a's page ([`enforce`]) must not show. A probe there reached
+/// the service, so the fence let it out.
+///
+/// # Errors
+/// When b's page shows `probe`, or doesn't answer.
+pub async fn not_received(drive_b: &mut Driver, probe: &str) -> Result<(), ScenarioError> {
+    if drive_b.shows_text("b must not have the probe", probe).await? {
+        return Err(setup("b received the probe the fence denied".to_owned()));
+    }
+    Ok(())
 }
 
 /// Forces a deny ([`ForcedDeny`]) on every `POST` or `PUT` of `session` whose body holds [`PROBE_MARKER`], whatever
@@ -294,7 +313,7 @@ impl Steps<'_> {
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-fn deny_probes(session: &LabSession, probe: &str) -> Result<(), ScenarioError> {
+pub(crate) fn deny_probes(session: &LabSession, probe: &str) -> Result<(), ScenarioError> {
     let any_url = |method| ForcedDeny::new(method, ".").map_err(|error| setup(error.to_string()));
     for method in ["POST", "PUT"] {
         session.force_deny(any_url(method)?.with_body_containing(probe).labelled(THIS_RUN_PROBE));
@@ -344,7 +363,12 @@ pub async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), Scen
 /// this run's rule ([`THIS_RUN_PROBE`]), a message post to the a–b chat (`chat` finds its id in the URL: the evidence
 /// that a's compose box belongs to that chat) after it was sent, and that very post, found by its `Network` id, must
 /// fail in a's page as blocked by the fence.
-async fn enforce(a: &LabSession, drive_a: &mut Driver, probe: &str, chat: &Regex) -> Result<(), ScenarioError> {
+pub(crate) async fn enforce(
+    a: &LabSession,
+    drive_a: &mut Driver,
+    probe: &str,
+    chat: &Regex,
+) -> Result<(), ScenarioError> {
     let this_run = ForcedPost::new(THIS_RUN_PROBE, chat).map_err(|error| setup(error.to_string()))?;
     send(drive_a, "a (the probe)", probe).await?;
     let Some(denial) = this_run.wait(a).await else {
@@ -455,7 +479,13 @@ async fn no_probe_deny(a: &LabSession, drive_a: &Driver) -> ScenarioError {
 /// diagnosis of a failed run; a note saying where, or why not. `None` for a run that isn't recorded. A page that doesn't
 /// answer within [`DIAGNOSIS_WAIT`] gets no screenshot: the run goes on to close the browsers.
 pub(crate) async fn save_screenshot(alias: Alias, session: &LabSession) -> Option<String> {
-    let path = session.capture_dir()?.join("failure.png");
+    save_screenshot_as(alias, session, "failure.png").await
+}
+
+/// [`save_screenshot`] under the file name `name` in the capture dir: one per failed step of a run that goes on after
+/// a step failed. An existing file is never overwritten.
+pub(crate) async fn save_screenshot_as(alias: Alias, session: &LabSession, name: &str) -> Option<String> {
+    let path = session.capture_dir()?.join(name);
     let mut driver = session.driver();
     driver.set_call_timeout(DIAGNOSIS_WAIT);
     let saved = match driver.screenshot("a screenshot of the failure").await {
@@ -501,6 +531,6 @@ pub(crate) async fn load_at(
     Err(setup(format!("{alias}: the web client didn't load: {status}")))
 }
 
-fn setup(reason: String) -> ScenarioError {
+pub(crate) fn setup(reason: String) -> ScenarioError {
     ScenarioError::Setup(reason)
 }

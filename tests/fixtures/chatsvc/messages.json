@@ -1,0 +1,169 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: the two message reads b's web client made on opening the a-b 1:1 chat in the ab-chat-full run of 2026-10-20 (capture ab-chat-full/20261020T194156Z, reference copy reference/chat/ab-chat-full-b.jsonl, read locally). First the sync read from the sync state the client had kept, answered with what changed since (newest first) and the next sync link; then the read around the time b joined (the thread's lastjoinat), both ways, answered with the page (newest first) and no link; trimmed here to its two oldest messages, while the real page also held the newer ones the sync read gave. The messages: a deleted one, a quoted reply, an edited one whose reaction was taken back, a plain one and the chat's first event (the members added). <guid:a>, <guid:b> are lab accounts' object ids, <guid:tenant> the tenant, <token:N> sync states; tests fill them in. See docs/protocol/chat.md.",
+  "sync": {
+    "request": {
+      "method": "GET",
+      "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "query": "view=msnp24Equivalent|supportsMessageProperties&pageSize=200&syncState=<token:1>"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "messages": [
+          {
+            "sequenceId": 5,
+            "skypeeditedid": "5555555555555555555",
+            "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "contenttype": "Text",
+            "type": "Message",
+            "fromDisplayNameInToken": "Lab A",
+            "id": "1760000060000",
+            "clientmessageid": "5555555555555555555",
+            "version": "1760000068000",
+            "messagetype": "RichText/Html",
+            "content": "",
+            "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+            "imdisplayname": "Lab A",
+            "composetime": "2026-01-01T00:01:00.0000000Z",
+            "originalarrivaltime": "2026-01-01T00:01:00.0000000Z",
+            "properties": {"deletetime": 1760000068000}
+          },
+          {
+            "sequenceId": 4,
+            "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "contenttype": "Text",
+            "type": "Message",
+            "amsreferences": [],
+            "fromDisplayNameInToken": "Lab A",
+            "id": "1760000050000",
+            "clientmessageid": "4444444444444444444",
+            "version": "1760000050000",
+            "messagetype": "RichText/Html",
+            "content": "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"1760000010000\"><strong itemprop=\"mri\" itemid=\"8:orgid:<guid:a>\">Lab A</strong><span itemprop=\"time\" itemid=\"1760000010000\"></span><p itemprop=\"preview\">a made-up message, edited</p></blockquote>\n<p>a made-up reply</p>",
+            "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+            "imdisplayname": "Lab A",
+            "composetime": "2026-01-01T00:00:50.0000000Z",
+            "originalarrivaltime": "2026-01-01T00:00:50.0000000Z",
+            "properties": {
+              "mentions": "[]",
+              "cards": "[]",
+              "links": "[]",
+              "files": "[]",
+              "qtdMsgs": [
+                {
+                  "messageId": 1760000010000,
+                  "sender": "8:orgid:<guid:a>",
+                  "time": 1760000010000,
+                  "message": null,
+                  "validationResult": "Valid",
+                  "sharedRefId": null,
+                  "replyChainId": null
+                }
+              ],
+              "formatVariant": "TEAMS",
+              "hasValidMsgReferences": true,
+              "languageStamp": "languages=en:100;length:40;&detector=Bling"
+            }
+          },
+          {
+            "sequenceId": 3,
+            "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "contenttype": "Text",
+            "type": "Message",
+            "amsreferences": [],
+            "annotationsSummary": {},
+            "fromDisplayNameInToken": "Lab A",
+            "id": "1760000010000",
+            "clientmessageid": "1111111111111111111",
+            "version": "1760000030000",
+            "messagetype": "RichText/Html",
+            "content": "<p>a made-up message, edited</p>",
+            "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+            "imdisplayname": "Lab A",
+            "composetime": "2026-01-01T00:00:10.0000000Z",
+            "originalarrivaltime": "2026-01-01T00:00:10.0000000Z",
+            "properties": {
+              "mentions": "[]",
+              "cards": "[]",
+              "links": "[]",
+              "files": "[]",
+              "formatVariant": "TEAMS",
+              "edittime": 1760000020000,
+              "composetime": "2026-01-01T00:00:10.000Z",
+              "languageStamp": "languages=en:100;length:30;&detector=Bling",
+              "emotions": [{"key": "like", "users": []}]
+            }
+          }
+        ],
+        "tenantId": "<guid:tenant>",
+        "_metadata": {
+          "lastCompleteSegmentStartTime": 1,
+          "lastCompleteSegmentEndTime": 1760000068000,
+          "syncState": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces/messages?startTime=1760000000400&syncState=<token:2>&pageSize=200&view=msnp24Equivalent"
+        }
+      }
+    }
+  },
+  "around": {
+    "request": {
+      "method": "GET",
+      "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/epochTimeStamp/1760000000000",
+      "query": "pageSize=40&direction=BIDIRECTIONAL&includeMetadata=true&locationType=Primary"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "messages": [
+          {
+            "sequenceId": 2,
+            "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "contenttype": "Text",
+            "type": "Message",
+            "amsreferences": [],
+            "fromDisplayNameInToken": "Lab A",
+            "id": "1760000005000",
+            "clientmessageid": "2222222222222222222",
+            "version": "1760000005000",
+            "messagetype": "RichText/Html",
+            "content": "<p>an earlier made-up message</p>",
+            "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+            "imdisplayname": "Lab A",
+            "composetime": "2026-01-01T00:00:05.0000000Z",
+            "originalarrivaltime": "2026-01-01T00:00:05.0000000Z",
+            "properties": {
+              "mentions": "[]",
+              "cards": "[]",
+              "links": "[]",
+              "files": "[]",
+              "formatVariant": "TEAMS",
+              "languageStamp": "languages=en:100;length:30;&detector=Bling"
+            }
+          },
+          {
+            "sequenceId": 1,
+            "origincontextid": "<guid:context>",
+            "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "type": "Message",
+            "id": "1760000000400",
+            "version": "1760000000400",
+            "messagetype": "ThreadActivity/AddMember",
+            "content": "<addmember><eventtime>1760000000399</eventtime><initiator>8:orgid:<guid:a></initiator><rosterVersion>1760000000000</rosterVersion><target>8:orgid:<guid:a></target><detailedtargetinfo><id>8:orgid:<guid:a></id></detailedtargetinfo><target>8:orgid:<guid:b></target><detailedtargetinfo><id>8:orgid:<guid:b></id></detailedtargetinfo></addmember>",
+            "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "composetime": "2026-01-01T00:00:00.4000000Z",
+            "originalarrivaltime": "2026-01-01T00:00:00.4000000Z"
+          }
+        ],
+        "tenantId": "<guid:tenant>",
+        "_metadata": {
+          "lastCompleteSegmentStartTime": 0,
+          "lastCompleteSegmentEndTime": 0
+        }
+      }
+    }
+  }
+}

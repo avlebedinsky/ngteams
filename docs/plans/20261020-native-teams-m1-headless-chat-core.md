@@ -384,19 +384,48 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Modify: `crates/proto-lab/src/{classify.rs,scenario/mod.rs}`, `crates/proto-lab/tests/fence_targets.rs`,
   `docs/protocol/fence-targets.md`
 
-- [ ] a scenario `ab-chat-full` (the `ab-chat` fence, its forced-deny probe first, the Task 1 list): a sends, edits,
+- [x] a scenario `ab-chat-full` (the `ab-chat` fence, its forced-deny probe first, the Task 1 list): a sends, edits,
       reacts (add, remove), mentions b, replies with a quote, deletes; b reads and reacts; every write is on the a–b
       chat
-- [ ] tests first for any mapping row the capture corrects (edit, delete, reaction, read receipt); a shape not in the
-      table stays `Unknown`
-- [ ] from the capture (read locally, exported to reference copies only) and Task 3's reference copies: the
+      ⚠️ no mention: under the fence the mention picker offers nobody but a message extension (b shows as "Unknown
+      User": the profile lookups behind it are denied `POST`s). The scenario does no mention; its wire form is the
+      bundle's, marked not captured (`docs/backlog/mention-not-captured-under-the-fence.md`, settled with Codex). a
+      also reacts to its reply and leaves the like, so b's read shows a reaction with its user.
+- [x] tests first for any mapping row the capture corrects (edit, delete, reaction, read receipt); a shape not in the
+      table stays `Unknown` — the capture matched every row; corrected: an edit is the whole message again, so the
+      mapping now needs its body (a message `messagetype`), and a message's or edit's `properties.mentions` MRIs are
+      added participants (any other `mentions` form is `Unknown`)
+- [x] from the capture (read locally, exported to reference copies only) and Task 3's reference copies: the
       conversation list and its paging/sync links (from the probe if the web client only used CSA), message pages and
       `syncState`, message shapes (versions and `skypeeditedid`, deletes, `emotions`, `mentions` and the mention
       markup, quotes, `amsreferences`/`files` of received attachments), into `docs/protocol/chat.md`, each shape with
-      its source; tick or correct the open rows of `fence-targets.md`
-- [ ] synthetic fixtures of the same shapes, marked `_synthetic`; `cargo test -p fixture-guard` passes
-- [ ] live run recorded in this plan (a breached run as in Development Approach); `cargo test -p proto-lab` and the
-      gate pass
+      its source; tick or correct the open rows of `fence-targets.md` — mentions from the bundle only; no received
+      attachment was seen (all `amsreferences` `[]`, `files` `"[]"`); the group-chat row stays Task 8's
+- [x] synthetic fixtures of the same shapes, marked `_synthetic`; `cargo test -p fixture-guard` passes
+- [x] live run recorded in this plan (a breached run as in Development Approach); `cargo test -p proto-lab` and the
+      gate pass (parallel run: crate-scoped gate; workspace gate after merge)
+      Live runs of 2026-10-20 (`proto-lab run ab-chat-full --headless`, normal build, under the lab's live lock;
+      none breached, every allowed write on the a–b chat, no lab browser left):
+      - 19:41Z (the first agent's): enforcement passed; send, edit, react, unreact, quoted reply and delete done; the
+        mention failed (picker, above); b read the history and reacted, sent no read receipt; exit 1 on two bot
+        invokes. The shapes in `chat.md` come mostly from this run.
+      - 20:20Z: failed before enforcement (a deep link reloaded the page under the compose-box wait); only denies.
+        The DSL's waits now go on across a navigation (`dsl::navigated_away`).
+      - 20:30Z: enforcement passed; the edit box rebuilt its element and lost the scenario's mark, the next steps
+        typed into the open edit box (a garbled edit on the lab chat), reply/delete/b's read failed; exit 1. The edit
+        now types into the focus (`rewrite_editor`) and cancels a box it leaves open.
+      - 20:51Z (confirming): every step done (a: send, edit, react, unreact, reply, react to the reply, delete; b:
+        read, react; b's receipt came during its reaction); exit 1 only on nine denied `isread` puts on a's own
+        activity feed (`48:notifications`), reviewed afterwards and added to the expected-deny list with the
+        `composeExtension/fetchCommands` bot invokes (both stay denied).
+      - 21:37Z (after the review fixes: b's probe check, case-folded optional keys, `crossPostChannels`/`onbehalfof`
+        only in their captured forms): **exit 0**, `ab-chat-full: ok`. Enforcement passed on both sides (a's probe
+        denied and failed in a's page; b's copy of the chat had a's message and not the probe); every step done (a:
+        send, edit, react, unreact, reply, react to the reply, delete; b: read, react; b sent no read receipt within
+        30 s). `fence.log`: 26 allowed writes, all on the a–b chat (6 message, 4 typing, 2 edit, 2 delete, 8
+        reaction, 4 read receipt), 20 own Entra token posts, 13 forced denies (the probes), 888 unclassified denies,
+        all expected by the reviewed list; no breach. The web client's posts and edits kept `crossPostChannels: []`
+        and `onbehalfof: null` (none fell to `Unknown`). No lab browser left.
 
 ### Task 8: Group chats under the fence (a, b, c)
 **Files:**

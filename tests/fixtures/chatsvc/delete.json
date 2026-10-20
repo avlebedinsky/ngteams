@@ -1,0 +1,32 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: a's delete of its own message in the a-b 1:1 chat, ab-chat-full run of 2026-10-20 (capture ab-chat-full/20261020T194153Z, reference copy reference/chat/ab-chat-full-a.jsonl, read locally), and the deleted message as b's read gave it back (ab-chat-full/20261020T194156Z). The delete is a soft delete with no body, answered with the text null. Read back the message keeps its id and clientmessageid, with empty content, version and properties.deletetime the delete's time, no other property, and skypeeditedid set to its clientmessageid. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md.",
+  "request": {
+    "method": "DELETE",
+    "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000060000",
+    "query": "behavior=softDelete",
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body_text": "null"
+  },
+  "read_back": {
+    "sequenceId": 5,
+    "skypeeditedid": "5555555555555555555",
+    "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "fromDisplayNameInToken": "Lab A",
+    "id": "1760000060000",
+    "clientmessageid": "5555555555555555555",
+    "version": "1760000068000",
+    "messagetype": "RichText/Html",
+    "content": "",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "imdisplayname": "Lab A",
+    "composetime": "2026-01-01T00:01:00.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:01:00.0000000Z",
+    "properties": {"deletetime": 1760000068000}
+  }
+}

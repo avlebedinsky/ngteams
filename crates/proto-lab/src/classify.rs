@@ -12,7 +12,8 @@
 //! that uses it is fail-closed: every mutating request outside the own-state list is [`Classification::Unknown`]. A
 //! run that writes uses [`Classifier::mapped`], which also maps the chat service's writes on chats
 //! (`docs/protocol/fence-targets.md`): messages, typing, edits, deletes, reactions, read receipts, new chats and member
-//! changes, each to its [`Target`]. Anything the mapping doesn't recognize, a channel or team among them, stays
+//! changes, each to its [`Target`]; whoever a message or an edit mentions is added to its target, so the fence judges
+//! them as it judges the chat's members. Anything the mapping doesn't recognize, a channel or team among them, stays
 //! [`Classification::Unknown`]. Any method other than the three reading ones counts as mutating, including ones the
 //! classifier has never heard of.
 //!
@@ -290,8 +291,8 @@ fn map_write(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
     };
     let on = |kind, chat: &str| chat_scope(chat).map(|scope| Target::new(kind, scope));
     match (method, path.as_slice()) {
-        ("POST", ["users", "ME", "conversations", chat, "messages"]) => on(message_kind(body?)?, chat),
-        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Edit, chat),
+        ("POST", ["users", "ME", "conversations", chat, "messages"]) => message_write(body?, chat, false),
+        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => message_write(body?, chat, true),
         ("DELETE", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Delete, chat),
         ("PUT" | "DELETE", ["users", "ME", "conversations", chat, "messages", _, "properties"])
             if name()? == "emotions" =>
@@ -322,11 +323,25 @@ fn chat_scope(id: &str) -> Option<Scope> {
     chat.then(|| Scope::Conversation { id: id.to_owned() })
 }
 
-/// What a message post is, by its `messagetype`: typing (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`,
-/// `RichText`, `RichText/…`). Any other type, or a body that isn't a JSON object with one (read by [`strict_json`]), is
-/// unknown.
-fn message_kind(body: &[u8]) -> Option<WriteKind> {
+/// A message post (`edit` false: a message or typing) or an edit (`edit` true: the whole message again, as the web
+/// client sends it) on the chat `chat`, its body read by [`strict_json`]; whoever it mentions is added ([`mentioned`]).
+/// An edit whose body isn't a message ([`message_kind`]), and a body that could reach beyond the chat ([`chat_only`]),
+/// are unknown.
+fn message_write(body: &[u8], chat: &str, edit: bool) -> Option<Target> {
     let body = strict_json(body)?;
+    chat_only(&body)?;
+    let kind = match (message_kind(&body)?, edit) {
+        (kind, false) => kind,
+        (WriteKind::Message, true) => WriteKind::Edit,
+        (_, true) => return None,
+    };
+    Some(Target::new(kind, chat_scope(chat)?).with_added(mentioned(&body)?))
+}
+
+/// What a message post (or edit) is, by the `messagetype` of its body (read by [`strict_json`]): typing
+/// (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`, `RichText`, `RichText/…`). Any other type, or a
+/// body that isn't a JSON object with one, is unknown.
+fn message_kind(body: &Value) -> Option<WriteKind> {
     match body.get("messagetype")?.as_str()? {
         "Control/Typing" | "Control/ClearTyping" => Some(WriteKind::Typing),
         "Text" | "RichText" => Some(WriteKind::Message),
@@ -334,6 +349,64 @@ fn message_kind(body: &[u8]) -> Option<WriteKind> {
         _ => None,
     }
 }
+
+/// `Some` for a message body whose fields that could take it beyond the chat are as the captures showed them, or left
+/// out: `crossPostChannels` (a post into channels too) an empty list, `properties.onbehalfof` (a message sent for
+/// someone else) `null`. Any other value of either, or either key in another case ([`optional`]), is `None` (unknown):
+/// the mapping's target is the chat alone, and what the service does with those forms wasn't seen.
+fn chat_only(body: &Value) -> Option<()> {
+    let body = body.as_object()?;
+    match optional(body, "crossPostChannels").ok()? {
+        None => {}
+        Some(Value::Array(channels)) if channels.is_empty() => {}
+        Some(_) => return None,
+    }
+    let Some(properties) = optional(body, "properties").ok()? else {
+        return Some(());
+    };
+    match optional(properties.as_object()?, "onbehalfof").ok()? {
+        None | Some(Value::Null) => Some(()),
+        Some(_) => None,
+    }
+}
+
+/// The MRIs a message body mentions: its `properties.mentions`, a JSON list sent as a string, each entry naming one
+/// `mri` (`docs/protocol/chat.md`; the captures showed only the empty list `"[]"`, the entries' form is the web
+/// bundle's). They are the write's added participants, so the fence judges whoever is mentioned as it judges the
+/// chat's members. No `properties`, or no `mentions` in them, is no mention. Anything else is `None` (unknown):
+/// `properties` that aren't an object, `mentions` that aren't a string holding a JSON list read by [`strict_json`],
+/// an entry that isn't an object with a string `mri`, and either key in another case ([`optional`]).
+fn mentioned(body: &Value) -> Option<Vec<Mri>> {
+    let Some(properties) = optional(body.as_object()?, "properties").ok()? else {
+        return Some(Vec::new());
+    };
+    let Some(mentions) = optional(properties.as_object()?, "mentions").ok()? else {
+        return Some(Vec::new());
+    };
+    strict_json(mentions.as_str()?.as_bytes())?
+        .as_array()?
+        .iter()
+        .map(|mention| mention.as_object()?.get("mri")?.as_str().map(Mri::new))
+        .collect()
+}
+
+/// A key a body may leave out, in an object read by [`strict_json`]: the value under `name` exactly, `None` when no
+/// key of its [`fold`] is there, and [`OtherCase`] (unknown) for a key of its fold in another case (`Mentions` for
+/// `mentions`). An exact lookup alone would read that key as missing, and a missing optional key means the body asks
+/// nothing of that kind, while a service binding keys in any case would act on it.
+fn optional<'v>(object: &'v Map<String, Value>, name: &str) -> Result<Option<&'v Value>, OtherCase> {
+    if let Some(value) = object.get(name) {
+        return Ok(Some(value));
+    }
+    let folded = fold(name);
+    if object.keys().any(|key| fold(key) == folded) {
+        return Err(OtherCase);
+    }
+    Ok(None)
+}
+
+/// [`optional`]'s key, there only in another case.
+struct OtherCase;
 
 /// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the body
 /// isn't read by [`strict_json`], or the list is missing, empty, or has a member that isn't an object with a string id.

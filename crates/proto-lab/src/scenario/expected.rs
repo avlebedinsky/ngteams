@@ -1,5 +1,5 @@
-//! The reviewed **expected-deny** list of the writing scenarios (`ab-chat`, `echo-call`): the requests and WebSocket
-//! frames of the web client that the fence denies and a scenario doesn't need.
+//! The reviewed **expected-deny** list of the writing scenarios (`ab-chat`, `ab-chat-full`, `echo-call`): the requests
+//! and WebSocket frames of the web client that the fence denies and a scenario doesn't need.
 //!
 //! The list changes only how a run is judged, never a verdict: the fence never reads it, so a request on it is still
 //! denied, kept and logged to `fence.log` like any other. A deny is expected ([`Review::expects`]) only when it is on
@@ -7,17 +7,19 @@
 //! - its cause is [`DenyCause::Unclassified`]: a partial or refused membership read, a request whose `fence.log` entry
 //!   failed (own-state or listed), a malformed pause or a frame sent through another realm stays unexpected whatever
 //!   its URL;
-//! - its URL doesn't name a mapped target of the scenario (the a–b chat in `ab-chat`): nothing denied on the chat the
-//!   scenario writes to is ever expected.
+//! - its URL doesn't name a mapped target of the scenario (the a–b chat in `ab-chat` and `ab-chat-full`): nothing
+//!   denied on the chat the scenario writes to is ever expected.
 //!
 //! The one exception to both is a forced deny ([`DenyCause::Forced`]) whose rule's label the scenario names
-//! ([`Review::expecting_forced`]): `ab-chat`'s enforcement probes. Any other forced deny is unexpected.
+//! ([`Review::expecting_forced`]): the enforcement probes of `ab-chat` and `ab-chat-full`. Any other forced deny is
+//! unexpected.
 //!
 //! The classes are the ones the M0 acceptance runs of `ab-chat` showed on 2026-10-20 (both accounts) and that its
-//! `load`, `ab-chat` and `echo-call` captures since repeat. Each entry says why the scenario doesn't need it. A class
-//! that isn't here keeps failing the run until it is reviewed: writes on conversations other than the scenario's (a
-//! tenant team's thread, say), the calling stack's own-state and every request on a call (`echo-call` needs those:
-//! `docs/backlog/fence-call-follow-ups.md`).
+//! `load`, `ab-chat`, `ab-chat-full` and `echo-call` captures since repeat, plus two first seen in `ab-chat-full`'s
+//! runs of 2026-10-20: the bot invokes an opening editor sends and the own activity feed's item read
+//! (`48:notifications`, `isread`). Each entry says why the scenario doesn't need it. A class that isn't here keeps failing the run until it
+//! is reviewed: writes on conversations other than the scenario's (a tenant team's thread, say), the calling stack's
+//! own-state and every request on a call (`echo-call` needs those: `docs/backlog/fence-call-follow-ups.md`).
 
 use url::Url;
 
@@ -157,6 +159,24 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         path: "/api/chatsvc/*/v1/users/ME/properties",
         reason: "the account's own settings on the chat service, not a chat: the client keeps working from what it \
                  read, and the scenario's chat doesn't depend on them",
+    },
+    ExpectedRequest {
+        class: "bot invokes",
+        hosts: TEAMS,
+        method: "POST",
+        path: "/api/chatsvc/*/v1/agents/*/invoke",
+        reason: "a bot invoke reaches the bot's own service, which the fence never allows: the ones seen \
+                 (ab-chat-full, 2026-10-20) are the compose box's message extensions fetching their commands \
+                 (`composeExtension/fetchCommands`) when an editor opens, and the scenario uses no message extension",
+    },
+    ExpectedRequest {
+        class: "own activity feed item read",
+        hosts: TEAMS,
+        method: "PUT",
+        path: "/api/chatsvc/*/v1/users/ME/conversations/48%3Anotifications/messages/*/properties",
+        reason: "the account marking an item of its own activity feed read (`?name=isread`, `{\"isread\":\"true\"}`), \
+                 seen once b's reaction reached a's feed (ab-chat-full, 2026-10-20): it changes only what the \
+                 account's own feed shows, and the scenario reads nothing from the feed",
     },
     ExpectedRequest {
         class: "chat list by POST (CSA)",
