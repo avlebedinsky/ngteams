@@ -9,7 +9,7 @@ no call was answered. The machine was busy with other agents' builds the whole t
 | # | criterion | verdict |
 |---|---|---|
 | 1 | `status` ok and a skypetoken for a, b, c | **met** |
-| 2 | fence suite, `ab-chat` with the live enforcement test | **met with a documented blocker**: everything the scenario checks holds, but `run ab-chat` exits 1 |
+| 2 | fence suite, `ab-chat` with the live enforcement test | **met with a documented blocker**: run 2 met all four (goal, enforcement, no breach, lab-only writes); run 1 was reported as a breach (an arming step timed out under load; nothing was sent unguarded; `docs/backlog/arming-timeout-under-load-counts-as-breach.md`); `run ab-chat` exits 1 on both (unreviewed denies) |
 | 3 | GPUI on niri, 9 × 720p30 | **met** with the patched GPUI (decision and patch documented) |
 | 4 | the echo call returns our tone | **met with a documented blocker**: no tone; blocker and next step documented |
 | 5 | the full gate, the fixture guard | **met** (one known flake, green on rerun) |
@@ -56,13 +56,15 @@ dropped on deny, a frame that gets past the guard caught by the audit).
 | writes allowed | message 2, typing 4: all on the a–b 1:1 chat, both members lab accounts (checked against `lab.toml`) | message 2, typing 4: the same |
 | forced denies (the probe, re-sent by the client) | 10 | 10 |
 | other denies (`Unclassified`, fail-closed) | 575 requests, 72 frames | 488 requests (473 not telemetry), 53 frames |
-| breach | **yes**: an iframe's arming step `Network` got no answer within 10 s; no frame was sent without an allow | none |
+| breach | **yes**: an iframe's arming step `Network` got no answer within 10 s and its close wasn't confirmed; it was never resumed, browser-level `Fetch` stayed on, no frame was sent without an allow | none |
 | exit code | 1 | 1 |
 
 What "passes" is taken to mean here: the scenario's goal is reached, the live enforcement test holds, the fence isn't
 breached, and every write it allowed is within the lab. Run 2 meets all four. Run 1's breach is the known one under
 load (Task 11's notes: an iframe that can't be armed in time and can't be confirmed closed counts as a breach; the
-browser-level `Fetch` stays on for it, and no unsanctioned frame was seen); run 2, right after it, was clean.
+browser-level `Fetch` stays on for it, and no unsanctioned frame was seen); run 2, right after it, was clean. Whether
+that breach is real or only an unconfirmed close of a target that never ran is open:
+`docs/backlog/arming-timeout-under-load-counts-as-breach.md`.
 
 **The blocker: `ab-chat` exits 1 on every run**, because its deny policy expects only the forced probe and telemetry,
 and the web client makes several hundred other requests the fail-closed fence denies: own chat properties (`PUT
