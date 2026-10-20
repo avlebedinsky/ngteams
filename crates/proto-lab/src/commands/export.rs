@@ -2,7 +2,10 @@
 //!
 //! The capture's events are sanitized as one capture ([`crate::sanitize`]), and the result goes to
 //! `tests/fixtures/<fixture-name>`: JSONL by default (`.jsonl` is added to a name without an extension), or one
-//! pretty-printed JSON array for a name ending in `.json`. Before anything is written, the text is checked for every
+//! pretty-printed JSON array for a name ending in `.json`. If sanitizing had to replace a name inside a host (a name
+//! word that is also a label of a host other than a public protocol host, `https://<name:1>.example.test/`), the export
+//! fails naming the events, since that host would be destroyed in the fixture. Before anything is written, the text is
+//! checked for every
 //! name the sanitizer found in the capture ([`check_names`], at every layer of encoding, apart from the sanitizer's own
 //! replacing): if a word of one is still there, nothing is written and the export fails, naming the lines and the
 //! names' placeholders, never the names. Then the fixture guard scans the text:
@@ -47,6 +50,11 @@ pub enum ExportError {
     Refused(Vec<(usize, Kind)>),
     #[error("a name found in the capture is still in the sanitized text, nothing was written: {}", name_findings(.0))]
     NameLeft(Vec<NameFinding>),
+    #[error(
+        "a name found in the capture is also a label of a host, which replacing it would destroy, nothing was written: {}",
+        events(.0)
+    )]
+    NameInHost(Vec<usize>),
     #[error("no cargo workspace with a {FIXTURES_DIR} in {} or above it; pass --fixtures-dir", .0.display())]
     NoFixturesDir(PathBuf),
 }
@@ -57,6 +65,11 @@ fn findings(found: &[(usize, Kind)]) -> String {
         .map(|(line, kind)| format!("line {line}: {kind:?}"))
         .collect();
     lines.join(", ")
+}
+
+fn events(found: &[usize]) -> String {
+    let events: Vec<String> = found.iter().map(|event| format!("event {event}")).collect();
+    events.join(", ")
 }
 
 fn name_findings(found: &[NameFinding]) -> String {
@@ -198,8 +211,8 @@ fn stage(guard: &Guard, staging: &Path, text: &str) -> Result<(), ExportError> {
 /// writes it as fixture `name` under `fixtures_dir` through [`write_fixture`].
 ///
 /// # Errors
-/// As [`fixture_path`], [`read_capture`] and [`write_fixture`]; [`ExportError::NameLeft`] when a name is left, with
-/// nothing written.
+/// As [`fixture_path`], [`read_capture`] and [`write_fixture`]; [`ExportError::NameInHost`] when a name took a host's
+/// place, and [`ExportError::NameLeft`] when a name is left, with nothing written.
 pub fn export(
     capture: &Path,
     name: &str,
@@ -225,6 +238,9 @@ pub fn export_with(
     let (path, layout) = fixture_path(fixtures_dir, name)?;
     let events = read_capture(capture)?;
     let sanitized = sanitize(&events).map_err(ExportError::Pattern)?;
+    if !sanitized.name_in_host.is_empty() {
+        return Err(ExportError::NameInHost(sanitized.name_in_host));
+    }
     let text = render(&sanitized.events, layout);
     let left = check_names(&sanitized.names, &text);
     if !left.is_empty() {

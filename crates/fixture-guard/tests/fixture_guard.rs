@@ -126,14 +126,64 @@ fn every_kind_of_secret_is_detected() {
         ),
         (r#"{"signature":"c2lnbmF0dXJlLXZhbHVlLXBsYW50ZWQ"}"#, Kind::Signature),
     ];
-    let guard = Guard::new().unwrap();
+    assert_detected(&Guard::new().unwrap(), &cases);
+}
+
+fn assert_detected(guard: &Guard, cases: &[(&str, Kind)]) {
     for (text, kind) in cases {
         assert!(
-            kinds(&guard, text).contains(&kind),
+            kinds(guard, text).contains(kind),
             "{text:?} should be {kind:?}, got {:?}",
-            kinds(&guard, text)
+            kinds(guard, text)
         );
     }
+}
+
+#[test]
+fn a_meetings_join_credentials_are_detected() {
+    let cases = [
+        // A Teams meeting link with its passcode or its code, in every form a capture holds one.
+        (
+            "https://teams.microsoft.com/meet/1234567890123?p=Ab3dEf5gHi7jKl9mNo",
+            Kind::MeetingLink,
+        ),
+        ("https://teams.live.com/meet/1234567890123", Kind::MeetingLink),
+        (
+            "https://teams.microsoft.com/meet/<meeting:1>?anon=true&p=Ab3dEf5gHi7jKl9mNo",
+            Kind::MeetingLink,
+        ),
+        (
+            "https://teams.microsoft.com/meet/<meeting:1>?x=<token:2>&amp;p=Ab3dEf",
+            Kind::MeetingLink,
+        ),
+        (
+            "/v2/?meetingjoin=true#/meet/<meeting:1>?p=Ab3dEf5gHi7jKl9mNo",
+            Kind::MeetingLink,
+        ),
+        ("/lm/meet/1234567890123", Kind::MeetingLink),
+        (
+            "/l/meetup-join/19%3ameeting_x%40thread.v2/0?context=%7b%7d&p=Ab3dEf",
+            Kind::MeetingLink,
+        ),
+        (
+            "?next=https%3A%2F%2Fteams.microsoft.com%2Fmeet%2F%3Cmeeting%3A1%3E%3Fp%3DAb3dEf5gHi7jKl9mNo",
+            Kind::MeetingLink,
+        ),
+        (
+            "?next=https%253A%252F%252Fteams.microsoft.com%252Fmeet%252F1234567890123",
+            Kind::MeetingLink,
+        ),
+        // A passcode: under a key, and as an invitation spells it out.
+        (r#"{"passcode":"Qx7Rt2"}"#, Kind::Passcode),
+        (r#"{"meetingPasscode": "246813"}"#, Kind::Passcode),
+        ("meetingPw=Ab3dEf5gHi7jKl9mNo", Kind::Passcode),
+        ("<p>Passcode: <b>Qx7Rt2</b></p>", Kind::Passcode),
+        (
+            "{\"body\":\"Passcode:\u{a0}<span class=\\\"x\\\">Qx7Rt2</span>\"}",
+            Kind::Passcode,
+        ),
+    ];
+    assert_detected(&Guard::new().unwrap(), &cases);
 }
 
 #[test]
@@ -155,6 +205,13 @@ fn placeholders_and_prose_pass() {
         "web client `5e3ce6c0-2b1f-4285-8d4b-75ee78787346`, MSA client `8ec6bc83-69c8-4392-8f08-b3c986009232`",
         "meeting artifacts `6BC3B958-689B-49F5-9006-36D165F30E00`, nil 00000000-0000-0000-0000-000000000000",
         "sig=<token:1>&X-Amz-Signature=<token:2>, a `sig` parameter, signature=short",
+        // A meeting link whose code and passcode are placeholders, and the routes that look like one.
+        "https://teams.microsoft.com/meet/<meeting:1>?p=<token:1>&anon=true",
+        "https%3A%2F%2Fteams.microsoft.com%2Fmeet%2F%3Cmeeting%3A1%3E%3Fp%3D%3Ctoken%3A1%3E",
+        "/meet/meet-now, /v2/meet/meet-now, /l/meetup-join/19:<thread:1>@thread.v2/0?context=x",
+        "a `/meet/` link's `p` parameter is its passcode",
+        r#"{"passcode":"<token:1>","isPasscodeRequired":true,"passcodeLength":"short"}"#,
+        "Passcode: <b><token:3></b>, the passcode: required",
     ];
     let guard = Guard::new().unwrap();
     for text in clean {

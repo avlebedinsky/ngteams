@@ -47,6 +47,13 @@ const PRIVATE_IP: &str = "192.168.1.23";
 const IPV6: &str = "2001:db8:85a3::8a2e:370:7334";
 const COWORKER_NAME: &str = "Jane Doe";
 const TOPIC: &str = "Secret project kickoff";
+/// A Teams meeting's code (its numeric meeting id) and its join passcode, as a `/meet/` link carries them.
+const MEETING_CODE: &str = "1234567890123";
+const MEETING_PASSCODE: &str = "Ab3dEf5gHi7jKl9mNo";
+/// The meeting id and passcode of an invitation's text, and a dial-in conference id.
+const INVITE_CODE: &str = "355 123 456 789";
+const INVITE_PASSCODE: &str = "Qx7Rt2";
+const DIAL_IN_ID: &str = "987654321";
 
 fn identities() -> Identities {
     Identities {
@@ -204,11 +211,30 @@ fn transport_events() -> [Value; 5] {
     ]
 }
 
+/// A Teams meeting join link, with the meeting's code and its passcode.
+fn meeting_link() -> String {
+    format!("https://teams.microsoft.com/meet/{MEETING_CODE}?p={MEETING_PASSCODE}")
+}
+
+/// A calendar answer: a meeting with its join link, an invitation that spells out its id and passcode, a dial-in.
+fn calendar_event() -> Value {
+    let calendar = json!({
+        "value": [{
+            "onlineMeeting": {"joinUrl": meeting_link(), "conferenceId": DIAL_IN_ID},
+            "body": {"content": format!(
+                "<p>Meeting ID: <span>{INVITE_CODE}</span><br>Passcode: <b>{INVITE_PASSCODE}</b></p><p>Dial in: +1 323 555 0199,,{DIAL_IN_ID}#</p>"
+            )},
+        }],
+    });
+    json!({"type": "response_body", "session": "S1", "request_id": "1000.5", "body": calendar.to_string(), "base64Encoded": false})
+}
+
 fn capture() -> Vec<Value> {
     let mut events = vec![request_event(), people_event(), frame_event()];
     events.extend(token_events());
     events.extend(rtc_events());
     events.extend(transport_events());
+    events.push(calendar_event());
     events.push(cdp(
         "Network.webSocketCreated",
         &json!({"requestId": "2000.2", "url": format!("wss://pub.example.invalid/{ECHO_MRI}?x=1")}),
@@ -252,6 +278,11 @@ fn secrets_are_removed() {
         "eyJ1aWQiOiJsYWIiLCJ1dGlkIjoibGFiIn0",
         // the raw header text is dropped whole
         "HTTP/1.1 200 OK",
+        MEETING_CODE,
+        MEETING_PASSCODE,
+        INVITE_CODE,
+        INVITE_PASSCODE,
+        DIAL_IN_ID,
     ];
     for secret in secrets {
         assert!(!text.contains(secret), "{secret} survived");
@@ -499,8 +530,10 @@ fn the_fixture_guard_finds_nothing_in_a_sanitized_capture() {
             Kind::Email,
             Kind::Guid,
             Kind::Jwt,
+            Kind::MeetingLink,
             Kind::Mri,
             Kind::OauthToken,
+            Kind::Passcode,
             Kind::Signature,
             Kind::Skypetoken
         ]
@@ -755,6 +788,12 @@ fn planted() -> Vec<(&'static str, String, Vec<String>)> {
         ),
         // a name only ever seen in form data (`displayName=Odalys+Quennell`), used elsewhere
         ("text", format!("Hi {FORM_ONLY_NAME}"), pieces(FORM_ONLY_NAME)),
+        // a meeting link: its code and its passcode (a short value under a key no secret rule knows)
+        (
+            "joinUrl",
+            meeting_link(),
+            vec![MEETING_CODE.to_owned(), MEETING_PASSCODE.to_owned()],
+        ),
     ]
 }
 
@@ -969,6 +1008,174 @@ fn a_name_is_found_where_a_longer_variant_stops_short_and_in_keys() {
     // keys holding a name become its placeholder (two keys for one name become one)
     let keys: Vec<&String> = out[1]["reactions"].as_object().unwrap().keys().collect();
     assert_eq!(keys, ["<name:1>", "other"]);
+}
+
+// --- meetings ---
+
+#[test]
+fn a_meeting_links_code_and_passcode_become_placeholders() {
+    let events = [
+        json!({"joinUrl": meeting_link()}),
+        json!({"links": {"join": format!("https://teams.live.com/meet/{MEETING_CODE}?anon=true&p={MEETING_PASSCODE}")}}),
+        json!({"url": format!("https://teams.microsoft.com/v2/?meetingjoin=true#/meet/{MEETING_CODE}?p={MEETING_PASSCODE}&x=1")}),
+        json!({"url": format!("https://teams.cloud.microsoft/lm/meet/{MEETING_CODE}?p={MEETING_PASSCODE}")}),
+        // the routes that look like one are no meeting
+        json!({"routes": ["/meet/meet-now", "/v2/meet/meet-now", "/l/meetup-join/"]}),
+        // only the query encoded; in an HTML attribute; a legacy join link
+        json!({"url": format!("https://teams.microsoft.com/meet/{MEETING_CODE}%3Fp%3D{MEETING_PASSCODE}")}),
+        json!({"html": format!("<a href=\"https://teams.microsoft.com/meet/{MEETING_CODE}?anon=true&amp;p={MEETING_PASSCODE}\">Join</a>")}),
+        json!({"url": format!("https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0?context=%7b%7d&p={MEETING_PASSCODE}")}),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    assert_eq!(
+        out[0]["joinUrl"],
+        "https://teams.microsoft.com/meet/<meeting:1>?p=<token:1>"
+    );
+    assert_eq!(
+        out[1]["links"]["join"],
+        "https://teams.live.com/meet/<meeting:1>?anon=true&p=<token:1>"
+    );
+    assert_eq!(
+        out[2]["url"],
+        "https://teams.microsoft.com/v2/?meetingjoin=true#/meet/<meeting:1>?p=<token:1>&x=1"
+    );
+    assert_eq!(
+        out[3]["url"],
+        "https://teams.cloud.microsoft/lm/meet/<meeting:1>?p=<token:1>"
+    );
+    assert_eq!(out[4], events[4]);
+    assert_eq!(
+        out[5]["url"],
+        "https://teams.microsoft.com/meet/<meeting:1>%3Fp%3D<token:1>"
+    );
+    assert_eq!(
+        out[6]["html"],
+        "<a href=\"https://teams.microsoft.com/meet/<meeting:1>?anon=true&amp;p=<token:1>\">Join</a>"
+    );
+    assert_eq!(
+        out[7]["url"],
+        "https://teams.microsoft.com/l/meetup-join/19%3a<thread:1>%40thread.v2/0?context=%7b%7d&p=<token:1>"
+    );
+    assert_eq!(Guard::new().unwrap().scan_text(&as_jsonl(&out)), []);
+}
+
+#[test]
+fn a_meetings_code_and_passcode_are_found_under_their_keys_in_invitations_and_everywhere_else() {
+    let events = [
+        json!({"meetingData": {"meetingCode": MEETING_CODE, "passcode": MEETING_PASSCODE}}),
+        // as numbers
+        json!({"joinMeetingIdSettings": {"joinMeetingId": 1_234_567_890_123_u64, "passcode": 246_813}}),
+        json!({"url": format!("https://rpe.example.invalid/c?meetingId={MEETING_CODE}&meetingPw={MEETING_PASSCODE}")}),
+        json!({"body": format!("<p>Meeting ID: <span>{INVITE_CODE}</span><br>Passcode: <b>{INVITE_PASSCODE}</b></p>")}),
+        json!({"audioConferencing": {"conferenceId": DIAL_IN_ID}}),
+        // what was learned anywhere is replaced everywhere else, the code in any grouping
+        json!({"text": format!(
+            "join {MEETING_CODE} or {} with {INVITE_PASSCODE}; dial +1 323 555 0199,,{DIAL_IN_ID}# then 246813",
+            INVITE_CODE.replace(' ', "")
+        )}),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    assert_eq!(
+        out[0]["meetingData"],
+        json!({"meetingCode": "<meeting:1>", "passcode": "<token:1>"})
+    );
+    assert_eq!(
+        out[1]["joinMeetingIdSettings"],
+        json!({"joinMeetingId": "<meeting:1>", "passcode": "<token:2>"})
+    );
+    assert_eq!(
+        out[2]["url"],
+        "https://rpe.example.invalid/c?meetingId=<meeting:1>&meetingPw=<token:1>"
+    );
+    assert_eq!(
+        out[3]["body"],
+        "<p>Meeting ID: <span><meeting:2></span><br>Passcode: <b><token:3></b></p>"
+    );
+    assert_eq!(out[4]["audioConferencing"]["conferenceId"], "<meeting:3>");
+    assert_eq!(
+        out[5]["text"],
+        "join <meeting:1> or <meeting:2> with <token:3>; dial +1 323 555 0199,,<meeting:3># then <token:2>"
+    );
+    assert_eq!(Guard::new().unwrap().scan_text(&as_jsonl(&out)), []);
+}
+
+// --- names and hosts ---
+
+/// Every URL of `urls` in `text`, as often as `times`.
+fn assert_urls_intact(text: &str, urls: &[&str], times: usize) {
+    for url in urls {
+        assert_eq!(text.matches(url).count(), times, "{url} was changed: {text}");
+    }
+}
+
+#[test]
+fn an_email_shaped_display_name_leaves_every_host_intact() {
+    let urls = [
+        "https://teams.microsoft.com/api/mt/emea/beta/users/",
+        "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        "https://api.contoso.com/v1/x",
+        "https://www.example.org/x",
+        "wss://pub.example.com/v1",
+    ];
+    let events = vec![
+        json!({"displayName": "jane.doe@example.com"}),
+        json!({"displayName": "jane.doe@contoso.com"}),
+        json!({"displayName": "Lab (lab.example.org)"}),
+        json!({"displayName": format!("8:orgid:{COWORKER_GUID}")}),
+        json!({"urls": urls, "cookie": "x=1; Domain=.teams.microsoft.com; Path=/"}),
+        json!({"text": "ask jane.doe@example.com in the lab", "port": "8080"}),
+    ];
+    let out = sanitize_capture(&events, &Identities::default()).unwrap();
+    let text = as_jsonl(&out.events);
+    assert_urls_intact(&text, &urls, 1);
+    assert!(text.contains("Domain=.teams.microsoft.com"), "{text}");
+    assert_eq!(out.events[5]["text"], "ask <name:1> in the <name:3>");
+    assert_eq!(out.name_in_host, Vec::<usize>::new());
+    // the export's own check doesn't take a domain's labels for a name's words either
+    assert_eq!(check_names(&out.names, &text), []);
+    let names = names_in(&[json!({"displayName": "jane.doe@contoso.com"})]).unwrap();
+    assert_eq!(check_names(&names, "{\"u\":\"https://api.contoso.com/v1\"}\n"), []);
+
+    // and an export of it is written with every host as it was
+    let dir = tempfile::tempdir().unwrap();
+    let capture = write_capture(dir.path(), &events).unwrap();
+    let exported = export::export(&capture, "hosts", &dir.path().join("fixtures"), &Identities::default()).unwrap();
+    assert_urls_intact(&fs::read_to_string(exported.path).unwrap(), &urls, 1);
+}
+
+#[test]
+fn a_name_word_in_a_public_protocol_host_is_kept() {
+    let events = [
+        json!({"displayName": "Microsoft Teams"}),
+        json!({"displayName": "Login Live"}),
+        json!({
+            "url": "https://teams.microsoft.com/api/x?next=https%3A%2F%2Flogin.live.com%2Fy",
+            "text": "open Microsoft Teams, teams rock; live long",
+        }),
+    ];
+    let out = sanitize_capture(&events, &Identities::default()).unwrap();
+    assert_eq!(
+        out.events[2]["url"],
+        "https://teams.microsoft.com/api/x?next=https%3A%2F%2Flogin.live.com%2Fy"
+    );
+    assert_eq!(out.events[2]["text"], "open <name:1>, <name:1> rock; <name:2> long");
+    assert_eq!(out.name_in_host, Vec::<usize>::new());
+    assert_eq!(check_names(&out.names, &as_jsonl(&out.events)), []);
+}
+
+#[test]
+fn a_name_word_in_any_other_host_is_reported() {
+    let events = [
+        json!({"displayName": "Jane Quill"}),
+        json!({"ok": "nothing here"}),
+        json!({"url": "https://quill.example.test/a", "text": "Quill"}),
+        // a lookalike of a public host is no public host
+        json!({"url": "https://teams.microsoft.com.quill.example.test/b"}),
+    ];
+    let out = sanitize_capture(&events, &Identities::default()).unwrap();
+    assert_eq!(out.name_in_host, [3, 4]);
+    // replaced all the same: nothing is left of the name
+    assert_eq!(out.events[2]["url"], "https://<name:1>.example.test/a");
 }
 
 // --- the export's check for names ---
@@ -1231,6 +1438,67 @@ fn an_export_with_a_name_left_writes_nothing() {
     })
     .unwrap();
     assert_ne!(fs::read_to_string(&path).unwrap(), "{\"old\":true}\n");
+}
+
+#[test]
+fn an_export_that_would_put_a_name_in_a_host_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixtures = dir.path().join("fixtures");
+    let events = [
+        json!({"displayName": "Jane Quill"}),
+        json!({"url": "https://quill.example.test/a", "text": "thanks Quill"}),
+    ];
+    let capture = write_capture(dir.path(), &events).unwrap();
+    let path = fixtures.join("hosts.jsonl");
+    fs::create_dir_all(&fixtures).unwrap();
+    fs::write(&path, "{\"old\":true}\n").unwrap();
+    let error = export::export(&capture, "hosts", &fixtures, &Identities::default()).unwrap_err();
+    let ExportError::NameInHost(events) = &error else {
+        panic!("expected a name in a host, got {error}");
+    };
+    assert_eq!(events, &[2]);
+    let message = error.to_string();
+    assert!(message.contains("event 2"), "{message}");
+    assert!(!message.to_lowercase().contains("quill"), "{message}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{\"old\":true}\n");
+    let names: Vec<_> = fs::read_dir(&fixtures)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["hosts.jsonl"]);
+}
+
+#[test]
+fn an_export_never_writes_a_meeting_passcode() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixtures = dir.path().join("fixtures");
+    let link = meeting_link();
+    let events = [
+        json!({"joinUrl": link}),
+        json!({"url": format!("https://x.example.invalid/r?target={}", enc(&enc(&link)))}),
+    ];
+    let capture = write_capture(dir.path(), &events).unwrap();
+    let exported = export::export(&capture, "meeting", &fixtures, &Identities::default()).unwrap();
+    let written = fs::read_to_string(exported.path).unwrap();
+    for gone in [MEETING_CODE, MEETING_PASSCODE] {
+        assert!(!written.contains(gone), "{gone} was written: {written}");
+    }
+    assert!(
+        written.contains("https://teams.microsoft.com/meet/<meeting:1>?p=<token:1>"),
+        "{written}"
+    );
+    // a sanitizer that misses the passcode: the fixture guard refuses the export
+    let leaky = |events: &[Value]| {
+        let mut sanitized = sanitize_capture(events, &Identities::default())?;
+        sanitized.events[0]["joinUrl"] = json!(meeting_link());
+        Ok(sanitized)
+    };
+    let error = export::export_with(&capture, "leak", &fixtures, leaky).unwrap_err();
+    assert!(
+        matches!(&error, ExportError::Refused(found) if found.contains(&(1, Kind::MeetingLink))),
+        "{error}"
+    );
+    assert!(!fixtures.join("leak.jsonl").exists());
 }
 
 #[test]

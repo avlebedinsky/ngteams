@@ -11,6 +11,10 @@
 //!   of letters and digits nothing else recognized. Raw header text (`headersText`) is dropped, and binary content
 //!   (base64 bodies that aren't UTF-8 text, binary WebSocket frames in CDP events and in the fence's verdicts, `bytes`)
 //!   becomes `<binary:LEN>`.
+//! - **Teams meetings** (`sanitize/meeting.rs`): a join link's passcode (`/meet/<code>?p=…`) and any passcode under its
+//!   key or an invitation's label become `<token:N>`; the meeting's code (its numeric id, in the link, under
+//!   `meetingCode`/`joinMeetingId`/`*conferenceId`, after `Meeting ID:`) `<meeting:N>`. Both are learned across the
+//!   capture and replaced wherever else they show.
 //! - **Identifiers become placeholders**: emails `<user:N>`, MRIs `<mri:N>` (`8:orgid:…`, `8:live:…`, `28:…`, phone
 //!   `4:…`, `tel:`), conversation ids `19:<thread:N>@thread.v2`, GUIDs `<guid:N>`, tenant domains
 //!   (`*.onmicrosoft.com`, `*.sharepoint.com`, the lab's own) `<domain:N>`, IP addresses other than loopback `<ip:N>`,
@@ -23,8 +27,12 @@
 //!   occurrence of a learned name, or of a word of it with 3 letters or more, in any case and as a whole word (`_`
 //!   separates words too), is replaced in every text and every object key (a message body that says "Hi Jane", a
 //!   `OneDrive` path with `jane_doe`, a query with `Hello%20Jane`, a map keyed by display name). A name's words are its
-//!   runs of letters and digits, so punctuation never sticks to one (`Doe, Jane` gives `Doe`); a "Last, First" name
-//!   also stands for "First Last". A name found in form data is learned both as written and form-decoded
+//!   runs of letters and digits, so punctuation never sticks to one (`Doe, Jane` gives `Doe`), but none of a part
+//!   that is an identifier (an email or UPN, an MRI, a URL, a GUID, a domain: `jane.doe@contoso.com` is replaced whole
+//!   and gives no `com`) and no run of digits alone (`sanitize/words.rs`); a "Last, First" name also stands for
+//!   "First Last". A name is never replaced inside a public protocol host (`teams.microsoft.com`); one replaced inside
+//!   any other host destroys it, so [`sanitize_capture`] reports the event and the export refuses. A name found in form
+//!   data is learned both as written and form-decoded
 //!   (`Marguerite+Fakename` also as `Marguerite Fakename`; `%2B` stays a plus), only here: to every other rule `+`
 //!   stays `+`, so a base64 secret isn't split. A name only ever seen under a generic key such as `name` isn't learned.
 //!   Every name value is also kept as it was found ([`Sanitizer::learned_names`]), for the export's own check
@@ -49,6 +57,8 @@
 
 mod backstop;
 mod layers;
+mod meeting;
+mod words;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -60,10 +70,11 @@ use serde_json::{Map, Value};
 
 pub use self::backstop::{CHECK_ROUNDS, LearnedNames, NameFinding, check_names};
 use self::layers::{DECODE_ROUNDS, Layered, decode_all};
+use self::words::{host_of, hosts, learnable_words};
 use crate::config::{Alias, LabConfig};
 
 /// Every kind of placeholder the sanitizer writes.
-const KINDS: &str = "token|user|mri|guid|thread|domain|ip|name|pii|binary|omitted";
+const KINDS: &str = "token|user|mri|guid|thread|domain|ip|name|pii|meeting|binary|omitted";
 
 /// Separators as captures write them: plain, percent-encoded, encoded twice.
 const COLON: &str = "(?::|%3[aA]|%253[aA])";
@@ -75,12 +86,14 @@ const GUID: &str = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-
 const LOCAL_ESCAPE: &str = "%(?:25)?(?:2[14ABDEabde]|5[EFef]|60|7[B-Eb-e])";
 
 /// Key fragments whose values are always secrets (keys are compared lowercased).
-const SECRET_PARTS: [&str; 22] = [
+const SECRET_PARTS: [&str; 23] = [
     "token",
     "secret",
     "password",
     "passwd",
     "passcode",
+    // a meeting's passcode, as Microsoft's own forms name it
+    "meetingpw",
     "cookie",
     "credential",
     "signature",
@@ -261,6 +274,7 @@ struct Rules {
     field: Regex,
     field_value: Regex,
     opaque_run: Regex,
+    meeting: meeting::Patterns,
 }
 
 impl Rules {
@@ -303,6 +317,7 @@ impl Rules {
             // ... and the value: quoted (group 1, 2) or bare (3), up to the next delimiter
             field_value: Regex::new(r#"^(?:"([^"<>]*)"|'([^'<>]*)'|([^"'&#\r\n;,{}\[\]<>\s][^"'&#\r\n;,{}\[\]<>]*))"#)?,
             opaque_run: Regex::new(r"[A-Za-z0-9_\-]+")?,
+            meeting: meeting::Patterns::new()?,
         })
     }
 }
@@ -329,6 +344,17 @@ struct State {
     found_names: HashMap<String, String>,
     names_regex: Option<Regex>,
     names_changed: bool,
+    /// How many times a name was replaced inside a host that isn't a public one (`words.rs`): sanitizing did destroy
+    /// that host, and the export refuses ([`Sanitized::name_in_host`]).
+    name_in_host: usize,
+    /// Meetings' codes (`meeting.rs`).
+    meetings: Table,
+    /// The codes learned, as their digits.
+    codes: HashSet<String>,
+    /// The passcodes learned: lowercased, with the passcode as found.
+    passcodes: HashMap<String, String>,
+    passcodes_regex: Option<Regex>,
+    passcodes_changed: bool,
 }
 
 impl State {
@@ -395,6 +421,12 @@ enum Mode {
     Plain,
     /// Under a secret key: every string in it is a credential.
     Secret,
+    /// Under a meeting passcode's key: a secret, a number too, learned ([`meeting`]).
+    Passcode,
+    /// Under a meeting code's key: `<meeting:N>`, a number too, learned.
+    Code,
+    /// Under `meetingId`: a meeting's code when it is a number.
+    NumericCode,
     /// A `Cookie` or `Set-Cookie` header.
     Cookie,
     /// Under a [`WEAK_KEYS`] key.
@@ -469,17 +501,20 @@ impl Sanitizer {
         }
     }
 
-    /// The name fields in text (`displayName=…`, `"givenName":"…"`), at every layer of its encoding.
+    /// The name fields in text (`displayName=…`, `"givenName":"…"`), and meetings' codes and passcodes (`meeting.rs`),
+    /// at every layer of its encoding.
     fn learn_text(&mut self, text: &str) {
         let mut layered = Layered::new(text);
         for round in 0..=DECODE_ROUNDS {
             let plain = layered.plain();
-            let names = fields_in(&self.rules, &plain)
-                .into_iter()
-                .filter(|(mode, _)| *mode == Mode::Name);
-            for (_, range) in names {
-                self.state.learn_name(&plain[range]);
+            for (mode, range) in fields_in(&self.rules, &plain) {
+                match mode {
+                    Mode::Name => self.state.learn_name(&plain[range]),
+                    Mode::Code | Mode::NumericCode => self.state.learn_code(&plain[range]),
+                    _ => {}
+                }
             }
+            meeting::learn(&self.rules.meeting, &mut self.state, &plain);
             if round == DECODE_ROUNDS || !layered.decode() {
                 break;
             }
@@ -490,6 +525,10 @@ impl Sanitizer {
     fn learn_entry(&mut self, key: &str, value: &Value, base64: bool) {
         match (key_mode(key), value) {
             (Mode::Name, _) => self.learn_names_in(value),
+            (Mode::Code | Mode::NumericCode, Value::String(_) | Value::Number(_)) => {
+                self.state.learn_code(&scalar_text(value));
+            }
+            (Mode::Passcode, Value::String(_) | Value::Number(_)) => self.state.learn_passcode(&scalar_text(value)),
             (_, Value::String(text)) if base64 && is_body_key(key) => {
                 if let Some(text) = base64_text(text) {
                     self.learn(&Value::String(text));
@@ -514,6 +553,7 @@ impl Sanitizer {
     /// The learned names don't compile into a pattern (too many of them).
     pub fn sanitize(&mut self, event: &Value) -> Result<Value, regex::Error> {
         self.state.rebuild_names()?;
+        self.state.rebuild_passcodes()?;
         Ok(self.value(event, Mode::Plain))
     }
 
@@ -538,7 +578,19 @@ impl Sanitizer {
             Value::String(text) => Value::String(self.string(text, mode)),
             Value::Array(items) => Value::Array(items.iter().map(|item| self.value(item, mode)).collect()),
             Value::Object(map) => Value::Object(self.object(map, mode)),
+            Value::Number(number) => self.number(number, mode),
             other => other.clone(),
+        }
+    }
+
+    /// A number: a meeting's code or passcode as one becomes its placeholder; any other stays.
+    fn number(&mut self, number: &serde_json::Number, mode: Mode) -> Value {
+        let text = number.to_string();
+        match mode {
+            Mode::Code => Value::String(self.state.meeting(&text)),
+            Mode::NumericCode if meeting::is_numeric_code(&text) => Value::String(self.state.meeting(&text)),
+            Mode::Passcode => Value::String(self.state.token(&text)),
+            _ => Value::Number(number.clone()),
         }
     }
 
@@ -548,7 +600,7 @@ impl Sanitizer {
         for (key, value) in map {
             let lower = key.to_lowercase();
             let child = match mode {
-                Mode::Secret | Mode::Cookie => Mode::Secret,
+                Mode::Secret | Mode::Cookie | Mode::Passcode => Mode::Secret,
                 _ => key_mode(key),
             };
             let sanitized = match value {
@@ -588,8 +640,10 @@ impl Sanitizer {
             return text.to_owned();
         }
         match mode {
-            Mode::Secret => self.credential(text),
+            Mode::Secret | Mode::Passcode => self.credential(text),
             Mode::Cookie => self.cookie(text),
+            Mode::Code if !text.trim().is_empty() => self.state.meeting(text),
+            Mode::NumericCode if meeting::is_numeric_code(text) => self.state.meeting(text),
             Mode::Weak if text.len() >= WEAK_MIN => self.state.token(text),
             Mode::Name if !text.trim().is_empty() => self.state.name(text),
             Mode::Pii if !text.trim().is_empty() => self.state.pii(text),
@@ -667,9 +721,13 @@ pub fn sanitize_events(events: &[Value], identities: &Identities) -> Result<Vec<
 pub struct Sanitized {
     pub events: Vec<Value>,
     pub names: LearnedNames,
+    /// The events (from 1) where a name was replaced inside a host other than a public protocol host
+    /// (`https://<name:1>.example.test/`): the host is gone, so the export refuses rather than write it.
+    pub name_in_host: Vec<usize>,
 }
 
-/// As [`sanitize_events`], also handing back the names found ([`Sanitizer::learned_names`]).
+/// As [`sanitize_events`], also handing back the names found ([`Sanitizer::learned_names`]) and where a name took a
+/// host's place.
 ///
 /// # Errors
 /// As [`Sanitizer::new`] and [`Sanitizer::sanitize`].
@@ -678,13 +736,19 @@ pub fn sanitize_capture(events: &[Value], identities: &Identities) -> Result<San
     for event in events {
         sanitizer.learn(event);
     }
-    let events = events
-        .iter()
-        .map(|event| sanitizer.sanitize(event))
-        .collect::<Result<_, _>>()?;
+    let mut out = Vec::with_capacity(events.len());
+    let mut name_in_host = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let before = sanitizer.state.name_in_host;
+        out.push(sanitizer.sanitize(event)?);
+        if sanitizer.state.name_in_host > before {
+            name_in_host.push(index + 1);
+        }
+    }
     Ok(Sanitized {
-        events,
+        events: out,
         names: sanitizer.learned_names(),
+        name_in_host,
     })
 }
 
@@ -701,8 +765,9 @@ fn normalize_mri(mri: &str) -> String {
 }
 
 /// Every text that stands for a name: the name and, for a "Last, First" name (one comma), "First Last", each also with
-/// `%20`, `+` and `_` for its spaces; and every word of 3 letters or more, words being runs of letters and digits (any
-/// script), so punctuation never sticks to one (`Doe, Jane` gives `Doe` and `Jane`).
+/// `%20`, `+` and `_` for its spaces; and its words ([`learnable_words`]: runs of letters and digits of 3 or more, any
+/// script, so punctuation never sticks to one, `Doe, Jane` giving `Doe` and `Jane`; none from a part that is an
+/// identifier, so `jane.doe@contoso.com` gives no `com`).
 fn name_variants(name: &str) -> Vec<String> {
     let mut full = vec![name.to_owned()];
     if let Some((last, first)) = name.split_once(',').filter(|_| name.matches(',').count() == 1) {
@@ -718,12 +783,16 @@ fn name_variants(name: &str) -> Vec<String> {
         }
         variants.push(name);
     }
-    variants.extend(
-        name.split(|char: char| !char.is_alphanumeric())
-            .filter(|word| word.chars().count() >= 3)
-            .map(str::to_owned),
-    );
+    variants.extend(learnable_words(name).into_iter().map(str::to_owned));
     variants
+}
+
+/// A string's or a number's text.
+fn scalar_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// What an identity is compared by: decoded, without the spaces around it.
@@ -775,13 +844,19 @@ fn key_mode(key: &str) -> Mode {
     if lower == "cookie" || lower == "set-cookie" {
         return Mode::Cookie;
     }
+    let bare: String = lower.chars().filter(|&char| char != '_' && char != '-').collect();
+    if let Some(mode) = meeting::key_mode(&bare).filter(|mode| *mode == Mode::Passcode) {
+        return mode;
+    }
     if SECRET_PARTS.iter().any(|part| lower.contains(part)) || SECRET_KEYS.contains(&lower.as_str()) {
         return Mode::Secret;
     }
     if WEAK_KEYS.contains(&lower.as_str()) {
         return Mode::Weak;
     }
-    let bare: String = lower.chars().filter(|&char| char != '_' && char != '-').collect();
+    if let Some(mode) = meeting::key_mode(&bare) {
+        return mode;
+    }
     if NAME_PARTS.iter().any(|part| bare.contains(part)) {
         return Mode::Name;
     }
@@ -815,12 +890,14 @@ type Edits = Vec<(Range<usize>, String)>;
 
 type Rule = fn(&Rules, &mut State, &str) -> Edits;
 
-/// The rules for free text, in order: secrets first (so a token is never taken apart), then identifiers, then personal
-/// fields, names, and whatever still looks like a token.
-const TEXT_RULES: [Rule; 15] = [
+/// The rules for free text, in order: secrets first (so a token is never taken apart; meetings' passcodes and codes
+/// with them), then identifiers, then personal fields, names, and whatever still looks like a token.
+const TEXT_RULES: [Rule; 17] = [
     bearer,
     secret_values,
     jwts,
+    meetings,
+    meetings_learned,
     mris,
     guids,
     threads,
@@ -837,8 +914,9 @@ const TEXT_RULES: [Rule; 15] = [
 
 /// The rules for object keys: identifiers and learned names (a map may be keyed by MRI or by display name), never
 /// secrets (a key is never a secret's name to redact).
-const KEY_RULES: [Rule; 11] = [
+const KEY_RULES: [Rule; 12] = [
     jwts,
+    meetings_learned,
     mris,
     guids,
     threads,
@@ -930,6 +1008,14 @@ fn secret_values(rules: &Rules, state: &mut State, text: &str) -> Edits {
         }
         Some((value.range(), state.token(plain)))
     })
+}
+
+fn meetings(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    meeting::meetings(&rules.meeting, state, text)
+}
+
+fn meetings_learned(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    meeting::learned(&rules.meeting, state, text)
 }
 
 fn jwts(rules: &Rules, state: &mut State, text: &str) -> Edits {
@@ -1063,8 +1149,9 @@ fn ufrags(rules: &Rules, state: &mut State, text: &str) -> Edits {
     })
 }
 
-/// The values of name and other personal fields in text (`displayName=Jane`, `"jobTitle":"Engineer"`), with their
-/// mode ([`Mode::Name`] or [`Mode::Pii`]); in order, not overlapping.
+/// The values of name, other personal and meeting code fields in text (`displayName=Jane`, `"jobTitle":"Engineer"`,
+/// `meetingId=1234567890123`), with their mode ([`Mode::Name`], [`Mode::Pii`], [`Mode::Code`] or
+/// [`Mode::NumericCode`]); in order, not overlapping.
 fn fields_in(rules: &Rules, text: &str) -> Vec<(Mode, Range<usize>)> {
     let mut found = Vec::new();
     let mut done = 0;
@@ -1073,7 +1160,8 @@ fn fields_in(rules: &Rules, text: &str) -> Vec<(Mode, Range<usize>)> {
             continue;
         };
         let mode = key_mode(key.as_str());
-        if key.start() < done || !matches!(mode, Mode::Name | Mode::Pii) {
+        let wanted = matches!(mode, Mode::Name | Mode::Pii | Mode::Code | Mode::NumericCode);
+        if key.start() < done || !wanted {
             continue;
         }
         let Some(range) = field_value(rules, text, whole.end()) else {
@@ -1102,13 +1190,16 @@ fn field_value(rules: &Rules, text: &str, at: usize) -> Option<Range<usize>> {
 fn fields(rules: &Rules, state: &mut State, text: &str) -> Edits {
     fields_in(rules, text)
         .into_iter()
-        .map(|(mode, range)| {
+        .filter_map(|(mode, range)| {
             let value = &text[range.clone()];
             let placeholder = match mode {
                 Mode::Name => state.name(value),
+                Mode::Code => state.meeting(value),
+                Mode::NumericCode if meeting::is_numeric_code(value) => state.meeting(value),
+                Mode::NumericCode => return None,
                 _ => state.pii(value),
             };
-            (range, placeholder)
+            Some((range, placeholder))
         })
         .collect()
 }
@@ -1117,21 +1208,36 @@ fn fields(rules: &Rules, state: &mut State, text: &str) -> Edits {
 /// letter or a digit (a name behind an escape, `Hello%20Jane`, is found once the escape is decoded). A match that isn't
 /// bounded is looked at again as the single word it starts (`Jane Does` holds `Jane`, not `Jane Doe`), and the search
 /// goes on from the next character, so nothing inside it is skipped.
+///
+/// A match inside a public protocol host (`teams.microsoft.com`, `words.rs`) is no name and stays. One inside any
+/// other host is replaced, and counted ([`State::name_in_host`]): that host is gone, and the export refuses.
 fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
     let Some(regex) = &state.names_regex else {
         return Vec::new();
     };
+    let hosts = hosts(text);
     let mut edits = Vec::new();
+    let mut in_host = 0;
     let mut at = 0;
     while let Some(found) = regex.find_at(text, at) {
         let start = found.start();
-        if let Some((end, label)) = name_at(state, text, start, found.end()) {
-            edits.push((start..end, format!("<name:{label}>")));
-            at = end;
-        } else {
-            at = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        let next = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        let Some((end, label)) = name_at(state, text, start, found.end()) else {
+            at = next;
+            continue;
+        };
+        match host_of(&hosts, &(start..end)) {
+            Some(true) => {
+                at = next;
+                continue;
+            }
+            Some(false) => in_host += 1,
+            None => {}
         }
+        edits.push((start..end, format!("<name:{label}>")));
+        at = end;
     }
+    state.name_in_host += in_host;
     edits
 }
 

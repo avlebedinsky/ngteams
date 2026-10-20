@@ -1,6 +1,7 @@
 //! The fixture guard: scans files meant for the repository (sanitized fixtures, docs) for what must never be committed,
 //! such as JWTs, `Bearer` and skypetoken values, OAuth tokens, email addresses, real MRIs, GUIDs (other than
-//! Microsoft's public app ids) and signed URLs' signatures. It is the backstop behind the sanitizer: what the sanitizer
+//! Microsoft's public app ids), signed URLs' signatures, and Teams meetings' join credentials (a join link's code or
+//! `p` passcode, a passcode under its key or label). It is the backstop behind the sanitizer: what the sanitizer
 //! misses fails the export instead of being committed.
 //!
 //! Each line is scanned twice: as written, and decoded the way captures hide text, with `%XX` percent escapes decoded
@@ -41,6 +42,12 @@ pub enum Kind {
     Guid,
     /// A signed URL's signature (`sig=`, `signature=`, `X-Amz-Signature:`, …) of 16 characters or more.
     Signature,
+    /// A Teams meeting join link that still holds its code (`/meet/1234567890123`, also under `/v2/meet/`, `/lm/meet/`)
+    /// or a passcode (`p=` in the query of a `/meet/`, `/l/meetup-join/` or `/l/meetnow-join` link), on any host.
+    MeetingLink,
+    /// A meeting passcode under its key or label (`"passcode":"…"`, `meetingPw=…`, an invitation's `Passcode: …`,
+    /// HTML tags between): 4 to 64 letters and digits, a digit among them.
+    Passcode,
 }
 
 /// GUIDs that may appear anywhere: Microsoft's first-party app ids, the same in every tenant and published in
@@ -75,6 +82,10 @@ impl fmt::Display for Finding {
 const GUID: &str = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 /// A token-shaped value: 20 or more URL-safe base64/JWT characters. Placeholders start with `<`, so they never match.
 const VALUE: &str = r"[A-Za-z0-9._\-]{20,}";
+/// An HTML tag between a label and its value (`</span><span class="x">`), never a placeholder (`<token:1>`).
+const TAG: &str = r"</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?/?>";
+/// The shortest meeting code in a link.
+const MEETING_CODE_MIN: usize = 6;
 /// Reserved documentation domains (RFC 2606), which a fixture or doc may use freely.
 const RESERVED_DOMAINS: [&str; 3] = ["example.com", "example.org", "example.net"];
 
@@ -117,6 +128,19 @@ impl Guard {
             (
                 Kind::Signature,
                 r#"(?i)(?:^|[^A-Za-z0-9])(?:sig|signature)["']?\s*[:=]\s*["']?[A-Za-z0-9+/=_.%\-]{16,}"#.to_owned(),
+            ),
+            // a join path, its code (group 1) and the rest of the link (group 2), placeholders included: checked in
+            // `matches_line`
+            (
+                Kind::MeetingLink,
+                r#"(?i)/(?:(?:v2/|lm/)?meet/([A-Za-z0-9]*)|l/meet(?:up|now)-join\b)((?:[^\s"'<>\\`]|<[a-z]+:[A-Za-z0-9]+>)*)"#
+                    .to_owned(),
+            ),
+            (
+                Kind::Passcode,
+                format!(
+                    r#"(?i)(?:passcode|meetingpw)["']?(?:\s|{TAG})*[:=](?:\s|["']|{TAG}|&nbsp;)*([A-Za-z0-9]{{4,64}})\b"#
+                ),
             ),
         ];
         let rules = patterns
@@ -257,8 +281,35 @@ fn matches_line(kind: Kind, regex: &Regex, line: &str) -> bool {
         Kind::Guid => regex
             .find_iter(line)
             .any(|guid| !PUBLIC_GUIDS.contains(&guid.as_str().to_ascii_lowercase().as_str())),
+        Kind::MeetingLink => regex.captures_iter(line).any(|captures| {
+            let code = captures
+                .get(1)
+                .is_some_and(|code| is_meeting_code(code.as_str(), &line[code.end()..]));
+            code || captures.get(2).is_some_and(|rest| has_passcode(rest.as_str()))
+        }),
+        Kind::Passcode => regex.captures_iter(line).any(|captures| {
+            captures
+                .get(1)
+                .is_some_and(|value| value.as_str().bytes().any(|byte| byte.is_ascii_digit()))
+        }),
         _ => regex.is_match(line),
     }
+}
+
+/// Whether the text after `/meet/` (`after` follows it) is a meeting's code: 6 characters or more with a digit, a
+/// whole word.
+fn is_meeting_code(code: &str, after: &str) -> bool {
+    code.len() >= MEETING_CODE_MIN && code.bytes().any(|byte| byte.is_ascii_digit()) && !after.starts_with(['-', '_'])
+}
+
+/// Whether the rest of a meeting link holds a `p` parameter whose value isn't a placeholder.
+fn has_passcode(rest: &str) -> bool {
+    let lower = rest.to_ascii_lowercase();
+    lower.match_indices("p=").any(|(at, _)| {
+        let after_separator = at > 0 && matches!(lower.as_bytes()[at - 1], b'?' | b'&' | b'#' | b';');
+        let value = lower[at + 2..].chars().next();
+        after_separator && value.is_some_and(|first| !matches!(first, '<' | '&' | '#' | ';'))
+    })
 }
 
 fn is_reserved(domain: &str) -> bool {

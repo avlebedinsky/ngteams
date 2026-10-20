@@ -4,7 +4,9 @@
 //! It works from the name values as they were found in the capture ([`LearnedNames`], kept before any decoding), not
 //! from the sanitizer's own list of what to replace, so a mistake in how that list is made doesn't hide its own leak.
 //! Each value is decoded (fully, and with form decoding where a `+` is a space and `%2B` a plus) and split into words
-//! (runs of letters and digits, any script); every word of 3 characters or more, lowercased, is looked for. Every line
+//! the way the sanitizer reads a name (`words.rs`: runs of letters and digits, any script, of 3 characters or more,
+//! none from a part that is an identifier such as `jane.doe@contoso.com`, no digits alone); each, lowercased, is looked
+//! for, anywhere but in a public protocol host (`teams.microsoft.com`), whose labels are never a name's. Every line
 //! of the output is checked as written and again after each layer of escapes is decoded (percent escapes, backslash
 //! escapes, HTML character references, a `+` being a separator like any other character that isn't a letter or a
 //! digit), up to [`CHECK_ROUNDS`] layers; a line that still holds escapes after that can't be checked and is refused
@@ -20,13 +22,11 @@ use std::fmt;
 
 use super::KINDS;
 use super::layers::decode_once;
+use super::words::{MIN_WORD, learnable_words, without_public_hosts};
 
 /// How many layers of escapes [`check_names`] decodes in a line (more than the sanitizer's rules do, so it also sees
 /// what they never reached).
 pub const CHECK_ROUNDS: usize = 8;
-
-/// The shortest word of a name that is looked for.
-const MIN_WORD: usize = 3;
 
 /// The name values found in a capture, as they were found, each with its placeholder (`<name:1>`). Never printed: its
 /// `Debug` shows only the placeholders.
@@ -54,7 +54,7 @@ impl LearnedNames {
         let mut words = HashMap::new();
         for (raw, label) in &self.names {
             for decoded in [decoded(raw), decoded(&raw.replace('+', " "))] {
-                for word in name_words(&decoded) {
+                for word in learnable_words(&decoded) {
                     words.entry(word.to_lowercase()).or_insert_with(|| label.clone());
                 }
             }
@@ -138,10 +138,11 @@ fn check_line(words: &HashMap<String, String>, longest: usize, line: usize, text
     }
 }
 
-/// The labels of the names whose words `text` holds.
+/// The labels of the names whose words `text` holds, outside its public protocol hosts.
 fn hits<'a>(words: &'a HashMap<String, String>, longest: usize, text: &str) -> Vec<&'a str> {
     let mut labels = Vec::new();
-    for word in name_words(text) {
+    let text = without_public_hosts(text);
+    for word in name_words(&text) {
         if word.chars().count() > longest {
             continue;
         }
