@@ -18,7 +18,10 @@
 use ego_tree::iter::Edge;
 use scraper::node::Element;
 use scraper::{Html, Node as HtmlNode};
+use serde_json::Value;
 use url::Url;
+
+use crate::chat::model::Field;
 
 /// The deepest the model nests containers (paragraphs, links, quotes, mentions).
 pub const MAX_DEPTH: usize = 32;
@@ -154,8 +157,10 @@ pub struct ThreadActivity {
     pub kind: String,
     pub initiator: Option<String>,
     pub targets: Vec<String>,
-    pub roster_version: Option<u64>,
-    pub event_time: Option<u64>,
+    /// `rosterVersion`: digits as captured, any other text kept as [`Field::Unknown`] (a JSON string).
+    pub roster_version: Field<u64>,
+    /// `eventtime` (ms): as `roster_version`.
+    pub event_time: Field<u64>,
 }
 
 /// Parses a message's HTML content (see the module docs).
@@ -216,12 +221,20 @@ pub fn thread_activity(content: &str) -> Option<ThreadActivity> {
         match element.name() {
             "initiator" => activity.initiator = Some(text()),
             "target" => activity.targets.push(text()),
-            "rosterversion" => activity.roster_version = text().parse().ok(),
-            "eventtime" => activity.event_time = text().parse().ok(),
+            "rosterversion" => activity.roster_version = digits(text()),
+            "eventtime" => activity.event_time = digits(text()),
             _ => {}
         }
     }
     Some(activity)
+}
+
+/// An element's text as a number: digits only (as captured), anything else kept as it came.
+fn digits(text: String) -> Field<u64> {
+    match text.parse() {
+        Ok(number) if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) => Field::Known(number),
+        _ => Field::Unknown(Value::String(text)),
+    }
 }
 
 /// What an open element became.

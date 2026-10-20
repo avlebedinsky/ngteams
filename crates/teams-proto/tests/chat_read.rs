@@ -110,7 +110,7 @@ fn the_conversation_list_reads_each_kind_and_marks_channels_read_only() -> TestR
 fn a_conversation_entry_reads_its_horizon_and_last_message() -> TestResult {
     let list = conversation_list(&fixture("conversations.json")?["response"]["body"])?;
     let ab = &list.conversations[0];
-    assert_eq!(ab.version, Some(1_760_000_300_100));
+    assert_eq!(ab.version, Field::Known(1_760_000_300_100));
     let horizon = ab.consumption_horizon().ok_or("no horizon")?;
     assert_eq!(horizon.last_read_arrival, Some(1_760_000_300_000));
     assert_eq!(horizon.updated, Some(1_760_000_300_100));
@@ -160,9 +160,9 @@ fn a_sync_page_reads_its_links_and_a_deleted_message() -> TestResult {
 
     let deleted = &page.messages[0];
     assert!(deleted.is_deleted());
-    assert_eq!(deleted.delete_time(), Some(1_760_000_068_000));
-    assert_eq!(deleted.skype_edited_id, deleted.client_message_id);
-    assert_eq!(deleted.version, Some(1_760_000_068_000));
+    assert_eq!(deleted.delete_time(), Field::Known(1_760_000_068_000));
+    assert_eq!(deleted.skype_edited_id.as_ref(), deleted.client_message_id.as_known());
+    assert_eq!(deleted.version, Field::Known(1_760_000_068_000));
     assert_eq!(deleted.rich_text(), Some(RichText::default()));
     Ok(())
 }
@@ -206,14 +206,14 @@ fn a_quoted_reply_reads_its_quote_from_content_and_properties() -> TestResult {
 fn an_edited_message_reads_its_edit_time_and_taken_back_reaction() -> TestResult {
     let page = sync_page()?;
     let edited = &page.messages[2];
-    assert_eq!(edited.edit_time(), Some(1_760_000_020_000));
+    assert_eq!(edited.edit_time(), Field::Known(1_760_000_020_000));
     assert!(!edited.is_deleted());
     let reactions = edited.reactions().known().ok_or("emotions")?;
     assert_eq!(reactions.len(), 1);
     assert_eq!((reactions[0].key.as_str(), reactions[0].users.len()), ("like", 0));
     assert_eq!(edited.annotations_summary, Some(json!({})));
     assert_eq!(edited.message_type, MessageType::RichTextHtml);
-    assert_eq!(edited.sequence_id, Some(3));
+    assert_eq!(edited.sequence_id, Field::Known(3));
     assert_eq!(edited.compose_time_ms(), Some(1_767_225_610_000));
     assert_eq!(edited.arrival_time_ms(), Some(1_767_225_610_000));
     assert!(edited.extra.contains_key("conversationLink"));
@@ -232,15 +232,15 @@ fn the_page_around_a_time_reads_the_chats_first_event() -> TestResult {
     assert_eq!(page.sync_state(), None);
     let event = &page.messages[1];
     assert_eq!(event.message_type, MessageType::AddMember);
-    assert_eq!(event.client_message_id, None);
+    assert_eq!(event.client_message_id, Field::Absent);
     assert_eq!(event.sender(), Some(AB_CHAT), "a thread's event comes from the thread");
     assert_eq!(event.rich_text(), None);
     let activity = event.thread_activity().ok_or("no activity")?;
     assert_eq!(activity.kind, "addmember");
     assert_eq!(activity.initiator.as_deref(), Some(LAB_A));
     assert_eq!(activity.targets, [LAB_A, LAB_B]);
-    assert_eq!(activity.roster_version, Some(1_760_000_000_000));
-    assert_eq!(activity.event_time, Some(1_760_000_000_399));
+    assert_eq!(activity.roster_version, Field::Known(1_760_000_000_000));
+    assert_eq!(activity.event_time, Field::Known(1_760_000_000_399));
     assert!(event.extra.contains_key("origincontextid"));
     Ok(())
 }
@@ -248,8 +248,8 @@ fn the_page_around_a_time_reads_the_chats_first_event() -> TestResult {
 #[test]
 fn edits_deletes_and_reactions_read_back_as_their_fixtures_recorded() -> TestResult {
     let edited = message(&fixture("edit.json")?["read_back"])?;
-    assert_eq!(edited.edit_time(), Some(1_760_000_020_900));
-    assert_eq!(edited.version, Some(1_760_000_020_900));
+    assert_eq!(edited.edit_time(), Field::Known(1_760_000_020_900));
+    assert_eq!(edited.version, Field::Known(1_760_000_020_900));
     assert_eq!(edited.skype_edited_id, None);
     assert_eq!(
         edited.rich_text().map(|rich| rich.plain_text()),
@@ -266,8 +266,8 @@ fn edits_deletes_and_reactions_read_back_as_their_fixtures_recorded() -> TestRes
     let reactions = kept.reactions().known().ok_or("emotions")?;
     let user = &reactions[0].users[0];
     assert_eq!(
-        (user.mri.as_str(), user.time, user.value.as_deref()),
-        (LAB_A, Some(1_760_000_055_100), Some("1760000055000"))
+        (user.mri.as_str(), &user.time, user.value.as_known().map(String::as_str)),
+        (LAB_A, &Field::Known(1_760_000_055_100), Some("1760000055000"))
     );
     assert_eq!(kept.annotations_summary, Some(json!({"emotions": {"like": 1}})));
     let taken_back = message(&reaction["read_back_taken_back"])?;
@@ -304,8 +304,8 @@ fn a_quote_as_sent_names_its_message_as_a_string() -> TestResult {
     let sent = message(&fixture("reply.json")?["request"]["body"])?;
     let quotes = sent.quotes().known().ok_or("qtdMsgs as a JSON string")?;
     assert_eq!(
-        (quotes[0].message_id.as_str(), quotes[0].time),
-        ("1760000010000", Some(1_760_000_010_000))
+        (quotes[0].message_id.as_str(), &quotes[0].time),
+        ("1760000010000", &Field::Known(1_760_000_010_000))
     );
     Ok(())
 }
@@ -317,12 +317,12 @@ fn the_group_thread_read_and_member_list_read_their_members() -> TestResult {
     let members: Vec<&str> = thread.members.iter().map(|member| member.id.as_str()).collect();
     assert_eq!(members, [LAB_A, LAB_B, LAB_C]);
     assert_eq!(thread.members[0].role.as_deref(), Some("Admin"));
-    assert_eq!(thread.roster_version, Some(1_760_000_000_000));
+    assert_eq!(thread.roster_version, Field::Known(1_760_000_000_000));
     assert!(thread.extra.contains_key("eTag"));
     let list: MemberList = serde_json::from_value(fixture("thread-group-members.json")?["response"]["body"].clone())?;
     assert_eq!(
-        (list.members.len(), list.total_member_count, list.roster_version),
-        (3, Some(3), Some(0))
+        (list.members.len(), &list.total_member_count, &list.roster_version),
+        (3, &Field::Known(3), &Field::Known(0))
     );
     Ok(())
 }
@@ -344,7 +344,7 @@ fn what_this_build_does_not_know_is_kept_never_a_parse_failure() -> TestResult {
         }
     }))?;
     assert_eq!(odd.id, "17");
-    assert_eq!(odd.version, None);
+    assert_eq!(odd.version, Field::Unknown(json!("x1")), "kept, not dropped");
     assert_eq!(odd.message_type, MessageType::Unknown("Event/Call".to_owned()));
     assert_eq!(odd.message_type.as_str(), "Event/Call");
     assert_eq!(odd.rich_text(), None);
@@ -352,9 +352,181 @@ fn what_this_build_does_not_know_is_kept_never_a_parse_failure() -> TestResult {
     assert_eq!(odd.extra["newField"], json!({"nested": true}));
     assert_eq!(odd.mentions(), Field::Unknown(json!("{\"not\": \"a list\"}")));
     assert_eq!(odd.reactions(), Field::Unknown(json!("like")));
-    assert_eq!(odd.edit_time(), None);
+    assert_eq!(odd.edit_time(), Field::Unknown(Value::Null));
     assert_eq!(odd.quotes(), Field::Unknown(json!([{"sender": "no id"}])));
     assert_eq!(odd.files(), Field::Unknown(json!(3)));
+    Ok(())
+}
+
+#[test]
+fn a_messages_named_numbers_and_ids_are_absent_known_or_kept_as_they_came() -> TestResult {
+    let absent = message(&json!({"id": "1"}))?;
+    assert_eq!(
+        (&absent.sequence_id, &absent.version, &absent.client_message_id),
+        (&Field::Absent, &Field::Absent, &Field::Absent)
+    );
+    let known = message(&json!({"id": "1", "sequenceId": 4, "version": "1760000000000", "clientmessageid": 42}))?;
+    assert_eq!(
+        (&known.sequence_id, &known.version, &known.client_message_id),
+        (
+            &Field::Known(4),
+            &Field::Known(1_760_000_000_000),
+            &Field::Known("42".to_owned())
+        )
+    );
+    let odd = json!({"id": "1", "sequenceId": -1, "version": 1.5, "clientmessageid": {}});
+    let unknown = message(&odd)?;
+    assert_eq!(
+        (&unknown.sequence_id, &unknown.version, &unknown.client_message_id),
+        (
+            &Field::Unknown(json!(-1)),
+            &Field::Unknown(json!(1.5)),
+            &Field::Unknown(json!({}))
+        )
+    );
+    let nulls = message(&json!({"id": "1", "version": null, "clientmessageid": null}))?;
+    assert_eq!(
+        (&nulls.version, &nulls.client_message_id),
+        (&Field::Unknown(Value::Null), &Field::Unknown(Value::Null)),
+        "null is no form a capture showed"
+    );
+
+    let page = page_of(&json!({"messages": [odd]}))?;
+    assert_eq!(
+        (page.messages.len(), page.unreadable.len()),
+        (1, 0),
+        "read, not unreadable"
+    );
+    assert_eq!(page.messages[0].version, Field::Unknown(json!(1.5)));
+
+    let back = serde_json::to_value(&unknown)?;
+    assert_eq!(
+        (&back["sequenceId"], &back["version"], &back["clientmessageid"]),
+        (&json!(-1), &json!(1.5), &json!({})),
+        "serialized as it came"
+    );
+    let back = serde_json::to_value(&absent)?;
+    assert!(back.get("version").is_none() && back.get("clientmessageid").is_none());
+    Ok(())
+}
+
+#[test]
+fn a_conversations_named_numbers_are_absent_known_or_kept_as_they_came() -> TestResult {
+    let list = conversation_list(&json!({"conversations": [
+        {"id": AB_CHAT},
+        {"id": AB_CHAT, "version": 7, "lastUpdatedMessageId": "1760000000000", "lastUpdatedMessageVersion": 0},
+        {"id": AB_CHAT, "version": null, "lastUpdatedMessageId": "17e3", "lastUpdatedMessageVersion": [1]}
+    ]}))?;
+    assert!(list.unreadable.is_empty());
+    let fields = |conversation: &Conversation| {
+        (
+            conversation.version.clone(),
+            conversation.last_updated_message_id.clone(),
+            conversation.last_updated_message_version.clone(),
+        )
+    };
+    assert_eq!(
+        fields(&list.conversations[0]),
+        (Field::Absent, Field::Absent, Field::Absent)
+    );
+    assert_eq!(
+        fields(&list.conversations[1]),
+        (Field::Known(7), Field::Known(1_760_000_000_000), Field::Known(0))
+    );
+    assert_eq!(
+        fields(&list.conversations[2]),
+        (
+            Field::Unknown(Value::Null),
+            Field::Unknown(json!("17e3")),
+            Field::Unknown(json!([1]))
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn reaction_users_and_quotes_keep_a_time_or_value_of_another_form() -> TestResult {
+    let read = message(&json!({"id": "1", "properties": {
+        "emotions": [{"key": "like", "users": [
+            {"mri": "8:orgid:x"},
+            {"mri": "8:orgid:y", "time": "5", "value": 6},
+            {"mri": "8:orgid:z", "time": "soon", "value": true}
+        ]}],
+        "qtdMsgs": [{"messageId": "1"}, {"messageId": "2", "time": 3}, {"messageId": "3", "time": -3}]
+    }}))?;
+    let reactions = read.reactions().known().ok_or("emotions")?;
+    let users: Vec<_> = reactions[0]
+        .users
+        .iter()
+        .map(|user| (user.time.clone(), user.value.clone()))
+        .collect();
+    assert_eq!(
+        users,
+        [
+            (Field::Absent, Field::Absent),
+            (Field::Known(5), Field::Known("6".to_owned())),
+            (Field::Unknown(json!("soon")), Field::Unknown(json!(true)))
+        ]
+    );
+    let quotes = read.quotes().known().ok_or("qtdMsgs")?;
+    let times: Vec<_> = quotes.iter().map(|quote| quote.time.clone()).collect();
+    assert_eq!(times, [Field::Absent, Field::Known(3), Field::Unknown(json!(-3))]);
+    Ok(())
+}
+
+#[test]
+fn a_threads_and_member_lists_named_numbers_are_absent_known_or_kept_as_they_came() -> TestResult {
+    let absent: Thread = serde_json::from_value(json!({"id": ABC_CHAT}))?;
+    assert_eq!(
+        (&absent.roster_version, &absent.version),
+        (&Field::Absent, &Field::Absent)
+    );
+    let read: Thread = serde_json::from_value(json!({"id": ABC_CHAT, "rosterVersion": "r1", "version": "7"}))?;
+    assert_eq!(
+        (&read.roster_version, &read.version),
+        (&Field::Unknown(json!("r1")), &Field::Known(7))
+    );
+    let list: MemberList = serde_json::from_value(json!({"totalMemberCount": [3], "rosterVersion": 2}))?;
+    assert_eq!(
+        (&list.total_member_count, &list.roster_version),
+        (&Field::Unknown(json!([3])), &Field::Known(2))
+    );
+    let empty: MemberList = serde_json::from_value(json!({}))?;
+    assert_eq!(
+        (&empty.total_member_count, &empty.roster_version),
+        (&Field::Absent, &Field::Absent)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_thread_events_numbers_and_a_messages_edit_and_delete_times_keep_another_form() -> TestResult {
+    let event = message(&json!({
+        "id": "1",
+        "messagetype": "ThreadActivity/AddMember",
+        "content": "<addmember><eventtime>soon</eventtime><rosterVersion>+5</rosterVersion></addmember>"
+    }))?;
+    let activity = event.thread_activity().ok_or("no activity")?;
+    assert_eq!(
+        (&activity.event_time, &activity.roster_version),
+        (&Field::Unknown(json!("soon")), &Field::Unknown(json!("+5")))
+    );
+    let bare = message(&json!({"id": "1", "messagetype": "ThreadActivity/AddMember", "content": "<addmember/>"}))?;
+    let activity = bare.thread_activity().ok_or("no activity")?;
+    assert_eq!(
+        (&activity.event_time, &activity.roster_version),
+        (&Field::Absent, &Field::Absent)
+    );
+
+    let odd = message(&json!({"id": "1", "properties": {"deletetime": "yesterday", "edittime": "5"}}))?;
+    assert_eq!(odd.delete_time(), Field::Unknown(json!("yesterday")));
+    assert!(
+        !odd.is_deleted(),
+        "a deletetime no capture showed isn't read as a delete"
+    );
+    assert_eq!(odd.edit_time(), Field::Known(5));
+    let plain = message(&json!({"id": "1"}))?;
+    assert_eq!((plain.edit_time(), plain.delete_time()), (Field::Absent, Field::Absent));
     Ok(())
 }
 
@@ -587,7 +759,7 @@ async fn message_pages_follow_the_services_backward_and_sync_links() -> TestResu
     assert_eq!(whole.messages.len(), 5);
     assert!(whole.unreadable.is_empty());
     assert!(whole.messages[0].is_deleted());
-    assert_eq!(whole.messages[2].edit_time(), Some(1_760_000_020_000));
+    assert_eq!(whole.messages[2].edit_time(), Field::Known(1_760_000_020_000));
     assert_eq!(whole.messages[4].message_type, MessageType::AddMember);
     let sync = whole.sync_state().ok_or("no sync link")?;
     let since = reads.messages_from(AB_CHAT, sync).await?;
@@ -611,7 +783,7 @@ async fn threads_and_member_lists_through_the_transport() -> TestResult {
     assert_eq!(group.kind(), ConversationKind::Group);
     assert_eq!(group.members.len(), 3);
     let list = reads.members(ABC_CHAT).await?;
-    assert_eq!((list.members.len(), list.total_member_count), (3, Some(3)));
+    assert_eq!((list.members.len(), &list.total_member_count), (3, &Field::Known(3)));
     // a chat the caller isn't in is the service's refusal, as the transport reports it
     let outside = lab_client(&mock, LAB_C)?;
     let refused = ChatReads::new(&outside).thread(AB_CHAT).await;

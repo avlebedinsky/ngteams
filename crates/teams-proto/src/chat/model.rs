@@ -11,7 +11,7 @@
 //! `sequenceId`, a quoted message's `messageId`) are read in either form.
 
 use serde::de::{DeserializeOwned, Deserializer};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 use teams_fence::{is_group_chat_id, one_to_one_pair};
 use time::OffsetDateTime;
@@ -20,9 +20,13 @@ use time::format_description::well_known::Rfc3339;
 use crate::chat::html::{self, RichText, ThreadActivity};
 
 /// A value that may be missing, in a form a capture showed ([`Field::Known`]), or in another one, kept as it came
-/// ([`Field::Unknown`]).
-#[derive(Clone, Debug, PartialEq)]
+/// ([`Field::Unknown`]). A named field that came as `null` is `Unknown(Value::Null)`: no capture showed one.
+///
+/// It serializes as the value it holds (`Known` as `T`, `Unknown` as the raw value); a struct field that is `Absent`
+/// is left out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Field<T> {
+    #[default]
     Absent,
     Known(T),
     Unknown(Value),
@@ -35,6 +39,31 @@ impl<T> Field<T> {
         match self {
             Self::Known(value) => Some(value),
             Self::Absent | Self::Unknown(_) => None,
+        }
+    }
+
+    /// The known value by reference, if there is one.
+    #[must_use]
+    pub const fn as_known(&self) -> Option<&T> {
+        match self {
+            Self::Known(value) => Some(value),
+            Self::Absent | Self::Unknown(_) => None,
+        }
+    }
+
+    /// Whether the value is missing (neither known nor in another form).
+    #[must_use]
+    pub const fn is_absent(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+}
+
+impl<T: Serialize> Serialize for Field<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Absent => serializer.serialize_none(),
+            Self::Known(value) => value.serialize(serializer),
+            Self::Unknown(raw) => raw.serialize(serializer),
         }
     }
 }
@@ -93,12 +122,26 @@ impl ConversationList {
 pub struct Conversation {
     pub id: String,
     /// The conversation's version (ms): raised by every change.
-    #[serde(default, deserialize_with = "lenient_number")]
-    pub version: Option<u64>,
-    #[serde(rename = "lastUpdatedMessageId", default, deserialize_with = "lenient_number")]
-    pub last_updated_message_id: Option<u64>,
-    #[serde(rename = "lastUpdatedMessageVersion", default, deserialize_with = "lenient_number")]
-    pub last_updated_message_version: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub version: Field<u64>,
+    #[serde(
+        rename = "lastUpdatedMessageId",
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub last_updated_message_id: Field<u64>,
+    #[serde(
+        rename = "lastUpdatedMessageVersion",
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub last_updated_message_version: Field<u64>,
     /// The last message, without its `properties`; `{}` (here `None`) for an empty chat, and so is one that isn't the
     /// shape of a message (the raw value stays in [`Conversation::last_message_raw`]).
     #[serde(rename = "lastMessage", default)]
@@ -291,11 +334,20 @@ pub struct Message {
     #[serde(deserialize_with = "string_or_number")]
     pub id: String,
     /// 1, 2, … in the chat.
-    #[serde(rename = "sequenceId", default, deserialize_with = "lenient_number")]
-    pub sequence_id: Option<u64>,
+    #[serde(
+        rename = "sequenceId",
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub sequence_id: Field<u64>,
     /// Raised by every edit, delete and reaction change (ms).
-    #[serde(default, deserialize_with = "lenient_number")]
-    pub version: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub version: Field<u64>,
     #[serde(rename = "conversationid", default)]
     pub conversation_id: Option<String>,
     #[serde(rename = "messagetype", default)]
@@ -307,8 +359,13 @@ pub struct Message {
     #[serde(default)]
     pub from: Option<String>,
     /// The sender's own id for it, kept across edits and deletes; none on a thread's event.
-    #[serde(rename = "clientmessageid", default, deserialize_with = "lenient_string")]
-    pub client_message_id: Option<String>,
+    #[serde(
+        rename = "clientmessageid",
+        default,
+        deserialize_with = "text_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub client_message_id: Field<String>,
     /// The name the sender's client gave.
     #[serde(rename = "imdisplayname", default)]
     pub display_name: Option<String>,
@@ -360,20 +417,21 @@ impl Message {
 
     /// `properties.edittime` (ms, set by the service): the message was edited.
     #[must_use]
-    pub fn edit_time(&self) -> Option<u64> {
-        number_field(self.properties.get("edittime")).known()
+    pub fn edit_time(&self) -> Field<u64> {
+        number_field(self.properties.get("edittime"))
     }
 
     /// `properties.deletetime` (ms): the message was deleted.
     #[must_use]
-    pub fn delete_time(&self) -> Option<u64> {
-        number_field(self.properties.get("deletetime")).known()
+    pub fn delete_time(&self) -> Field<u64> {
+        number_field(self.properties.get("deletetime"))
     }
 
-    /// A soft-deleted message: `properties.deletetime` set.
+    /// A soft-deleted message: `properties.deletetime` a time. A `deletetime` in a form no capture showed isn't read
+    /// as a delete either way: [`Message::delete_time`] has it as [`Field::Unknown`].
     #[must_use]
     pub fn is_deleted(&self) -> bool {
-        self.delete_time().is_some()
+        matches!(self.delete_time(), Field::Known(_))
     }
 
     /// `properties.emotions`: one entry per reaction key, a key taken back left with no users.
@@ -495,11 +553,19 @@ pub struct Reaction {
 pub struct ReactionUser {
     pub mri: String,
     /// The service's time (ms).
-    #[serde(default, deserialize_with = "lenient_number")]
-    pub time: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub time: Field<u64>,
     /// The value the reacting client sent, as a string.
-    #[serde(default, deserialize_with = "lenient_string")]
-    pub value: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "text_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub value: Field<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -584,8 +650,12 @@ pub struct QuotedMessage {
     pub message_id: String,
     #[serde(default)]
     pub sender: Option<String>,
-    #[serde(default, deserialize_with = "lenient_number")]
-    pub time: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub time: Field<u64>,
     /// `Valid` as read back.
     #[serde(rename = "validationResult", default)]
     pub validation_result: Option<String>,
@@ -603,10 +673,19 @@ pub struct Thread {
     /// `threadType`, `createdat`, `creator`, `capabilities`, … as they came.
     #[serde(default)]
     pub properties: Map<String, Value>,
-    #[serde(rename = "rosterVersion", default, deserialize_with = "lenient_number")]
-    pub roster_version: Option<u64>,
-    #[serde(default, deserialize_with = "lenient_number")]
-    pub version: Option<u64>,
+    #[serde(
+        rename = "rosterVersion",
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub roster_version: Field<u64>,
+    #[serde(
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub version: Field<u64>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -636,10 +715,20 @@ pub struct ThreadMember {
 pub struct MemberList {
     #[serde(default)]
     pub members: Vec<ThreadMember>,
-    #[serde(rename = "totalMemberCount", default, deserialize_with = "lenient_number")]
-    pub total_member_count: Option<u64>,
-    #[serde(rename = "rosterVersion", default, deserialize_with = "lenient_number")]
-    pub roster_version: Option<u64>,
+    #[serde(
+        rename = "totalMemberCount",
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub total_member_count: Field<u64>,
+    #[serde(
+        rename = "rosterVersion",
+        default,
+        deserialize_with = "number_or_unknown",
+        skip_serializing_if = "Field::is_absent"
+    )]
+    pub roster_version: Field<u64>,
     /// `eTag`, `isDeleted`, any paging key, and anything else.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -746,17 +835,23 @@ fn iso_millis(text: &str) -> Option<i64> {
     i64::try_from(time.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
-/// A number or a string of digits, `None` for anything else (never an error).
-fn lenient_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
-    Ok(number(&Value::deserialize(deserializer)?))
+/// A named number field: a number or a string of digits is known; anything else (`null` too) is kept as it came,
+/// never an error. A missing field is [`Field::Absent`] (`serde(default)`).
+fn number_or_unknown<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Field<u64>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(match number(&value) {
+        Some(number) => Field::Known(number),
+        None => Field::Unknown(value),
+    })
 }
 
-/// A string, or a number as its text; `None` for anything else (never an error).
-fn lenient_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+/// A named text field: a string, or a whole non-negative number as its digits, is known; anything else (`null` too)
+/// is kept as it came, never an error. A missing field is [`Field::Absent`] (`serde(default)`).
+fn text_or_unknown<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Field<String>, D::Error> {
     Ok(match Value::deserialize(deserializer)? {
-        Value::String(text) => Some(text),
-        Value::Number(number) => Some(number.to_string()),
-        _ => None,
+        Value::String(text) => Field::Known(text),
+        Value::Number(number) if number.is_u64() => Field::Known(number.to_string()),
+        other => Field::Unknown(other),
     })
 }
 
