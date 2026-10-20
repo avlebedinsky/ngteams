@@ -1,0 +1,15 @@
+{
+  "_synthetic": "SYNTHETIC, not a capture: written by hand (Task 19) from the relay descriptor and token shapes the web client's bundle checks. Unconfirmed: needs the Task 18 capture; the token service's request and response envelope are not known.",
+  "relay": {
+    "addresses": ["192.0.2.10", "192.0.2.11", "not-an-ip"],
+    "fqdns": ["relay.example.invalid"],
+    "udpPort": 3478,
+    "tcpPort": 443
+  },
+  "token": {
+    "username": "<turn-user>",
+    "password": "<turn-password>",
+    "realm": "<turn-realm>",
+    "expires": 3600
+  }
+}

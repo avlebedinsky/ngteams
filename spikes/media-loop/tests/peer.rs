@@ -191,3 +191,42 @@ fn udp_peer_keeps_reading_past_junk() {
     }
     assert_eq!(peer.peer().dropped_datagrams(), 3);
 }
+
+#[test]
+fn a_peer_with_a_relayed_candidate_sends_from_and_receives_at_the_allocation() {
+    // The test plays the TURN server: whatever A sends leaves from the allocation, whatever B sends to the allocation
+    // reaches A, and A's socket to the server (`local`) never shows up as a source or destination.
+    let relayed = SocketAddr::from(([127, 0, 0, 1], 40_000));
+    let local = SocketAddr::from(([127, 0, 0, 1], 10_000));
+    let mut now = Instant::now();
+    let candidate = str0m::Candidate::relayed(relayed, local, "udp").unwrap();
+    let mut a = Peer::with_candidate(now, candidate).unwrap();
+    let mut b = Peer::new(now, SocketAddr::from(([127, 0, 0, 1], 20_000)), Protocol::Udp).unwrap();
+    let (offer, pending) = a.offer_audio().unwrap();
+    assert!(
+        offer.to_sdp_string().contains("typ relay"),
+        "A offers its relayed candidate"
+    );
+    let answer = b.accept_offer(offer).unwrap();
+    a.accept_answer(pending, answer).unwrap();
+    let limit = now + PHASE_LIMIT;
+    while !(a.is_connected() && b.is_connected()) {
+        assert!(now < limit, "no connection through the carried relay");
+        while let Some(d) = a.poll_datagram() {
+            assert_eq!(d.source, relayed, "A sends from its allocation");
+            b.handle_datagram(now, d.proto, d.source, d.destination, &d.contents)
+                .unwrap();
+        }
+        while let Some(d) = b.poll_datagram() {
+            assert_eq!(d.destination, relayed, "B only knows A's allocation");
+            a.handle_datagram(now, d.proto, d.source, d.destination, &d.contents)
+                .unwrap();
+        }
+        for peer in [&mut a, &mut b] {
+            if now >= peer.deadline() {
+                peer.handle_timeout(now).unwrap();
+            }
+        }
+        now += STEP;
+    }
+}

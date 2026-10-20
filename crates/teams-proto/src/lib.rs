@@ -9,4 +9,4 @@ mod client;
 mod write;
 
 pub use client::{Client, Transport, WriteError};
-pub use write::{Authorized, Mutating, SendMessage, TargetMismatch};
+pub use write::{Authorized, Mutating, SendMessage, StartCall, TargetMismatch};

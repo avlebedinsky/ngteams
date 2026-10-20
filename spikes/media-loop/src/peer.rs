@@ -79,10 +79,21 @@ impl Peer {
     /// # Errors
     /// [`Error::Rtc`] if `host` is not a usable candidate address.
     pub fn new(now: Instant, host: SocketAddr, proto: Protocol) -> Result<Self, Error> {
+        let candidate = Candidate::host(host, proto).map_err(|e| Error::Rtc(e.to_string()))?;
+        Self::with_candidate(now, candidate)
+    }
+
+    /// A peer whose only local ICE candidate is `candidate`, such as a relayed one
+    /// (`Candidate::relayed(<allocation>, <socket to the TURN server>, "udp")`). str0m sends a relayed pair's datagrams
+    /// with the allocation as their source, and takes datagrams for it with the allocation as their destination: the
+    /// caller carries them through the TURN server.
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if str0m fails while draining.
+    pub fn with_candidate(now: Instant, candidate: Candidate) -> Result<Self, Error> {
         let mut rtc = Rtc::builder()
             .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
             .build(now);
-        let candidate = Candidate::host(host, proto).map_err(|e| Error::Rtc(e.to_string()))?;
         rtc.add_local_candidate(candidate);
         let mut peer = Self {
             rtc,
