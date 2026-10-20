@@ -12,8 +12,9 @@
 //!   any URL whose decoded path isn't exactly the base's plus the endpoint's segments. Entra and authz aren't on it
 //!   (they stay in `teams-auth`'s own clients, the reviewed exception), and neither is AMS.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
-//!   is an answer, never followed: a region hop is the caller's to report), [`CONNECT_TIMEOUT`] and
-//!   [`REQUEST_TIMEOUT`], bodies read up to [`MAX_BODY`].
+//!   is an answer, never followed: a region hop is the caller's to report), no retries of its own (reqwest's default
+//!   replays a request after an HTTP/2 GOAWAY or `REFUSED_STREAM`, which would send a write again and an own-state
+//!   request unlogged), [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`], bodies read up to [`MAX_BODY`].
 //! - **Credentials** come from the account's [`Session`] ([`Credentials`]), per service: the chat service takes
 //!   `Authorization: Bearer <ic3>` with `X-MS-Migration: True` and `BehaviorOverride: redirectAs404` (the web client's
 //!   set, which the service took with our own non-CAE token, M1 Task 3); the registrar the same token with
@@ -171,7 +172,8 @@ pub struct HttpTransport<C> {
     client: reqwest::Client,
     credentials: Arc<C>,
     fence: Arc<Fence>,
-    /// The chat base, without a trailing slash.
+    /// The chat base: an AFD base (`https://<AFD host>/api/chatsvc/<region>`) without a trailing slash, a regional
+    /// base as its origin (`https://<host>/`, the slash `Url` keeps for an empty path).
     chat_base: Url,
     /// The AFD host the registrar is reached on.
     registrar_host: &'static str,
@@ -240,6 +242,8 @@ impl<C: Credentials> HttpTransport<C> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
+            // the only retries are `exchange`'s and the outbox's (see the module docs)
+            .retry(reqwest::retry::never())
             .https_only(https_only)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)

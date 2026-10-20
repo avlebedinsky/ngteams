@@ -16,8 +16,8 @@ use teams_auth::session::Session;
 use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_proto::{
-    Client, Credentials, Endpoint, HttpError, HttpTransport, MAX_BODY, Mutating as _, ProbeOwnState, Read, SendMessage,
-    Service, StartCall, Transport,
+    Client, Credentials, DEFAULT_RETRY_WAIT, Endpoint, HttpError, HttpTransport, MAX_BODY, Mutating as _,
+    ProbeOwnState, Read, SendMessage, Service, StartCall, Transport,
 };
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -541,6 +541,47 @@ async fn the_wait_before_a_retry_is_capped() {
     );
 }
 
+/// How long a read throttled once with `retry_after` (none: no header) takes, under a 2 s cap on the wait.
+#[cfg(test)]
+async fn throttled_read_takes(retry_after: Option<&str>) -> Duration {
+    let mut setup = setup().await;
+    setup.transport = setup.transport.with_max_retry_wait(Duration::from_secs(2));
+    let mut throttled = ResponseTemplate::new(429);
+    if let Some(retry_after) = retry_after {
+        throttled = throttled.insert_header("Retry-After", retry_after);
+    }
+    Mock::given(method("GET"))
+        .respond_with(throttled)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&setup.server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&setup.server)
+        .await;
+
+    let started = Instant::now();
+    setup.transport.read(&conversations()).await.unwrap();
+    started.elapsed()
+}
+
+#[tokio::test]
+async fn a_throttled_read_waits_its_retry_after_before_the_retry() {
+    let waited = throttled_read_takes(Some("1")).await;
+
+    assert!(waited >= Duration::from_secs(1), "waited {waited:?}");
+}
+
+#[tokio::test]
+async fn a_throttled_read_without_a_retry_after_waits_the_default() {
+    let waited = throttled_read_takes(None).await;
+
+    let expected = DEFAULT_RETRY_WAIT.min(Duration::from_secs(2));
+    assert!(waited >= expected, "waited {waited:?}, expected at least {expected:?}");
+}
+
 #[tokio::test]
 async fn throttled_twice_is_returned_with_its_retry_after() {
     let setup = setup().await;
@@ -652,7 +693,8 @@ fn a_responses_debug_shows_the_bodys_length_only() {
 }
 
 impl Setup {
-    /// A fence over the same roster as the transport's, for permits (its log is separate).
+    /// A fence over the same roster as the transport's, for permits. It shares the transport's log, so its decisions
+    /// show up next to any own-state records.
     fn transport_fence(&self) -> Arc<Fence> {
         fence(self.log.clone())
     }
