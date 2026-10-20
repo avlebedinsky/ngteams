@@ -16,7 +16,8 @@ also holds back `user.activity`); what the fence lets through is `crates/proto-l
 - Chat events reach the messaging stack's own socket as `POST /v4/f/<endpoint>/messaging` deliveries, `async` with a
   15-minute lifetime: new messages, typing, the chat's update, edits, reactions, deletes. a's message showed in b's
   open chat 3.5–4 s after a's compose box let it go (typing and the client's own rendering included; the delivery
-  itself came 200–250 ms after the message's `originalarrivaltime`), an edit 1.2–1.3 s after a sent it.
+  itself came 200–250 ms after the message's `originalarrivaltime`), an edit 1.2–1.6 s after a sent it, and a
+  reaction's delivery reached b's socket 0.9 s after a's reaction request went out (0.13 s after its `200`).
 - **Unanswered deliveries cost a bounded replay on every reconnect, nothing more**: deliveries stay unanswered, and
   the native client builds no response path ([Answering deliveries](#answering-deliveries)).
 - **`user.activity` is not needed** for deliveries; the native client doesn't send it in M1
@@ -151,9 +152,16 @@ Chat events reach the **messaging stack's** socket as socket.io messages:
 | a delete | `MessageUpdate` | the same message id, a new `version`, empty `content`, `properties` only `deletetime`, `importance`, `subject` |
 | a reply with a quote | `NewMessage` | `content` starting with the quote's `<blockquote itemscope itemtype="http://schema.skype.com/Reply" …>`, `properties.qtdMsgs` and `hasValidMsgReferences` |
 
-The reaction, removal, delete and reply rows come from deliveries b's endpoints got as stored replays of an
-`ab-chat-full` run (Task 7, the same a–b chat); `ab-trouter`'s own reaction step never found the client's reaction
-control (below). A reaction by b to a's message reaches b's own endpoints too: an account's endpoints get its own
+The reaction row was captured live in run 13 (below): a liked its edited message from the message's hover bar
+(`message-actions-like`, the control `ab-chat-full` uses), its `PUT …/properties?name=emotions` was answered `200`
+741 ms after it went out, and b's open socket got one live `MessageUpdate` 873 ms after it went out: the message
+whole (its `properties` still holding `edittime`), `emotions` `[{"key":"like","users":[one user: `mri`, `time`,
+`value`]}]`, the live delivery's headers as above (`X-Trouter-Delivery-Control: async; ttl=900; flow=messaging;
+prio=normal`, `Trouter-Timeout`/`Trouter-TimeoutMs`, `__RequestTunnelId__`, no `mstore`). a's own socket got the same
+event. Left unanswered, it wasn't delivered again on b's stable socket in the 16 minutes that followed. The removal,
+delete and reply rows come from deliveries b's endpoints got as stored replays of an `ab-chat-full` run (Task 7, the
+same a–b chat), seen again at run 13's connects. A reaction by b to a's message reaches b's own endpoints too: an
+account's endpoints get its own
 events.
 
 The native client turns these into typed events (Task 16): a `NewMessage` whose `messagetype` is `Control/…` is a
@@ -238,8 +246,9 @@ newly found offline messages are notified is M2's.
 ## Live runs
 
 All on 2026-10-20 (UTC), `proto-lab run ab-trouter[-quiet] --headless` from a normal build, accounts a and b, the
-machine shared with other agents' builds (load average 15–30 for runs 1–9, 2–4 for runs 10–12). Every write the
-fence allowed in these runs was on the a–b 1:1 chat (messages, typing, edits, read receipts), both of whose members
+machine shared with other agents' builds (load average 15–30 for runs 1–9, 2–4 for runs 10–12, about 30 for run
+13). Every write the fence allowed in these runs was on the a–b 1:1 chat (messages, typing, edits, reactions, read
+receipts), both of whose members
 are lab accounts; the probe was force-denied and failed in a's page in every run that got that far.
 
 | run | start | outcome |
@@ -256,10 +265,12 @@ are lab accounts; the probe was force-denied and failed in a's page in every run
 | 10 | 20:54 | `ab-trouter-quiet`: message and edit delivered; `user.activity` denied 37 times; the web client reconnected about every 10 s; reaction control not found |
 | 11 | 21:00 | message and edit delivered; the connect replayed run 10's unanswered events; 16 min observed: no redelivery |
 | 12 | 21:20 | as run 11; the reaction's fallback (the "more options" menu) found no reaction control either |
+| 13 | 22:14 | after the review fixes (the hover bar's `message-actions-like`; each of b's documents must get a registration answered `2xx`): **exit 0**, no breach. Message shown on b 12.7 s after a's Enter (under load), edit 1.6 s after it was sent, reaction from the hover bar answered `200` and delivered live to b 0.9 s after it went out; 16 min observed: no redelivery. Registrations: a 2 answered, 36 denied; b 2 answered, 39 denied (the calling stack's retries). `fence.log`: the only allowed writes were a message, typing, an edit and a reaction (2 permits each), all on the a–b chat, no participant added; the other allows were the two accounts' token refreshes, the messaging stack's registrations (8) and Trouter session frames (135); 25 forced denies (the probe and the client's resends of it), every other deny unclassified |
 
-Runs 1–4 were made by an earlier agent on this task before it was cut off; their printed output was kept. No run
-exited 0: each failed on a step of the web client's UI (a's compose box under load, the reaction control) or on an
-arming timeout, never on an unexpected deny after run 5. The three breached runs count as breaches (the CLAUDE.md
+Runs 1–4 were made by an earlier agent on this task before it was cut off; their printed output was kept. Runs 1–12
+didn't exit 0: each failed on a step of the web client's UI (a's compose box under load, the reaction control) or on
+an arming timeout, never on an unexpected deny after run 5. Run 13, after the reaction step moved to the hover bar's
+like, was the first to exit 0. The three breached runs count as breaches (the CLAUDE.md
 rule: a resume sent, or a target not held, is a breach); the later clean runs are reported next to them, not in their
 place.
 
@@ -273,6 +284,3 @@ place.
 - Whether a long-lived native session without `user.activity` is treated differently (the sockets that never sent
   one here lived seconds to minutes).
 - What makes an account show online ([presence](#useractivity-and-presence)).
-- `ab-trouter`'s reaction step: the client's reaction control (`default-reaction-*` in the bundle) showed neither on
-  hover nor in the message's "more options" menu in this build; the reaction delivery's shape came from replayed
-  `ab-chat-full` events instead.

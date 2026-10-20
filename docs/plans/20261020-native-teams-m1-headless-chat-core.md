@@ -499,10 +499,12 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - [x] capture (web client, `ab-chat`-style run with that set): b's Trouter session while a sends, edits and reacts;
       the registrar registration of the messaging stack; the deliveries for chat events (method, url, headers, body
       shape); the token renewal on a live socket (re-authenticate or reconnect)
-      (⚠️ two gaps, recorded in `trouter.md`: `ab-trouter`'s reaction step never found the client's reaction control,
-      so the reaction, removal and delete delivery shapes come from an `ab-chat-full` run's events replayed to b's
-      endpoints; the renewal was not capturable live, the web client's CAE `ic3` token living ~24 h, so it rests on
-      the bundle: no re-authentication of an open socket, a renewed token takes a reconnect)
+      (⚠️ one gap, recorded in `trouter.md`: the renewal was not capturable live, the web client's CAE `ic3` token
+      living ~24 h, so it rests on the bundle: no re-authentication of an open socket, a renewed token takes a
+      reconnect. The reaction, missing from runs 1–12 (the step looked for `default-reaction-*`), was captured live
+      in run 13 after the review fix, from the hover bar's `message-actions-like`: answered `200`, delivered to b's
+      open socket 0.9 s after it went out; the removal and delete shapes still come from an `ab-chat-full` run's
+      events replayed to b's endpoints)
 - [x] answer, with evidence, whether leaving chat deliveries unanswered harms the client: redelivery volume and timing,
       the socket closed, deliveries throttled or stopped. Decide with Codex; record it in `trouter.md`
       (no operational harm shown: on a stable socket no redelivery in 16 min, no close, throttling or stop; on every
@@ -529,7 +531,9 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
       10 s; run 4: two `browser_ui` targets' auto-attach unanswered; captures and `fence.log` show nothing sent
       unguarded), 2 contained, 3 failed on a's compose box under load; runs 5 and 9–12 clean: message delivered to b
       by push in every one, the edit in 5 and 10–12, no unexpected deny after run 5. None exited 0 (the reaction
-      step). Every allowed write was on the a–b 1:1 chat)
+      step). Every allowed write was on the a–b 1:1 chat. After the review fixes, run 13 (2026-10-20 22:14 UTC):
+      **exit 0**, no breach, message, edit and reaction delivered live to b, 16 min observed without a redelivery;
+      `fence.log`: allowed writes only a message, typing, an edit and a reaction on the a–b chat)
 - [x] `cargo test -p proto-lab` and the gate pass (parallel run: crate-scoped gate; workspace gate after merge)
 
 ### Task 15: The Trouter frame policy
