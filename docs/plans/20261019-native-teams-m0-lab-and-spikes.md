@@ -430,15 +430,21 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
 - Create: `spikes/gpui-video/src/{frames.rs,bench.rs,grid.rs}`, `docs/spikes/gpui-video.md`
 - Create: `spikes/gpui-video/tests/frames.rs`
 
-- [ ] tests first for the synthetic frame generator (1280×720 NV12/BGRA, with a burned-in frame counter that can be read back from the pixels) and the stats aggregator (p50/p95, fps)
-- [ ] approach (a): stock GPUI, uploading each frame as an image into a 3×3 grid; measure on the iGPU and the dGPU
-- [ ] approach (b), only if (a) misses the target: patching GPUI is acceptable (user's decision, 2026-10-19). Start from agterm-rs's existing patch rather than writing our own:
+- [x] tests first for the synthetic frame generator (1280×720 NV12/BGRA, with a burned-in frame counter that can be read back from the pixels) and the stats aggregator (p50/p95, fps)
+  - ➕ `tests/frames.rs`: the counter (24 bits + complement, so a damaged one reads as `None`) reads back from NV12 luma, from BGRA and from a box-downscaled tile inside a bigger image; BT.601 conversion; stats by nearest rank; frames shown/skipped; the parsers the runner needs (GPUI's `frame duration`, the summary line, schedstat, DRM fdinfo, `nvidia-smi -q -d PIDS`).
+- [x] approach (a): stock GPUI, uploading each frame as an image into a 3×3 grid; measure on the iGPU and the dGPU
+  - ➕ misses on both: iGPU 19.3 fps per tile, frame time p50/p95 40.4/61.2 ms; dGPU 28.9 fps, 14.2/35.7 ms (best run, load ≈ 11–12). Every frame is a new 1280×1024 sprite-atlas texture; the render thread is the bottleneck (69–80% of a core).
+- [x] approach (b), only if (a) misses the target: patching GPUI is acceptable (user's decision, 2026-10-19). Start from agterm-rs's existing patch rather than writing our own:
   - `build/patches/gpui-pre/0001-external-surfaces.patch` and `build/patches/gpui-pre-wgpu/0001`: `Window::paint_external_surface`, dmabuf import through wgpu-hal Vulkan, CPU frames uploaded by damaged rectangles
   - vendored by `scripts/vendor-gpui.sh` from a crates.io archive with a verified checksum into `vendor/` + `[patch.crates-io]`, checked with `--check`
   - on top of it we may need NV12→RGB in a shader and zero-copy from VA-API/NVDEC dmabufs
   - measure
-- [ ] `docs/spikes/gpui-video.md`: the numbers, the chosen approach, the cost of maintaining the patch
-- [ ] target: 9 × 720p at 30 fps with p95 frame time under 33 ms. If we miss it, add ⚠️ and the decision to this plan.
+  - ➕ done with the two patches copied unchanged and only the CPU-pixel path (`PixelFrame` per tile, one texture kept per surface); no shader, no dmabufs yet. iGPU 29.4 fps, p50/p95 7.1/18.7 ms, CPU 238% (render thread 48%, NV12→BGRA in 9 source threads 190%), 158 MiB; dGPU 29.8 fps, 8.4/15.5 ms, CPU 244% (43% + 200%), 138 MiB.
+- [x] `docs/spikes/gpui-video.md`: the numbers, the chosen approach, the cost of maintaining the patch
+- [x] target: 9 × 720p at 30 fps with p95 frame time under 33 ms. If we miss it, add ⚠️ and the decision to this plan.
+  - ➕ met with approach (b), missed with (a). Measured in the private headless weston + nested niri (60 Hz timer, no vblank) while other agents were building (load average 11–29 on 20 CPUs), so the numbers are pessimistic; (a) vs (b) inside one run is sound.
+  - ⚠️ decision: the workspace now builds GPUI from `vendor/` (crates.io 0.3.9 + agterm-rs's external-surfaces patches, `[patch.crates-io]`); every GPUI bump re-runs `scripts/vendor-gpui.sh` and rebases the patches. The iGPU is the tight case: under heavier load (run 4) it fell to 27.8 fps, p95 36 ms. Re-measure on a quiet machine, and move NV12→RGB off the CPU (shader or decoder dmabufs) before the meeting UI.
+  - ➕ beyond the file list: `src/lib.rs`, `src/sandbox.rs` (Task 15's weston + niri harness, moved out of `tests/smoke.rs` to share it), `tests/bench.rs` (the runner; the measurement is `#[ignore]`d), `docs/spikes/gpui-video-runs.txt` (raw results), `build/patches/`, `scripts/vendor-gpui.sh`, `vendor/`.
 
 ### Task 17: Offline str0m media loop (spike 3a)
 **Files:**

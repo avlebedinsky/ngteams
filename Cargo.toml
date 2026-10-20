@@ -11,6 +11,8 @@ members = [
     "spikes/gpui-video",
     "spikes/media-loop",
 ]
+# Patched crates.io sources (scripts/vendor-gpui.sh), used through [patch.crates-io], never workspace members.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,6 +27,8 @@ teams-auth = { path = "crates/teams-auth" }
 teams-fence = { path = "crates/teams-fence" }
 teams-proto = { path = "crates/teams-proto" }
 media-loop = { path = "spikes/media-loop" }
+# The video source hands frames to GPUI's foreground executor: the version GPUI already links.
+async-channel = "2.5.0"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 # gzip only, on the zlib-rs backend zip already uses
@@ -101,3 +105,16 @@ multiple_unsafe_ops_per_block = "deny"
 # exceptions
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
+
+# The gpui-video spike converts 1280x720 frames on the CPU; unoptimized, one conversion takes ~250 ms, so even the
+# debug tests of its video grid get optimized code for that crate (its dependencies stay as they are).
+[profile.dev.package.gpui-video]
+opt-level = 3
+
+# GPUI with agterm-rs's external-surfaces patches (M0 Task 16, approach (b) of the video spike):
+# `Window::paint_external_surface` draws CPU pixels uploaded into a texture kept per surface, or a dmabuf imported on
+# the GPU, instead of a new sprite atlas texture per video frame. vendor/gpui-pre and vendor/gpui-pre-wgpu are the verified crates.io sources of the
+# pinned 0.3.9 plus build/patches/gpui-pre{,-wgpu} (scripts/vendor-gpui.sh; `--check` verifies them).
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }

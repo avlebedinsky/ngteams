@@ -2259,8 +2259,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2599,10 +2597,9 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b1cdb26c1503bf9662ee8fbc5ab0b44b2deeee4b5c12dc67491ba6fb5fc544b"
 dependencies = [
  "anyhow",
+ "ash",
  "bytemuck",
  "cosmic-text",
  "etagere",
@@ -2673,11 +2670,13 @@ checksum = "4b0d73e1bc02eef886a5947f41b8512708792e9e5d3053d181843311a487f96f"
 name = "gpui-video"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "gpui-pre",
  "gpui-pre-platform",
  "image",
  "log",
  "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

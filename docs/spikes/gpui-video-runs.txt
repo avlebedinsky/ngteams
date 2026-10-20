@@ -1,0 +1,205 @@
+# Raw output of spikes/gpui-video/tests/bench.rs `video_grid_benchmark` (M0 Task 16), as appended by GPUI_BENCH_OUT.
+# Release build, 20 s measured after 3 s warm-up, private headless weston + nested niri, 9 x 720p at 30 fps.
+# Runs 1-2: crates.io GPUI 0.3.9, image path only (approach (a)). Runs 3-5: the patched build (vendor/), both the
+# image path (stock code, unchanged by the patch) and the surface path (approach (b)). Other agents were building in
+# parallel throughout; the load average at the start and end of each run is in its block. See gpui-video.md.
+
+# run 1 (2026-10-19T21:47:29+03:00)
+=== 0x10de 0x2820: NVIDIA GeForce RTX 4070 Laptop GPU (Wayland)
+cpus allowed: 0-19; load average at start 28.70 31.67 23.91 / end 24.25 30.48 23.69
+measured 20.0 s; draws 666 = 33.3/s
+video: received 5404 (270.1/s), shown 4603 = 25.6 fps per tile (target 30), skipped 813
+gpui frame duration (draw+present, CPU): n=666 p50=25.37 ms p95=54.36 ms max=73.16 ms mean=28.44 ms
+interval: p50=26.71 ms p95=55.80 ms max=74.61 ms
+latency: p50=12.76 ms p95=30.12 ms max=47.28 ms
+convert: p50=7.44 ms p95=9.72 ms max=26.35 ms
+cpu over 19.0 s: total 287% = main 80% + video-src 207% + other 1% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=0.0 MiB nvidia-smi=242.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(692), Some(692), Some(692), Some(692), Some(692), Some(692), Some(692), Some(691), Some(691)] then [Some(728), Some(728), Some(728), Some(728), Some(727), Some(727), Some(727), Some(727), Some(727)]
+
+=== 0x8086 0xa7a0: Intel(R) Iris(R) Xe Graphics (RPL-P) (Wayland)
+cpus allowed: 0-19; load average at start 22.40 29.88 23.56 / end 19.53 28.72 23.31
+measured 20.0 s; draws 535 = 26.7/s
+video: received 5399 (269.4/s), shown 4472 = 24.8 fps per tile (target 30), skipped 936
+gpui frame duration (draw+present, CPU): n=535 p50=28.06 ms p95=45.76 ms max=80.20 ms mean=28.77 ms
+interval: p50=36.85 ms p95=55.59 ms max=91.63 ms
+latency: p50=15.22 ms p95=31.11 ms max=42.44 ms
+convert: p50=7.50 ms p95=10.05 ms max=41.01 ms
+cpu over 19.0 s: total 282% = main 75% + video-src 206% + other 0% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=261.0 MiB nvidia-smi=2.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(693), Some(693), Some(693), Some(693), Some(693), Some(693), Some(693), Some(693), Some(693)] then [Some(729), Some(729), Some(729), Some(728), Some(729), Some(728), Some(728), Some(728), Some(728)]
+
+# run 2, approach (a) (2026-10-19T23:41:46+03:00)
+=== 0x10de 0x2820: NVIDIA GeForce RTX 4070 Laptop GPU (Wayland)
+cpus allowed: 0-19; load average at start 12.45 18.26 27.13 / end 11.10 17.56 26.71
+measured 20.0 s; draws 988 = 49.4/s
+video: received 5414 (270.7/s), shown 5196 = 28.9 fps per tile (target 30), skipped 214
+gpui frame duration (draw+present, CPU): n=988 p50=14.24 ms p95=35.72 ms max=90.31 ms mean=17.12 ms
+interval: p50=16.78 ms p95=37.20 ms max=91.46 ms
+latency: p50=9.38 ms p95=25.12 ms max=40.95 ms
+convert: p50=5.40 ms p95=9.54 ms max=31.70 ms
+cpu over 19.0 s: total 240% = main 69% + video-src 170% + other 1% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=3.5 MiB nvidia-smi=186.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(684), Some(684), Some(684), Some(686), Some(687), Some(684), Some(682), Some(684), Some(684)] then [Some(720), Some(720), Some(720), Some(722), Some(723), Some(720), Some(718), Some(720), Some(720)]
+
+=== 0x8086 0xa7a0: Intel(R) Iris(R) Xe Graphics (RPL-P) (Wayland)
+cpus allowed: 0-19; load average at start 10.87 17.19 26.44 / end 11.36 16.90 26.15
+measured 20.0 s; draws 389 = 19.4/s
+video: received 5404 (270.1/s), shown 3473 = 19.3 fps per tile (target 30), skipped 1937
+gpui frame duration (draw+present, CPU): n=389 p50=40.38 ms p95=61.22 ms max=93.48 ms mean=41.09 ms
+interval: p50=50.82 ms p95=73.53 ms max=106.21 ms
+latency: p50=16.56 ms p95=31.72 ms max=45.15 ms
+convert: p50=7.72 ms p95=10.00 ms max=27.87 ms
+cpu over 19.0 s: total 298% = main 79% + video-src 219% + other 0% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=234.5 MiB nvidia-smi=2.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(690), Some(690), Some(690), Some(690), Some(690), Some(690), Some(690), Some(690), Some(690)] then [Some(727), Some(727), Some(727), Some(727), Some(726), Some(726), Some(726), Some(726), Some(726)]
+
+# run 3, patched GPUI build, both paths (2026-10-19T23:51:33+03:00)
+=== 0x10de 0x2820, upload image: NVIDIA GeForce RTX 4070 Laptop GPU (Wayland)
+cpus allowed: 0-19; load average at start 27.19 19.75 22.78 / end 23.36 19.37 22.60
+measured 20.0 s; draws 834 = 41.7/s
+video: received 5402 (270.0/s), shown 5143 = 28.6 fps per tile (target 30), skipped 259
+gpui frame duration (draw+present, CPU): n=834 p50=19.10 ms p95=39.82 ms max=71.92 ms mean=22.07 ms
+interval: p50=20.38 ms p95=41.21 ms max=73.47 ms
+latency: p50=11.49 ms p95=28.81 ms max=38.20 ms
+convert: p50=7.52 ms p95=9.67 ms max=17.03 ms
+cpu over 19.0 s: total 287% = main 75% + video-src 211% + other 1% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=3.6 MiB nvidia-smi=226.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(690), Some(690), Some(690), Some(690), Some(690), Some(689), Some(689), Some(689), Some(689)] then [Some(726), Some(726), Some(726), Some(725), Some(725), Some(725), Some(725), Some(725), Some(725)]
+
+=== 0x10de 0x2820, upload surface: NVIDIA GeForce RTX 4070 Laptop GPU (Wayland)
+cpus allowed: 0-19; load average at start 20.68 18.98 22.41 / end 17.83 18.43 22.16
+measured 20.0 s; draws 1185 = 59.2/s
+video: received 5401 (270.1/s), shown 5365 = 29.8 fps per tile (target 30), skipped 36
+gpui frame duration (draw+present, CPU): n=1185 p50=8.39 ms p95=15.47 ms max=153.87 ms mean=9.38 ms
+interval: p50=16.67 ms p95=17.25 ms max=155.38 ms
+latency: p50=8.43 ms p95=16.26 ms max=37.19 ms
+convert: p50=6.97 ms p95=8.64 ms max=16.98 ms
+cpu over 19.0 s: total 244% = main 43% + video-src 200% + other 1% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=3.5 MiB nvidia-smi=138.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(690), Some(690), Some(690), Some(690), Some(690), Some(690), Some(689), Some(689), Some(689)] then [Some(725), Some(725), Some(725), Some(725), Some(725), Some(725), Some(724), Some(724), Some(724)]
+
+=== 0x8086 0xa7a0, upload image: Intel(R) Iris(R) Xe Graphics (RPL-P) (Wayland)
+cpus allowed: 0-19; load average at start 16.40 18.10 22.01 / end 16.43 17.98 21.89
+measured 20.0 s; draws 548 = 27.4/s
+video: received 5400 (270.0/s), shown 4171 = 23.2 fps per tile (target 30), skipped 1222
+gpui frame duration (draw+present, CPU): n=548 p50=26.56 ms p95=51.91 ms max=70.59 ms mean=27.48 ms
+interval: p50=36.34 ms p95=63.15 ms max=90.39 ms
+latency: p50=14.24 ms p95=30.79 ms max=42.06 ms
+convert: p50=7.13 ms p95=11.39 ms max=43.77 ms
+cpu over 19.0 s: total 275% = main 75% + video-src 201% + other 0% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=234.6 MiB nvidia-smi=2.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(689), Some(689), Some(689), Some(689), Some(689), Some(689), Some(689), Some(689), Some(689)] then [Some(729), Some(728), Some(728), Some(728), Some(728), Some(728), Some(728), Some(728), Some(728)]
+
+=== 0x8086 0xa7a0, upload surface: Intel(R) Iris(R) Xe Graphics (RPL-P) (Wayland)
+cpus allowed: 0-19; load average at start 16.94 18.05 21.87 / end 14.77 17.48 21.60
+measured 20.0 s; draws 1099 = 55.0/s
+video: received 5400 (270.0/s), shown 5285 = 29.4 fps per tile (target 30), skipped 112
+gpui frame duration (draw+present, CPU): n=1099 p50=7.09 ms p95=18.74 ms max=68.75 ms mean=8.75 ms
+interval: p50=16.70 ms p95=30.43 ms max=81.69 ms
+latency: p50=8.84 ms p95=19.78 ms max=51.34 ms
+convert: p50=6.28 ms p95=11.23 ms max=50.53 ms
+cpu over 19.0 s: total 238% = main 48% + video-src 190% + other 0% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=158.4 MiB nvidia-smi=2.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(691), Some(691), Some(691), Some(691), Some(690), Some(690), Some(690), Some(690), Some(690)] then [Some(727), Some(727), Some(727), Some(727), Some(727), Some(727), Some(727), Some(727), Some(726)]
+
+# run 4, patched GPUI build, both paths (2026-10-20T00:18:58+03:00)
+=== 0x10de 0x2820, upload image: NVIDIA GeForce RTX 4070 Laptop GPU (Wayland)
+cpus allowed: 0-19; load average at start 14.10 38.28 40.07 / end 17.13 37.41 39.74
+measured 20.0 s; draws 701 = 35.0/s
+video: received 5403 (270.0/s), shown 4706 = 26.1 fps per tile (target 30), skipped 690
+gpui frame duration (draw+present, CPU): n=701 p50=22.95 ms p95=50.19 ms max=67.42 ms mean=26.59 ms
+interval: p50=24.64 ms p95=51.90 ms max=69.66 ms
+latency: p50=12.55 ms p95=30.43 ms max=44.19 ms
+convert: p50=8.25 ms p95=12.49 ms max=49.08 ms
+cpu over 19.0 s: total 305% = main 77% + video-src 227% + other 1% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=3.4 MiB nvidia-smi=194.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(690), Some(690), Some(690), Some(690), Some(690), Some(690), Some(689), Some(689), Some(689)] then [Some(732), Some(732), Some(732), Some(732), Some(732), Some(731), Some(731), Some(731), Some(731)]
+
+=== 0x10de 0x2820, upload surface: NVIDIA GeForce RTX 4070 Laptop GPU (Wayland)
+cpus allowed: 0-19; load average at start 16.28 36.25 39.32 / end 19.66 35.77 39.10
+measured 20.0 s; draws 1176 = 58.8/s
+video: received 5401 (270.1/s), shown 5386 = 29.9 fps per tile (target 30), skipped 15
+gpui frame duration (draw+present, CPU): n=1176 p50=8.62 ms p95=18.05 ms max=53.54 ms mean=9.87 ms
+interval: p50=16.68 ms p95=20.37 ms max=56.78 ms
+latency: p50=8.73 ms p95=16.62 ms max=42.21 ms
+convert: p50=7.93 ms p95=12.61 ms max=48.71 ms
+cpu over 19.0 s: total 258% = main 43% + video-src 214% + other 1% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=0.0 MiB nvidia-smi=130.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(692), Some(692), Some(692), Some(692), Some(692), Some(692), Some(692), Some(692), Some(692)] then [Some(731), Some(730), Some(730), Some(730), Some(730), Some(730), Some(730), Some(730), Some(730)]
+
+=== 0x8086 0xa7a0, upload image: Intel(R) Iris(R) Xe Graphics (RPL-P) (Wayland)
+cpus allowed: 0-19; load average at start 18.86 35.06 38.84 / end 17.64 33.72 38.31
+measured 20.0 s; draws 404 = 20.2/s
+video: received 5398 (269.9/s), shown 3534 = 19.6 fps per tile (target 30), skipped 1855
+gpui frame duration (draw+present, CPU): n=404 p50=37.49 ms p95=62.47 ms max=103.86 ms mean=38.48 ms
+interval: p50=48.13 ms p95=79.20 ms max=113.62 ms
+latency: p50=16.53 ms p95=32.32 ms max=47.96 ms
+convert: p50=8.81 ms p95=16.71 ms max=51.95 ms
+cpu over 19.0 s: total 319% = main 76% + video-src 243% + other 0% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=252.9 MiB nvidia-smi=2.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(688), Some(688), Some(688), Some(688), Some(688), Some(687), Some(687), Some(687), Some(687)] then [Some(729), Some(729), Some(729), Some(729), Some(729), Some(729), Some(729), Some(729), Some(728)]
+
+=== 0x8086 0xa7a0, upload surface: Intel(R) Iris(R) Xe Graphics (RPL-P) (Wayland)
+cpus allowed: 0-19; load average at start 20.42 33.55 38.19 / end 19.78 32.53 37.75
+measured 20.0 s; draws 761 = 38.0/s
+video: received 5400 (269.9/s), shown 4998 = 27.8 fps per tile (target 30), skipped 410
+gpui frame duration (draw+present, CPU): n=761 p50=15.10 ms p95=36.14 ms max=75.36 ms mean=17.47 ms
+interval: p50=25.45 ms p95=46.92 ms max=80.47 ms
+latency: p50=12.40 ms p95=29.32 ms max=49.04 ms
+convert: p50=9.66 ms p95=16.70 ms max=50.24 ms
+cpu over 19.0 s: total 336% = main 64% + video-src 272% + other 0% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=174.5 MiB nvidia-smi=2.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(692), Some(692), Some(692), Some(692), Some(692), Some(691), Some(691), Some(691), Some(691)] then [Some(730), Some(730), Some(730), Some(730), Some(730), Some(730), Some(730), Some(730), Some(729)]
+
+# run 5, patched GPUI build, both paths, void: the load climbed during the run (2026-10-20T00:51:17+03:00)
+=== 0x10de 0x2820, upload image: NVIDIA GeForce RTX 4070 Laptop GPU (Wayland)
+cpus allowed: 0-19; load average at start 15.62 28.67 40.37 / end 24.67 29.88 40.52
+measured 20.1 s; draws 110 = 5.5/s
+video: received 4935 (244.9/s), shown 990 = 5.5 fps per tile (target 30), skipped 3934
+gpui frame duration (draw+present, CPU): n=110 p50=157.01 ms p95=264.93 ms max=301.95 ms mean=163.99 ms
+interval: p50=180.79 ms p95=270.13 ms max=315.49 ms
+latency: p50=21.45 ms p95=51.67 ms max=126.49 ms
+convert: p50=28.63 ms p95=53.32 ms max=140.76 ms
+cpu over 19.0 s: total 340% = main 36% + video-src 304% + other 1% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=3.4 MiB nvidia-smi=234.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(634), Some(622), Some(631), Some(625), Some(636), Some(636), Some(619), Some(621), Some(622)] then [Some(671), Some(662), Some(671), Some(661), Some(677), Some(675), Some(658), Some(660), Some(660)]
+
+=== 0x10de 0x2820, upload surface: NVIDIA GeForce RTX 4070 Laptop GPU (Wayland)
+cpus allowed: 0-19; load average at start 29.66 30.73 40.63 / end 36.21 32.17 40.89
+measured 20.1 s; draws 274 = 13.6/s
+video: received 5013 (249.3/s), shown 2293 = 12.7 fps per tile (target 30), skipped 2716
+gpui frame duration (draw+present, CPU): n=274 p50=59.33 ms p95=160.06 ms max=259.96 ms mean=70.36 ms
+interval: p50=63.45 ms p95=164.49 ms max=264.33 ms
+latency: p50=18.28 ms p95=41.98 ms max=103.03 ms
+convert: p50=27.69 ms p95=52.37 ms max=133.59 ms
+cpu over 19.0 s: total 352% = main 36% + video-src 315% + other 1% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=0.0 MiB nvidia-smi=178.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(630), Some(632), Some(621), Some(632), Some(642), Some(650), Some(654), Some(639), Some(614)] then [Some(670), Some(673), Some(658), Some(668), Some(682), Some(689), Some(694), Some(678), Some(646)]
+
+=== 0x8086 0xa7a0, upload image: Intel(R) Iris(R) Xe Graphics (RPL-P) (Wayland)
+cpus allowed: 0-19; load average at start 38.81 32.95 41.01 / end 43.74 34.43 41.32
+measured 20.0 s; draws 121 = 6.0/s
+video: received 4885 (243.9/s), shown 1087 = 6.0 fps per tile (target 30), skipped 3827
+gpui frame duration (draw+present, CPU): n=121 p50=124.63 ms p95=275.08 ms max=346.31 ms mean=138.17 ms
+interval: p50=150.03 ms p95=301.14 ms max=363.95 ms
+latency: p50=20.78 ms p95=48.08 ms max=95.48 ms
+convert: p50=29.69 ms p95=54.22 ms max=109.51 ms
+cpu over 19.0 s: total 349% = main 38% + video-src 310% + other 0% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=229.0 MiB nvidia-smi=2.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(647), Some(634), Some(634), Some(612), Some(636), Some(630), Some(624), Some(643), Some(629)] then [Some(691), Some(678), Some(680), Some(657), Some(678), Some(664), Some(668), Some(686), Some(673)]
+
+=== 0x8086 0xa7a0, upload surface: Intel(R) Iris(R) Xe Graphics (RPL-P) (Wayland)
+cpus allowed: 0-19; load average at start 47.14 35.65 41.61 / end 49.52 36.95 41.91
+measured 20.0 s; draws 215 = 10.8/s
+video: received 4802 (240.1/s), shown 1916 = 10.6 fps per tile (target 30), skipped 2909
+gpui frame duration (draw+present, CPU): n=215 p50=64.93 ms p95=199.58 ms max=254.32 ms mean=84.11 ms
+interval: p50=74.25 ms p95=207.03 ms max=273.73 ms
+latency: p50=20.21 ms p95=48.44 ms max=129.32 ms
+convert: p50=29.65 ms p95=53.63 ms max=156.96 ms
+cpu over 19.0 s: total 337% = main 37% + video-src 300% + other 0% (100% = one core)
+gpu memory (max of 3 samples): fdinfo:i915=177.0 MiB nvidia-smi=2.0 MiB
+viewport 1280x800, window screenshot 1280x800; read-back after the summary, 1 s apart: [Some(594), Some(631), Some(543), Some(626), Some(620), Some(624), Some(632), Some(636), Some(620)] then [Some(636), Some(672), Some(582), Some(667), Some(659), Some(666), Some(673), Some(678), Some(660)]
+
+# run 5 is void: the load rose from 15.6 to 49.5 during it (other agents building); the main thread got ~37% of a core
+
