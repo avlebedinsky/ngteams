@@ -150,6 +150,55 @@
       "expect": "unknown"
     },
     {
+      "name": "a message cross-posted to a channel (not captured: the captures only had an empty crossPostChannels)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"mentions": "[]"}, "crossPostChannels": ["19:channel0001@thread.tacv2"]},
+      "expect": "unknown"
+    },
+    {
+      "name": "an edit cross-posted to a channel",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "<p>edited</p>", "messagetype": "RichText/Html", "crossPostChannels": [{"id": "19:channel0001@thread.tacv2"}]},
+      "expect": "unknown"
+    },
+    {
+      "name": "crossPostChannels in a form the captures didn't show (null)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "crossPostChannels": null},
+      "expect": "unknown"
+    },
+    {
+      "name": "crossPostChannels under a key in another case",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "CrossPostChannels": ["19:channel0001@thread.tacv2"]},
+      "expect": "unknown"
+    },
+    {
+      "name": "a message on behalf of someone (not captured: the captures only had onbehalfof null)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"mentions": "[]", "onbehalfof": "{\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:x>\"}"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "an edit on behalf of someone",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "<p>edited</p>", "messagetype": "RichText/Html", "properties": {"onbehalfof": {"mri": "8:orgid:<guid:x>"}}},
+      "expect": "unknown"
+    },
+    {
+      "name": "onbehalfof under a key in another case",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hi</p>", "messagetype": "RichText/Html", "properties": {"onBehalfOf": "8:orgid:<guid:x>"}},
+      "expect": "unknown"
+    },
+    {
       "name": "a soft delete",
       "method": "DELETE",
       "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000?behavior=softDelete",

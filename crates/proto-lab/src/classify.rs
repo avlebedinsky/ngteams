@@ -325,9 +325,11 @@ fn chat_scope(id: &str) -> Option<Scope> {
 
 /// A message post (`edit` false: a message or typing) or an edit (`edit` true: the whole message again, as the web
 /// client sends it) on the chat `chat`, its body read by [`strict_json`]; whoever it mentions is added ([`mentioned`]).
-/// An edit whose body isn't a message ([`message_kind`]) is unknown.
+/// An edit whose body isn't a message ([`message_kind`]), and a body that could reach beyond the chat ([`chat_only`]),
+/// are unknown.
 fn message_write(body: &[u8], chat: &str, edit: bool) -> Option<Target> {
     let body = strict_json(body)?;
+    chat_only(&body)?;
     let kind = match (message_kind(&body)?, edit) {
         (kind, false) => kind,
         (WriteKind::Message, true) => WriteKind::Edit,
@@ -345,6 +347,26 @@ fn message_kind(body: &Value) -> Option<WriteKind> {
         "Text" | "RichText" => Some(WriteKind::Message),
         kind if kind.starts_with("RichText/") => Some(WriteKind::Message),
         _ => None,
+    }
+}
+
+/// `Some` for a message body whose fields that could take it beyond the chat are as the captures showed them, or left
+/// out: `crossPostChannels` (a post into channels too) an empty list, `properties.onbehalfof` (a message sent for
+/// someone else) `null`. Any other value of either, or either key in another case ([`optional`]), is `None` (unknown):
+/// the mapping's target is the chat alone, and what the service does with those forms wasn't seen.
+fn chat_only(body: &Value) -> Option<()> {
+    let body = body.as_object()?;
+    match optional(body, "crossPostChannels").ok()? {
+        None => {}
+        Some(Value::Array(channels)) if channels.is_empty() => {}
+        Some(_) => return None,
+    }
+    let Some(properties) = optional(body, "properties").ok()? else {
+        return Some(());
+    };
+    match optional(properties.as_object()?, "onbehalfof").ok()? {
+        None | Some(Value::Null) => Some(()),
+        Some(_) => None,
     }
 }
 

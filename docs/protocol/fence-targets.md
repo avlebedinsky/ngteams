@@ -156,6 +156,9 @@ Rules that keep the mapping fail-closed:
   `properties` or no `mentions` is no mention; `properties` that aren't an object, `mentions` in any other form, and
   either key in another case (`Properties`, `Mentions`, which a service binding keys in any case may read) are
   `Unknown`.
+- A message or an edit maps to its chat alone only in the forms the captures showed of the fields that could take it
+  further: `crossPostChannels` (a post into channels too) left out or `[]`, and `properties.onbehalfof` (a message
+  sent for someone else) left out or `null`. Any other value of either, or either key in another case, is `Unknown`.
 - A new chat's participants are exactly the body's `members`; a body without them is `Unknown`. The fence judges a
   `New` target by those participants without a read.
 - Only chat ids map: channels (`@thread.tacv2`, `@thread.skype`) and reply chains (`;messageid=`) are `Unknown`,
