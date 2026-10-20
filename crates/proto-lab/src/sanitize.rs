@@ -357,6 +357,13 @@ struct State {
     /// How many times a learned passcode was replaced inside a real host that isn't a public one (`meeting.rs`): a
     /// secret is redacted even there, and that host is gone ([`Sanitized::passcode_in_host`]).
     passcode_in_host: usize,
+    /// How many times a word of a name was replaced inside a run only shaped like a host (`words.rs`: a dotted name, a
+    /// file name, prose, or a host its context didn't show to be one), which then is no longer as it was
+    /// ([`Sanitized::name_in_shaped`]).
+    name_in_shaped: usize,
+    /// How many times a learned passcode was replaced inside a run only shaped like a host (`meeting.rs`,
+    /// [`Sanitized::passcode_in_shaped`]).
+    passcode_in_shaped: usize,
     /// Whether the text the rules see now is a host header's value or a cookie's domain ([`Mode::Host`]), whose
     /// host-shaped run is a real host however it is written.
     host_value: bool,
@@ -374,6 +381,17 @@ struct State {
 }
 
 impl State {
+    /// The counts [`sanitize_capture`] reports by event: [`Self::name_in_host`], [`Self::passcode_in_host`],
+    /// [`Self::name_in_shaped`], [`Self::passcode_in_shaped`].
+    fn host_counts(&self) -> [usize; 4] {
+        [
+            self.name_in_host,
+            self.passcode_in_host,
+            self.name_in_shaped,
+            self.passcode_in_shaped,
+        ]
+    }
+
     /// What host of `hosts` (`words.rs`) `range` lies in, if any: in a host value ([`Self::host_value`]) a host-shaped
     /// run is a real host.
     fn host_at(&self, hosts: &[(Range<usize>, Host)], range: &Range<usize>) -> Option<Host> {
@@ -769,10 +787,17 @@ pub struct Sanitized {
     /// The events (from 1) where a learned passcode was replaced inside a host other than a public protocol host: the
     /// secret is gone, and so is that host.
     pub passcode_in_host: Vec<usize>,
+    /// The events (from 1) where a word of a name was replaced inside a run only shaped like a host (a dotted name, a
+    /// file name, prose, or a host its context didn't show to be one, such as `quill.com` in prose): the name is gone,
+    /// and so is that run as it was.
+    pub name_in_shaped: Vec<usize>,
+    /// The events (from 1) where a learned passcode was replaced inside a run only shaped like a host.
+    pub passcode_in_shaped: Vec<usize>,
 }
 
 /// As [`sanitize_events`], also handing back the names found ([`Sanitizer::learned_names`]), where a name was left
-/// inside a host and where a passcode took a host's place.
+/// inside a host, where a passcode took a host's place, and where a name or a passcode was replaced inside a run only
+/// shaped like a host.
 ///
 /// # Errors
 /// As [`Sanitizer::new`] and [`Sanitizer::sanitize`].
@@ -782,23 +807,25 @@ pub fn sanitize_capture(events: &[Value], identities: &Identities) -> Result<San
         sanitizer.learn(event);
     }
     let mut out = Vec::with_capacity(events.len());
-    let mut name_in_host = Vec::new();
-    let mut passcode_in_host = Vec::new();
+    let mut found: [Vec<usize>; 4] = Default::default();
     for (index, event) in events.iter().enumerate() {
-        let before = (sanitizer.state.name_in_host, sanitizer.state.passcode_in_host);
+        let before = sanitizer.state.host_counts();
         out.push(sanitizer.sanitize(event)?);
-        if sanitizer.state.name_in_host > before.0 {
-            name_in_host.push(index + 1);
-        }
-        if sanitizer.state.passcode_in_host > before.1 {
-            passcode_in_host.push(index + 1);
+        let after = sanitizer.state.host_counts();
+        for ((list, was), now) in found.iter_mut().zip(before).zip(after) {
+            if now > was {
+                list.push(index + 1);
+            }
         }
     }
+    let [name_in_host, passcode_in_host, name_in_shaped, passcode_in_shaped] = found;
     Ok(Sanitized {
         events: out,
         names: sanitizer.learned_names(),
         name_in_host,
         passcode_in_host,
+        name_in_shaped,
+        passcode_in_shaped,
     })
 }
 
@@ -1265,7 +1292,7 @@ fn fields(rules: &Rules, state: &mut State, text: &str) -> Edits {
 /// A match inside a public protocol host (`teams.microsoft.com`, `words.rs`) is no name and stays. One inside any
 /// other real host (a URL's authority, a host header's value, a cookie's domain, a host name) stays too, so the host
 /// isn't destroyed, and is counted ([`State::name_in_host`]). One inside a run only shaped like a host (`Mei.Li`,
-/// `notes-jane.md`) is replaced.
+/// `notes-jane.md`, a host its context didn't show to be one) is replaced, and counted ([`State::name_in_shaped`]).
 fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
     let Some(regex) = &state.names_regex else {
         return Vec::new();
@@ -1273,6 +1300,7 @@ fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
     let hosts = hosts(text);
     let mut edits = Vec::new();
     let mut in_host = 0;
+    let mut in_shaped = 0;
     let mut at = 0;
     while let Some(found) = regex.find_at(text, at) {
         let start = found.start();
@@ -1291,12 +1319,14 @@ fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
                 at = next;
                 continue;
             }
-            Some(Host::Shaped) | None => {}
+            Some(Host::Shaped) => in_shaped += 1,
+            None => {}
         }
         edits.push((start..end, format!("<name:{label}>")));
         at = end;
     }
     state.name_in_host += in_host;
+    state.name_in_shaped += in_shaped;
     edits
 }
 

@@ -1431,7 +1431,8 @@ fn a_name_is_left_only_inside_a_real_host() {
         out.events[3]
     );
     assert_eq!(out.name_in_host, [3, 4]);
-    // the name is replaced in what only looks like a host
+    // the name is replaced in what only looks like a host, and that is counted apart
+    assert_eq!(out.name_in_shaped, [5]);
     assert_eq!(
         out.events[4],
         json!({
@@ -1890,6 +1891,77 @@ fn a_whole_capture_with_a_name_that_is_a_host_label_is_written_with_a_warning() 
     );
     assert!(summary.contains(&expected), "{summary}");
     assert!(!summary.contains("quill") && !summary.contains("jane"), "{summary}");
+}
+
+/// A person whose surname is a label of two-label domains no context shows to be hosts (a key that isn't a host's,
+/// prose), and a passcode that is the label of one.
+fn shaped_host_events() -> [Value; 6] {
+    [
+        json!({"displayName": "Jane Quill"}),
+        json!({"domain": "quill.com"}),
+        json!({"text": "our site quill.com"}),
+        json!({"text": "thanks Quill"}),
+        json!({"meetingData": {"passcode": "ZqNBBm"}}),
+        json!({"note": "mirror at zqnbbm.io"}),
+    ]
+}
+
+#[test]
+fn a_name_replaced_inside_a_run_shaped_like_a_host_is_counted() {
+    let out = sanitize_capture(&shaped_host_events(), &Identities::default()).unwrap();
+    // the name and the passcode are replaced there all the same
+    assert_eq!(out.events[1]["domain"], "<name:1>.com");
+    assert_eq!(out.events[2]["text"], "our site <name:1>.com");
+    assert_eq!(out.events[3]["text"], "thanks <name:1>");
+    assert_eq!(out.events[5]["note"], "mirror at <token:1>.io");
+    // and counted apart from what was left in or replaced inside a real host
+    assert_eq!(out.name_in_shaped, [2, 3]);
+    assert_eq!(out.passcode_in_shaped, [6]);
+    assert_eq!(out.name_in_host, Vec::<usize>::new());
+    assert_eq!(out.passcode_in_host, Vec::<usize>::new());
+    assert_eq!(check_names(&out.names, &as_jsonl(&out.events)), []);
+}
+
+#[test]
+fn an_export_warns_about_a_name_replaced_inside_a_run_shaped_like_a_host_and_strict_refuses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("reference");
+    let capture = write_capture(dir.path(), &shaped_host_events()).unwrap();
+
+    let exported = export::export(&capture, "shaped", &reference, &Identities::default(), Checks::Warn).unwrap();
+    let warnings = &exported.warnings;
+    assert_eq!(warnings.name_in_shaped, [2, 3]);
+    assert_eq!(warnings.passcode_in_shaped, [6]);
+    assert!(!warnings.is_empty());
+    let written = fs::read_to_string(&exported.path).unwrap().to_lowercase();
+    assert!(!written.contains("quill") && !written.contains("zqnbbm"), "{written}");
+    let summary = warnings.summary().join("\n");
+    assert!(
+        summary.contains("a word of a name was replaced inside a run shaped like a host")
+            && summary.contains("in 2 event(s): 2, 3"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("a meeting passcode was replaced inside a run shaped like a host")
+            && summary.contains("in 1 event(s): 6"),
+        "{summary}"
+    );
+    let lower = summary.to_lowercase();
+    assert!(
+        !lower.contains("quill") && !lower.contains("jane") && !lower.contains("zqnbbm"),
+        "{summary}"
+    );
+
+    // --strict refuses it, as the export did before names were left inside hosts, and writes nothing
+    let error = export::export(&capture, "strict", &reference, &Identities::default(), Checks::Strict).unwrap_err();
+    assert!(
+        matches!(&error, ExportError::NameInHost(found) if found == &[2, 3, 6]),
+        "{error}"
+    );
+    let message = error.to_string().to_lowercase();
+    assert!(message.contains("event 2, event 3, event 6"), "{message}");
+    assert!(!message.contains("quill") && !message.contains("zqnbbm"), "{message}");
+    assert!(!reference.join("strict.jsonl").exists());
 }
 
 #[test]

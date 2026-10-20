@@ -25,7 +25,8 @@
 //! `Online`) that only an invitation's structure gave away, under a label no list has: it is replaced wherever it
 //! follows a label again, and not as a word everywhere. A learned passcode is never replaced inside a public protocol host, and
 //! one replaced inside any other real host (`words.rs`; a secret is redacted even there) is counted
-//! (`State::passcode_in_host`).
+//! (`State::passcode_in_host`); one replaced inside a run only shaped like a host is counted too
+//! (`State::passcode_in_shaped`).
 
 use std::ops::Range;
 
@@ -325,7 +326,8 @@ pub(super) fn learned(patterns: &Patterns, state: &mut State, text: &str) -> Edi
 }
 
 /// The learned passcodes in `text`, as whole words, none inside a public protocol host; one inside any other real host
-/// is counted ([`State::passcode_in_host`]).
+/// is counted ([`State::passcode_in_host`]), and so is one inside a run only shaped like a host
+/// ([`State::passcode_in_shaped`]).
 fn learned_passcodes(state: &mut State, text: &str) -> Vec<Range<usize>> {
     let Some(regex) = &state.passcodes_regex else {
         return Vec::new();
@@ -344,7 +346,8 @@ fn learned_passcodes(state: &mut State, text: &str) -> Vec<Range<usize>> {
         match state.host_at(&hosts, &range) {
             Some(Host::Public) => continue,
             Some(Host::Real) => state.passcode_in_host += 1,
-            Some(Host::Shaped) | None => {}
+            Some(Host::Shaped) => state.passcode_in_shaped += 1,
+            None => {}
         }
         kept.push(range);
     }

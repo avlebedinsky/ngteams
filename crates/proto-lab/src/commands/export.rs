@@ -18,6 +18,10 @@
 //!   than a public protocol host, such as a URL's authority or a `Host` header's value: replacing it would destroy the
 //!   host, so it stays; a dotted name or a file name is no host) or replaced a meeting passcode inside one
 //!   ([`Warnings::name_in_host`], [`Warnings::passcode_in_host`]);
+//! - where the sanitizer replaced a word of a name or a meeting passcode inside a run only shaped like a host (a dotted
+//!   name, a file name, prose, or a host no context showed to be one, such as a two-label domain in prose): the value
+//!   is gone, but the run may have been a host, which is then no longer intact ([`Warnings::name_in_shaped`],
+//!   [`Warnings::passcode_in_shaped`]);
 //! - every name the sanitizer found in the capture, looked for in the text ([`check_names`], at every layer of
 //!   encoding): a word of one left outside any host, one inside a host, a line too deeply encoded to check
 //!   ([`Warnings::names`]);
@@ -85,8 +89,8 @@ pub enum ExportError {
     )]
     NameLeft(Vec<NameFinding>),
     #[error(
-        "a name or passcode found in the capture is also a label of a host, where a name was left or a passcode \
-         destroyed the host (--strict), nothing was written: {}",
+        "a name or passcode found in the capture is also a label of a host or of a run shaped like one, where a name \
+         was left or a name or passcode was replaced (--strict), nothing was written: {}",
         events(.0)
     )]
     NameInHost(Vec<usize>),
@@ -144,6 +148,10 @@ pub struct Warnings {
     pub name_in_host: Vec<usize>,
     /// The events (from 1) where a meeting passcode was replaced inside a host other than a public protocol host.
     pub passcode_in_host: Vec<usize>,
+    /// The events (from 1) where a word of a name was replaced inside a run only shaped like a host.
+    pub name_in_shaped: Vec<usize>,
+    /// The events (from 1) where a meeting passcode was replaced inside a run only shaped like a host.
+    pub passcode_in_shaped: Vec<usize>,
     /// What [`check_names`] found in the written text.
     pub names: Vec<NameFinding>,
     /// What the fixture guard found in the written text: line (from 1) and kind.
@@ -158,6 +166,8 @@ impl Warnings {
     pub fn is_empty(&self) -> bool {
         self.name_in_host.is_empty()
             && self.passcode_in_host.is_empty()
+            && self.name_in_shaped.is_empty()
+            && self.passcode_in_shaped.is_empty()
             && self.names.is_empty()
             && self.guard.is_empty()
     }
@@ -180,6 +190,7 @@ impl Warnings {
                 positions(&self.passcode_in_host)
             ));
         }
+        lines.extend(self.shaped_summary());
         lines.extend(self.name_summary());
         if !self.guard.is_empty() {
             let kinds = counted(self.guard.iter().map(|(_, kind)| format!("{kind:?}")));
@@ -189,6 +200,25 @@ impl Warnings {
                 self.guard.len(),
                 positions(&found)
             ));
+        }
+        lines
+    }
+
+    /// The lines for replacements inside runs only shaped like a host.
+    fn shaped_summary(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (found, what) in [
+            (&self.name_in_shaped, "a word of a name"),
+            (&self.passcode_in_shaped, "a meeting passcode"),
+        ] {
+            if !found.is_empty() {
+                lines.push(format!(
+                    "{what} was replaced inside a run shaped like a host (a dotted name, a file name, prose, or a host \
+                     not recognised as one, which is then no longer intact) in {} event(s): {}",
+                    found.len(),
+                    positions(found)
+                ));
+            }
         }
         lines
     }
@@ -476,7 +506,8 @@ fn stage(mut file: fs::File, guard: Option<&Guard>, staging: &Path, text: &str) 
 ///
 /// # Errors
 /// As [`reference_path`], [`refuse_inside_repository`], [`read_capture`] and [`write_reference`]; under
-/// [`Checks::Strict`], [`ExportError::NameInHost`] when a name was left in a host or a passcode took a host's place,
+/// [`Checks::Strict`], [`ExportError::NameInHost`] when a name was left in a host, a passcode took a host's place, or
+/// a name or a passcode was replaced inside a run only shaped like a host,
 /// and [`ExportError::NameLeft`] when the name check finds anything, with nothing written.
 pub fn export(
     capture: &Path,
@@ -510,6 +541,8 @@ pub fn export_with(
     let mut warnings = Warnings {
         name_in_host: sanitized.name_in_host,
         passcode_in_host: sanitized.passcode_in_host,
+        name_in_shaped: sanitized.name_in_shaped,
+        passcode_in_shaped: sanitized.passcode_in_shaped,
         names: check_names(&sanitized.names, &text),
         guard: Vec::new(),
     };
@@ -528,7 +561,13 @@ pub fn export_with(
 
 /// The refusal `--strict` makes of what the sanitizer and the name check found, if anything.
 fn refuse_on(warnings: &Warnings) -> Result<(), ExportError> {
-    let mut in_host = [warnings.name_in_host.as_slice(), warnings.passcode_in_host.as_slice()].concat();
+    let mut in_host = [
+        warnings.name_in_host.as_slice(),
+        warnings.passcode_in_host.as_slice(),
+        warnings.name_in_shaped.as_slice(),
+        warnings.passcode_in_shaped.as_slice(),
+    ]
+    .concat();
     in_host.sort_unstable();
     in_host.dedup();
     if !in_host.is_empty() {
