@@ -64,9 +64,9 @@ anything the fixture guard finds. A word of a name is never replaced inside a ho
 intact: a public Microsoft protocol host such as `teams.microsoft.com` is never taken for a name, and a word of a name
 that is also a label of any other host is left there and counted in the warnings (it is still replaced everywhere
 else). Only a real host counts: a URL's authority (as written or encoded), a `Host`-style header's value, a cookie's
-`Domain=`, or a lowercase host name of three labels or more; a dotted name (`Mei.Li`), a file name (`notes-jane.md`)
-or prose gets the name replaced, and that is counted in the warnings too, since such a run may be a host nothing
-around it gave away (`quill.com` in prose). `--strict` turns every one of these warnings back into a refusal that writes
+`Domain=`; a dotted name (`Mei.Li`, `jun.hao.li`), a file name (`quill.notes.md`) or prose gets the name replaced,
+and that is counted in the warnings too, since such a run may be a host nothing around it gave away (`quill.com` or
+`cdn.quill.example` in prose). `--strict` turns every one of these warnings back into a refusal that writes
 nothing. Teams meeting codes and join passcodes (of letters only too) become `<meeting:N>` and `<token:N>` wherever
 they show, a host included, invitations read in every language the web client has locale strings for, and the fixture
 guard flags a join link, a meeting id or a passcode left in the clear. The sanitizer is defence in depth, with known

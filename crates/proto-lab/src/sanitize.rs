@@ -36,10 +36,10 @@
 //!   that is an identifier (an email or UPN, an MRI, a URL, a GUID, a domain: `jane.doe@contoso.com` is replaced whole
 //!   and gives no `com`) and no run of digits alone (`sanitize/words.rs`); a "Last, First" name also stands for
 //!   "First Last". A name is never replaced inside a host: a public protocol host (`teams.microsoft.com`) holds none,
-//!   and replacing a word of any other real host (a URL's authority, a `Host` header's value, a cookie's domain, a
-//!   lowercase host name of three labels or more: `sanitize/words.rs`) would destroy it, so there the name is left and
-//!   [`sanitize_capture`] reports the event (the export warns about it). What is only shaped like a host, a dotted
-//!   name (`Mei.Li`), a file name (`notes-jane.md`), gets the name replaced. A name found in form data is learned both
+//!   and replacing a word of any other real host (a URL's authority, a `Host` header's value, a cookie's domain:
+//!   `sanitize/words.rs`) would destroy it, so there the name is left and [`sanitize_capture`] reports the event (the
+//!   export warns about it). What is only shaped like a host, a dotted name (`Mei.Li`, `jun.hao.li`), a file name
+//!   (`notes-jane.md`, `quill.notes.md`), a host in prose, gets the name replaced. A name found in form data is learned both
 //!   as written and form-decoded (`Marguerite+Fakename` also as `Marguerite Fakename`; `%2B` stays a plus), only here:
 //!   to every other rule `+` stays `+`, so a base64 secret isn't split. A name only ever seen under a generic key such
 //!   as `name` isn't learned. Every name value is also kept as it was found ([`Sanitizer::learned_names`]), for the
@@ -1290,9 +1290,9 @@ fn fields(rules: &Rules, state: &mut State, text: &str) -> Edits {
 /// goes on from the next character, so nothing inside it is skipped.
 ///
 /// A match inside a public protocol host (`teams.microsoft.com`, `words.rs`) is no name and stays. One inside any
-/// other real host (a URL's authority, a host header's value, a cookie's domain, a host name) stays too, so the host
-/// isn't destroyed, and is counted ([`State::name_in_host`]). One inside a run only shaped like a host (`Mei.Li`,
-/// `notes-jane.md`, a host its context didn't show to be one) is replaced, and counted ([`State::name_in_shaped`]).
+/// other real host (a URL's authority, a host header's value, a cookie's domain) stays too, so the host isn't
+/// destroyed, and is counted ([`State::name_in_host`]). One inside a run only shaped like a host (`Mei.Li`,
+/// `quill.notes.md`, a host its context didn't show to be one) is replaced, and counted ([`State::name_in_shaped`]).
 fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
     let Some(regex) = &state.names_regex else {
         return Vec::new();

@@ -19,15 +19,14 @@
 //!   only holds one (`teams.microsoft.com.example.test`) isn't one;
 //! - any other is a real host ([`Host::Real`]) only where it clearly is one: a URL's authority (after `://`, as written
 //!   or encoded, `https%3A%2F%2F` or `https:\/\/`, or after a `//` that starts a value), the value of a `Host`-style
-//!   header (`"host":"…"`, `":authority":"…"`, `Host: …` at the start of a line) or of a cookie's `Domain=`, or a
-//!   host name by the rule a name value's parts are read by (`lab.example.org`: three labels or more, lowercase, the
-//!   last a known top-level domain). The sanitizer leaves a word of a name inside one, so as not to destroy the host,
-//!   and the export warns about it;
-//! - anything else only looks like one ([`Host::Shaped`]): a dotted name (`Mei.Li`, `jane.wu`, `Jane.Doe.HR`), a file
-//!   name (`notes-jane.md`), prose with no space after a full stop (`met Quill.So we`), and a host no context above
-//!   shows to be one (`quill.com` in prose or under a key that isn't a host's). A word of a name there is replaced as
-//!   anywhere else, and counted: the export warns about it (and `--strict` refuses), since the run may have been a
-//!   host.
+//!   header (`"host":"…"`, `":authority":"…"`, `Host: …` at the start of a line) or of a cookie's `Domain=`. Only
+//!   context makes one: the run's own shape never does. The sanitizer leaves a word of a name inside one, so as not
+//!   to destroy the host, and the export warns about it;
+//! - anything else only looks like one ([`Host::Shaped`]): a dotted name (`Mei.Li`, `jane.wu`, `Jane.Doe.HR`,
+//!   `jun.hao.li`), a file name (`notes-jane.md`, `quill.notes.md`), prose with no space after a full stop
+//!   (`met Quill.So we`), and a host no context above shows to be one (`quill.com` or `cdn.quill.example` in prose or
+//!   under a key that isn't a host's). A word of a name there is replaced as anywhere else, and counted: the export
+//!   warns about it (and `--strict` refuses), since the run may have been a host.
 
 use std::iter;
 use std::ops::Range;
@@ -224,9 +223,6 @@ pub(super) fn hosts(text: &str) -> Vec<(Range<usize>, Host)> {
 fn kind(before: &str, host: &str) -> Host {
     if is_public(host) {
         return Host::Public;
-    }
-    if is_host_name(host) {
-        return Host::Real;
     }
     let before = context(before).replace('\0', "");
     if after_authority(&before) || after_host_key(&before) {
