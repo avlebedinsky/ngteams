@@ -7,9 +7,11 @@
 //! the way the sanitizer reads a name (`words.rs`: runs of letters and digits, any script, of 3 characters or more,
 //! none from a part that is an identifier such as `jane.doe@contoso.com`, no digits alone); each, lowercased, is looked
 //! for, anywhere but in a public protocol host (`teams.microsoft.com`), whose labels are never a name's. One found
-//! inside any other host is reported apart ([`NameFinding::InHost`]): the sanitizer leaves names there on purpose, so
-//! as not to destroy the host. Every line of the output is checked as written and again after each layer of escapes is
-//! decoded (percent escapes, backslash escapes, HTML character references, a `+` being a separator like any other
+//! inside any other real host (`words.rs`: a URL's authority, a `Host`-style header's value, a cookie's domain, a host
+//! name) is reported apart ([`NameFinding::InHost`]): the sanitizer leaves names there on purpose, so as not to
+//! destroy the host. One inside a run only shaped like a host (`Mei.Li`, `notes-jane.md`) is a name left like any
+//! other ([`NameFinding::Name`]). Every line of the output is checked as written and again after each layer of escapes
+//! is decoded (percent escapes, backslash escapes, HTML character references, a `+` being a separator like any other
 //! character that isn't a letter or a digit), up to [`CHECK_ROUNDS`] layers; a line that still holds escapes after
 //! that can't be checked and is reported as such. Placeholders written as is (`<name:1>`) are no words; one that only
 //! appears once escapes are decoded is.
@@ -21,13 +23,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-
-use super::KINDS;
-use super::layers::decode_once;
 use std::iter;
 use std::ops::Range;
 
-use super::words::{MIN_WORD, host_of, hosts, learnable_words};
+use super::KINDS;
+use super::layers::decode_once;
+use super::words::{Host, MIN_WORD, host_of, hosts, learnable_words};
 
 /// How many layers of escapes [`check_names`] decodes in a line (more than the sanitizer's rules do, so it also sees
 /// what they never reached).
@@ -81,7 +82,7 @@ pub enum NameFinding {
     /// A word of the name `label` (`<name:1>`) on `line` (from 1), seen once `layer` layers of escapes were decoded
     /// (0: as written).
     Name { line: usize, layer: usize, label: String },
-    /// As [`Self::Name`], inside a host that isn't a public protocol host, where the sanitizer leaves names.
+    /// As [`Self::Name`], inside a real host that isn't a public protocol host, where the sanitizer leaves names.
     InHost { line: usize, layer: usize, label: String },
     /// `line` still holds escapes after [`CHECK_ROUNDS`] layers: it couldn't be checked.
     TooDeep { line: usize },
@@ -152,7 +153,7 @@ fn check_line(words: &HashMap<String, String>, longest: usize, line: usize, text
 }
 
 /// The labels of the names whose words `text` holds outside its public protocol hosts, each with whether it is inside
-/// another host.
+/// another real host.
 fn hits<'a>(words: &'a HashMap<String, String>, longest: usize, text: &str) -> Vec<(&'a str, bool)> {
     let mut labels = Vec::new();
     let hosts = hosts(text);
@@ -165,9 +166,9 @@ fn hits<'a>(words: &'a HashMap<String, String>, longest: usize, text: &str) -> V
             continue;
         };
         match host_of(&hosts, &range) {
-            Some(true) => {}
-            Some(false) => labels.push((label.as_str(), true)),
-            None => labels.push((label.as_str(), false)),
+            Some(Host::Public) => {}
+            Some(Host::Real) => labels.push((label.as_str(), true)),
+            Some(Host::Shaped) | None => labels.push((label.as_str(), false)),
         }
     }
     labels

@@ -14,8 +14,9 @@
 //! pretty-printed JSON array for a name ending in `.json`. A destination inside a git work tree (a directory at or above
 //! it holds `.git`, as written or with symlinks resolved, `..` resolved too) is always refused before anything is read,
 //! as is one that is a symlink or has a `..` after a directory that doesn't exist yet. The checks:
-//! - where the sanitizer left a word of a name inside a host (a name word that is also a label of a host other than a
-//!   public protocol host: replacing it would destroy the host, so it stays) or replaced a meeting passcode inside one
+//! - where the sanitizer left a word of a name inside a host (a name word that is also a label of a real host other
+//!   than a public protocol host, such as a URL's authority or a `Host` header's value: replacing it would destroy the
+//!   host, so it stays; a dotted name or a file name is no host) or replaced a meeting passcode inside one
 //!   ([`Warnings::name_in_host`], [`Warnings::passcode_in_host`]);
 //! - every name the sanitizer found in the capture, looked for in the text ([`check_names`], at every layer of
 //!   encoding): a word of one left outside any host, one inside a host, a line too deeply encoded to check
@@ -396,12 +397,13 @@ pub fn render(events: &[Value], layout: Layout) -> String {
 /// into place, and hands back what the fixture guard found in `text`. Under [`Checks::Warn`] the file is written
 /// whatever the guard finds; under [`Checks::Strict`] a finding refuses the write before anything touches the disk,
 /// and the staging file is scanned again as it lies there before the rename. Whatever fails, the staging file is
-/// removed and an existing file at `path` stays as it was.
+/// removed and an existing file at `path` stays as it was. The staging file is always created new: anything already
+/// at its path (a leftover, a symlink) refuses the write and is left alone.
 ///
 /// # Errors
 /// As [`refuse_inside_repository`], and under [`Checks::Strict`] [`ExportError::Refused`] (listing what the guard
-/// found), with nothing written; [`ExportError::Io`] when the file can't be written; [`ExportError::GuardPattern`] when
-/// the guard can't be built.
+/// found), with nothing written; [`ExportError::Io`] when the file can't be written, its staging path taken included;
+/// [`ExportError::GuardPattern`] when the guard can't be built.
 pub fn write_reference(path: &Path, text: &str, checks: Checks) -> Result<Vec<(usize, Kind)>, ExportError> {
     let path = &refuse_inside_repository(path)?;
     let guard = Guard::new().map_err(ExportError::GuardPattern)?;
@@ -417,11 +419,24 @@ pub fn write_reference(path: &Path, text: &str, checks: Checks) -> Result<Vec<(u
     private_dir(parent)?;
     let file_name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
     let staging = parent.join(format!(".{file_name}.export-{}", std::process::id()));
-    let placed = stage(rescan, &staging, text).and_then(|()| fs::rename(&staging, path).map_err(io_at(path)));
+    // what was at the staging path already isn't ours: refused, and left as it was
+    let file = create_staging(&staging)?;
+    let placed = stage(file, rescan, &staging, text).and_then(|()| fs::rename(&staging, path).map_err(io_at(path)));
     if placed.is_err() {
         let _ = fs::remove_file(&staging);
     }
     placed.map(|()| found)
+}
+
+/// Creates the staging file `0600`, only if nothing is at `staging`: `create_new` (`O_CREAT | O_EXCL`) refuses an
+/// existing file and a symlink, a dangling one too, rather than write through it.
+fn create_staging(staging: &Path) -> Result<fs::File, ExportError> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(staging)
+        .map_err(io_at(staging))
 }
 
 /// Creates `dir` and its missing parents `0700`, and makes `dir` itself `0700` when it already existed.
@@ -434,16 +449,9 @@ fn private_dir(dir: &Path) -> Result<(), ExportError> {
     fs::set_permissions(dir, Permissions::from_mode(0o700)).map_err(io_at(dir))
 }
 
-/// Writes the staging file (`0600`) and, given a guard, scans it as it lies on disk.
-fn stage(guard: Option<&Guard>, staging: &Path, text: &str) -> Result<(), ExportError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(staging)
-        .map_err(io_at(staging))?;
-    // a leftover staging file keeps its old mode through `open`
+/// Writes the staging file `file` (at `staging`, made `0600`) and, given a guard, scans it as it lies on disk.
+fn stage(mut file: fs::File, guard: Option<&Guard>, staging: &Path, text: &str) -> Result<(), ExportError> {
+    // the umask may have taken bits off the mode it was created with
     file.set_permissions(Permissions::from_mode(0o600))
         .map_err(io_at(staging))?;
     file.write_all(text.as_bytes()).map_err(io_at(staging))?;

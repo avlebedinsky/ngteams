@@ -24,7 +24,8 @@
 //! `passcodePolicy`). The one exception is a value that may be a word (no digit, no capital after its first letter:
 //! `Online`) that only an invitation's structure gave away, under a label no list has: it is replaced wherever it
 //! follows a label again, and not as a word everywhere. A learned passcode is never replaced inside a public protocol host, and
-//! one replaced inside any other host (a secret is redacted even there) is counted (`State::passcode_in_host`).
+//! one replaced inside any other real host (`words.rs`; a secret is redacted even there) is counted
+//! (`State::passcode_in_host`).
 
 use std::ops::Range;
 
@@ -32,7 +33,7 @@ use fixture_guard::labels::{Label, Labelled, Labels, is_passcode_value};
 use regex::Regex;
 
 use super::layers::decode_all;
-use super::words::{host_of, hosts};
+use super::words::{Host, hosts};
 use super::{Edits, Mode, State};
 
 /// Key fragments (lowercased, without `_` and `-`) whose values are always a meeting's code.
@@ -323,8 +324,8 @@ pub(super) fn learned(patterns: &Patterns, state: &mut State, text: &str) -> Edi
         .collect()
 }
 
-/// The learned passcodes in `text`, as whole words, none inside a public protocol host; one inside any other host is
-/// counted ([`State::passcode_in_host`]).
+/// The learned passcodes in `text`, as whole words, none inside a public protocol host; one inside any other real host
+/// is counted ([`State::passcode_in_host`]).
 fn learned_passcodes(state: &mut State, text: &str) -> Vec<Range<usize>> {
     let Some(regex) = &state.passcodes_regex else {
         return Vec::new();
@@ -340,10 +341,10 @@ fn learned_passcodes(state: &mut State, text: &str) -> Vec<Range<usize>> {
     let hosts = hosts(text);
     let mut kept = Vec::new();
     for range in matches {
-        match host_of(&hosts, &range) {
-            Some(true) => continue,
-            Some(false) => state.passcode_in_host += 1,
-            None => {}
+        match state.host_at(&hosts, &range) {
+            Some(Host::Public) => continue,
+            Some(Host::Real) => state.passcode_in_host += 1,
+            Some(Host::Shaped) | None => {}
         }
         kept.push(range);
     }

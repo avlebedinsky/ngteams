@@ -7,17 +7,30 @@
 //! Public Suffix List). The identifier rules replace those whole; their pieces (`com`, `contoso`, `orgid`) are no
 //! person's name, and learning them would replace every host and path that holds them. A dotted part that may be a
 //! person's (`jane.wu`, `Mei.Li`, `Doe.CA`) gives its words, but never a lowercase last label that is a top-level
-//! domain (`contoso.com` gives `contoso`; the sanitizer leaves it inside a host, and the export warns). A run of
+//! domain (`contoso.com` gives `contoso`; the sanitizer leaves it inside a real host, and the export warns). A run of
 //! digits alone is no word of a name either.
 //!
 //! A host in a text is a run of letters, digits, `-` and `.` whose last label is a top-level domain (of the Public
-//! Suffix List, a reserved one, or any two letters). One under [`PUBLIC_DOMAINS`] (`teams.microsoft.com`, `login.microsoftonline.com`) is a public protocol
-//! host: its labels are never a name's (a group called "Microsoft Teams" doesn't make `teams.microsoft.com` a name),
-//! so the sanitizer leaves them and the check doesn't look in them. A lookalike that only holds one
-//! (`teams.microsoft.com.example.test`) isn't one.
+//! Suffix List, a reserved one, or any two letters), without the tail of an escape glued to its start (the second `2F`
+//! of `%2F%2Fapi.example.test`). That shape is broad on purpose, and [`Host`] tells what such a run is:
+//! - one under [`PUBLIC_DOMAINS`] (`teams.microsoft.com`, `login.microsoftonline.com`) is a public protocol host
+//!   ([`Host::Public`]): its labels are never a name's (a group called "Microsoft Teams" doesn't make
+//!   `teams.microsoft.com` a name), so the sanitizer leaves them and the check doesn't look in them. A lookalike that
+//!   only holds one (`teams.microsoft.com.example.test`) isn't one;
+//! - any other is a real host ([`Host::Real`]) only where it clearly is one: a URL's authority (after `://`, as written
+//!   or encoded, `https%3A%2F%2F` or `https:\/\/`, or after a `//` that starts a value), the value of a `Host`-style
+//!   header (`"host":"…"`, `":authority":"…"`, `Host: …` at the start of a line) or of a cookie's `Domain=`, or a
+//!   host name by the rule a name value's parts are read by (`lab.example.org`: three labels or more, lowercase, the
+//!   last a known top-level domain). The sanitizer leaves a word of a name inside one, so as not to destroy the host,
+//!   and the export warns about it;
+//! - anything else only looks like one ([`Host::Shaped`]): a dotted name (`Mei.Li`, `jane.wu`, `Jane.Doe.HR`), a file
+//!   name (`notes-jane.md`), prose with no space after a full stop (`met Quill.So we`). A word of a name there is
+//!   replaced as anywhere else.
 
 use std::iter;
 use std::ops::Range;
+
+use super::layers::decode_all;
 
 /// The shortest word of a name that counts.
 pub(super) const MIN_WORD: usize = 3;
@@ -64,6 +77,24 @@ const PUBLIC_DOMAINS: [&str; 37] = [
     "svc.ms",
     "trouter.io",
 ];
+
+/// Header keys (lowercased) whose value is a host: the request's own (`Host`, HTTP/2's `:authority`).
+pub(super) const HOST_KEYS: [&str; 4] = ["host", ":authority", "authority", "x-forwarded-host"];
+
+/// How far back from a host its context (`https%253A%252F%252F`, `"x-forwarded-host": "`) is looked for, in
+/// characters.
+const CONTEXT: usize = 48;
+
+/// What a host-shaped run of a text is (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Host {
+    /// Under [`PUBLIC_DOMAINS`]: no label of it is a name's.
+    Public,
+    /// Clearly a host: a URL's authority, a `Host`-style header's value, a cookie's domain, or a host name.
+    Real,
+    /// Only shaped like one: a dotted name, a file name, prose.
+    Shaped,
+}
 
 /// Top-level domains of names reserved for tests, documentation and local networks, which the Public Suffix List
 /// doesn't hold.
@@ -163,8 +194,8 @@ fn is_public(host: &str) -> bool {
         .any(|domain| host == *domain || host.strip_suffix(domain).is_some_and(|rest| rest.ends_with('.')))
 }
 
-/// Every host in `text`, in order, with whether it is a public protocol host.
-pub(super) fn hosts(text: &str) -> Vec<(Range<usize>, bool)> {
+/// Every host-shaped run in `text`, in order, with what it is.
+pub(super) fn hosts(text: &str) -> Vec<(Range<usize>, Host)> {
     let mut found = Vec::new();
     let mut start = None;
     for (index, char) in text.char_indices().chain(iter::once((text.len(), ' '))) {
@@ -175,20 +206,126 @@ pub(super) fn hosts(text: &str) -> Vec<(Range<usize>, bool)> {
         let Some(begin) = start.take() else {
             continue;
         };
+        let begin = begin + escape_tail(&text[..begin], &text[begin..index]);
         let run = &text[begin..index];
         let host = run.trim_matches(['.', '-']);
         if is_domain(host) {
             let at = begin + (run.len() - run.trim_start_matches(['.', '-']).len());
-            found.push((at..at + host.len(), is_public(host)));
+            found.push((at..at + host.len(), kind(&text[..at], host)));
         }
     }
     found
 }
 
-/// Whether `range` of a text lies inside one of its `hosts`, and whether that host is public.
-pub(super) fn host_of(hosts: &[(Range<usize>, bool)], range: &Range<usize>) -> Option<bool> {
+/// What the host `host`, found after `before`, is. Its context is read without NULs, which the name check puts around a
+/// decoded character (`backstop.rs`).
+fn kind(before: &str, host: &str) -> Host {
+    if is_public(host) {
+        return Host::Public;
+    }
+    if is_host_name(host) {
+        return Host::Real;
+    }
+    let before = context(before).replace('\0', "");
+    if after_authority(&before) || after_host_key(&before) {
+        Host::Real
+    } else {
+        Host::Shaped
+    }
+}
+
+/// How many bytes at the start of `run` (letters, digits, `-` and `.`) are the tail of an escape `before` ends in: the
+/// hex digits of a percent escape (`2F`, or `252F` for `%252F`, after a `%`), or of a `\uXXXX` or a `\xXX`.
+fn escape_tail(before: &str, run: &str) -> usize {
+    let bytes = run.as_bytes();
+    let hex = |from: usize, len: usize| {
+        bytes
+            .get(from..from + len)
+            .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit))
+    };
+    if before.ends_with('%') {
+        let mut skip = 0;
+        while bytes[skip..].starts_with(b"25") && hex(skip + 2, 2) {
+            skip += 2;
+        }
+        return if hex(skip, 2) { skip + 2 } else { 0 };
+    }
+    if before.ends_with('\\') {
+        return match bytes.first() {
+            Some(b'u') if hex(1, 4) => 5,
+            Some(b'x') if hex(1, 2) => 3,
+            _ => 0,
+        };
+    }
+    0
+}
+
+/// The last [`CONTEXT`] characters of `before`: as far back as a host's context is looked for.
+fn context(before: &str) -> &str {
+    let start = before
+        .char_indices()
+        .rev()
+        .nth(CONTEXT - 1)
+        .map_or(0, |(index, _)| index);
+    &before[start..]
+}
+
+/// Whether a host found after `before` is a URL's authority: once every layer of escapes is decoded, `before` ends in
+/// `://`, or in a `//` that starts a value (a protocol-relative URL).
+fn after_authority(before: &str) -> bool {
+    let decoded = decode_all(before);
+    if decoded.ends_with("://") {
+        return true;
+    }
+    decoded.strip_suffix("//").is_some_and(|rest| {
+        !rest
+            .chars()
+            .next_back()
+            .is_some_and(|char| char.is_alphanumeric() || matches!(char, '/' | '.' | '-' | '_' | '%' | '\\'))
+    })
+}
+
+/// Whether a host found after `before` is the value of a `Host`-style header ([`HOST_KEYS`]: `"host":"` or
+/// `":authority": "` in JSON, `Host: ` at the start of a line) or a cookie's domain (`; Domain=.`).
+fn after_host_key(before: &str) -> bool {
+    let value = before.trim_end_matches('.');
+    let json = value
+        .strip_suffix('"')
+        .map(str::trim_end)
+        .and_then(|rest| rest.strip_suffix(':'))
+        .map(str::trim_end)
+        .and_then(|rest| rest.strip_suffix('"'))
+        .is_some_and(|key| ends_in_key(key, &HOST_KEYS, |before| before.ends_with('"')));
+    // a line starts at the start of the text or after a line break, as written or escaped (`\r\n` in a JSON string)
+    let line_start = |before: &str| {
+        before.is_empty() || before.ends_with(['\n', '\r']) || before.ends_with("\\n") || before.ends_with("\\r")
+    };
+    let line = value
+        .trim_end_matches([' ', '\t'])
+        .strip_suffix(':')
+        .is_some_and(|key| ends_in_key(key, &HOST_KEYS, line_start));
+    let cookie = value.strip_suffix('=').is_some_and(|key| {
+        ends_in_key(key, &["domain"], |before| {
+            before.is_empty() || before.ends_with(|char: char| char.is_whitespace() || matches!(char, ';' | '"'))
+        })
+    });
+    json || line || cookie
+}
+
+/// Whether `text` ends in one of `keys` (in any case), after a text that `opens` takes.
+fn ends_in_key(text: &str, keys: &[&str], opens: impl Fn(&str) -> bool) -> bool {
+    keys.iter().any(|key| {
+        let Some(at) = text.len().checked_sub(key.len()) else {
+            return false;
+        };
+        text.is_char_boundary(at) && text[at..].eq_ignore_ascii_case(key) && opens(&text[..at])
+    })
+}
+
+/// Whether `range` of a text lies inside one of its `hosts`, and what that host is.
+pub(super) fn host_of(hosts: &[(Range<usize>, Host)], range: &Range<usize>) -> Option<Host> {
     hosts
         .iter()
         .find(|(host, _)| host.start <= range.start && range.end <= host.end)
-        .map(|(_, public)| *public)
+        .map(|(_, host)| *host)
 }

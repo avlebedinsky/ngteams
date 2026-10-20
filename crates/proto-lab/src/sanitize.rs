@@ -36,12 +36,14 @@
 //!   that is an identifier (an email or UPN, an MRI, a URL, a GUID, a domain: `jane.doe@contoso.com` is replaced whole
 //!   and gives no `com`) and no run of digits alone (`sanitize/words.rs`); a "Last, First" name also stands for
 //!   "First Last". A name is never replaced inside a host: a public protocol host (`teams.microsoft.com`) holds none,
-//!   and replacing a word of any other host would destroy it, so there the name is left and [`sanitize_capture`]
-//!   reports the event (the export warns about it). A name found in form data is learned both as written and
-//!   form-decoded (`Marguerite+Fakename` also as `Marguerite Fakename`; `%2B` stays a plus), only here: to every other
-//!   rule `+` stays `+`, so a base64 secret isn't split. A name only ever seen under a generic key such as `name` isn't
-//!   learned. Every name value is also kept as it was found ([`Sanitizer::learned_names`]), for the export's own check
-//!   ([`check_names`], `sanitize/backstop.rs`) of whether a word of one is left.
+//!   and replacing a word of any other real host (a URL's authority, a `Host` header's value, a cookie's domain, a
+//!   lowercase host name of three labels or more: `sanitize/words.rs`) would destroy it, so there the name is left and
+//!   [`sanitize_capture`] reports the event (the export warns about it). What is only shaped like a host, a dotted
+//!   name (`Mei.Li`), a file name (`notes-jane.md`), gets the name replaced. A name found in form data is learned both
+//!   as written and form-decoded (`Marguerite+Fakename` also as `Marguerite Fakename`; `%2B` stays a plus), only here:
+//!   to every other rule `+` stays `+`, so a base64 secret isn't split. A name only ever seen under a generic key such
+//!   as `name` isn't learned. Every name value is also kept as it was found ([`Sanitizer::learned_names`]), for the
+//!   export's own check ([`check_names`], `sanitize/backstop.rs`) of whether a word of one is left.
 //!
 //! **Every rule sees every layer of encoding** (`sanitize/layers.rs`). Text rules run on a text as written, then again
 //! with one layer of escapes decoded (percent escapes, `%25XX` being one more layer, as UTF-8; backslash escapes; HTML
@@ -75,7 +77,7 @@ use serde_json::{Map, Value};
 
 pub use self::backstop::{CHECK_ROUNDS, LearnedNames, NameFinding, check_names};
 use self::layers::{DECODE_ROUNDS, Layered, decode_all};
-use self::words::{host_of, hosts, learnable_words};
+use self::words::{HOST_KEYS, Host, host_of, hosts, learnable_words};
 use crate::config::{Alias, LabConfig};
 
 /// Every kind of placeholder the sanitizer writes.
@@ -349,12 +351,15 @@ struct State {
     found_names: HashMap<String, String>,
     names_regex: Option<Regex>,
     names_changed: bool,
-    /// How many times a name was left inside a host that isn't a public one (`words.rs`), so as not to destroy that
-    /// host ([`Sanitized::name_in_host`]).
+    /// How many times a name was left inside a real host that isn't a public one (`words.rs`), so as not to destroy
+    /// that host ([`Sanitized::name_in_host`]).
     name_in_host: usize,
-    /// How many times a learned passcode was replaced inside a host that isn't a public one (`meeting.rs`): a secret is
-    /// redacted even there, and that host is gone ([`Sanitized::passcode_in_host`]).
+    /// How many times a learned passcode was replaced inside a real host that isn't a public one (`meeting.rs`): a
+    /// secret is redacted even there, and that host is gone ([`Sanitized::passcode_in_host`]).
     passcode_in_host: usize,
+    /// Whether the text the rules see now is a host header's value or a cookie's domain ([`Mode::Host`]), whose
+    /// host-shaped run is a real host however it is written.
+    host_value: bool,
     /// Meetings' codes (`meeting.rs`).
     meetings: Table,
     /// The codes learned, as their digits.
@@ -369,6 +374,15 @@ struct State {
 }
 
 impl State {
+    /// What host of `hosts` (`words.rs`) `range` lies in, if any: in a host value ([`Self::host_value`]) a host-shaped
+    /// run is a real host.
+    fn host_at(&self, hosts: &[(Range<usize>, Host)], range: &Range<usize>) -> Option<Host> {
+        host_of(hosts, range).map(|host| match host {
+            Host::Shaped if self.host_value => Host::Real,
+            other => other,
+        })
+    }
+
     /// A secret's placeholder; the same secret in any encoding gets the same one.
     fn token(&mut self, value: &str) -> String {
         format!("<token:{}>", self.tokens.label(&decode_all(value)))
@@ -444,6 +458,8 @@ enum Mode {
     Weak,
     Name,
     Pii,
+    /// A `Host`-style header's value (`words.rs`): free text whose host is a real one.
+    Host,
 }
 
 /// Turns raw capture events into sanitized ones; see the module docs. Use one per capture: [`Self::learn`] every
@@ -660,8 +676,17 @@ impl Sanitizer {
             Mode::Weak if text.len() >= WEAK_MIN => self.state.token(text),
             Mode::Name if !text.trim().is_empty() => self.state.name(text),
             Mode::Pii if !text.trim().is_empty() => self.state.pii(text),
+            Mode::Host => self.host_text(text),
             _ => self.text(text),
         }
+    }
+
+    /// A host header's value or a cookie's domain: free text, whose host-shaped run is a real host.
+    fn host_text(&mut self, text: &str) -> String {
+        self.state.host_value = true;
+        let out = self.text(text);
+        self.state.host_value = false;
+        out
     }
 
     /// A credential: its scheme kept, the rest a token.
@@ -696,7 +721,11 @@ impl Sanitizer {
             return part.to_owned();
         };
         let name = self.key(name);
-        if COOKIE_ATTRIBUTES.contains(&name.trim().to_lowercase().as_str()) {
+        let attribute = name.trim().to_lowercase();
+        if attribute == "domain" {
+            return format!("{name}={}", self.host_text(value));
+        }
+        if COOKIE_ATTRIBUTES.contains(&attribute.as_str()) {
             return format!("{name}={}", self.text(value));
         }
         if value.is_empty() || self.is_placeholder(value) {
@@ -883,6 +912,9 @@ fn key_mode(key: &str) -> Mode {
     }
     if PII_PARTS.iter().any(|part| bare.contains(part)) || PII_KEYS.contains(&bare.as_str()) {
         return Mode::Pii;
+    }
+    if HOST_KEYS.contains(&lower.as_str()) {
+        return Mode::Host;
     }
     Mode::Plain
 }
@@ -1231,7 +1263,9 @@ fn fields(rules: &Rules, state: &mut State, text: &str) -> Edits {
 /// goes on from the next character, so nothing inside it is skipped.
 ///
 /// A match inside a public protocol host (`teams.microsoft.com`, `words.rs`) is no name and stays. One inside any
-/// other host stays too, so the host isn't destroyed, and is counted ([`State::name_in_host`]).
+/// other real host (a URL's authority, a host header's value, a cookie's domain, a host name) stays too, so the host
+/// isn't destroyed, and is counted ([`State::name_in_host`]). One inside a run only shaped like a host (`Mei.Li`,
+/// `notes-jane.md`) is replaced.
 fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
     let Some(regex) = &state.names_regex else {
         return Vec::new();
@@ -1247,10 +1281,17 @@ fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
             at = next;
             continue;
         };
-        if let Some(public) = host_of(&hosts, &(start..end)) {
-            in_host += usize::from(!public);
-            at = next;
-            continue;
+        match state.host_at(&hosts, &(start..end)) {
+            Some(Host::Public) => {
+                at = next;
+                continue;
+            }
+            Some(Host::Real) => {
+                in_host += 1;
+                at = next;
+                continue;
+            }
+            Some(Host::Shaped) | None => {}
         }
         edits.push((start..end, format!("<name:{label}>")));
         at = end;

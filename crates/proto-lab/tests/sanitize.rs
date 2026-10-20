@@ -1396,6 +1396,87 @@ fn a_name_word_in_any_other_host_is_left_and_reported() {
     assert!(!format!("{found:?} {}", found[0]).to_lowercase().contains("quill"));
 }
 
+#[test]
+fn a_name_is_left_only_inside_a_real_host() {
+    let real = json!({
+        "url": "https://jane.contoso.example/a",
+        "next": "https%3A%2F%2Fquill.example%2Fb",
+        "twice": "https%253A%252F%252Fquill.example%252Fb",
+        "escaped": r"https:\/\/quill.example\/c",
+        "relative": "//quill.example/d",
+        "cdn": "see cdn.quill.example for it",
+        "headers": {"Host": "quill.example", ":authority": "jane.example:443", "Referer": "https://quill.example/"},
+    });
+    let events = [
+        json!({"displayName": "Jane Quill"}),
+        json!({"displayName": "Mei Wu"}),
+        real.clone(),
+        json!({"set-cookie": "s=1; Domain=.quill.example; Path=/"}),
+        // only shaped like hosts: dotted names, prose, file names
+        json!({
+            "text": "cc Mei.Li and jane.wu, Jane.Doe.HR; met Quill.So we",
+            "file": "notes-jane.md",
+            "path": "/docs/Quill.md",
+        }),
+    ];
+    let out = sanitize_capture(&events, &Identities::default()).unwrap();
+    // every real host stays as it was, and is reported
+    assert_eq!(out.events[2], real);
+    assert!(
+        out.events[3]["set-cookie"]
+            .as_str()
+            .unwrap()
+            .contains("Domain=.quill.example;"),
+        "{}",
+        out.events[3]
+    );
+    assert_eq!(out.name_in_host, [3, 4]);
+    // the name is replaced in what only looks like a host
+    assert_eq!(
+        out.events[4],
+        json!({
+            "text": "cc <name:2>.Li and <name:1>.wu, <name:1>.Doe.HR; met <name:1>.So we",
+            "file": "notes-<name:1>.md",
+            "path": "/docs/<name:1>.md",
+        })
+    );
+    // the name check reads hosts the same way: inside a real host apart, nothing left anywhere else
+    let text = as_jsonl(&out.events);
+    let found = check_names(&out.names, &text);
+    assert!(
+        found
+            .iter()
+            .all(|finding| matches!(finding, NameFinding::InHost { line: 3 | 4, .. })),
+        "{found:?}"
+    );
+    let left = "{\"text\":\"cc Mei.Li, jane.wu\",\"file\":\"notes-quill.md\"}\n";
+    assert_eq!(
+        check_names(&out.names, left),
+        [
+            NameFinding::Name {
+                line: 1,
+                layer: 0,
+                label: "<name:2>".to_owned()
+            },
+            NameFinding::Name {
+                line: 1,
+                layer: 0,
+                label: "<name:1>".to_owned()
+            },
+        ]
+    );
+    let hosts =
+        "{\"Host\":\"quill.example\"}\n{\"u\":\"https:\\/\\/quill.example\\/\"}\n{\"h\":\"x\\nHost: quill.example\"}\n";
+    let found = check_names(&out.names, hosts);
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|finding| matches!(finding, NameFinding::InHost { .. })),
+        "{found:?}"
+    );
+}
+
 // --- the export's check for names ---
 
 /// The names found in `events` (a capture), as the export gets them.
@@ -1602,6 +1683,37 @@ fn a_fixture_that_cant_be_put_in_place_leaves_no_staging_file() {
     names.sort();
     assert_eq!(names, ["taken.jsonl"]);
     assert!(path.join("inside").is_dir());
+}
+
+#[test]
+fn a_symlink_at_the_staging_path_is_refused_and_never_written_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("reference");
+    fs::create_dir_all(&reference).unwrap();
+    let path = reference.join("copy.jsonl");
+    let staging = reference.join(format!(".copy.jsonl.export-{}", std::process::id()));
+    let target = dir.path().join("elsewhere.txt");
+    fs::write(&target, "untouched\n").unwrap();
+    std::os::unix::fs::symlink(&target, &staging).unwrap();
+    for checks in [Checks::Warn, Checks::Strict] {
+        let error = export::write_reference(&path, "{\"ok\":1}\n", checks).unwrap_err();
+        assert!(matches!(error, ExportError::Io { .. }), "{error}");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "untouched\n");
+        assert!(fs::symlink_metadata(&staging).unwrap().file_type().is_symlink());
+        assert!(!path.exists());
+    }
+    // a dangling one too: nothing is created at its target
+    let dangling = dir.path().join("never.txt");
+    fs::remove_file(&staging).unwrap();
+    std::os::unix::fs::symlink(&dangling, &staging).unwrap();
+    export::write_reference(&path, "{\"ok\":1}\n", Checks::Warn).unwrap_err();
+    assert!(!dangling.exists());
+    assert!(!path.exists());
+    // once the path is free, the copy is written
+    fs::remove_file(&staging).unwrap();
+    export::write_reference(&path, "{\"ok\":1}\n", Checks::Warn).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{\"ok\":1}\n");
+    assert_eq!(mode(&path).unwrap(), 0o600);
 }
 
 /// A capture naming people only in places the sanitizer reads: a "Last, First" display name, a name in form data.
