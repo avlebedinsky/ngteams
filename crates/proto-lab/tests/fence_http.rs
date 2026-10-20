@@ -991,6 +991,74 @@ async fn closing_the_fence_asks_the_browser_to_close_then_stops_it() {
     assert!(process::gone(helper).await, "the browser outlived close");
 }
 
+/// A membership source that answers only after `delay`, as a slow live read does, and says when it is asked.
+struct Slow {
+    delay: Duration,
+    membership: Membership,
+    asked: Arc<tokio::sync::Notify>,
+}
+
+impl MembershipSource for Slow {
+    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
+        self.asked.notify_one();
+        Box::pin(async move {
+            tokio::time::sleep(self.delay).await;
+            self.membership.clone()
+        })
+    }
+}
+
+#[tokio::test]
+async fn closing_the_fence_waits_for_the_decisions_still_running() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let lab = lab().unwrap();
+    let asked = Arc::new(tokio::sync::Notify::new());
+    let members = Slow {
+        delay: Duration::from_secs(2),
+        membership: Membership::Complete(vec![Mri::new(LAB_A), Mri::new(COWORKER)]),
+        asked: Arc::clone(&asked),
+    };
+    let http = HttpFence::new(Classifier::mapped(), Arc::clone(&lab.fence), Arc::new(members));
+    let options = ArmOptions {
+        service_worker_origins: Vec::new(),
+    };
+    let armed = ArmedBrowser::arm(fake.launch().await.unwrap(), http, ws_fence(&lab).unwrap(), &options)
+        .await
+        .unwrap();
+    let decisions = armed.decisions();
+    let body = r#"{"messagetype":"Text","content":"hi"}"#;
+    assert!(matches!(
+        Classifier::mapped().classify("POST", CHAT, Some(body.as_bytes())),
+        Classification::Write(_)
+    ));
+    let pause = json!({
+        "requestId": "r-write",
+        "request": {"method": "POST", "url": CHAT, "postData": body, "headers": {}},
+        "resourceType": "Fetch",
+    });
+    fake.event(Some("S1"), "Fetch.requestPaused", &pause).unwrap();
+    // the write's membership read is running when the fence closes
+    tokio::time::timeout(Duration::from_secs(5), asked.notified())
+        .await
+        .unwrap();
+    assert!(decisions.denials().is_empty());
+
+    armed.close(Duration::from_millis(100)).await.unwrap();
+
+    let causes: Vec<DenyCause> = decisions.denials().iter().map(|denial| denial.cause).collect();
+    assert_eq!(
+        causes,
+        [DenyCause::Fenced(DenyReason::Outsiders { count: 1 })],
+        "the deny that landed after the browser went down is kept"
+    );
+    assert_eq!(decisions.undecided(), 0);
+    // the connection ending after the close isn't a lost one
+    fake.hang_up().unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let failed = decisions.verdict().unwrap_err();
+    assert!(!failed.connection_lost, "{failed}");
+}
+
 fn hang_up_on_close(method: &str, session: Option<&str>) -> bool {
     method == "Browser.close" && session.is_none()
 }

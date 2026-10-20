@@ -35,7 +35,7 @@ use teams_fence::{FailClosed, Fence, LiveMembershipSource, LiveSourceError, Memb
 use tokio::sync::mpsc;
 use url::Url;
 
-use crate::arming::{ArmError, ArmOptions, ArmedBrowser, ArmingFailure, TEAMS_ORIGINS};
+use crate::arming::{ArmError, ArmOptions, ArmedBrowser, ArmingFailure, DECISION_GRACE, Decisions, TEAMS_ORIGINS};
 use crate::browser::{Browser, BrowserError, Display, LaunchOptions};
 use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
@@ -368,21 +368,23 @@ pub struct FenceReport {
 }
 
 impl FenceReport {
-    fn of(armed: &ArmedBrowser) -> Self {
+    /// What `decisions` holds so far.
+    #[must_use]
+    pub fn of(decisions: &Decisions) -> Self {
         let mut denied_requests = BTreeMap::new();
-        for denial in armed.denials() {
+        for denial in decisions.denials() {
             let host = Url::parse(&denial.url)
                 .ok()
                 .and_then(|url| url.host_str().map(str::to_owned))
                 .unwrap_or_else(|| "?".to_owned());
             *denied_requests.entry(host).or_default() += 1;
         }
-        let failed = armed.verdict().err();
+        let failed = decisions.verdict().err();
         Self {
             denied_requests,
-            denied_frames: armed.frame_denials().len(),
-            unsanctioned_frames: armed.unsanctioned_frames().len(),
-            unarmed: armed.failures(),
+            denied_frames: decisions.frame_denials().len(),
+            unsanctioned_frames: decisions.unsanctioned_frames().len(),
+            unarmed: decisions.failures(),
             connection_lost: failed.is_some_and(|failed| failed.connection_lost),
         }
     }
@@ -444,6 +446,10 @@ pub enum SessionError {
     Cdp(#[from] CdpError),
     #[error("can't record the run: {0}")]
     Capture(#[from] CaptureError),
+    #[error(
+        "{0} fence decision(s) still undecided {DECISION_GRACE:?} after the browser closed; their denies may be missing"
+    )]
+    Undecided(usize),
     #[error(transparent)]
     LiveSource(#[from] LiveSourceError),
 }
@@ -651,22 +657,33 @@ impl LabSession {
     /// What the fence did so far.
     #[must_use]
     pub fn report(&self) -> FenceReport {
-        FenceReport::of(&self.armed)
+        FenceReport::of(&self.armed.decisions())
     }
 
-    /// Closes the browser (killing it unless it confirms), finishes the capture, and says what the fence did and
-    /// where the capture is.
+    /// What the fence decides in this session, readable after [`Self::close`] too: the run's final denials are read
+    /// from it once the close has waited for the decisions still running.
+    #[must_use]
+    pub fn decisions(&self) -> Decisions {
+        self.armed.decisions()
+    }
+
+    /// Closes the browser (killing it unless it confirms), waits for the fence's decisions still running, finishes the
+    /// capture, and says what the fence did, every one of those decisions included.
     ///
     /// # Errors
-    /// When the browser had to be killed or couldn't be reaped, or the capture lost events.
+    /// When the browser had to be killed or couldn't be reaped, the capture lost events, or a decision was still
+    /// running when the wait for them ended ([`SessionError::Undecided`]).
     pub async fn close(self) -> Result<FenceReport, SessionError> {
-        let report = self.report();
+        let decisions = self.armed.decisions();
         let closed = self.armed.close(CLOSE_GRACE).await;
         if let Some(recorder) = &self.recorder {
             recorder.finish()?;
         }
         closed?;
-        Ok(report)
+        match decisions.undecided() {
+            0 => Ok(FenceReport::of(&decisions)),
+            undecided => Err(SessionError::Undecided(undecided)),
+        }
     }
 
     /// [`Self::close`], also giving the capture's directory.

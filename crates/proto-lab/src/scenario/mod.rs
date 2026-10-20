@@ -189,22 +189,23 @@ impl ScenarioReport {
 
     /// Closes `session` and adds its run ([`Self::add_account`]), judged by `policy`. A close that fails (the browser
     /// had to be killed, the capture lost events) fails the run but doesn't end it: the report so far and the other
-    /// accounts' runs are kept.
+    /// accounts' runs are kept. The run is judged on what the fence decided once the close has waited for the decisions
+    /// still running, so a deny that lands while the browser goes down counts too (and one still undecided when that
+    /// wait ends fails the run through the close).
     pub async fn close_account(&mut self, alias: Alias, session: LabSession, policy: DenyPolicy) {
-        let denials = session.denials();
-        let frame_denials = session.frame_denials();
-        let fence = session.report();
+        let decisions = session.decisions();
         let capture = session.capture_dir().map(Path::to_path_buf);
         if let Err(error) = session.close().await {
             self.failures.push(format!("{alias}: {error}"));
         }
+        let fence = FenceReport::of(&decisions);
         self.notes.push(format!("{alias}: {}", fence.summary()));
         self.add_account(
             AccountRun {
                 alias,
                 fence,
-                denials,
-                frame_denials,
+                denials: decisions.denials(),
+                frame_denials: decisions.frame_denials(),
                 capture,
             },
             policy,
