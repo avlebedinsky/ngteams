@@ -26,9 +26,9 @@ on (`teams.cloud.microsoft` after the client moves there, `teams.microsoft.com` 
 
 Credential: the web client sends the chat service an **Entra bearer token**, `Authorization: Bearer <token>` whose
 audience is `https://ic3.teams.office.com` (scope `Teams.AccessAsUser.All`), on every chat service request, and no
-skypetoken there. The bundle and auth.md's service table also name `Authentication: skypetoken=<skypetoken>`; the
-fence's live read accepts either and sends back the form the page used. No `RegistrationToken` was sent: the client
-registered no endpoint.
+skypetoken there. The bundle also names `Authentication: skypetoken=<skypetoken>`, which the captures never showed
+(auth.md's service table); the fence's live read accepts either and sends back the form the page used. No
+`RegistrationToken` was sent: the client registered no endpoint.
 
 What the fence accepts as the chat service (the mapping and the live read share one check,
 `teams_fence::chat_service_path`): `https` only, no port, no user info, and either an AFD host of the commercial cloud

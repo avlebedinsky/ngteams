@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made-up values shaped like an Entra v2 refresh grant for a second audience (Graph) with the same refresh token; not from a capture. See docs/protocol/auth.md.",
+  "_synthetic": "Written from a capture's reference copy (the web client's own refresh grant for Graph, load capture of 2026-10-20, read locally via proto-lab export), values made up, as the native Teams client's request: the form is ours (native client, no client_info, no CAE claims), and the answer has the captured fields and headers minus refresh_token_expires_in and client_info, which only the web client's SPA request gets; the granted scope list has the captured layout (OpenID scopes first, the resource's scopes, then its .default) with invented Graph scopes. See docs/protocol/auth.md.",
   "request": {
     "method": "POST",
     "url": "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
@@ -16,14 +16,17 @@
   "response": {
     "status": 200,
     "headers": {
+      "cache-control": "no-store, no-cache",
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store, no-cache"
+      "expires": "-1",
+      "pragma": "no-cache",
+      "x-ms-request-id": "<guid:31>"
     },
     "body": {
       "token_type": "Bearer",
-      "scope": "https://graph.microsoft.com/User.Read https://graph.microsoft.com/.default",
-      "expires_in": 4500,
-      "ext_expires_in": 4500,
+      "scope": "email openid profile https://graph.microsoft.com/Synthetic.Read https://graph.microsoft.com/Synthetic.ReadWrite https://graph.microsoft.com/.default",
+      "expires_in": 7012,
+      "ext_expires_in": 7012,
       "access_token": "<token:5>",
       "refresh_token": "<token:6>",
       "id_token": "<token:7>"

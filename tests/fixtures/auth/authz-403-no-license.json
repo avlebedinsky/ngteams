@@ -1,22 +1,35 @@
 {
-  "_synthetic": "Made-up values shaped like Teams authz refusing a signed-in user who has no Teams license (what Task 8 saw live as a bare 403); errorCode is one of the values the web bundle 26260.1717.5229.7049 checks for, the body layout is a guess; not from a capture. See docs/protocol/auth.md.",
+  "_synthetic": "Written from a capture's reference copy (the web client's authz POST for a lab account before it was licensed, load capture of 2026-10-19, read locally via proto-lab export), values made up: the request headers are the ones the web client sent, the answer body has exactly the two captured fields, errorCode as captured and the message text invented. See docs/protocol/auth.md.",
   "request": {
     "method": "POST",
     "url": "https://teams.microsoft.com/api/authsvc/v1.0/authz",
     "headers": {
       "authorization": "Bearer <token:1>",
-      "claimsChallengeCapable": "true",
-      "content-length": "0"
+      "claimschallengecapable": "true",
+      "clientrequestid": "<guid:20>",
+      "content-length": "0",
+      "ms-teams-authz-type": "ExplicitLogin",
+      "origin": "https://teams.example.test",
+      "referer": "https://teams.example.test/v2/",
+      "x-ms-client-type": "web",
+      "x-ms-client-version": "<client-version>",
+      "x-ms-migration": "True",
+      "x-ms-request-id": "<guid:20>"
     }
   },
   "response": {
     "status": 403,
     "headers": {
-      "content-type": "application/json; charset=utf-8"
+      "access-control-expose-headers": "Correlation-Id,Correlation-Tags,X-MSEdge-Ref,ETag,Retry-After,X-Error-Code",
+      "content-type": "application/json; charset=utf-8",
+      "correlation-id": "<guid:21>",
+      "correlation-tags": "CorrelationId: <guid:21>, ClientRequestId: <guid:20>, MsCv:",
+      "x-cache": "CONFIG_NOCACHE",
+      "x-request-id": "<guid:22>"
     },
     "body": {
       "errorCode": "UserLicenseNotPresentTrialEligible",
-      "message": "(synthetic) the user has no Teams license"
+      "message": "(synthetic) the user has no Teams license but may start a trial"
     }
   }
 }

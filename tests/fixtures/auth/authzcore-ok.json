@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made-up values shaped like a successful POST to Teams authzcore (v2 flow, no skypetoken) as the web bundle reads it; field names from bundle 26260.1717.5229.7049, every value invented and every host under example.test; not from a capture. See docs/protocol/auth.md.",
+  "_synthetic": "Made-up values shaped like a successful POST to Teams authzcore (v2 flow, no skypetoken) as the web bundle reads it; field names from bundle 26260.1717.5229.7049, every value invented and every host under example.test; not from a capture: the web client used authz in every capture of 2026-10-19/20, never authzcore. See docs/protocol/auth.md.",
   "request": {
     "method": "POST",
     "url": "https://teams.microsoft.com/api/authsvc/v1.0/authzcore",

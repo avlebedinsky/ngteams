@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made-up values shaped like a throttled Entra v2 token request; not from a capture. See docs/protocol/auth.md.",
+  "_synthetic": "Made-up values shaped like a throttled Entra v2 token request; not from a capture: no capture of 2026-10-19/20 shows a token-endpoint error, so the layout is Entra's documented one. See docs/protocol/auth.md.",
   "request": {
     "method": "POST",
     "url": "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
