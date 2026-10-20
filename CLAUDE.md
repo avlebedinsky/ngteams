@@ -14,15 +14,27 @@ These hold for every agent and every change, with no exceptions.
   messages, edits, deletes, reactions, typing, read receipts, calls and answering a call, invites, meetings, member
   changes, chat creation, channel posts, bot replies. It is allowed only when every participant of its target, fetched
   fresh, is a lab account or an approved service participant. Anything unknown, partial or paginated is denied.
-- **A denied request may be allowed only if nothing it does or names leaves the lab.** Nobody outside the 3 lab
-  accounts can notice it: it changes only the lab accounts' own state, or a target whose every participant, fetched
-  fresh, is a lab account. Every account, MRI or id it reads or names is a lab account, checked against the roster
-  when the fence decides, as for writes. It hands no token or credential to a third party (a bot, an app's backend).
-  Such an allowance is added only after a review, in the exact captured shape (host, method, path, body schema), with
-  its reason and tests first, and what it allows is logged to `fence.log`. Any other shape of the same endpoint stays
-  `Unknown` and denied, and so does a request the fence can't read with certainty. It never covers calls. The user
-  set this on 2026-10-21. For example, the mention picker's profile lookups of lab accounts may be allowed; the people
-  search, whose results list other tenant users, and bot invokes, whose body carries the account's token, may not.
+- **A denied request may be allowed only if nothing it does or names leaves the lab.** The user set this on
+  2026-10-21. Nobody outside the 3 lab accounts can notice it: it changes nothing (a read sent by `POST`), or only
+  lab-account state no one outside the lab can see (its session, its tokens, its own settings). Presence, a status
+  note, out-of-office, profile fields, typing and read receipts are seen across the tenant: they are writes, under the
+  rule above. A request the write mapping classifies as a write is judged only by `Fence::check`, never allowed by
+  this rule. Every id it names is checked when the fence decides: an account or MRI against the roster; a
+  conversation by its members, fetched fresh and complete through the fence's membership source, all lab accounts; a
+  message or notification id only under such a conversation or the account's own `ME`. Any other id makes it
+  `Unknown`. Its captured response shape can hold only the accounts it names or that conversation's members: a
+  request whose results can list anyone else (a search, suggestions, the org chart) is never allowed. It hands no
+  token or credential to a third party (a bot, an app's backend). It never covers calls.
+- **An allowance matches the request's exact captured shape, query included.** It is added only after a review, with
+  its reason and tests first. Its shape is the host, the method, the path, every query parameter and its value, the
+  headers that change what the request does, and the body schema. A query parameter or body field the capture didn't
+  show makes the request `Unknown`, as does anything the fence can't read with certainty, and any other shape of the
+  same endpoint stays `Unknown` and denied. A path-only matcher doesn't qualify: `OwnRule` and `UrlPattern` ignore the
+  query and `classify` checks own rules before `map_write`, so such a rule on a message's `properties` path would pass
+  a reaction (`?name=emotions`) unfenced. An allowance never takes a request the write mapping would classify. What
+  it allows is logged to `fence.log`. For example, the mention picker's profile lookups of lab accounts may be
+  allowed; the people search, whose results list other tenant users, and bot invokes, whose body carries the
+  account's token, may not.
 - **Nothing runs live against the tenant before the browser fence is armed** (M0 Tasks 6–7): HTTP interception on
   every host and target, the WebSocket guard, the service worker neutralized. Until the write-target mapping exists
   (M0 Task 11) the fence runs fail-closed: every mutating request is denied except the seeded own-state list.
