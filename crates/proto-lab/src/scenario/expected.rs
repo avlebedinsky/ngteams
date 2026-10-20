@@ -3,7 +3,7 @@
 //!
 //! The list changes only how a run is judged, never a verdict: the fence never reads it, so a request on it is still
 //! denied, kept and logged to `fence.log` like any other. A deny is expected ([`Review::expects`]) only when it is on
-//! the list *and*:
+//! the list, or in one of the scenario's own classes (below), *and*:
 //! - its cause is [`DenyCause::Unclassified`]: a partial or refused membership read, a request whose `fence.log` entry
 //!   failed (own-state or listed), a malformed pause or a frame sent through another realm stays unexpected whatever
 //!   its URL;
@@ -12,6 +12,11 @@
 //!
 //! The one exception to both is a forced deny ([`DenyCause::Forced`]) whose rule's label the scenario names
 //! ([`Review::expecting_forced`]): `ab-chat`'s enforcement probes. Any other forced deny is unexpected.
+//!
+//! A scenario may also name classes of its own besides the list ([`Review::expecting_requests`]), expected under the
+//! same two conditions: `ab-trouter`'s are what comes up only with the push channel
+//! (`super::ab_trouter::TROUTER_RUN_REQUESTS`), the calling stack's endpoint registration among them. Of the calling
+//! stack's own-state (below), only that registration is expected, and only in an `ab-trouter` run.
 //!
 //! The classes are the ones the M0 acceptance runs of `ab-chat` showed on 2026-10-20 (both accounts) and that its
 //! `load`, `ab-chat` and `echo-call` captures since repeat. Each entry says why the scenario doesn't need it. A class

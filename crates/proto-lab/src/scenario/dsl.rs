@@ -395,6 +395,37 @@ impl Driver {
         }
     }
 
+    /// Reads every event that has come in and gives how many requests have been seen: a mark for
+    /// [`Self::wait_for_seen`], which then passes over every request seen before it (an earlier document's).
+    pub fn seen_so_far(&mut self) -> usize {
+        self.drain();
+        self.requests.len()
+    }
+
+    /// Waits up to `timeout` for a seen request, the `since`th or a later one, that `this` picks, and gives the first
+    /// one; `waiting_for` says what for, in the error. It looks at every request from `since` on, whatever the request
+    /// waits matched, and leaves their place alone: a wait for a request's answer, say, after a wait for a later one.
+    ///
+    /// # Errors
+    /// [`StepError::Timeout`] when none is picked in time, [`StepError::Closed`] when the connection goes.
+    pub async fn wait_for_seen(
+        &mut self,
+        step: &str,
+        waiting_for: &str,
+        since: usize,
+        timeout: Duration,
+        this: impl Fn(&SeenRequest) -> bool,
+    ) -> Result<SeenRequest, StepError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            self.drain();
+            if let Some(seen) = self.requests.iter().skip(since).find(|seen| this(seen)) {
+                return Ok(seen.clone());
+            }
+            self.wait_for_events(step, deadline, timeout, waiting_for).await?;
+        }
+    }
+
     /// Reads every event that has come in.
     fn drain(&mut self) {
         loop {

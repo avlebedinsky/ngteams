@@ -13,23 +13,27 @@
 //! 1. Before anything loads, a's fence force-denies every write carrying the probe marker, as in `ab-chat`
 //!    ([`super::ab_chat`]).
 //! 2. b opens the web client and must register its messaging endpoint, then opens the chat with a (a new document,
-//!    which registers again) and must read it: b now shows the a–b chat, with its push channel up.
+//!    which registers again) and must read it: b now shows the a–b chat, with its push channel up. Each document must
+//!    get a registration answered with a 2xx ([`wait_registered`]): only the messaging stack's can be, so a denied one
+//!    (the calling stack's retries, or a messaging one off the reviewed shape) or the earlier document's never counts.
 //! 3. a opens the web client and the chat with b, and proves enforcement live with this run's probe (`ab-chat`'s
 //!    step 4).
 //! 4. a sends the message; b, already showing the chat, must show it within [`DELIVERY`] (it can only come by push or
 //!    by a read b makes by itself) and never the probe. The time from a's Enter to b showing it is noted.
-//! 5. a edits the message and reacts to it from the message's own actions ([`edit`], [`react`]); b must show the
-//!    edit. These steps failing fails the run but doesn't end it: the observation still runs.
+//! 5. a edits the message and reacts to it with a like ([`edit`], [`react`]); b must show the edit, and the reaction
+//!    must be answered with a 2xx. These steps failing fails the run but doesn't end it: the observation still runs.
 //! 6. Both pages stay open, nothing driven, for [`observation`] (when the activity is reported, longer than the
 //!    lifetime a chat delivery carries): the capture shows whether the service delivers again what went unanswered,
 //!    how often and for how long, and whether it closes the socket.
-//! 7. b's messaging registration must have succeeded ([`registered`]). Judged as `ab-chat`, plus what comes up only
-//!    with the push channel ([`trouter_policy`]): no deny but the probes' forced ones, the reviewed expected-deny list
-//!    (the denied delivery responses are Trouter frames, on it) and [`TROUTER_RUN_REQUESTS`] (the calling stack's
-//!    registration, presence, the activity feed's read state, agent invocations); nothing denied on the a–b chat.
+//! 7. The notes count each account's endpoint registrations, answered and denied ([`registrations_note`]). Judged as
+//!    `ab-chat`, plus what comes up only with the push channel ([`trouter_policy`]): no deny but the probes' forced
+//!    ones, the reviewed expected-deny list (the denied delivery responses are Trouter frames, on it) and
+//!    [`TROUTER_RUN_REQUESTS`] (the calling stack's registration, presence, the activity feed's read state, agent
+//!    invocations); nothing denied on the a–b chat.
 //!
 //! Nothing in the run answers a call, and nothing registers the calling stack's endpoint.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde_json::json;
@@ -38,6 +42,7 @@ use tokio::time::Instant;
 use crate::browser::Media;
 use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
+use crate::fence_http::without_query;
 use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
@@ -45,7 +50,7 @@ use super::ab_chat::{
     CHAT_OPEN, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_link, chat_requests, chat_url, deny_probes, enforce, load,
     message_text, nonce, one_to_one_id, probe_text, save_screenshot, send,
 };
-use super::dsl::{Driver, RequestPattern, Selector};
+use super::dsl::{Driver, RequestPattern, SeenRequest, Selector, StepError};
 use super::expected::{ExpectedRequest, Review, TEAMS};
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
@@ -88,10 +93,14 @@ const MORE: Selector<'static> = Selector::Tid("message-actions-more");
 /// The "Edit" entry of a message's "more options" menu.
 const EDIT: Selector<'static> = Selector::Tid("message-actions-edit");
 
-/// The first quick reaction of a message's actions or of its "more options" menu.
-const QUICK_REACTION: Selector<'static> = Selector::Css(r#"[data-tid^="default-reaction-"]"#);
+/// The like on a message's hover bar: the quick reaction `ab-chat-full` (Task 7) reacted with live (2026-10-20). The
+/// bundle's `default-reaction-*` showed neither on the hover bar nor in the "more options" menu in this build.
+const LIKE: &str = r#"[data-tid="message-actions-like"]"#;
 
-/// How long the hover alone gets to show quick reactions before [`react`] opens the menu.
+/// A reaction a click on the message, or its context menu, may offer: the like or one of the bundle's defaults.
+const ANY_REACTION: &str = r#"[data-tid="message-actions-like"], [data-tid^="default-reaction-"]"#;
+
+/// How long each way to a reaction gets to show one before [`react`] tries the next.
 const QUICK_LOOK: Duration = Duration::from_secs(5);
 
 /// The attribute [`edit`] marks the message's editor with, so the typing goes there and not to the compose box.
@@ -109,8 +118,11 @@ pub const TROUTER_RUN_REQUESTS: &[ExpectedRequest] = &[
         method: "POST",
         path: "/registrar/prod/V2/registrations",
         reason: "the calling stack registers its own endpoint (`SkypeSpacesWeb`) once the push channel is up; the \
-                 messaging set lets only the messaging stack's registration out (b's is checked to have gone out), \
-                 and the account must not become reachable for calls",
+                 messaging set lets only the messaging stack's registration out, and the account must not become \
+                 reachable for calls. The class reads only method, host and path, so it also covers a messaging \
+                 registration denied for being off the reviewed shape: what catches that is step 2 (each of b's \
+                 documents must get a registration answered with a 2xx) and the run's notes (every account's \
+                 registrations, answered and denied, counted by URL)",
     },
     ExpectedRequest {
         class: "presence endpoint",
@@ -161,17 +173,75 @@ pub fn trouter_policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error>
     Ok(DenyPolicy::Reviewed(review))
 }
 
-/// Whether `driver` saw a registration ([`REGISTRATION`]) answered with a success: the messaging stack's, the only one
-/// the messaging set lets out.
+/// The pattern of an endpoint's registration ([`REGISTRATION`]), either stack's.
+///
+/// # Errors
+/// Never: the pattern is fixed.
+pub fn registration() -> Result<RequestPattern, regex::Error> {
+    RequestPattern::new(Some("POST"), REGISTRATION)
+}
+
+/// Whether `request` is a registration (`pattern`, [`registration`]) answered with a 2xx: the messaging stack's, the
+/// only one the messaging set lets out. A denied one (the calling stack's, or a messaging one off the reviewed shape)
+/// fails in the page and never is.
 #[must_use]
-pub fn registered(driver: &Driver) -> bool {
-    let Ok(pattern) = RequestPattern::new(Some("POST"), REGISTRATION) else {
-        return false;
+pub fn registered(pattern: &RequestPattern, request: &SeenRequest) -> bool {
+    pattern.matches(&request.method, &request.url) && request.status.is_some_and(|status| (200..300).contains(&status))
+}
+
+/// Waits up to [`REGISTER`] for a registration sent as the `since`th request seen by `driver` or later (since a
+/// document began: [`Driver::seen_so_far`]) to be answered with a 2xx ([`registered`]), and gives it. A denied
+/// registration, or one an earlier document made, never meets the wait, and the other request waits keep their place.
+///
+/// # Errors
+/// [`StepError::Timeout`] when none is answered so in time, [`StepError::Closed`] when the connection goes.
+pub async fn wait_registered(driver: &mut Driver, step: &str, since: usize) -> Result<SeenRequest, StepError> {
+    let pattern = registration().map_err(|error| StepError::Failed {
+        step: step.to_owned(),
+        reason: error.to_string(),
+    })?;
+    let waiting_for = format!("{pattern} answered with a 2xx");
+    driver
+        .wait_for_seen(step, &waiting_for, since, REGISTER, |seen| registered(&pattern, seen))
+        .await
+}
+
+/// What `requests` hold of endpoint registrations ([`REGISTRATION`]), for the run's notes: how many were answered
+/// with a 2xx, how many failed in the page or were answered otherwise (each URL, without its query, with its count:
+/// the calling stack's denied retries, and any messaging registration off the reviewed shape), and how many got
+/// neither yet.
+#[must_use]
+pub fn registrations_note(who: &str, requests: &[SeenRequest]) -> String {
+    let Ok(pattern) = registration() else {
+        return format!("{who}: can't read the registrations");
     };
-    driver.requests().iter().any(|request| {
-        pattern.matches(&request.method, &request.url)
-            && request.status.is_some_and(|status| (200..300).contains(&status))
-    })
+    let (mut answered, mut pending) = (0, 0);
+    let mut denied = BTreeMap::<&str, usize>::new();
+    for request in requests
+        .iter()
+        .filter(|request| pattern.matches(&request.method, &request.url))
+    {
+        if registered(&pattern, request) {
+            answered += 1;
+        } else if request.failed.is_some() || request.status.is_some() {
+            *denied.entry(without_query(&request.url)).or_default() += 1;
+        } else {
+            pending += 1;
+        }
+    }
+    let denied = if denied.is_empty() {
+        "none".to_owned()
+    } else {
+        denied
+            .iter()
+            .map(|(url, count)| format!("{count} × {url}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "{who}: endpoint registrations: {answered} answered with a 2xx; failed or answered otherwise: {denied}; \
+         {pending} unanswered"
+    )
 }
 
 /// The text of the edited message: the message's own text with a suffix and no new space (the editor turned the space
@@ -334,8 +404,9 @@ impl Steps<'_> {
             "b: {} WebSocket frame(s) denied so far",
             b.frame_denials().len()
         ));
-        if !registered(&drive_b) {
-            return Err(setup("b's messaging endpoint registration never succeeded".to_owned()));
+        for (who, driver) in [("a", &mut drive_a), ("b", &mut drive_b)] {
+            driver.seen_so_far();
+            report.notes.push(registrations_note(who, driver.requests()));
         }
         Ok(())
     }
@@ -347,24 +418,21 @@ impl Steps<'_> {
         chat_id: &str,
         report: &mut ScenarioReport,
     ) -> Result<Driver, ScenarioError> {
-        let registration = RequestPattern::new(Some("POST"), REGISTRATION).map_err(|error| setup(error.to_string()))?;
         let opened = chat_requests(chat_id).map_err(|error| setup(error.to_string()))?;
         let mut drive_b = b.driver();
         load(Alias::B, b, self.options.load_timeout).await?;
         report.notes.push("b: the web client loaded".to_owned());
-        drive_b
-            .wait_for_request("b registers its messaging endpoint", &registration, REGISTER)
-            .await?;
+        wait_registered(&mut drive_b, "b registers its messaging endpoint", 0).await?;
         size(b).await?;
+        // what the chat's document sends from here on: its registration, not the first document's
+        let chat_document = drive_b.seen_so_far();
         drive_b
             .navigate("b opens the chat with a", &chat_link(self.mri_a))
             .await?;
         drive_b
             .wait_for_request("b reads the a–b chat", &opened, CHAT_OPEN)
             .await?;
-        drive_b
-            .wait_for_request("b registers its messaging endpoint again", &registration, REGISTER)
-            .await?;
+        wait_registered(&mut drive_b, "b registers its messaging endpoint again", chat_document).await?;
         report
             .notes
             .push("b: the a–b chat is open and the messaging endpoint registered".to_owned());
@@ -402,8 +470,12 @@ impl Steps<'_> {
             Ok(true) => edited,
             _ => message,
         };
+        let clicked = Instant::now();
         match react(a, drive_a, &shown).await {
-            Ok(()) => report.notes.push("a reacted to its message".to_owned()),
+            Ok(way) => report.notes.push(format!(
+                "a reacted to its message with a like from {way}, answered {} ms after it began",
+                clicked.elapsed().as_millis()
+            )),
             Err(error) => {
                 report.failures.push(format!("the reaction: {error}"));
                 report.notes.push(tids_note("a", drive_a).await);
@@ -430,8 +502,8 @@ async fn size(session: &LabSession) -> Result<(), ScenarioError> {
 /// Moves the mouse over the last leaf element whose text holds `text` inside the chat's messages
 /// (`[data-tid="chat-pane-message"]`; anywhere on `session`'s page when no message holds it), so the client shows that
 /// message's actions. The same text also shows elsewhere (the chat list's preview, notices), which once took the
-/// hover away from the message (seen live 2026-10-20).
-async fn hover(session: &LabSession, driver: &Driver, text: &str) -> Result<(), ScenarioError> {
+/// hover away from the message (seen live 2026-10-20). Gives the point the mouse rests on.
+async fn hover(session: &LabSession, driver: &Driver, text: &str) -> Result<(f64, f64), ScenarioError> {
     let expression = format!(
         "(() => {{ const t = {}; const leaves = s => [...document.querySelectorAll(s)].filter(e => \
          e.childElementCount === 0 && (e.textContent || '').includes(t)); let all = \
@@ -444,18 +516,32 @@ async fn hover(session: &LabSession, driver: &Driver, text: &str) -> Result<(), 
     let (Some(x), Some(y)) = (point[0].as_f64(), point[1].as_f64()) else {
         return Err(setup("no element shows the message".to_owned()));
     };
-    for (dx, kind) in [(-40.0, "mouseMoved"), (0.0, "mouseMoved")] {
-        session
-            .cdp()
-            .call(
-                Some(session.page()),
-                "Input.dispatchMouseEvent",
-                json!({"type": kind, "x": x + dx, "y": y}),
-            )
-            .await
-            .map_err(|error| setup(format!("can't move the mouse: {error}")))?;
+    for dx in [-40.0, 0.0] {
+        mouse(session, "mouseMoved", (x + dx, y), "none").await?;
+    }
+    Ok((x, y))
+}
+
+/// Clicks `button` (`left` or `right`) at `point` of `session`'s page, as a mouse would: pressed, then released.
+async fn click_at(session: &LabSession, point: (f64, f64), button: &str) -> Result<(), ScenarioError> {
+    for kind in ["mousePressed", "mouseReleased"] {
+        mouse(session, kind, point, button).await?;
     }
     Ok(())
+}
+
+/// One mouse event of `kind` at `(x, y)` of `session`'s page; `button` is `none`, `left` or `right`.
+async fn mouse(session: &LabSession, kind: &str, (x, y): (f64, f64), button: &str) -> Result<(), ScenarioError> {
+    let mut params = json!({"type": kind, "x": x, "y": y, "button": button});
+    if kind != "mouseMoved" {
+        params["clickCount"] = json!(1);
+    }
+    session
+        .cdp()
+        .call(Some(session.page()), "Input.dispatchMouseEvent", params)
+        .await
+        .map(drop)
+        .map_err(|error| setup(format!("can't use the mouse: {error}")))
 }
 
 /// a edits `message` to `edited`: its actions' "more options", "Edit", the whole text replaced, Enter; the edit's
@@ -483,26 +569,73 @@ async fn edit(a: &LabSession, drive_a: &mut Driver, message: &str, edited: &str)
     Ok(())
 }
 
-/// a reacts to `message` with the first quick reaction of its actions, or, when the hover shows none (seen live
-/// 2026-10-20), of its "more options" menu (the bundle also puts reactions there, `message-reactions-on-menu`); the
-/// reaction's `PUT` must go out within [`ACTION`].
-async fn react(a: &LabSession, drive_a: &mut Driver, message: &str) -> Result<(), ScenarioError> {
+/// a reacts to `message` with a like, tried in this order, each given [`QUICK_LOOK`]: the hover bar the mouse on the
+/// message shows ([`LIKE`], as `ab-chat-full` reacts), then a click on the message, then its context menu (a right
+/// click; [`ANY_REACTION`] for both, the menu given [`ACTION`]). The reaction's `PUT` must go out and be answered with a
+/// 2xx within [`ACTION`]. Gives where the like was found.
+async fn react(a: &LabSession, drive_a: &mut Driver, message: &str) -> Result<&'static str, ScenarioError> {
     let put = RequestPattern::new(Some("PUT"), REACTION).map_err(|error| setup(error.to_string()))?;
-    hover(a, drive_a, message).await?;
-    if drive_a
-        .wait_for("the message's quick reactions", QUICK_REACTION, QUICK_LOOK)
+    let point = hover(a, drive_a, message).await?;
+    let way = if click_visible(drive_a, "a likes it on the hover bar", LIKE, QUICK_LOOK)
         .await
-        .is_err()
+        .is_ok()
     {
-        drive_a.wait_for("the message's actions", MORE, ACTION).await?;
-        drive_a.click("a opens the message's options", MORE).await?;
-        drive_a
-            .wait_for("the menu's quick reactions", QUICK_REACTION, ACTION)
+        "its hover bar"
+    } else {
+        click_at(a, point, "left").await?;
+        if click_visible(
+            drive_a,
+            "a likes it once it clicked the message",
+            ANY_REACTION,
+            QUICK_LOOK,
+        )
+        .await
+        .is_ok()
+        {
+            "a click on the message"
+        } else {
+            click_at(a, point, "right").await?;
+            click_visible(
+                drive_a,
+                "a likes it from the message's context menu",
+                ANY_REACTION,
+                ACTION,
+            )
             .await?;
+            "its context menu"
+        }
+    };
+    let sent = drive_a.wait_for_request("a's reaction goes out", &put, ACTION).await?;
+    let same = |seen: &SeenRequest| seen.session == sent.session && seen.request_id == sent.request_id;
+    let answer = drive_a
+        .wait_for_seen("a's reaction is answered", "the reaction's answer", 0, ACTION, |seen| {
+            same(seen) && (seen.status.is_some() || seen.failed.is_some())
+        })
+        .await?;
+    match (answer.status, answer.failed) {
+        (Some(200..=299), _) => Ok(way),
+        (status, failed) => Err(setup(format!(
+            "a's reaction ({way}) was answered {status:?}, failed {failed:?}"
+        ))),
     }
-    drive_a.click("a reacts", QUICK_REACTION).await?;
-    drive_a.wait_for_request("a's reaction goes out", &put, ACTION).await?;
-    Ok(())
+}
+
+/// Clicks the first visible element matching `css`, waiting up to `timeout` for one (as `ab-chat-full` does): a
+/// control the page keeps, hidden, in more than one place shows only where the mouse is.
+async fn click_visible(drive: &mut Driver, step: &str, css: &str, timeout: Duration) -> Result<(), StepError> {
+    let expression = format!(
+        "(() => {{ const e = [...document.querySelectorAll({})].find(e => {{ const r = e.getBoundingClientRect(); \
+         return r.width > 0 && r.height > 0; }}); if (!e) return false; e.click(); return true; }})()",
+        serde_json::Value::String(css.to_owned())
+    );
+    drive
+        .wait_until_true(
+            step,
+            &expression,
+            &format!("a visible element matching {css:?}"),
+            timeout,
+        )
+        .await
 }
 
 /// For a failed edit or reaction: the `data-tid`s the page shows that name messages, reactions or editing (the
