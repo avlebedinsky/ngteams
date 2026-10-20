@@ -28,8 +28,9 @@
 //! 7. The notes count each account's endpoint registrations, answered and denied ([`registrations_note`]). Judged as
 //!    `ab-chat`, plus what comes up only with the push channel ([`trouter_policy`]): no deny but the probes' forced
 //!    ones, the reviewed expected-deny list (the denied delivery responses are Trouter frames, on it) and
-//!    [`TROUTER_RUN_REQUESTS`] (the calling stack's registration, presence, the activity feed's read state, agent
-//!    invocations); nothing denied on the a–b chat.
+//!    [`TROUTER_RUN_REQUESTS`] (the calling stack's registration, presence; the activity feed's read state and agent
+//!    invocations, first seen here, are on the reviewed list since `ab-chat-full` showed them too); nothing denied on
+//!    the a–b chat.
 //!
 //! Nothing in the run answers a call, and nothing registers the calling stack's endpoint.
 
@@ -138,23 +139,6 @@ pub const TROUTER_RUN_REQUESTS: &[ExpectedRequest] = &[
         method: "POST",
         path: "/ups/*/v1/pubsub/subscriptions/*",
         reason: "subscribes the account's push endpoint to other people's presence: the scenario shows no presence",
-    },
-    ExpectedRequest {
-        class: "activity feed read state",
-        hosts: TEAMS,
-        method: "PUT",
-        path: "/api/chatsvc/*/v1/users/ME/conversations/48%3Anotifications/messages/*/properties",
-        reason: "marks an item of the account's own activity feed (a pseudo-conversation) as read, retried while it is \
-                 denied: the scenario reads no feed, and whether it becomes reviewed own-state is for the feed's own \
-                 work, not this capture",
-    },
-    ExpectedRequest {
-        class: "agent invocation",
-        hosts: TEAMS,
-        method: "POST",
-        path: "/api/chatsvc/*/v1/agents/*/invoke",
-        reason: "the client invoking a bot or agent (a `28:` participant, outside the lab roster) by itself: it \
-                 reaches a service no one approved and stays denied; the scenario needs none",
     },
 ];
 
