@@ -501,14 +501,32 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Create: `crates/teams-mock/{Cargo.toml,src/lib.rs,src/chatsvc.rs}`, `crates/teams-mock/tests/mock.rs`
 - Modify: `Cargo.toml` (member, workspace deps)
 
-- [ ] tests first: the mock serves the conversation list, threads (1:1 and group), message pages with sync links, and
+- [x] tests first: the mock serves the conversation list, threads (1:1 and group), message pages with sync links, and
       takes message posts, edits, deletes, reactions and read receipts, queuing each as an event for the other members
       (Task 16 adds the Trouter side that delivers them); it checks the headers Task 3 found and answers 401 without
       them
-- [ ] everything from synthetic fixtures; no capture is read by a test
-- [ ] dev-dependency only (never in a lab binary); clients reach it only through the Task 5 `test-support` mock
+      (`ChatServiceMock::start()` on wiremock with one catch-all responder over its state; extra modules
+      `fixtures.rs`, `world.rs`, `reads.rs`, `writes.rs`. World: a, b, c and an outsider x; the a–b chat with
+      `messages.json`'s messages, empty a–c and a–x chats, the a–b–c group chat of `thread-group.json`, and a's
+      channel and notifications stream (read-only). Reads: the list and its sync link (it names the caller's MRI),
+      first page, sync and backward links (`backwardLink`, the bundle's name; the mock's link tokens are its own),
+      the read around a time, thread read, member list, filtered view (403). Writes: posts and typing (201 with
+      `OriginalArrivalTime` and a `Location` on the regional host), edits, soft deletes, reactions, read receipts,
+      and chat creation (`POST v1/threads`, for Task 12), each read back as its fixture recorded; events are typed
+      `ChatEvent`s (`take_events(mri)`), the Trouter wire form waiting for Tasks 14/16. Headers: the `ic3` bearer
+      token with `X-MS-Migration: True` and `BehaviorOverride: redirectAs404`, else 401; the thread read takes the
+      token alone, the form the fence's own read sends and Task 3 saw answered in full. Unmodelled requests 404,
+      malformed bodies 400, non-members, read-only conversations and other people's messages 403. Tests: the
+      fixtures replayed, each write read back, the fence's live read finding the mock's 1:1 chats complete and
+      denying the outsider's, a permitted `SendMessage` through `HttpTransport::with_mock_origin` reaching b)
+- [x] everything from synthetic fixtures; no capture is read by a test
+      (the fixtures are embedded with `include_str!` from `tests/fixtures/chatsvc/`; a test checks that the crate's
+      sources include nothing else and name no capture or lab data path)
+- [x] dev-dependency only (never in a lab binary); clients reach it only through the Task 5 `test-support` mock
       origin; `[lints] workspace = true`, listed in `members`
-- [ ] `cargo test -p teams-mock` and the gate pass
+      (`teams-mock` in `[workspace.dependencies]`; a test reads every member's manifest and fails if any takes it
+      outside `[dev-dependencies]`, target-specific tables included)
+- [x] `cargo test -p teams-mock` and the gate pass
 
 ### Task 10: Chat service reads and the message model
 **Files:**

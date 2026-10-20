@@ -1,0 +1,450 @@
+//! Writes: message posts and typing, edits, soft deletes, reactions, read receipts and chat creation. Each one changes
+//! the state as the service did in the captures behind the fixtures (`docs/protocol/chat.md`), answers as its fixture
+//! recorded, and queues a [`crate::ChatEvent`] for every other member of the chat.
+
+use serde_json::{Map, Value, json};
+use wiremock::ResponseTemplate;
+
+use crate::chatsvc::{Call, json, status};
+use crate::fixtures::object;
+use crate::reads::{member_of, thread_body};
+use crate::world::{self, Kind, State, iso_time};
+use crate::{CHAT_BASE, EventKind, REGIONAL_HOST};
+
+/// The string-valued message properties a post or an edit carries through as sent (JSON strings of lists).
+const LISTED_PROPERTIES: [&str; 4] = ["mentions", "cards", "links", "files"];
+
+/// The message keys a post carries through as sent, when it has them.
+const SENT_KEYS: [&str; 4] = ["clientmessageid", "contenttype", "imdisplayname", "amsreferences"];
+
+/// `POST …/conversations/<chat>/messages`: a message (`Text`, `RichText`, `RichText/…`) is stored as a read gives it
+/// back and answered 201 with its arrival time (its id) and a `Location`; typing (`Control/Typing`,
+/// `Control/ClearTyping`) is only an event, answered with an arrival time too.
+pub(crate) fn post(state: &mut State, call: &Call<'_>, chat: &str) -> ResponseTemplate {
+    if let Err(code) = writable(state, chat, &call.caller) {
+        return status(code);
+    }
+    let Some(body) = call.object() else {
+        return status(400);
+    };
+    let (Some(messagetype), Some(_)) = (text(&body, "messagetype"), text(&body, "content")) else {
+        return status(400);
+    };
+    if matches!(messagetype, "Control/Typing" | "Control/ClearTyping") {
+        let arrival = state.tick();
+        state.queue(
+            chat,
+            &call.caller,
+            EventKind::Typing,
+            &json!({"messagetype": messagetype}),
+        );
+        return posted(state, arrival, None);
+    }
+    if !is_message(messagetype) {
+        return status(400);
+    }
+    let arrival = state.tick();
+    let Some(message) = new_message(state, call, chat, &body, arrival) else {
+        return status(400);
+    };
+    if let Some(conversation) = state.conversation_mut(chat) {
+        conversation.messages.push(message.clone());
+        conversation.version = arrival;
+    }
+    state.queue(chat, &call.caller, EventKind::Message, &message);
+    let location = format!("{REGIONAL_HOST}/v1/users/ME/conversations/{chat}/messages/{arrival}");
+    posted(state, arrival, Some(location))
+}
+
+/// `PUT …/messages/<id>`: the whole message again (`edit.json`). The sender's own standing message takes the new
+/// `content` and the properties sent; its `version` and `properties.edittime` are the service's time, and
+/// `properties.composetime` is the one sent.
+pub(crate) fn edit(state: &mut State, call: &Call<'_>, chat: &str, id: &str) -> ResponseTemplate {
+    if let Err(code) = writable(state, chat, &call.caller) {
+        return status(code);
+    }
+    let Some(body) = call.object() else {
+        return status(400);
+    };
+    let (Some(messagetype), Some(content)) = (text(&body, "messagetype"), text(&body, "content")) else {
+        return status(400);
+    };
+    let Some(sent) = sent_properties(body.get("properties")).filter(|_| is_message(messagetype)) else {
+        return status(400);
+    };
+    let caller = call.caller.as_str();
+    let changed = change(state, chat, id, caller, EventKind::Edit, |message, time| {
+        own_and_standing(message, caller)?;
+        let fields = object(message);
+        fields.insert("content".to_owned(), json!(stored_content(content)));
+        fields.insert("version".to_owned(), json!(time.to_string()));
+        let properties = object(fields.entry("properties").or_insert(Value::Null));
+        properties.extend(sent);
+        properties.insert("edittime".to_owned(), json!(time));
+        if let Some(composetime) = body.get("composetime") {
+            properties.insert("composetime".to_owned(), composetime.clone());
+        }
+        Ok(())
+    });
+    changed.map_or_else(status, |()| state.fixtures.edited.template())
+}
+
+/// `DELETE …/messages/<id>?behavior=softDelete` (`delete.json`): the sender's own message keeps its id and
+/// `clientmessageid`, loses its content and every property but `deletetime`, and gains `skypeeditedid`.
+pub(crate) fn delete(state: &mut State, call: &Call<'_>, chat: &str, id: &str) -> ResponseTemplate {
+    if let Err(code) = writable(state, chat, &call.caller) {
+        return status(code);
+    }
+    if call.query("behavior") != Some("softDelete") {
+        return status(404);
+    }
+    let caller = call.caller.as_str();
+    let changed = change(state, chat, id, caller, EventKind::Delete, |message, time| {
+        own_and_standing(message, caller)?;
+        let fields = object(message);
+        fields.insert("content".to_owned(), json!(""));
+        fields.insert("version".to_owned(), json!(time.to_string()));
+        fields.insert("properties".to_owned(), json!({"deletetime": time}));
+        if let Some(client_id) = fields.get("clientmessageid").cloned() {
+            fields.insert("skypeeditedid".to_owned(), client_id);
+        }
+        fields.remove("amsreferences");
+        fields.remove("annotationsSummary");
+        Ok(())
+    });
+    changed.map_or_else(status, |()| state.fixtures.deleted.template())
+}
+
+/// `PUT`/`DELETE …/messages/<id>/properties?name=emotions` (`reaction.json`): the caller's reaction under its key,
+/// with the service's time and the value sent as a string; taken back, the key stays with the users left. The
+/// message's `version` moves, and `annotationsSummary` counts the standing reactions per key.
+pub(crate) fn reaction(state: &mut State, call: &Call<'_>, chat: &str, id: &str, remove: bool) -> ResponseTemplate {
+    if let Err(code) = writable(state, chat, &call.caller) {
+        return status(code);
+    }
+    if call.query("name") != Some("emotions") {
+        return status(404);
+    }
+    let Some((key, value)) = emotion(call, remove) else {
+        return status(400);
+    };
+    let caller = call.caller.as_str();
+    let changed = change(state, chat, id, caller, EventKind::Reaction, |message, time| {
+        if is_deleted(message) {
+            return Err(404);
+        }
+        let user = value.map(|value| json!({"mri": caller, "time": time, "value": value}));
+        react(message, &key, caller, user);
+        object(message).insert("version".to_owned(), json!(time.to_string()));
+        Ok(())
+    });
+    let fixture = if remove {
+        &state.fixtures.unreacted
+    } else {
+        &state.fixtures.reacted
+    };
+    changed.map_or_else(status, |()| fixture.template())
+}
+
+/// `PUT …/conversations/<chat>/properties?name=consumptionhorizon`: the caller's own read horizon, answered 200 with
+/// an empty body (`docs/protocol/chat.md`).
+pub(crate) fn read_horizon(state: &mut State, call: &Call<'_>, chat: &str) -> ResponseTemplate {
+    if let Err(code) = writable(state, chat, &call.caller) {
+        return status(code);
+    }
+    if call.query("name") != Some("consumptionhorizon") {
+        return status(404);
+    }
+    let Some(horizon) = call
+        .object()
+        .and_then(|body| body.get("consumptionhorizon")?.as_str().map(str::to_owned))
+    else {
+        return status(400);
+    };
+    let time = state.tick();
+    if let Some(conversation) = state.conversation_mut(chat) {
+        conversation.horizons.insert(call.caller.clone(), horizon.clone());
+        conversation.version = time;
+    }
+    let resource = json!({"consumptionhorizon": horizon});
+    state.queue(chat, &call.caller, EventKind::ReadReceipt, &resource);
+    status(200)
+}
+
+/// `POST v1/threads` (`docs/protocol/fence-targets.md`): `{members: [{id, role}], properties: {threadType: "chat"}}`
+/// with the caller among the members. With `uniquerosterthread` and two members it is their 1:1 chat (the one there
+/// is, if any), otherwise a new group chat. Answered 201 with `{"threadResource": <the thread read>}` and a
+/// `Location`.
+pub(crate) fn create_chat(state: &mut State, call: &Call<'_>) -> ResponseTemplate {
+    let Some((members, unique)) = chat_members(call) else {
+        return status(400);
+    };
+    if !members.contains(&call.caller) {
+        return status(403);
+    }
+    let id = if unique {
+        match one_to_one_id(&members) {
+            Some(id) => id,
+            None => return status(400),
+        }
+    } else {
+        state.new_group_id()
+    };
+    if state.conversation(&id).is_none() {
+        let Some(empty) = state.fixtures.entries.get(1).cloned() else {
+            return status(500);
+        };
+        let time = state.tick();
+        let kind = if unique { Kind::OneToOne } else { Kind::Group };
+        // the caller first: the creator
+        let mut ordered: Vec<&str> = vec![call.caller.as_str()];
+        ordered.extend(
+            members
+                .iter()
+                .map(String::as_str)
+                .filter(|member| *member != call.caller),
+        );
+        let conversation = world::created(&empty, &id, kind, &ordered, time);
+        let thread = thread_body(state, &conversation);
+        state.conversations.push(conversation);
+        state.queue(&id, &call.caller, EventKind::ChatCreated, &thread);
+    }
+    let Some(conversation) = state.conversation(&id) else {
+        return status(500);
+    };
+    json(201, &json!({"threadResource": thread_body(state, conversation)}))
+        .insert_header("Location", format!("{REGIONAL_HOST}/v1/threads/{id}").as_str())
+}
+
+/// Whether `caller` may write to the chat `id`: a member, and not of a read-only conversation (403).
+fn writable(state: &State, id: &str, caller: &str) -> Result<(), u16> {
+    let conversation = member_of(state, id, caller)?;
+    if conversation.kind == Kind::ReadOnly {
+        Err(403)
+    } else {
+        Ok(())
+    }
+}
+
+/// Applies `apply` to message `id` of `chat` at a new time, moves the chat's `version` to it, and queues `kind` with
+/// the message as it now reads for the other members.
+fn change(
+    state: &mut State,
+    chat: &str,
+    id: &str,
+    caller: &str,
+    kind: EventKind,
+    apply: impl FnOnce(&mut Value, u64) -> Result<(), u16>,
+) -> Result<(), u16> {
+    let time = state.tick();
+    let conversation = state.conversation_mut(chat).ok_or(404_u16)?;
+    let message = conversation.message_mut(id).ok_or(404_u16)?;
+    apply(message, time)?;
+    let message = message.clone();
+    conversation.version = time;
+    state.queue(chat, caller, kind, &message);
+    Ok(())
+}
+
+/// Whether `caller` sent the message and nobody deleted it: 403 for someone else's, 404 for a deleted one.
+fn own_and_standing(message: &Value, caller: &str) -> Result<(), u16> {
+    if is_deleted(message) {
+        return Err(404);
+    }
+    let from = message["from"].as_str().unwrap_or_default();
+    if from == contact(caller) { Ok(()) } else { Err(403) }
+}
+
+fn is_deleted(message: &Value) -> bool {
+    message["properties"].get("deletetime").is_some()
+}
+
+/// A message `messagetype`, as the fence maps it (`Text`, `RichText`, `RichText/…`).
+fn is_message(messagetype: &str) -> bool {
+    messagetype == "Text" || messagetype == "RichText" || messagetype.starts_with("RichText/")
+}
+
+/// A user's contact URL, the `from` of their messages as read.
+fn contact(mri: &str) -> String {
+    format!("{CHAT_BASE}/v1/users/ME/contacts/{mri}")
+}
+
+fn text<'a>(body: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    body.get(key).and_then(Value::as_str)
+}
+
+/// A post's answer (`reply.json`'s, 201 `{"OriginalArrivalTime": …}`) at `arrival`, with `location` if given.
+fn posted(state: &State, arrival: u64, location: Option<String>) -> ResponseTemplate {
+    let posted = &state.fixtures.posted;
+    let mut body = posted.json().cloned().unwrap_or(Value::Null);
+    object(&mut body).insert("OriginalArrivalTime".to_owned(), json!(arrival));
+    let answer = ResponseTemplate::new(posted.status()).set_body_json(&body);
+    match location {
+        Some(location) => answer.insert_header("Location", location.as_str()),
+        None => answer,
+    }
+}
+
+/// A posted message as a read gives it back (`reply.json`'s `read_back`, `messages.json`): the service's id, version,
+/// sequence and times, the sender from the token, the sent keys and properties carried through.
+fn new_message(state: &State, call: &Call<'_>, chat: &str, body: &Map<String, Value>, arrival: u64) -> Option<Value> {
+    let conversation = state.conversation(chat)?;
+    let display = state.account(&call.caller)?.display_name.clone();
+    let properties = sent_properties(body.get("properties"))?;
+    let mut message = json!({
+        "sequenceId": conversation.next_sequence(),
+        "conversationid": chat,
+        "conversationLink": format!("{CHAT_BASE}/v1/users/ME/conversations/{chat}"),
+        "type": "Message",
+        "fromDisplayNameInToken": display,
+        "id": arrival.to_string(),
+        "version": arrival.to_string(),
+        "messagetype": body.get("messagetype")?,
+        "content": stored_content(body.get("content")?.as_str()?),
+        "from": contact(&call.caller),
+        "composetime": iso_time(arrival, 7),
+        "originalarrivaltime": iso_time(arrival, 7),
+        "properties": properties,
+    });
+    let fields = object(&mut message);
+    for key in SENT_KEYS {
+        if let Some(value) = body.get(key) {
+            fields.insert(key.to_owned(), value.clone());
+        }
+    }
+    Some(message)
+}
+
+/// A message's `content` as the service stores it: as sent, but with a line break after a quote's `</blockquote>`
+/// when markup follows it straight away (`reply.json`: sent without one, read back with one).
+fn stored_content(sent: &str) -> String {
+    sent.replace("</blockquote><", "</blockquote>\n<")
+}
+
+/// The properties a post or an edit sent, as a read gives them back: the listed ones (JSON strings) and
+/// `formatVariant` as sent, and `qtdMsgs` (sent as a JSON string) as a list of objects with
+/// `hasValidMsgReferences`. `None` for properties that aren't an object, or one of these in another form.
+fn sent_properties(sent: Option<&Value>) -> Option<Map<String, Value>> {
+    let mut properties = Map::new();
+    let Some(sent) = sent else {
+        return Some(properties);
+    };
+    let sent = sent.as_object()?;
+    for key in LISTED_PROPERTIES {
+        if let Some(value) = sent.get(key) {
+            properties.insert(key.to_owned(), json!(value.as_str()?));
+        }
+    }
+    if let Some(variant) = sent.get("formatVariant") {
+        properties.insert("formatVariant".to_owned(), variant.clone());
+    }
+    if let Some(quoted) = sent.get("qtdMsgs") {
+        properties.insert("qtdMsgs".to_owned(), Value::Array(quoted_messages(quoted)?));
+        properties.insert("hasValidMsgReferences".to_owned(), json!(true));
+    }
+    Some(properties)
+}
+
+/// `qtdMsgs` as sent (`[{"messageId": "<id>", "sender", "time"}]` in a JSON string), as read back.
+fn quoted_messages(sent: &Value) -> Option<Vec<Value>> {
+    let entries: Vec<Value> = serde_json::from_str(sent.as_str()?).ok()?;
+    entries
+        .iter()
+        .map(|entry| {
+            let id = entry.get("messageId")?;
+            let id: u64 = id.as_u64().or_else(|| id.as_str()?.parse().ok())?;
+            Some(json!({
+                "messageId": id,
+                "sender": entry.get("sender")?,
+                "time": entry.get("time")?,
+                "message": null,
+                "validationResult": "Valid",
+                "sharedRefId": null,
+                "replyChainId": null,
+            }))
+        })
+        .collect()
+}
+
+/// A reaction's key, and (unless taken back) its value as a string.
+fn emotion(call: &Call<'_>, remove: bool) -> Option<(String, Option<String>)> {
+    let body = call.object()?;
+    let emotion = body.get("emotions")?.as_object()?;
+    let key = emotion.get("key")?.as_str()?.to_owned();
+    if remove {
+        return Some((key, None));
+    }
+    let value = match emotion.get("value")? {
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+        _ => return None,
+    };
+    Some((key, Some(value)))
+}
+
+/// Puts `caller`'s reaction `user` under `key` in the message's `properties.emotions` (or takes it out when `None`),
+/// and counts the standing ones in `annotationsSummary`.
+fn react(message: &mut Value, key: &str, caller: &str, user: Option<Value>) {
+    let fields = object(message);
+    let properties = object(fields.entry("properties").or_insert(Value::Null));
+    let emotions = properties.entry("emotions").or_insert(Value::Null);
+    if !emotions.is_array() {
+        *emotions = json!([]);
+    }
+    let Value::Array(emotions) = emotions else {
+        return;
+    };
+    let position = if let Some(position) = emotions.iter().position(|entry| entry["key"].as_str() == Some(key)) {
+        position
+    } else {
+        emotions.push(json!({"key": key, "users": []}));
+        emotions.len() - 1
+    };
+    if let Some(Value::Array(users)) = emotions.get_mut(position).and_then(|entry| entry.get_mut("users")) {
+        users.retain(|standing| standing["mri"].as_str() != Some(caller));
+        users.extend(user);
+    }
+    let counts: Map<String, Value> = emotions
+        .iter()
+        .filter_map(|entry| {
+            let count = entry["users"].as_array()?.len();
+            (count > 0).then(|| Some((entry["key"].as_str()?.to_owned(), json!(count))))?
+        })
+        .collect();
+    let summary = if counts.is_empty() {
+        json!({})
+    } else {
+        json!({"emotions": counts})
+    };
+    fields.insert("annotationsSummary".to_owned(), summary);
+}
+
+/// A chat create's members (distinct, in the body's order) and whether it asks for the unique-roster (1:1) thread;
+/// `None` unless its body is `{members: [{id}, …two or more…], properties: {threadType: "chat"}}`.
+fn chat_members(call: &Call<'_>) -> Option<(Vec<String>, bool)> {
+    let body = call.object()?;
+    let mut members: Vec<String> = Vec::new();
+    for member in body.get("members")?.as_array()? {
+        let id = member.get("id")?.as_str()?;
+        if !members.iter().any(|known| known == id) {
+            members.push(id.to_owned());
+        }
+    }
+    let properties = body.get("properties")?.as_object()?;
+    if properties.get("threadType")?.as_str()? != "chat" || members.len() < 2 {
+        return None;
+    }
+    let unique = properties.get("uniquerosterthread").and_then(Value::as_bool) == Some(true);
+    Some((members, unique))
+}
+
+/// The 1:1 chat id of two `8:orgid:` members: `19:<oid>_<oid>@unq.gbl.spaces`, lowercase and sorted.
+fn one_to_one_id(members: &[String]) -> Option<String> {
+    let [first, second] = members else {
+        return None;
+    };
+    let oid = |mri: &str| mri.strip_prefix("8:orgid:").map(str::to_ascii_lowercase);
+    let mut oids = [oid(first)?, oid(second)?];
+    oids.sort();
+    Some(format!("19:{}_{}@unq.gbl.spaces", oids[0], oids[1]))
+}

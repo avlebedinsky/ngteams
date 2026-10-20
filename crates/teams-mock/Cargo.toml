@@ -1,0 +1,29 @@
+[package]
+name = "teams-mock"
+description = "A local chat service for tests, built from the synthetic chat fixtures; clients reach it only through the test-support mock origin. A dev-dependency only, never in a lab binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# decodes the conversation and message ids the clients percent-encode as one path segment
+percent-encoding.workspace = true
+serde_json.workspace = true
+# the local HTTP server: one catch-all responder over the mock's state, with the requests it got recorded
+wiremock.workspace = true
+
+[dev-dependencies]
+# the mock's own tests send raw requests too: a missing header, a malformed body
+reqwest.workspace = true
+teams-auth.workspace = true
+# the end-to-end test: a fence over a test roster whose live membership read goes to the mock
+teams-fence = { workspace = true, features = ["test-support"] }
+# and the native transport reaching the mock through its mock origin
+teams-proto = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+# the test that keeps the mock out of every crate's normal dependencies reads the manifests
+toml.workspace = true
+
+[lints]
+workspace = true

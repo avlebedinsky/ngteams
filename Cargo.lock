@@ -6201,6 +6201,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "teams-mock"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "reqwest",
+ "serde_json",
+ "teams-auth",
+ "teams-fence",
+ "teams-proto",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "wiremock",
+]
+
+[[package]]
 name = "teams-proto"
 version = "0.1.0"
 dependencies = [

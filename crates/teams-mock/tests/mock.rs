@@ -1,0 +1,1115 @@
+//! The mock chat service against its fixtures: reads replay `tests/fixtures/chatsvc/`, writes read back as the
+//! fixtures recorded and queue an event for every other member, the headers M1 Task 3 found are required, and the
+//! native transport and the fence's membership read reach it through their `test-support` mock origins.
+//!
+//! Every id and token here is the mock's made-up one, never a real one.
+
+use std::future::{self, Future};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use reqwest::Method;
+use serde_json::{Value, json};
+use teams_auth::secrets::Secret;
+use teams_auth::token::TokenError;
+use teams_fence::{
+    ChatCredential, DenyReason, Fence, FenceLog, LiveMembershipSource, Membership, MembershipSource, Mri, Roster,
+    Scope, Target, WriteKind,
+};
+use teams_mock::{
+    AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, CHAT_BASE, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B,
+    LAB_C, NOTIFICATIONS, OUTSIDER, REGIONAL_HOST, TENANT,
+};
+use teams_proto::{Client, Credentials, Endpoint, HttpTransport, Read, SendMessage, Service};
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/chatsvc");
+
+fn oid(mri: &str) -> &str {
+    mri.trim_start_matches("8:orgid:")
+}
+
+/// A fixture with its placeholders filled in as the mock fills them.
+fn fixture(name: &str) -> TestResult<Value> {
+    let text = std::fs::read_to_string(Path::new(FIXTURES).join(name))?;
+    let group = ABC_CHAT.trim_start_matches("19:").trim_end_matches("@thread.v2");
+    let text = text
+        .replace("<region>", "amer")
+        .replace("<guid:a>", oid(LAB_A))
+        .replace("<guid:b>", oid(LAB_B))
+        .replace("<guid:c>", oid(LAB_C))
+        .replace("<guid:tenant>", TENANT)
+        .replace("<guid:group>", "00000000-0000-4000-8000-000000000002")
+        .replace("<guid:context>", "00000000-0000-4000-8000-000000000003")
+        .replace("<group>", group)
+        .replace("<token:1>", "mock-fixture-1")
+        .replace("<token:2>", "mock-fixture-2");
+    Ok(serde_json::from_str(&text)?)
+}
+
+/// A chat id as the web client puts it in a path: one segment, `:` and `@` encoded.
+fn segment(id: &str) -> String {
+    id.replace(':', "%3A").replace('@', "%40")
+}
+
+/// The mock and a plain HTTP client for it, sending the web client's headers unless told otherwise.
+struct Lab {
+    mock: ChatServiceMock,
+    http: reqwest::Client,
+}
+
+/// An answer: its status, `Location` and body text.
+struct Answer {
+    status: u16,
+    location: Option<String>,
+    text: String,
+}
+
+impl Answer {
+    fn json(&self) -> TestResult<Value> {
+        Ok(serde_json::from_str(&self.text)?)
+    }
+}
+
+impl Lab {
+    async fn start() -> TestResult<Self> {
+        Ok(Self {
+            mock: ChatServiceMock::start().await?,
+            http: reqwest::Client::builder().no_proxy().build()?,
+        })
+    }
+
+    /// `path` (with its query) under the chat base, on the mock's origin.
+    fn url(&self, path: &str) -> String {
+        format!("{}/api/chatsvc/amer/v1/{path}", self.mock.origin())
+    }
+
+    /// A link the mock handed out (a full URL under the chat base), on the mock's origin.
+    fn link(&self, link: &str) -> String {
+        link.replace("https://teams.microsoft.com", &self.mock.origin())
+    }
+
+    /// Sends as `who` with the web client's chat headers.
+    async fn send(&self, who: &str, method: Method, path: &str, body: Option<&Value>) -> TestResult<Answer> {
+        let token = format!("Bearer {}", self.mock.token(who).ok_or("no such account")?);
+        let headers = [
+            ("Authorization", token.as_str()),
+            ("X-MS-Migration", "True"),
+            ("BehaviorOverride", "redirectAs404"),
+        ];
+        self.send_raw(method, &self.url(path), &headers, body).await
+    }
+
+    async fn send_raw(
+        &self,
+        method: Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&Value>,
+    ) -> TestResult<Answer> {
+        let mut request = self.http.request(method, url).header("Accept", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        if let Some(body) = body {
+            request = request
+                .header("Content-Type", "application/json")
+                .body(body.to_string());
+        }
+        let answer = request.send().await?;
+        let status = answer.status().as_u16();
+        let location = answer
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Ok(Answer {
+            status,
+            location,
+            text: answer.text().await?,
+        })
+    }
+
+    /// A read as `who` that must succeed.
+    async fn get(&self, who: &str, path: &str) -> TestResult<Value> {
+        let answer = self.send(who, Method::GET, path, None).await?;
+        assert_eq!(answer.status, 200, "GET {path}: {}", answer.text);
+        answer.json()
+    }
+
+    /// A link the mock handed out, read as `who`.
+    async fn follow(&self, who: &str, link: &str) -> TestResult<Value> {
+        let token = format!("Bearer {}", self.mock.token(who).ok_or("no such account")?);
+        let headers = [
+            ("Authorization", token.as_str()),
+            ("X-MS-Migration", "True"),
+            ("BehaviorOverride", "redirectAs404"),
+        ];
+        let answer = self.send_raw(Method::GET, &self.link(link), &headers, None).await?;
+        assert_eq!(answer.status, 200, "GET {link}: {}", answer.text);
+        answer.json()
+    }
+
+    async fn list(&self, who: &str) -> TestResult<Value> {
+        self.get(
+            who,
+            "users/ME/conversations?view=msnp24Equivalent&pageSize=200&startTime=1&targetType=All",
+        )
+        .await
+    }
+
+    /// `chat`'s messages as `who` reads them, newest first (the read around a time: every message).
+    async fn messages(&self, who: &str, chat: &str) -> TestResult<Vec<Value>> {
+        let path = format!(
+            "users/ME/conversations/{}/messages/epochTimeStamp/1?pageSize=200&direction=BIDIRECTIONAL",
+            segment(chat)
+        );
+        let page = self.get(who, &path).await?;
+        Ok(page["messages"].as_array().cloned().unwrap_or_default())
+    }
+
+    async fn message(&self, who: &str, chat: &str, id: &str) -> TestResult<Value> {
+        let messages = self.messages(who, chat).await?;
+        messages
+            .into_iter()
+            .find(|message| message["id"] == id)
+            .ok_or_else(|| format!("no message {id}").into())
+    }
+
+    /// Posts `body` to `chat` as `who`; returns the new message's id.
+    async fn post(&self, who: &str, chat: &str, body: &Value) -> TestResult<String> {
+        let path = format!("users/ME/conversations/{}/messages", segment(chat));
+        let answer = self.send(who, Method::POST, &path, Some(body)).await?;
+        assert_eq!(answer.status, 201, "{}", answer.text);
+        Ok(answer.json()?["OriginalArrivalTime"].to_string())
+    }
+}
+
+fn ids(list: &Value) -> Vec<String> {
+    list["conversations"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap_or_default().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn entry<'a>(list: &'a Value, id: &str) -> Option<&'a Value> {
+    list["conversations"].as_array()?.iter().find(|entry| entry["id"] == id)
+}
+
+fn keys(value: &Value) -> Vec<String> {
+    value
+        .as_object()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn kinds(events: &[ChatEvent]) -> Vec<EventKind> {
+    events.iter().map(|event| event.kind).collect()
+}
+
+fn text_message(content: &str, client_id: &str) -> Value {
+    json!({
+        "content": content,
+        "messagetype": "RichText/Html",
+        "contenttype": "Text",
+        "clientmessageid": client_id,
+        "imdisplayname": "Lab A",
+        "amsreferences": [],
+        "properties": {"mentions": "[]", "files": "[]", "formatVariant": "TEAMS"},
+    })
+}
+
+#[tokio::test]
+async fn the_conversation_list_shows_each_member_their_chats_in_the_fixtures_shape() -> TestResult {
+    let lab = Lab::start().await?;
+    let recorded = fixture("conversations.json")?;
+    let recorded = &recorded["response"]["body"]["conversations"];
+    let list = lab.list(LAB_A).await?;
+    assert_eq!(
+        ids(&list),
+        [AB_CHAT, AC_CHAT, AX_CHAT, ABC_CHAT, CHANNEL, NOTIFICATIONS]
+    );
+    assert_eq!(ids(&lab.list(LAB_B).await?), [AB_CHAT, ABC_CHAT]);
+    assert_eq!(ids(&lab.list(LAB_C).await?), [AC_CHAT, ABC_CHAT]);
+
+    // the empty chat and the channel are their fixture entries as they are; the chat with messages keeps its keys
+    assert_eq!(entry(&list, AC_CHAT), Some(&recorded[1]));
+    assert_eq!(entry(&list, CHANNEL), Some(&recorded[2]));
+    let ab = entry(&list, AB_CHAT).ok_or("no a-b chat")?;
+    assert_eq!(keys(ab), keys(&recorded[0]));
+    assert_eq!(keys(&ab["threadProperties"]), keys(&recorded[0]["threadProperties"]));
+    assert_eq!(
+        ab["properties"]["consumptionhorizon"],
+        recorded[0]["properties"]["consumptionhorizon"]
+    );
+    assert_eq!(
+        ab["lastMessage"]["id"], "1760000060000",
+        "the deleted message is the newest"
+    );
+    assert!(ab["lastMessage"].get("properties").is_none());
+    let b_list = lab.list(LAB_B).await?;
+    let b_ab = entry(&b_list, AB_CHAT).ok_or("no a-b chat for b")?;
+    assert!(
+        b_ab["properties"].get("consumptionhorizon").is_none(),
+        "a's horizon is a's own"
+    );
+    assert_eq!(b_ab["threadProperties"]["isCreator"], false);
+
+    // a group chat's entry has no 1:1-only keys
+    let abc = entry(&list, ABC_CHAT).ok_or("no group chat")?;
+    assert_eq!(abc["threadProperties"]["threadType"], "chat");
+    assert!(abc["threadProperties"].get("productThreadType").is_none());
+    assert!(abc["threadProperties"].get("uniquerosterthread").is_none());
+
+    let metadata = &list["_metadata"];
+    assert_eq!(metadata["totalCount"], 6);
+    assert_eq!(metadata["forwardLink"], "");
+    let sync = metadata["syncState"].as_str().ok_or("no sync link")?;
+    assert!(
+        sync.starts_with(&format!("{CHAT_BASE}/v1/users/{LAB_A}/conversations?")),
+        "{sync}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_conversation_lists_sync_link_gives_only_what_changed_since() -> TestResult {
+    let lab = Lab::start().await?;
+    let sync = lab.list(LAB_A).await?["_metadata"]["syncState"].clone();
+    lab.post(LAB_B, AB_CHAT, &text_message("<p>new</p>", "1")).await?;
+    let changed = lab.follow(LAB_A, sync.as_str().ok_or("no sync link")?).await?;
+    assert_eq!(ids(&changed), [AB_CHAT]);
+    let again = lab
+        .follow(LAB_A, changed["_metadata"]["syncState"].as_str().ok_or("no sync link")?)
+        .await?;
+    assert!(ids(&again).is_empty());
+    // the link names a's MRI: nobody else follows it
+    let b_token = format!("Bearer {}", lab.mock.token(LAB_B).ok_or("no b")?);
+    let headers = [
+        ("Authorization", b_token.as_str()),
+        ("X-MS-Migration", "True"),
+        ("BehaviorOverride", "redirectAs404"),
+    ];
+    let link = lab.link(sync.as_str().ok_or("no sync link")?);
+    assert_eq!(lab.send_raw(Method::GET, &link, &headers, None).await?.status, 403);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_read_around_a_time_replays_the_message_fixture() -> TestResult {
+    let lab = Lab::start().await?;
+    let recorded = fixture("messages.json")?;
+    let path = format!(
+        "users/ME/conversations/{}/messages/epochTimeStamp/1760000000000?pageSize=40&direction=BIDIRECTIONAL&includeMetadata=true&locationType=Primary",
+        segment(AB_CHAT)
+    );
+    let page = lab.get(LAB_B, &path).await?;
+    let mut expected: Vec<Value> = Vec::new();
+    for read in ["sync", "around"] {
+        expected.extend(
+            recorded[read]["response"]["body"]["messages"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    assert_eq!(page["messages"], Value::Array(expected));
+    assert_eq!(page["tenantId"], TENANT);
+    assert_eq!(page["_metadata"], recorded["around"]["response"]["body"]["_metadata"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn message_pages_go_back_through_backward_links_and_forward_through_sync_links() -> TestResult {
+    let lab = Lab::start().await?;
+    let path = format!(
+        "users/ME/conversations/{}/messages?view=msnp24Equivalent&pageSize=2",
+        segment(AB_CHAT)
+    );
+    let mut page = lab.get(LAB_B, &path).await?;
+    let sync = page["_metadata"]["syncState"]
+        .as_str()
+        .ok_or("no sync link")?
+        .to_owned();
+    let mut sequences = Vec::new();
+    loop {
+        let messages = page["messages"].as_array().cloned().unwrap_or_default();
+        sequences.push(
+            messages
+                .iter()
+                .map(|message| message["sequenceId"].clone())
+                .collect::<Vec<_>>(),
+        );
+        let Some(back) = page["_metadata"]["backwardLink"].as_str().map(str::to_owned) else {
+            break;
+        };
+        page = lab.follow(LAB_B, &back).await?;
+    }
+    assert_eq!(
+        sequences,
+        [vec![json!(5), json!(4)], vec![json!(3), json!(2)], vec![json!(1)]]
+    );
+
+    // a edits its plain message: the sync link gives that message alone, as it now reads
+    let edit = json!({"content": "<p>changed</p>", "messagetype": "RichText/Html"});
+    let edit_path = format!("users/ME/conversations/{}/messages/1760000005000", segment(AB_CHAT));
+    assert_eq!(lab.send(LAB_A, Method::PUT, &edit_path, Some(&edit)).await?.status, 200);
+    let changed = lab.follow(LAB_B, &sync).await?;
+    let changed = changed["messages"].as_array().cloned().unwrap_or_default();
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0]["content"], "<p>changed</p>");
+    assert!(
+        sync.starts_with(&format!("{CHAT_BASE}/v1/users/ME/conversations/{AB_CHAT}/messages?")),
+        "{sync}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_reads_are_the_group_chat_fixtures() -> TestResult {
+    let lab = Lab::start().await?;
+    let thread = lab
+        .get(LAB_B, &format!("threads/{}?view=msnp24Equivalent", segment(ABC_CHAT)))
+        .await?;
+    assert_eq!(thread, fixture("thread-group.json")?["response"]["body"]);
+    let members_path = format!("threads/{}/members?view=msnp24Equivalent&pageSize=1", segment(ABC_CHAT));
+    let members = lab.get(LAB_C, &members_path).await?;
+    assert_eq!(members, fixture("thread-group-members.json")?["response"]["body"]);
+    let filtered = lab
+        .send(
+            LAB_A,
+            Method::GET,
+            &format!("threads/{}/filtered?view=msnp24Equivalent", segment(ABC_CHAT)),
+            None,
+        )
+        .await?;
+    let recorded = fixture("thread-group-filtered.json")?;
+    assert_eq!(filtered.status, 403);
+    assert_eq!(filtered.json()?, recorded["response"]["body"]);
+
+    // a 1:1 chat's thread takes the same shape with its two members; outsiders of a chat and unknown chats get nothing
+    let one_to_one = lab
+        .get(LAB_A, &format!("threads/{}?view=msnp24Equivalent", segment(AB_CHAT)))
+        .await?;
+    assert_eq!(one_to_one["id"], AB_CHAT);
+    let listed: Vec<Value> = one_to_one["members"]
+        .as_array()
+        .map(|members| members.iter().map(|member| member["id"].clone()).collect())
+        .unwrap_or_default();
+    assert_eq!(listed, [json!(LAB_A), json!(LAB_B)]);
+    let refused = lab
+        .send(LAB_C, Method::GET, &format!("threads/{}", segment(AB_CHAT)), None)
+        .await?;
+    assert_eq!(refused.status, 403);
+    let unknown = lab
+        .send(LAB_A, Method::GET, "threads/19%3Anone%40thread.v2", None)
+        .await?;
+    assert_eq!(unknown.status, 404);
+    Ok(())
+}
+
+/// The account's token as the transport asks for it.
+struct MockToken(String);
+
+impl Credentials for MockToken {
+    fn bearer(&self, _audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        future::ready(Ok(Secret::new(self.0.clone())))
+    }
+
+    fn bearer_rejected(
+        &self,
+        _audience: &str,
+        _rejected: &Secret,
+    ) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        future::ready(Ok(Secret::new(self.0.clone())))
+    }
+}
+
+/// A fence over the lab roster whose live membership read goes to the mock with `who`'s token.
+fn lab_fence(lab: &Lab, who: &str) -> TestResult<(Arc<Fence>, LiveMembershipSource)> {
+    let fence = Fence::new(
+        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
+        FenceLog::from_writer(io::sink()),
+    );
+    let source = LiveMembershipSource::with_mock_origin(&lab.mock.origin())?;
+    let token = lab.mock.token(who).ok_or("no such account")?;
+    source.set_credential(ChatCredential::bearer(CHAT_BASE, &token).ok_or("not a credential")?);
+    Ok((Arc::new(fence), source))
+}
+
+#[tokio::test]
+async fn the_fences_membership_read_finds_the_mocks_one_to_one_chats_complete() -> TestResult {
+    let lab = Lab::start().await?;
+    let (fence, source) = lab_fence(&lab, LAB_A)?;
+    let chat = |id: &str| Scope::Conversation { id: id.to_owned() };
+    assert_eq!(
+        source.members(&chat(AB_CHAT)).await,
+        Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)])
+    );
+    assert_eq!(
+        source.members(&chat(AX_CHAT)).await,
+        Membership::Complete(vec![Mri::new(LAB_A), Mri::new(OUTSIDER)])
+    );
+    // so a message to the chat with the outsider is denied, and one to the lab chat allowed
+    let denied = fence
+        .check(Target::new(WriteKind::Message, chat(AX_CHAT)), &source)
+        .await
+        .err()
+        .ok_or("a write to the outsider's chat was allowed")?;
+    assert_eq!(*denied.reason(), DenyReason::Outsiders { count: 1 });
+    assert!(
+        fence
+            .check(Target::new(WriteKind::Message, chat(AB_CHAT)), &source)
+            .await
+            .is_ok()
+    );
+    Ok(())
+}
+
+/// A read of the test's choosing, for the transport.
+struct Get(Endpoint);
+
+impl Read for Get {
+    fn service(&self) -> Service {
+        Service::ChatService
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        self.0.clone()
+    }
+}
+
+#[tokio::test]
+async fn a_permitted_message_through_the_native_transport_reaches_the_other_member() -> TestResult {
+    let lab = Lab::start().await?;
+    let (fence, source) = lab_fence(&lab, LAB_A)?;
+    let token = Arc::new(MockToken(lab.mock.token(LAB_A).ok_or("no a")?));
+    let transport = HttpTransport::with_mock_origin(token, Arc::clone(&fence), CHAT_BASE, &lab.mock.origin())?;
+    let client = Client::new(transport);
+
+    let list = Get(Endpoint::new(["v1", "users", "ME", "conversations"])
+        .with_query("view", "msnp24Equivalent")
+        .with_query("pageSize", "200"));
+    let read = client.read(&list).await?;
+    assert_eq!(ids(&serde_json::from_slice(read.body())?).len(), 6);
+
+    let permit = fence
+        .check(
+            Target::new(WriteKind::Message, Scope::Conversation { id: AB_CHAT.to_owned() }),
+            &source,
+        )
+        .await?;
+    let answer = client
+        .write(SendMessage::new(AB_CHAT, "<p>hello b</p>"), permit)
+        .await?;
+    assert_eq!(answer.status(), 201);
+    let arrival = serde_json::from_slice::<Value>(answer.body())?["OriginalArrivalTime"].to_string();
+    let location = format!("{REGIONAL_HOST}/v1/users/ME/conversations/{AB_CHAT}/messages/{arrival}");
+    assert_eq!(answer.location(), Some(location.as_str()));
+
+    let events = lab.mock.take_events(LAB_B);
+    assert_eq!(kinds(&events), [EventKind::Message]);
+    assert_eq!(
+        (events[0].conversation.as_str(), events[0].from.as_str()),
+        (AB_CHAT, LAB_A)
+    );
+    assert_eq!(events[0].resource["content"], "<p>hello b</p>");
+    assert!(lab.mock.take_events(LAB_A).is_empty(), "the writer is told nothing");
+    assert!(lab.mock.take_events(LAB_B).is_empty(), "taken once");
+    assert_eq!(lab.message(LAB_B, AB_CHAT, &arrival).await?, events[0].resource);
+    Ok(())
+}
+
+/// `message` with the values the service sets on arrival taken out, to compare with a fixture's read-back.
+fn without_service_values(message: &Value) -> Value {
+    let mut message = message.clone();
+    if let Some(fields) = message.as_object_mut() {
+        for key in ["id", "version", "sequenceId", "composetime", "originalarrivaltime"] {
+            fields.remove(key);
+        }
+    }
+    if let Some(properties) = message["properties"].as_object_mut() {
+        properties.remove("languageStamp");
+    }
+    message
+}
+
+#[tokio::test]
+async fn a_quoted_reply_reads_back_as_the_reply_fixture() -> TestResult {
+    let lab = Lab::start().await?;
+    let recorded = fixture("reply.json")?;
+    let path = format!("users/ME/conversations/{}/messages", segment(AB_CHAT));
+    let answer = lab
+        .send(LAB_A, Method::POST, &path, Some(&recorded["request"]["body"]))
+        .await?;
+    assert_eq!(answer.status, 201);
+    assert_eq!(keys(&answer.json()?), keys(&recorded["response"]["body"]));
+    assert!(
+        answer
+            .location
+            .as_ref()
+            .is_some_and(|location| location.starts_with(REGIONAL_HOST))
+    );
+    let id = answer.json()?["OriginalArrivalTime"].to_string();
+    let read = lab.message(LAB_B, AB_CHAT, &id).await?;
+    assert_eq!(
+        without_service_values(&read),
+        without_service_values(&recorded["read_back"])
+    );
+    assert_eq!(read["sequenceId"], 6);
+    assert_eq!(read["version"], id);
+    assert!(
+        read["composetime"].as_str().is_some_and(|time| time.len() == 28),
+        "{read}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_edit_reads_back_as_the_edit_fixture() -> TestResult {
+    let lab = Lab::start().await?;
+    let recorded = fixture("edit.json")?;
+    let path = format!("users/ME/conversations/{}/messages/1760000010000", segment(AB_CHAT));
+    let answer = lab
+        .send(LAB_A, Method::PUT, &path, Some(&recorded["request"]["body"]))
+        .await?;
+    assert_eq!((answer.status, answer.text.as_str()), (200, ""));
+    let read = lab.message(LAB_B, AB_CHAT, "1760000010000").await?;
+    let expected = &recorded["read_back"];
+    for key in ["id", "clientmessageid", "content", "messagetype", "from", "composetime"] {
+        assert_eq!(read[key], expected[key], "{key}");
+    }
+    assert_eq!(read["properties"]["composetime"], expected["properties"]["composetime"]);
+    // the service's own time: the version and the edit time move together
+    assert_eq!(
+        read["version"].as_str().map(str::to_owned),
+        Some(read["properties"]["edittime"].to_string())
+    );
+    let events = lab.mock.take_events(LAB_B);
+    assert_eq!(kinds(&events), [EventKind::Edit]);
+    assert_eq!(events[0].resource, read);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_soft_delete_reads_back_as_the_delete_fixture() -> TestResult {
+    let lab = Lab::start().await?;
+    let recorded = fixture("delete.json")?;
+    let id = lab
+        .post(LAB_A, AB_CHAT, &text_message("<p>to delete</p>", "7777777777777777777"))
+        .await?;
+    let path = format!("users/ME/conversations/{}/messages/{id}", segment(AB_CHAT));
+    let answer = lab
+        .send(LAB_A, Method::DELETE, &format!("{path}?behavior=softDelete"), None)
+        .await?;
+    assert_eq!((answer.status, answer.text.as_str()), (200, "null"));
+    let read = lab.message(LAB_B, AB_CHAT, &id).await?;
+    let mut read_keys = keys(&read);
+    let mut recorded_keys = keys(&recorded["read_back"]);
+    read_keys.sort();
+    recorded_keys.sort();
+    assert_eq!(read_keys, recorded_keys);
+    assert_eq!(read["content"], "");
+    assert_eq!(read["skypeeditedid"], "7777777777777777777");
+    assert_eq!(
+        read["properties"],
+        json!({"deletetime": read["version"].as_str().unwrap_or_default().parse::<u64>()?})
+    );
+    assert_eq!(
+        kinds(&lab.mock.take_events(LAB_B)),
+        [EventKind::Message, EventKind::Delete]
+    );
+
+    // a deleted message isn't edited or deleted again
+    let edit = text_message("<p>back</p>", "7777777777777777777");
+    assert_eq!(lab.send(LAB_A, Method::PUT, &path, Some(&edit)).await?.status, 404);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reactions_read_back_as_the_reaction_fixture() -> TestResult {
+    let lab = Lab::start().await?;
+    let recorded = fixture("reaction.json")?;
+    let path = format!(
+        "users/ME/conversations/{}/messages/1760000050000/properties?name=emotions",
+        segment(AB_CHAT)
+    );
+    let like = json!({"emotions": {"key": "like", "value": 1_760_000_055_000_u64}});
+    let added = lab.send(LAB_A, Method::PUT, &path, Some(&like)).await?;
+    assert_eq!((added.status, added.text.as_str()), (200, "200"));
+    let read = lab.message(LAB_B, AB_CHAT, "1760000050000").await?;
+    let kept = &recorded["read_back_kept"];
+    assert_eq!(read["annotationsSummary"], kept["annotationsSummary"]);
+    let users = &read["properties"]["emotions"][0]["users"];
+    assert_eq!(users[0]["mri"], LAB_A);
+    assert_eq!(
+        users[0]["value"],
+        kept["properties"]["emotions"][0]["users"][0]["value"]
+    );
+    assert_eq!(
+        users[0]["time"].to_string(),
+        read["version"].as_str().unwrap_or_default()
+    );
+
+    let removed = lab
+        .send(
+            LAB_A,
+            Method::DELETE,
+            &path,
+            Some(&recorded["remove"]["request"]["body"]),
+        )
+        .await?;
+    assert_eq!((removed.status, removed.text.as_str()), (200, "null"));
+    let read = lab.message(LAB_B, AB_CHAT, "1760000050000").await?;
+    let taken_back = &recorded["read_back_taken_back"];
+    assert_eq!(read["annotationsSummary"], taken_back["annotationsSummary"]);
+    assert_eq!(read["properties"]["emotions"], taken_back["properties"]["emotions"]);
+    assert_eq!(
+        kinds(&lab.mock.take_events(LAB_B)),
+        [EventKind::Reaction, EventKind::Reaction]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_read_receipt_sets_only_the_readers_own_horizon() -> TestResult {
+    let lab = Lab::start().await?;
+    let a_horizon =
+        entry(&lab.list(LAB_A).await?, AB_CHAT).ok_or("no chat")?["properties"]["consumptionhorizon"].clone();
+    let horizon = "1760000060000;1760001000500;5555555555555555555";
+    let path = format!(
+        "users/ME/conversations/{}/properties?name=consumptionhorizon",
+        segment(AB_CHAT)
+    );
+    let answer = lab
+        .send(LAB_B, Method::PUT, &path, Some(&json!({"consumptionhorizon": horizon})))
+        .await?;
+    assert_eq!((answer.status, answer.text.as_str()), (200, ""));
+    let b_list = lab.list(LAB_B).await?;
+    assert_eq!(
+        entry(&b_list, AB_CHAT).ok_or("no chat")?["properties"]["consumptionhorizon"],
+        horizon
+    );
+    let a_list = lab.list(LAB_A).await?;
+    assert_eq!(
+        entry(&a_list, AB_CHAT).ok_or("no chat")?["properties"]["consumptionhorizon"],
+        a_horizon
+    );
+    let events = lab.mock.take_events(LAB_A);
+    assert_eq!(kinds(&events), [EventKind::ReadReceipt]);
+    assert_eq!(events[0].resource, json!({"consumptionhorizon": horizon}));
+    assert!(lab.mock.take_events(LAB_B).is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn typing_and_group_messages_reach_every_other_member() -> TestResult {
+    let lab = Lab::start().await?;
+    let typing = json!({"content": "", "messagetype": "Control/Typing", "contenttype": "Application/Message"});
+    lab.post(LAB_A, ABC_CHAT, &typing).await?;
+    assert!(
+        lab.messages(LAB_B, ABC_CHAT).await?.is_empty(),
+        "typing isn't a message"
+    );
+    let id = lab
+        .post(LAB_A, ABC_CHAT, &text_message("<p>hello both</p>", "2"))
+        .await?;
+    for member in [LAB_B, LAB_C] {
+        let events = lab.mock.take_events(member);
+        assert_eq!(kinds(&events), [EventKind::Typing, EventKind::Message], "{member}");
+        assert_eq!(events[0].resource, json!({"messagetype": "Control/Typing"}));
+        assert_eq!(events[1].resource["id"], id);
+    }
+    assert!(lab.mock.take_events(LAB_A).is_empty());
+    let list = lab.list(LAB_C).await?;
+    let abc = entry(&list, ABC_CHAT).ok_or("no group chat")?;
+    assert_eq!(abc["lastMessage"]["id"], id);
+    assert_eq!(abc["properties"]["isemptyconversation"], "False");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_chat_create_makes_the_one_to_one_chat_or_a_new_group_chat() -> TestResult {
+    let lab = Lab::start().await?;
+    let members =
+        |mris: &[&str]| -> Vec<Value> { mris.iter().map(|mri| json!({"id": mri, "role": "Admin"})).collect() };
+    let one_to_one = json!({
+        "members": members(&[LAB_B, LAB_C]),
+        "properties": {"threadType": "chat", "fixedRoster": true, "uniquerosterthread": true},
+    });
+    let created = lab.send(LAB_B, Method::POST, "threads", Some(&one_to_one)).await?;
+    assert_eq!(created.status, 201);
+    let bc = format!("19:{}_{}@unq.gbl.spaces", oid(LAB_B), oid(LAB_C));
+    assert_eq!(created.json()?["threadResource"]["id"], bc);
+    assert_eq!(created.location, Some(format!("{REGIONAL_HOST}/v1/threads/{bc}")));
+    assert!(ids(&lab.list(LAB_C).await?).contains(&bc));
+    assert_eq!(kinds(&lab.mock.take_events(LAB_C)), [EventKind::ChatCreated]);
+    // asked again, it is the same chat, and nobody is told again
+    let again = lab.send(LAB_C, Method::POST, "threads", Some(&one_to_one)).await?;
+    assert_eq!(again.json()?["threadResource"]["id"], bc);
+    assert!(lab.mock.take_events(LAB_B).is_empty());
+
+    let group = json!({"members": members(&[LAB_A, LAB_B, LAB_C]), "properties": {"threadType": "chat"}});
+    let made = lab.send(LAB_A, Method::POST, "threads", Some(&group)).await?.json()?;
+    let id = made["threadResource"]["id"].as_str().ok_or("no id")?.to_owned();
+    assert!(
+        id.starts_with("19:") && id.ends_with("@thread.v2") && id != ABC_CHAT,
+        "{id}"
+    );
+    assert_eq!(made["threadResource"]["members"].as_array().map(Vec::len), Some(3));
+    for member in [LAB_B, LAB_C] {
+        assert_eq!(kinds(&lab.mock.take_events(member)), [EventKind::ChatCreated]);
+    }
+
+    let without_me = json!({"members": members(&[LAB_B, LAB_C]), "properties": {"threadType": "chat"}});
+    assert_eq!(
+        lab.send(LAB_A, Method::POST, "threads", Some(&without_me))
+            .await?
+            .status,
+        403
+    );
+    let no_properties = json!({"members": members(&[LAB_A, LAB_B])});
+    assert_eq!(
+        lab.send(LAB_A, Method::POST, "threads", Some(&no_properties))
+            .await?
+            .status,
+        400
+    );
+    Ok(())
+}
+
+/// The headers a request carries, what it is, and the status it gets.
+struct HeaderCase<'a> {
+    case: &'a str,
+    headers: Vec<(&'a str, &'a str)>,
+    expected: u16,
+}
+
+#[tokio::test]
+async fn a_request_without_the_headers_task_3_found_is_refused_with_401() -> TestResult {
+    let lab = Lab::start().await?;
+    let token = lab.mock.token(LAB_A).ok_or("no a")?;
+    let bearer = format!("Bearer {token}");
+    let skype = format!("skypetoken={token}");
+    let list = lab.url("users/ME/conversations?view=msnp24Equivalent");
+    let (migration, behavior) = (("X-MS-Migration", "True"), ("BehaviorOverride", "redirectAs404"));
+    let case = |case, headers, expected| HeaderCase {
+        case,
+        headers,
+        expected,
+    };
+    let cases = [
+        case("no token", vec![migration, behavior], 401),
+        case(
+            "a skypetoken",
+            vec![("Authentication", &skype), migration, behavior],
+            401,
+        ),
+        case(
+            "a token the mock didn't hand out",
+            vec![
+                ("Authorization", "Bearer mock-ic3-token-unknown-0"),
+                migration,
+                behavior,
+            ],
+            401,
+        ),
+        case("no X-MS-Migration", vec![("Authorization", &bearer), behavior], 401),
+        case("no BehaviorOverride", vec![("Authorization", &bearer), migration], 401),
+        case(
+            "the web client's set",
+            vec![("Authorization", &bearer), migration, behavior],
+            200,
+        ),
+    ];
+    for HeaderCase {
+        case,
+        headers,
+        expected,
+    } in cases
+    {
+        let answer = lab.send_raw(Method::GET, &list, &headers, None).await?;
+        assert_eq!(answer.status, expected, "{case}");
+        if expected == 401 {
+            assert_eq!(answer.text, "", "{case}");
+        }
+    }
+
+    // a write without them changes nothing and tells nobody
+    let post = lab.url(&format!("users/ME/conversations/{}/messages", segment(AB_CHAT)));
+    let body = text_message("<p>unheard</p>", "3");
+    let refused = lab
+        .send_raw(Method::POST, &post, &[("Authorization", &bearer)], Some(&body))
+        .await?;
+    assert_eq!(refused.status, 401);
+    assert!(lab.mock.take_events(LAB_B).is_empty());
+    assert_eq!(lab.messages(LAB_B, AB_CHAT).await?.len(), 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_thread_read_takes_the_token_alone_and_a_replaced_token_is_refused() -> TestResult {
+    let lab = Lab::start().await?;
+    let bearer = format!("Bearer {}", lab.mock.token(LAB_A).ok_or("no a")?);
+    // the fence's own read sends the token and `Accept` only, as Task 3 saw the service answer in full
+    let thread = lab.url(&format!("threads/{}?view=msnp24Equivalent", segment(AB_CHAT)));
+    let alone = lab
+        .send_raw(Method::GET, &thread, &[("Authorization", &bearer)], None)
+        .await?;
+    assert_eq!(alone.status, 200);
+    assert_eq!(lab.send_raw(Method::GET, &thread, &[], None).await?.status, 401);
+
+    assert!(lab.mock.set_token(LAB_A, "mock-ic3-token-renewed-1"));
+    let stale = lab
+        .send_raw(Method::GET, &thread, &[("Authorization", &bearer)], None)
+        .await?;
+    assert_eq!(stale.status, 401);
+    assert_eq!(lab.mock.token(LAB_A).as_deref(), Some("mock-ic3-token-renewed-1"));
+    assert_eq!(
+        lab.send(LAB_A, Method::GET, "users/ME/conversations", None)
+            .await?
+            .status,
+        200
+    );
+    assert!(!lab.mock.set_token("8:orgid:nobody", "mock-ic3-token-nobody-0"));
+    Ok(())
+}
+
+/// A request the mock refuses: who sends it, how, and the status it gets.
+struct Refusal {
+    case: &'static str,
+    who: &'static str,
+    method: Method,
+    path: String,
+    body: Option<Value>,
+    expected: u16,
+}
+
+impl Refusal {
+    fn new(
+        case: &'static str,
+        who: &'static str,
+        method: Method,
+        path: String,
+        body: Option<Value>,
+        expected: u16,
+    ) -> Self {
+        Self {
+            case,
+            who,
+            method,
+            path,
+            body,
+            expected,
+        }
+    }
+}
+
+/// Sends every refusal, then checks that none of them changed anything or told anyone.
+async fn refused(lab: &Lab, refusals: Vec<Refusal>) -> TestResult {
+    for refusal in refusals {
+        let answer = lab
+            .send(refusal.who, refusal.method, &refusal.path, refusal.body.as_ref())
+            .await?;
+        assert_eq!(answer.status, refusal.expected, "{}: {}", refusal.case, answer.text);
+    }
+    for member in [LAB_A, LAB_B, LAB_C] {
+        assert!(lab.mock.take_events(member).is_empty(), "{member}");
+    }
+    assert_eq!(lab.messages(LAB_A, AB_CHAT).await?.len(), 5);
+    let edited = lab.message(LAB_A, AB_CHAT, "1760000010000").await?;
+    assert_eq!(edited["content"], "<p>a made-up message, edited</p>");
+    Ok(())
+}
+
+fn messages_path(chat: &str) -> String {
+    format!("users/ME/conversations/{}/messages", segment(chat))
+}
+
+fn message_path(id: &str) -> String {
+    format!("users/ME/conversations/{}/messages/{id}", segment(AB_CHAT))
+}
+
+#[tokio::test]
+async fn writes_by_someone_who_may_not_make_them_change_nothing() -> TestResult {
+    let lab = Lab::start().await?;
+    let body = || Some(text_message("<p>no</p>", "4"));
+    let a_message = message_path("1760000010000");
+    let refusals = vec![
+        Refusal::new("not a member", LAB_C, Method::POST, messages_path(AB_CHAT), body(), 403),
+        Refusal::new("a channel", LAB_A, Method::POST, messages_path(CHANNEL), body(), 403),
+        Refusal::new(
+            "someone else's edit",
+            LAB_B,
+            Method::PUT,
+            a_message.clone(),
+            body(),
+            403,
+        ),
+        Refusal::new(
+            "someone else's delete",
+            LAB_B,
+            Method::DELETE,
+            format!("{a_message}?behavior=softDelete"),
+            None,
+            403,
+        ),
+        Refusal::new(
+            "an unknown chat",
+            LAB_A,
+            Method::POST,
+            messages_path("19:none@thread.v2"),
+            body(),
+            404,
+        ),
+        Refusal::new("an unknown message", LAB_A, Method::PUT, message_path("1"), body(), 404),
+    ];
+    refused(&lab, refusals).await
+}
+
+#[tokio::test]
+async fn requests_the_mock_does_not_model_or_cannot_read_change_nothing() -> TestResult {
+    let lab = Lab::start().await?;
+    let a_message = message_path("1760000010000");
+    let post = || messages_path(AB_CHAT);
+    let refusals = vec![
+        Refusal::new(
+            "a body that isn't an object",
+            LAB_A,
+            Method::POST,
+            post(),
+            Some(json!("text")),
+            400,
+        ),
+        Refusal::new(
+            "an unknown message type",
+            LAB_A,
+            Method::POST,
+            post(),
+            Some(json!({"content": "", "messagetype": "Event/Call"})),
+            400,
+        ),
+        Refusal::new(
+            "mentions that aren't a string",
+            LAB_A,
+            Method::POST,
+            post(),
+            Some(json!({"content": "", "messagetype": "Text", "properties": {"mentions": []}})),
+            400,
+        ),
+        Refusal::new(
+            "another message property",
+            LAB_A,
+            Method::PUT,
+            format!("{a_message}/properties?name=isread"),
+            Some(json!({"isread": "true"})),
+            404,
+        ),
+        Refusal::new("a hard delete", LAB_A, Method::DELETE, a_message, None, 404),
+        Refusal::new(
+            "an unmodelled read",
+            LAB_A,
+            Method::GET,
+            "users/ME/properties".to_owned(),
+            None,
+            404,
+        ),
+    ];
+    refused(&lab, refusals).await
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Whether `manifest` names `teams-mock` in a dependency table other than `[dev-dependencies]` (target-specific
+/// tables included).
+fn normal_dependency(manifest: &toml::Table) -> bool {
+    let names = |table: Option<&toml::Value>| {
+        ["dependencies", "build-dependencies"].iter().any(|kind| {
+            table
+                .and_then(|table| table.get(*kind))
+                .and_then(|deps| deps.get("teams-mock"))
+                .is_some()
+        })
+    };
+    let root = Some(toml::Value::Table(manifest.clone()));
+    let targets = manifest.get("target").and_then(toml::Value::as_table);
+    names(root.as_ref()) || targets.is_some_and(|targets| targets.values().any(|target| names(Some(target))))
+}
+
+#[test]
+fn the_mock_is_never_a_normal_dependency_of_any_crate() -> TestResult {
+    let root = workspace_root();
+    let workspace: toml::Table = std::fs::read_to_string(root.join("Cargo.toml"))?.parse()?;
+    let members = workspace["workspace"]["members"].as_array().ok_or("no members")?;
+    assert!(
+        members
+            .iter()
+            .any(|member| member.as_str() == Some("crates/teams-mock"))
+    );
+    let mut checked = 0;
+    for member in members {
+        let path = root.join(member.as_str().ok_or("not a path")?).join("Cargo.toml");
+        let manifest: toml::Table = std::fs::read_to_string(&path)?.parse()?;
+        assert!(
+            !normal_dependency(&manifest),
+            "{} takes teams-mock as a normal dependency",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked >= 10);
+    // the check itself sees one
+    let planted: toml::Table = "[target.'cfg(unix)'.dependencies]\nteams-mock.workspace = true\n".parse()?;
+    assert!(normal_dependency(&planted));
+    let dev_only: toml::Table = "[dev-dependencies]\nteams-mock.workspace = true\n".parse()?;
+    assert!(!normal_dependency(&dev_only));
+    Ok(())
+}
+
+#[test]
+fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for dir in ["src", "tests"] {
+        for file in std::fs::read_dir(crate_dir.join(dir))? {
+            let path = file?.path();
+            let source = std::fs::read_to_string(&path)?;
+            // split, so this file doesn't name them itself
+            let forbidden = [
+                concat!("captures", "/"),
+                concat!("reference", "/"),
+                concat!("teams", "-lab"),
+                concat!(".local", "/share"),
+            ];
+            for forbidden in forbidden {
+                assert!(!source.contains(forbidden), "{} names {forbidden}", path.display());
+            }
+            for include in source.split("include_str!(\"").skip(1) {
+                assert!(
+                    include.starts_with("../../../tests/fixtures/chatsvc/"),
+                    "{}: {include:.60}",
+                    path.display()
+                );
+            }
+        }
+    }
+    for entry in std::fs::read_dir(FIXTURES)? {
+        let path = entry?.path();
+        let text = std::fs::read_to_string(&path)?;
+        let fixture: Value = serde_json::from_str(&text)?;
+        assert!(
+            fixture.get("_synthetic").is_some(),
+            "{} isn't marked synthetic",
+            path.display()
+        );
+    }
+    Ok(())
+}
