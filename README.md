@@ -107,15 +107,18 @@ are visible.
 - `ab-chat`: a and b; a opens the a–b 1:1 chat by b's MRI and sends a message, and b must show it. First, a live
   enforcement test: a probe post to the chat is force-denied, must fail in a's page and must never show on b. It maps
   the chat service's writes (`Classifier::mapped`) and reads the target's members live (`LiveMembershipSource`, with
-  the `ic3` bearer token the page itself sent). It expects only the forced probe and telemetry to be denied, so today it
-  **exits 1** on the web client's ~450–575 other fail-closed denies, although goal and enforcement pass
-  (`docs/backlog/ab-chat-exit-code-counts-unreviewed-denies.md`).
+  the `ic3` bearer token the page itself sent). It expects only its two probes' forced denies and the web client's
+  requests and frames on the reviewed expected-deny list (`crates/proto-lab/src/scenario/expected.rs`: telemetry,
+  middle-tier lookups by `POST`, presence, the account's own chat properties, Trouter and AugLoop frames, …), each
+  with the reason the scenario doesn't need it. The list only judges the run: everything on it stays denied. A deny on
+  the a–b chat other than the probes, one for a partial or refused membership, or a class off the list fails the run.
 - `echo-call`: account a places the web client's test call to the echo service, with a fake microphone playing a
   440 Hz tone. The calling classifiers allow the account's reviewed own-state (its settings and policy reads, the
   Trouter session, the endpoint registration) and the call start in exactly its captured shape, a new call of a and
   the echo (`crates/proto-lab/src/calling.rs`, `docs/protocol/calling-echo.md`). Every write on the started call is
   still denied (no authoritative call-membership read: `docs/backlog/fence-call-follow-ups.md`), so the echo never
-  joins and the run exits 1. An incoming call is never answered.
+  joins and the run exits 1: it is judged by the same expected-deny list, and the call's follow-ups are needed, so
+  they are not on it. An incoming call is never answered.
 
 **`export`** sanitizes a capture (its dir or `events.jsonl`, or `<scenario>/<ts>` under the captures dir) into
 `reference/<name>` (`.jsonl` added without an extension; a `.json` name gets one JSON array), file `0600`, dirs `0700`.

@@ -27,8 +27,8 @@ Run 2, right after it on the same build, was clean. The arming failure's details
 that run's printed output: `fence.log` doesn't record arming failures.
 
 **Why it is worth doing either way**: if the breach is real, the fence has a hole under load that needs closing. If it
-is false, every loaded run risks a breach verdict that has to be read by hand, the same way the exit code is today
-(`ab-chat-exit-code-counts-unreviewed-denies.md`).
+is false, every loaded run risks a breach verdict that has to be read by hand, the same way the exit code had to be
+before the scenarios got their reviewed expected-deny list (`crates/proto-lab/src/scenario/expected.rs`).
 
 **What would settle it**:
 

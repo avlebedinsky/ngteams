@@ -201,19 +201,22 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Create: `crates/proto-lab/src/scenario/expected.rs`, `crates/proto-lab/tests/expected_denies.rs`
 - Delete: `docs/backlog/ab-chat-exit-code-counts-unreviewed-denies.md` (when done)
 
-- [ ] tests first: a reviewed **expected-deny** list (host + method + path pattern; frames by socket host) changes
+- [x] tests first: a reviewed **expected-deny** list (host + method + path pattern; frames by socket host) changes
       only how a run is judged, never a verdict; a request on it is still denied and logged
-- [ ] tests first: still unexpected, whatever the list says: any deny on a mapped target (the a–b chat), any deny
+- [x] tests first: still unexpected, whatever the list says: any deny on a mapped target (the a–b chat), any deny
       whose cause isn't `Unclassified` (partial or refused membership), any class not on the list. The only
       exceptions are the two forced denies `ab_chat::deny_probes` sets up, each told apart by its rule's label: this
       run's enforcement probe (`THIS_RUN_PROBE`) and an earlier run's probe the web client sends again on load (the
       `PROBE_MARKER` rule, given a label of its own). Any other forced deny and every ordinary deny of a mapped write
       stay unexpected, and enforcement evidence still counts only `THIS_RUN_PROBE`
-- [ ] build the list from the classes in the backlog item, each entry with the reason the scenario doesn't need it;
+- [x] build the list from the classes in the backlog item, each entry with the reason the scenario doesn't need it;
       test it against those classes and against a mapped write that must stay unexpected
-- [ ] `ab-chat` and `echo-call` use it (`echo-call` keeps failing on the call follow-ups: they are needed, not
+      (also on it: CSA's `chatsAndChannelsByIds`, a chat-list read by `POST` denied in nearly every run and listed in
+      `docs/protocol/fence-targets.md`, though the backlog item didn't name it; the captured writes on a tenant team's
+      thread stay off the list)
+- [x] `ab-chat` and `echo-call` use it (`echo-call` keeps failing on the call follow-ups: they are needed, not
       expected)
-- [ ] `cargo test -p proto-lab` and the gate pass; delete the backlog item
+- [x] `cargo test -p proto-lab` and the gate pass; delete the backlog item
 
 ### Task 2: Is an arming timeout under load a real breach?
 **Files:**

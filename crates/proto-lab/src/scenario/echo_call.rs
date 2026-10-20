@@ -16,12 +16,14 @@
 //! 3. a clicks "Make a test call" ([`TEST_CALL_BUTTON`]); the call screen must show its hang-up button ([`HANG_UP`])
 //!    within [`CALL_START`], and the fence must have allowed the call start ([`call_starts`]);
 //! 4. the run stays in the call for [`IN_CALL`], hangs up (if the call is still up) and records [`AFTER_HANG_UP`] more;
-//! 5. after the run, the capture's WebRTC statistics must show audio sent and received ([`AudioSummary`]).
+//! 5. after the run, the capture's WebRTC statistics must show audio sent and received ([`AudioSummary`]), and no deny
+//!    but the reviewed expected-deny list's ([`policy`]).
 //!
 //! Live on 2026-10-20 steps 1–4 pass; step 5 doesn't: the call's later requests (the echo service's `add` to the
 //! conversation, the call's acknowledgements, `leave`) land on the call, whose members the fence can't read yet, so they
 //! stay unknown and are denied; the leg reaches Teams' media controller, the echo service never joins
-//! (`docs/protocol/calling-echo.md`).
+//! (`docs/protocol/calling-echo.md`). Those denies stay unexpected: the call needs them
+//! (`docs/backlog/fence-call-follow-ups.md`), so they are no class of the list.
 //!
 //! The scenario never answers a call: nothing in it accepts one, and the fence keeps an answer unmapped (`Unknown`,
 //! denied). A failed run leaves the page's screenshot as `failure.png` in its capture.
@@ -44,7 +46,8 @@ use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{load, save_screenshot};
 use super::dsl::{Driver, Selector, StepError};
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
+use super::expected::Review;
+use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// The account that places the call.
 pub const ACCOUNT: Alias = Alias::A;
@@ -99,8 +102,12 @@ pub const TONE_RATE: u32 = 48_000;
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 
-/// The denies a run of this scenario expects: telemetry only, as in `ab-chat`.
-pub const POLICY: DenyPolicy = DenyPolicy::ForcedAnd(&TELEMETRY_HOSTS);
+/// The denies a run of this scenario expects: the reviewed list alone ([`super::expected`]). The run forces no deny,
+/// and every deny on the call (its follow-ups, the echo service's `add`, `leave`) stays unexpected: the call needs them.
+#[must_use]
+pub fn policy() -> DenyPolicy {
+    DenyPolicy::Reviewed(Review::new())
+}
 
 /// A mono 16-bit PCM WAV file of a sine tone at `frequency` Hz, `seconds` long at `rate` samples per second, at half
 /// of full scale.
@@ -299,7 +306,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     }
     let capture = session.capture_dir().map(Path::to_path_buf);
     // the browser goes down and the capture is finished, whatever happened
-    report.close_account(ACCOUNT, session, POLICY).await;
+    report.close_account(ACCOUNT, session, &policy()).await;
     if let Some(dir) = capture {
         judge_capture(&dir, &mut report);
         report.notes.push(format!("recorded into {}", dir.display()));

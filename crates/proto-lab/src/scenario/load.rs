@@ -70,7 +70,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             frame_denials,
             capture,
         },
-        DenyPolicy::AllExpected,
+        &DenyPolicy::AllExpected,
     );
     Ok(report)
 }

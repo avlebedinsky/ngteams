@@ -6,7 +6,8 @@
 //! 1. Before anything loads, a's fence force-denies every write carrying [`PROBE_MARKER`] (`deny_probes`), for the
 //!    whole run: the web client keeps a send that failed and sends it again on a later load, so an earlier run's probe
 //!    would otherwise go out now. This run's probe ([`probe_text`] of a run-unique [`nonce`]) has a forced deny of its
-//!    own, labelled [`THIS_RUN_PROBE`], so its deny can't be mistaken for an earlier run's probe sent again.
+//!    own, labelled [`THIS_RUN_PROBE`], so its deny can't be mistaken for an earlier run's probe sent again (labelled
+//!    [`EARLIER_RUN_PROBE`]).
 //! 2. a and b open the web client; both must load.
 //! 3. a opens the chat with b ([`chat_link`] by b's MRI), which the client starts with a `POST v1/threads` (a chat
 //!    create the fence judges by the members in its body) the first time.
@@ -15,12 +16,13 @@
 //!    id) must fail in a's page with `net::ERR_BLOCKED_BY_CLIENT`.
 //! 5. a sends the real message. b then opens the chat with a and must show it within [`DELIVERY`], and must not show
 //!    the probe: b reads the chat's history from the service, so the probe missing there means it never got there.
-//! 6. After the run: no deny but the forced ones and telemetry ([`DenyPolicy::ForcedAnd`] with [`TELEMETRY_HOSTS`]).
+//! 6. After the run, judged by [`policy`]: no deny but the two probes' forced ones and the reviewed expected-deny list
+//!    ([`super::expected`]), and nothing denied on the a–b chat but the probes.
 //!
-//! Run live on 2026-10-20 (`docs/protocol/fence-targets.md`): steps 2–5 pass. Step 6 doesn't: the web client makes
-//! hundreds of requests the fence doesn't map (middle-tier lookups posted as `POST`, presence, the user's own
-//! properties, the push channel's frames, …) and denies, as in `load`; until they are reviewed they count as
-//! unexpected and the run exits non-zero. A failed run leaves each page's screenshot as `failure.png` in its capture.
+//! Run live on 2026-10-20 (`docs/protocol/fence-targets.md`): steps 2–5 pass. Step 6 failed then on the web client's
+//! hundreds of unmapped requests (middle-tier lookups posted as `POST`, presence, the user's own properties, the push
+//! channel's frames, …), which the fence denies, as in `load`; those classes are now on the reviewed list, and stay
+//! denied. A failed run leaves each page's screenshot as `failure.png` in its capture.
 //!
 //! Every call to a page is bounded ([`super::dsl::CALL_TIMEOUT`], shorter for the failure's diagnosis): a page that
 //! stops answering fails the step, and the run still closes both browsers and finishes both captures.
@@ -38,7 +40,8 @@ use crate::session::{LabSession, SessionOptions, SessionState, TEAMS_URL};
 use regex::Regex;
 
 use super::dsl::{Driver, RequestPattern, Selector, StepError};
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
+use super::expected::Review;
+use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// The message compose box's selector: the web client's rich-text editor (seen on 2026-10-20).
 const COMPOSE_CSS: &str = r#"[contenteditable="true"][role="textbox"]"#;
@@ -55,6 +58,13 @@ pub const PROBE_MARKER: &str = "lab fence probe ";
 
 /// The label of the forced deny of this run's probe ([`crate::fence_http::Denial::label`]).
 pub const THIS_RUN_PROBE: &str = "this run's probe";
+
+/// The label of the forced deny of any other probe ([`PROBE_MARKER`]): an earlier run's, which the web client still
+/// holds as unsent and sends again once it loads.
+pub const EARLIER_RUN_PROBE: &str = "an earlier run's probe";
+
+/// The forced denies a run of this scenario expects: its two probe rules' ([`deny_probes`]).
+pub const EXPECTED_FORCED: [&str; 2] = [THIS_RUN_PROBE, EARLIER_RUN_PROBE];
 
 /// How long the failure's diagnosis (the compose box's state, a screenshot) may wait for a page.
 const DIAGNOSIS_WAIT: Duration = Duration::from_secs(10);
@@ -73,8 +83,19 @@ pub const PROBE_FAIL: Duration = Duration::from_secs(30);
 /// How long the real message gets to reach b.
 pub const DELIVERY: Duration = Duration::from_secs(60);
 
-/// The denies a run of this scenario expects.
-pub const POLICY: DenyPolicy = DenyPolicy::ForcedAnd(&TELEMETRY_HOSTS);
+/// The denies a run of this scenario expects: the reviewed list ([`super::expected`]) and the two probe rules' forced
+/// denies ([`EXPECTED_FORCED`]); with the a–b chat's id, any other deny of a URL naming that chat ([`chat_url`]) is
+/// unexpected, the list notwithstanding.
+///
+/// # Errors
+/// Never for an id from [`one_to_one_id`]; when the chat's pattern doesn't compile.
+pub fn policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
+    let mut review = Review::new().expecting_forced(&EXPECTED_FORCED);
+    if let Some(chat_id) = chat_id {
+        review = review.with_mapped_target(chat_url(chat_id)?);
+    }
+    Ok(DenyPolicy::Reviewed(review))
+}
 
 /// The 1:1 chat id of two work accounts, as the web client builds it: `19:<oid>_<oid>@unq.gbl.spaces`, the two object
 /// ids (lowercase) sorted. `None` unless both MRIs are `8:orgid:<oid>` of two different accounts.
@@ -169,6 +190,13 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
     let chat_id = one_to_one_id(mri(Alias::A), mri(Alias::B));
+    let policy = policy(chat_id.as_deref()).unwrap_or_else(|error| {
+        // the run fails, and a's and b's denies are still listed
+        report
+            .failures
+            .push(format!("can't tell the a–b chat in a URL: {error}"));
+        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
+    });
     let steps = Steps {
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
@@ -187,7 +215,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     }
     // both browsers go down and both captures are finished, whatever happened to either
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
-        report.close_account(alias, session, POLICY).await;
+        report.close_account(alias, session, &policy).await;
     }
     Ok(report)
 }
@@ -262,7 +290,7 @@ impl Steps<'_> {
 /// its URL: this run's probe (a client that put the first message into the chat's creation is stopped too), and any
 /// earlier run's probe the client still holds as unsent and sends again once it loads. This run's `probe` gets its
 /// rule first, labelled [`THIS_RUN_PROBE`]: a deny names the first rule that matched it, so only this run's probe is
-/// denied under that label.
+/// denied under that label, and any other probe under [`EARLIER_RUN_PROBE`].
 ///
 /// # Errors
 /// Never: the patterns are fixed.
@@ -272,7 +300,11 @@ fn deny_probes(session: &LabSession, probe: &str) -> Result<(), ScenarioError> {
         session.force_deny(any_url(method)?.with_body_containing(probe).labelled(THIS_RUN_PROBE));
     }
     for method in ["POST", "PUT"] {
-        session.force_deny(any_url(method)?.with_body_containing(PROBE_MARKER));
+        session.force_deny(
+            any_url(method)?
+                .with_body_containing(PROBE_MARKER)
+                .labelled(EARLIER_RUN_PROBE),
+        );
     }
     Ok(())
 }

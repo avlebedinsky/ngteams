@@ -916,7 +916,7 @@ async fn a_target_closed_before_it_ran_is_a_warning_not_a_breach() {
         frame_denials: Vec::new(),
         capture: None,
     };
-    report.add_account(run, DenyPolicy::AllExpected);
+    report.add_account(run, &DenyPolicy::AllExpected);
     assert!(!report.failed(), "{:?}", report.failures);
     let warned = |note: &String| note.contains("warning") && note.contains("1 target(s)");
     assert!(report.notes.iter().any(warned), "{:?}", report.notes);
@@ -943,7 +943,7 @@ async fn a_target_whose_resume_was_sent_may_have_run_and_is_a_breach() {
         frame_denials: Vec::new(),
         capture: None,
     };
-    report.add_account(run, DenyPolicy::AllExpected);
+    report.add_account(run, &DenyPolicy::AllExpected);
     assert!(
         report.failures.iter().any(|failure| failure.contains("breached")),
         "{:?}",

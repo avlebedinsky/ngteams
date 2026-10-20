@@ -9,11 +9,13 @@
 //!   to the echo service, the one approved participant outside the lab, stays in it a while and hangs up; recorded.
 //!
 //! The steps are in [`dsl`]. A run fails (`proto-lab run` exits non-zero) when its goal isn't reached, when the fence
-//! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`].
+//! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`]. The writing scenarios
+//! judge by the reviewed expected-deny list ([`expected`]), which never changes what the fence denies.
 
 pub mod ab_chat;
 pub mod dsl;
 pub mod echo_call;
+pub mod expected;
 pub mod load;
 
 use std::fmt;
@@ -21,15 +23,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::ValueEnum;
-use url::Url;
 
 use crate::browser::Display;
 use crate::config::{Alias, LabPaths};
-use crate::fence_http::{Denial, DenyCause};
+use crate::fence_http::Denial;
 use crate::fence_ws::FrameDenial;
 use crate::session::{FenceReport, LabSession, SessionError};
 
 use self::dsl::StepError;
+use self::expected::Review;
 
 /// The scenarios `proto-lab run` knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -69,55 +71,45 @@ pub struct RunOptions {
 }
 
 /// Which denies a scenario expects; any other one fails the run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum DenyPolicy {
     /// Every deny is expected: a fail-closed run that records what the client tries (`load`).
     AllExpected,
-    /// Only the denies the run forced, and requests to these host suffixes (matched on a dot boundary): telemetry,
-    /// which no scenario needs and the fence keeps denying. No WebSocket frame deny is expected: a run forces denies
-    /// on requests only, and telemetry goes out as posts.
-    ForcedAnd(&'static [&'static str]),
+    /// The reviewed expected-deny list ([`expected`]), with the forced denies and the mapped targets of the scenario.
+    Reviewed(Review),
 }
-
-/// The telemetry hosts the web client posts to, whose denies a writing run expects.
-pub const TELEMETRY_HOSTS: [&str; 1] = ["events.data.microsoft.com"];
 
 impl DenyPolicy {
     /// Whether this policy expects `denial`.
     #[must_use]
-    pub fn expects(self, denial: &Denial) -> bool {
+    pub fn expects(&self, denial: &Denial) -> bool {
         match self {
             Self::AllExpected => true,
-            Self::ForcedAnd(hosts) => {
-                denial.cause == DenyCause::Forced
-                    || Url::parse(&denial.url).is_ok_and(|url| {
-                        url.host_str()
-                            .is_some_and(|host| hosts.iter().any(|suffix| on_host(host, suffix)))
-                    })
-            }
+            Self::Reviewed(review) => review.expects(denial),
         }
     }
 
     /// The denies of `denials` this policy doesn't expect.
     #[must_use]
-    pub fn unexpected(self, denials: &[Denial]) -> Vec<Denial> {
+    pub fn unexpected(&self, denials: &[Denial]) -> Vec<Denial> {
         denials.iter().filter(|denial| !self.expects(denial)).cloned().collect()
     }
 
-    /// Whether this policy expects a WebSocket frame deny: only [`DenyPolicy::AllExpected`] does.
+    /// Whether this policy expects the WebSocket frame deny `denial`.
     #[must_use]
-    pub fn expects_frames(self) -> bool {
-        self == Self::AllExpected
+    pub fn expects_frame(&self, denial: &FrameDenial) -> bool {
+        match self {
+            Self::AllExpected => true,
+            Self::Reviewed(review) => review.expects_frame(denial),
+        }
     }
-}
 
-/// `host` is `suffix` or a subdomain of it.
-fn on_host(host: &str, suffix: &str) -> bool {
-    host.eq_ignore_ascii_case(suffix)
-        || host
-            .len()
-            .checked_sub(suffix.len() + 1)
-            .is_some_and(|dot| host.as_bytes()[dot] == b'.' && host[dot + 1..].eq_ignore_ascii_case(suffix))
+    /// Whether this policy expects frame denies it can't see (counted, but not listed): only
+    /// [`DenyPolicy::AllExpected`] does.
+    #[must_use]
+    pub fn expects_unseen_frames(&self) -> bool {
+        matches!(self, Self::AllExpected)
+    }
 }
 
 /// What became of one account's browser in a run.
@@ -164,7 +156,7 @@ impl ScenarioReport {
     /// Adds an account's run, judged by `policy`: a breach or an unexpected deny, of a request or a WebSocket frame,
     /// fails the scenario. A target closed before it ran ([`FenceReport::closed_unarmed`]) is a warning in the notes:
     /// the scenario fails on it only through a step that needed it.
-    pub fn add_account(&mut self, run: AccountRun, policy: DenyPolicy) {
+    pub fn add_account(&mut self, run: AccountRun, policy: &DenyPolicy) {
         let alias = run.alias;
         if run.fence.breached() {
             self.failures
@@ -183,20 +175,18 @@ impl ScenarioReport {
                 denial.method, denial.url, denial.cause
             ));
         }
-        if !policy.expects_frames() {
-            for denial in &run.frame_denials {
-                self.failures.push(format!(
-                    "{alias}: unexpected deny of a WebSocket frame to {} ({:?})",
-                    denial.url, denial.cause
-                ));
-            }
-            // the report's count, taken at another moment, may hold frames the list doesn't
-            let unlisted = run.fence.denied_frames.saturating_sub(run.frame_denials.len());
-            if unlisted > 0 {
-                self.failures.push(format!(
-                    "{alias}: unexpected deny of {unlisted} more WebSocket frame(s)"
-                ));
-            }
+        for denial in run.frame_denials.iter().filter(|denial| !policy.expects_frame(denial)) {
+            self.failures.push(format!(
+                "{alias}: unexpected deny of a WebSocket frame to {} ({:?})",
+                denial.url, denial.cause
+            ));
+        }
+        // the report's count, taken at another moment, may hold frames the list doesn't: nothing says what they were
+        let unlisted = run.fence.denied_frames.saturating_sub(run.frame_denials.len());
+        if unlisted > 0 && !policy.expects_unseen_frames() {
+            self.failures.push(format!(
+                "{alias}: unexpected deny of {unlisted} more WebSocket frame(s)"
+            ));
         }
         self.accounts.push(run);
     }
@@ -206,7 +196,7 @@ impl ScenarioReport {
     /// accounts' runs are kept. The run is judged on what the fence decided once the close has waited for the decisions
     /// still running, so a deny that lands while the browser goes down counts too (and one still undecided when that
     /// wait ends fails the run through the close).
-    pub async fn close_account(&mut self, alias: Alias, session: LabSession, policy: DenyPolicy) {
+    pub async fn close_account(&mut self, alias: Alias, session: LabSession, policy: &DenyPolicy) {
         let decisions = session.decisions();
         let capture = session.capture_dir().map(Path::to_path_buf);
         if let Err(error) = session.close().await {

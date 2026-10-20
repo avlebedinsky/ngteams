@@ -212,7 +212,8 @@ captures stay outside the repository and no fixture was exported from them.
 - [x] Own state: the own properties above; no endpoint registration (the client uses the push channel `trouter` and the
       async gateway instead). Still not on the own-state list.
 - [x] `RegistrationToken`: never sent; reads work without it.
-- [x] Denied in every run, all `Unknown` and so expected by `load` and unexpected for `ab-chat`: telemetry
+- [x] Denied in every run, all `Unknown`, expected by `load` and, through the reviewed expected-deny list that keeps
+      them denied (`crates/proto-lab/src/scenario/expected.rs`), by `ab-chat` and `echo-call`: telemetry
       (`*.events.data.microsoft.com`, `browser.pipe.aria.microsoft.com`, `admin.microsoft.com/api/instrument`), the
       middle tier's lookups by `POST` (`users/fetchShortProfile` with a JSON array of MRIs, `users/fetch`,
       `effectivePolicies`, `useraggregatesettings`, `fetchfeaturesettings`, `apps/aggregatedEntitlements`,

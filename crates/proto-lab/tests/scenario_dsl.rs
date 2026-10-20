@@ -17,7 +17,7 @@ use proto_lab::scenario::ab_chat::{
     self, MESSAGE_POST, PROBE_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id, probe_text,
 };
 use proto_lab::scenario::dsl::{Driver, RequestPattern, Selector, StepError};
-use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
+use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport, echo_call};
 use proto_lab::session::FenceReport;
 use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Roster};
 use wiremock::matchers::{method, path};
@@ -317,9 +317,16 @@ fn denial(url: &str, cause: DenyCause) -> Denial {
     Denial::new("POST", url, cause)
 }
 
+fn forced(url: &str, label: Option<&str>) -> Denial {
+    Denial {
+        label: label.map(str::to_owned),
+        ..denial(url, DenyCause::Forced)
+    }
+}
+
 #[test]
-fn a_writing_scenario_expects_only_forced_and_telemetry_denies() {
-    let policy = DenyPolicy::ForcedAnd(&TELEMETRY_HOSTS);
+fn a_writing_scenario_expects_only_its_probes_and_the_reviewed_list() -> TestResult {
+    let policy = ab_chat::policy(Some(CHAT))?;
     let expected = [
         denial(
             "https://browser.events.data.microsoft.com/OneCollector/1.0/",
@@ -329,9 +336,17 @@ fn a_writing_scenario_expects_only_forced_and_telemetry_denies() {
             "https://teams.events.data.microsoft.com/OneCollector/1.0/",
             DenyCause::Unclassified,
         ),
-        denial("https://teams.microsoft.com/api/chatsvc/emea/v1/x", DenyCause::Forced),
+        forced(
+            "https://teams.microsoft.com/api/chatsvc/emea/v1/x",
+            Some(ab_chat::THIS_RUN_PROBE),
+        ),
+        forced(
+            "https://teams.microsoft.com/api/chatsvc/emea/v1/x",
+            Some(ab_chat::EARLIER_RUN_PROBE),
+        ),
     ];
     let unexpected = [
+        forced("https://teams.microsoft.com/api/chatsvc/emea/v1/x", None),
         denial(
             "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints/x",
             DenyCause::Unclassified,
@@ -352,6 +367,9 @@ fn a_writing_scenario_expects_only_forced_and_telemetry_denies() {
     let all: Vec<Denial> = expected.iter().chain(&unexpected).cloned().collect();
     assert_eq!(policy.unexpected(&all), unexpected.to_vec());
     assert!(DenyPolicy::AllExpected.unexpected(&all).is_empty());
+    // echo-call forces no deny: not even a probe's is expected
+    assert!(!echo_call::policy().expects(&expected[2]));
+    Ok(())
 }
 
 const LOW: &str = "8:orgid:0000000a-0000-4000-8000-000000000001";
@@ -414,22 +432,26 @@ fn account(denials: Vec<Denial>, fence: FenceReport) -> AccountRun {
 }
 
 #[test]
-fn a_writing_run_fails_on_any_denied_frame() {
-    let policy = DenyPolicy::ForcedAnd(&TELEMETRY_HOSTS);
+fn a_writing_run_fails_on_a_denied_frame_off_the_list() -> TestResult {
+    let policy = ab_chat::policy(Some(CHAT))?;
     let frame = FrameDenial {
         url: "wss://teams.microsoft.com/api/socket".to_owned(),
         cause: DenyCause::Unclassified,
     };
+    let listed = FrameDenial {
+        url: "wss://augloop.office.com/".to_owned(),
+        cause: DenyCause::Unclassified,
+    };
     let fence = FenceReport {
-        denied_frames: 1,
+        denied_frames: 2,
         ..FenceReport::default()
     };
     let run = AccountRun {
-        frame_denials: vec![frame.clone()],
+        frame_denials: vec![frame.clone(), listed.clone()],
         ..account(Vec::new(), fence.clone())
     };
     let mut report = ScenarioReport::new(ScenarioName::AbChat);
-    report.add_account(run, policy);
+    report.add_account(run, &policy);
     assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
     assert!(
         report.failures[0].contains("WebSocket frame") && report.failures[0].contains("/api/socket"),
@@ -437,12 +459,27 @@ fn a_writing_run_fails_on_any_denied_frame() {
         report.failures
     );
 
-    // a deny the report counts but the list missed fails it too
+    // a frame on a listed socket alone passes
+    let mut clean = ScenarioReport::new(ScenarioName::AbChat);
+    let run = AccountRun {
+        frame_denials: vec![listed],
+        ..account(
+            Vec::new(),
+            FenceReport {
+                denied_frames: 1,
+                ..FenceReport::default()
+            },
+        )
+    };
+    clean.add_account(run, &policy);
+    assert!(!clean.failed(), "{:?}", clean.failures);
+
+    // a deny the report counts but the list missed fails it too: nothing says what it was
     let mut counted = ScenarioReport::new(ScenarioName::AbChat);
-    counted.add_account(account(Vec::new(), fence.clone()), policy);
+    counted.add_account(account(Vec::new(), fence.clone()), &policy);
     assert!(counted.failed());
     assert!(
-        counted.failures[0].contains("1 more WebSocket frame"),
+        counted.failures[0].contains("2 more WebSocket frame"),
         "{:?}",
         counted.failures
     );
@@ -453,8 +490,9 @@ fn a_writing_run_fails_on_any_denied_frame() {
         frame_denials: vec![frame],
         ..account(Vec::new(), fence)
     };
-    load.add_account(run, DenyPolicy::AllExpected);
+    load.add_account(run, &DenyPolicy::AllExpected);
     assert!(!load.failed(), "{:?}", load.failures);
+    Ok(())
 }
 
 #[test]
@@ -467,16 +505,16 @@ fn a_run_fails_on_an_unexpected_deny_or_a_breach_only() {
         "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints/x",
         DenyCause::Unclassified,
     );
-    let policy = DenyPolicy::ForcedAnd(&TELEMETRY_HOSTS);
+    let policy = echo_call::policy();
 
-    let mut clean = ScenarioReport::new(ScenarioName::AbChat);
-    clean.add_account(account(vec![telemetry.clone()], FenceReport::default()), policy);
+    let mut clean = ScenarioReport::new(ScenarioName::EchoCall);
+    clean.add_account(account(vec![telemetry.clone()], FenceReport::default()), &policy);
     assert!(!clean.failed(), "{:?}", clean.failures);
 
-    let mut denied = ScenarioReport::new(ScenarioName::AbChat);
+    let mut denied = ScenarioReport::new(ScenarioName::EchoCall);
     denied.add_account(
         account(vec![telemetry, endpoint.clone()], FenceReport::default()),
-        policy,
+        &policy,
     );
     assert!(denied.failed());
     assert_eq!(denied.failures.len(), 1);
@@ -488,13 +526,16 @@ fn a_run_fails_on_an_unexpected_deny_or_a_breach_only() {
 
     // the fail-closed load expects every deny, but not a breach
     let mut load = ScenarioReport::new(ScenarioName::Load);
-    load.add_account(account(vec![endpoint], FenceReport::default()), DenyPolicy::AllExpected);
+    load.add_account(
+        account(vec![endpoint], FenceReport::default()),
+        &DenyPolicy::AllExpected,
+    );
     assert!(!load.failed());
     let breached = FenceReport {
         unsanctioned_frames: 1,
         ..FenceReport::default()
     };
-    load.add_account(account(Vec::new(), breached), DenyPolicy::AllExpected);
+    load.add_account(account(Vec::new(), breached), &DenyPolicy::AllExpected);
     assert!(load.failed());
     assert!(load.failures[0].contains("breached"), "{:?}", load.failures);
 }
