@@ -526,10 +526,21 @@ teams-fence (write guard, lab builds)   teams-mock (fixture replay, M1)   proto-
   - ➕ met: fmt, clippy, lint-report exit 0; `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 cargo test --workspace` 582 passed, 0 failed, 3 ignored on the rerun; fixture guard 13 passed. Flake: `scenario_dsl::a_request_is_waited_for_even_when_it_came_first_and_matched_once` failed once (`net::ERR_ABORTED`, load about 40), 3/3 green on rerun
 
 ### Task 21: [Final] Update documentation
-- [ ] README.md: what this is, the lab layout, `proto-lab` commands, how to run tests
-- [ ] CLAUDE.md: patterns discovered during M0 (fence arming, fixtures, scenarios)
-- [ ] write the M1 plan (headless chat core), informed by the spike results
-- [ ] move this plan to `docs/plans/completed/`
+- [x] README.md: what this is, the lab layout, `proto-lab` commands, how to run tests
+  - ➕ every command checked against `proto-lab --help` of a normal build (`chrome install|path`, `login`, `status`,
+    `auth`, `run load|ab-chat|echo-call`, `export [--strict]`, `bundles import|search`, `service-mri`); the lab's
+    directories and files, the crates and spikes, the test variables (`PROTO_LAB_CHROME`, `PROTO_LAB_REQUIRE_CHROME`,
+    `GPUI_SMOKE_REQUIRE`, `--features live` + `PROTO_LAB_LIVE`, `ECHO_CALL_TURN_*`, `GPUI_BENCH_*`), where docs live
+- [x] CLAUDE.md: patterns discovered during M0 (fence arming, fixtures, scenarios)
+  - ➕ a "Patterns learned in M0" section (arming order and levels, the WebSocket guard, service workers, worklets,
+    unarmable targets; the sealed fence API; captures, reference copies, fixtures; scenarios; live runs; Chrome under
+    load); the hard rules unchanged
+- [x] write the M1 plan (headless chat core), informed by the spike results
+  - ➕ `docs/plans/20261020-native-teams-m1-headless-chat-core.md`; its first tasks close the M0 items M1 depends on
+    (the expected-deny list, our own `ic3` token at the chat service, token renewal)
+- [x] move this plan to `docs/plans/completed/`
+  - ➕ left to the orchestrator, which moves the file after merging; README and CLAUDE.md already point at
+    `docs/plans/completed/`
 
 ## Roadmap after M0 (each milestone gets its own plan)
 - **M1 — headless chat core:** `teams-store` (SQLite), `teams-trouter`, chatsvc (conversations, messages, send/edit/delete/react, rich text, mentions, attachments), an outbox with `clientmessageid` dedupe, catch-up sync, `teams-mock`. *Exit:* A→B delivery in under 2 s, covering edits, reactions and a 3-person group chat, automated.
