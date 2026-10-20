@@ -4,8 +4,9 @@
 //! The list changes only how a run is judged, never a verdict: the fence never reads it, so a request on it is still
 //! denied, kept and logged to `fence.log` like any other. A deny is expected ([`Review::expects`]) only when it is on
 //! the list *and*:
-//! - its cause is [`DenyCause::Unclassified`]: a partial or refused membership read, an own-state request whose log
-//!   failed, a malformed pause or a frame sent through another realm stays unexpected whatever its URL;
+//! - its cause is [`DenyCause::Unclassified`]: a partial or refused membership read, a request whose `fence.log` entry
+//!   failed (own-state or listed), a malformed pause or a frame sent through another realm stays unexpected whatever
+//!   its URL;
 //! - its URL doesn't name a mapped target of the scenario (the a–b chat in `ab-chat`): nothing denied on the chat the
 //!   scenario writes to is ever expected.
 //!

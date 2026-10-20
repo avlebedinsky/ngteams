@@ -87,7 +87,7 @@ pub struct MalformedPause(pub &'static str);
 pub enum DenyCause {
     /// Nothing classifies it.
     Unclassified,
-    /// An own-state request whose allow couldn't be written to `fence.log`.
+    /// An own-state request whose allow, or an unclassified one whose deny, couldn't be written to `fence.log`.
     LogUnavailable,
     /// The fence refused the write (its reason is in `fence.log`).
     Fenced(teams_fence::DenyReason),
@@ -492,8 +492,8 @@ impl HttpFence {
 
 /// Decides one request or frame already classified, for either layer of the browser fence: a read passes unlogged, an
 /// own-state one passes logged (denied if the log won't take it), a mapped write passes only with a permit from
-/// [`Fence::check`] (which logs it), and anything else is denied and logged. `request` names the channel, method and
-/// URL for the log; its outcome is set here.
+/// [`Fence::check`] (which logs it), and anything else is denied and logged ([`DenyCause::LogUnavailable`] when the
+/// log won't take it). `request` names the channel, method and URL for the log; its outcome is set here.
 pub(crate) async fn judge(
     fence: &Fence,
     members: &(dyn MembershipSource + Send),
@@ -511,11 +511,11 @@ pub(crate) async fn judge(
             Ok(_permit) => Verdict::Allow,
             Err(denied) => Verdict::Deny(DenyCause::Fenced(*denied.reason())),
         },
-        Classification::Unknown => {
-            // denied whether or not the log takes it; a log failure fails the run through the deny anyway
-            let _ = fence.log().record_request(&record(RequestOutcome::Unclassified));
-            Verdict::Deny(DenyCause::Unclassified)
-        }
+        // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
+        Classification::Unknown => match fence.log().record_request(&record(RequestOutcome::Unclassified)) {
+            Ok(()) => Verdict::Deny(DenyCause::Unclassified),
+            Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
+        },
     }
 }
 

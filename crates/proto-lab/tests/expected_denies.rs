@@ -527,6 +527,42 @@ async fn the_list_changes_only_the_judgement_never_the_verdict() -> TestResult {
     Ok(())
 }
 
+/// A log sink that takes nothing.
+struct Refuses;
+
+impl std::io::Write for Refuses {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("disk full"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A listed request whose deny `fence.log` won't take is still denied, but as `LogUnavailable`: the lost audit entry
+/// fails the run instead of hiding behind the list.
+#[tokio::test]
+async fn a_listed_deny_the_log_refuses_is_unexpected() -> TestResult {
+    let fence = Arc::new(Fence::new(
+        Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], []),
+        FenceLog::from_writer(Refuses),
+    ));
+    let http = HttpFence::new(Classifier::mapped(), fence, Arc::new(FailClosed));
+    let classes = backlog_classes();
+    for (method, url) in &classes {
+        assert_eq!(
+            http.decide(&paused(method, url, Some("{}"))).await,
+            Verdict::Deny(DenyCause::LogUnavailable),
+            "{method} {url}"
+        );
+    }
+    let denials = http.denials();
+    assert_eq!(denials.len(), classes.len());
+    assert_eq!(ab_chat_policy()?.unexpected(&denials).len(), denials.len());
+    Ok(())
+}
+
 #[test]
 fn the_list_alone_expects_no_forced_deny_and_maps_nothing() {
     let review = Review::new();
