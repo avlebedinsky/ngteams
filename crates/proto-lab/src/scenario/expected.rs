@@ -159,6 +159,24 @@ pub const REQUESTS: &[ExpectedRequest] = &[
                  read, and the scenario's chat doesn't depend on them",
     },
     ExpectedRequest {
+        class: "bot invokes",
+        hosts: TEAMS,
+        method: "POST",
+        path: "/api/chatsvc/*/v1/agents/*/invoke",
+        reason: "a bot invoke reaches the bot's own service, which the fence never allows: the ones seen \
+                 (ab-chat-full, 2026-10-20) are the compose box's message extensions fetching their commands \
+                 (`composeExtension/fetchCommands`) when an editor opens, and the scenario uses no message extension",
+    },
+    ExpectedRequest {
+        class: "own activity feed item read",
+        hosts: TEAMS,
+        method: "PUT",
+        path: "/api/chatsvc/*/v1/users/ME/conversations/48%3Anotifications/messages/*/properties",
+        reason: "the account marking an item of its own activity feed read (`?name=isread`, `{\"isread\":\"true\"}`), \
+                 seen once b's reaction reached a's feed (ab-chat-full, 2026-10-20): it changes only what the \
+                 account's own feed shows, and the scenario reads nothing from the feed",
+    },
+    ExpectedRequest {
         class: "chat list by POST (CSA)",
         hosts: TEAMS,
         method: "POST",

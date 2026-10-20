@@ -5,7 +5,8 @@ with `proto-lab bundles import`, searched with `proto-lab bundles search` and re
 builders), plus [auth.md](auth.md). Then checked the same day against live traffic, once the lab accounts had a Teams
 license: `proto-lab run load` (account a) and `proto-lab run ab-chat` (a and b, the a–b 1:1 chat), the web client as
 served then. [What the captures showed](#what-the-captures-showed) lists what they confirmed and what they corrected;
-the sections above it are already corrected.
+the sections above it are already corrected. M1 Task 7's `proto-lab run ab-chat-full` (the same day) exercised the
+edit, the delete, the reactions and a quoted reply, and corrected the edit row ([chat.md](chat.md) has the shapes).
 
 The code: the mapping is `Classifier::mapped` (`crates/proto-lab/src/classify.rs`), the member read is
 `LiveMembershipSource` (`crates/teams-fence/src/membership.rs`). Both are tested against synthetic fixtures in the
@@ -102,11 +103,11 @@ is a chat id, `1:1` or group, never a channel).
 
 | Request | Body | WriteKind | Target |
 |---|---|---|---|
-| `POST v1/users/ME/conversations/<chat>/messages` | `messagetype` `Text`, `RichText`, `RichText/…` | `Message` | `Conversation(<chat>)` |
+| `POST v1/users/ME/conversations/<chat>/messages` | `messagetype` `Text`, `RichText`, `RichText/…` | `Message` | `Conversation(<chat>)`, adding whoever `properties.mentions` names |
 | same | `messagetype` `Control/Typing`, `Control/ClearTyping` | `Typing` | `Conversation(<chat>)` |
-| `PUT v1/users/ME/conversations/<chat>/messages/<msg>` | the edited message | `Edit` | `Conversation(<chat>)` |
+| `PUT v1/users/ME/conversations/<chat>/messages/<msg>` | the whole message again, a message `messagetype` | `Edit` | `Conversation(<chat>)`, adding whoever `properties.mentions` names |
 | `DELETE v1/users/ME/conversations/<chat>/messages/<msg>?behavior=softDelete` | none | `Delete` | `Conversation(<chat>)` |
-| `PUT`/`DELETE v1/users/ME/conversations/<chat>/messages/<msg>/properties?name=emotions` | the reaction | `Reaction` | `Conversation(<chat>)` |
+| `PUT`/`DELETE v1/users/ME/conversations/<chat>/messages/<msg>/properties?name=emotions` | `{"emotions": {"key", "value"}}` / `{"emotions": {"key"}}` | `Reaction` | `Conversation(<chat>)` |
 | `PUT v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` | the read horizon | `ReadReceipt` | `Conversation(<chat>)` |
 | `POST v1/threads` | `{members: [{id, role}], properties}` | `ChatCreate` | `New`, adding every member in the body |
 | `PUT v1/threads/<chat>/members` | `{members: [{id, role}]}` | `MemberChange` | `Conversation(<chat>)`, adding the body's members |
@@ -116,7 +117,9 @@ is a chat id, `1:1` or group, never a channel).
 A message post's body is the message: `content`, `messagetype`, `contenttype`, `clientmessageid`, `imdisplayname`,
 `properties`. A reply in a reply chain posts to the chain's conversation id (`…;messageid=<root>`).
 
-Seen live (the web client of 2026-10-20, the a–b 1:1 chat; the rows not listed here weren't exercised):
+Seen live (the web client of 2026-10-20, the a–b 1:1 chat: `ab-chat`, and `ab-chat-full` for the edit, the delete,
+the reactions and the quoted reply; the rows not listed here weren't exercised). The bodies and the answers in detail,
+and how each change reads back, are in [chat.md](chat.md):
 
 - **New 1:1 chat**: the first send in a chat that doesn't exist yet is preceded by `POST v1/threads` with
   `{"members": [{"id": "8:orgid:<oid>", "role": "Admin"}, …both…], "properties": {"threadType": "chat",
@@ -133,11 +136,25 @@ Seen live (the web client of 2026-10-20, the a–b 1:1 chat; the rows not listed
   "Control/Typing"}`.
 - **Read receipt**: `PUT v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` with
   `{"consumptionhorizon": "<horizon>"}`, answering 200.
+- **Edit**: `PUT …/messages/<id>` with the whole message again (its `id`, the new `content`, `version` an ISO time,
+  `properties.edittime`), answering 200 with an empty body.
+- **Delete**: `DELETE …/messages/<id>?behavior=softDelete`, no body, answering 200.
+- **Reaction**: `PUT …/messages/<id>/properties?name=emotions` with `{"emotions": {"key": "like", "value": <ms>}}`, and
+  taken back with `DELETE` on the same URL and `{"emotions": {"key": "like"}}`; both answer 200.
+- **Quoted reply**: an ordinary message post (`RichText/Html`) whose content quotes the message and whose
+  `properties.qtdMsgs` names it. A 1:1 chat has no reply chain.
+- **Mention**: not seen (the fence leaves the mention picker nobody to offer; chat.md). Its form is the bundle's.
 
 Rules that keep the mapping fail-closed:
 
 - The kind of a message post comes from its body. A body the browser didn't inline, one that isn't JSON, or a
-  `messagetype` not in the table (`Control/…` other than typing, `Event/…`, …) is `Unknown` and denied.
+  `messagetype` not in the table (`Control/…` other than typing, `Event/…`, …) is `Unknown` and denied. An edit needs
+  its body too, with a message `messagetype`.
+- Whoever a message or an edit mentions is an added participant of its target, so the fence judges them as it judges
+  the chat's members, and a mention of an outsider is denied. The mentions are `properties.mentions`, a JSON string of
+  a list whose entries each name an `mri` (the bundle's form; the captures only had the empty `"[]"`). No
+  `properties` or no `mentions` is no mention; `properties` that aren't an object, or `mentions` in any other form,
+  are `Unknown`.
 - A new chat's participants are exactly the body's `members`; a body without them is `Unknown`. The fence judges a
   `New` target by those participants without a read.
 - Only chat ids map: channels (`@thread.tacv2`, `@thread.skype`) and reply chains (`;messageid=`) are `Unknown`,
@@ -150,11 +167,13 @@ Rules that keep the mapping fail-closed:
     (`v1/threads/<id>/livemessages`), forwarding and moving messages (`…/messages/forward`, `…/messages/move`),
     targeted messages, reply-chain metadata (`rcmetadata`, `rc2s`), file references (`v1/threads/<id>/files`), drafts
     (`v1/users/ME/drafts`);
-  - bot invokes (`POST v1/agents/<bot mri>/invoke`), a `BotReply` candidate;
+  - bot invokes (`POST v1/agents/<bot mri>/invoke`), a `BotReply` candidate; seen live whenever an editor opened (the compose
+    box at the mention picker, an edit box): `composeExtension/fetchCommands` to two message extensions' bots, denied
+    (and expected by the scenarios' reviewed list, [chat.md](chat.md));
   - the user's own properties (`PUT v1/users/ME/properties?name=<n>`), endpoint registration
     (`PUT`/`DELETE v2/users/ME/endpoints/<id>`) and the active-endpoint post (`activeendpoint`). These change only the
     account's own state and are **candidates for the own-state list**, but they are not on it: nothing is added there
-    without a review. Seen live: the own properties `messageDensity`, `favorites`, `firstLoginInformation` and `locale`,
+    without a review. Seen live: the own properties `messageDensity`, `favorites`, `firstLoginInformation`, `locale` and `readReceiptsEnabled`,
     each a one-key JSON object, which the client retries more than a hundred times a run while they are denied; no
     endpoint registration or active-endpoint post at all. Until reviewed a writing run sees them denied (`ab-chat`
     fails on them, which is the honest outcome).
@@ -205,8 +224,11 @@ captures stay outside the repository and no fixture was exported from them.
 - [ ] A group chat's read and `thread_members` paging: not seen (the lab accounts have no group chat). Group chats stay
       `Partial(Unsupported)`.
 - [x] Writes as sent: chat create, message (`RichText/Html`), typing (`Control/Typing`) and read receipt
-      (`consumptionhorizon`) match the table and the mapping (see [Writes](#writes)). Edit, delete, reactions, member
-      changes and reply chains weren't exercised.
+      (`consumptionhorizon`) match the table and the mapping (see [Writes](#writes)).
+- [x] Edit, delete, reaction (added and taken back) and quoted reply, exercised by `ab-chat-full` (2026-10-20, M1
+      Task 7): they match the table; each was mapped to the a–b chat and allowed after the live member read. The edit
+      sends the whole message again, which the mapping now requires (with a message `messagetype`), and a message's or
+      an edit's mentioned MRIs are added participants. Member changes, reply chains and a mention weren't exercised.
 - [x] The 1:1 id: the two object ids, lowercase and sorted (the bundle builds it that way; the live chat's id matches).
       Federated and guest chats weren't seen.
 - [x] Own state: the own properties above; no endpoint registration (the client uses the push channel `trouter` and the

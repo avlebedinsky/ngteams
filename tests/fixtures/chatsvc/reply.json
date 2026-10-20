@@ -1,0 +1,82 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: a's reply quoting its own earlier message in the a-b 1:1 chat, ab-chat-full run of 2026-10-20 (capture ab-chat-full/20261020T194153Z, reference copy reference/chat/ab-chat-full-a.jsonl, read locally), and the reply as b's read gave it back (ab-chat-full/20261020T194156Z). The quote is a blockquote of itemtype Reply in the content, naming the quoted message's id, its sender and a preview, plus properties.qtdMsgs: a JSON string on the way in, a list of objects (the id as a number, a validation result) on the way out. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md.",
+  "request": {
+    "method": "POST",
+    "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+    "body": {
+      "id": "-1",
+      "type": "Message",
+      "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "conversationLink": "blah/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "from": "8:orgid:<guid:a>",
+      "fromUserId": "8:orgid:<guid:a>",
+      "composetime": "2026-01-01T00:00:49.500Z",
+      "originalarrivaltime": "2026-01-01T00:00:49.500Z",
+      "content": "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"1760000010000\"><strong itemprop=\"mri\" itemid=\"8:orgid:<guid:a>\">Lab A</strong><span itemprop=\"time\" itemid=\"1760000010000\"></span><p itemprop=\"preview\">a made-up message, edited</p></blockquote><p>a made-up reply</p>",
+      "messagetype": "RichText/Html",
+      "contenttype": "Text",
+      "imdisplayname": "Lab A",
+      "clientmessageid": "4444444444444444444",
+      "callId": "",
+      "state": 0,
+      "version": "0",
+      "amsreferences": [],
+      "properties": {
+        "importance": "",
+        "subject": "",
+        "title": "",
+        "cards": "[]",
+        "links": "[]",
+        "mentions": "[]",
+        "onbehalfof": null,
+        "files": "[]",
+        "qtdMsgs": "[{\"messageId\":\"1760000010000\",\"sender\":\"8:orgid:<guid:a>\",\"time\":1760000010000}]",
+        "policyViolation": null,
+        "formatVariant": "TEAMS"
+      },
+      "crossPostChannels": []
+    }
+  },
+  "response": {
+    "status": 201,
+    "body": {"OriginalArrivalTime": 1760000050000}
+  },
+  "read_back": {
+    "sequenceId": 4,
+    "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "fromDisplayNameInToken": "Lab A",
+    "id": "1760000050000",
+    "clientmessageid": "4444444444444444444",
+    "version": "1760000050000",
+    "messagetype": "RichText/Html",
+    "content": "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"1760000010000\"><strong itemprop=\"mri\" itemid=\"8:orgid:<guid:a>\">Lab A</strong><span itemprop=\"time\" itemid=\"1760000010000\"></span><p itemprop=\"preview\">a made-up message, edited</p></blockquote>\n<p>a made-up reply</p>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "imdisplayname": "Lab A",
+    "composetime": "2026-01-01T00:00:50.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:00:50.0000000Z",
+    "properties": {
+      "mentions": "[]",
+      "cards": "[]",
+      "links": "[]",
+      "files": "[]",
+      "qtdMsgs": [
+        {
+          "messageId": 1760000010000,
+          "sender": "8:orgid:<guid:a>",
+          "time": 1760000010000,
+          "message": null,
+          "validationResult": "Valid",
+          "sharedRefId": null,
+          "replyChainId": null
+        }
+      ],
+      "formatVariant": "TEAMS",
+      "hasValidMsgReferences": true,
+      "languageStamp": "languages=en:100;length:40;&detector=Bling"
+    }
+  }
+}

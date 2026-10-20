@@ -1,0 +1,37 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: a's like on its own message in the a-b 1:1 chat and its taking it back, ab-chat-full run of 2026-10-20 (capture ab-chat-full/20261020T194153Z, reference copy reference/chat/ab-chat-full-a.jsonl, read locally), and the message's emotions as b's read gave them back (ab-chat-full/20261020T194156Z), plus a like a kept on its reply as b's read gave it back in the confirming run (ab-chat-full/20261020T205156Z). Both writes answer 200 with a bare text (200, null). A reaction taken back leaves its key with no users; a kept one lists its user with the service's time and the value the client sent, as a string, and annotationsSummary counts it. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md.",
+  "add": {
+    "request": {
+      "method": "PUT",
+      "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties",
+      "query": "name=emotions",
+      "body": {"emotions": {"key": "like", "value": 1760000025000}}
+    },
+    "response": {"status": 200, "body_text": "200"}
+  },
+  "remove": {
+    "request": {
+      "method": "DELETE",
+      "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties",
+      "query": "name=emotions",
+      "body": {"emotions": {"key": "like"}}
+    },
+    "response": {"status": 200, "body_text": "null"}
+  },
+  "read_back_taken_back": {
+    "id": "1760000010000",
+    "version": "1760000030000",
+    "annotationsSummary": {},
+    "properties": {
+      "emotions": [{"key": "like", "users": []}]
+    }
+  },
+  "read_back_kept": {
+    "id": "1760000050000",
+    "version": "1760000055100",
+    "annotationsSummary": {"emotions": {"like": 1}},
+    "properties": {
+      "emotions": [{"key": "like", "users": [{"mri": "8:orgid:<guid:a>", "time": 1760000055100, "value": "1760000055000"}]}]
+    }
+  }
+}

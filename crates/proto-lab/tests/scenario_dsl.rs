@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
+use proto_lab::cdp::{CdpError, RemoteError};
 use proto_lab::classify::{Classifier, OwnKind, OwnRule};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
@@ -16,10 +17,12 @@ use proto_lab::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
 use proto_lab::scenario::ab_chat::{
     self, MESSAGE_POST, PROBE_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id, probe_text,
 };
-use proto_lab::scenario::dsl::{Driver, RequestPattern, Selector, StepError};
+use proto_lab::scenario::ab_chat_full::{self, Texts, Writes};
+use proto_lab::scenario::dsl::{self, Driver, Key, RequestPattern, SeenRequest, Selector, StepError};
 use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport, echo_call};
 use proto_lab::session::FenceReport;
 use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Roster};
+use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -27,12 +30,29 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// A page that adds a `data-tid` element after 400 ms, fetches `/api/ping` at once and `/api/late` after 600 ms, and
 /// echoes what is typed into its box when Enter is pressed. Its `hang` button stalls the page for good, a moment after
-/// the click.
+/// the click. Its message, far down the page, grows a `bar` button once the mouse is over it and says which button
+/// opened its context menu; the box reports other keys pressed in it.
 const PAGE: &str = r#"<!doctype html><html><body>
 <div id="out"></div>
+<div id="keys"></div>
+<div id="menu"></div>
 <button data-tid="hang" onclick="setTimeout(() => { for (;;) {} }, 50)">hang</button>
 <div contenteditable="true" role="textbox" data-tid="box" id="box"></div>
+<div data-tid="message" id="message" style="margin-top: 3000px">a message</div>
 <script>
+const message = document.getElementById('message');
+message.addEventListener('mouseover', () => {
+  if (document.querySelector('[data-tid="bar"]')) return;
+  const bar = document.createElement('button'); bar.dataset.tid = 'bar'; message.append(bar);
+});
+message.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  document.getElementById('menu').textContent = 'menu by button ' + event.button;
+});
+document.getElementById('box').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') return;
+  document.getElementById('keys').textContent = 'key ' + (event.ctrlKey ? 'ctrl+' : '') + event.key;
+});
 fetch('/api/ping?n=1');
 setTimeout(() => { const e = document.createElement('div'); e.dataset.tid = 'chat-list'; e.textContent = 'chats'; document.body.append(e); }, 400);
 setTimeout(() => fetch('/api/late'), 600);
@@ -53,11 +73,11 @@ struct Run {
     _dir: tempfile::TempDir,
 }
 
-async fn serve() -> MockServer {
+async fn serve(page: &'static str) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/page"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(PAGE, "text/html"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(page, "text/html"))
         .mount(&server)
         .await;
     Mock::given(path("/api/ping"))
@@ -81,10 +101,18 @@ async fn with_page<F>(body: F) -> TestResult
 where
     F: AsyncFnOnce(&mut Run) -> TestResult,
 {
+    with_html(PAGE, body).await
+}
+
+/// [`with_page`] on the page `page`.
+async fn with_html<F>(page: &'static str, body: F) -> TestResult
+where
+    F: AsyncFnOnce(&mut Run) -> TestResult,
+{
     let Some(chrome) = common::chrome_or_skip() else {
         return Ok(());
     };
-    let server = serve().await;
+    let server = serve(page).await;
     let dir = tempfile::tempdir()?;
     let browser = Browser::launch(
         &chrome,
@@ -298,6 +326,193 @@ async fn typing_and_enter_send_and_the_text_shows() -> TestResult {
         Ok(())
     })
     .await
+}
+
+#[tokio::test]
+async fn hovering_shows_what_is_under_the_pointer_and_a_right_click_opens_the_menu() -> TestResult {
+    with_page(async |run| {
+        let message = Selector::Tid("message");
+        run.driver
+            .wait_for("the message", message, Duration::from_secs(5))
+            .await?;
+        assert!(
+            run.driver
+                .wait_for_tid("no bar yet", "bar", Duration::from_millis(300))
+                .await
+                .is_err()
+        );
+        // the message is far below the fold: hovering scrolls it into view first
+        run.driver.hover("hover the message", message).await?;
+        run.driver
+            .wait_for_tid("the bar", "bar", Duration::from_secs(5))
+            .await?;
+        run.driver.right_click("the message's menu", message).await?;
+        run.driver
+            .wait_for_text("the menu", "menu by button 2", Duration::from_secs(5))
+            .await?;
+        for error in [
+            run.driver.hover("hover nothing", Selector::Tid("missing")).await,
+            run.driver
+                .right_click("right-click nothing", Selector::Tid("missing"))
+                .await,
+        ] {
+            let error = error.err().ok_or("pointed at a missing element")?;
+            assert!(matches!(error, StepError::Failed { .. }), "{error:?}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("no an element with data-tid \"missing\" to point at")
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A page that keeps its renderer busy most of the time, unless it was opened as `?arrived`: then it grows the
+/// element a wait looks for.
+const BUSY_PAGE: &str = r"<!doctype html><html><body><script>
+if (location.search === '?arrived') {
+  setTimeout(() => { const e = document.createElement('div'); e.dataset.tid = 'arrived'; document.body.append(e); }, 300);
+} else {
+  setInterval(() => { const until = Date.now() + 400; while (Date.now() < until) {} }, 450);
+}
+</script></body></html>";
+
+#[tokio::test]
+async fn a_wait_goes_on_across_navigations_of_its_page() -> TestResult {
+    with_html(BUSY_PAGE, async |run| {
+        // a busy page on one site, left for the other (a new renderer) while waits look into it, a few times over.
+        // The race the live run hit (an evaluation still pending when its page navigates) can't be forced here;
+        // what the browser answers then is `navigated_away`'s, tested below
+        let port = Url::parse(&run.server.uri())?.port().ok_or("no port")?;
+        for round in 0..3 {
+            let (here, there) = if round % 2 == 0 {
+                ("localhost", "127.0.0.1")
+            } else {
+                ("127.0.0.1", "localhost")
+            };
+            run.driver
+                .navigate("the busy page", &format!("http://{here}:{port}/page"))
+                .await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            run.driver
+                .navigate("the other site", &format!("http://{there}:{port}/page?arrived"))
+                .await?;
+            run.driver
+                .wait_for_tid("after the hop", "arrived", Duration::from_secs(20))
+                .await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[test]
+fn only_an_evaluation_refused_because_its_page_navigated_counts_as_navigated_away() {
+    let remote = |message: &str| StepError::Cdp {
+        step: "a wait".to_owned(),
+        source: CdpError::Remote {
+            method: "Runtime.evaluate".to_owned(),
+            error: RemoteError {
+                code: -32000,
+                message: message.to_owned(),
+            },
+        },
+    };
+    for message in [
+        "Inspected target navigated or closed",
+        "Execution context was destroyed.",
+        "Cannot find context with specified id",
+    ] {
+        assert!(dsl::navigated_away(&remote(message)), "{message}");
+    }
+    for error in [
+        remote("Session with given id not found."),
+        StepError::Cdp {
+            step: "a wait".to_owned(),
+            source: CdpError::Closed,
+        },
+        StepError::Closed {
+            step: "a wait".to_owned(),
+        },
+    ] {
+        assert!(!dsl::navigated_away(&error), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn keys_are_pressed_with_their_modifiers() -> TestResult {
+    with_page(async |run| {
+        run.driver.type_into("type", Selector::Tid("box"), "hello").await?;
+        run.driver.press("select all", Key::SELECT_ALL).await?;
+        run.driver
+            .wait_for_text("ctrl+a", "key ctrl+a", Duration::from_secs(5))
+            .await?;
+        run.driver.press("escape", Key::ESCAPE).await?;
+        run.driver
+            .wait_for_text("escape", "key Escape", Duration::from_secs(5))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_answer_is_waited_for_only_among_requests_not_passed_over() -> TestResult {
+    with_page(async |run| {
+        run.driver
+            .wait_for_tid("the page ran", "chat-list", Duration::from_secs(10))
+            .await?;
+        let ping = RequestPattern::new(Some("GET"), "/api/ping")?;
+        // the ping went out (and was answered) before: passed over, a wait for its answer runs out
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        run.driver.skip_seen();
+        let error = run
+            .driver
+            .wait_for_answer("the ping, passed over", &ping, Duration::from_millis(300))
+            .await
+            .err()
+            .ok_or("waited for a request passed over")?;
+        assert!(error.to_string().contains("to be answered"), "{error}");
+        run.driver.type_into("type", Selector::Tid("box"), "hello").await?;
+        run.driver.press_enter("send").await?;
+        let send = RequestPattern::new(Some("POST"), "/api/send$")?;
+        let seen = run
+            .driver
+            .wait_for_answer(
+                "the post",
+                &send.clone().with_body_containing("hello"),
+                Duration::from_secs(5),
+            )
+            .await?;
+        assert_eq!((seen.method.as_str(), seen.status), ("POST", Some(204)));
+        assert_eq!(seen.body.as_deref(), Some("hello"));
+        Ok(())
+    })
+    .await
+}
+
+#[test]
+fn a_request_pattern_with_a_body_text_matches_only_a_body_holding_it() -> TestResult {
+    let request = |body: Option<&str>| SeenRequest {
+        session: None,
+        request_id: "1".to_owned(),
+        method: "POST".to_owned(),
+        url: "https://example.test/messages".to_owned(),
+        status: None,
+        failed: None,
+        body: body.map(str::to_owned),
+    };
+    let any = RequestPattern::new(Some("POST"), "/messages$")?;
+    let message = any.clone().with_body_containing("lab message");
+    assert!(any.matches_request(&request(None)));
+    assert!(message.matches_request(&request(Some(r#"{"content":"<p>lab message 1</p>"}"#))));
+    // a typing post to the same URL, and a body the events left out
+    assert!(!message.matches_request(&request(Some(r#"{"messagetype":"Control/Typing"}"#))));
+    assert!(!message.matches_request(&request(None)));
+    assert!(message.to_string().ends_with(r#"holding "lab message""#), "{message}");
+    Ok(())
 }
 
 #[test]
@@ -538,4 +753,221 @@ fn a_run_fails_on_an_unexpected_deny_or_a_breach_only() {
     load.add_account(account(Vec::new(), breached), &DenyPolicy::AllExpected);
     assert!(load.failed());
     assert!(load.failures[0].contains("breached"), "{:?}", load.failures);
+}
+
+/// A page shaped like the web client's chat where `ab-chat-full` acts: two messages (the second quoting the first), a
+/// hover bar that shows once the first is pointed at, with an edit action, a like and a more-options button whose menu
+/// holds delete; a hidden like ahead of the bar's; and a compose box. Each control says on the page what it did; the
+/// like posts too.
+const CHAT_PAGE: &str = r#"<!doctype html><html><body>
+<div id="out"></div>
+<button data-tid="message-actions-like" hidden>a hidden like</button>
+<div data-tid="chat-pane-message" id="first"><p>lab full n1 first</p></div>
+<div data-tid="chat-pane-message" id="quote"><blockquote>lab full n1 first</blockquote><p>lab full n1 reply</p></div>
+<div id="bar" hidden>
+  <div data-tid="message-hover-action-edit"><button onclick="say('edit')">edit</button></div>
+  <button data-tid="message-actions-like" onclick="say('like'); fetch('/api/send', {method: 'POST', body: 'like'})">like</button>
+  <button data-tid="message-actions-more" onclick="document.getElementById('menu').hidden = false">more</button>
+</div>
+<div id="menu" hidden><div role="menuitem" data-tid="message-actions-delete" onclick="say('delete')">delete</div></div>
+<div contenteditable="true" role="textbox" id="compose"></div>
+<script>
+function say(what) { document.getElementById('out').textContent = 'did ' + what; }
+document.getElementById('first').addEventListener('mouseover', () => { document.getElementById('bar').hidden = false; });
+</script></body></html>"#;
+
+#[tokio::test]
+async fn ab_chat_full_finds_the_oldest_message_holding_a_text_and_its_actions() -> TestResult {
+    with_html(CHAT_PAGE, async |run| {
+        let drive = &mut run.driver;
+        ab_chat_full::find_message(drive, "find the first message", "lab full n1 first").await?;
+        // the quote of it comes later: the message itself is marked
+        let marked = |id| format!("#{id}[data-lab-mark]");
+        drive
+            .wait_for("marked", Selector::Css(&marked("first")), Duration::from_secs(1))
+            .await?;
+        // on the hover bar, which shows once the message is pointed at
+        ab_chat_full::message_action(drive, "a", "edit").await?;
+        drive
+            .wait_for_text("edited", "did edit", Duration::from_secs(5))
+            .await?;
+        // not on the bar: from the more-options menu
+        ab_chat_full::message_action(drive, "a", "delete").await?;
+        drive
+            .wait_for_text("deleted", "did delete", Duration::from_secs(5))
+            .await?;
+        // the visible like, not the hidden one ahead of it
+        drive.skip_seen();
+        let like = r#"[data-tid="message-actions-like"]"#;
+        ab_chat_full::click_visible(drive, "like", like, Duration::from_secs(5)).await?;
+        drive.wait_for_text("liked", "did like", Duration::from_secs(5)).await?;
+        let post = RequestPattern::new(Some("POST"), "/api/send$")?;
+        let seen = drive
+            .wait_for_answer("the like's post", &post, Duration::from_secs(5))
+            .await?;
+        ab_chat_full::answered("the like", &seen)?;
+        // the mark moves to the next message found
+        ab_chat_full::find_message(drive, "find the reply", "lab full n1 reply").await?;
+        drive
+            .wait_for("marked", Selector::Css(&marked("quote")), Duration::from_secs(1))
+            .await?;
+        assert!(!drive.shows_text("look", "nothing").await?);
+        let missing =
+            ab_chat_full::click_visible(drive, "nothing", r#"[data-tid="nope"]"#, Duration::from_millis(300)).await;
+        assert!(matches!(missing, Err(StepError::Timeout { .. })), "{missing:?}");
+        Ok(())
+    })
+    .await
+}
+
+/// An edit box like the web client's: ahead of the compose box, it rebuilds its element (a new one, same text, the
+/// focus moved to it) the first time it is focused, and Enter in it says what it saves.
+const EDIT_PAGE: &str = r#"<!doctype html><html><body>
+<div id="out"></div>
+<div id="slot"><div contenteditable="true" role="textbox" class="edit">lab full n1 first</div></div>
+<div contenteditable="true" role="textbox" id="compose"></div>
+<script>
+let rebuilt = false;
+document.getElementById('slot').addEventListener('focusin', (event) => {
+  if (rebuilt) return;
+  rebuilt = true;
+  const old = event.target, fresh = old.cloneNode(true);
+  setTimeout(() => { old.replaceWith(fresh); fresh.focus(); }, 0);
+});
+document.getElementById('slot').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  document.getElementById('out').textContent = 'saved ' + event.target.innerText;
+});
+</script></body></html>"#;
+
+#[tokio::test]
+async fn ab_chat_full_rewrites_an_editor_that_rebuilds_itself_when_focused() -> TestResult {
+    with_html(EDIT_PAGE, async |run| {
+        let drive = &mut run.driver;
+        ab_chat_full::rewrite_editor(drive, "the edit box", "lab full n1 first", "lab full n1 first, edited").await?;
+        drive.press_enter("save").await?;
+        drive
+            .wait_for_text("saved", "saved lab full n1 first, edited", Duration::from_secs(5))
+            .await?;
+        // nothing went into the compose box
+        let compose = drive
+            .wait_until_true(
+                "the compose box is empty",
+                "document.getElementById('compose').innerText === ''",
+                "an empty compose box",
+                Duration::from_secs(1),
+            )
+            .await;
+        assert!(compose.is_ok(), "{compose:?}");
+        Ok(())
+    })
+    .await
+}
+
+fn seen(status: Option<u16>, failed: Option<&str>) -> SeenRequest {
+    SeenRequest {
+        session: None,
+        request_id: "1".to_owned(),
+        method: "PUT".to_owned(),
+        url: "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/c/messages/1?name=emotions"
+            .to_owned(),
+        status,
+        failed: failed.map(str::to_owned),
+        body: None,
+    }
+}
+
+#[test]
+fn ab_chat_full_takes_only_a_2xx_answer_for_a_write_that_went_through() {
+    assert!(ab_chat_full::answered("a write", &seen(Some(201), None)).is_ok());
+    assert!(ab_chat_full::answered("a write", &seen(Some(200), None)).is_ok());
+    for (status, failed, says) in [
+        (
+            None,
+            Some("net::ERR_BLOCKED_BY_CLIENT"),
+            "failed in the page: net::ERR_BLOCKED_BY_CLIENT",
+        ),
+        (Some(404), None, "was answered Some(404)"),
+        (Some(302), None, "was answered Some(302)"),
+    ] {
+        let error = ab_chat_full::answered("a write", &seen(status, failed))
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(error.contains(says), "{error}");
+        // the request is named without its query
+        assert!(
+            error.contains("PUT https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/c/messages/1 "),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn ab_chat_full_waits_for_the_writes_on_the_lab_chat_only() -> TestResult {
+    let chat = one_to_one_id(
+        "8:orgid:00000000-0000-4000-8000-00000000000a",
+        "8:orgid:00000000-0000-4000-8000-00000000000b",
+    )
+    .ok_or("no chat id")?;
+    let encoded = chat.replace(':', "%3A").replace('@', "%40");
+    let writes = Writes::on(&chat)?;
+    let base = "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations";
+    for id in [chat.as_str(), encoded.as_str()] {
+        let message = format!("{base}/{id}/messages/1792512759831");
+        assert!(writes.post.matches("POST", &format!("{base}/{id}/messages")));
+        assert!(writes.edit.matches("PUT", &message));
+        assert!(
+            writes
+                .delete
+                .matches("DELETE", &format!("{message}?behavior=softDelete"))
+        );
+        for method in ["PUT", "DELETE"] {
+            assert!(
+                writes
+                    .reaction
+                    .matches(method, &format!("{message}/properties?name=emotions"))
+            );
+        }
+        let horizon = format!("{base}/{id}/properties?name=consumptionhorizon");
+        assert!(writes.read_receipt.matches("PUT", &horizon));
+        // not one for another
+        assert!(!writes.post.matches("POST", &message));
+        assert!(
+            !writes
+                .edit
+                .matches("PUT", &format!("{message}/properties?name=emotions"))
+        );
+        assert!(
+            !writes
+                .reaction
+                .matches("PUT", &format!("{message}/properties?name=emotionsX"))
+        );
+        assert!(
+            !writes
+                .read_receipt
+                .matches("PUT", &format!("{base}/{id}/properties?name=lastTimeFavorited"))
+        );
+    }
+    // another chat's writes are none of them
+    let other = "19%3Aother%40thread.v2";
+    assert!(!writes.post.matches("POST", &format!("{base}/{other}/messages")));
+    assert!(!writes.edit.matches("PUT", &format!("{base}/{other}/messages/1")));
+    Ok(())
+}
+
+#[test]
+fn ab_chat_full_texts_are_this_runs_and_apart() {
+    let texts = Texts::new("n1");
+    let all = [&texts.first, &texts.edited, &texts.reply, &texts.doomed];
+    for (index, text) in all.iter().enumerate() {
+        assert!(text.contains("n1") && !text.contains(PROBE_MARKER.trim()), "{text}");
+        for (other_index, other) in all.iter().enumerate() {
+            // only the edit holds another text: the message it edits
+            let holds = index != other_index && text.contains(other.as_str());
+            assert_eq!(holds, (index, other_index) == (1, 0), "{text} / {other}");
+        }
+    }
+    assert_eq!(ScenarioName::AbChatFull.as_str(), "ab-chat-full");
 }

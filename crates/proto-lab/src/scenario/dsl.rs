@@ -11,9 +11,15 @@
 //!   the request the last wait matched (so a request sent just before the wait isn't missed, and none is matched twice);
 //! - [`Driver::wait_for_failure`]: that request failed, and how (a fenced one with `net::ERR_BLOCKED_BY_CLIENT`);
 //! - [`Driver::wait_for_text`]: the page shows a text;
-//! - [`Driver::navigate`], [`Driver::click`], [`Driver::type_into`], [`Driver::press_enter`].
+//! - [`Driver::wait_for_answer`]: a request matching a pattern was answered (or failed), and how;
+//! - [`Driver::navigate`], [`Driver::click`], [`Driver::type_into`], [`Driver::insert_text`] (into the focused
+//!   element), [`Driver::press_enter`], [`Driver::press`] (any
+//!   [`Key`]), [`Driver::hover`] and [`Driver::right_click`] (real mouse events, for what shows only under the
+//!   pointer).
 //!
-//! A wait that runs out fails with [`StepError::Timeout`], naming the step, how long it waited and what for. So does
+//! A wait goes on across a navigation of its page: an evaluation the browser refuses because the page navigated
+//! ([`navigated_away`]) is a look that found nothing yet. A wait that runs out fails with [`StepError::Timeout`],
+//! naming the step, how long it waited and what for. So does
 //! any call to the page that gets no answer within the driver's call timeout ([`CALL_TIMEOUT`] unless
 //! [`Driver::set_call_timeout`] sets another): a page that stops answering (a busy renderer, a modal dialog) fails the
 //! step instead of hanging the run before its teardown.
@@ -98,11 +104,55 @@ impl fmt::Display for Selector<'_> {
     }
 }
 
-/// Which requests a wait is for: a method (any if `None`) and a regular expression found in the URL.
+/// A key [`Driver::press`] presses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Key {
+    /// The key's value (`KeyboardEvent.key`).
+    pub key: &'static str,
+    /// The physical key (`KeyboardEvent.code`).
+    pub code: &'static str,
+    /// The Windows virtual key code.
+    pub virtual_key: u32,
+    /// The text the key types, if it types any.
+    pub text: Option<&'static str>,
+    /// The modifiers held: Alt 1, Ctrl 2, Meta 4, Shift 8.
+    pub modifiers: u32,
+}
+
+impl Key {
+    /// Enter: sends a message from the compose box.
+    pub const ENTER: Self = Self {
+        key: "Enter",
+        code: "Enter",
+        virtual_key: 13,
+        text: Some("\r"),
+        modifiers: 0,
+    };
+    /// Escape: closes a menu or a popup.
+    pub const ESCAPE: Self = Self {
+        key: "Escape",
+        code: "Escape",
+        virtual_key: 27,
+        text: None,
+        modifiers: 0,
+    };
+    /// Ctrl+A: selects everything in the focused editor.
+    pub const SELECT_ALL: Self = Self {
+        key: "a",
+        code: "KeyA",
+        virtual_key: 65,
+        text: None,
+        modifiers: 2,
+    };
+}
+
+/// Which requests a wait is for: a method (any if `None`), a regular expression found in the URL and, optionally, a
+/// text the body holds ([`RequestPattern::with_body_containing`]).
 #[derive(Clone, Debug)]
 pub struct RequestPattern {
     method: Option<String>,
     url: Regex,
+    body: Option<String>,
 }
 
 impl RequestPattern {
@@ -112,15 +162,37 @@ impl RequestPattern {
         Ok(Self {
             method: method.map(str::to_ascii_uppercase),
             url: Regex::new(url)?,
+            body: None,
         })
     }
 
+    /// The same pattern, matching only a request whose body (as the `Network` events carry it inline) holds `text`: a
+    /// message post rather than the typing posts to the same URL. A request whose body the events left out never
+    /// matches.
+    #[must_use]
+    pub fn with_body_containing(mut self, text: &str) -> Self {
+        self.body = Some(text.to_owned());
+        self
+    }
+
+    /// Whether a request of `method` to `url` matches the method and the URL (a pattern with a body text needs
+    /// [`Self::matches_request`]).
     #[must_use]
     pub fn matches(&self, method: &str, url: &str) -> bool {
         self.method
             .as_deref()
             .is_none_or(|wanted| wanted.eq_ignore_ascii_case(method))
             && self.url.is_match(url)
+    }
+
+    /// Whether `request` matches: its method, its URL and, for a pattern with a body text, its body.
+    #[must_use]
+    pub fn matches_request(&self, request: &SeenRequest) -> bool {
+        self.matches(&request.method, &request.url)
+            && self
+                .body
+                .as_deref()
+                .is_none_or(|text| request.body.as_deref().is_some_and(|body| body.contains(text)))
     }
 }
 
@@ -131,7 +203,11 @@ impl fmt::Display for RequestPattern {
             "a {} request to /{}/",
             self.method.as_deref().unwrap_or("any"),
             self.url
-        )
+        )?;
+        match &self.body {
+            Some(text) => write!(f, " holding {text:?}"),
+            None => Ok(()),
+        }
     }
 }
 
@@ -148,6 +224,9 @@ pub struct SeenRequest {
     pub status: Option<u16>,
     /// Why it failed (`Network.loadingFailed`'s `errorText`), if it did.
     pub failed: Option<String>,
+    /// Its body, when the event carried it inline (`postData`); kept in memory only, for
+    /// [`RequestPattern::with_body_containing`].
+    pub body: Option<String>,
 }
 
 /// Drives one armed tab (see the module docs).
@@ -258,6 +337,15 @@ impl Driver {
         );
         self.expect_true(step, &expression, &format!("no {selector} to type into"))
             .await?;
+        self.insert_text(step, text).await
+    }
+
+    /// Types `text` into whatever has the focus, as a person typing would (`Input.insertText`): for an editor that
+    /// rebuilds its element as it is focused, so that no selector found beforehand still finds it.
+    ///
+    /// # Errors
+    /// When the browser refuses the input.
+    pub async fn insert_text(&mut self, step: &str, text: &str) -> Result<(), StepError> {
         self.call(step, "Input.insertText", json!({"text": text}))
             .await
             .map(drop)
@@ -268,14 +356,110 @@ impl Driver {
     /// # Errors
     /// When the browser refuses the input.
     pub async fn press_enter(&mut self, step: &str) -> Result<(), StepError> {
+        self.press(step, Key::ENTER).await
+    }
+
+    /// Presses `key` (with its modifiers) in the focused element, as a keyboard would: down, then up.
+    ///
+    /// # Errors
+    /// When the browser refuses the input.
+    pub async fn press(&mut self, step: &str, key: Key) -> Result<(), StepError> {
         for kind in ["keyDown", "keyUp"] {
-            let mut params = json!({"type": kind, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13});
-            if kind == "keyDown" {
-                params["text"] = json!("\r");
+            let mut params = json!({
+                "type": kind,
+                "key": key.key,
+                "code": key.code,
+                "windowsVirtualKeyCode": key.virtual_key,
+                "modifiers": key.modifiers,
+            });
+            if let (Some(text), "keyDown") = (key.text, kind) {
+                params["text"] = json!(text);
             }
             self.call(step, "Input.dispatchKeyEvent", params).await?;
         }
         Ok(())
+    }
+
+    /// Moves the mouse onto the middle of the element `selector` finds, scrolled into view first, as a person pointing
+    /// at it would: what the page shows only under the pointer (a message's action bar) shows.
+    ///
+    /// # Errors
+    /// When there is no such element, or the browser refuses the input.
+    pub async fn hover(&mut self, step: &str, selector: Selector<'_>) -> Result<(), StepError> {
+        let (x, y) = self.centre(step, selector).await?;
+        self.mouse(step, "mouseMoved", x, y, "none").await
+    }
+
+    /// Right-clicks the middle of the element `selector` finds, scrolled into view first: its context menu opens.
+    ///
+    /// # Errors
+    /// When there is no such element, or the browser refuses the input.
+    pub async fn right_click(&mut self, step: &str, selector: Selector<'_>) -> Result<(), StepError> {
+        let (x, y) = self.centre(step, selector).await?;
+        self.mouse(step, "mouseMoved", x, y, "none").await?;
+        self.mouse(step, "mousePressed", x, y, "right").await?;
+        self.mouse(step, "mouseReleased", x, y, "right").await
+    }
+
+    /// The middle of the element `selector` finds, in the viewport, once it is scrolled into view.
+    async fn centre(&self, step: &str, selector: Selector<'_>) -> Result<(f64, f64), StepError> {
+        let expression = format!(
+            "(() => {{ const e = {}; if (!e) return null; e.scrollIntoView({{block: 'center'}}); \
+             const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }})()",
+            selector.query()
+        );
+        let value = self.evaluate(step, &expression).await?;
+        match (value[0].as_f64(), value[1].as_f64()) {
+            (Some(x), Some(y)) => Ok((x, y)),
+            _ => Err(StepError::Failed {
+                step: step.to_owned(),
+                reason: format!("no {selector} to point at"),
+            }),
+        }
+    }
+
+    /// One mouse event at `(x, y)`; `button` is `none`, `left` or `right`.
+    async fn mouse(&self, step: &str, kind: &str, x: f64, y: f64, button: &str) -> Result<(), StepError> {
+        let mut params = json!({"type": kind, "x": x, "y": y, "button": button});
+        if kind != "mouseMoved" {
+            params["clickCount"] = json!(1);
+        }
+        self.call(step, "Input.dispatchMouseEvent", params).await.map(drop)
+    }
+
+    /// Passes over every request seen so far: the next request wait matches only a request sent from now on.
+    pub fn skip_seen(&mut self) {
+        self.drain();
+        self.cursor = self.requests.len();
+    }
+
+    /// Waits up to `timeout` for the first request matching `pattern`, sent since the driver began or since the request
+    /// the last request wait returned (or [`Self::skip_seen`]), to be answered or to fail, and gives it.
+    ///
+    /// # Errors
+    /// [`StepError::Timeout`] when none is sent and answered in time, [`StepError::Closed`] when the connection goes.
+    pub async fn wait_for_answer(
+        &mut self,
+        step: &str,
+        pattern: &RequestPattern,
+        timeout: Duration,
+    ) -> Result<SeenRequest, StepError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let waiting_for = format!("{pattern} to be answered");
+        loop {
+            self.drain();
+            let found = self.requests[self.cursor..]
+                .iter()
+                .position(|request| pattern.matches_request(request));
+            if let Some(index) = found.map(|offset| self.cursor + offset) {
+                let seen = &self.requests[index];
+                if seen.status.is_some() || seen.failed.is_some() {
+                    self.cursor = index + 1;
+                    return Ok(seen.clone());
+                }
+            }
+            self.wait_for_events(step, deadline, timeout, &waiting_for).await?;
+        }
     }
 
     /// Waits up to `timeout` for a request matching `pattern`, sent since the driver began or since the request the last
@@ -294,7 +478,7 @@ impl Driver {
             self.drain();
             let found = self.requests[self.cursor..]
                 .iter()
-                .position(|request| pattern.matches(&request.method, &request.url));
+                .position(|request| pattern.matches_request(request));
             if let Some(offset) = found {
                 let index = self.cursor + offset;
                 self.cursor = index + 1;
@@ -322,7 +506,7 @@ impl Driver {
             self.drain();
             let found = self.requests[self.cursor..]
                 .iter()
-                .position(|request| request.failed.is_some() && pattern.matches(&request.method, &request.url));
+                .position(|request| request.failed.is_some() && pattern.matches_request(request));
             if let Some(offset) = found {
                 let index = self.cursor + offset;
                 self.cursor = index + 1;
@@ -453,6 +637,7 @@ impl Driver {
                     url: request["url"].as_str().unwrap_or_default().to_owned(),
                     status: None,
                     failed: None,
+                    body: request["postData"].as_str().map(str::to_owned),
                 });
             }
             "Network.responseReceived" => {
@@ -500,9 +685,15 @@ impl Driver {
         loop {
             self.drain();
             // a page that doesn't answer (a busy renderer, a modal dialog) runs out the wait too
-            let value = tokio::time::timeout_at(deadline, self.evaluate(step, expression))
+            let value = match tokio::time::timeout_at(deadline, self.evaluate(step, expression))
                 .await
-                .map_err(|_| timed_out())??;
+                .map_err(|_| timed_out())?
+            {
+                Ok(value) => value,
+                // the page navigated under the evaluation (a deep link reloads the web client): not there yet
+                Err(error) if navigated_away(&error) => Value::Null,
+                Err(error) => return Err(error),
+            };
             if value == Value::Bool(true) {
                 return Ok(());
             }
@@ -569,6 +760,25 @@ impl Driver {
                 source,
             })
     }
+}
+
+/// The browser's answers to an evaluation whose page navigated before it ran or while it ran: the document it was for
+/// is gone, and a wait asks the new one at its next look. One whose tab closed fails at that look instead.
+const NAVIGATED_AWAY: [&str; 3] = [
+    "Inspected target navigated or closed",
+    "Execution context was destroyed",
+    "Cannot find context with specified id",
+];
+
+/// Whether `error` is an evaluation refused only because its page navigated ([`NAVIGATED_AWAY`]): seen live on
+/// 2026-10-20, when a deep link reloaded the web client while a wait looked for its compose box.
+#[must_use]
+pub fn navigated_away(error: &StepError) -> bool {
+    matches!(
+        error,
+        StepError::Cdp { source: CdpError::Remote { error, .. }, .. }
+            if NAVIGATED_AWAY.iter().any(|text| error.message.contains(text))
+    )
 }
 
 /// A JavaScript string literal of `text`.

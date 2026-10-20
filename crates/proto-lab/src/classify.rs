@@ -12,7 +12,8 @@
 //! that uses it is fail-closed: every mutating request outside the own-state list is [`Classification::Unknown`]. A
 //! run that writes uses [`Classifier::mapped`], which also maps the chat service's writes on chats
 //! (`docs/protocol/fence-targets.md`): messages, typing, edits, deletes, reactions, read receipts, new chats and member
-//! changes, each to its [`Target`]. Anything the mapping doesn't recognize, a channel or team among them, stays
+//! changes, each to its [`Target`]; whoever a message or an edit mentions is added to its target, so the fence judges
+//! them as it judges the chat's members. Anything the mapping doesn't recognize, a channel or team among them, stays
 //! [`Classification::Unknown`]. Any method other than the three reading ones counts as mutating, including ones the
 //! classifier has never heard of.
 //!
@@ -290,8 +291,8 @@ fn map_write(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
     };
     let on = |kind, chat: &str| chat_scope(chat).map(|scope| Target::new(kind, scope));
     match (method, path.as_slice()) {
-        ("POST", ["users", "ME", "conversations", chat, "messages"]) => on(message_kind(body?)?, chat),
-        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Edit, chat),
+        ("POST", ["users", "ME", "conversations", chat, "messages"]) => message_write(body?, chat, false),
+        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => message_write(body?, chat, true),
         ("DELETE", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Delete, chat),
         ("PUT" | "DELETE", ["users", "ME", "conversations", chat, "messages", _, "properties"])
             if name()? == "emotions" =>
@@ -322,17 +323,49 @@ fn chat_scope(id: &str) -> Option<Scope> {
     chat.then(|| Scope::Conversation { id: id.to_owned() })
 }
 
-/// What a message post is, by its `messagetype`: typing (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`,
-/// `RichText`, `RichText/…`). Any other type, or a body that isn't a JSON object with one (read by [`strict_json`]), is
-/// unknown.
-fn message_kind(body: &[u8]) -> Option<WriteKind> {
+/// A message post (`edit` false: a message or typing) or an edit (`edit` true: the whole message again, as the web
+/// client sends it) on the chat `chat`, its body read by [`strict_json`]; whoever it mentions is added ([`mentioned`]).
+/// An edit whose body isn't a message ([`message_kind`]) is unknown.
+fn message_write(body: &[u8], chat: &str, edit: bool) -> Option<Target> {
     let body = strict_json(body)?;
+    let kind = match (message_kind(&body)?, edit) {
+        (kind, false) => kind,
+        (WriteKind::Message, true) => WriteKind::Edit,
+        (_, true) => return None,
+    };
+    Some(Target::new(kind, chat_scope(chat)?).with_added(mentioned(&body)?))
+}
+
+/// What a message post (or edit) is, by the `messagetype` of its body (read by [`strict_json`]): typing
+/// (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`, `RichText`, `RichText/…`). Any other type, or a
+/// body that isn't a JSON object with one, is unknown.
+fn message_kind(body: &Value) -> Option<WriteKind> {
     match body.get("messagetype")?.as_str()? {
         "Control/Typing" | "Control/ClearTyping" => Some(WriteKind::Typing),
         "Text" | "RichText" => Some(WriteKind::Message),
         kind if kind.starts_with("RichText/") => Some(WriteKind::Message),
         _ => None,
     }
+}
+
+/// The MRIs a message body mentions: its `properties.mentions`, a JSON list sent as a string, each entry naming one
+/// `mri` (`docs/protocol/chat.md`; the captures showed only the empty list `"[]"`, the entries' form is the web
+/// bundle's). They are the write's added participants, so the fence judges whoever is mentioned as it judges the
+/// chat's members. No `properties`, or no `mentions` in them, is no mention. Anything else is `None` (unknown):
+/// `properties` that aren't an object, `mentions` that aren't a string holding a JSON list read by [`strict_json`],
+/// an entry that isn't an object with a string `mri`.
+fn mentioned(body: &Value) -> Option<Vec<Mri>> {
+    let Some(properties) = body.get("properties") else {
+        return Some(Vec::new());
+    };
+    let Some(mentions) = properties.as_object()?.get("mentions") else {
+        return Some(Vec::new());
+    };
+    strict_json(mentions.as_str()?.as_bytes())?
+        .as_array()?
+        .iter()
+        .map(|mention| mention.as_object()?.get("mri")?.as_str().map(Mri::new))
+        .collect()
 }
 
 /// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the body

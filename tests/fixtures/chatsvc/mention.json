@@ -1,0 +1,43 @@
+{
+  "_synthetic": "Made up, NOT captured: a message mentioning the chat's other member, in the form the web bundle 26260.1717.5229.7049 builds and reads (no mention could be made under the fence: docs/protocol/chat.md, docs/backlog/mention-not-captured-under-the-fence.md). The rest of the post is the captured message shape (tests/fixtures/chatsvc/reply.json). The content marks the mentioned name with a span of itemtype Mention whose itemid indexes properties.mentions, a JSON string of a list with one entry per mention. Check it against a capture before relying on it. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in.",
+  "request": {
+    "method": "POST",
+    "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+    "body": {
+      "id": "-1",
+      "type": "Message",
+      "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "conversationLink": "blah/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "from": "8:orgid:<guid:a>",
+      "fromUserId": "8:orgid:<guid:a>",
+      "composetime": "2026-01-01T00:00:40.000Z",
+      "originalarrivaltime": "2026-01-01T00:00:40.000Z",
+      "content": "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Lab B</span> a made-up mention</p>",
+      "messagetype": "RichText/Html",
+      "contenttype": "Text",
+      "imdisplayname": "Lab A",
+      "clientmessageid": "6666666666666666666",
+      "callId": "",
+      "state": 0,
+      "version": "0",
+      "amsreferences": [],
+      "properties": {
+        "importance": "",
+        "subject": "",
+        "title": "",
+        "cards": "[]",
+        "links": "[]",
+        "mentions": "[{\"@type\":\"http://schema.skype.com/Mention\",\"itemid\":\"0\",\"mri\":\"8:orgid:<guid:b>\",\"mentionType\":\"person\",\"displayName\":\"Lab B\"}]",
+        "onbehalfof": null,
+        "files": "[]",
+        "policyViolation": null,
+        "formatVariant": "TEAMS"
+      },
+      "crossPostChannels": []
+    }
+  },
+  "response": {
+    "status": 201,
+    "body": {"OriginalArrivalTime": 1760000040000}
+  }
+}

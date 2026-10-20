@@ -2,8 +2,9 @@
 //! the browser fence decides them with the live membership source, where the source's credential comes from, and the
 //! forced deny `ab-chat`'s live enforcement test uses.
 //!
-//! The requests are the synthetic fixture `tests/fixtures/chatsvc/writes.json` (sanitized form); the thread answer
-//! is `tests/fixtures/chatsvc/thread-one-to-one.json`. Made-up GUIDs fill in their placeholders; no real MRI or token
+//! The requests are the synthetic fixture `tests/fixtures/chatsvc/writes.json` (sanitized form) and the writes of the
+//! capture-shaped fixtures beside it (`edit.json`, `delete.json`, `reaction.json`, `reply.json`, and the bundle-shaped
+//! `mention.json`); the thread answer is `tests/fixtures/chatsvc/thread-one-to-one.json`. Made-up GUIDs fill in their placeholders; no real MRI or token
 //! appears here. The forced-deny test runs a throwaway armed browser on a local page.
 
 mod common;
@@ -116,6 +117,51 @@ fn the_mapped_classifier_maps_each_chat_write_to_its_target() -> TestResult {
             .clone()
             .map_or(Classification::Unknown, Classification::Write);
         assert_eq!(got, want, "{}", case.name);
+    }
+    Ok(())
+}
+
+/// The writes of the capture-shaped fixtures (`docs/protocol/chat.md`): each fixture's requests, by where they sit in
+/// it, with the write they must map to on the lab chat.
+const SHAPED: [(&str, &str, WriteKind); 6] = [
+    ("edit.json", "/request", WriteKind::Edit),
+    ("delete.json", "/request", WriteKind::Delete),
+    ("reply.json", "/request", WriteKind::Message),
+    ("mention.json", "/request", WriteKind::Message),
+    ("reaction.json", "/add/request", WriteKind::Reaction),
+    ("reaction.json", "/remove/request", WriteKind::Reaction),
+];
+
+#[test]
+fn the_capture_shaped_fixtures_map_to_their_writes_on_the_lab_chat() -> TestResult {
+    let classifier = Classifier::mapped();
+    for (name, at, kind) in SHAPED {
+        let path = format!("{}/../../tests/fixtures/chatsvc/{name}", env!("CARGO_MANIFEST_DIR"));
+        let fixture: Value = serde_json::from_str(&fill(&std::fs::read_to_string(path)?))?;
+        let request = fixture.pointer(at).ok_or("no request")?;
+        let mut url = format!(
+            "https://teams.microsoft.com{}",
+            request["path"].as_str().ok_or("no path")?
+        );
+        if let Some(query) = request["query"].as_str() {
+            url = format!("{url}?{query}");
+        }
+        let body = match &request["body"] {
+            Value::Null => None,
+            body => Some(serde_json::to_vec(body)?),
+        };
+        let method = request["method"].as_str().ok_or("no method")?;
+        // only the mention fixture mentions anyone: the chat's other member
+        let mentioned = request["body"]["properties"]["mentions"]
+            .as_str()
+            .is_some_and(|mentions| mentions != "[]");
+        let target =
+            Target::new(kind, Scope::Conversation { id: one_to_one() }).with_added(mentioned.then(|| lab_mri(GUID_B)));
+        assert_eq!(
+            classifier.classify(method, &url, body.as_deref()),
+            Classification::Write(target),
+            "{name} {at}"
+        );
     }
     Ok(())
 }
@@ -380,6 +426,32 @@ async fn a_message_in_the_lab_chat_passes_with_live_members_and_nothing_else_doe
     assert_eq!(
         decide(&[GUID_A, GUID_B], &message_to("19:channel0001@thread.tacv2")).await,
         Verdict::Deny(DenyCause::Unclassified)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_mention_of_an_outsider_in_the_lab_chat_is_denied() -> TestResult {
+    let server = MockServer::start().await;
+    let live = live_source(&server).await?;
+    let members: Arc<dyn MembershipSource + Send> = live.clone();
+    let http = HttpFence::new(Classifier::mapped(), Arc::new(fence(&[GUID_A, GUID_B])), members);
+    let mentioning = |guid: &str| {
+        let mentions = json!([{"@type": "http://schema.skype.com/Mention", "itemid": "0", "mri": format!("8:orgid:{guid}"),
+            "mentionType": "person", "displayName": "Someone"}]);
+        let mut request = message_to(&one_to_one());
+        request.body = Some(
+            json!({"messagetype": "RichText/Html", "content": "<p>hi</p>", "properties": {"mentions": mentions.to_string()}})
+                .to_string()
+                .into_bytes(),
+        );
+        request
+    };
+    // the chat's two members are lab accounts; whom the message mentions decides
+    assert_eq!(http.decide(&mentioning(GUID_B)).await, Verdict::Allow);
+    assert_eq!(
+        http.decide(&mentioning(GUID_X)).await,
+        Verdict::Deny(DenyCause::Fenced(DenyReason::Outsiders { count: 1 }))
     );
     Ok(())
 }

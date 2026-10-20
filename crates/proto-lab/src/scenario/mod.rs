@@ -5,6 +5,9 @@
 //! - [`ab_chat`] (accounts a and b, writes mapped, members read live): a sends a message in the a–b chat and b
 //!   receives it; before that, a forced deny on one a–b message checks live that a denied write never leaves the
 //!   browser.
+//! - [`ab_chat_full`] (accounts a and b, as `ab-chat`): the a–b chat beyond a plain message, recorded: a sends, edits,
+//!   reacts and takes the reaction back, replies with a quote and reacts to it, and deletes; b reads and reacts. No
+//!   mention: the fence leaves the web client's mention picker nobody to offer.
 //! - [`echo_call`] (account a, writes mapped, members read live, fake microphone): a places the web client's test call
 //!   to the echo service, the one approved participant outside the lab, stays in it a while and hangs up; recorded.
 //!
@@ -13,6 +16,7 @@
 //! judge by the reviewed expected-deny list ([`expected`]), which never changes what the fence denies.
 
 pub mod ab_chat;
+pub mod ab_chat_full;
 pub mod dsl;
 pub mod echo_call;
 pub mod expected;
@@ -40,6 +44,9 @@ pub enum ScenarioName {
     Load,
     /// Account a sends a message in the a–b chat and b receives it, after a live enforcement test.
     AbChat,
+    /// Accounts a and b in the a–b chat beyond a plain message (an edit, reactions, a quoted reply, a delete, b's read
+    /// and reaction), after the same enforcement test; recorded.
+    AbChatFull,
     /// Account a places the test call to the echo service with a fake microphone playing a tone; recorded.
     EchoCall,
 }
@@ -51,6 +58,7 @@ impl ScenarioName {
         match self {
             Self::Load => "load",
             Self::AbChat => "ab-chat",
+            Self::AbChatFull => "ab-chat-full",
             Self::EchoCall => "echo-call",
         }
     }
@@ -250,6 +258,7 @@ pub async fn run(
     match scenario {
         ScenarioName::Load => load::run(paths, options).await,
         ScenarioName::AbChat => ab_chat::run(paths, options).await,
+        ScenarioName::AbChatFull => ab_chat_full::run(paths, options).await,
         ScenarioName::EchoCall => echo_call::run(paths, options).await,
     }
 }

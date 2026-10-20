@@ -1,0 +1,170 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: the chat service's conversation list as Task 3's read-only probe read it for a lab account (reference copy reference/chat/probe-conversations-a.jsonl, 2026-10-20, read locally; the web client itself reads its chat list through CSA). One page; an entry of each kind the list held: the 1:1 chat with a message, an empty 1:1 chat, a team's channel (trimmed to its kind and links) and the notifications stream. <guid:a>, <guid:b> are lab accounts' object ids, <guid:c> a second partner, <guid:tenant> the tenant, <guid:group> a team's group; <token:1> a sync state; tests fill them in. See docs/protocol/chat.md.",
+  "request": {
+    "method": "GET",
+    "path": "/api/chatsvc/<region>/v1/users/ME/conversations",
+    "query": "view=msnp24Equivalent&pageSize=200&startTime=1&targetType=All"
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "conversations": [
+        {
+          "id": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+          "type": "Conversation",
+          "version": 1760000300100,
+          "targetLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/threads/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+          "messages": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces/messages",
+          "lastUpdatedMessageId": 1760000300000,
+          "lastUpdatedMessageVersion": 1760000300000,
+          "lastMessage": {
+            "id": "1760000300000",
+            "sequenceId": 4,
+            "type": "Message",
+            "messagetype": "RichText/Html",
+            "content": "<p>a made-up message</p>",
+            "clientmessageid": "3333333333333333333",
+            "version": "1760000300000",
+            "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+            "imdisplayname": "Lab A",
+            "fromDisplayNameInToken": "Lab A",
+            "composetime": "2026-01-01T00:05:00.0000000Z",
+            "originalarrivaltime": "2026-01-01T00:05:00.0000000Z"
+          },
+          "memberProperties": {
+            "role": "Admin",
+            "interest": "Interested",
+            "isReader": false,
+            "memberExpirationTime": 0,
+            "relationshipState": {"inQuarantine": false}
+          },
+          "properties": {
+            "addedBy": "8:orgid:<guid:a>",
+            "addedByTenantId": "<guid:tenant>",
+            "consumptionhorizon": "1760000300000;1760000300100;3333333333333333333",
+            "isemptyconversation": "False"
+          },
+          "threadProperties": {
+            "threadType": "chat",
+            "productThreadType": "OneToOneChat",
+            "uniquerosterthread": "True",
+            "createdat": "2026-01-01T00:00:00.00Z",
+            "isCreator": true,
+            "gapDetectionEnabled": "True",
+            "lastSequenceId": "4",
+            "lastjoinat": "1760000000000",
+            "originalThreadId": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "rosterVersion": 1760000000000,
+            "version": "1760000000000"
+          }
+        },
+        {
+          "id": "19:<guid:a>_<guid:c>@unq.gbl.spaces",
+          "type": "Conversation",
+          "version": 1760000400100,
+          "targetLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/threads/19:<guid:a>_<guid:c>@unq.gbl.spaces",
+          "messages": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:c>@unq.gbl.spaces/messages",
+          "lastUpdatedMessageId": 0,
+          "lastUpdatedMessageVersion": 0,
+          "lastMessage": {},
+          "memberProperties": {
+            "role": "Admin",
+            "interest": "Interested",
+            "isReader": false,
+            "memberExpirationTime": 0,
+            "relationshipState": {"inQuarantine": false}
+          },
+          "properties": {
+            "addedBy": "8:orgid:<guid:a>",
+            "addedByTenantId": "<guid:tenant>",
+            "isemptyconversation": "True"
+          },
+          "threadProperties": {
+            "threadType": "chat",
+            "productThreadType": "OneToOneChat",
+            "uniquerosterthread": "True",
+            "createdat": "2026-01-01T00:06:40.000Z",
+            "isCreator": true,
+            "gapDetectionEnabled": "True",
+            "lastjoinat": "1760000400000",
+            "originalThreadId": "19:<guid:a>_<guid:c>@unq.gbl.spaces",
+            "rosterVersion": 1760000400000,
+            "version": "1760000400000"
+          }
+        },
+        {
+          "id": "19:channel0001@thread.tacv2",
+          "type": "Conversation",
+          "version": 1750000000300,
+          "targetLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/threads/19:channel0001@thread.tacv2",
+          "messages": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:channel0001@thread.tacv2/messages",
+          "lastUpdatedMessageId": 0,
+          "lastUpdatedMessageVersion": 0,
+          "lastMessage": {},
+          "memberProperties": {"role": "User", "isReader": false, "memberExpirationTime": 253402300800000},
+          "properties": {"addedByTenantId": "<guid:tenant>", "isemptyconversation": "True"},
+          "threadProperties": {
+            "threadType": "space",
+            "productThreadType": "TeamsTeam",
+            "spaceType": "standard",
+            "spaceThreadTopic": "A made-up team",
+            "groupId": "<guid:group>",
+            "createdat": "2025-06-01T00:00:00.000Z",
+            "isCreator": false,
+            "gapDetectionEnabled": "True",
+            "lastjoinat": "1750000000000",
+            "originalThreadId": "19:channel0001@thread.tacv2",
+            "rosterVersion": 1750000000100,
+            "topics": "[{\"createdat\":\"1750000000200\",\"id\":\"19:channel0002@thread.tacv2\",\"isdeleted\":false,\"name\":\"A made-up channel\",\"picture\":null}]",
+            "version": "1750000000200"
+          }
+        },
+        {
+          "id": "48:notifications",
+          "type": "Conversation",
+          "version": 1750000001300,
+          "targetLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/threads/48:notifications",
+          "messages": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/48:notifications/messages",
+          "lastUpdatedMessageId": 1750000001200,
+          "lastUpdatedMessageVersion": 1750000001200,
+          "lastMessage": {
+            "id": "1750000001200",
+            "sequenceId": 2,
+            "type": "Message",
+            "messagetype": "Text",
+            "content": "",
+            "clientmessageid": "1750000001100",
+            "version": "1750000001200",
+            "conversationid": "48:notifications",
+            "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/48:notifications",
+            "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+            "imdisplayname": "",
+            "s2spartnername": "skypespaces",
+            "composetime": "2025-06-01T00:00:01.2000000Z",
+            "originalarrivaltime": "2025-06-01T00:00:01.2000000Z"
+          },
+          "memberProperties": {"role": "Admin", "interest": "Interested", "isReader": false, "memberExpirationTime": 0},
+          "properties": {"isemptyconversation": "False"},
+          "threadProperties": {
+            "threadType": "streamofnotifications",
+            "productThreadType": "StreamOfNotifications",
+            "isCreator": true,
+            "gapDetectionEnabled": "True",
+            "lastSequenceId": "2",
+            "lastjoinat": "1750000001000",
+            "originalThreadId": "19:teamsstream_notifications_<guid:a>@thread.v2",
+            "rosterVersion": 1750000001000,
+            "version": "1750000001000"
+          }
+        }
+      ],
+      "_metadata": {
+        "totalCount": 4,
+        "forwardLink": "",
+        "syncState": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/8:orgid:<guid:a>/conversations?view=msnp24Equivalent&syncState=<token:1>&pageSize=200"
+      }
+    }
+  }
+}
