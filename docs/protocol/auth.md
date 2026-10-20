@@ -12,17 +12,20 @@ Status: 2026-10-19, M0 Task 12. Written from static analysis only, with no live 
 Update 2026-10-20: the lab accounts now have a Teams license (Microsoft 365 Business Basic), and `proto-lab auth`'s
 own authz exchange succeeds for all 3 (`docs/spikes/auth.md`). What that exchange showed is marked **Live** below.
 
-Update 2026-10-20, later: the web client itself was captured, armed and fail-closed (M0 Task 11): 3 `load` runs of
-account A (one from before the license, with the 403) and 26 `ab-chat` runs of accounts A and B. The captures stay
-under the lab's data dir; they were read locally, the auth exchanges through `proto-lab export` reference copies.
-What they showed is marked **Capture** below. The fence denied every write and every unmapped POST, so for those
-requests the capture shows what the client sent, never what the service answered.
+Update 2026-10-20, later: the web client itself was captured with the fence armed (M0 Task 11): 3 `load` runs of
+account A (one from before the license, with two authz 403s) and 26 `ab-chat` runs of accounts A and B. The captures
+stay under the lab's data dir; they were read locally, the auth exchanges through `proto-lab export` reference copies.
+What they showed is marked **Capture** below. In the `load` runs the fence was fail-closed and denied every write. In
+the `ab-chat` runs it allowed the mapped writes inside the a–b lab chat (chat creation, messages, typing, read
+receipts; their answers are in `fence-targets.md`) and denied every other write and every unmapped POST. For the
+requests it denied, the capture shows what the client sent, never what the service answered.
 Everything else that isn't from the CA probe is what the client code says it does; the
 [To confirm by capture](#to-confirm-by-capture) list says what the capture settled and what is still open.
 
 **The web client is not our client.** It signs in as the SPA client `5e3ce6c0-…` with MSAL.js and asks for CAE
 tokens, so its tokens live much longer than ours (see [CAE](#cae-and-token-lifetimes)). Headers and audiences carry
-over to us; lifetimes don't.
+over to us, except that the `Origin` it sends authz picks the host of its AFD GTMs ([Region GTMs](#region-gtms));
+lifetimes don't.
 
 ## The two layers
 
@@ -145,6 +148,9 @@ the fence's own-state list). (Answered since, see [Open questions](#open-questio
 with the newest refresh token, for `api.spaces.skype.com` (again, now asking for CAE), `chatsvcagg`,
 `outlook.office.com/`, `outlook.office.com/search`, `substrate.office.com`, `ic3.teams.office.com`,
 `graph.microsoft.com` and the meeting-artifacts app, and later `m365copilotapp.svc.cloud.microsoft`; every one got 200.
+In the `ab-chat` runs the same chain went on after Copilot with presence, asked for as
+`https://presence.teams.microsoft.com//.default` (two slashes, the scope rule again), then the Office shell and
+Delve tokens; no `load` run got that far.
 
 ## authz: the skypetoken exchange
 
@@ -178,8 +184,10 @@ environment; prod doesn't set it.
   bundle.
 - **For us:** use authz. It's what prod does by default, it gives us the skypetoken and the region GTMs, and authzcore
   would only matter if Microsoft flips the flight for the whole tenant. Both are on the fence's own-state list.
-  **Capture:** the web client posted to `…/authz` in every capture, never to `authzcore`. Chat itself no longer needs
-  the skypetoken (see the [service table](#audience--service-table)); the few calls that still do are listed there.
+  **Capture:** every authz POST the web client made went to `…/authz`, never to `authzcore` (4 POSTs in 3 runs, see
+  [Request](#request); the other runs made none and reused the skypetoken from an earlier run). Chat itself no
+  longer needs the skypetoken (see the [service table](#audience--service-table)); the few calls that still do are
+  listed there.
 - **Never call `…/authz/signuptrial`** (or `…/authzcore/signuptrial`). It's the "start a Teams trial" variant of the
   same POST, a write that changes the account's licensing. The fence's own-state rules match `authz` and `authzcore`
   as whole paths, so `signuptrial` stays denied; keep it that way.
@@ -201,9 +209,11 @@ environment; prod doesn't set it.
 
 Anonymous and guest users post to `…/visitor` or `…/guest` with a JSON body (tenant ID or meeting URL). Not our case.
 
-**Capture (3 authz POSTs of the web client: two 403s before the license, one 200 after).** The URL was always
-`https://teams.microsoft.com/api/authsvc/v1.0/authz`, also when the page itself ran on `teams.cloud.microsoft` (a
-cross-site CORS request then), with `Content-Length: 0` and no body. Headers, apart from the browser's own:
+**Capture (all 4 authz POSTs of the web client, in 3 of the 29 runs: two 403s in the `load` run from before the
+license, then one 200 in a later `load` run and one in an `ab-chat` run; every other run reused the skypetoken it
+already had and posted none).** The URL was always `https://teams.microsoft.com/api/authsvc/v1.0/authz`, also when
+the page itself ran on `teams.cloud.microsoft` (a cross-site CORS request then), with `Content-Length: 0` and no body.
+Headers, apart from the browser's own:
 
 - `Authorization: Bearer` with the web client's Entra token for `https://api.spaces.skype.com` (CAE-capable, see
   [CAE](#cae-and-token-lifetimes));
@@ -214,8 +224,10 @@ cross-site CORS request then), with `Content-Length: 0` and no body. Headers, ap
   `ClientInfo` header names `clientVer`);
 - `Origin` and `Referer` of the page.
 
-No `X-Client-UI-Language` and no `ConsistencyLevel`. So our own request (the table above minus the `x-ms-client-*`
-headers and `Origin`) differs from the web client's only in those, and authz answers both alike.
+No `X-Client-UI-Language` and no `ConsistencyLevel`. Our own request is the table above minus the `x-ms-client-*`
+headers, `X-Client-UI-Language` and `ConsistencyLevel`, and it carries no `Origin`; so it differs from the web
+client's only in the `x-ms-client-*` headers and `Origin`. authz answers both with the same fields, but the `Origin`
+isn't neutral: the AFD host of the GTMs follows it (see [Region GTMs](#region-gtms)).
 
 ### Response
 
@@ -319,11 +331,13 @@ if absent). Chat and presence requests carry `BehaviorOverride: redirectAs404`; 
 prefix of that `Location`.
 
 **Capture:** every chat request went to `chatServiceAfd` (`<AFD host>/api/chatsvc/amer`), none to `chatService`
-(`amer.ng.msg…`). Every chat and presence request carried `BehaviorOverride: redirectAs404`. No region hop happened:
-no 404 came with a `Location`. The 404s seen were ordinary misses (`users/ME/properties`, and the call-log
-conversation `48:calllogs`, which answered 404 in some runs and 200 in others), with a diagnostic code in the
-`ContextId` answer header and no `Location`. How a hop looks is still
-unseen; the lab's home region matches its GTMs.
+(`amer.ng.msg…`). That host showed up only in answers: as the `chatService` GTM, and in the `Location` header of the
+201s to chat creation and message posts, which name the new resource as
+`https://amer.ng.msg.teams.microsoft.com/v1/…` (`fence-targets.md`). Every chat and presence request carried
+`BehaviorOverride: redirectAs404`. No region hop happened: no 404 came with a `Location`. The 404s seen were ordinary
+misses (`users/ME/properties`, and the call-log conversation `48:calllogs`, which answered 404 in some runs and 200 in
+others), with a diagnostic code in the `ContextId` answer header and no `Location`. How a hop looks is still unseen;
+the lab's home region matches its GTMs.
 
 ## Audience × service table
 
@@ -370,13 +384,15 @@ as CAE-capable audiences. A CAE client advertises the capability when it asks En
 are ordinary ones.
 
 **Capture.** The web client advertises it by sending `claims={"access_token":{"xms_cc":{"values":["CP1"]}}}` on the
-refresh grant, for `api.spaces.skype.com`, `chatsvcagg`, `outlook.office.com/`, `outlook.office.com/search` and `ic3`;
-not for Graph, substrate, the meeting-artifacts app or Copilot. The tokens that came back with `xms_cc` (spaces,
-`chatsvcagg`, Outlook, `ic3`, presence) lived about 21–26 hours (`expires_in` 76 000–92 000 s); the others, the Outlook
-search token included, about 2 hours (7 000–8 800 s). The very first token, from the code redemption without
-`claims`, was a 2-hour one, and the client re-asked for the same audience with CAE at once. That is why the web
-client's skypetoken lasts about a day and ours about 2 hours ([Response](#response)). No claims challenge (a 401 with
-`insufficient_claims`) came in any capture, so its shape is still only what the bundle says.
+refresh grant, for `api.spaces.skype.com`, `chatsvcagg`, `outlook.office.com/`, `outlook.office.com/search`, `ic3`
+and presence (`https://presence.teams.microsoft.com/`, warmed only in the `ab-chat` runs); not for Graph, substrate,
+the meeting-artifacts app or Copilot. The tokens that came back with `xms_cc` (spaces, `chatsvcagg`, Outlook, `ic3`,
+presence) lived about 20–28 hours (`expires_in` 72 000–100 000 s); the others about 2 hours (7 200–9 000 s), the
+Outlook search token included: it was asked with `claims` but came back without `xms_cc`, its `aud` an application
+ID. The very first token, from the code redemption without `claims`, was a 2-hour one, and the client re-asked for
+the same audience with CAE at once. That is why the web client's skypetoken lasts about a day and ours about 2 hours
+([Response](#response)). No claims challenge (a 401 with `insufficient_claims`) came in any capture, so its shape is
+still only what the bundle says.
 
 ### Skype token migration (STM)
 
@@ -404,15 +420,17 @@ every chat request, on most middle-tier calls, on some CSA calls, on the AMS `aa
 of `/trap/tokens` and inside trouter's `user.authenticate` frame: about 4 600 requests over the captures. It was the
 only migration header; the "companion header" the bundle mentions never appeared. Every Entra token sent with it was
 the CAE `ic3` one, except on the middle tier and authz (their `api.spaces.skype.com` token) and CSA (its `chatsvcagg`
-token). No answer
-carried a migration header and no 401 named a protocol, so the fallback was never exercised. Which middle-tier
-calls keep `x-skypetoken` is in the table above; whether a migrated endpoint would also accept the both-headers form is
-still unknown, since no request sent both.
+token). No answer carried a migration header and no 401 named a protocol, so the fallback was never exercised. Which
+middle-tier calls keep `x-skypetoken` is in the table above; whether a migrated endpoint would also accept the
+both-headers form is still unknown, since no request sent both.
 
-For us this means: chat goes with the `ic3` Entra token and STM, as the web client does (the fence's live membership
-read already does so since Task 11). The skypetoken is still needed for the few middle-tier calls above, the TURN
-credentials and the AMS exchanges, so authz stays part of sign-in. Whether chat still accepts the skypetoken form is
-unknown and not needed.
+For us this means: chat goes with the `ic3` Entra token and STM, as the web client does. The fence's live membership
+read (Task 11) is not that form: it sends back the page's `ic3` bearer token with only an `Accept` header, no
+`X-MS-Migration` and no `BehaviorOverride` (`fence-targets.md`). Its `GET v1/threads/<id>` succeeded that way in the
+`ab-chat` runs, so the chat service took the web client's CAE `ic3` token without STM on at least that read; whether
+STM is needed anywhere in chat is open, and so is whether our non-CAE token works (question 8). The skypetoken is
+still needed for the few middle-tier calls above, the TURN credentials and the AMS exchanges, so authz stays part of
+sign-in. Whether chat still accepts the skypetoken form is unknown and not needed.
 
 ## Open questions
 
