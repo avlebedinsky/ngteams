@@ -1,7 +1,8 @@
 //! The session against `wiremock` with a fake clock: an access token per audience cached until the margin, one refresh
 //! for concurrent callers, the stored rotated refresh token, a forced refresh for a refused token, the skypetoken
-//! renewed only after refreshing `api.spaces.skype.com`, throttling handed back with no hidden retry, renewal
-//! notifications, the region's service bases, and no token in any `Debug` or error.
+//! renewed only after refreshing `api.spaces.skype.com`, a refused skypetoken never handed out again, throttling
+//! handed back with no hidden retry and kept to (one request however many callers wait, nothing sent until its
+//! `Retry-After` has passed), renewal notifications, the region's service bases, and no token in any `Debug` or error.
 //!
 //! The answers are shaped from the fixtures under `tests/fixtures/auth/` (`entra-token-refresh.json`,
 //! `authz-ok.json`, `entra-error-429.json`); each test puts made-up tokens and lifetimes of its own into them. A
@@ -488,6 +489,39 @@ async fn a_refused_skypetoken_is_renewed_once_however_many_callers_it_was_refuse
 }
 
 #[tokio::test]
+async fn a_refused_skypetoken_is_not_handed_out_again_after_a_failed_renewal() -> TestResult {
+    let lab = Lab::default().await?;
+    // the stored one is good for an hour, yet a service refused it, and the renewal fails
+    let stored = skypetoken_jwt(lab.clock.now() + Duration::from_secs(3_600), "stored");
+    lab.store_skypetoken(&stored).await?;
+    Mock::given(method("POST"))
+        .and(path(AUTHZ_PATH))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(&lab.server)
+        .await;
+
+    let error = lab
+        .session
+        .skypetoken_rejected(&Secret::new(stored.as_str()))
+        .await
+        .expect_err("the renewal failed");
+    assert!(matches!(error, TokenError::Authz(_)), "{error:?}");
+
+    // still in memory and in the store, yet the next caller gets a renewal, not the refused one
+    let held = lab.session.store().get(&skypetoken_key(ACCOUNT)).await?;
+    assert_eq!(held.map(|token| token.expose().to_owned()), Some(stored.clone()));
+    let renewed_jwt = skypetoken_jwt(lab.clock.now() + Duration::from_secs(3_600), "renewed");
+    lab.mount_authz(&renewed_jwt, "amer").await?;
+    assert_eq!(lab.session.skypetoken().await?.token.expose(), renewed_jwt);
+    assert_eq!(lab.requests_to(AUTHZ_PATH).await?.len(), 2);
+    // and the renewed one is used from now on
+    assert_eq!(lab.session.skypetoken().await?.token.expose(), renewed_jwt);
+    assert_eq!(lab.requests_to(AUTHZ_PATH).await?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_refused_skypetoken_not_the_held_one_gets_the_held_one() -> TestResult {
     let lab = Lab::default().await?;
     let stored = skypetoken_jwt(lab.clock.now() + Duration::from_secs(3_600), "stored");
@@ -542,17 +576,20 @@ async fn a_renewal_with_an_old_entra_token_is_refused_before_it_is_sent() -> Tes
     Ok(())
 }
 
-#[tokio::test]
-async fn entra_throttling_is_handed_back_with_its_wait_and_no_retry() -> TestResult {
+/// A session whose Entra answers every grant with a 429 (with `Retry-After` when given) after 200 ms.
+async fn entra_throttling(
+    retry_after: Option<&str>,
+) -> TestResult<(MockServer, Arc<FakeClock>, Session<MemorySecretStore>)> {
     let server = MockServer::start().await;
+    let mut answer = ResponseTemplate::new(429)
+        .set_body_json(fixture_body("entra-error-429")?)
+        .set_delay(Duration::from_millis(200));
+    if let Some(retry_after) = retry_after {
+        answer = answer.insert_header("retry-after", retry_after);
+    }
     Mock::given(method("POST"))
         .and(path(TOKEN_PATH))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .insert_header("retry-after", "30")
-                .set_body_json(fixture_body("entra-error-429")?),
-        )
-        .expect(1)
+        .respond_with(answer)
         .mount(&server)
         .await;
     let store = MemorySecretStore::new();
@@ -562,15 +599,130 @@ async fn entra_throttling_is_handed_back_with_its_wait_and_no_retry() -> TestRes
     let tokens =
         TokenClient::new(EntraConfig::teams_native().with_authority(format!("{}/organizations/", server.uri())))?;
     let authz = AuthzClient::with_endpoint(&format!("{}{AUTHZ_PATH}", server.uri()))?;
-    let session = Session::new(ACCOUNT, store, tokens, authz, stored_region()).with_clock(FakeClock::new());
+    let clock = FakeClock::new();
+    let session = Session::new(ACCOUNT, store, tokens, authz, stored_region()).with_clock(clock.clone());
+    Ok((server, clock, session))
+}
+
+async fn requests(server: &MockServer) -> TestResult<usize> {
+    Ok(server.received_requests().await.ok_or("recording is off")?.len())
+}
+
+fn throttled_for(error: &TokenError, wait: Option<Duration>) -> bool {
+    matches!(error, TokenError::Throttled { retry_after, .. } if *retry_after == wait)
+}
+
+#[tokio::test]
+async fn entra_throttling_is_handed_back_with_its_wait_and_no_retry() -> TestResult {
+    let (server, _, session) = entra_throttling(Some("30")).await?;
 
     let error = session.access_token(IC3).await.expect_err("throttled");
 
-    assert!(
-        matches!(error, TokenError::Throttled { retry_after: Some(wait), .. } if wait == Duration::from_secs(30)),
-        "{error:?}"
+    assert!(throttled_for(&error, Some(Duration::from_secs(30))), "{error:?}");
+    assert_eq!(requests(&server).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn callers_waiting_on_a_throttled_grant_share_it_and_nothing_is_sent_until_its_wait_has_passed() -> TestResult {
+    let (server, clock, session) = entra_throttling(Some("30")).await?;
+    let wait = Some(Duration::from_secs(30));
+
+    let (first, second, third, other) = tokio::join!(
+        session.access_token(IC3),
+        session.access_token(IC3),
+        session.access_token(IC3),
+        session.access_token(SPACES_RESOURCE),
     );
-    server.verify().await;
+
+    for result in [first, second, third, other] {
+        let error = result.expect_err("throttled");
+        assert!(throttled_for(&error, wait), "{error:?}");
+    }
+    assert_eq!(requests(&server).await?, 1, "one grant for all four callers");
+    // later callers, a forced refresh and a skypetoken renewal are refused with the wait left, without a request
+    clock.advance(Duration::from_secs(10));
+    let left = Some(Duration::from_secs(20));
+    let error = session.access_token(IC3).await.expect_err("still throttled");
+    assert!(throttled_for(&error, left), "{error:?}");
+    let error = session
+        .refresh_rejected(IC3, &Secret::new("synthetic-refused-token"))
+        .await
+        .expect_err("still throttled");
+    assert!(throttled_for(&error, left), "{error:?}");
+    let error = session.skypetoken().await.expect_err("still throttled");
+    assert!(throttled_for(&error, left), "{error:?}");
+    assert_eq!(requests(&server).await?, 1);
+    // once the wait has passed, the next caller asks again
+    clock.advance(Duration::from_secs(20));
+    let error = session.access_token(IC3).await.expect_err("throttled again");
+    assert!(throttled_for(&error, wait), "{error:?}");
+    assert_eq!(requests(&server).await?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_throttled_grant_without_retry_after_is_shared_only_with_the_callers_already_waiting() -> TestResult {
+    let (server, _, session) = entra_throttling(None).await?;
+
+    let (first, second) = tokio::join!(session.access_token(IC3), session.access_token(IC3));
+
+    for result in [first, second] {
+        let error = result.expect_err("throttled");
+        assert!(throttled_for(&error, None), "{error:?}");
+    }
+    assert_eq!(requests(&server).await?, 1);
+    // a caller that comes after it asks again
+    let error = session.access_token(IC3).await.expect_err("throttled");
+    assert!(throttled_for(&error, None), "{error:?}");
+    assert_eq!(requests(&server).await?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn callers_waiting_on_a_throttled_renewal_share_it_and_nothing_is_sent_until_its_wait_has_passed() -> TestResult {
+    let lab = Lab::default().await?;
+    Mock::given(method("POST"))
+        .and(path(AUTHZ_PATH))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "45")
+                .set_delay(Duration::from_millis(200)),
+        )
+        .up_to_n_times(1)
+        .mount(&lab.server)
+        .await;
+    let wait = Some(Duration::from_secs(45));
+    let refused = Secret::new("synthetic-refused-skypetoken");
+
+    let (first, second, third) = tokio::join!(
+        lab.session.skypetoken(),
+        lab.session.skypetoken(),
+        lab.session.skypetoken_rejected(&refused),
+    );
+
+    for result in [first, second, third] {
+        let error = result.expect_err("throttled");
+        assert!(throttled_for(&error, wait), "{error:?}");
+    }
+    assert_eq!(
+        lab.requests_to(AUTHZ_PATH).await?.len(),
+        1,
+        "one exchange for all three"
+    );
+    assert_eq!(lab.grants(), 1, "one spaces grant for all three");
+    // a later renewal sends nothing, not even the spaces grant; access tokens aren't held up
+    let error = lab.session.skypetoken().await.expect_err("still throttled");
+    assert!(throttled_for(&error, wait), "{error:?}");
+    assert_eq!(lab.grants(), 1);
+    lab.session.access_token(IC3).await?;
+    assert_eq!(lab.grants(), 2);
+    // once the wait has passed, the renewal goes through
+    lab.clock.advance(Duration::from_secs(45));
+    let renewed_jwt = skypetoken_jwt(lab.clock.now() + Duration::from_secs(3_600), "renewed");
+    lab.mount_authz(&renewed_jwt, "amer").await?;
+    assert_eq!(lab.session.skypetoken().await?.token.expose(), renewed_jwt);
+    assert_eq!(lab.requests_to(AUTHZ_PATH).await?.len(), 2);
     Ok(())
 }
 
