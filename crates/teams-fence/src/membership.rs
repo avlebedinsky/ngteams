@@ -14,7 +14,10 @@
 //! the thread the service returns is that exact thread and lists exactly those two members (`8:orgid:<oid>`); that
 //! cross-check is the evidence that the list is the whole membership and not a view filtered by the caller's
 //! permissions. Every other scope (group and meeting chats, channels, teams, calls) is
-//! [`PartialReason::Unsupported`] until a capture shows how its full membership can be confirmed.
+//! [`PartialReason::Unsupported`] until evidence shows how its full membership can be confirmed. For group chats a
+//! live read was made (M1 Task 8): the thread read and the member list agree, and the member list carries a
+//! `totalMemberCount`, but a 3-member chat can't show that neither is a caller-visible subset or a page, so they stay unsupported
+//! (`docs/backlog/group-chat-member-read-completeness.md`).
 //!
 //! Anything less than a clean answer is [`Membership::Partial`]: no credential yet, a failed or slow request, a
 //! non-success status, a body over [`MAX_BODY`] (truncated), a pagination marker, a member count above the listed
@@ -361,6 +364,18 @@ impl LiveMembershipSource {
     }
 }
 
+impl LiveMembershipSource {
+    /// Whether this source can ever find `scope`'s membership complete: today only a 1:1 chat's
+    /// ([`one_to_one_pair`]). Every other scope is [`PartialReason::Unsupported`], answered without a read: group chats
+    /// too, since a live read of one (M1 Task 8, `docs/protocol/fence-targets.md`) couldn't show that its member list
+    /// is the whole membership and not a page or a view of it. A caller can tell before a write that it will be
+    /// denied.
+    #[must_use]
+    pub fn reads_in_full(scope: &Scope) -> bool {
+        matches!(scope, Scope::Conversation { id } if one_to_one_pair(id).is_some())
+    }
+}
+
 impl MembershipSource for LiveMembershipSource {
     fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a> {
         Box::pin(async move {
@@ -409,6 +424,23 @@ pub fn one_to_one_pair(id: &str) -> Option<[Mri; 2]> {
     }
     let mri = |oid: &str| Mri::new(format!("8:orgid:{}", oid.to_ascii_lowercase()));
     Some([mri(first), mri(second)])
+}
+
+/// The suffix of a group (or meeting) chat's conversation id.
+const GROUP_SUFFIX: &str = "@thread.v2";
+
+/// Whether `id` is a group chat's conversation id: `19:<id>@thread.v2`, the id 1–128 ASCII letters, digits, `_` or
+/// `-`, and not a meeting's chat (`19:meeting_…`).
+#[must_use]
+pub fn is_group_chat_id(id: &str) -> bool {
+    let Some(inner) = id.strip_prefix("19:").and_then(|rest| rest.strip_suffix(GROUP_SUFFIX)) else {
+        return false;
+    };
+    (1..=128).contains(&inner.len())
+        && inner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && !inner.to_ascii_lowercase().starts_with("meeting_")
 }
 
 fn is_guid(text: &str) -> bool {

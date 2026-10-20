@@ -404,24 +404,68 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
   `crates/proto-lab/src/scenario/` (a new `abc-chat` scenario), `docs/protocol/fence-targets.md`
 - Create: `tests/fixtures/chatsvc/thread-group*.json` (synthetic)
 
-- [ ] live, reads only plus one allowed `ChatCreate` (`New`, members a, b, c): a creates the a–b–c group chat in the
+- [x] live, reads only plus one allowed `ChatCreate` (`New`, members a, b, c): a creates the a–b–c group chat in the
       web client. The web client creates the chat when its first message is sent, and that message is denied
       (`Partial(Unsupported)` until this task's read exists) and would be resent on every later load: the scenario puts
       a `ForcedDeny` with a label of its own on a first-message marker, kept for every later run on these profiles, and
       expects it. The new chat's id goes to `<data_dir>/chats.toml`, never the repo
-- [ ] capture the thread read, `thread_members` (paged form), `filtered`, member counts and roster versions for that
+      (2026-10-20, `target/lab` normal build, load average ~50–95: `proto-lab run abc-chat --headless --timeout 400`
+      exit 0, no breach, no arming failure. a opened the web client straight at `l/chat/0/0?users=<b>,<c>`; the fence
+      allowed `POST v1/threads` as `ChatCreate` with the three lab accounts added (`fence.log`: `allow chat_create new
+      added 3`, from the browser and the page session); the first message, marker `lab fence probe abc-chat first
+      message ` (it begins with `ab-chat`'s probe marker, so `ab-chat` and `abc-chat` force-deny it when it is resent;
+      anywhere else the fence denies it as a group chat write), was force-denied under its own label and failed in a's page; the id (`19:<32 hex>@thread.v2`) is in
+      `chats.toml` (`0600`, `teams_fence::lab::{LabChats, record_abc_chat}`). Two earlier attempts failed before
+      anything was sent, no breach: the deep link, navigated to after the first load, reloads the whole client, which
+      didn't finish within 60 s and then 180 s on the loaded machine; the scenario now loads each account straight at
+      its deep link, and its load waits take `--timeout`)
+- [x] capture the thread read, `thread_members` (paged form), `filtered`, member counts and roster versions for that
       chat as a, b and c see it
-- [ ] decide with Codex what makes a group chat's member read **complete** (the evidence the 1:1 id gives for free:
+      (new read-only `proto-lab probe thread <alias> [--save <name>]`: GETs with the account's own `ic3` token of the
+      thread, the batch read, the member list at `pageSize` 100 and 1 (next pages followed only on the same list, on
+      the chat base), the filtered view and the own view, then the fence's own read; prints key names and counts only.
+      Live for a, b and c, reference copies `reference/chat/thread-group-{a,b,c}.jsonl`. All three saw the same: the
+      thread read lists a, b, c with no count and no paging key; the member list the same three with
+      `totalMemberCount` 3 and no next link at `pageSize` 1 too (no paging form seen); `rosterVersion` = `eTag` on the
+      thread, 0 on the list, the `eTag`s equal; the filtered view 403 `AclCheckFailed` for every member. Written up in
+      `fence-targets.md`, synthetic fixtures `tests/fixtures/chatsvc/thread-group{,-members,-filtered}.json`)
+- [x] decide with Codex what makes a group chat's member read **complete** (the evidence the 1:1 id gives for free:
       not a filtered view, not a page); record the decision and the evidence here and in `fence-targets.md`. Meeting
       chats, channels and any chat the evidence doesn't cover stay `Partial(Unsupported)`
-- [ ] ⚠️ stop condition: if the evidence isn't sufficient, group chats stay `Partial(Unsupported)`, the finding is filed
+      (decided with Codex: **not sufficient**. The candidate paired read (thread read and member list unpaged, the same
+      distinct members, `totalMemberCount` equal to them, equal `eTag`s, `threadType` `chat`) shows the endpoints agree,
+      not that what they agree on is the whole membership: one caller-visible subset, listed and counted by both, fits
+      the same answers, and a 3-member roster every viewer sees alike can't tell them apart; no paging form was seen;
+      the `eTag`s' meaning across endpoints is unknown. A read-only look at a large tenant thread would show only the
+      paging form, for another thread template and with other people's member lists, so it wasn't done. Transcript
+      `~/.local/state/plan-exec-revmux/20261020-native-teams-m1-headless-chat-core/discussions/task-8-group-complete/`)
+- [x] ⚠️ stop condition: if the evidence isn't sufficient, group chats stay `Partial(Unsupported)`, the finding is filed
       to `docs/backlog/`, and the M1 exit's group-chat part goes to the user (Decisions for the user). Until they
       answer, later tasks build and test group chats on the mock only, and Task 21 runs the 1:1 part
-- [ ] tests first (wiremock, synthetic fixtures): complete only with that evidence; paging, a count above the list, a
+      (⚠️ **hit**: group chats stay `Partial(Unsupported)`; filed as `docs/backlog/group-chat-member-read-completeness.md`;
+      the M1 exit's group-chat part is a pending decision for the user, below. Meanwhile later tasks use the mock for
+      group chats and Task 21 runs the 1:1 part)
+- [x] tests first (wiremock, synthetic fixtures): complete only with that evidence; paging, a count above the list, a
       filtered marker, a mismatch between the reads → `Partial`; then implement it in `LiveMembershipSource`
-- [ ] `abc-chat`: a messages the group, b and c show it; enforcement probe first; exit 0 under the Task 1 list; a
+      (without the evidence there is no complete case to implement, and Codex and Claude agreed not to land the
+      candidate rule unwired. Instead the tests pin the decision against the live shapes: the group fixtures served as
+      the service answered, the source still answers `Partial(Unsupported)` without a read and the fence denies a
+      message to a lab-only group chat; `LiveMembershipSource::reads_in_full` (only 1:1 chats) and
+      `teams_fence::is_group_chat_id` are tested in `crates/teams-fence/tests/membership.rs`, `chats.toml` in
+      `tests/lab_config.rs`, the probe in `crates/proto-lab/tests/probe.rs`, the scenario's offline parts in
+      `crates/proto-lab/tests/abc_chat.rs`)
+- [x] `abc-chat`: a messages the group, b and c show it; enforcement probe first; exit 0 under the Task 1 list; a
       breached run as in Development Approach
-- [ ] `cargo test -p teams-fence -p fence-seal -p proto-lab` and the gate pass
+      (built: `crates/proto-lab/src/scenario/abc_chat.rs`, its creation part run live, above. The messaging part is
+      blocked by the ⚠️ stop condition and was **not run**: while `reads_in_full` says no for a group chat, the run fails
+      before it opens a browser, because a's message would be denied and then resent by the web client on every later
+      load of a's profile, failing every scenario there. It runs once the user's decision and the evidence allow it.
+      Checked live from the normal build with the recorded id: `proto-lab run abc-chat --headless` exits 1 with that
+      reason before any browser opens)
+- [x] `cargo test -p teams-fence -p fence-seal -p proto-lab` and the gate pass (parallel run: crate-scoped gate;
+      workspace gate after merge. `cargo fmt --all --check`, `cargo clippy -p teams-fence -p fence-seal -p proto-lab
+      --all-targets -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p teams-fence -p fence-seal -p proto-lab -p
+      fixture-guard`, all pinned to 4 cores)
 
 ### Task 9: `teams-mock`: the chat service from synthetic fixtures
 **Files:**
@@ -702,7 +746,8 @@ TEAMS_HEADLESS_BIN=target/lab/debug/teams-headless PROTO_LAB_LIVE=1 \
 **Decisions for the user:**
 - Approving any new service participant (none planned in M1).
 - After Task 8, only if the evidence doesn't show a group chat's member read complete: whether M1 exits on 1:1 chats
-  (group chats on the mock only) or waits for more evidence.
+  (group chats on the mock only) or waits for more evidence. **Open since Task 8 (2026-10-20): the evidence didn't
+  show it** (`docs/backlog/group-chat-member-read-completeness.md`).
 - After Task 14, only if unanswered chat deliveries harm the client: whether the native client may answer reviewed
   chat deliveries on lab-only chats (this revises the M0 rule that delivery responses stay denied).
 - Before M2: whether the user's own account passes Conditional Access with the native client (M0's open question 6 of

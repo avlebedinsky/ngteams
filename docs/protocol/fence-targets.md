@@ -5,7 +5,8 @@ with `proto-lab bundles import`, searched with `proto-lab bundles search` and re
 builders), plus [auth.md](auth.md). Then checked the same day against live traffic, once the lab accounts had a Teams
 license: `proto-lab run load` (account a) and `proto-lab run ab-chat` (a and b, the a–b 1:1 chat), the web client as
 served then. [What the captures showed](#what-the-captures-showed) lists what they confirmed and what they corrected;
-the sections above it are already corrected.
+the sections above it are already corrected. M1 Task 8 (2026-10-20) added a group chat: [A group chat's
+reads](#a-group-chats-reads).
 
 The code: the mapping is `Classifier::mapped` (`crates/proto-lab/src/classify.rs`), the member read is
 `LiveMembershipSource` (`crates/teams-fence/src/membership.rs`). Both are tested against synthetic fixtures in the
@@ -91,9 +92,42 @@ complete only when:
 
 That last check is what makes the answer evidence of the *full* membership rather than a view filtered by the
 caller's permissions: a 1:1 chat's membership is fixed by its id, and the read only confirms the thread exists with
-exactly those members. Group and meeting chats, channels, teams and calls are `Partial(Unsupported)` and so denied:
-the bundle shows paging (`thread_members`) and a separate filtered view (`filtered_thread`), and nothing static says
-whether the plain thread read lists every member of a large chat. Pagination and truncation are always `Partial`.
+exactly those members. Group and meeting chats, channels, teams and calls are `Partial(Unsupported)` and so denied,
+answered without a read (`LiveMembershipSource::reads_in_full` tells a caller up front): the bundle shows paging
+(`thread_members`) and a separate filtered view (`filtered_thread`), and for group chats a live read didn't settle it
+either (below). Pagination and truncation are always `Partial`.
+
+### A group chat's reads
+
+Seen live (M1 Task 8, 2026-10-20): the a–b–c group chat, created by a in the web client (`proto-lab run abc-chat`, its
+id kept in the lab's `chats.toml`), read with each account's own `ic3` token (`proto-lab probe thread <alias>`; local
+reference copies `reference/chat/thread-group-{a,b,c}.jsonl`; synthetic fixtures `tests/fixtures/chatsvc/thread-group.json`,
+`thread-group-members.json`, `thread-group-filtered.json` written from them). A, b and c got the same answers:
+
+- The id: `19:<32 lowercase hex>@thread.v2`.
+- `GET v1/threads/<id>?view=msnp24Equivalent` (and the batch form, an array holding the same object): 200; `id`,
+  `type` `Thread`, `members` (a, b and c, each `role` `Admin`, `hidden` false, with `capabilities`, `rangeStart`,
+  `rangeEnd`, `meetingRole`, `userLink`, …), `properties` (`threadType` `chat`, `creator`, `createdat`,
+  `capabilities`, `historydisclosed`, `productContext` `TEAMS`, …), `rosterVersion`, `version` and `eTag` (all three the
+  creation time), `tenantId`, `messages` (a link), `fileReferences`, `encryptionType`, `copilotShareTokens`. No member
+  count, no paging key, no `_metadata`.
+- `GET v1/threads/<id>/members?view=msnp24Equivalent&pageSize=<n>`: 200; `members` (the same three, each with
+  `interest`), `totalMemberCount` 3, `eTag` (the thread's), `rosterVersion` **0**, `isDeleted` false. `pageSize=1` got
+  the same answer as `pageSize=100`: all members and no next link, so its paging form was never seen.
+- `GET v1/threads/<id>/filtered?view=msnp24Equivalent`: **403**, error 209 `AclCheckFailed`: a chat's `Admin` lacks
+  the `GetFilteredThread` capability.
+- `GET v1/users/ME/conversations/<id>?view=msnp24Equivalent`: the account's own view, no member list:
+  `memberProperties` (`role`, `interest`, `isReader`), `threadProperties` (`rosterVersion` as the thread's,
+  `threadType` `chat`, `productThreadType` `Chat`, `isCreator`, …), `properties.isemptyconversation`.
+
+**Decision (with Codex): not enough to call a group chat's member read complete; group chats stay
+`Partial(Unsupported)`.** The candidate was a paired read: the thread read and the member list unpaged and listing the
+same distinct members, `totalMemberCount` equal to that list, equal `eTag`s, `threadType` `chat`, not a meeting's id.
+It shows the two endpoints agree, not that what they agree on is the whole membership: both exposing, and the count
+counting, one caller-visible subset fits the same answers, and a 3-member roster that every viewer sees alike can't
+tell the two apart. Nor was any paging form seen, and the `eTag`s' meaning across the endpoints is unknown (the list's
+`rosterVersion` is 0). What would settle it, and the open decision for the user (whether M1 exits on 1:1 chats), are in
+`docs/backlog/group-chat-member-read-completeness.md`.
 
 ## Writes
 
@@ -123,6 +157,11 @@ Seen live (the web client of 2026-10-20, the a–b 1:1 chat; the rows not listed
   "fixedRoster": true, "uniquerosterthread": true}}`. It answers 201 with `{"threadResource": {…the thread…}}`; the
   thread's id is the `19:<oid>_<oid>@unq.gbl.spaces` the two object ids make. The fence judged it as `ChatCreate` with
   both lab accounts added, and allowed it.
+- **New group chat** (M1 Task 8): opened by the deep link `l/chat/0/0?users=<mri>,<mri>`, the first send is preceded
+  by `POST v1/threads` with `{"members": [{"id": "8:orgid:<oid>", "role": "Admin"}, …all three…], "properties":
+  {"threadType": "chat"}}` (no `fixedRoster`, no `uniquerosterthread`), answering 201; then the message post to the new
+  `19:<hex>@thread.v2`. The fence judged the create as `ChatCreate` with the three lab accounts added, and allowed it;
+  the message was force-denied by the scenario (see [How a run uses it](#how-a-run-uses-it)).
 - **Message**: `POST v1/users/ME/conversations/<chat>/messages`, `messagetype` `RichText/Html`, `contenttype` `Text`,
   the HTML in `content`, plus `id` `-1`, `type` `Message`, `conversationid`, `conversationLink`, `from`,
   `fromUserId`, `composetime`, `originalarrivaltime`, `clientmessageid`, `imdisplayname`, `callId`, `state`,
@@ -180,6 +219,17 @@ Rules that keep the mapping fail-closed:
 - `ab-chat` opens the chat by b's MRI (`l/chat/0/0?users=<mri>`): by UPN the client first resolves the user with the
   middle tier's `fetchShortProfile`, a `POST` the fence denies, and never opens the chat; by the chat's id a page that
   loaded before the chat existed says the user isn't in it.
+- `abc-chat` (M1 Task 8) creates the a–b–c group chat once, from account a: it opens the web client straight at the
+  new-chat deep link for b and c (a deep link reloads the whole client), sends a first message carrying the marker
+  `lab fence probe abc-chat first message ` and the run's nonce, force-denied under a label of this run's own (an
+  earlier creation run's first message, sent again on load, is denied under another, so it can't stand in for this
+  run's), and records the chat's id (from that denied post's URL) in the lab's `chats.toml` as soon as the deny names
+  it, even when the run fails after that: the chat exists by then, and a run without its id would create another one.
+  The marker begins with `ab-chat`'s probe marker, so `ab-chat` and
+  `abc-chat` force-deny the first message, as expected, when the web client sends it again; any other scenario on a's
+  profile sees the fence deny it as a write to a group chat (`Partial(Unsupported)`), unexpected there. Once the id is recorded, a run would
+  message the chat (a's probe, then a real message that b and c must show), but it refuses to start while
+  `LiveMembershipSource::reads_in_full` says no for a group chat: a denied message would be resent on every later load.
 - `ab-chat`'s live enforcement test forces a deny (`ForcedDeny`) on every write carrying the probe marker, from before
   the page loads to the end of the run (so an earlier run's unsent probe, sent again on load, is denied too). This
   run's probe carries a run-unique nonce and has a labelled forced deny of its own ahead of the marker's, so the
@@ -202,8 +252,10 @@ captures stay outside the repository and no fixture was exported from them.
 - [x] The 1:1 thread read: the fence's `GET v1/threads/<1:1 id>?view=msnp24Equivalent` with the bearer token came back
       complete for the a–b chat (the writes it gated were allowed). The client itself reads the batch form
       (`threads?threadIds=`), whose thread object has `id`, both members in `members` and no paging or count field.
-- [ ] A group chat's read and `thread_members` paging: not seen (the lab accounts have no group chat). Group chats stay
-      `Partial(Unsupported)`.
+- [x] A group chat's read and `thread_members` (M1 Task 8, [A group chat's reads](#a-group-chats-reads)): the thread
+      read and the member list agree and the list carries `totalMemberCount`; no paging form was seen and the filtered
+      view is refused to members. Not enough to call the read complete (decided with Codex): group chats stay
+      `Partial(Unsupported)` (`docs/backlog/group-chat-member-read-completeness.md`).
 - [x] Writes as sent: chat create, message (`RichText/Html`), typing (`Control/Typing`) and read receipt
       (`consumptionhorizon`) match the table and the mapping (see [Writes](#writes)). Edit, delete, reactions, member
       changes and reply chains weren't exercised.

@@ -166,6 +166,12 @@ impl ForcedDeny {
         self
     }
 
+    /// The rule's label ([`ForcedDeny::labelled`]), if it has one.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
     /// Only requests whose body holds `text`.
     #[must_use]
     pub fn with_body_containing(mut self, text: &str) -> Self {

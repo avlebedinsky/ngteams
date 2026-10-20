@@ -2,15 +2,16 @@
 //! `with_mock_origin`), and every way an answer falls short of a complete member list.
 //!
 //! The thread answer is the synthetic fixture `tests/fixtures/chatsvc/thread-one-to-one.json` (sanitized form), with
-//! made-up GUIDs filled in for its placeholders. No real MRI or token appears here.
+//! made-up GUIDs filled in for its placeholders; a group chat's answers are `tests/fixtures/chatsvc/thread-group*.json`.
+//! No real MRI or token appears here.
 
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 use teams_fence::{
     ChatCredential, DenyReason, Fence, FenceLog, FetchFailure, LiveMembershipSource, MAX_BODY, Membership,
-    MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind, chat_service_path, one_to_one_pair,
-    parse_thread,
+    MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind, chat_service_path, is_group_chat_id,
+    one_to_one_pair, parse_thread,
 };
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -519,6 +520,121 @@ async fn the_fence_allows_a_lab_only_one_to_one_chat_and_denies_one_with_an_outs
         .ok_or("allowed")?;
     assert_eq!(*denied.reason(), DenyReason::Outsiders { count: 1 });
     Ok(())
+}
+
+const GUID_C: &str = "00000000-0000-4000-8000-00000000000c";
+const GROUP: &str = "0123456789abcdef0123456789abcdef";
+const GROUP_FIXTURES: [(&str, &str); 3] = [
+    ("", include_str!("../../../tests/fixtures/chatsvc/thread-group.json")),
+    (
+        "/members",
+        include_str!("../../../tests/fixtures/chatsvc/thread-group-members.json"),
+    ),
+    (
+        "/filtered",
+        include_str!("../../../tests/fixtures/chatsvc/thread-group-filtered.json"),
+    ),
+];
+
+fn group_chat() -> Scope {
+    Scope::Conversation {
+        id: format!("19:{GROUP}@thread.v2"),
+    }
+}
+
+/// Serves the group chat fixtures' answers, as the chat service gave them live (M1 Task 8): the thread read and the
+/// member list agree on a, b and c and the list counts them (`totalMemberCount`); the filtered view is refused.
+async fn serve_group(server: &MockServer) -> TestResult {
+    for (suffix, fixture) in GROUP_FIXTURES {
+        let filled = fill(fixture)
+            .replace("<guid:c>", GUID_C)
+            .replace("<guid:tenant>", GUID_X)
+            .replace("<group>", GROUP);
+        let fixture: Value = serde_json::from_str(&filled)?;
+        let status = u16::try_from(fixture["response"]["status"].as_u64().ok_or("no status")?)?;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/chatsvc/emea/v1/threads/19:{GROUP}@thread.v2{suffix}"
+            )))
+            .respond_with(ResponseTemplate::new(status).set_body_json(&fixture["response"]["body"]))
+            .mount(server)
+            .await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_group_chat_stays_unsupported_even_when_its_reads_look_complete() -> TestResult {
+    // the answers agree and count their members, but nothing shows that neither is a page or a caller's view of the
+    // chat (docs/backlog/group-chat-member-read-completeness.md): unsupported, and never read
+    let server = MockServer::start().await;
+    serve_group(&server).await?;
+    let source = source(&server)?;
+    assert_eq!(
+        source.members(&group_chat()).await,
+        Membership::Partial(PartialReason::Unsupported)
+    );
+    assert!(server.received_requests().await.unwrap_or_default().is_empty());
+
+    // and so the fence denies a message to a chat of lab accounts only
+    let lab = Fence::new(
+        Roster::new(vec![mri(GUID_A), mri(GUID_B), mri(GUID_C)], []),
+        FenceLog::from_writer(std::io::sink()),
+    );
+    let denied = lab
+        .check(Target::new(WriteKind::Message, group_chat()), &source)
+        .await
+        .err()
+        .ok_or("a group chat message was allowed")?;
+    assert_eq!(*denied.reason(), DenyReason::Partial(PartialReason::Unsupported));
+    assert!(server.received_requests().await.unwrap_or_default().is_empty());
+    Ok(())
+}
+
+#[test]
+fn only_a_one_to_one_chat_can_be_read_in_full() {
+    assert!(LiveMembershipSource::reads_in_full(&chat()));
+    for scope in [
+        group_chat(),
+        Scope::Conversation {
+            id: "19:meeting_0123456789abcdef@thread.v2".to_owned(),
+        },
+        Scope::Conversation {
+            id: format!("19:{GUID_A}_{GUID_A}@unq.gbl.spaces"),
+        },
+        Scope::Channel {
+            team: "19:team@thread.tacv2".to_owned(),
+            channel: "19:channel@thread.tacv2".to_owned(),
+        },
+        Scope::Team {
+            id: "19:team@thread.tacv2".to_owned(),
+        },
+        Scope::Call {
+            id: "call-1".to_owned(),
+        },
+    ] {
+        assert!(!LiveMembershipSource::reads_in_full(&scope), "{scope}");
+    }
+}
+
+#[test]
+fn a_group_chat_id_is_19_an_id_and_thread_v2_and_never_a_meeting_s() {
+    assert!(is_group_chat_id(&format!("19:{GROUP}@thread.v2")));
+    assert!(is_group_chat_id("19:a_b-C9@thread.v2"));
+    for id in [
+        "19:meeting_0123@thread.v2",
+        "19:MEETING_0123@thread.v2",
+        "19:@thread.v2",
+        "19:01 23@thread.v2",
+        "19:0123@thread.tacv2",
+        "19:0123@thread.v2;messageid=1",
+        "19:0123%40thread.v2",
+        "0123@thread.v2",
+        &format!("19:{GUID_A}_{GUID_B}@unq.gbl.spaces"),
+        &format!("19:{}@thread.v2", "a".repeat(129)),
+    ] {
+        assert!(!is_group_chat_id(id), "{id}");
+    }
 }
 
 #[test]

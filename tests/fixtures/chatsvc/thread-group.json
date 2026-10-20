@@ -1,0 +1,84 @@
+{
+  "_synthetic": "Written by hand, synthetic-from-capture: the shape of the chat service's thread read of a 3-member group chat (GET v1/threads/<id>?view=msnp24Equivalent) as the lab's reference copies chat/thread-group-{a,b,c} (proto-lab probe thread, 2026-10-20, M1 Task 8) show it, every value made up. <guid:a>, <guid:b>, <guid:c> stand for the three members' object ids, <guid:tenant> for the tenant, <group> for the chat's 32-hex id; tests fill them in. The batch read (GET v1/threads?view=msnp24Equivalent&threadIds=<id>) answers a JSON array holding this same object.",
+  "request": {
+    "method": "GET",
+    "path": "/api/chatsvc/<region>/v1/threads/19:<group>@thread.v2",
+    "query": "view=msnp24Equivalent",
+    "headers": {
+      "Authorization": "Bearer <token:1>",
+      "Accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "copilotShareTokens": [],
+      "eTag": "\"1760000000000\"",
+      "encryptionType": "None",
+      "fileReferences": {},
+      "id": "19:<group>@thread.v2",
+      "members": [
+        {
+          "capabilities": ["kickMember"],
+          "cid": "0",
+          "hidden": false,
+          "id": "8:orgid:<guid:a>",
+          "isFollowing": false,
+          "linkedMri": "",
+          "meetingRole": "None",
+          "rangeEnd": 253402300800000,
+          "rangeStart": 1760000000000,
+          "role": "Admin",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:a>"
+        },
+        {
+          "capabilities": ["kickMember"],
+          "cid": "0",
+          "hidden": false,
+          "id": "8:orgid:<guid:b>",
+          "isFollowing": false,
+          "linkedMri": "",
+          "meetingRole": "None",
+          "rangeEnd": 253402300800000,
+          "rangeStart": 1760000000000,
+          "role": "Admin",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:b>"
+        },
+        {
+          "capabilities": ["kickMember"],
+          "cid": "0",
+          "hidden": false,
+          "id": "8:orgid:<guid:c>",
+          "isFollowing": false,
+          "linkedMri": "",
+          "meetingRole": "None",
+          "rangeEnd": 253402300800000,
+          "rangeStart": 1760000000000,
+          "role": "Admin",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:c>"
+        }
+      ],
+      "messages": "https://<region>.example.test/v1/users/ME/conversations/19:<group>@thread.v2/messages",
+      "properties": {
+        "capabilities": ["AddMember", "ChangeTopic", "ChangePicture", "EditMsg", "SendText"],
+        "createdat": "1760000000000",
+        "creator": "8:orgid:<guid:a>",
+        "disableanonymousjoin": "false",
+        "gapDetectionEnabled": "True",
+        "hasReplies": "False",
+        "historydisclosed": "false",
+        "isMigrated": "True",
+        "productContext": "TEAMS",
+        "tenantid": "<guid:tenant>",
+        "threadType": "chat"
+      },
+      "rosterVersion": 1760000000000,
+      "tenantId": "<guid:tenant>",
+      "type": "Thread",
+      "version": 1760000000000
+    }
+  }
+}

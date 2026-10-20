@@ -15,12 +15,14 @@ use proto_lab::commands::probe::{
     CONVERSATIONS_PATH, Challenge, ChatProbe, HIDDEN, HeaderForm, IC3_RESOURCE, Origin, ProbeError, ProbeRequest,
     probe_chat,
 };
+use proto_lab::commands::thread_probe::{ThreadProbe, ThreadReadKind, next_page, probe_thread};
 use proto_lab::config::{Alias, LabConfig};
 use proto_lab::sanitize::Identities;
 use serde_json::{Value, json};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore as _};
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
+use teams_fence::lab::record_abc_chat;
 use teams_fence::{LiveMembershipSource, Membership};
 use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -495,5 +497,266 @@ async fn saving_writes_a_sanitized_reference_copy_and_never_inside_a_repository(
     let refused = export::export_events(&events, "chat/probe-a", &inside, &identities, Checks::Warn);
     assert!(matches!(refused, Err(ExportError::InsideRepository(_))), "{refused:?}");
     assert!(!inside.exists());
+    Ok(())
+}
+
+const GROUP: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
+const GROUP_ENCODED: &str = "19%3A0123456789abcdef0123456789abcdef%40thread.v2";
+const GUID_C: &str = "0000000c-0000-4000-8000-00000000000c";
+
+fn group_member(guid: &str) -> Value {
+    json!({"id": format!("8:orgid:{guid}"), "role": "Admin"})
+}
+
+fn group_thread() -> Value {
+    json!({
+        "id": GROUP,
+        "type": "Thread",
+        "properties": {"threadType": "chat", "topic": BODY_MARKER},
+        "members": [group_member(GUID_A), group_member(GUID_B), group_member(GUID_C)],
+        "rosterVersion": 7,
+        "version": 1_760_000_000_000_u64,
+    })
+}
+
+/// The group chat's reads (the id as the client puts it in a path segment: `:` and `@` aren't encoded there): the
+/// thread, the batch read, the member list in one page and in pages of one (the second
+/// page's next link names another chat's list, which mustn't be followed), the filtered view, the own view.
+async fn group_service(server: &MockServer) {
+    let members = format!("{CHAT_PREFIX}/v1/threads/{GROUP}/members");
+    let mounts = [
+        (format!("{CHAT_PREFIX}/v1/threads/{GROUP}"), None, group_thread()),
+        (
+            format!("{CHAT_PREFIX}/v1/threads"),
+            Some(("threadIds", GROUP)),
+            json!([group_thread()]),
+        ),
+        (
+            members.clone(),
+            Some(("pageSize", "100")),
+            json!({"members": [group_member(GUID_A), group_member(GUID_B), group_member(GUID_C)]}),
+        ),
+        (
+            format!("{CHAT_PREFIX}/v1/threads/{GROUP}/filtered"),
+            None,
+            group_thread(),
+        ),
+        (
+            format!("{CHAT_PREFIX}/v1/users/ME/conversations/{GROUP}"),
+            None,
+            json!({"id": GROUP, "threadProperties": {"membercount": "3"}}),
+        ),
+    ];
+    for (at, param, body) in mounts {
+        let mut mock = Mock::given(method("GET"))
+            .and(path(at))
+            .and(query_param("view", "msnp24Equivalent"));
+        if let Some((name, value)) = param {
+            mock = mock.and(query_param(name, value));
+        }
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+    // pages of one: the first names the second by a full URL on the regional host, the second another chat's list
+    let second = format!(
+        "https://amer.ng.msg.teams.microsoft.com/v1/threads/{GROUP_ENCODED}/members?view=msnp24Equivalent&pageSize=1&\
+         syncState=page2"
+    );
+    let elsewhere = "https://amer.ng.msg.teams.microsoft.com/v1/threads/19%3Aother%40thread.v2/members?view=\
+                     msnp24Equivalent&syncState=page3";
+    Mock::given(method("GET"))
+        .and(path(members.clone()))
+        .and(query_param("syncState", "page2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "members": [group_member(GUID_B)],
+            "_metadata": {"nextLink": elsewhere},
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(members))
+        .and(query_param("pageSize", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "members": [group_member(GUID_A)],
+            "_metadata": {"nextLink": second},
+        })))
+        .with_priority(10)
+        .mount(server)
+        .await;
+}
+
+async fn run_thread(config: &LabConfig, entra: &MockServer, chat: &MockServer) -> TestResult<ThreadProbe> {
+    let source = LiveMembershipSource::with_mock_origin(&chat.uri())?;
+    let origin = Origin::Mock(chat.uri());
+    Ok(probe_thread(&store().await?, &tokens(entra)?, config, Alias::A, &origin, source).await?)
+}
+
+/// The thread probe of a lab whose `chats.toml` records the group chat, against [`group_service`]: the lab, the
+/// token Entra handed out, the chat service and the probe.
+async fn probed_group(dir: &Path) -> TestResult<(LabConfig, String, MockServer, ThreadProbe)> {
+    let config = lab(dir, Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    record_abc_chat(config.paths(), GROUP)?;
+    let token = ic3_token();
+    let entra = entra(&token).await;
+    let chat = MockServer::start().await;
+    group_service(&chat).await;
+    let probe = run_thread(&config, &entra, &chat).await?;
+    Ok((config, token, chat, probe))
+}
+
+#[tokio::test]
+async fn the_thread_probe_reads_the_group_chat_s_member_reads_with_gets_only() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (_config, token, chat, probe) = probed_group(dir.path()).await?;
+    let requests = chat.received_requests().await.ok_or("no recording")?;
+    let bearer = format!("Bearer {token}");
+    for request in &requests {
+        assert_eq!(request.method.as_str(), "GET");
+        let sent = request
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(sent, Some(bearer.as_str()));
+    }
+    // the second page was followed on the chat base, the other chat's list never
+    let queries: Vec<String> = requests
+        .iter()
+        .map(|request| request.url.query().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        queries.iter().any(|query| query.contains("syncState=page2")),
+        "{queries:?}"
+    );
+    assert!(!queries.iter().any(|query| query.contains("page3")), "{queries:?}");
+    assert!(!requests.iter().any(|request| request.url.path().contains("other")));
+    let kinds: Vec<(ThreadReadKind, usize)> = probe.reads.iter().map(|read| (read.kind, read.page)).collect();
+    assert_eq!(
+        kinds,
+        [
+            (ThreadReadKind::Thread, 1),
+            (ThreadReadKind::Threads, 1),
+            (ThreadReadKind::Members, 1),
+            (ThreadReadKind::MembersPaged, 1),
+            (ThreadReadKind::MembersPaged, 2),
+            (ThreadReadKind::Filtered, 1),
+            (ThreadReadKind::MyConversation, 1),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_thread_probe_shows_keys_and_counts_and_no_value() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (_config, token, _chat, probe) = probed_group(dir.path()).await?;
+    let text = format!("{}\n{probe:?}", probe.lines(SystemTime::now()).join("\n"));
+    for hidden in [
+        token.as_str(),
+        BODY_MARKER,
+        REFRESH_TOKEN,
+        GUID_A,
+        GUID_B,
+        GUID_C,
+        "0123456789abcdef",
+    ] {
+        assert!(!text.contains(hidden), "{hidden}: {text}");
+    }
+    assert!(text.contains("3 member(s)"), "{text}");
+    assert!(
+        text.contains("members same as the thread read's; rosterVersion same"),
+        "{text}"
+    );
+    assert!(text.contains("paging keys [nextLink]"), "{text}");
+    assert!(
+        text.contains("members different as the thread read's"),
+        "a page of one: {text}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_thread_probe_s_reference_copy_keeps_the_answers_sanitized() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (config, token, _chat, probe) = probed_group(dir.path()).await?;
+    let events = probe.reference_events();
+    assert_eq!(events.len(), 7);
+    let reference_dir = export::reference_dir(config.paths().data_dir());
+    let exported = export::export_events(
+        &events,
+        "chat/thread-a",
+        &reference_dir,
+        &Identities::from_lab(&config),
+        Checks::Warn,
+    )?;
+    let copy = std::fs::read_to_string(&exported.path)?;
+    assert!(copy.contains("\"read\":\"thread_members (paged)\""), "{copy}");
+    assert!(
+        copy.contains("<mri:a>") && copy.contains("19:<thread:1>@thread.v2"),
+        "{copy}"
+    );
+    // never the mock origin or the token; a chat's topic is a name someone gave it, so the sanitizer takes it out too
+    for hidden in [
+        token.as_str(),
+        "127.0.0.1",
+        BODY_MARKER,
+        GUID_A,
+        GUID_C,
+        "0123456789abcdef",
+    ] {
+        assert!(!copy.contains(hidden), "{hidden}: {copy}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_thread_probe_needs_a_recorded_group_chat_before_anything_is_read() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    let entra = entra(&ic3_token()).await;
+    let chat = MockServer::start().await;
+    let refused = run_thread(&config, &entra, &chat).await;
+    let error = refused.err().ok_or("the probe ran without a group chat")?;
+    assert!(error.to_string().contains("no a-b-c group chat"), "{error}");
+    assert!(chat.received_requests().await.unwrap_or_default().is_empty());
+    assert!(entra.received_requests().await.unwrap_or_default().is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_next_page_is_followed_only_on_the_same_member_list_and_only_on_the_current_origin() -> TestResult {
+    let current = url::Url::parse(&format!(
+        "https://teams.microsoft.com/api/chatsvc/amer/v1/threads/{GROUP_ENCODED}/members?view=msnp24Equivalent&\
+         pageSize=1"
+    ))?;
+    let regional = format!(
+        "https://amer.ng.msg.teams.microsoft.com/v1/threads/{GROUP_ENCODED}/members?view=msnp24Equivalent&syncState=x"
+    );
+    let next = next_page(&json!({"_metadata": {"nextLink": regional}}), &current).ok_or("not followed")?;
+    assert_eq!(
+        next.host_str(),
+        Some("teams.microsoft.com"),
+        "re-based on the current origin"
+    );
+    assert_eq!(next.path(), current.path());
+    assert_eq!(next.query(), Some("view=msnp24Equivalent&syncState=x"));
+    let other_chat =
+        "https://amer.ng.msg.teams.microsoft.com/v1/threads/19%3Aother%40thread.v2/members?view=msnp24Equivalent";
+    for refused in [
+        json!({"_metadata": {"nextLink": other_chat}}),
+        json!({"_metadata": {"nextLink": "https://example.com/v1/threads/x/members"}}),
+        json!({"_metadata": {"nextLink": "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations"}}),
+        json!({"_metadata": {"nextLink": 3}}),
+        json!({"_metadata": {"backwardLink": regional}}),
+        json!([{"nextLink": regional}]),
+    ] {
+        assert_eq!(next_page(&refused, &current), None, "{refused}");
+    }
+    let relative = next_page(
+        &json!({"nextLink": "members?view=msnp24Equivalent&syncState=y"}),
+        &current,
+    )
+    .ok_or("relative not followed")?;
+    assert_eq!(relative.query(), Some("view=msnp24Equivalent&syncState=y"));
     Ok(())
 }

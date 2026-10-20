@@ -17,6 +17,7 @@ use proto_lab::commands::export;
 use proto_lab::commands::login::{self, LoginOptions};
 use proto_lab::commands::probe;
 use proto_lab::commands::status::{self, AccountStatus};
+use proto_lab::commands::thread_probe;
 use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_service_mri};
 use proto_lab::sanitize::Identities;
 use proto_lab::scenario::{self, RunOptions, ScenarioName};
@@ -141,6 +142,17 @@ enum ProbeCommand {
         #[arg(long)]
         save: Option<String>,
     },
+    /// How the chat service answers the member reads of the a-b-c group chat (its id from the lab's chats.toml) as
+    /// the account sees them: the thread, the batch read, the member list in one page and paged, the filtered view and
+    /// the account's own view, then the fence's own read. Prints statuses, key names and counts only. GETs only.
+    Thread {
+        /// The lab account: a, b or c.
+        alias: Alias,
+        /// Also write the answers as a sanitized local reference copy under the lab's reference/ dir, such as
+        /// `chat/thread-group-a` (never inside a git work tree).
+        #[arg(long)]
+        save: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -194,6 +206,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Probe {
             command: ProbeCommand::Chat { alias, with, save },
         } => run_probe_chat(alias, with, save.as_deref()).await,
+        Command::Probe {
+            command: ProbeCommand::Thread { alias, save },
+        } => run_probe_thread(alias, save.as_deref()).await,
         Command::Auth {
             alias,
             timeout,
@@ -312,6 +327,48 @@ async fn run_probe_chat(
         name,
         &reference_dir,
         &identities,
+        export::Checks::Warn,
+    )?;
+    for line in exported.warnings.summary() {
+        eprintln!("warning: {line}");
+    }
+    println!(
+        "{alias}: wrote a sanitized reference copy of {} read(s) to {}; it stays outside the repository",
+        exported.events,
+        exported.path.display()
+    );
+    Ok(())
+}
+
+async fn run_probe_thread(alias: Alias, save: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let config = LabConfig::load(&LabLocations::from_env()?)?;
+    let reference_dir = export::reference_dir(config.paths().data_dir());
+    // a bad `--save` name or destination fails here, before the refresh and the reads go out
+    if let Some(name) = save {
+        export::check_destination(&reference_dir, name)?;
+    }
+    let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
+    let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
+    let report = thread_probe::probe_thread(
+        &store,
+        &tokens,
+        &config,
+        alias,
+        &probe::Origin::ChatService,
+        teams_fence::LiveMembershipSource::new()?,
+    )
+    .await?;
+    for line in report.lines(std::time::SystemTime::now()) {
+        println!("{line}");
+    }
+    let Some(name) = save else {
+        return Ok(());
+    };
+    let exported = export::export_events(
+        &report.reference_events(),
+        name,
+        &reference_dir,
+        &Identities::from_lab(&config),
         export::Checks::Warn,
     )?;
     for line in exported.warnings.summary() {

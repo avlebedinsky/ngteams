@@ -6,3 +6,4 @@ pub mod export;
 pub mod login;
 pub mod probe;
 pub mod status;
+pub mod thread_probe;
