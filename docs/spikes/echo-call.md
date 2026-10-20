@@ -35,15 +35,22 @@ ran a browser, or answered a call.
   long-term request with the MD5 key), and its XOR-MAPPED-ADDRESS bytes match the RFC's.
 - A sans-IO client for one allocation: Allocate (unauthenticated first, then with the realm and nonce from the 401),
   Refresh before expiry, CreatePermission and ChannelBind with their refreshes (4 of 5 and 9 of 10 minutes), Send/Data
-  indications and `ChannelData`, 438 stale-nonce renewal, retransmission over UDP per RFC 8489, release with lifetime
-  0. Responses to authenticated requests are acted on only with a valid `MESSAGE-INTEGRITY` (a forged or missing one
-  is dropped and the request retransmitted). 401 twice, 4xx/5xx and 300 Try-Alternate end the allocation.
+  indications and `ChannelData`, 438 stale-nonce renewal, retransmission over UDP per RFC 8489 (over TCP a request is
+  sent once and waits up to 39.5 s), release with lifetime 0 (a 437 to it counts as released). Responses to
+  authenticated requests are acted on only with a valid `MESSAGE-INTEGRITY`, the 401/438 challenge errors excepted:
+  over UDP a forged or missing one is dropped and the request retransmitted; over TCP, where nothing is retransmitted,
+  it ends the request (`TurnFailure::Unverified`, with the code it claimed).
+- Only a failed Allocate or Refresh (401 twice, any other 4xx/5xx, 300 Try-Alternate, no answer) ends the allocation.
+  A refused or unanswered CreatePermission or ChannelBind is reported as `TurnEvent::RequestRefused` and the
+  allocation stays: a refused one isn't asked again for that IP or peer and data goes by Send indication; an
+  unanswered one is asked again on the next send, a ChannelBind under the same channel number (the server may hold
+  the binding already). A peer keeps its channel number for the allocation's life.
 - On real sockets: UDP and TCP. On TCP the messages are framed natively (RFC 8656 12.5, `ChannelData` padded to 4
   bytes; what coturn and browsers speak) or with the RFC 4571 2-byte length prefix (`Framing::Rfc4571`), which TURN
   over TCP doesn't normally use; which one Teams' relays expect is an open question below. `allocate_any` tries the
   servers in order (a relay descriptor gives every address over UDP first, then over TCP), so a UDP relay that stays
   silent falls back to TCP after the allocation timeout.
-- Tested on synthetic exchanges with a scripted server (`tests/turn.rs`, 20 tests), on loopback against a minimal
+- Tested on synthetic exchanges with a scripted server (`tests/turn.rs`), on loopback against a minimal
   TURN server of our own (`tests/relay.rs`), and **against coturn 4.6.3** (the `coturn/coturn` container, on loopback
   only, with `--allow-loopback-peers`, started and stopped by hand for this run): allocation, permissions, channels and
   the full echo below passed over UDP and over TCP. Run it again with `ECHO_CALL_TURN_SERVER=127.0.0.1:<port>`,
@@ -138,5 +145,5 @@ refuses on purpose: the signaling is unconfirmed, and nothing unconfirmed is sen
    Teams' media relays may be ICE-lite. Our peer offers one relayed candidate; whether host candidates should be
    added is a privacy and connectivity choice for M3.
 8. **Credentials preparation.** The client takes TURN credentials as given (no `OpaqueString`/SASLprep), which is
-   fine for the ASCII credentials seen so far; MESSAGE-INTEGRITY-SHA256 and `PASSWORD-ALGORITHMS` (RFC 8489) are not
-   implemented.
+   fine if Teams' relay credentials are ASCII, unconfirmed until the Task 18 capture (no Teams relay credentials have
+   been seen yet); MESSAGE-INTEGRITY-SHA256 and `PASSWORD-ALGORITHMS` (RFC 8489) are not implemented.

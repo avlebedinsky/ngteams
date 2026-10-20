@@ -1,6 +1,7 @@
 //! `echo-call`: places the echo call from lab account A, as far as it can go (see `echo_call::call`). Today it stops
-//! at the fence: the echo service has no approved MRI in `lab.toml` yet. Nothing is sent to Microsoft until the
-//! signaling is confirmed by Task 18's capture; no incoming call is ever answered.
+//! before the fence: the echo service has no MRI in `lab.toml` yet (`--callee` with an MRI `lab.toml` doesn't approve
+//! is denied by the fence). Nothing is sent to Microsoft until the signaling is confirmed by Task 18's capture; no
+//! incoming call is ever answered.
 
 use std::process::ExitCode;
 

@@ -624,3 +624,155 @@ fn credentials_debug_hides_the_password() {
     assert!(text.contains(USER) && !text.contains(PASSWORD), "{text}");
     assert!(!format!("{:?}", key()).contains(PASSWORD));
 }
+
+fn refusal(request: &Message, code: u16) -> Message {
+    Message::new(Class::Error, request.method, request.transaction_id).with(Attribute::ErrorCode {
+        code,
+        reason: "Refused".into(),
+    })
+}
+
+/// The classes and methods of the STUN messages sent, and how many `ChannelData` went.
+fn methods_and_channel_data(sent: &Sent) -> (Vec<(Class, Method)>, usize) {
+    let methods = sent.0.iter().map(|(m, _)| (m.class, m.method)).collect();
+    (methods, sent.1.len())
+}
+
+fn channel_of(message: &Message) -> Option<u16> {
+    message.find(|a| match a {
+        Attribute::ChannelNumber(channel) => Some(*channel),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_success_carrying_an_auth_error_code_without_integrity_is_dropped() {
+    let mut script = Script::new(Transport::Udp, PASSWORD);
+    script.client.allocate(script.now).unwrap();
+    let (first, _) = script.one_request();
+    script.reply(&challenge(&first, "nonce-1"), None);
+    let (second, _) = script.one_request();
+
+    for code in [401, 438] {
+        let forged = allocate_success(&second, 600).with(Attribute::ErrorCode {
+            code,
+            reason: "Unauthorized".into(),
+        });
+        script.reply(&forged, None);
+    }
+    assert!(
+        script.events().is_empty(),
+        "only an error may come unsigned: no allocation from a forged success"
+    );
+    assert_eq!(script.client.relayed(), None);
+    script.advance(Duration::from_millis(100));
+    assert_eq!(
+        script.one_request().0.transaction_id,
+        second.transaction_id,
+        "still waiting"
+    );
+}
+
+#[test]
+fn over_tcp_an_answer_without_valid_integrity_ends_the_request() {
+    let mut script = Script::new(Transport::Tcp, PASSWORD);
+    script.client.allocate(script.now).unwrap();
+    let (first, _) = script.one_request();
+    script.reply(&challenge(&first, "nonce-1"), None);
+    let (second, _) = script.one_request();
+    script.reply(&refusal(&second, 400), None);
+    assert_eq!(
+        script.events(),
+        [TurnEvent::Failed(TurnFailure::Unverified {
+            method: Method::Allocate,
+            code: Some(400),
+        })],
+        "at once, with the code it claimed, not after 39.5 s"
+    );
+    assert!(script.client.is_done());
+}
+
+#[test]
+fn refused_permissions_and_channels_are_not_asked_again_and_data_goes_by_indication() {
+    let mut script = Script::allocated(Transport::Udp);
+    let peer: SocketAddr = PEER.parse().unwrap();
+    script.client.send_to(script.now, peer, b"first").unwrap();
+    let (stun, _) = script.sent();
+    script.reply(&refusal(&stun[0].0, 403), Some(&key()));
+    script.reply(&refusal(&stun[1].0, 508), Some(&key()));
+    assert_eq!(
+        script.events(),
+        [
+            TurnEvent::RequestRefused {
+                method: Method::CreatePermission,
+                code: 403
+            },
+            TurnEvent::RequestRefused {
+                method: Method::ChannelBind,
+                code: 508
+            },
+        ]
+    );
+
+    // more sends than there are channel numbers
+    for _ in 0..5_000 {
+        script.client.send_to(script.now, peer, b"rtp").unwrap();
+    }
+    let sent = script.sent();
+    let (methods, channel_data) = methods_and_channel_data(&sent);
+    assert_eq!((methods.len(), channel_data), (5_000, 0));
+    assert!(
+        methods.iter().all(|m| *m == (Class::Indication, Method::Send)),
+        "no new CreatePermission or ChannelBind, so no channel number is used up"
+    );
+    assert!(!script.client.is_done(), "the allocation stays");
+}
+
+#[test]
+fn an_unanswered_channel_bind_is_asked_again_under_the_same_number() {
+    let mut script = Script::allocated(Transport::Udp);
+    let peer: SocketAddr = PEER.parse().unwrap();
+    script.client.send_to(script.now, peer, b"first").unwrap();
+    let (stun, _) = script.sent();
+    script.reply(&success(&stun[0].0), Some(&key()));
+    assert_eq!(channel_of(&stun[1].0), Some(0x4000));
+    script.events();
+
+    // the server may have bound it: only the answers were lost
+    script.advance(Duration::from_millis(100));
+    script.advance(Duration::from_millis(200));
+    script.advance(Duration::from_millis(400));
+    script.sent();
+    assert_eq!(
+        script.events(),
+        [TurnEvent::RequestRefused {
+            method: Method::ChannelBind,
+            code: 0
+        }]
+    );
+
+    script.client.send_to(script.now, peer, b"again").unwrap();
+    let sent = script.sent();
+    assert_eq!(
+        methods_and_channel_data(&sent),
+        (
+            vec![(Class::Request, Method::ChannelBind), (Class::Indication, Method::Send)],
+            0
+        ),
+        "the permission stands; the channel is asked again"
+    );
+    let rebind = &sent.0[0].0;
+    assert_eq!(channel_of(rebind), Some(0x4000), "the same channel, not a new one");
+    script.reply(&success(rebind), Some(&key()));
+    assert_eq!(script.events(), [TurnEvent::ChannelBound { peer, channel: 0x4000 }]);
+}
+
+#[test]
+fn a_437_to_the_release_means_the_allocation_is_gone() {
+    let mut script = Script::allocated(Transport::Udp);
+    script.client.close(script.now).unwrap();
+    let (refresh, _) = script.one_request();
+    script.reply(&refusal(&refresh, 437), Some(&key()));
+    assert_eq!(script.events(), [TurnEvent::Closed]);
+    assert!(script.client.is_done());
+}

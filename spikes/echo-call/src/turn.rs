@@ -6,12 +6,20 @@
 //!   sent again with `USERNAME`, `REALM`, `NONCE` and `MESSAGE-INTEGRITY`. Every later request is authenticated the
 //!   same way. A 438 (stale nonce) takes the new nonce and sends the request again; a second 401 means the
 //!   credentials are wrong.
-//! - Responses to authenticated requests count only with a valid `MESSAGE-INTEGRITY`, except a 401 or 438, which a
-//!   server sends without one; a response with a bad or missing one is dropped (the request is retransmitted).
+//! - Responses to authenticated requests count only with a valid `MESSAGE-INTEGRITY`, except a 401 or 438 error,
+//!   which a server sends without one. A response with a bad or missing one is dropped over UDP (the request is
+//!   retransmitted and may still get a real answer); over TCP nothing is retransmitted, so it ends the request at once
+//!   ([`TurnFailure::Unverified`]), as RFC 8489 9.2.5 asks of a reliable transport.
+//! - **Failures**: only a failed Allocate or Refresh ends the allocation ([`TurnEvent::Failed`]). A refused or
+//!   unanswered `CreatePermission` or `ChannelBind` is reported ([`TurnEvent::RequestRefused`]) and the allocation
+//!   stays. A refused one is not asked again for that IP or peer (data goes by `Send` indication); an unanswered one
+//!   is asked again on the next send, a `ChannelBind` with the same channel number, since the server may hold it. A
+//!   peer keeps its channel number for the allocation's life, whatever happens to its binding. A 437 to the release
+//!   means the allocation is already gone: it counts as closed.
 //! - **Data**: [`TurnClient::send_to`] installs a permission for the peer's IP and binds a channel on first use, sends
 //!   by `Send` indication until the channel is bound and by `ChannelData` after. Incoming `Data` indications and
 //!   `ChannelData` come out as [`TurnEvent::Data`]; data from a peer without a permission never reaches us (the server
-//!   drops it), and `ChannelData` on an unknown channel is dropped here.
+//!   drops it), and `ChannelData` on a channel no peer was ever bound to is dropped here.
 //! - **Timers**: over UDP a request is retransmitted after 0.5 s, doubling, 7 sends in all (RFC 8489 6.2.1); over TCP
 //!   it is sent once. The allocation is refreshed a minute before it runs out (or halfway through a shorter one),
 //!   permissions after 4 of their 5 minutes, channel bindings after 9 of their 10.
@@ -104,6 +112,12 @@ pub enum TurnFailure {
     Timeout(Method),
     #[error("the TURN server's success answer lacks XOR-RELAYED-ADDRESS")]
     NoRelayedAddress,
+    /// Over TCP, the answer to an authenticated request had a bad or missing `MESSAGE-INTEGRITY`; `code` is the error
+    /// code it claimed, unverified.
+    #[error(
+        "the TURN server's answer to the {method:?} request has no valid MESSAGE-INTEGRITY (claimed code {code:?})"
+    )]
+    Unverified { method: Method, code: Option<u16> },
 }
 
 /// What the client reports.
@@ -121,7 +135,8 @@ pub enum TurnEvent {
     PermissionCreated(IpAddr),
     /// `peer` is bound to `channel`: data goes as `ChannelData` from now on.
     ChannelBound { peer: SocketAddr, channel: u16 },
-    /// A permission or channel request was refused (not final: data still goes by indication where it can).
+    /// A permission or channel request was refused or went unanswered (not final: data still goes by indication where
+    /// it can). `code` is the server's error code, 0 when no trusted answer came.
     RequestRefused { method: Method, code: u16 },
     /// Data relayed from `peer`.
     Data { peer: SocketAddr, payload: Vec<u8> },
@@ -195,9 +210,29 @@ struct Auth {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Permission {
+    /// The first `CreatePermission` is out.
+    Pending,
+    Installed {
+        refresh_at: Instant,
+    },
+    /// The server refused it: not asked again in this allocation.
+    Refused,
+}
+
+/// A peer's channel. The number stays the peer's for the allocation's life, whatever happens to the binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Binding {
     Pending(u16),
-    Bound { channel: u16, refresh_at: Instant },
+    Bound {
+        channel: u16,
+        refresh_at: Instant,
+    },
+    /// The last `ChannelBind` went unanswered: the server may hold the binding, so the next send asks for the same
+    /// number again.
+    Unconfirmed(u16),
+    /// The server refused it: data goes by indication, and the channel isn't asked again in this allocation.
+    Refused(u16),
 }
 
 /// A sans-IO TURN client for one allocation.
@@ -210,8 +245,7 @@ pub struct TurnClient {
     auth: Option<Auth>,
     state: State,
     transactions: HashMap<TransactionId, Transaction>,
-    /// IP → when to refresh it; `None` while the first `CreatePermission` is pending.
-    permissions: HashMap<IpAddr, Option<Instant>>,
+    permissions: HashMap<IpAddr, Permission>,
     bindings: HashMap<SocketAddr, Binding>,
     peers_by_channel: HashMap<u16, SocketAddr>,
     next_channel: u16,
@@ -302,7 +336,7 @@ impl TurnClient {
         self.start(now, Request::Refresh { lifetime: Some(0) }, 0)
     }
 
-    /// Lets data from `ip` through (`CreatePermission`), unless a permission exists or is pending.
+    /// Lets data from `ip` through (`CreatePermission`), unless a permission exists, is pending, or was refused.
     ///
     /// # Errors
     /// [`TurnError::NotAllocated`] before the allocation exists.
@@ -311,7 +345,7 @@ impl TurnClient {
         if self.permissions.contains_key(&ip) {
             return Ok(());
         }
-        self.permissions.insert(ip, None);
+        self.permissions.insert(ip, Permission::Pending);
         self.start(now, Request::CreatePermission(ip), 0)
     }
 
@@ -323,16 +357,17 @@ impl TurnClient {
     pub fn send_to(&mut self, now: Instant, peer: SocketAddr, payload: &[u8]) -> Result<(), TurnError> {
         self.relayed().ok_or(TurnError::NotAllocated)?;
         self.permit(now, peer.ip())?;
-        match self.bindings.get(&peer) {
+        match self.bindings.get(&peer).copied() {
             Some(Binding::Bound { channel, .. }) => {
                 let message = ChannelData {
-                    channel: *channel,
+                    channel,
                     data: payload.to_vec(),
                 };
                 self.outgoing.push_back(message.encode(false));
                 return Ok(());
             }
-            Some(Binding::Pending(_)) => {}
+            Some(Binding::Pending(_) | Binding::Refused(_)) => {}
+            Some(Binding::Unconfirmed(channel)) => self.bind_channel(now, peer, channel)?,
             None => self.bind(now, peer)?,
         }
         let indication = Message::new(Class::Indication, Method::Send, Self::transaction_id()?)
@@ -387,10 +422,13 @@ impl TurnClient {
             State::Allocated { refresh_at, .. } => Some(refresh_at),
             _ => None,
         };
-        let permissions = self.permissions.values().filter_map(|at| *at);
+        let permissions = self.permissions.values().filter_map(|permission| match permission {
+            Permission::Installed { refresh_at } => Some(*refresh_at),
+            Permission::Pending | Permission::Refused => None,
+        });
         let bindings = self.bindings.values().filter_map(|binding| match binding {
             Binding::Bound { refresh_at, .. } => Some(*refresh_at),
-            Binding::Pending(_) => None,
+            Binding::Pending(_) | Binding::Unconfirmed(_) | Binding::Refused(_) => None,
         });
         transactions.chain(allocation).chain(permissions).chain(bindings).min()
     }
@@ -409,12 +447,17 @@ impl TurnClient {
         TransactionId::random().map_err(|_| TurnError::Random)
     }
 
+    /// Binds `peer` a new channel number.
     fn bind(&mut self, now: Instant, peer: SocketAddr) -> Result<(), TurnError> {
         let channel = self.next_channel;
         if channel > CHANNEL_MAX {
             return Err(TurnError::NoChannel);
         }
         self.next_channel += 1;
+        self.bind_channel(now, peer, channel)
+    }
+
+    fn bind_channel(&mut self, now: Instant, peer: SocketAddr, channel: u16) -> Result<(), TurnError> {
         self.bindings.insert(peer, Binding::Pending(channel));
         self.start(now, Request::ChannelBind { peer, channel }, 0)
     }
@@ -506,12 +549,21 @@ impl TurnClient {
         let Some(transaction) = self.transactions.get(&message.transaction_id) else {
             return;
         };
-        if !self.trusted(transaction, message, raw) {
+        let trusted = self.trusted(transaction, message, raw);
+        if !trusted && self.transport == Transport::Udp {
+            // a retransmission may still bring the real answer
             return;
         }
         let Some(transaction) = self.transactions.remove(&message.transaction_id) else {
             return;
         };
+        if !trusted {
+            // over TCP nothing is retransmitted: the request ends here
+            let method = transaction.request.method();
+            let code = message.error_code().map(|(code, _)| code);
+            self.on_request_failed(&transaction.request, TurnFailure::Unverified { method, code }, 0);
+            return;
+        }
         if message.class == Class::Success {
             self.on_success(now, &transaction.request, message);
         } else {
@@ -519,12 +571,12 @@ impl TurnClient {
         }
     }
 
-    /// Whether a response may be acted on: a request sent with integrity needs it back, except for a 401 or 438.
+    /// Whether a response may be acted on: a request sent with integrity needs it back, except for a 401 or 438 error.
     fn trusted(&self, transaction: &Transaction, message: &Message, raw: &[u8]) -> bool {
         if !transaction.authenticated {
             return true;
         }
-        let auth_challenge = matches!(message.error_code(), Some((401 | 438, _)));
+        let auth_challenge = message.class == Class::Error && matches!(message.error_code(), Some((401 | 438, _)));
         match &self.auth {
             Some(auth) if message.has_integrity() => verify_integrity(raw, &auth.key),
             _ => auth_challenge,
@@ -538,11 +590,7 @@ impl TurnClient {
         });
         match request {
             Request::Allocate => self.on_allocated(now, message, lifetime.unwrap_or(Duration::from_secs(600))),
-            Request::Refresh { lifetime: Some(0) } => {
-                self.state = State::Done;
-                self.transactions.clear();
-                self.events.push_back(TurnEvent::Closed);
-            }
+            Request::Refresh { lifetime: Some(0) } => self.closed(),
             Request::Refresh { .. } => {
                 let lifetime = lifetime.unwrap_or(Duration::from_secs(600));
                 if let State::Allocated { relayed, .. } = self.state {
@@ -554,7 +602,10 @@ impl TurnClient {
                 self.events.push_back(TurnEvent::Refreshed { lifetime });
             }
             Request::CreatePermission(ip) => {
-                let first = self.permissions.insert(*ip, Some(now + PERMISSION_REFRESH)) == Some(None);
+                let installed = Permission::Installed {
+                    refresh_at: now + PERMISSION_REFRESH,
+                };
+                let first = self.permissions.insert(*ip, installed) == Some(Permission::Pending);
                 if first {
                     self.events.push_back(TurnEvent::PermissionCreated(*ip));
                 }
@@ -615,6 +666,12 @@ impl TurnClient {
             }
             return;
         }
+        if code == 437 && transaction.request == (Request::Refresh { lifetime: Some(0) }) {
+            // Allocation Mismatch to the release: it is gone already (RFC 8656 7.3), say a retransmission after the
+            // first one's answer was lost
+            self.closed();
+            return;
+        }
         let failure = match code {
             401 | 438 => TurnFailure::Unauthorized,
             300 => match message.find(|a| match a {
@@ -655,26 +712,43 @@ impl TurnClient {
         true
     }
 
-    /// A request that won't succeed: the allocation's own requests fail the client, the others are reported.
+    /// A request that won't succeed: the allocation's own requests fail the client, the others are reported. An
+    /// unanswered permission or channel is asked again on the next send (the channel under the same number); a refused
+    /// one is not asked again.
     fn on_request_failed(&mut self, request: &Request, failure: TurnFailure, code: u16) {
+        let unanswered = matches!(failure, TurnFailure::Timeout(_));
         match request {
             Request::Allocate | Request::Refresh { .. } => self.fail(failure),
             Request::CreatePermission(ip) => {
-                self.permissions.remove(ip);
+                if unanswered {
+                    self.permissions.remove(ip);
+                } else {
+                    self.permissions.insert(*ip, Permission::Refused);
+                }
                 self.events.push_back(TurnEvent::RequestRefused {
                     method: Method::CreatePermission,
                     code,
                 });
             }
             Request::ChannelBind { peer, channel } => {
-                self.bindings.remove(peer);
-                self.peers_by_channel.remove(channel);
+                let binding = if unanswered {
+                    Binding::Unconfirmed(*channel)
+                } else {
+                    Binding::Refused(*channel)
+                };
+                self.bindings.insert(*peer, binding);
                 self.events.push_back(TurnEvent::RequestRefused {
                     method: Method::ChannelBind,
                     code,
                 });
             }
         }
+    }
+
+    fn closed(&mut self) {
+        self.state = State::Done;
+        self.transactions.clear();
+        self.events.push_back(TurnEvent::Closed);
     }
 
     fn fail(&mut self, failure: TurnFailure) {
@@ -729,11 +803,14 @@ impl TurnClient {
         let permissions: Vec<IpAddr> = self
             .permissions
             .iter()
-            .filter(|(_, at)| at.is_some_and(|at| at <= now))
+            .filter(|(_, permission)| matches!(permission, Permission::Installed { refresh_at } if *refresh_at <= now))
             .map(|(ip, _)| *ip)
             .collect();
         for ip in permissions {
-            self.permissions.insert(ip, Some(now + PERMISSION_REFRESH));
+            let installed = Permission::Installed {
+                refresh_at: now + PERMISSION_REFRESH,
+            };
+            self.permissions.insert(ip, installed);
             self.start(now, Request::CreatePermission(ip), 0)?;
         }
         let bindings: Vec<(SocketAddr, u16)> = self

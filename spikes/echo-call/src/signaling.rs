@@ -214,7 +214,10 @@ pub enum Action {
     Hangup,
 }
 
-/// Our one outgoing call. It reacts to deliveries about it and to nothing else.
+/// Our one outgoing call, driven by the deliveries to its callback links. A delivery carries no call id and the links
+/// are the same for every call (see [`call_start_body`]), so nothing here tells our call's deliveries from a late one
+/// of an earlier call or another call's on the same endpoint: every callback delivery is taken as ours. Telling them
+/// apart needs the call id the Task 18 capture should show. Incoming calls are recognized and never acted on.
 #[derive(Debug)]
 pub struct OutgoingCall {
     state: CallState,
@@ -267,7 +270,10 @@ impl OutgoingCall {
             Inbound::MediaAnswer {
                 sdp, acknowledgement, ..
             } => {
-                self.state = CallState::MediaAnswered;
+                // a later answer (a renegotiation, or a stray one) doesn't take a connected call back
+                if self.state != CallState::Connected {
+                    self.state = CallState::MediaAnswered;
+                }
                 Action::ApplyAnswer { sdp, acknowledgement }
             }
             Inbound::Accepted => {

@@ -135,6 +135,15 @@ fn the_outgoing_call_follows_its_callbacks() {
     assert_eq!(call.state(), CallState::MediaAnswered);
     assert_eq!(call.on_inbound(inbound("acceptance.json").unwrap()), Action::Nothing);
     assert_eq!(call.state(), CallState::Connected);
+    assert!(matches!(
+        call.on_inbound(inbound("media-answer.json").unwrap()),
+        Action::ApplyAnswer { .. }
+    ));
+    assert_eq!(
+        call.state(),
+        CallState::Connected,
+        "a later answer doesn't take the call back"
+    );
     assert_eq!(call.on_inbound(inbound("end.json").unwrap()), Action::Hangup);
     assert_eq!(
         call.on_inbound(inbound("media-answer.json").unwrap()),

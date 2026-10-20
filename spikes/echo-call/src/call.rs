@@ -1,11 +1,12 @@
 //! Placing the echo call, step by step, as far as it can go today:
 //!
 //! 1. the participants: lab account A (its MRI from `lab.toml`) calls the approved echo service (the `echo` service
-//!    participant's MRI from `lab.toml`, or an MRI given on the command line);
+//!    participant's MRI from `lab.toml`, or an MRI given on the command line). The echo service's MRI isn't in
+//!    `lab.toml` until Task 18's capture shows it, so today the call stops here ([`CallError::NoEchoMri`]) and the
+//!    fence isn't asked;
 //! 2. the fence: [`teams_fence::Fence::check`] on the call's target (`WriteKind::Call`, a new scope, the caller and
-//!    the callee), and [`Authorized::new`] pairs the request with its permit. The echo service's MRI isn't in
-//!    `lab.toml` until Task 18's capture shows it, so the fence denies the call until then (a callee given on the
-//!    command line is denied the same way: only `lab.toml` approves);
+//!    the callee), and [`Authorized::new`] pairs the request with its permit. A callee given on the command line that
+//!    `lab.toml` doesn't approve is denied here: only `lab.toml` approves;
 //! 3. A's skypetoken from the secret store (Task 14). None exists: authz refuses the unlicensed lab accounts;
 //! 4. the call start through signaling: refused here on purpose, because the signaling is unconfirmed (Task 18), and
 //!    nothing unconfirmed is sent to Microsoft.
@@ -100,8 +101,8 @@ pub fn start(_call: &Authorized<StartCall>, _skypetoken: &Secret) -> Result<(), 
 /// Steps 1–4 in order.
 ///
 /// # Errors
-/// The first step that stops: today the fence's denial (no echo MRI approved), then the missing skypetoken, then the
-/// unconfirmed signaling.
+/// The first step that stops: today the missing echo MRI ([`CallError::NoEchoMri`]); with `echo_override`, the fence's
+/// denial of a callee `lab.toml` doesn't approve; then the missing skypetoken, then the unconfirmed signaling.
 pub async fn place_echo_call(
     config: &LabConfig,
     fence: &Fence,
