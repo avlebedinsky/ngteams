@@ -1,7 +1,7 @@
-//! `echo-call`: places the echo call from lab account A, as far as it can go (see `echo_call::call`). Today it stops
-//! before the fence: the echo service has no MRI in `lab.toml` yet (`--callee` with an MRI `lab.toml` doesn't approve
-//! is denied by the fence). Nothing is sent to Microsoft until the signaling is confirmed by Task 18's capture; no
-//! incoming call is ever answered.
+//! `echo-call`: places the echo call from lab account A, as far as it can go (see `echo_call::call`): the fence allows
+//! the test call (A and the `lab.toml` echo service; `--callee` with an MRI `lab.toml` doesn't approve is denied), the
+//! skypetoken is read, and the call start is not sent: the echo would join only through writes on the started call
+//! that the fence can't permit yet. Nothing is sent to Microsoft; no incoming call is ever answered.
 
 use std::process::ExitCode;
 
@@ -20,7 +20,7 @@ struct Cli {
     /// The lab account that calls.
     #[arg(long, default_value = "a")]
     caller: String,
-    /// The callee's MRI instead of lab.toml's echo service. The fence still decides: only lab.toml approves.
+    /// The echo service's MRI instead of lab.toml's. The fence still decides: only lab.toml approves.
     #[arg(long)]
     callee: Option<String>,
 }

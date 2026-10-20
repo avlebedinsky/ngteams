@@ -17,7 +17,7 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/proto-lab` | the lab harness CLI |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs |
 | `spikes/gpui-video` | GPUI spike: the Wayland smoke window (M0 Task 15), then video rendering |
-| `spikes/echo-call` | echo call spike (M0 Task 19): TURN client, `str0m` through the relay, unconfirmed signaling, the call through the fence |
+| `spikes/echo-call` | echo call spike (M0 Task 19): TURN client, `str0m` through the relay, the test call's signaling from the Task 18 capture, the call through the fence (the start sends nothing yet) |
 | `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike |
 | `docs/protocol/`, `docs/spikes/` | protocol notes and spike write-ups |
 | `tools/` | interim Node tools (lab sign-in, Conditional Access probe) |

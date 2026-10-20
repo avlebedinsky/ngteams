@@ -11,7 +11,9 @@ unknown, so the fence denies it: `PUT …/conv/<id>/updateEndpointMetadata`, `PO
 applyChannelParameters`, `POST …/cc/v1/callAcceptance/<call>/…/acknowledge` (and the same answer over Trouter, a
 delivery response with a body), **`POST …/conv/<id>/add`**, which is how the client brings the echo bot in, and
 `POST …/conv/<id>/leave`. The leg reaches Teams' media controller, the echo never joins, no tone comes back
-(`docs/protocol/calling-echo.md`). The native client of Task 19 has the same writes to make.
+(`docs/protocol/calling-echo.md`). The native client of Task 19 has the same writes to make: its `add` is
+`teams_proto::AddToCall` (an invite on `Scope::Call`), denied as partial today, and `echo_call::call::start` sends
+nothing until this is resolved.
 
 The fence allows a write only after a fresh, complete read of its target's members (`MembershipSource`,
 `crates/teams-fence/src/decision.rs`); for a `Scope::Call` there is no such read. Decided with Codex (2026-10-20,

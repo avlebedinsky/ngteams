@@ -1,14 +1,15 @@
 //! The echo call's flow up to the skypetoken, on a lab config in a temp dir: the call goes through the fence and is
 //! denied until `lab.toml` approves the echo service's MRI; a token is read only after the fence allowed the call; and
-//! even then the unconfirmed signaling sends nothing.
+//! even then nothing is sent, because the `add` that brings the echo in is a write on the started call that the fence
+//! can't permit yet.
 
 use std::path::Path;
 
-use echo_call::call::{CallError, authorize, echo_call, place_echo_call};
+use echo_call::call::{CallError, authorize, authorize_invite, echo_call, echo_invite, place_echo_call};
 use teams_auth::authz::skypetoken_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore as _};
 use teams_fence::lab::{Alias, LabConfig};
-use teams_fence::{DenyReason, Fence, Mri};
+use teams_fence::{DenyReason, FailClosed, Fence, LiveMembershipSource, Mri, PartialReason, Scope, WriteKind};
 use teams_proto::Mutating as _;
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -63,8 +64,8 @@ fn the_call_is_from_account_a_to_the_echo_service_of_lab_toml() {
     let lab = lab(Some(ECHO), Some(LAB_A)).unwrap();
     let call = echo_call(&lab.config, Alias::A, None).unwrap();
     assert_eq!(call.caller(), &Mri::new(LAB_A));
-    assert_eq!(call.callees().iter().collect::<Vec<_>>(), [&Mri::new(ECHO)]);
-    assert_eq!(call.target().kind(), teams_fence::WriteKind::Call);
+    assert_eq!(call.echo(), &Mri::new(ECHO));
+    assert_eq!(call.target().kind(), WriteKind::Call);
 }
 
 #[test]
@@ -114,14 +115,14 @@ async fn an_approved_call_still_needs_a_skypetoken() {
 }
 
 #[tokio::test]
-async fn with_a_skypetoken_the_unconfirmed_signaling_sends_nothing() {
+async fn with_a_skypetoken_the_call_start_is_still_not_sent() {
     let lab = lab(Some(ECHO), Some(LAB_A)).unwrap();
     let store = store_with_token().await.unwrap();
     let error = place_echo_call(&lab.config, &lab.fence, &store, Alias::A, None)
         .await
         .unwrap_err();
-    assert!(matches!(error, CallError::SignalingUnconfirmed), "{error}");
-    assert!(error.to_string().contains("Task 18"));
+    assert!(matches!(error, CallError::FollowUpsUnfenced), "{error}");
+    assert!(error.to_string().contains("fence-call-follow-ups"));
 }
 
 #[tokio::test]
@@ -130,4 +131,34 @@ async fn the_permit_covers_exactly_the_call_it_was_issued_for() {
     let call = echo_call(&lab.config, Alias::A, None).unwrap();
     let authorized = authorize(&lab.fence, call.clone()).await.unwrap();
     assert_eq!(authorized.permit().target(), &call.target());
+}
+
+#[tokio::test]
+async fn adding_the_echo_to_the_started_call_is_denied_with_every_source_a_lab_binary_has() {
+    let lab = lab(Some(ECHO), Some(LAB_A)).unwrap();
+    let call = echo_call(&lab.config, Alias::A, None).unwrap();
+    let invite = echo_invite(&call, "conversation-1");
+    assert_eq!(
+        invite.target().scope(),
+        &Scope::Call {
+            id: "conversation-1".into()
+        }
+    );
+    assert_eq!(invite.target().kind(), WriteKind::Invite);
+
+    let error = authorize_invite(&lab.fence, invite.clone(), &FailClosed)
+        .await
+        .unwrap_err();
+    let CallError::Denied(denied) = &error else {
+        panic!("expected the fence to deny, got {error}");
+    };
+    assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::NoSource));
+
+    // the live source reads chats only: a call's members aren't read (and nothing goes out for it)
+    let live = LiveMembershipSource::new().unwrap();
+    let error = authorize_invite(&lab.fence, invite, &live).await.unwrap_err();
+    let CallError::Denied(denied) = &error else {
+        panic!("expected the fence to deny, got {error}");
+    };
+    assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::Unsupported));
 }

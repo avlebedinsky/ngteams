@@ -1,6 +1,6 @@
 [package]
 name = "echo-call"
-description = "Spike 3b: a native echo call — TURN client (RFC 8656), str0m through the relay, signaling shaped from the bundle"
+description = "Spike 3b: a native echo call — TURN client (RFC 8656), str0m through the relay, signaling from the Task 18 capture"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,10 +24,13 @@ tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 fixture-guard.workspace = true
+# the native call start is checked against the browser fence's call-start mapping (`proto_lab::calling`)
+proto-lab.workspace = true
 tempfile.workspace = true
 # the call-flow tests build fences over test rosters
 teams-fence = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+url.workspace = true
 
 [lints]
 workspace = true

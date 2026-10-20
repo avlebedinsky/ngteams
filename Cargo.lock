@@ -1633,6 +1633,7 @@ dependencies = [
  "hmac 0.13.0",
  "md-5 0.11.0",
  "media-loop",
+ "proto-lab",
  "serde_json",
  "sha1 0.11.0",
  "str0m",
@@ -1642,6 +1643,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, shaped like the echo-call capture of 2026-10-20 (read locally from its sanitized reference copy; docs/protocol/calling-echo.md): what the services answer during the test call. The TURN credentials, the call start's answer (the conversation, its links cut to their names), and the call controller's acceptance callback delivered over Trouter (its links cut to a few). <guid:N> are made-up ids; hosts' region names, credentials and paths are made up.",
+  "_synthetic": "Made up, shaped like the echo-call capture of 2026-10-20 (read locally from its sanitized reference copy; docs/protocol/calling-echo.md): what the services answer during the test call. The TURN credentials, the call start's answer (the conversation, its links cut to their names), and the call controller's acceptance callback delivered over Trouter (its links cut to a few; its media answer, the media controller's SDP in the same Teams dialect as the offer, made up and shortened to an audio line and the data line). <guid:N> are made-up ids; hosts' region names, credentials and paths are made up.",
   "trap_tokens": {
     "tokens": [{"realm": "\"rtcmedia\"", "username": "<token:1>", "password": "<token:2>"}],
     "expires": 604800
@@ -30,7 +30,17 @@
           "callLeg": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/<guid:5>/1/a1/1?i=0-0-0-0&e=1",
           "mediaRenegotiation": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/<guid:5>/1/a1/1/renegotiate?i=0-0-0-0&e=1",
           "applyChannelParameters": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/mcProxy/<guid:5>/1/k1/1/applyChannelParameters?i=0-0-0-0&e=1"
-        }
+        },
+        "mediaContent": {
+          "contentType": "application/sdp-ngc-1.0",
+          "blob": "v=0\r\no=- 0 0 IN IP4 198.51.100.20\r\ns=session\r\nc=IN IP4 198.51.100.20\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 3478 RTP/SAVP 111 0 13\r\nc=IN IP4 198.51.100.20\r\na=rtcp:3478\r\na=ice-ufrag:<token:3>\r\na=ice-pwd:<token:4>\r\na=fingerprint:sha-256 <token:5>\r\na=setup:passive\r\na=mid:0\r\na=sendrecv\r\na=rtcp-mux\r\na=label:main-audio\r\na=x-ssrc-range:2000-2000\r\na=x-signaling-fb:* x-message app send:dsh recv:dsh\r\na=candidate:1 1 UDP 54788863 198.51.100.20 3478 typ relay raddr 198.51.100.20 rport 3478\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 usedtx=1;useinbandfec=1\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:13 CN/8000\r\na=ptime:20\r\nm=x-data 3478 RTP/SAVP 127\r\nc=IN IP4 198.51.100.20\r\na=rtcp:3478\r\na=setup:passive\r\na=mid:1\r\na=sendrecv\r\na=rtcp-mux\r\na=label:data\r\na=x-data-protocol:sctp\r\na=rtpmap:127 x-data/90000\r\n",
+          "mediaLegId": "SYNTHETICMEDIALEG0000000000000000",
+          "escalationOccurring": false,
+          "newOffer": false,
+          "fromMixer": true,
+          "skipIceReinvite": false
+        },
+        "callKeepAliveInterval": 2700
       }
     }
   }

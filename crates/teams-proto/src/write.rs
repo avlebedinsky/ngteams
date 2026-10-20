@@ -1,7 +1,5 @@
 //! Mutating requests ([`Mutating`]) and the pairing of one with the permit issued for its target ([`Authorized`]).
 
-use std::collections::BTreeSet;
-
 use teams_fence::{Mri, Scope, Target, WriteKind, WritePermit};
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
@@ -22,6 +20,7 @@ mod sealed {
 
     impl Sealed for super::SendMessage {}
     impl Sealed for super::StartCall {}
+    impl Sealed for super::AddToCall {}
 }
 
 /// A mutating request together with the permit for its target. The only way to make one is [`Authorized::new`],
@@ -124,22 +123,28 @@ impl Mutating for SendMessage {
     }
 }
 
-/// Places a new call: the caller rings the callees. The call doesn't exist yet, so its target is [`Scope::New`] and its
-/// participants are exactly the caller and the callees, all of which the fence judges. There is no request here that
-/// answers an incoming call ([`WriteKind::CallAnswer`]): a lab client never answers one.
+/// The conversation scenario of the web client's test call (Task 18, `docs/protocol/calling-echo.md`): the call start
+/// that opens it names no callee.
+pub const TEST_CALL_SCENARIO: &str = "UserInitiatedTestCall";
+
+/// Places the test call to the echo service, as the web client does (Task 18): the call start opens a conversation of
+/// the caller alone (no callee, scenario [`TEST_CALL_SCENARIO`]), and the caller then invites the echo service into
+/// it with an [`AddToCall`]. The echo is counted in here anyway, so the fence lets the start through only for a call
+/// it would let the echo join: the target is [`WriteKind::Call`] on [`Scope::New`] with the caller and the echo, the
+/// same target the browser fence gives the web client's start (`proto_lab::calling::call_start`).
+///
+/// There is no request here that answers an incoming call ([`WriteKind::CallAnswer`]): a lab client never answers one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartCall {
     caller: Mri,
-    callees: BTreeSet<Mri>,
+    echo: Mri,
 }
 
 impl StartCall {
+    /// `caller`'s test call, which `echo` (the echo service) joins once the caller adds it.
     #[must_use]
-    pub fn new(caller: Mri, callees: impl IntoIterator<Item = Mri>) -> Self {
-        Self {
-            caller,
-            callees: callees.into_iter().collect(),
-        }
+    pub fn test_call(caller: Mri, echo: Mri) -> Self {
+        Self { caller, echo }
     }
 
     /// The account placing the call.
@@ -148,16 +153,54 @@ impl StartCall {
         &self.caller
     }
 
-    /// Everyone the call rings.
+    /// The echo service the call is for. The call start doesn't name it: an [`AddToCall`] adds it.
     #[must_use]
-    pub fn callees(&self) -> &BTreeSet<Mri> {
-        &self.callees
+    pub fn echo(&self) -> &Mri {
+        &self.echo
     }
 }
 
 impl Mutating for StartCall {
     fn target(&self) -> Target {
-        Target::new(WriteKind::Call, Scope::New)
-            .with_added(std::iter::once(self.caller.clone()).chain(self.callees.iter().cloned()))
+        Target::new(WriteKind::Call, Scope::New).with_added([self.caller.clone(), self.echo.clone()])
+    }
+}
+
+/// Invites someone into a call that exists (the conversation's `add`; how the test call brings the echo in). Its
+/// target is [`WriteKind::Invite`] on [`Scope::Call`] (the conversation id from the call start's answer) with the
+/// invitee added, so the fence judges the call's current members, read fresh and in full, together with the invitee.
+/// No membership source can read a call yet (`docs/backlog/fence-call-follow-ups.md`): today the fence denies this
+/// request as partial, whoever the invitee is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddToCall {
+    call: String,
+    invitee: Mri,
+}
+
+impl AddToCall {
+    #[must_use]
+    pub fn new(call: impl Into<String>, invitee: Mri) -> Self {
+        Self {
+            call: call.into(),
+            invitee,
+        }
+    }
+
+    /// The conversation id of the call.
+    #[must_use]
+    pub fn call(&self) -> &str {
+        &self.call
+    }
+
+    /// Who is invited.
+    #[must_use]
+    pub fn invitee(&self) -> &Mri {
+        &self.invitee
+    }
+}
+
+impl Mutating for AddToCall {
+    fn target(&self) -> Target {
+        Target::new(WriteKind::Invite, Scope::Call { id: self.call.clone() }).with_added([self.invitee.clone()])
     }
 }

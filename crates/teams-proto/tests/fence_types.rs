@@ -11,7 +11,7 @@ use teams_fence::{
     Denied, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope, Target, WriteKind,
     WritePermit,
 };
-use teams_proto::{Authorized, Client, Mutating, SendMessage, StartCall, Transport, WriteError};
+use teams_proto::{AddToCall, Authorized, Client, Mutating, SendMessage, StartCall, Transport, WriteError};
 
 const LAB_A: &str = "8:orgid:lab-a";
 const LAB_B: &str = "8:orgid:lab-b";
@@ -212,34 +212,33 @@ fn fence_with_echo() -> Fence {
     )
 }
 
-fn call_target(caller: &str, callees: &[&str]) -> Target {
-    Target::new(WriteKind::Call, Scope::New)
-        .with_added(std::iter::once(caller).chain(callees.iter().copied()).map(Mri::new))
+fn call_target(caller: &str, echo: &str) -> Target {
+    Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(caller), Mri::new(echo)])
 }
 
 #[test]
-fn start_call_targets_a_new_call_with_the_caller_and_the_callees() {
-    let request = StartCall::new(Mri::new(LAB_A), [Mri::new(ECHO)]);
-    assert_eq!(request.target(), call_target(LAB_A, &[ECHO]));
+fn the_test_call_targets_a_new_call_of_the_caller_and_the_echo_it_adds() {
+    let request = StartCall::test_call(Mri::new(LAB_A), Mri::new(ECHO));
+    assert_eq!(request.target(), call_target(LAB_A, ECHO));
     assert_eq!(request.caller(), &Mri::new(LAB_A));
-    assert_eq!(request.callees().iter().collect::<Vec<_>>(), [&Mri::new(ECHO)]);
+    assert_eq!(request.echo(), &Mri::new(ECHO));
 }
 
 #[tokio::test]
-async fn a_call_to_an_approved_service_gets_a_permit_that_covers_it() {
-    let request = StartCall::new(Mri::new(LAB_A), [Mri::new(ECHO)]);
+async fn a_test_call_with_an_approved_echo_gets_a_permit_that_covers_it() {
+    let request = StartCall::test_call(Mri::new(LAB_A), Mri::new(ECHO));
     let permit = fence_with_echo()
         .check(request.target(), &LabOnly)
         .await
         .expect("lab account + approved service");
 
     let authorized = Authorized::new(request, permit).expect("the permit covers the call");
-    assert_eq!(authorized.request().callees().len(), 1);
+    assert_eq!(authorized.request().echo(), &Mri::new(ECHO));
 }
 
 #[tokio::test]
-async fn a_call_to_a_service_the_roster_does_not_approve_is_denied() {
-    let request = StartCall::new(Mri::new(LAB_A), [Mri::new(ECHO)]);
+async fn a_test_call_with_an_echo_the_roster_does_not_approve_is_denied() {
+    let request = StartCall::test_call(Mri::new(LAB_A), Mri::new(ECHO));
     let denied = fence()
         .check(request.target(), &LabOnly)
         .await
@@ -248,24 +247,68 @@ async fn a_call_to_a_service_the_roster_does_not_approve_is_denied() {
 }
 
 #[tokio::test]
-async fn a_call_permit_does_not_cover_a_call_to_someone_else() {
+async fn a_call_permit_does_not_cover_a_test_call_for_someone_else() {
     let permit = fence_with_echo()
-        .check(call_target(LAB_A, &[ECHO]), &LabOnly)
+        .check(call_target(LAB_A, ECHO), &LabOnly)
         .await
         .expect("lab account + approved service");
 
     let mismatch =
-        Authorized::new(StartCall::new(Mri::new(LAB_A), [Mri::new(OUTSIDER)]), permit).expect_err("another callee");
-    assert_eq!(mismatch.permitted(), &call_target(LAB_A, &[ECHO]));
-    assert_eq!(mismatch.requested(), &call_target(LAB_A, &[OUTSIDER]));
+        Authorized::new(StartCall::test_call(Mri::new(LAB_A), Mri::new(OUTSIDER)), permit).expect_err("another echo");
+    assert_eq!(mismatch.permitted(), &call_target(LAB_A, ECHO));
+    assert_eq!(mismatch.requested(), &call_target(LAB_A, OUTSIDER));
 }
 
 #[tokio::test]
 async fn a_call_from_outside_the_lab_is_denied() {
-    let request = StartCall::new(Mri::new(OUTSIDER), [Mri::new(ECHO)]);
+    let request = StartCall::test_call(Mri::new(OUTSIDER), Mri::new(ECHO));
     let denied = fence_with_echo()
         .check(request.target(), &LabOnly)
         .await
         .expect_err("the caller isn't a lab account");
     assert_eq!(denied.reason(), &teams_fence::DenyReason::Outsiders { count: 1 });
+}
+
+#[test]
+fn adding_to_a_call_is_an_invite_on_that_call() {
+    let request = AddToCall::new("conversation-1", Mri::new(ECHO));
+    assert_eq!(
+        request.target(),
+        Target::new(
+            WriteKind::Invite,
+            Scope::Call {
+                id: "conversation-1".into()
+            }
+        )
+        .with_added([Mri::new(ECHO)])
+    );
+}
+
+#[tokio::test]
+async fn adding_the_echo_to_a_call_is_denied_while_no_source_reads_a_call() {
+    let request = AddToCall::new("conversation-1", Mri::new(ECHO));
+    let denied = fence_with_echo()
+        .check(request.target(), &teams_fence::FailClosed)
+        .await
+        .expect_err("a call's members can't be read");
+    assert!(
+        matches!(denied.reason(), teams_fence::DenyReason::Partial(_)),
+        "{:?}",
+        denied.reason()
+    );
+}
+
+#[tokio::test]
+async fn with_the_call_read_in_full_adding_the_echo_gets_a_permit_that_covers_it() {
+    // what the fence would need: a complete read of the call's members (LabOnly stands in for one)
+    let request = AddToCall::new("conversation-1", Mri::new(ECHO));
+    let permit = fence_with_echo()
+        .check(request.target(), &LabOnly)
+        .await
+        .expect("lab accounts + approved service");
+    let other = AddToCall::new("conversation-2", Mri::new(ECHO));
+    assert!(
+        Authorized::new(other, permit).is_err(),
+        "a permit covers its own call only"
+    );
 }
