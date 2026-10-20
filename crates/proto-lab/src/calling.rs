@@ -275,11 +275,11 @@ fn json_object(text: &str) -> Option<Map<String, Value>> {
 /// What a mutating request is to a run that calls, on the web client's origins ([`TEAMS_ORIGINS`]):
 /// [`OwnKind::EndpointRegistration`] for registering the endpoint's own Trouter URL, [`OwnKind::SettingsRead`] for
 /// reading the account's own settings (`useraggregatesettings`) or effective policies (`effectivePolicies`) by `POST`
-/// (see the module docs), `None` for anything else.
+/// (see the module docs), `None` for anything else. Each URL is as captured, with no query.
 #[must_use]
 pub fn own_request(method: &str, url: &Url, body: Option<&[u8]>) -> Option<OwnKind> {
     let teams = TEAMS_ORIGINS.contains(&url.origin().ascii_serialization().as_str());
-    if method != "POST" || !teams {
+    if method != "POST" || !teams || url.query().is_some() {
         return None;
     }
     let body = body?;
@@ -682,12 +682,13 @@ fn fits_fields(object: &Map<String, Value>, fields: &[Field]) -> bool {
 /// test call start only when it would admit the echo too. Without one it is `None`. (The target is what the fence
 /// authorizes, not the conversation's members at that moment, which are the caller alone.)
 ///
-/// Only the captured shape maps: the scenario [`TEST_CALL_SCENARIO`], and every key, at every level, one the capture
-/// had, its value of the type it had there (`null` where it was `null`). Another scenario, a call to anyone else, a key
-/// nobody reviewed or a call into something that exists already is `None` (unknown).
+/// Only the captured shape maps: [`CALL_START_URL`] with no query, the scenario [`TEST_CALL_SCENARIO`], and every key,
+/// at every level, one the capture had, its value of the type it had there (`null` where it was `null`). Another
+/// scenario, a call to anyone else, a key nobody reviewed or a call into something that exists already is `None`
+/// (unknown).
 #[must_use]
 pub fn call_start(method: &str, url: &Url, body: Option<&[u8]>, test_call_callee: Option<&Mri>) -> Option<Target> {
-    if method != "POST" || &url[..Position::AfterPath] != CALL_START_URL {
+    if method != "POST" || &url[..Position::AfterPath] != CALL_START_URL || url.query().is_some() {
         return None;
     }
     let start = strict_json(body?)?;

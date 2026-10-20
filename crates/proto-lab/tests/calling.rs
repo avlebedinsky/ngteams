@@ -294,6 +294,17 @@ fn a_settings_read_off_the_reviewed_shape_is_unknown() {
             "https://teams.microsoft.com/api/mt/part/../beta/users/effectivePolicies",
             EFFECTIVE_POLICIES,
         ),
+        // the captured reads have no query: one they didn't show makes the request unknown
+        (
+            "POST",
+            "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/useraggregatesettings?x=1",
+            AGGREGATE_SETTINGS,
+        ),
+        (
+            "POST",
+            "https://teams.cloud.microsoft/api/mt/part/amer-03/beta/users/effectivePolicies?",
+            EFFECTIVE_POLICIES,
+        ),
     ] {
         assert_eq!(
             Classifier::calling().classify(method, url, Some(body.as_bytes())),
@@ -381,6 +392,12 @@ fn a_registration_off_the_reviewed_shape_is_unknown() {
         ("POST", "https://teams.microsoft.com/registrar/prod/V2/registrations/x"),
         ("POST", "https://teams.microsoft.com/registrar/prod/V3/registrations"),
         ("POST", "https://example.com/registrar/prod/V2/registrations"),
+        // the captured registration has no query: one it didn't show makes the request unknown
+        (
+            "POST",
+            "https://teams.microsoft.com/registrar/prod/V2/registrations?x=1",
+        ),
+        ("POST", "https://teams.cloud.microsoft/registrar/prod/V2/registrations?"),
     ] {
         assert_eq!(
             Classifier::calling().classify(method, url, Some(REGISTRATION.as_bytes())),
@@ -577,6 +594,9 @@ fn a_call_start_off_the_reviewed_shape_is_unknown() {
             "https://api.flightproxy.teams.microsoft.com.example.com/api/v2/epconv",
         ),
         ("POST", "http://api.flightproxy.teams.microsoft.com/api/v2/epconv"),
+        // the captured start has no query: one it didn't show makes the request unknown
+        ("POST", "https://api.flightproxy.teams.microsoft.com/api/v2/epconv?x=1"),
+        ("POST", "https://api.flightproxy.teams.microsoft.com/api/v2/epconv?"),
     ] {
         assert_eq!(
             classifier.classify(method, url, Some(test_call().as_bytes())),
