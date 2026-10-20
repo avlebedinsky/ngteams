@@ -11,6 +11,9 @@
 //! - [`abc_chat`] (accounts a, b and c, writes mapped, members read live): the group chat of a, b and c, created once
 //!   (its id kept in the lab's `chats.toml`); messaging it (a sends, b and c receive, after a live enforcement test)
 //!   is refused before anything opens until the fence can read a group chat's members in full.
+//! - [`ab_trouter`] (accounts a and b, writes mapped, members read live, the push channel's own frames and the
+//!   messaging endpoint's registration let out): b's Trouter session while a sends, edits and reacts in the a–b chat,
+//!   recorded; `ab-trouter-quiet` holds back the client's own `user.activity` as well.
 //! - [`echo_call`] (account a, writes mapped, members read live, fake microphone): a places the web client's test call
 //!   to the echo service, the one approved participant outside the lab, stays in it a while and hangs up; recorded.
 //!
@@ -20,6 +23,7 @@
 
 pub mod ab_chat;
 pub mod ab_chat_full;
+pub mod ab_trouter;
 pub mod abc_chat;
 pub mod dsl;
 pub mod echo_call;
@@ -54,6 +58,10 @@ pub enum ScenarioName {
     /// Account a creates the a–b–c group chat (once); messaging it is refused until the fence can read a group chat's
     /// members in full.
     AbcChat,
+    /// b's push channel while a sends, edits and reacts in the a–b chat; recorded.
+    AbTrouter,
+    /// As `ab-trouter`, with every `user.activity` of the client held back.
+    AbTrouterQuiet,
     /// Account a places the test call to the echo service with a fake microphone playing a tone; recorded.
     EchoCall,
 }
@@ -67,6 +75,8 @@ impl ScenarioName {
             Self::AbChat => "ab-chat",
             Self::AbChatFull => "ab-chat-full",
             Self::AbcChat => "abc-chat",
+            Self::AbTrouter => "ab-trouter",
+            Self::AbTrouterQuiet => "ab-trouter-quiet",
             Self::EchoCall => "echo-call",
         }
     }
@@ -268,6 +278,8 @@ pub async fn run(
         ScenarioName::AbChat => ab_chat::run(paths, options).await,
         ScenarioName::AbChatFull => ab_chat_full::run(paths, options).await,
         ScenarioName::AbcChat => abc_chat::run(paths, options).await,
+        ScenarioName::AbTrouter => ab_trouter::run(paths, options, ab_trouter::Activity::Reported).await,
+        ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,
         ScenarioName::EchoCall => echo_call::run(paths, options).await,
     }
 }

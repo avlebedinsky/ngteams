@@ -1,0 +1,94 @@
+{
+  "_synthetic": "Made up, shaped like b's messaging Trouter session in the ab-trouter capture of 2026-10-20 (read locally; docs/protocol/trouter.md): the frames of one socket in order, from the service's handshake to the keep-alives, both directions. Each frame the client sends carries what FrameClassifier::messaging makes of it (expected) and, where it differs, what the ab-trouter-quiet variant makes of it (expected_quiet). Tokens, endpoint ids, correlation vectors, times and host names are made up.",
+  "sockets": {
+    "first": "wss://go.trouter.teams.microsoft.com/v4/c?tc=%7B%22cv%22:%220.0%22,%22ua%22:%22TeamsCDL%22,%22hr%22:%22%22,%22v%22:%220/0%22%7D&timeout=40",
+    "regional": "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c?tc=%7B%22cv%22:%220.0%22,%22ua%22:%22TeamsCDL%22,%22hr%22:%22%22,%22v%22:%220/0%22%7D&timeout=40"
+  },
+  "frames": [
+    {
+      "name": "the service's socket.io connect",
+      "socket": "regional",
+      "direction": "in",
+      "frame": "1::"
+    },
+    {
+      "name": "authentication with the reconnect parameters an earlier trouter.connected handed over",
+      "socket": "regional",
+      "direction": "out",
+      "frame": "5:::{\"name\":\"user.authenticate\",\"args\":[{\"headers\":{\"X-Ms-Test-User\":\"False\",\"Authorization\":\"Bearer <token:1>\",\"X-MS-Migration\":\"True\"},\"connectparams\":{\"issuer\":\"\",\"scae\":\"1\",\"sig\":\"\",\"sr\":\"SyntheticEndpoint00000A\",\"sp\":\"pub-ent-zz-01\",\"se\":\"1700000600000\",\"st\":\"1700000000000\"}}]}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "the endpoint and its push URLs",
+      "socket": "regional",
+      "direction": "in",
+      "frame": "5:1::{\"name\":\"trouter.connected\",\"args\":[{\"id\":\"SyntheticEndpoint00000A\",\"ccid\":\"Endpoint00000A\",\"url\":\"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:8443/v4/f/SyntheticEndpoint00000A/\",\"surl\":\"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/\",\"curlb\":\"https://pub-ent-zz-01-t.trouter.teams.microsoft.com:443\",\"healthUrl\":\"https://pub-ent-zz-01-t.trouter.teams.microsoft.com:443/v4/h\",\"reconnectUrl\":\"wss://pub-ent-zz-01-t.trouter.teams.microsoft.com:443/v4/c\",\"registrarUrl\":\"https://registrar.example.test/registrar/zz/v3/registrations\",\"socketio\":\"https://pub-ent-zz-01-t.trouter.teams.microsoft.com:443/\",\"ttl\":\"600\",\"dur\":\"1\",\"connectparams\":{\"issuer\":\"\",\"scae\":\"1\",\"sig\":\"\",\"sr\":\"SyntheticEndpoint00000A\",\"sp\":\"pub-ent-zz-01\",\"se\":\"1700000600000\",\"st\":\"1700000000000\"}}]}"
+    },
+    {
+      "name": "the service's report of what the endpoint missed while away (sent more than once)",
+      "socket": "regional",
+      "direction": "in",
+      "frame": "5:2::{\"name\":\"trouter.message_loss\",\"args\":[{\"droppedIndicators\":[{\"tag\":\"messaging\",\"etag\":\"2000-01-01T00:00:00.0000001Z\"}]}]}"
+    },
+    {
+      "name": "the client's acknowledgement of that report, the indicators handed back as they came",
+      "socket": "regional",
+      "direction": "out",
+      "frame": "5:1+::{\"name\":\"trouter.processed_message_loss\",\"args\":[{\"droppedIndicators\":[{\"tag\":\"messaging\",\"etag\":\"2000-01-01T00:00:00.0000001Z\"}]}]}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "the service's acknowledgement of event 1",
+      "socket": "regional",
+      "direction": "in",
+      "frame": "6:::1+[]"
+    },
+    {
+      "name": "the client's own activity",
+      "socket": "regional",
+      "direction": "out",
+      "frame": "5:2+::{\"name\":\"user.activity\",\"args\":[{\"state\":\"active\",\"cv\":\"SyntheticCorrelation00.0.1\"}]}",
+      "expected": "own:trouter_session",
+      "expected_quiet": "unknown"
+    },
+    {
+      "name": "the service's acknowledgement of event 2",
+      "socket": "regional",
+      "direction": "in",
+      "frame": "6:::2+[]"
+    },
+    {
+      "name": "the keep-alive, every 40 s and after every response the client sends",
+      "socket": "regional",
+      "direction": "out",
+      "frame": "5:3+::{\"name\":\"ping\"}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "the service's answer to the keep-alive",
+      "socket": "regional",
+      "direction": "in",
+      "frame": "6:::3+[\"pong\"]"
+    },
+    {
+      "name": "the client's disconnect",
+      "socket": "regional",
+      "direction": "out",
+      "frame": "0::",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "the first socket's authentication, without reconnect parameters",
+      "socket": "first",
+      "direction": "out",
+      "frame": "5:::{\"name\":\"user.authenticate\",\"args\":[{\"headers\":{\"Authorization\":\"Bearer <token:1>\",\"X-MS-Migration\":\"True\"}}]}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "the service closing a socket the client was slow to authenticate",
+      "socket": "first",
+      "direction": "in",
+      "frame": "0:::{\"reason\":\"timeout\"}"
+    }
+  ]
+}
