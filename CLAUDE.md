@@ -115,14 +115,21 @@ What the code does and why. A change that undoes one of these needs a new reason
 
 ### Chrome under load
 
-The machine is often loaded by other agents' builds (load average 30–75), and then a few things flake:
+The machine is often loaded by other agents' builds (load average 30–75), and then two tests are known to flake on
+timing:
 
-- an iframe whose arming step gets no answer within 10 s: closed, and a breach of that run unless it was closed
-  before its resume;
 - `scenario_dsl::a_request_is_waited_for_even_when_it_came_first_and_matched_once` (`net::ERR_ABORTED`);
 - `browser::a_browser_that_exits_early_is_reported`.
 
-Rerun that one test or run before calling it a failure; never raise a timeout or skip an arming step to make it pass.
+Rerun that one test before calling it a failure; never raise a timeout or skip an arming step to make it pass.
+
+**A fence breach is never a flake.** Under load an arming step can go unanswered for 10 s; the target is then closed,
+and the run is reported breached when its resume was sent or its close couldn't be confirmed. Whether such a breach is
+real is open (`docs/backlog/arming-timeout-under-load-counts-as-breach.md`), so it counts as real until that item
+settles it: don't rerun until a run comes out clean and record that as a pass. Keep the breached run's printed output
+(the failed step and the close result survive only there, not in `fence.log`), check it and `fence.log` for anything
+sent unguarded, report the run as breached with a link to the backlog item, and report any later clean run next to
+it, never in its place.
 
 ## Lint rules
 

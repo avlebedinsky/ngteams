@@ -64,9 +64,11 @@ outside the repo:
 
 ## `proto-lab`
 
-Every command that opens a browser runs the pinned Chrome headless on the account's profile, with the fence armed
-before anything loads, and one browser per profile at a time. `chrome` and `bundles` need no `lab.toml` (an invalid one
-is refused all the same); every other command needs it.
+Every command that opens a browser uses the pinned Chrome on the account's profile, with the fence armed before
+anything loads, and one browser per profile at a time. `login`, `status` and `auth` always run it headless; `run` does
+only with `--headless` (agents always pass it). `chrome` and `bundles` need no `lab.toml`, and neither does `export`,
+whose placeholders are then all numbered (with a `lab.toml` the lab accounts get their aliases); an invalid one is
+refused all the same. Every other command needs it.
 
 ```sh
 proto-lab chrome install                  # download the pinned Chrome for Testing into the lab and verify it

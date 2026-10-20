@@ -10,9 +10,12 @@
 - **Every write goes through the fence.** The native client has no browser fence around it, so its protection is the
   type-level one from M0: every request that others could notice is a sealed `teams_proto::Mutating` type sent only
   with a `WritePermit` from `Fence::check`, every other non-read request is on a reviewed own-state list, and the
-  transport can send nothing else. Writes reach only the 3 lab accounts.
-- The first tasks close what M0 left open and M1 depends on: a scenario exit code that means pass/fail (the
-  expected-deny list), whether the chat service takes **our** `ic3` token, and token renewal.
+  transport can send nothing else. The same holds for the Trouter socket: every outgoing frame is a sealed, reviewed
+  own-state frame (authenticate, keep-alive) or a delivery response the fence judged, and each is logged to
+  `fence.log` before it is sent. Writes reach only the 3 lab accounts.
+- The first tasks close what M0 left open and M1 depends on: a scenario verdict that means pass/fail (the
+  expected-deny list, and whether an arming timeout under load is a real breach), whether the chat service takes
+  **our** `ic3` token, and token renewal.
 - Out of scope: channels and teams (the lab accounts share tenant teams with people outside the lab, so channel writes
   stay unmapped and denied), meetings, calls (the call follow-ups stay in `docs/backlog/fence-call-follow-ups.md`
   for M3), presence, Graph and files beyond reading attachments, any UI.
@@ -86,8 +89,9 @@
 ## Testing Strategy
 - **unit / replay**: `cargo test --workspace`, offline. HTTP on `wiremock`; whole-client tests against `teams-mock`
   (chat service + Trouter replayed from synthetic fixtures), two native clients talking through it.
-- **fence suite**: as in M0, plus the native request policy (compile-fail cases: no send without a permit or an
-  own-state kind) and the group-chat membership read.
+- **fence suite**: as in M0, plus the native request policy (compile-fail cases: no request sent without a permit or
+  an own-state kind, no Trouter frame sent that isn't a reviewed own-state frame or a judged delivery response) and the
+  group-chat membership read.
 - **fixture guard**: `cargo test -p fixture-guard` on every `tests/fixtures/` and `docs/`.
 - **live lab**: `--features live` tests that run only with `PROTO_LAB_LIVE=1`, plus `proto-lab run …` and the
   `teams-headless` lab binary against a, b and c.
@@ -116,7 +120,10 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
   reviewed list of the account's own-state requests, logged to `fence.log`), `Mutating` (only as `Authorized`, logged
   by `Fence::check`). Fixed host allowlist, no redirects, no proxy.
 - **`teams-trouter`**: socket.io 0.9 over WSS, `user.authenticate` in the first frame, keep-alives, the registrar
-  registration, deliveries turned into events; deliveries are answered only on reviewed paths, incoming calls never.
+  registration, deliveries turned into events. Its socket sends only the sealed frame classes of the Task 4 policy,
+  each logged to `fence.log` first: `OwnFrame` (authenticate, keep-alive, anything else only once reviewed) and
+  `DeliveryResponse`, built only for a delivery on a reviewed path whose conversation the fence judged complete and
+  lab-only. Incoming calls are never answered; `user.activity` is not sent (the lab never sets presence).
 - **`teams-store`**: conversations, members, messages with versions (edits, deletes), reactions, read horizons, sync
   state, the outbox.
 - **`teams-core`**: commands → outbox → fence → transport; events (Trouter, sync) → store; catch-up on start and after
@@ -143,24 +150,36 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 
 ## Implementation Steps
 
-### Task 1: Expected-deny list for the writing scenarios
+### Task 1: A scenario verdict that means pass/fail (expected denies, arming breaches)
 **Files:**
-- Modify: `crates/proto-lab/src/scenario/{mod.rs,ab_chat.rs,echo_call.rs}`
+- Modify: `crates/proto-lab/src/scenario/{mod.rs,ab_chat.rs,echo_call.rs}`, `crates/proto-lab/src/arming.rs`,
+  `crates/proto-lab/tests/browser.rs`
 - Create: `crates/proto-lab/src/scenario/expected.rs`, `crates/proto-lab/tests/expected_denies.rs`
-- Delete: `docs/backlog/ab-chat-exit-code-counts-unreviewed-denies.md` (when done)
+- Delete: `docs/backlog/ab-chat-exit-code-counts-unreviewed-denies.md`,
+  `docs/backlog/arming-timeout-under-load-counts-as-breach.md` (each when done)
 
 - [ ] tests first: a reviewed **expected-deny** list (host + method + path pattern; frames by socket host) changes
       only how a run is judged, never a verdict; a request on it is still denied and logged
 - [ ] tests first: still unexpected, whatever the list says: any deny on a mapped target (the a–b chat), any deny
-      whose cause isn't `Unclassified` (partial or refused membership, forced deny of another run), any class not on
-      the list
+      whose cause isn't `Unclassified` (partial or refused membership), any class not on the list. The only
+      exceptions are the two forced denies `ab_chat::deny_probes` sets up, each told apart by its rule's label: this
+      run's enforcement probe (`THIS_RUN_PROBE`) and an earlier run's probe the web client sends again on load (the
+      `PROBE_MARKER` rule, given a label of its own). Any other forced deny and every ordinary deny of a mapped write
+      stay unexpected, and enforcement evidence still counts only `THIS_RUN_PROBE`
 - [ ] build the list from the classes in the backlog item, each entry with the reason the scenario doesn't need it;
       test it against those classes and against a mapped write that must stay unexpected
 - [ ] `ab-chat` and `echo-call` use it (`echo-call` keeps failing on the call follow-ups: they are needed, not
       expected)
-- [ ] live: `proto-lab run ab-chat --headless` exits 0 with goal, enforcement and lab-only writes as before; record
-      the run in this plan
-- [ ] `cargo test -p proto-lab` passes; delete the backlog item
+- [ ] settle `docs/backlog/arming-timeout-under-load-counts-as-breach.md` before any live run of this plan (this
+      task's included) relies on a breach verdict: tests first (Chrome 155, a page whose held iframe sends a request and a frame as soon as it
+      runs) on what happens to a target held by `waitForDebuggerOnStart` whose arming gave up before the resume and
+      whose close failed or went unanswered; record every arming failure (target type, failed step, whether it was the
+      resume, close result) in the capture and `fence.log`; then, by that evidence, either make an unconfirmed close
+      before the resume a warning (re-checked with `Target.getTargets`) or confirm the close (retry, or kill the
+      browser). Nothing is loosened without that evidence; decide with Codex if it is ambiguous
+- [ ] live: `proto-lab run ab-chat --headless` exits 0 with goal, enforcement, no breach and lab-only writes as
+      before; record the run in this plan
+- [ ] `cargo test -p proto-lab` passes; delete both backlog items
 
 ### Task 2: Does the chat service take our own `ic3` token? (read-only)
 **Files:**
@@ -197,7 +216,7 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 
 ### Task 4: Native request policy and the HTTP transport
 **Files:**
-- Create: `crates/teams-proto/src/{http.rs,read.rs,own.rs}`, `crates/teams-proto/tests/{http.rs,policy.rs}`,
+- Create: `crates/teams-proto/src/{http.rs,read.rs,own.rs,frame.rs}`, `crates/teams-proto/tests/{http.rs,policy.rs}`,
   `crates/teams-proto/tests/ui/*` (new trybuild cases)
 - Modify: `crates/teams-proto/src/{lib.rs,client.rs,write.rs}`, `crates/fence-seal/tests/*`
 
@@ -209,8 +228,16 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
       credentials from the Task 3 session
 - [ ] every `OwnState` request is logged to `fence.log` (channel, method, URL without query) before it is sent; one
       that can't be logged isn't sent
-- [ ] the own-state list starts empty; each entry is added only by the task that captured and reviewed it, in its
-      exact shape (method, origin, path, body schema)
+- [ ] tests first (trybuild): the WebSocket side of the same policy, for `teams-trouter` (Task 14). A socket sink sends
+      only `OwnFrame` (a sealed, reviewed list: `user.authenticate`, keep-alives) or a `DeliveryResponse`; an
+      unreviewed frame (raw text, `user.activity`, a response built by hand) doesn't compile, and neither type can be
+      implemented or constructed outside `teams-proto`. A `DeliveryResponse` is built only by a fence check on the
+      delivery it answers: its path is on the reviewed list (Task 13) and its conversation's membership read is
+      complete and lab-only; anything else (an incoming call, an unknown path, a partial read) gets no response
+- [ ] every outgoing frame is logged to `fence.log` (channel, frame kind, delivery path and scope for a response,
+      never a token) before it is sent; one that can't be logged isn't sent
+- [ ] the own-state lists (requests and frames) start empty; each entry is added only by the task that captured and
+      reviewed it, in its exact shape (method, origin, path, body schema; frame kind and schema)
 - [ ] tests on wiremock: reads, a permitted write, an own-state request, the refusals; mutation-check the log rule
 - [ ] `cargo test -p teams-proto -p fence-seal` passes
 
@@ -296,6 +323,7 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 **Files:**
 - Create: `crates/teams-store/{Cargo.toml,src/lib.rs,src/schema.rs,src/migrations/*.sql}`,
   `crates/teams-store/tests/store.rs`
+- Modify: `Cargo.toml` (member, workspace deps)
 
 - [ ] tests first: migrations from empty; idempotent upserts of conversations, members and messages by id and version
       (an older version never overwrites a newer one); edits, soft deletes, reactions per user, read horizons, sync
@@ -323,9 +351,11 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 
 ### Task 12: Outbox with `clientmessageid` dedupe
 **Files:**
-- Create: `crates/teams-core/src/outbox.rs`, `crates/teams-core/tests/outbox.rs`
-- Modify: `crates/teams-store/src/*`
+- Create: `crates/teams-core/{Cargo.toml,src/lib.rs,src/outbox.rs}`, `crates/teams-core/tests/outbox.rs`
+- Modify: `Cargo.toml` (member, workspace deps), `crates/teams-store/src/*`
 
+- [ ] create the `teams-core` crate (`[lints] workspace = true`, listed in `members`) with the outbox as its first
+      module; sync and the engine come in Task 15
 - [ ] tests first: a command becomes an outbox row with a fresh `clientmessageid`; each attempt asks the fence again
       (a fresh permit, a fresh membership read); a network error retries with the same `clientmessageid`; a 4xx doesn't
       retry; a denied attempt marks the row denied and sends nothing
@@ -344,8 +374,9 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - [ ] capture (web client, `ab-chat`-style run): b's Trouter session while a sends, edits and reacts; the registrar
       registration of the messaging stack (`TeamsCDLWebWorker`); the deliveries for chat events (method, url, headers,
       body shape) and what the service does when their responses are denied (redelivery timing)
-- [ ] decide with Codex which delivery responses only acknowledge a chat event and may be own-state, and which
-      (incoming calls, anything unseen) are never answered; record the evidence; nothing call-related is answered
+- [ ] decide with Codex which delivery responses only acknowledge a chat event and may become the reviewed paths of
+      the Task 4 frame policy, and which (incoming calls, anything unseen) are never answered; record the evidence;
+      nothing call-related is answered
 - [ ] write `trouter.md` in our own words: connect and regional move, `user.authenticate` in the first frame (the
       `ic3` token, `X-MS-Migration`), keep-alives, `trouter.connected` push URLs, registration and its TTL,
       deliveries and responses, reconnect parameters, whether `user.activity` is needed (the lab never sets presence)
@@ -355,22 +386,28 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 **Files:**
 - Create: `crates/teams-trouter/{Cargo.toml,src/lib.rs,src/frames.rs,src/session.rs,src/registration.rs}`,
   `crates/teams-trouter/tests/{frames.rs,session.rs}`
+- Modify: `Cargo.toml` (member, workspace deps), `crates/teams-proto/src/frame.rs` (the reviewed frame entries)
 
 - [ ] tests first: socket.io 0.9 frame codec on the Task 13 fixtures; authenticate as the first frame; acknowledged
       keep-alives; reconnect with backoff and the service's reconnect parameters; a delivery for an incoming call is
       **ignored, never answered** (the M0 echo-call policy), and so is any delivery path not on the reviewed list
+- [ ] every outgoing frame goes through the Task 4 frame policy and is logged to `fence.log` first: authenticate and
+      keep-alives as `OwnFrame`, delivery responses only as a fence-judged `DeliveryResponse` on a Task 13 reviewed
+      path; the socket has no other way to send
 - [ ] the registrar registration and its renewal as `OwnState` requests (Task 4), the `ic3` token from the session
 - [ ] deliveries → typed chat events (new message, edit, delete, reaction, read horizon, thread update); unknown ones
       kept as `Unknown` and logged by kind only
-- [ ] tests on `teams-mock`: connect, register, receive a delivery, acknowledge it only if reviewed, survive a dropped
-      socket
+- [ ] tests on `teams-mock`: connect, register, receive a delivery, acknowledge it only if reviewed and its chat is
+      lab-only, never answer one from a chat with an outsider (no frame sent, `fence.log` entry written), survive a
+      dropped socket
 - [ ] `cargo test -p teams-trouter` passes
 
 ### Task 15: Catch-up sync, `teams-core` and the `teams-headless` lab binary
 **Files:**
-- Create: `crates/teams-core/{Cargo.toml,src/lib.rs,src/sync.rs,src/engine.rs}`,
-  `crates/teams-core/tests/{sync.rs,engine.rs}`, `crates/teams-headless/{Cargo.toml,src/main.rs}`
-- Modify: `README.md`
+- Create: `crates/teams-core/src/{sync.rs,engine.rs}`, `crates/teams-core/tests/{sync.rs,engine.rs}`,
+  `crates/teams-headless/{Cargo.toml,src/main.rs}`
+- Modify: `crates/teams-core/{Cargo.toml,src/lib.rs}` (from Task 12), `Cargo.toml` (`teams-headless` as a member),
+  `README.md`
 
 - [ ] tests first (on `teams-mock`): first sync fills the store; a sync after a gap (socket down, messages sent
       meanwhile) catches up exactly once; Trouter events and sync agree (no duplicates, versions respected); a
@@ -406,8 +443,8 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - [ ] the same test covers an edit and a reaction (both arrive on b), and a 3-person group chat of a, b and c (each
       message reaches both others)
 - [ ] a catch-up check: b's socket closed, a sends, b reconnects and has every message exactly once
-- [ ] `fence.log` for the run: allows only on the lab chats, no deny of a mapped write, no own-state request off the
-      list
+- [ ] `fence.log` for the run: allows only on the lab chats, no deny of a mapped write, no own-state request or
+      Trouter frame off the list, delivery responses only for lab chats
 - [ ] `proto-lab run ab-chat --headless` and `abc-chat` exit 0
 - [ ] the full gate passes; write `docs/m1-acceptance.md` (numbers, fence summary, flakes)
 
