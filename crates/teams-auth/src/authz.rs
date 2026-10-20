@@ -15,12 +15,13 @@ use std::fmt::Write as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::StatusCode;
-use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, RETRY_AFTER, WWW_AUTHENTICATE};
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, WWW_AUTHENTICATE};
 use serde_json::{Map, Value, json};
 use url::Url;
 
 use crate::claims::{payload, text, time};
 use crate::secrets::{Secret, SecretError, SecretKey, SecretStore};
+use crate::token::{retry_after, seconds};
 
 /// Teams' authz endpoint in the commercial cloud.
 pub const AUTHZ_ENDPOINT: &str = "https://teams.microsoft.com/api/authsvc/v1.0/authz";
@@ -298,12 +299,10 @@ fn refusal(status: StatusCode, headers: &HeaderMap, answer: &[u8]) -> AuthzError
 }
 
 fn unavailable(status: u16, headers: &HeaderMap) -> AuthzError {
-    let retry_after = headers
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
-        .map(Duration::from_secs);
-    AuthzError::Unavailable { status, retry_after }
+    AuthzError::Unavailable {
+        status,
+        retry_after: retry_after(headers),
+    }
 }
 
 /// Teams' `errorCode`, if the body is JSON with one shaped like an identifier.
@@ -364,18 +363,8 @@ fn take_token(fields: &mut Map<String, Value>) -> Option<(Secret, Option<Duratio
             Some(Value::String(token)) if !token.is_empty() => Some(Secret::from(token)),
             _ => None,
         })?;
-    let expires_in = tokens.get("expiresIn").and_then(seconds);
+    let expires_in = seconds(tokens.get("expiresIn"));
     Some((token, expires_in))
-}
-
-/// A number of seconds, or the same as a string.
-fn seconds(value: &Value) -> Option<Duration> {
-    let seconds = match value {
-        Value::Number(number) => number.as_u64()?,
-        Value::String(text) => text.trim().parse().ok()?,
-        _ => return None,
-    };
-    Some(Duration::from_secs(seconds))
 }
 
 /// `regionGtms` as a map of its string entries; `None` when it isn't an object.

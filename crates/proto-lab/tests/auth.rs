@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use proto_lab::commands::auth::{AudienceOutcome, AuthReport, SkypetokenSummary, region_file, save_region};
+use proto_lab::commands::auth::{
+    AudienceOutcome, AuthError, AuthReport, SkypetokenSummary, region_file, save_region, within,
+};
 use proto_lab::config::{Alias, LabPaths};
 use proto_lab::session::FenceReport;
 use serde_json::Value;
@@ -173,4 +175,65 @@ fn the_region_is_saved_privately_without_the_token() {
         1,
         "no partial file left"
     );
+}
+
+#[test]
+fn saves_that_run_at_once_each_replace_the_file_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(dir.path().join("lab"));
+    let expiries: Vec<u64> = (1..=16).map(|n| NOW + n * 1_000).collect();
+
+    std::thread::scope(|scope| {
+        let saves: Vec<_> = expiries
+            .iter()
+            .map(|&expiry| {
+                let paths = &paths;
+                scope.spawn(move || {
+                    let skypetoken = SkypetokenSummary {
+                        expires_at: at(expiry),
+                        region: region(),
+                    };
+                    save_region(paths, Alias::C, &skypetoken)
+                })
+            })
+            .collect();
+        for save in saves {
+            save.join().unwrap().unwrap();
+        }
+    });
+
+    let file = region_file(&paths, Alias::C);
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert!(
+        expiries.contains(&saved["skypetokenExpiresAt"].as_u64().unwrap()),
+        "{saved}"
+    );
+    assert_eq!(Region::from_json(&saved), Some(region()));
+    assert_eq!(
+        std::fs::read_dir(file.parent().unwrap()).unwrap().count(),
+        1,
+        "no staging file left"
+    );
+}
+
+#[tokio::test]
+async fn the_timeout_bounds_a_step_that_never_answers() {
+    // a navigation the browser never answers: the bound has to cover it, not only the wait after it
+    let limit = Duration::from_millis(50);
+    let started = std::time::Instant::now();
+    let outcome = within(limit, std::future::pending::<Result<(), AuthError>>()).await;
+    assert!(
+        matches!(outcome, Err(AuthError::Timeout(given)) if given == limit),
+        "{outcome:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // a step that ends in time keeps its own outcome
+    let done = within(Duration::from_secs(5), async { Ok::<_, AuthError>(7) }).await;
+    assert!(matches!(done, Ok(7)), "{done:?}");
+    let refused = within(Duration::from_secs(5), async {
+        Err::<(), _>(AuthError::InteractionNeeded)
+    })
+    .await;
+    assert!(matches!(refused, Err(AuthError::InteractionNeeded)), "{refused:?}");
 }

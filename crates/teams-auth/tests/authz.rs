@@ -313,6 +313,32 @@ async fn other_failures_are_told_apart_by_status() {
 }
 
 #[tokio::test]
+async fn an_http_date_retry_after_is_kept_as_a_wait() {
+    let server = MockServer::start().await;
+    let when = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(120));
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", when.as_str()))
+        .mount(&server)
+        .await;
+    let client = AuthzClient::with_endpoint(&format!("{}/v1.0/authz", server.uri())).unwrap();
+
+    let error = client
+        .exchange(&spaces_token(), AuthzKind::ExplicitLogin)
+        .await
+        .unwrap_err();
+
+    let AuthzError::Unavailable {
+        status: 503,
+        retry_after: Some(wait),
+    } = error
+    else {
+        panic!("{error:?}");
+    };
+    // the date has a one-second resolution, and the request took a moment
+    assert!((100..=120).contains(&wait.as_secs()), "{wait:?}");
+}
+
+#[tokio::test]
 async fn an_answer_without_a_skypetoken_or_region_is_refused() {
     let core = Fixture::load("authzcore-ok").unwrap();
     let server = MockServer::start().await;

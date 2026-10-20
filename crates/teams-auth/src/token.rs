@@ -495,8 +495,8 @@ fn take_secret(fields: &mut Map<String, Value>, key: &str) -> Option<Secret> {
     }
 }
 
-/// `expires_in`: a number of seconds, or the same as a string.
-fn seconds(value: Option<&Value>) -> Option<Duration> {
+/// A lifetime field (`expires_in`, authz's `expiresIn`): a number of seconds, or the same as a string.
+pub(crate) fn seconds(value: Option<&Value>) -> Option<Duration> {
     let seconds = match value? {
         Value::Number(number) => number.as_u64()?,
         Value::String(text) => text.trim().parse().ok()?,
@@ -505,8 +505,8 @@ fn seconds(value: Option<&Value>) -> Option<Duration> {
     Some(Duration::from_secs(seconds))
 }
 
-/// `Retry-After` as delta-seconds or an HTTP date.
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+/// `Retry-After` as delta-seconds or an HTTP date (Entra's and authz's answers alike).
+pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = value.parse() {
         return Some(Duration::from_secs(seconds));

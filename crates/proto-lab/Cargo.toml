@@ -23,6 +23,8 @@ teams-auth.workspace = true
 teams-fence.workspace = true
 # a token's expiry as an HTTP date in `proto-lab auth`'s report
 httpdate.workspace = true
+# `proto-lab auth`: each region save stages in a file of its own before the rename
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-tungstenite.workspace = true
@@ -33,7 +35,6 @@ zeroize.workspace = true
 [dev-dependencies]
 # a local HTTPS server: Chrome uploads Reporting API reports only over a secure connection
 rcgen.workspace = true
-tempfile.workspace = true
 # the fence tests build fences over test rosters and fake membership sources; never a normal dependency, and the
 # binary refuses to run when a test build unified it in
 teams-fence = { workspace = true, features = ["test-support"] }

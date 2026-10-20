@@ -19,7 +19,8 @@
 //! region, or the refusal.
 
 use std::fmt::Write as _;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::future::Future;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -34,7 +35,7 @@ use tokio::sync::mpsc;
 
 use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabPaths};
-use crate::fence_http::RedirectCatch;
+use crate::fence_http::{CatchError, RedirectCatch};
 use crate::session::{FenceReport, LabSession, SessionError, SessionState};
 
 /// The `application` attribute of the lab's items in the Secret Service.
@@ -60,7 +61,7 @@ const TICK: Duration = Duration::from_millis(250);
 /// What to do beyond the sign-in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthOptions {
-    /// How long the redirect may take.
+    /// How long the browser step may take, from opening the authorize URL to the redirect.
     pub timeout: Duration,
     /// Exchange the access token for a skypetoken.
     pub skypetoken: bool,
@@ -75,6 +76,8 @@ pub enum AuthError {
     Session(#[from] SessionError),
     #[error("can't make the authorization request: {0}")]
     Pkce(#[from] PkceError),
+    #[error("can't catch the redirect: {0}")]
+    Catch(#[from] CatchError),
     #[error("the redirect: {0}")]
     Redirect(#[from] RedirectError),
     #[error(transparent)]
@@ -156,7 +159,7 @@ pub async fn authorize<S: SecretStore>(
     }
     let (redirect, fence) =
         redirect_through_profile(config.paths(), alias, &entra, &authorization, options.timeout).await?;
-    let code = authorization.code_from_redirect(redirect?.expose())?;
+    let code = authorization.code_from_redirect(redirect.expose())?;
 
     let client = TokenClient::new(entra)?;
     let sign_in = client.exchange_code(store, &authorization, code.expose()).await?;
@@ -198,36 +201,47 @@ async fn skypetoken<S: SecretStore>(
     Ok(SkypetokenSummary::from(&skypetoken))
 }
 
-/// Opens the authorize URL in `alias`'s profile under the armed fence and waits for the redirect the fence catches.
-/// The browser is closed whatever happened; the fence report comes back with the outcome.
+/// Opens the authorize URL in `alias`'s profile under the armed fence and waits for the redirect the fence catches,
+/// the two together bounded by `timeout` ([`within`]). The browser is closed whatever happened, and a breach outranks
+/// any other outcome. The fence report comes back with the redirect only; on an error the report adds nothing to it.
 async fn redirect_through_profile(
     paths: &LabPaths,
     alias: Alias,
     entra: &EntraConfig,
     authorization: &Authorization,
     timeout: Duration,
-) -> Result<(Result<Secret, AuthError>, FenceReport), AuthError> {
+) -> Result<(Secret, FenceReport), AuthError> {
     let (catch, mut caught) = RedirectCatch::new(&entra.authorize_endpoint(), entra.redirect_uri())?;
     let mut session = LabSession::open_with(paths, alias, Classifier::seeded(), Some(catch)).await?;
-    let redirect = match session.navigate(authorization.url()).await {
-        Ok(()) => wait_for_redirect(&mut session, &mut caught, timeout).await,
-        Err(error) => Err(error.into()),
-    };
+    let redirect = within(timeout, async {
+        session.navigate(authorization.url()).await?;
+        wait_for_redirect(&mut session, &mut caught).await
+    })
+    .await;
     let fence = session.close().await?;
     if fence.breached() {
         return Err(AuthError::Breached(fence.summary()));
     }
-    Ok((redirect, fence))
+    Ok((redirect?, fence))
+}
+
+/// `step`, given up as [`AuthError::Timeout`] once `timeout` has passed, wherever it is waiting: the browser's
+/// navigation (which doesn't answer until the page commits) as much as the wait for the redirect.
+///
+/// # Errors
+/// `step`'s error, or [`AuthError::Timeout`].
+pub async fn within<T>(timeout: Duration, step: impl Future<Output = Result<T, AuthError>>) -> Result<T, AuthError> {
+    tokio::time::timeout(timeout, step)
+        .await
+        .unwrap_or(Err(AuthError::Timeout(timeout)))
 }
 
 /// Pumps the session's events until the fence catches the redirect. A sign-in page that stands for
-/// [`SIGN_IN_GRACE`], a page on another host, the timeout or a lost connection end the wait.
+/// [`SIGN_IN_GRACE`], a page on another host or a lost connection end the wait; the caller bounds it in time.
 async fn wait_for_redirect(
     session: &mut LabSession,
     caught: &mut mpsc::UnboundedReceiver<Secret>,
-    timeout: Duration,
 ) -> Result<Secret, AuthError> {
-    let deadline = tokio::time::Instant::now() + timeout;
     let mut sign_in_since = None;
     loop {
         if let Ok(redirect) = caught.try_recv() {
@@ -244,9 +258,6 @@ async fn wait_for_redirect(
             SessionState::Elsewhere(host) => return Err(AuthError::Elsewhere(host)),
             _ => sign_in_since = None,
         }
-        if now >= deadline {
-            return Err(AuthError::Timeout(timeout));
-        }
         if !session.pump(TICK).await {
             return Err(AuthError::ConnectionLost);
         }
@@ -260,7 +271,8 @@ pub fn region_file(paths: &LabPaths, alias: Alias) -> PathBuf {
 }
 
 /// Persists the account's region (`regionGtms` and all) and the skypetoken's expiry to [`region_file`]: the directory
-/// `0700`, the file `0600`, replaced by rename. Not the token.
+/// `0700`, the file `0600`, replaced by rename from a staging file of its own, so saves that run at once never share
+/// one (the last rename wins, whole). Not the token.
 ///
 /// # Errors
 /// When the file can't be written.
@@ -273,17 +285,15 @@ pub fn save_region(paths: &LabPaths, alias: Alias, skypetoken: &SkypetokenSummar
     record["fetchedAt"] = json!(unix_seconds(SystemTime::now()));
     record["skypetokenExpiresAt"] = json!(unix_seconds(skypetoken.expires_at));
     let text = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
-    let partial = file.with_extension("json.partial");
-    let mut out = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&partial)?;
-    std::io::Write::write_all(&mut out, text.as_bytes())?;
-    out.sync_all()?;
-    drop(out);
-    std::fs::rename(&partial, &file)?;
+    // a uniquely named staging file, removed if anything fails before the rename
+    let mut staging = tempfile::Builder::new()
+        .prefix(&format!(".{}.json.", alias.as_str()))
+        .suffix(".partial")
+        .permissions(std::fs::Permissions::from_mode(0o600))
+        .tempfile_in(dir)?;
+    std::io::Write::write_all(&mut staging, text.as_bytes())?;
+    staging.as_file().sync_all()?;
+    staging.persist(&file).map_err(|error| error.error)?;
     Ok(file)
 }
 

@@ -109,6 +109,17 @@ pub enum Handled {
     ResponseContinued,
 }
 
+/// Why a [`RedirectCatch`] can't be made.
+#[derive(Debug, thiserror::Error)]
+pub enum CatchError {
+    /// The redirect URI isn't usable.
+    #[error(transparent)]
+    RedirectUri(#[from] RedirectError),
+    /// The authorize endpoint has no HTTP(S) origin whose responses could be paused.
+    #[error("the authorize endpoint must be an absolute http(s) URL")]
+    AuthorizeEndpoint,
+}
+
 /// Catches the authorization redirect to one registered redirect URI (see the module docs). Made for one
 /// `proto-lab auth` run; the URL it catches carries the authorization code, so it is handed over as a [`Secret`].
 #[derive(Debug)]
@@ -124,18 +135,18 @@ impl RedirectCatch {
     /// catches.
     ///
     /// # Errors
-    /// When `redirect_uri` isn't a bare absolute URL ([`RedirectUri::parse`]) or `authorize_endpoint` has no HTTP(S)
-    /// origin.
+    /// [`CatchError::RedirectUri`] when `redirect_uri` isn't a bare absolute URL ([`RedirectUri::parse`]);
+    /// [`CatchError::AuthorizeEndpoint`] when `authorize_endpoint` has no HTTP(S) origin.
     pub fn new(
         authorize_endpoint: &str,
         redirect_uri: &str,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<Secret>), RedirectError> {
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Secret>), CatchError> {
         let redirect = RedirectUri::parse(redirect_uri)?;
         let login_origin = Url::parse(authorize_endpoint)
             .ok()
             .filter(|url| matches!(url.scheme(), "https" | "http"))
             .map(|url| url.origin().ascii_serialization())
-            .ok_or(RedirectError::InvalidRedirectUri)?;
+            .ok_or(CatchError::AuthorizeEndpoint)?;
         let (caught, receiver) = mpsc::unbounded_channel();
         let catch = Self {
             login_origin,

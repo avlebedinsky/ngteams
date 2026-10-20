@@ -14,7 +14,7 @@ use std::time::Duration;
 use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::classify::Classifier;
-use proto_lab::fence_http::{HttpFence, RedirectCatch};
+use proto_lab::fence_http::{CatchError, HttpFence, RedirectCatch};
 use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
 use serde_json::{Value, json};
 use teams_auth::pkce::Pkce;
@@ -64,19 +64,20 @@ fn only_a_fence_with_a_catch_pauses_responses_and_only_the_login_origins() {
 #[test]
 fn a_catch_needs_a_bare_redirect_uri_and_a_web_authorize_endpoint() {
     let authorize = EntraConfig::teams_native().authorize_endpoint();
-    for (endpoint, redirect) in [
-        (authorize.as_str(), "https://login.microsoftonline.com/cb?x=1"),
-        (authorize.as_str(), "not a url"),
-        ("msauth.com.microsoft.teams2://auth", NATIVE_CLIENT_REDIRECT),
-        ("not a url", NATIVE_CLIENT_REDIRECT),
-    ] {
+    for redirect in ["https://login.microsoftonline.com/cb?x=1", "not a url"] {
         assert!(
             matches!(
-                RedirectCatch::new(endpoint, redirect),
-                Err(RedirectError::InvalidRedirectUri)
+                RedirectCatch::new(&authorize, redirect),
+                Err(CatchError::RedirectUri(RedirectError::InvalidRedirectUri))
             ),
-            "{endpoint} {redirect}"
+            "{redirect}"
         );
+    }
+    for endpoint in ["msauth.com.microsoft.teams2://auth", "not a url"] {
+        let error = RedirectCatch::new(endpoint, NATIVE_CLIENT_REDIRECT).unwrap_err();
+        assert!(matches!(error, CatchError::AuthorizeEndpoint), "{endpoint}: {error:?}");
+        // the authority is what's wrong, not the redirect URI
+        assert!(error.to_string().contains("authorize endpoint"), "{error}");
     }
     assert!(RedirectCatch::new(&authorize, CUSTOM_SCHEME).is_ok());
 }

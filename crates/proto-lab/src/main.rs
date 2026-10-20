@@ -46,7 +46,7 @@ enum Command {
     Auth {
         /// The lab account: a, b or c.
         alias: Alias,
-        /// Seconds the redirect may take.
+        /// Seconds the browser step may take, from opening the authorize URL to the redirect.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
         /// Stop after the Entra tokens; don't ask authz for a skypetoken.
