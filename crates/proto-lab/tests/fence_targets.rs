@@ -3,9 +3,9 @@
 //! forced deny `ab-chat`'s live enforcement test uses.
 //!
 //! The requests are the synthetic fixture `tests/fixtures/chatsvc/writes.json` (sanitized form) and the writes of the
-//! capture-shaped fixtures beside it (`edit.json`, `delete.json`, `reaction.json`, `reply.json`, and the bundle-shaped
-//! `mention.json`); the thread answer is `tests/fixtures/chatsvc/thread-one-to-one.json`. Made-up GUIDs fill in their placeholders; no real MRI or token
-//! appears here. The forced-deny test runs a throwaway armed browser on a local page.
+//! capture-shaped fixtures beside it (`edit.json`, `delete.json`, `reaction.json`, `reply.json`, `mention.json`); the
+//! thread answer is `tests/fixtures/chatsvc/thread-one-to-one.json`. Made-up GUIDs fill in their placeholders; no real
+//! MRI or token appears here. The forced-deny test runs a throwaway armed browser on a local page.
 
 mod common;
 

@@ -17,8 +17,9 @@
 //! The classes are the ones the M0 acceptance runs of `ab-chat` showed on 2026-10-20 (both accounts) and that its
 //! `load`, `ab-chat`, `ab-chat-full` and `echo-call` captures since repeat, plus two first seen in `ab-chat-full`'s
 //! runs of 2026-10-20: the bot invokes an opening editor sends and the own activity feed's item read
-//! (`48:notifications`, `isread`). Each entry says why the scenario doesn't need it. A class that isn't here keeps failing the run until it
-//! is reviewed: writes on conversations other than the scenario's (a tenant team's thread, say), the calling stack's
+//! (`48:notifications`, `isread`), and one first seen once it mentioned b (2026-10-21): the same read on the
+//! account's own mentions stream (`48:mentions`). Each entry says why the scenario doesn't need it. A class that isn't
+//! here keeps failing the run until it is reviewed: writes on conversations other than the scenario's (a tenant team's thread, say), the calling stack's
 //! own-state and every request on a call (`echo-call` needs those: `docs/backlog/fence-call-follow-ups.md`).
 
 use url::Url;
@@ -181,6 +182,15 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         reason: "the account marking an item of its own activity feed read (`?name=isread`, `{\"isread\":\"true\"}`), \
                  seen once b's reaction reached a's feed (ab-chat-full, 2026-10-20): it changes only what the \
                  account's own feed shows, and the scenario reads nothing from the feed",
+    },
+    ExpectedRequest {
+        class: "own mention read",
+        hosts: TEAMS,
+        method: "PUT",
+        path: "/api/chatsvc/*/v1/users/ME/conversations/48%3Amentions/messages/*/properties",
+        reason: "the account marking an item of its own mentions stream read (`?name=isread`, `{\"isread\":\"true\"}`), \
+                 seen once a's mention reached b (ab-chat-full, 2026-10-21): it changes only what the account's own \
+                 mentions show, and the scenario reads the mention from the chat, not from that stream",
     },
     ExpectedRequest {
         class: "chat list by POST (CSA)",

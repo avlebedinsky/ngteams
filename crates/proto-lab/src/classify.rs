@@ -398,8 +398,8 @@ fn chat_only(body: &Value) -> Option<()> {
 }
 
 /// The MRIs a message body mentions: its `properties.mentions`, a JSON list sent as a string, each entry naming one
-/// `mri` (`docs/protocol/chat.md`; the captures showed only the empty list `"[]"`, the entries' form is the web
-/// bundle's). They are the write's added participants, so the fence judges whoever is mentioned as it judges the
+/// `mri` (`docs/protocol/chat.md`: the form `ab-chat-full`'s mention of b showed on 2026-10-21, as the web bundle
+/// builds it). They are the write's added participants, so the fence judges whoever is mentioned as it judges the
 /// chat's members. No `properties`, or no `mentions` in them, is no mention. Anything else is `None` (unknown):
 /// `properties` that aren't an object, `mentions` that aren't a string holding a JSON list read by [`strict_json`],
 /// an entry that isn't an object with a string `mri`, and either key in another case ([`optional`]).

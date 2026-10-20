@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, NOT captured: a message mentioning the chat's other member, in the form the web bundle 26260.1717.5229.7049 builds and reads (no mention could be made under the fence: docs/protocol/chat.md, docs/backlog/mention-not-captured-under-the-fence.md). The rest of the post is the captured message shape (tests/fixtures/chatsvc/reply.json). The content marks the mentioned name with a span of itemtype Mention whose itemid indexes properties.mentions, a JSON string of a list with one entry per mention. Check it against a capture before relying on it. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in.",
+  "_synthetic": "Written synthetic-from-capture, made-up values: a's message mentioning b in the a-b 1:1 chat, ab-chat-full run of 2026-10-21 (captures ab-chat-full/20261020T223250Z for a and 20261020T223251Z for b, reference copies reference/chat/ab-chat-full-mention-a.jsonl and -b.jsonl, read locally), picked from the web client's mention picker once the fence let its profile lookups of lab accounts through. Sent, the content wraps the mention in a readonly element around a span of itemtype Mention whose itemid (a string) indexes properties.mentions, a JSON string of a list. Read back from the chat, the readonly wrapper is gone and the entry's itemid is a number; b's own mentions stream (48:mentions) gets an entry of its own pointing at the chat's message. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md.",
   "request": {
     "method": "POST",
     "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
@@ -12,7 +12,7 @@
       "fromUserId": "8:orgid:<guid:a>",
       "composetime": "2026-01-01T00:00:40.000Z",
       "originalarrivaltime": "2026-01-01T00:00:40.000Z",
-      "content": "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Lab B</span> a made-up mention</p>",
+      "content": "<p><readonly class=\"skipProofing\" itemtype=\"http://schema.skype.com/Mention\" spellcheck=\"false\"><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Lab B</span></readonly>&nbsp;a made-up mention</p>",
       "messagetype": "RichText/Html",
       "contenttype": "Text",
       "imdisplayname": "Lab A",
@@ -39,5 +39,88 @@
   "response": {
     "status": 201,
     "body": {"OriginalArrivalTime": 1760000040000}
+  },
+  "read_back": {
+    "sequenceId": 6,
+    "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "fromDisplayNameInToken": "Lab A",
+    "id": "1760000040000",
+    "clientmessageid": "6666666666666666666",
+    "version": "1760000040000",
+    "messagetype": "RichText/Html",
+    "content": "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"0\">Lab B</span>&nbsp;a made-up mention</p>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "imdisplayname": "Lab A",
+    "composetime": "2026-01-01T00:00:40.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:00:40.0000000Z",
+    "properties": {
+      "mentions": "[{\"@type\":\"http://schema.skype.com/Mention\",\"itemid\":0,\"mri\":\"8:orgid:<guid:b>\",\"mentionType\":\"person\",\"displayName\":\"Lab B\"}]",
+      "cards": "[]",
+      "links": "[]",
+      "files": "[]",
+      "formatVariant": "TEAMS",
+      "languageStamp": "languages=en:100;length:20;&detector=Bling"
+    }
+  },
+  "mentions_stream": {
+    "request": "GET /api/chatsvc/<region>/v1/users/ME/conversations/48%3Amentions/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=200&startTime=1",
+    "message": {
+      "sequenceId": 1,
+      "conversationid": "48:mentions",
+      "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/48:mentions",
+      "contenttype": "RichText/Html",
+      "type": "Message",
+      "s2spartnername": "skypespaces",
+      "clumpId": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "secondaryReferenceId": "T_19:<guid:a>_<guid:b>@unq.gbl.spaces_M_1760000040000",
+      "id": "1760000041000",
+      "clientmessageid": "1760000040900",
+      "version": "1760000041000",
+      "messagetype": "RichText/Html",
+      "content": "<span itemtype=\"http://schema.skype.com/Mention\" itemscope=\"\" itemid=\"0\">Lab B</span> a made-up mention",
+      "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:b>",
+      "imdisplayname": "",
+      "composetime": "2026-01-01T00:00:41.0000000Z",
+      "originalarrivaltime": "2026-01-01T00:00:41.0000000Z",
+      "properties": {
+        "mentions": "[{\"itemid\":0,\"mri\":\"8:orgid:<guid:b>\",\"mentionType\":\"person\",\"displayName\":\"Lab B\"}]",
+        "activity": {
+          "activityType": "mentions",
+          "activityReason": "mention",
+          "activitySubtype": "mention",
+          "activityTimestamp": "2026-01-01T00:00:40.020Z",
+          "activityId": 1000000000000001,
+          "sourceThreadId": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+          "sourceMessageId": 1760000040000,
+          "sourceMessageVersion": 1760000040000,
+          "sourceReplyChainId": 1760000040000,
+          "sourceUserId": "8:orgid:<guid:a>",
+          "sourceUserImDisplayName": "Lab A",
+          "targetUserId": "8:orgid:<guid:b>",
+          "messagePreview": "Lab B a made-up mention",
+          "messagePreviewTemplateOption": "hasText",
+          "activityContext": {
+            "WebhookCorrelationId": "<made-up correlation id>",
+            "IncomingMSCV": "<made-up correlation vector>",
+            "ClumpId": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+            "ClumpType": "Channel",
+            "activityProcessingLatency": "500.0"
+          },
+          "sourceThreadRosterNonBotMemberCount": 2,
+          "sourceThreadIsPrivateChannel": "false",
+          "threadParticipants": [],
+          "sourceThreadType": "chat"
+        },
+        "messageUpdatePolicyValue": 1760000040000,
+        "views": "{\"viewReferences\":[{\"view\":\"ActivityFeed\",\"stream\":\"48:notifications\",\"secondaryReferenceId\":\"T_19:<guid:a>_<guid:b>@unq.gbl.spaces_M_1760000040000\"},{\"view\":\"Mentions\",\"stream\":\"48:mentions\",\"secondaryReferenceId\":\"T_19:<guid:a>_<guid:b>@unq.gbl.spaces_M_1760000040000\"}],\"version\":\"1.0\"}",
+        "issaved": false,
+        "s2spartnername": "skypespaces",
+        "languageStamp": "languages=en:100;length:20;&detector=Bling"
+      }
+    }
   }
 }
