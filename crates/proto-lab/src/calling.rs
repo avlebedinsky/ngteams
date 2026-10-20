@@ -297,11 +297,11 @@ pub fn own_request(method: &str, url: &Url, body: Option<&[u8]>) -> Option<OwnKi
 /// origins: [`OwnKind::EndpointRegistration`] for registering the **messaging** stack's endpoint only (the reviewed
 /// registration whose app is [`MESSAGING_APP`] and whose template is `TeamsCDLWebWorker_<version>`), so the account's
 /// chat events reach its Trouter socket. Never the calling stack's (`SkypeSpacesWeb`), which makes the account
-/// reachable for calls; nothing else (`None`).
+/// reachable for calls; nothing else (`None`). The URL is the registrar's exactly as captured, with no query.
 #[must_use]
 pub fn messaging_request(method: &str, url: &Url, body: Option<&[u8]>) -> Option<OwnKind> {
     let teams = TEAMS_ORIGINS.contains(&url.origin().ascii_serialization().as_str());
-    if method != "POST" || !teams || url.path() != REGISTRATIONS {
+    if method != "POST" || !teams || url.path() != REGISTRATIONS || url.query().is_some() {
         return None;
     }
     let body = body?;

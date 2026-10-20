@@ -840,6 +840,18 @@ fn the_messaging_set_registers_the_messaging_stack_only() {
         Classifier::messaging().classify("PUT", REGISTRAR[0], Some(REGISTRATION.as_bytes())),
         Classification::Unknown
     );
+    // the captured registration has no query: one it didn't show makes the request unknown
+    for query in ["?x=1", "?"] {
+        assert_eq!(
+            Classifier::messaging().classify(
+                "POST",
+                &format!("{}{query}", REGISTRAR[0]),
+                Some(REGISTRATION.as_bytes())
+            ),
+            Classification::Unknown,
+            "{query}"
+        );
+    }
     assert_eq!(
         Classifier::messaging().classify("POST", REGISTRAR[0], None),
         Classification::Unknown
