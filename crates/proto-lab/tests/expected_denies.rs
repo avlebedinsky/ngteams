@@ -505,6 +505,7 @@ fn log_entries(path: &Path) -> TestResult<Vec<Value>> {
 fn paused(method: &str, url: &str, body: Option<&str>) -> PausedRequest {
     PausedRequest {
         request_id: "interception-job-1.0".to_owned(),
+        headers: Vec::new(),
         method: method.to_owned(),
         url: url.to_owned(),
         body: body.map(|body| body.as_bytes().to_vec()),

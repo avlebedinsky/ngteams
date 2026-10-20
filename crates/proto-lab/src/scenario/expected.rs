@@ -126,6 +126,10 @@ const TEAMS: Hosts = Hosts::Exact(&["teams.microsoft.com", "teams.cloud.microsof
 const MIDDLE_TIER: &str = "a middle-tier lookup the client posts (profiles, settings, policies, entitlements): no \
                            state changes, and the scenario reads the chat from the chat service, not from these";
 const APPS: &str = "the client's app catalogue and entitlements: the scenario uses no app";
+const PROFILES_OUTSIDE: &str = "a profile lookup the read-by-POST list doesn't let through (`crate::post_read`): it \
+                                names someone who isn't a lab account (a tenant member the client shows, an approved \
+                                service) or isn't in the captured shape; the scenario needs only the lab accounts' \
+                                profiles, which pass";
 const TOKEN_EXCHANGE: &str = "a token exchange of the asynchronous media gateway or AMS (images, files): the scenario \
                               sends and reads plain text only";
 
@@ -187,18 +191,18 @@ pub const REQUESTS: &[ExpectedRequest] = &[
                  read is a GET",
     },
     ExpectedRequest {
-        class: "short profiles",
+        class: "short profiles beyond the lab",
         hosts: TEAMS,
         method: "POST",
         path: "/api/mt/part/*/beta/users/fetchShortProfile",
-        reason: MIDDLE_TIER,
+        reason: PROFILES_OUTSIDE,
     },
     ExpectedRequest {
-        class: "user fetch",
+        class: "user fetch beyond the lab",
         hosts: TEAMS,
         method: "POST",
         path: "/api/mt/part/*/beta/users/fetch",
-        reason: MIDDLE_TIER,
+        reason: PROFILES_OUTSIDE,
     },
     ExpectedRequest {
         class: "feature settings",
@@ -352,7 +356,9 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         hosts: Hosts::Exact(&["substrate.office.com"]),
         method: "POST",
         path: "/search/api/v1/suggestions",
-        reason: "search suggestions: the scenario searches nothing",
+        reason: "Substrate's search suggestions (files, people): its answers list other people of the tenant, so it \
+                 stays denied (the user's rule of 2026-10-21); the scenario searches nothing, and its mention picker \
+                 offers b from the chat's members",
     },
     ExpectedRequest {
         class: "editor service config",

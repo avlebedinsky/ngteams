@@ -6,8 +6,8 @@
 //!   receives it; before that, a forced deny on one a–b message checks live that a denied write never leaves the
 //!   browser.
 //! - [`ab_chat_full`] (accounts a and b, as `ab-chat`): the a–b chat beyond a plain message, recorded: a sends, edits,
-//!   reacts and takes the reaction back, replies with a quote and reacts to it, and deletes; b reads and reacts. No
-//!   mention: the fence leaves the web client's mention picker nobody to offer.
+//!   reacts and takes the reaction back, mentions b (picked from the mention picker only once it is b), replies with a
+//!   quote and reacts to it, and deletes; b reads (the mention among it) and reacts.
 //! - [`echo_call`] (account a, writes mapped, members read live, fake microphone): a places the web client's test call
 //!   to the echo service, the one approved participant outside the lab, stays in it a while and hangs up; recorded.
 //!

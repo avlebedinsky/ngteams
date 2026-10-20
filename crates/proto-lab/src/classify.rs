@@ -5,6 +5,9 @@
 //! - [`Classification::Own`]: a mutating request on the seeded, reviewed own-state list (the Entra token endpoint and
 //!   Teams' authz exchange), which changes only the signed-in account's own session; `proto-lab login` adds Entra's
 //!   sign-in form ([`Classifier::sign_in`]);
+//! - [`Classification::PostRead`]: a read the web client sends as a `POST`, on the reviewed read-by-`POST` list
+//!   ([`crate::post_read`]; [`Classifier::mapped`] and [`Classifier::calling`] only), with the MRIs it names: the fence
+//!   lets it through only when every one is a lab account;
 //! - [`Classification::Write`]: a mapped write with its [`Target`], judged by [`teams_fence::Fence::check`];
 //! - [`Classification::Unknown`]: everything else, denied.
 //!
@@ -31,6 +34,8 @@ use serde_json::{Map, Value};
 pub use teams_fence::chat_service_path;
 use teams_fence::{Mri, Scope, Target, WriteKind};
 use url::Url;
+
+use crate::post_read::PostReadKind;
 
 /// A reviewed kind of own-state request: it changes only the signed-in account's own session state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -76,6 +81,9 @@ pub enum Classification {
     Read,
     /// A mutating request on the own-state list: let through.
     Own(OwnKind),
+    /// A read by `POST` on the reviewed list ([`crate::post_read`]), naming `names`: let through only when every one
+    /// is a lab account ([`teams_fence::Fence::lab_accounts_only`]), else denied as unknown.
+    PostRead { kind: PostReadKind, names: Vec<Mri> },
     /// A mapped write: let through only with a permit from the fence.
     Write(Target),
     /// A mutating request nothing classifies: denied.
@@ -166,7 +174,7 @@ const SIGN_IN: [&str; 4] = ["/*/GetCredentialType", "/*/login", "/kmsi", "/*/kms
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Classifier {
     own: Vec<OwnRule>,
-    /// Whether the chat service's writes are mapped ([`Classifier::mapped`]).
+    /// Whether the chat service's writes are mapped and the read-by-`POST` list applies ([`Classifier::mapped`]).
     writes: bool,
     /// Whether the calling stack's own-state passes and call starts are mapped ([`Classifier::calling`]).
     calling: bool,
@@ -198,8 +206,9 @@ impl Classifier {
         }
     }
 
-    /// The seeded list plus the write mapping (see the module docs): what a run that writes uses, together with a
-    /// membership source that can read the targets' members (`teams_fence::LiveMembershipSource`).
+    /// The seeded list plus the write mapping (see the module docs) and the read-by-`POST` list ([`crate::post_read`]:
+    /// the mention picker's profile lookups of lab accounts): what a run that writes uses, together with a membership
+    /// source that can read the targets' members (`teams_fence::LiveMembershipSource`).
     #[must_use]
     pub fn mapped() -> Self {
         Self {
@@ -249,10 +258,24 @@ impl Classifier {
         self
     }
 
-    /// Classifies one request: a read, an own-state request, a mapped write (with [`Classifier::mapped`]; the body
-    /// names what some writes are), or unknown.
+    /// Classifies one request: a read, an own-state request, a read by `POST` or a mapped write (with
+    /// [`Classifier::mapped`]; the body names what some writes are, and whom a read by `POST` looks up), or unknown.
     #[must_use]
     pub fn classify(&self, method: &str, url: &str, body: Option<&[u8]>) -> Classification {
+        self.classify_with_headers(method, url, &[], body)
+    }
+
+    /// [`Classifier::classify`] of a request whose headers are known, as the browser fence pauses it: only with them
+    /// can a request be a read by `POST` ([`crate::post_read`] checks the headers it depends on), and only when the
+    /// write mapping doesn't take it.
+    #[must_use]
+    pub fn classify_with_headers(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&[u8]>,
+    ) -> Classification {
         let method = method.to_ascii_uppercase();
         if !is_mutating(&method) {
             return Classification::Read;
@@ -271,12 +294,16 @@ impl Classifier {
                 return Classification::Write(target);
             }
         }
-        if self.writes
-            && let Some(target) = map_write(&method, &url, body)
-        {
+        if !self.writes {
+            return Classification::Unknown;
+        }
+        // a write is judged only by the fence's check: the read-by-POST list never takes what the mapping maps
+        if let Some(target) = map_write(&method, &url, body) {
             return Classification::Write(target);
         }
-        Classification::Unknown
+        crate::post_read::lookup(&method, &url, headers, body).map_or(Classification::Unknown, |(kind, names)| {
+            Classification::PostRead { kind, names }
+        })
     }
 }
 

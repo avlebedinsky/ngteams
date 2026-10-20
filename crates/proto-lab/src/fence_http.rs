@@ -52,6 +52,9 @@ pub struct PausedRequest {
     pub request_id: String,
     pub method: String,
     pub url: String,
+    /// The request's headers as the event lists them (name and value, each header once); a header whose value isn't
+    /// a string is left out.
+    pub headers: Vec<(String, String)>,
     /// The body as `postData` carries it. Missing when the request has none, or when Chrome didn't inline it.
     pub body: Option<Vec<u8>>,
     /// The request's `Network` id (`networkId`), the one the page's `Network` events know it by. Missing when the event
@@ -71,6 +74,15 @@ impl PausedRequest {
             request_id: text(&params["requestId"]).ok_or(MalformedPause("requestId"))?,
             method: text(&request["method"]).ok_or(MalformedPause("request.method"))?,
             url: text(&request["url"]).ok_or(MalformedPause("request.url"))?,
+            headers: request["headers"]
+                .as_object()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default(),
             body: request["postData"].as_str().map(|body| body.as_bytes().to_vec()),
             network_id: text(&params["networkId"]),
         })
@@ -393,9 +405,12 @@ impl HttpFence {
             });
             return Verdict::Deny(DenyCause::Forced);
         }
-        let classification = self
-            .classifier
-            .classify(&request.method, &request.url, request.body.as_deref());
+        let classification = self.classifier.classify_with_headers(
+            &request.method,
+            &request.url,
+            &request.headers,
+            request.body.as_deref(),
+        );
         self.judge(classification, &request.method, &request.url).await
     }
 
@@ -496,7 +511,8 @@ impl HttpFence {
 }
 
 /// Decides one request or frame already classified, for either layer of the browser fence: a read passes unlogged, an
-/// own-state one passes logged (denied if the log won't take it), a mapped write passes only with a permit from
+/// own-state one passes logged (denied if the log won't take it), so does a read by `POST` that names only lab accounts
+/// (one naming anyone else is denied as unknown), a mapped write passes only with a permit from
 /// [`Fence::check`] (which logs it), and anything else is denied and logged ([`DenyCause::LogUnavailable`] when the
 /// log won't take it). `request` names the channel, method and URL for the log; its outcome is set here.
 pub(crate) async fn judge(
@@ -512,15 +528,27 @@ pub(crate) async fn judge(
             Ok(()) => Verdict::Allow,
             Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
         },
+        // a read naming only lab accounts passes logged; one naming anyone else is denied as unknown
+        Classification::PostRead { kind, names } if fence.lab_accounts_only(&names) => {
+            match fence
+                .log()
+                .record_request(&record(RequestOutcome::PostRead(kind.as_str())))
+            {
+                Ok(()) => Verdict::Allow,
+                Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
+            }
+        }
         Classification::Write(target) => match fence.check(target, members).await {
             Ok(_permit) => Verdict::Allow,
             Err(denied) => Verdict::Deny(DenyCause::Fenced(*denied.reason())),
         },
         // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
-        Classification::Unknown => match fence.log().record_request(&record(RequestOutcome::Unclassified)) {
-            Ok(()) => Verdict::Deny(DenyCause::Unclassified),
-            Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
-        },
+        Classification::PostRead { .. } | Classification::Unknown => {
+            match fence.log().record_request(&record(RequestOutcome::Unclassified)) {
+                Ok(()) => Verdict::Deny(DenyCause::Unclassified),
+                Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
+            }
+        }
     }
 }
 

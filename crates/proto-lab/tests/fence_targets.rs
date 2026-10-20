@@ -394,6 +394,7 @@ fn message_to(chat: &str) -> PausedRequest {
     let chat: String = url::form_urlencoded::byte_serialize(chat.as_bytes()).collect();
     PausedRequest {
         request_id: "interception-1".to_owned(),
+        headers: Vec::new(),
         method: "POST".to_owned(),
         url: format!("https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{chat}/messages"),
         body: Some(br#"{"messagetype":"RichText/Html","content":"<p>hi</p>"}"#.to_vec()),
@@ -484,6 +485,7 @@ async fn a_new_chat_is_judged_by_its_members_without_a_read() -> TestResult {
     let create = |members: &[&str]| {
         PausedRequest {
         request_id: "interception-1".to_owned(),
+        headers: Vec::new(),
         method: "POST".to_owned(),
         url: "https://teams.microsoft.com/api/chatsvc/emea/v1/threads".to_owned(),
         body: Some(
@@ -560,6 +562,7 @@ fn a_forced_deny_matches_method_url_and_body_text() -> TestResult {
     let rule = ForcedDeny::new("post", r"/messages$")?.with_body_containing("probe-1");
     let request = |method: &str, url: &str, body: Option<&str>| PausedRequest {
         request_id: "r".to_owned(),
+        headers: Vec::new(),
         method: method.to_owned(),
         url: url.to_owned(),
         body: body.map(|body| body.as_bytes().to_vec()),
@@ -586,6 +589,7 @@ async fn a_forced_deny_comes_before_classification_and_is_logged() -> TestResult
     let http = HttpFence::new(own, fence, Arc::new(FailClosed));
     let send = |body: &str| PausedRequest {
         request_id: "r".to_owned(),
+        headers: Vec::new(),
         method: "POST".to_owned(),
         url: "http://127.0.0.1:9/api/send?x=1".to_owned(),
         body: Some(body.as_bytes().to_vec()),

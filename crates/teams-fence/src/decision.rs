@@ -60,6 +60,12 @@ impl Roster {
     pub fn admits(&self, mri: &Mri) -> bool {
         self.lab.contains(mri) || self.services.contains(mri)
     }
+
+    /// Whether `mri` is one of the lab accounts, by exact MRI (an approved service isn't).
+    #[must_use]
+    pub fn is_lab_account(&self, mri: &Mri) -> bool {
+        self.lab.contains(mri)
+    }
 }
 
 /// Why a membership fetch didn't produce a list.
@@ -288,6 +294,14 @@ impl Fence {
     #[must_use]
     pub fn log(&self) -> &FenceLog {
         &self.log
+    }
+
+    /// Whether `names` names someone and only the lab accounts, each by its exact MRI: no approved service, nobody
+    /// else. The browser fence lets a reviewed read by `POST` through only then (a profile lookup of the lab's own
+    /// accounts), so that nothing such a read names is outside the lab. It mints no permit and logs nothing.
+    #[must_use]
+    pub fn lab_accounts_only(&self, names: &[Mri]) -> bool {
+        !names.is_empty() && names.iter().all(|mri| self.roster.is_lab_account(mri))
     }
 
     /// Fetches the target scope's members from `source` (never from a cache) and allows the write only when every
