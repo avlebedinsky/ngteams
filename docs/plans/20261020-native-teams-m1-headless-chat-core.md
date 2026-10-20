@@ -569,18 +569,32 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Create: `crates/teams-core/{Cargo.toml,src/lib.rs,src/outbox.rs}`, `crates/teams-core/tests/outbox.rs`
 - Modify: `Cargo.toml` (member, workspace deps), `crates/teams-store/src/*`
 
-- [ ] create the `teams-core` crate (`[lints] workspace = true`, listed in `members`) with the outbox as its first
+- [x] create the `teams-core` crate (`[lints] workspace = true`, listed in `members`) with the outbox as its first
       module; sync and the engine come in Tasks 17–18
-- [ ] tests first: a command becomes an outbox row with a fresh `clientmessageid`; each attempt asks the fence again
+      (`Command` holds only `Send` for now, the one chat write with a sealed request; Task 12 adds the others. The
+      sync is a seam, `ConversationSync`, which Task 17 implements. `SendMessage` gained `with_client_message_id`,
+      posted as `clientmessageid`; Task 12 completes the rest of the body. No store change was needed)
+- [x] tests first: a command becomes an outbox row with a fresh `clientmessageid`; each attempt asks the fence again
       (a fresh permit, a fresh membership read); a denied attempt marks the row denied and sends nothing
-- [ ] the outbox's part of the retry table (Technical Details), each case tested: 401, 429/503 with `Retry-After`,
+      (`clientmessageid`: a random 19-digit number; a membership that changed between attempts denies the later one)
+- [x] the outbox's part of the retry table (Technical Details), each case tested: 401, 429/503 with `Retry-After`,
       other 4xx (no retry), and a timeout whose message did arrive (found by `clientmessageid` in a sync, not sent
       again) or didn't (sent again with the same id)
-- [ ] dedupe: our own message coming back (Trouter or sync) is matched by `clientmessageid` to its row, never stored
+      (a 5xx other than 503 is handled as a timeout, since it may have been stored; every attempt after the first
+      starts with the sync check, whatever ended the one before; a sync that fails sends nothing and leaves the row
+      waiting; a row is failed after `MAX_ATTEMPTS` = 5. A kind that can't be looked for in a sync isn't retried
+      after an unknown outcome: it is failed. Tested through the mock origin on wiremock, a timeout by a transport
+      wrapper that loses the answer or the request)
+- [x] dedupe: our own message coming back (Trouter or sync) is matched by `clientmessageid` to its row, never stored
       twice
-- [ ] **no resend across runs**: rows left pending by an earlier process are not sent on start; only an explicit
+      (`Outbox::receive` stores the message by id and version and matches it only when we sent it, in the row's
+      conversation; a row already sent with a message id keeps it; a message back before the post's answer wins)
+- [x] **no resend across runs**: rows left pending by an earlier process are not sent on start; only an explicit
       command resends them (the web client's late resend in M0 is the case this rules out)
-- [ ] `cargo test -p teams-core` and the gate pass
+      (enforced by the store's runs; `Outbox::send` refuses another run's row before asking the fence. After
+      `Store::resend`, a row the earlier run had attempted is looked for in a sync before it goes out again)
+- [x] `cargo test -p teams-core` and the gate pass (parallel run: crate-scoped gate; workspace gate after merge:
+      fmt, clippy and test on `teams-core`, `teams-proto` and `fence-seal`, `lint-report.sh`, `fixture-guard`)
 
 ### Task 14: Trouter: capture and notes for messaging
 **Files:**

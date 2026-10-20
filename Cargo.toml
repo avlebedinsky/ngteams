@@ -6,6 +6,7 @@ members = [
     "crates/fixture-guard",
     "crates/proto-lab",
     "crates/teams-auth",
+    "crates/teams-core",
     "crates/teams-fence",
     "crates/teams-proto",
     "crates/teams-store",
@@ -27,8 +28,10 @@ publish = false
 fixture-guard = { path = "crates/fixture-guard" }
 proto-lab = { path = "crates/proto-lab" }
 teams-auth = { path = "crates/teams-auth" }
+teams-core = { path = "crates/teams-core" }
 teams-fence = { path = "crates/teams-fence" }
 teams-proto = { path = "crates/teams-proto" }
+teams-store = { path = "crates/teams-store" }
 media-loop = { path = "spikes/media-loop" }
 # The video source hands frames to GPUI's foreground executor: the version GPUI already links.
 async-channel = "2.5.0"

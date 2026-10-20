@@ -6181,6 +6181,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "teams-core"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "teams-auth",
+ "teams-fence",
+ "teams-proto",
+ "teams-store",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "teams-fence"
 version = "0.1.0"
 dependencies = [
