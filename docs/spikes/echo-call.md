@@ -1,28 +1,30 @@
 # Spike 3b: a native echo call
 
-Date: 2026-10-20. M0 Task 19 (part 2 of spike 3). Code: `spikes/echo-call` (library plus the `echo-call` binary), on
-top of `spikes/media-loop` (Task 17) and `crates/teams-auth` (Tasks 13–14).
+Date: 2026-10-20. M0 Task 19 (part 2 of spike 3), brought in line with Task 18's capture of the web client's test
+call ([calling-echo.md](../protocol/calling-echo.md)) the same day. Code: `spikes/echo-call` (library plus the
+`echo-call` binary), on top of `spikes/media-loop` (Task 17) and `crates/teams-auth` (Tasks 13–14).
 
 ## Question
 
 Can our own Rust code place the Teams echo ("test call") call from lab account A, carry its audio over `str0m` and
 our own TURN client (TCP 443 when UDP fails), and hear our tone come back?
 
-## Answer: not yet. The media side works offline; the call itself is blocked
+## Answer: not yet. The signaling is known and built; the call is blocked by the fence
 
-No live call was placed, and none could be:
+No native call was placed. The first blockers are gone: the lab accounts are licensed (each gets a skypetoken), and
+Task 18 captured the web client's own test call, so the echo service's MRI is in `lab.toml` and the signaling below
+follows that capture. What blocks now is the fence, and it blocks the web client too:
 
-- **No skypetoken.** The lab accounts have no Teams license: authz answers 403
-  `UserLicenseNotPresentTrialEligible` for a, b and c (`docs/spikes/auth.md`,
-  `docs/backlog/lab-accounts-have-no-teams-license.md`). Calling needs Teams' own tokens and endpoints, which come
-  from that exchange.
-- **No capture of a real echo call** (Task 18). It needs the same license, so there are no signaling fixtures, no
-  confirmed endpoint for the call start, no confirmed SDP dialect, no confirmed TURN token flow, and no MRI for the
-  echo service in `lab.toml`.
+- **The echo joins only through writes on a call that exists.** The test call starts with nobody else in it; the
+  caller then adds the echo bot (`POST …/conv/<id>/add`), acknowledges the call controller's acceptance and, at the
+  end, leaves. The fence permits a write on an existing call only after a fresh, complete read of that call's
+  members, and nothing gives one: the conversation's `getAllParticipants` answered an empty list while account a was
+  in the call (`docs/backlog/fence-call-follow-ups.md`). So in Task 18 the web client's leg reached Teams' media
+  controller, the echo never joined and no tone came back, and a native start would end the same way, in a call it
+  couldn't even leave. `call::start` therefore sends nothing.
 
-So the round-trip delay through Teams' echo service and the transport Teams would pick are **unknown**. Everything
-that can be built and tested without Microsoft is built and tested; nothing in this task sent traffic to Microsoft,
-ran a browser, or answered a call.
+So the round-trip delay through Teams' echo service and whether it re-times its playback are still **unknown**.
+Nothing in this task sent traffic to Microsoft, ran a browser, or answered a call.
 
 ## What works (offline, tested)
 
@@ -48,8 +50,8 @@ ran a browser, or answered a call.
 - On real sockets: UDP and TCP. On TCP the messages are framed natively (RFC 8656 12.5, `ChannelData` padded to 4
   bytes; what coturn and browsers speak) or with the RFC 4571 2-byte length prefix (`Framing::Rfc4571`), which TURN
   over TCP doesn't normally use; which one Teams' relays expect is an open question below. `allocate_any` tries the
-  servers in order (a relay descriptor gives every address over UDP first, then over TCP), so a UDP relay that stays
-  silent falls back to TCP after the allocation timeout.
+  servers in order (`relay::teams_relay` gives Teams' relay over UDP 3478 first, then over TCP 443), so a UDP relay
+  that stays silent falls back to TCP after the allocation timeout. TURN over TLS (`turns:`, 443) isn't implemented.
 - Tested on synthetic exchanges with a scripted server (`tests/turn.rs`), on loopback against a minimal
   TURN server of our own (`tests/relay.rs`), and **against coturn 4.6.3** (the `coturn/coturn` container, on loopback
   only, with `--allow-loopback-peers`, started and stopped by hand for this run): allocation, permissions, channels and
@@ -77,96 +79,110 @@ frames of 20 ms, round trip = encode start → decode end of the echo):
 (Single runs on a loaded machine; our test server naps 0.2 ms when idle, coturn doesn't. These numbers say the path
 works, not what Teams' relays would add.)
 
-### Signaling (unconfirmed — needs the Task 18 capture)
 
-`src/signaling.rs`, shaped only from the web client's bundle (version 26260.1717.5229.7049, read through
-`proto-lab bundles search` and the calling chunk), in our own words, with hand-written fixtures in
-`spikes/echo-call/tests/fixtures/synthetic/`, each marked `_synthetic` (none of them is a capture; the fixture guard
-passes on them):
+### Signaling (from the Task 18 capture)
 
-- the call start's payload (`participants.from/to`, `conversationRequest.links`, `callInvitation` with
-  `callModalities`, the five call callback links and `mediaContent {contentType: application/sdp-ngc-1.0, blob: <SDP
-  offer>}`), built only from an `Authorized<StartCall>`, so its participants are the permitted ones;
-- the callbacks by path (`/call/progress/`, `/call/mediaAnswer/` with the remote SDP and its acknowledgement link,
-  `/call/acceptance/`, `/call/redirection/`, `/call/end/`) and a small state machine for our one outgoing call;
-- **the incoming-call policy**: a payload with a `callNotification` is an incoming call whatever its path, and
-  `OutgoingCall::on_inbound` answers it with `Action::Nothing` in every state; there is no action that could accept
-  or reject it (`tests/signaling.rs`). `teams-proto` has no request that answers a call either;
-- the relay descriptor (`addresses`, `fqdns`, `udpPort`, `tcpPort`) and relay token (`username`, `password`, `realm`,
-  `expires`) the bundle checks, turned into TURN servers (UDP first, then TCP) and credentials.
+`src/signaling.rs`, tested in `tests/signaling.rs` on the Task 18 fixtures (`tests/fixtures/calling/echo/*.json`,
+synthetic, shaped like the capture, each marked `_synthetic`); what the capture didn't have (a progress, an end, an
+incoming call) on the hand-written fixtures in `spikes/echo-call/tests/fixtures/synthetic/`. The fixture guard passes
+on both.
+
+- **TURN credentials**: `TrapTokens` reads the answer of `GET https://teams.microsoft.com/trap/tokens`,
+  `{"tokens":[{realm, username, password}], "expires": <seconds>}` (one credential, 7 days; the realm `"rtcmedia"`
+  with its quotes inside the string, which come off). The relay is one fixed host,
+  `gateway-world.az.relay.teams.cloud.microsoft` (`turn::TEAMS_RELAY_HOST`): UDP 3478, TCP 443 and TLS 443. There is
+  no relay descriptor; the bundle-shaped `RelayDescriptor` is gone.
+- **The call start**: `POST https://api.flightproxy.teams.microsoft.com/api/v2/epconv` with `X-Skypetoken`.
+  `call_start_body`, built only from an `Authorized<StartCall>`, sends `participants.from` (our MRI, display name,
+  endpoint id, participant id, language), an **empty `to`**, `conversationRequest` with the scenario
+  `UserInitiatedTestCall`, the roster and conversation callbacks, and `callInvitation` with `Audio`, the five call
+  callbacks and `mediaContent` (`application/sdp-ngc-1.0`). The test checks it against the captured start: the same
+  participants and links, every key one the client sent, and the browser fence's own mapping
+  (`proto_lab::calling::call_start`) reads it as exactly the `StartCall`'s target. The rest of the client's body
+  (capabilities, endpoint state, client details) is left out; whether the service needs any of it is unconfirmed.
+- **Callback links**: `CallbackLinks` builds each link as the web client does, `<Trouter push URL>callAgent/<agent
+  id>/<8 hex digits of its own>/<call|conversation>/<name>/`, and `OutgoingCall` acts only on deliveries at its own
+  links' paths: another call's delivery changes nothing.
+- **The answer**: `Conversation` reads the start's answer: its controller URL (`teams_proto::ConversationUrl`: https,
+  a host, a non-empty conversation id as the last path segment; anything else is no conversation) and its operation
+  links (`leave`, `getAllParticipants`, …). The client posts the `add` to the controller plus `/add`, query kept, not
+  to the answer's `addParticipant` link.
+- **The acceptance**: the call controller calls back at the `acceptance` link with `callAcceptance.mediaContent`, the
+  media controller's SDP answer, and `callAcceptance.links` (`acknowledgement`, `callLeg`, `mediaRenegotiation`, …).
+  `Inbound::Accepted` carries the answer and the two links; `OutgoingCall` asks to apply and acknowledge it once (the
+  service redelivers it while it isn't acknowledged). No `mediaAnswer` delivery was seen; one at that link changes
+  nothing.
+- **The SDP dialect**: both the offer and the answer are Teams' `application/sdp-ngc-1.0`, not the browser's SDP:
+  `RTP/SAVP` on real ports with the candidates inline, `a=rtcp:<port>`, `b=CT`, `a=x-ssrc-range`, `a=x-signaling-fb`,
+  `a=label`, and in the answer an `m=x-data` line. `NgcSdp` only tells it apart from a browser's (or str0m's) SDP and
+  refuses the latter; converting between the two is not built.
+- **The `add`**: `add_request`, built only from an `Authorized<AddToCall>` (its URL is `AddToCall::url`, its
+  invitee the request's), is posted where the client posts it and matches the captured `add` (the invitee with
+  a fresh participant id, the 1:1 chat with the bot, the caller as organizer, the `add`'s callbacks). Tested with a
+  stand-in membership source, because no real one can permit it.
+- **The incoming-call policy**: a payload with a `callNotification` is an incoming call whatever its path, and
+  `OutgoingCall::on_delivery` answers it with `Action::Nothing` in every state; there is no action that could accept
+  or reject it. `teams-proto` has no request that answers a call either. (The capture had no incoming call, so its
+  shape is still the bundle's.)
 
 ### The call through the fence
 
-`teams_proto::StartCall` is a new mutating request: target `WriteKind::Call` on `Scope::New`, its participants the
-caller and the callees, so the fence judges both. `src/call.rs` runs the flow: A's MRI and the echo service's MRI from
-`lab.toml` → `Fence::check` + `Authorized::new` → A's skypetoken from the Secret Service → the call start. The fence
-comes first, so no token is read for a call that isn't allowed, and the keyring isn't opened before the fence allowed
-the call. Today the binary stops at the first step:
+`teams_proto::StartCall::test_call(caller, echo)` is the call start: target `WriteKind::Call` on `Scope::New` with
+the caller and the echo. The start doesn't name the echo; it is counted in so that the fence lets a test call start
+only when it would admit the echo too, the same target the browser fence gives the web client's start.
+`teams_proto::AddToCall` is the `add`: `WriteKind::Invite` on `Scope::Call { id: <controller URL> }` with the
+invitee added. The id is the whole controller URL (host, path, query), and the `add` is posted to that same URL plus
+`/add`, so a permit for one call never carries an `add` to another, not even one with the same conversation id on
+another conversation host. The fence must read the call's members, which no source can (`FailClosed` reads nothing,
+`LiveMembershipSource` reads chats only): it is denied as partial (`tests/call.rs`,
+`crates/teams-proto/tests/fence_types.rs`).
 
-```
-$ cargo build -p echo-call && target/debug/echo-call
-echo-call: the echo service has no MRI in lab.toml yet: Task 18's capture fills it in (blocked: the lab accounts have no Teams license)
-```
-
-With `--callee <mri>` the fence decides, and denies any callee `lab.toml` doesn't approve (tested: `Outsiders`, logged
-to `fence.log`). With an approved echo MRI the next stop is the missing skypetoken; with a token, `call::start`
-refuses on purpose: the signaling is unconfirmed, and nothing unconfirmed is sent to Microsoft (`tests/call.rs`).
+`src/call.rs` runs the flow: A's MRI and the echo's MRI from `lab.toml` → `Fence::check` + `Authorized::new` → A's
+skypetoken from the Secret Service → the call start, which `call::start` refuses (`CallError::FollowUpsUnfenced`). The
+fence comes first, so no token is read for a call that isn't allowed. The echo is always `lab.toml`'s `echo` service
+(there is no flag for another: the start doesn't name the echo, so the target would describe a call the body doesn't
+place), the `add` invites the echo of the permitted start, and a test call for an echo the roster doesn't approve is
+denied (`Outsiders`, logged to `fence.log`).
 
 ## Blocked, and what unblocks it
 
 | Item | Blocked by | Unblocked when |
 |---|---|---|
-| skypetoken for A | no Teams license (403 at authz) | the lab accounts get a license or the Exploratory trial (backlog item) |
-| echo service MRI in `lab.toml` | Task 18's capture | the capture shows the callee of the web client's test call; the bundle's prod config has a `28:<guid>` value for `teamsEchoBotMri`, a candidate to confirm, not to copy into `lab.toml` unseen |
-| call start, callbacks, TURN tokens | Task 18's capture | `docs/protocol/calling-echo.md` and `tests/fixtures/calling/echo/*.json` exist; then `signaling.rs` is checked against them and `call::start` sends |
-| the live echo: RTT, transport used | all of the above | `echo-call` runs end to end |
+| the `add`, the acceptance's acknowledgement, the `leave` (and so the echo joining) | the fence can't read a call's members fresh and in full: `getAllParticipants` answered an empty list mid-call | an authoritative read of a call's members, or evidence that a test call's membership can change only through the caller's fenced `add` (`docs/backlog/fence-call-follow-ups.md`) |
+| sending the call start | the item above: a start whose follow-ups the fence denies leaves a call that can't be completed or left | the item above; then `call::start` sends the start, the `add` and the acknowledgement through the fence |
+| str0m talking to Teams' media controller | the SDP dialect: str0m's offer has to be written as `sdp-ngc-1.0` and the answer read back | the conversion is built and checked against the captured offer and answer |
+| the live echo: RTT, re-timing, transport used | all of the above | `echo-call` runs end to end |
 
-## Task 18's capture (2026-10-20): what it settled for this spike
+## Next step for M3
 
-The lab accounts got a license, and `proto-lab run echo-call` captured the web client's own test call
-([calling-echo.md](../protocol/calling-echo.md)). For this spike:
-
-- **Echo MRI**: established and recorded in `lab.toml` (`proto-lab service-mri echo <mri>`), so `call.rs`'s first
-  stop is gone; the bundle's `28:<guid>` candidate was the one the live client uses.
-- **Confirmed**: the call start's payload shape and its callback links, callbacks through Trouter at `…/call/<name>/`,
-  Opus with `useinbandfec`, BUNDLE and rtcp-mux on both sides (question 3 in part), TURN over UDP 3478, TCP 443 and
-  TLS 443 offered (question 5: TLS on 443 is in use, so TURNS matters).
-- **Corrected, for a Task 19 follow-up**: the endpoint is `POST https://api.flightproxy.teams.microsoft.com/api/v2/epconv`
-  with `X-Skypetoken` (question 1); the test call starts a conversation with nobody else in it
-  (`scenario: "UserInitiatedTestCall"`, `to: []`) and adds the echo bot with `…/conv/<id>/add`, where
-  `call_start_body` puts the bot in `to`; the blob is a Teams SDP dialect, not the browser's SDP as is (question 3);
-  the remote SDP and the call leg's links come with the `call/acceptance/` callback and are acknowledged by a `POST`
-  (no `call/mediaAnswer/` was seen); TURN credentials come from `GET https://teams.microsoft.com/trap/tokens`,
-  `{"tokens":[{realm, username, password}],"expires":<seconds>}`, 7 days (question 4), and no relay descriptor
-  appears: the relay is a fixed host. The code is unchanged; `call::start` still refuses to send.
-- **Still open**: the echo never joined in the capture, because the fence denies every write on an existing call (the
-  `add` among them) until it can read a call's members; so whether the echo re-times its playback (question 6) and
-  the round-trip delay through it are still unknown. The same holds for the native client: its follow-ups on the call
-  need that membership read too (`docs/backlog/fence-call-follow-ups.md`).
+1. Resolve the fence's call membership (the backlog item above): without it neither the web client nor ours gets an
+   echo, and the native call shouldn't be placed.
+2. Write the SDP conversion both ways: str0m's offer (audio only to begin with) into `sdp-ngc-1.0` with the relayed
+   candidate inline, and the media controller's answer into standard SDP for str0m (drop `m=x-data` and Teams'
+   attributes, `RTP/SAVP` back to `UDP/TLS/RTP/SAVPF`). Check it offline on the captured offer and answer.
+3. A native Trouter session and endpoint registration (M1's `teams-trouter`): the callbacks come over it, and the
+   acceptance's response over Trouter (`callAcceptanceAcknowledgement`) is itself a write on the call.
+4. Then run `echo-call` live: TURN credentials from `trap/tokens`, the start, the acceptance, the `add`, the tone, the
+   `leave`, and measure the round trip through the echo service.
 
 ## Open questions for M3
 
-1. **Where the call start goes and how it is authenticated.** The bundle builds the payload but the endpoint is
-   resolved at runtime (a regional GTM or the call controller URL from config?), and so is its auth (skypetoken,
-   or an IC3 Entra token in the token-migration mode `docs/protocol/auth.md` describes).
-2. **Callbacks need Trouter.** The service calls us back on the links we send, through our Trouter endpoint. That is
-   M1's `teams-trouter`; how a native client registers a calling endpoint (the registrar `v2`/`v3` registrations in
-   the bundle) is unknown, and registering makes the account reachable by coworkers: the incoming-call policy above
-   must be in place first.
-3. **`application/sdp-ngc-1.0`.** Is it plain SDP (str0m's offer as is), SDP with Teams-only attributes, or a
-   multi-part body? Does the echo service accept str0m's codecs and extensions (Opus with `useinbandfec`, BUNDLE,
-   rtcp-mux, which header extensions)?
-4. **TURN token flow.** The relay token service (`edge.skype.com/trap/tokens` in the bundle): request, auth, the
-   unit of `expires`, how many relays it returns, and their realm.
-5. **TCP framing of Teams' relays.** Native TURN framing (what browsers speak, and what coturn accepts) or the
-   RFC 4571 prefix? Both are implemented; the capture's relay candidates (`relayProtocol`) and a TCP allocation tell.
-   TLS on 443 (TURNS) isn't implemented yet; the descriptor's `tcpPort` may well mean TLS.
-6. **Does the echo service re-time its playback?** It records and then plays back, so per-frame RTT matching by RTP
+1. **Which parts of the call start the service needs.** The native body is a subset of the client's keys; the
+   capabilities, endpoint state and client details may be required.
+2. **Trouter and registration.** The capture shows the client's Trouter session and its registration with the
+   registrar (`docs/protocol/calling-echo.md`); registering makes the account reachable by coworkers, so the
+   incoming-call policy above must be in place first.
+3. **`application/sdp-ngc-1.0`.** Which of Teams' attributes the media controller requires in an offer, and whether
+   it takes an audio-only offer (the client offers 13 media lines: audio, video slots and data).
+4. **TCP framing of Teams' relays.** Native TURN framing (what browsers speak, and what coturn accepts) or the
+   RFC 4571 prefix? Both are implemented; a TCP allocation tells. TURN over TLS on 443 isn't implemented, and the
+   client offers it.
+5. **Does the echo service re-time its playback?** It records and then plays back, so per-frame RTT matching by RTP
    time may find nothing; the probe then only checks the frequency, and the RTT has to be measured from the first
    echoed frame instead.
-7. **ICE details.** The web client may send relay-only candidates (`iceTransportPolicy` appears in the bundle), and
-   Teams' media relays may be ICE-lite. Our peer offers one relayed candidate; whether host candidates should be
-   added is a privacy and connectivity choice for M3.
-8. **Credentials preparation.** The client takes TURN credentials as given (no `OpaqueString`/SASLprep), which is
-   fine if Teams' relay credentials are ASCII, unconfirmed until the Task 18 capture (no Teams relay credentials have
-   been seen yet); MESSAGE-INTEGRITY-SHA256 and `PASSWORD-ALGORITHMS` (RFC 8489) are not implemented.
+6. **ICE details.** The web client gathers host, server-reflexive and relay candidates (`iceTransportPolicy: all`),
+   and the media controller answers with relay candidates and no `ice-lite`. Our peer offers one relayed candidate;
+   whether host candidates should be added is a privacy and connectivity choice for M3.
+7. **Credentials preparation.** The client takes TURN credentials as given (no `OpaqueString`/SASLprep), which is
+   fine if Teams' relay credentials are ASCII (not checked); MESSAGE-INTEGRITY-SHA256 and `PASSWORD-ALGORITHMS`
+   (RFC 8489) are not implemented.

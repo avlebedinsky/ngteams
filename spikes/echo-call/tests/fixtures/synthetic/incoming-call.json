@@ -1,5 +1,5 @@
 {
-  "_synthetic": "SYNTHETIC, not a capture: written by hand (Task 19) from the key names in the web client's bundle. Unconfirmed: needs the Task 18 capture. The delivery path of an incoming call is not known.",
+  "_synthetic": "SYNTHETIC, not a capture: written by hand (Task 19) from the key names in the web client's bundle. The Task 18 capture had no incoming call, so its shape and its delivery path are unconfirmed.",
   "path": "/unconfirmed/incoming-call",
   "body": {
     "callNotification": {

@@ -2,8 +2,8 @@
 //!
 //! - [`RelayLink`] is one allocation over UDP or TCP ([`Framing`] picks how TCP carries the messages). Everything is
 //!   non-blocking; the caller turns it with `now`, as `media-loop`'s `UdpPeer` is turned.
-//! - [`allocate_any`] tries relay servers in order until one allocates: list the UDP ones first and TCP (port 443 in
-//!   Teams' relay descriptors) after, and a blocked UDP falls back to TCP.
+//! - [`allocate_any`] tries relay servers in order until one allocates: list the UDP ones first and TCP after
+//!   ([`teams_relay`]: Teams' relay host on UDP 3478, then TCP 443), and a blocked UDP falls back to TCP.
 //! - [`RelayedPeer`] is a `media_loop` [`Peer`] whose only candidate is the allocation: what str0m sends from the
 //!   allocation goes out through the server, what peers send to the allocation comes back in.
 
@@ -19,7 +19,7 @@ use str0m::net::Protocol;
 
 use crate::Error;
 use crate::stun::{Framing, StreamDecoder};
-use crate::turn::{Credentials, Timing, Transport, TurnClient, TurnEvent};
+use crate::turn::{Credentials, TEAMS_RELAY_TCP_PORT, TEAMS_RELAY_UDP_PORT, Timing, Transport, TurnClient, TurnEvent};
 
 /// Largest message we read at once.
 const MAX_READ: usize = 4_096;
@@ -55,6 +55,14 @@ pub fn fallback_order(addresses: &[IpAddr], udp_port: u16, tcp_port: u16) -> Vec
         transport: Transport::Tcp,
     });
     udp.chain(tcp).collect()
+}
+
+/// Teams' relay ([`TEAMS_RELAY_HOST`](crate::turn::TEAMS_RELAY_HOST), resolved by the caller to `addresses`) in the order to try it: every address
+/// over UDP on [`TEAMS_RELAY_UDP_PORT`], then over TCP on [`TEAMS_RELAY_TCP_PORT`]. Its TLS URL on the same port isn't
+/// tried: TURN over TLS isn't implemented.
+#[must_use]
+pub fn teams_relay(addresses: &[IpAddr]) -> Vec<RelayServer> {
+    fallback_order(addresses, TEAMS_RELAY_UDP_PORT, TEAMS_RELAY_TCP_PORT)
 }
 
 /// How to allocate.

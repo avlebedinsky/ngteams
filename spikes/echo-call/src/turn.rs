@@ -34,6 +34,15 @@ use crate::stun::{
     TRANSPORT_UDP, TransactionId, classify, verify_integrity,
 };
 
+/// Teams' media relay, as the web client uses it (Task 18, `docs/protocol/calling-echo.md`): one host for every
+/// account, no relay descriptor. The client lists it as `turn:<host>:3478?transport=udp`, `turn:<host>:443?transport=tcp`
+/// and `turns:<host>:443`; TURN over TLS isn't implemented here ([`Transport`] has UDP and TCP).
+pub const TEAMS_RELAY_HOST: &str = "gateway-world.az.relay.teams.cloud.microsoft";
+/// The relay's port for TURN over UDP.
+pub const TEAMS_RELAY_UDP_PORT: u16 = 3478;
+/// The relay's port for TURN over TCP (and over TLS).
+pub const TEAMS_RELAY_TCP_PORT: u16 = 443;
+
 /// How long a permission lasts on the server (RFC 8656 9).
 pub const PERMISSION_LIFETIME: Duration = Duration::from_secs(300);
 /// How long a channel binding lasts on the server (RFC 8656 12).
@@ -51,7 +60,9 @@ pub enum Transport {
     Tcp,
 }
 
-/// Long-term TURN credentials, as Teams' relay token service hands them out. `Debug` shows no password.
+/// Long-term TURN credentials, as `GET https://teams.microsoft.com/trap/tokens` hands them out
+/// (`crate::signaling::TrapTokens`; 7 days, realm `rtcmedia`). The realm isn't part of them: the client takes the one
+/// the server names in its 401. `Debug` shows no password.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials {
     pub username: String,

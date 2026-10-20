@@ -1,17 +1,18 @@
 //! Spike 3b: a native echo call. What exists and is tested offline:
 //!
 //! - [`stun`] and [`turn`]: a sans-IO TURN client (RFC 8656, long-term credentials) and its STUN codec, with the TCP
-//!   framings; [`relay`] puts it on UDP or TCP sockets, falls back from UDP to TCP, and puts a `media_loop` peer behind
-//!   the allocation;
+//!   framings; [`relay`] puts it on UDP or TCP sockets, falls back from UDP to TCP (Teams' relay: UDP 3478, then TCP
+//!   443), and puts a `media_loop` peer behind the allocation;
 //! - [`echo`]: the tone probe that measures the echo over any media path;
-//! - [`signaling`]: the call start and the callbacks as the bundle shapes them, and the incoming-call policy (ignored,
-//!   never answered). Checked against the Task 18 capture: the shapes hold, the test call differs (see `signaling`);
+//! - [`signaling`]: the web client's test call as the Task 18 capture shows it (the call start with no callee, the
+//!   conversation it opens, the acceptance with the remote SDP, the `add` that brings the echo in, the TURN
+//!   credentials from `trap/tokens`), and the incoming-call policy (ignored, never answered);
 //! - [`call`]: the flow up to the skypetoken, with the call start through the fence.
 //!
-//! What doesn't: the live native call. The Task 18 capture (`proto-lab run echo-call`) confirms part of the signaling
-//! (see [`signaling`]), but [`call::start`] still refuses to send, and even the web client's test call gets no echo: the
-//! echo service never joins, because the fence denies every write on a call that exists (adding the echo, the
-//! acknowledgements); `docs/spikes/echo-call.md` has the details.
+//! What doesn't: the live native call. [`call::start`] refuses to send, because the echo joins only through writes on
+//! the started call (the `add`, the acknowledgement, the `leave`) that the fence can't permit until it can read a
+//! call's members in full; the web client's own test call gets no echo for the same reason. Turning str0m's SDP into
+//! Teams' dialect and back, and TURN over TLS, are not built. `docs/spikes/echo-call.md` has the details.
 
 use std::io;
 

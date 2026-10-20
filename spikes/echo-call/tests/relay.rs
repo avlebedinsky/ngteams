@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use echo_call::Error;
 use echo_call::echo::{EchoConfig, EchoReport, run_echo};
-use echo_call::relay::{MediaPath, RelayLink, RelayOptions, RelayServer, RelayedPeer, allocate_any};
+use echo_call::relay::{MediaPath, RelayLink, RelayOptions, RelayServer, RelayedPeer, allocate_any, teams_relay};
 use echo_call::stun::Framing;
 use echo_call::turn::{Credentials, Transport, TurnEvent, TurnFailure};
 use str0m::change::{SdpAnswer, SdpOffer};
@@ -284,4 +284,27 @@ fn the_tone_comes_back_through_an_external_turn_server() {
     let credentials = Credentials { username, password };
     assert_echo(&echo_through(udp(addr), credentials.clone(), Framing::Native).unwrap());
     assert_echo(&echo_through(tcp(addr), credentials, Framing::Native).unwrap());
+}
+
+#[test]
+fn teams_relay_is_tried_over_udp_3478_first_then_tcp_443() {
+    // documentation addresses standing in for what the relay host resolves to; nothing is sent
+    let addresses = ["192.0.2.10".parse().unwrap(), "2001:db8::10".parse().unwrap()];
+    let servers: Vec<(Transport, SocketAddr)> = teams_relay(&addresses)
+        .iter()
+        .map(|server| (server.transport, server.addr))
+        .collect();
+    assert_eq!(
+        servers,
+        [
+            (Transport::Udp, "192.0.2.10:3478".parse().unwrap()),
+            (Transport::Udp, "[2001:db8::10]:3478".parse().unwrap()),
+            (Transport::Tcp, "192.0.2.10:443".parse().unwrap()),
+            (Transport::Tcp, "[2001:db8::10]:443".parse().unwrap()),
+        ]
+    );
+    assert_eq!(
+        echo_call::turn::TEAMS_RELAY_HOST,
+        "gateway-world.az.relay.teams.cloud.microsoft"
+    );
 }

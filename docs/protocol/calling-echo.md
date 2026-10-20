@@ -126,9 +126,12 @@ each URL handed out by the service before it is used.
    base64: a delivered HTTP request) and `nextSubscribeUrl`. The same callbacks also come over Trouter.
 5. **Acceptance.** The call controller calls back `…/call/acceptance/` with `callAcceptance.links`: the call leg
    (`…/ep/cc-…/cc/v1/active/<call id>/…`) and its operations (`acknowledgement`, `mediaRenegotiation`, `transfer`,
-   `hold`, `updateCallState`, `controlVideoStreaming`, `applyChannelParameters`, …), and the media answer.
-   `setRemoteDescription` applies the answer and ICE connects (the remote candidates are the media controller's,
-   `typ relay` on port 3478, UDP and TCP passive, IPv4 and IPv6).
+   `hold`, `updateCallState`, `controlVideoStreaming`, `applyChannelParameters`, …), and the media answer in
+   `callAcceptance.mediaContent` (`blob` in the same `application/sdp-ngc-1.0` dialect as the offer, `RTP/SAVP` with
+   an `m=x-data` line at the end, plus `mediaLegId` and flags such as `newOffer` and `fromMixer`), and
+   `callKeepAliveInterval`. The page turns it into standard SDP (below), `setRemoteDescription` applies it and ICE
+   connects (the remote candidates are the media controller's, `typ relay` on port 3478, UDP and TCP passive, IPv4
+   and IPv6).
 6. **Follow-ups the client sends next** (all denied today, see [Open](#open)):
    - `PUT …/conv/<conversation id>/updateEndpointMetadata` (the caller's `participants.from` and `endpointMetadata`);
    - `POST …/cc/v1/mcProxy/<call id>/…/applyChannelParameters` (send capabilities of a media line);

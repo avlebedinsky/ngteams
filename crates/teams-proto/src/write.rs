@@ -1,8 +1,7 @@
 //! Mutating requests ([`Mutating`]) and the pairing of one with the permit issued for its target ([`Authorized`]).
 
-use std::collections::BTreeSet;
-
 use teams_fence::{Mri, Scope, Target, WriteKind, WritePermit};
+use url::Url;
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
 /// [`Authorized`], next to a [`WritePermit`] issued for exactly that target.
@@ -22,6 +21,7 @@ mod sealed {
 
     impl Sealed for super::SendMessage {}
     impl Sealed for super::StartCall {}
+    impl Sealed for super::AddToCall {}
 }
 
 /// A mutating request together with the permit for its target. The only way to make one is [`Authorized::new`],
@@ -124,22 +124,28 @@ impl Mutating for SendMessage {
     }
 }
 
-/// Places a new call: the caller rings the callees. The call doesn't exist yet, so its target is [`Scope::New`] and its
-/// participants are exactly the caller and the callees, all of which the fence judges. There is no request here that
-/// answers an incoming call ([`WriteKind::CallAnswer`]): a lab client never answers one.
+/// The conversation scenario of the web client's test call (Task 18, `docs/protocol/calling-echo.md`): the call start
+/// that opens it names no callee.
+pub const TEST_CALL_SCENARIO: &str = "UserInitiatedTestCall";
+
+/// Places the test call to the echo service, as the web client does (Task 18): the call start opens a conversation of
+/// the caller alone (no callee, scenario [`TEST_CALL_SCENARIO`]), and the caller then invites the echo service into
+/// it with an [`AddToCall`]. The echo is counted in here anyway, so the fence lets the start through only for a call
+/// it would let the echo join: the target is [`WriteKind::Call`] on [`Scope::New`] with the caller and the echo, the
+/// same target the browser fence gives the web client's start (`proto_lab::calling::call_start`).
+///
+/// There is no request here that answers an incoming call ([`WriteKind::CallAnswer`]): a lab client never answers one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartCall {
     caller: Mri,
-    callees: BTreeSet<Mri>,
+    echo: Mri,
 }
 
 impl StartCall {
+    /// `caller`'s test call, which `echo` (the echo service) joins once the caller adds it.
     #[must_use]
-    pub fn new(caller: Mri, callees: impl IntoIterator<Item = Mri>) -> Self {
-        Self {
-            caller,
-            callees: callees.into_iter().collect(),
-        }
+    pub fn test_call(caller: Mri, echo: Mri) -> Self {
+        Self { caller, echo }
     }
 
     /// The account placing the call.
@@ -148,16 +154,108 @@ impl StartCall {
         &self.caller
     }
 
-    /// Everyone the call rings.
+    /// The echo service the call is for. The call start doesn't name it: an [`AddToCall`] adds it.
     #[must_use]
-    pub fn callees(&self) -> &BTreeSet<Mri> {
-        &self.callees
+    pub fn echo(&self) -> &Mri {
+        &self.echo
     }
 }
 
 impl Mutating for StartCall {
     fn target(&self) -> Target {
-        Target::new(WriteKind::Call, Scope::New)
-            .with_added(std::iter::once(self.caller.clone()).chain(self.callees.iter().cloned()))
+        Target::new(WriteKind::Call, Scope::New).with_added([self.caller.clone(), self.echo.clone()])
+    }
+}
+
+/// A call's conversation on the conversation service: the URL the call start's answer gives as its
+/// `conversationController` (`https://<proxy>/…/conv/<conversation id>?<routing query>`). Writes on the call go to
+/// this URL plus an operation, so it is also what the fence knows the call by: [`Scope::Call`]'s id is this URL as is,
+/// host, path and query, and two calls on different hosts or routes never share an id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationUrl(Url);
+
+impl ConversationUrl {
+    /// `None` unless `url` is an `https` URL with a host, no user info, no fragment and a non-empty last path segment
+    /// (the conversation id).
+    #[must_use]
+    pub fn parse(url: &str) -> Option<Self> {
+        let url = Url::parse(url).ok()?;
+        let has_id = url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|id| !id.is_empty());
+        let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
+        (url.scheme() == "https" && url.host_str().is_some() && plain && has_id).then_some(Self(url))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// The conversation id: the last path segment.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.0
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .unwrap_or_default()
+    }
+
+    /// The URL of the operation `name` on this conversation: its path plus `/<name>`, its query kept.
+    fn operation(&self, name: &str) -> Url {
+        let mut url = self.0.clone();
+        url.set_path(&format!("{}/{name}", self.0.path()));
+        url
+    }
+}
+
+/// Invites someone into a call that exists (the conversation's `add`; how the test call brings the echo in). Its
+/// target is [`WriteKind::Invite`] on [`Scope::Call`] (the call's [`ConversationUrl`] as is) with the invitee added,
+/// so the fence judges the call's current members, read fresh and in full, together with the invitee. The request is
+/// posted to [`AddToCall::url`], which comes from the same conversation URL, so a permit for one call never carries an
+/// `add` to another. No membership source can read a call yet (`docs/backlog/fence-call-follow-ups.md`): today the
+/// fence denies this request as partial, whoever the invitee is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddToCall {
+    conversation: ConversationUrl,
+    invitee: Mri,
+}
+
+impl AddToCall {
+    #[must_use]
+    pub fn new(conversation: ConversationUrl, invitee: Mri) -> Self {
+        Self { conversation, invitee }
+    }
+
+    /// The call's conversation.
+    #[must_use]
+    pub fn conversation(&self) -> &ConversationUrl {
+        &self.conversation
+    }
+
+    /// Who is invited.
+    #[must_use]
+    pub fn invitee(&self) -> &Mri {
+        &self.invitee
+    }
+
+    /// Where the `add` is posted, as the web client posts it: the conversation's path plus `/add`, its query kept (not
+    /// the answer's `addParticipant` link). A transport posts the request here and nowhere else.
+    #[must_use]
+    pub fn url(&self) -> Url {
+        self.conversation.operation("add")
+    }
+}
+
+impl Mutating for AddToCall {
+    fn target(&self) -> Target {
+        Target::new(
+            WriteKind::Invite,
+            Scope::Call {
+                id: self.conversation.as_str().to_owned(),
+            },
+        )
+        .with_added([self.invitee.clone()])
     }
 }

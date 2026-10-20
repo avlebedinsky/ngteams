@@ -24,6 +24,7 @@ publish = false
 # Shared dependency versions; crates take them with `name.workspace = true`.
 [workspace.dependencies]
 fixture-guard = { path = "crates/fixture-guard" }
+proto-lab = { path = "crates/proto-lab" }
 teams-auth = { path = "crates/teams-auth" }
 teams-fence = { path = "crates/teams-fence" }
 teams-proto = { path = "crates/teams-proto" }
