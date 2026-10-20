@@ -1,0 +1,251 @@
+//! Conversations (a thread's `version` orders them) and their members (the thread's `rosterVersion` orders the
+//! member list as a whole).
+
+use rusqlite::{OptionalExtension, Row, params};
+
+use crate::{Applied, Store, StoreError, sql_limit};
+
+/// What kind of conversation a thread is. A kind this build doesn't name is kept as the text it came as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConversationKind {
+    OneToOne,
+    Group,
+    Meeting,
+    /// A team channel: read, never written to in M1.
+    Channel,
+    Other(String),
+}
+
+impl ConversationKind {
+    /// The stored text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::OneToOne => "one_to_one",
+            Self::Group => "group",
+            Self::Meeting => "meeting",
+            Self::Channel => "channel",
+            Self::Other(text) => text,
+        }
+    }
+
+    /// The kind a stored text names; any other text is [`ConversationKind::Other`].
+    #[must_use]
+    pub fn from_text(text: &str) -> Self {
+        match text {
+            "one_to_one" => Self::OneToOne,
+            "group" => Self::Group,
+            "meeting" => Self::Meeting,
+            "channel" => Self::Channel,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+/// One conversation as the store keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conversation {
+    pub id: String,
+    pub kind: ConversationKind,
+    pub topic: Option<String>,
+    /// The thread's `version`: a newer one replaces the row, an older or equal one is ignored.
+    pub version: i64,
+    /// Milliseconds: the newest of what the service said about the last message and every stored message's arrival.
+    /// It never moves back.
+    pub last_activity: Option<i64>,
+}
+
+/// A member of a conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Member {
+    /// The member's MRI (`8:orgid:<oid>`, or a service's).
+    pub mri: String,
+    pub role: Option<String>,
+}
+
+impl Member {
+    #[must_use]
+    pub fn new(mri: &str, role: Option<&str>) -> Self {
+        Self {
+            mri: mri.to_owned(),
+            role: role.map(str::to_owned),
+        }
+    }
+}
+
+const CONVERSATION_COLUMNS: &str = "id, kind, topic, version, last_activity";
+
+fn conversation_from_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {
+    Ok(Conversation {
+        id: row.get(0)?,
+        kind: ConversationKind::from_text(&row.get::<_, String>(1)?),
+        topic: row.get(2)?,
+        version: row.get(3)?,
+        last_activity: row.get(4)?,
+    })
+}
+
+impl Store {
+    /// Writes a conversation unless the stored one is as new or newer (by `version`). `last_activity` keeps the newer
+    /// of the two whatever the version: an as-new or older version that brings a later last activity is
+    /// [`Applied::Ignored`] for its versioned fields, and its last activity is still taken.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write fails.
+    pub fn upsert_conversation(&mut self, conversation: &Conversation) -> Result<Applied, StoreError> {
+        let tx = self.conn.transaction()?;
+        let stored: Option<i64> = tx
+            .query_row(
+                "SELECT version FROM conversations WHERE id = ?1",
+                [&conversation.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let applied = match stored {
+            None => {
+                tx.execute(
+                    "INSERT INTO conversations (id, kind, topic, version, last_activity) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        conversation.id,
+                        conversation.kind.as_str(),
+                        conversation.topic,
+                        conversation.version,
+                        conversation.last_activity
+                    ],
+                )?;
+                Applied::Inserted
+            }
+            Some(version) if conversation.version > version => {
+                tx.execute(
+                    "UPDATE conversations SET kind = ?2, topic = ?3, version = ?4,
+                         last_activity = MAX(COALESCE(last_activity, ?5), COALESCE(?5, last_activity))
+                     WHERE id = ?1",
+                    params![
+                        conversation.id,
+                        conversation.kind.as_str(),
+                        conversation.topic,
+                        conversation.version,
+                        conversation.last_activity
+                    ],
+                )?;
+                Applied::Updated
+            }
+            Some(_) => {
+                // the version's fields stay, but a later last activity is still taken
+                tx.execute(
+                    "UPDATE conversations
+                     SET last_activity = MAX(COALESCE(last_activity, ?2), COALESCE(?2, last_activity))
+                     WHERE id = ?1",
+                    params![conversation.id, conversation.last_activity],
+                )?;
+                Applied::Ignored
+            }
+        };
+        tx.commit()?;
+        Ok(applied)
+    }
+
+    /// One conversation.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn conversation(&self, id: &str) -> Result<Option<Conversation>, StoreError> {
+        let sql = format!("SELECT {CONVERSATION_COLUMNS} FROM conversations WHERE id = ?1");
+        Ok(self.conn.query_row(&sql, [id], conversation_from_row).optional()?)
+    }
+
+    /// Up to `limit` conversations, the most recently active first; ones with no activity last.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn conversations_by_activity(&self, limit: usize) -> Result<Vec<Conversation>, StoreError> {
+        let sql = format!(
+            "SELECT {CONVERSATION_COLUMNS} FROM conversations
+             ORDER BY last_activity IS NULL, last_activity DESC, id LIMIT ?1"
+        );
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        let rows = statement.query_map([sql_limit(limit)], conversation_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Replaces a conversation's members with `members` unless the stored roster is as new or newer (by
+    /// `rosterVersion`). The list is the whole membership: anyone not in it is removed.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::UnknownConversation`] when the conversation isn't stored, [`StoreError::Sqlite`] when the
+    /// write fails.
+    pub fn replace_members(
+        &mut self,
+        conversation_id: &str,
+        roster_version: i64,
+        members: &[Member],
+    ) -> Result<Applied, StoreError> {
+        let tx = self.conn.transaction()?;
+        let stored: Option<Option<i64>> = tx
+            .query_row(
+                "SELECT roster_version FROM conversations WHERE id = ?1",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let applied = match stored {
+            None => return Err(StoreError::UnknownConversation(conversation_id.to_owned())),
+            Some(None) => Applied::Inserted,
+            Some(Some(version)) if roster_version > version => Applied::Updated,
+            Some(Some(_)) => return Ok(Applied::Ignored),
+        };
+        tx.execute("DELETE FROM members WHERE conversation_id = ?1", [conversation_id])?;
+        {
+            let mut insert =
+                tx.prepare_cached("INSERT INTO members (conversation_id, mri, role) VALUES (?1, ?2, ?3)")?;
+            for member in members {
+                insert.execute(params![conversation_id, member.mri, member.role])?;
+            }
+        }
+        tx.execute(
+            "UPDATE conversations SET roster_version = ?2 WHERE id = ?1",
+            params![conversation_id, roster_version],
+        )?;
+        tx.commit()?;
+        Ok(applied)
+    }
+
+    /// A conversation's members, by MRI.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn members(&self, conversation_id: &str) -> Result<Vec<Member>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT mri, role FROM members WHERE conversation_id = ?1 ORDER BY mri")?;
+        let rows = statement.query_map([conversation_id], |row| {
+            Ok(Member {
+                mri: row.get(0)?,
+                role: row.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The `rosterVersion` the stored members are at; none before the first roster (or for an unknown conversation).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn roster_version(&self, conversation_id: &str) -> Result<Option<i64>, StoreError> {
+        let version = self
+            .conn
+            .query_row(
+                "SELECT roster_version FROM conversations WHERE id = ?1",
+                [conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(version.flatten())
+    }
+}

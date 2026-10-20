@@ -1,0 +1,17 @@
+[package]
+name = "teams-store"
+description = "The native client's local store: conversations, members, messages with versions, reactions, read horizons, sync state and the outbox, in SQLite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

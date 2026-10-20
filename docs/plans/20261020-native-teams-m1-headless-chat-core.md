@@ -458,13 +458,19 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
   `crates/teams-store/tests/store.rs`
 - Modify: `Cargo.toml` (member, `rusqlite` in `[workspace.dependencies]`)
 
-- [ ] tests first: migrations from empty; idempotent upserts of conversations, members and messages by id and version
+- [x] tests first: migrations from empty; idempotent upserts of conversations, members and messages by id and version
       (an older version never overwrites a newer one); edits, soft deletes, reactions per user, read horizons, sync
       state per conversation; the outbox table (Task 13)
-- [ ] choose the SQLite crate (`rusqlite` bundled unless a reason shows up), record it here; WAL; the file `0600`
-- [ ] queries the core needs: conversation list by last activity, a page of messages, unread count
-- [ ] `[lints] workspace = true`, listed in `members`
-- [ ] `cargo test -p teams-store` and the gate pass
+- [x] choose the SQLite crate (`rusqlite` bundled unless a reason shows up), record it here; WAL; the file `0600`
+      — chosen: `rusqlite` 0.40.2 with `bundled` (SQLite built from source, the same version everywhere); no reason
+      showed up against it. The directory is made `0700`, the file `0600` before SQLite opens it (its `-wal`/`-shm`
+      take that mode), and a looser existing file is tightened
+- [x] queries the core needs: conversation list by last activity, a page of messages, unread count
+- [x] `[lints] workspace = true`, listed in `members`
+- [x] `cargo test -p teams-store` and the gate pass (run ahead of Tasks 7–10 and 13 in parallel: fmt, clippy on
+      `teams-store`, `lint-report.sh` and `cargo test -p teams-store`; the workspace-wide clippy and test run on the
+      merged branch). The row types are the store's own (Tasks 10 and 13 map onto them): extra modules
+      `conversations.rs`, `messages.rs`, `state.rs`, `outbox.rs`, `file.rs`
 
 ### Task 12: Chat writes as fenced requests
 **Files:**
