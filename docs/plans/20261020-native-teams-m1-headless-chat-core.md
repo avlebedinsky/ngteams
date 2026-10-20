@@ -346,15 +346,17 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Modify: `crates/fixture-guard/src/labels.rs`, `crates/fixture-guard/tests/fixture_guard.rs`,
   `docs/backlog/sanitizer-defence-in-depth-known-gaps.md`
 
-- [ ] the M1 risk: Tasks 7–8 and 14 write many hand-made chat fixtures from reference copies full of message text,
+- [x] the M1 risk: Tasks 7–8 and 14 write many hand-made chat fixtures from reference copies full of message text,
       and the guard is what catches a value copied by hand. The guard's two label gaps are fixed; the sanitizer's own
       gaps stay in the backlog item (`worth: later`, they only affect local reference copies)
-- [ ] tests first: a digit-prefixed passcode under a non-English label; a German `Kenncode`/`Besprechungskenncode`
+- [x] tests first: a digit-prefixed passcode under a non-English label; a German `Kenncode`/`Besprechungskenncode`
       invitation without a join link; both flagged by the guard
-- [ ] fix them as the backlog item proposes (passcode labels try the run first; `Kenncode` and `Besprechungskenncode`
+- [x] fix them as the backlog item proposes (passcode labels try the run first; `Kenncode` and `Besprechungskenncode`
       under `de`, with the comment's attribution corrected)
-- [ ] remove those two gaps from the backlog item, keep the rest
-- [ ] `cargo test -p fixture-guard` and the gate pass
+- [x] remove those two gaps from the backlog item, keep the rest
+- [x] `cargo test -p fixture-guard` and the gate pass (parallel run: fmt, `cargo clippy -p fixture-guard
+      --all-targets`, `scripts/lint-report.sh`, `cargo test -p fixture-guard` and proto-lab's sanitize tests here; the
+      workspace-wide clippy and test run after the merge)
 
 ### Task 7: Capture the 1:1 chat protocol beyond messages
 **Files:**

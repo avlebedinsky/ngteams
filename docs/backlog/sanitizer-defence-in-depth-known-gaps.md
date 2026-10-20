@@ -11,19 +11,10 @@ lab's data dir, and committed fixtures are written synthetic-from-capture with m
 marker that the guard enforces. The sanitizer stays as defence in depth for that local copy. These are its known gaps.
 Examples below describe shapes, not values.
 
-Found in review round 6 (`~/.local/state/plan-exec-revmux/20261019-native-teams-m0-lab-and-spikes/task9-r6-findings.txt`):
+Found in review round 6 (`~/.local/state/plan-exec-revmux/20261019-native-teams-m0-lab-and-spikes/task9-r6-findings.txt`;
+its two invitation-label gaps, a digit-prefixed passcode cut short and German's missing `Kenncode`, were fixed in M1
+Task 6):
 
-- **Passcodes cut short after a localized label** (`crates/fixture-guard/src/labels.rs`, `Labels::new` and `values`).
-  The label's value pattern tries the meeting-code alternative (6+ digits) before the alphanumeric run. Rust's regex
-  takes the first alternative that matches, so a 7+ character passcode whose first six characters are digits is read
-  as only those digits. The sanitizer (`sanitize/meeting.rs`, `labelled_part`) and the guard both reject the
-  truncated value because a letter follows it, so the whole passcode is neither redacted nor flagged. Fix: for
-  passcode labels, try the run first, or retry as a run when the code stops before a letter or digit. Test it with a
-  digit-prefixed passcode under a non-English label.
-- **German invitations' `Kenncode` label is missing** from `PASSCODE_LABELS`, and the `de` attribution in its comment
-  is wrong. A link-less copy of a German invitation keeps its passcode, and the guard passes it. The structural
-  fallback only catches a passcode when the same text has a join link. Fix: add `Kenncode` and `Besprechungskenncode`
-  under `de`, with a guard test.
 - **Dotted display names whose last part is also a TLD** (`crates/proto-lab/src/sanitize/words.rs`,
   `without_host_tld` and `is_host_name`). A lowercase `<first>.<surname>` whose surname is a Public Suffix List
   top-level entry (`kim`, `wang`, `green`, `ford`, …) loses the surname word. Three lowercase labels ending in such

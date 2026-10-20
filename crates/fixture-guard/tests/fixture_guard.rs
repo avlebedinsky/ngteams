@@ -208,6 +208,22 @@ fn a_meetings_join_credentials_are_detected() {
 }
 
 #[test]
+fn a_digit_prefixed_passcode_and_a_german_invitation_without_a_link_are_detected() {
+    let cases = [
+        // A passcode whose first six characters are digits is read whole, not as a meeting's code cut short.
+        ("Code secret\u{a0}: <span>123456hTqWmz</span>", Kind::Passcode),
+        ("Секретный код собрания: 9876543Xy", Kind::Passcode),
+        ("Kod dostępu: 13579246AbC", Kind::Passcode),
+        (r#"{"passcode":"2468135Qx"}"#, Kind::Passcode),
+        // A German invitation's passcode, no join link in the text.
+        ("Kenncode: Qx7Rt2", Kind::Passcode),
+        ("<p>Besprechungskenncode: <b>hTqWmz</b></p>", Kind::Passcode),
+        ("Besprechungskenncode:\u{a0}1234567Ab", Kind::Passcode),
+    ];
+    assert_detected(&Guard::new().unwrap(), &cases);
+}
+
+#[test]
 fn placeholders_and_prose_pass() {
     let clean = [
         "<user:a> wrote to <mri:b> in <guid:1>",

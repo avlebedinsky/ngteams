@@ -192,7 +192,7 @@ pub const MEETING_ID_LABELS: &[&str] = &[
 
 /// The labels of a meeting's passcode.
 pub const PASSCODE_LABELS: &[&str] = &[
-    // en, de, it, mt, fil (`Passcode`, `Passcode riunione`, …), and the key Microsoft's own forms use
+    // en, it, mt, fil (`Passcode`, `Passcode riunione`, …), and the key Microsoft's own forms use
     "Passcode",
     "Meeting passcode",
     "meetingPw",
@@ -232,6 +232,9 @@ pub const PASSCODE_LABELS: &[&str] = &[
     // da
     "Mødeadgangskode",
     "Adgangskode",
+    // de
+    "Besprechungskenncode",
+    "Kenncode",
     // el
     "Κωδικός πρόσβασης σύσκεψης",
     "Κωδικός πρόσβασης",
@@ -492,7 +495,8 @@ impl Labels {
     }
 
     /// Every value after a colon or `=` in `text`, in order, with what its label names: a meeting id's label takes a
-    /// code only; a passcode's label the run of letters and digits (a code of digits only too).
+    /// code only; a passcode's label the whole run of letters and digits where the value starts, even when that run
+    /// begins with a code (a passcode `123456Ab` is read whole, not as the code `123456`).
     #[must_use]
     pub fn values(&self, text: &str) -> Vec<Labelled> {
         self.marker
@@ -502,23 +506,30 @@ impl Labels {
                 let before = &text[text.floor_char_boundary(whole.start().saturating_sub(LABEL_WINDOW))..whole.start()];
                 let (code, run) = (captures.get(2), captures.get(3));
                 let (label, value) = if let Some(code) = code.filter(|_| self.id.is_match(before)) {
-                    (Label::MeetingId, code)
+                    (Label::MeetingId, code.range())
                 } else if self.passcode.is_match(before) {
-                    let digits = code.filter(|code| code.as_str().bytes().all(|byte| byte.is_ascii_digit()));
-                    (Label::Passcode, run.or(digits)?)
+                    let start = code.or(run)?.start();
+                    (Label::Passcode, start..run_end(text, start))
                 } else {
-                    (Label::Other, code.or(run)?)
+                    (Label::Other, code.or(run)?.range())
                 };
                 Some(Labelled {
                     label,
                     label_end: whole.start(),
                     colon: colon.as_str() != "=",
                     is_code: label != Label::Passcode && code.is_some(),
-                    value: value.range(),
+                    value,
                 })
             })
             .collect()
     }
+}
+
+/// Where the run of ASCII letters and digits that starts at `start` in `text` ends.
+fn run_end(text: &str, start: usize) -> usize {
+    text[start..]
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .map_or(text.len(), |length| start + length)
 }
 
 /// The labels as one regex alternation (no group), longest first: each escaped, a space between words as any run of
