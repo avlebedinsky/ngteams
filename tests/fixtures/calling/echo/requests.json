@@ -1,0 +1,160 @@
+{
+  "_synthetic": "Made up, shaped like the echo-call capture of 2026-10-20 (read locally from its sanitized reference copy; docs/protocol/calling-echo.md): the requests of the web client's test call to the echo service, each with what a run that calls (Classifier::calling with the echo service as the test call's callee) makes of it. <guid:a> is lab account a's object id, <guid:echo> the echo bot's id, other <guid:N> made-up ids; tests fill in made-up GUIDs. Hosts' region names, ids in paths, tokens and the SDP are made up and shortened.",
+  "cases": [
+    {
+      "name": "reading the account's own settings",
+      "method": "POST",
+      "url": "https://teams.cloud.microsoft/api/mt/part/amer-01/beta/users/useraggregatesettings",
+      "body": {"userPropertiesSettings": true, "voiceAdminSettings": true, "adminSettings": true, "tenantSettingsV2": true, "clientSettings": true},
+      "expected": "own:settings_read"
+    },
+    {
+      "name": "reading the account's own policies",
+      "method": "POST",
+      "url": "https://teams.cloud.microsoft/api/mt/part/amer-01/beta/users/effectivePolicies",
+      "body": ["teamsCallingPolicy", "teamsMeetingPolicy", "externalAccessPolicy", "teamsMessagingPolicy"],
+      "expected": "own:settings_read"
+    },
+    {
+      "name": "registering the calling stack's endpoint",
+      "method": "POST",
+      "url": "https://teams.cloud.microsoft/registrar/prod/V2/registrations",
+      "body": {
+        "clientDescription": {"appId": "SkypeSpacesWeb", "aesKey": "", "languageId": "en-US", "platform": "chrome", "templateKey": "SkypeSpacesWeb_2.6", "platformUIVersion": "1/1"},
+        "registrationId": "<guid:1>",
+        "nodeId": "",
+        "transports": {"TROUTER": [{"context": "", "path": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/", "ttl": 3600}]}
+      },
+      "expected": "own:endpoint_registration"
+    },
+    {
+      "name": "the chat with the echo bot the test call starts from",
+      "method": "POST",
+      "url": "https://teams.cloud.microsoft/api/chatsvc/amer/v1/threads",
+      "body": {
+        "members": [{"id": "8:orgid:<guid:a>", "role": "Admin"}, {"id": "28:<guid:echo>", "role": "Admin"}],
+        "properties": {"threadType": "chat", "fixedRoster": true, "uniquerosterthread": true}
+      },
+      "expected": "chat_create:8:orgid:<guid:a>,28:<guid:echo>"
+    },
+    {
+      "name": "the test call start",
+      "method": "POST",
+      "url": "https://api.flightproxy.teams.microsoft.com/api/v2/epconv",
+      "body": {
+        "conversationRequest": {
+          "conversationType": null,
+          "subject": null,
+          "suppressDialout": true,
+          "roster": {"type": "Delta", "rosterUpdate": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0a0a0a0a/conversation/rosterUpdate/"},
+          "properties": {"allowConversationWithoutHost": true, "enableGroupCallEventMessages": true, "enableGroupCallUpgradeMessage": false, "enableGroupCallMeetupGeneration": false},
+          "links": {
+            "conversationEnd": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0b0b0b0b/conversation/conversationEnd/",
+            "conversationUpdate": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0c0c0c0c/conversation/conversationUpdate/"
+          },
+          "scenario": "UserInitiatedTestCall"
+        },
+        "contentSharing": null,
+        "participants": {
+          "from": {"id": "8:orgid:<guid:a>", "displayName": "Lab A", "endpointId": "<guid:3>", "participantId": "<guid:4>", "languageId": "en-us"},
+          "to": []
+        },
+        "capabilities": null,
+        "endpointCapabilities": 1,
+        "clientEndpointCapabilities": 1,
+        "endpointMetadata": {"holographicCapabilities": 3},
+        "groupContext": null,
+        "groupChat": null,
+        "meetingInfo": null,
+        "meetingData": null,
+        "endpointState": {"endpointStateSequenceNumber": 1, "endpointProperties": {"additionalEndpointProperties": {"infoShownInReportMode": "FullInformation"}}},
+        "callInvitation": {
+          "callModalities": ["Audio", "Video"],
+          "replaces": null,
+          "transferor": null,
+          "clientTransferContext": null,
+          "customContext": null,
+          "links": {
+            "progress": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/01010101/call/progress/",
+            "mediaAnswer": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/02020202/call/mediaAnswer/",
+            "acceptance": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/03030303/call/acceptance/",
+            "redirection": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/04040404/call/redirection/",
+            "end": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/05050505/call/end/"
+          },
+          "pstnContent": {"emergencyCallCountry": "", "platformName": "SkypeSpaces/1/1/os=linux; browser=chrome", "publicApiCall": false},
+          "emergencyContent": null,
+          "mediaContent": {
+            "blob": "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 50000 RTP/SAVP 111\r\nc=IN IP4 192.0.2.10\r\na=x-signaling-fb:* x-message app recv:dsh\r\na=x-ssrc-range:1000-1000\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1\r\na=rtcp:50000\r\na=setup:actpass\r\na=mid:0\r\na=sendrecv\r\na=candidate:1 1 udp 2122194687 192.0.2.10 50000 typ host\r\na=rtcp-mux\r\na=label:main-audio\r\n",
+            "contentType": "application/sdp-ngc-1.0",
+            "mediaDescriptions": {"descriptions": [{"mid": "1", "direction": "sendrecv", "label": "main-video"}], "requestId": 1},
+            "mediaLegId": "SYNTHETICMEDIALEG0000000000000000"
+          },
+          "voicemailSettings": {},
+          "locationContent": null,
+          "networkContent": null,
+          "areaContent": null
+        },
+        "debugContent": {"ecsEtag": "\"synthetic\""},
+        "participantPropertyBag": {"aiVoiceConsent": {"value": {"aiVoiceConsentValue": "0"}, "sequenceNumber": 0}}
+      },
+      "expected": "call:8:orgid:<guid:a>,28:<guid:echo>"
+    },
+    {
+      "name": "the TURN credentials (a read)",
+      "method": "GET",
+      "url": "https://teams.microsoft.com/trap/tokens",
+      "body": null,
+      "expected": "read"
+    },
+    {
+      "name": "the caller's endpoint metadata on the call (a call follow-up: unknown until the fence can read a call's members)",
+      "method": "PUT",
+      "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/updateEndpointMetadata?i=0-0-0-0&e=1",
+      "body": {"participants": {"from": {"id": "8:orgid:<guid:a>", "displayName": "Lab A", "endpointId": "<guid:3>", "participantId": "<guid:4>", "languageId": "en-us"}}, "endpointMetadata": {"holographicCapabilities": 3}},
+      "expected": "unknown"
+    },
+    {
+      "name": "a media line's channel parameters (a call follow-up)",
+      "method": "POST",
+      "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/mcProxy/<guid:5>/1/k1/1/applyChannelParameters?i=0-0-0-0&e=1",
+      "body": {"applyChannelParameters": {"multiChannelParameter": {"mids": ["1"], "mediaParameter": "{\"maxVideoSendCapabilities\":{\"caps\":{\"max-width\":1280}}}"}}},
+      "expected": "unknown"
+    },
+    {
+      "name": "the acknowledgement of the call's acceptance (a call follow-up)",
+      "method": "POST",
+      "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/callAcceptance/<guid:5>/1/a1/1/acknowledge?i=0-0-0-0",
+      "body": {"callAcceptanceAcknowledgement": {"links": {"mediaRenegotiation": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/06060606/call/mediaRenegotiation/"}}},
+      "expected": "unknown"
+    },
+    {
+      "name": "adding the echo bot to the call (a call follow-up: where the echo joins)",
+      "method": "POST",
+      "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/add?i=0-0-0-0&e=1",
+      "body": {
+        "disableUnmute": false,
+        "participants": {
+          "from": {"id": "8:orgid:<guid:a>", "displayName": "Lab A", "endpointId": "<guid:3>", "participantId": "<guid:4>", "languageId": "en-us"},
+          "to": [{"id": "28:<guid:echo>", "participantId": "<guid:6>"}]
+        },
+        "participantInvitationData": {"invitationData": {"meetingInfo": {"organizerId": "<guid:a>", "tenantId": "<guid:7>"}}},
+        "replacementDetails": null,
+        "groupContext": null,
+        "groupChat": {"threadId": "19:<guid:a>_<guid:echo>@unq.gbl.spaces", "messageId": null},
+        "links": {"addParticipantSuccess": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/07070707/conversation/addParticipantSuccess/"}
+      },
+      "expected": "unknown"
+    },
+    {
+      "name": "leaving the call (a call follow-up)",
+      "method": "POST",
+      "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/leave?i=0-0-0-0&e=1",
+      "body": {
+        "participants": {"from": {"id": "8:orgid:<guid:a>", "displayName": "Lab A", "endpointId": "<guid:3>", "participantId": "<guid:4>", "languageId": "en-us"}},
+        "conversationTransactionEnd": {"reason": "noError", "code": 0, "phrase": "ConversationEndNoModalityConnected"},
+        "callTransactionEnd": {"code": 0, "subCode": 0, "phrase": "CallEndReasonLocalUserInitiated", "resultCategories": ["Success"]}
+      },
+      "expected": "unknown"
+    }
+  ]
+}

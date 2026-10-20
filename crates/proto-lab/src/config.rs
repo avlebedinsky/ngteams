@@ -4,5 +4,5 @@
 
 pub use teams_fence::lab::{
     ACCOUNT_COUNT, Account, Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, ServiceParticipant,
-    record_account_mri,
+    record_account_mri, record_service_mri,
 };

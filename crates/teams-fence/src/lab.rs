@@ -17,7 +17,8 @@
 //! ```
 //!
 //! Passwords never go in this file. An account's MRI is written into it by [`record_account_mri`] after the account's
-//! first login; nothing else here writes the file.
+//! first login, and an approved service participant's by [`record_service_mri`] once it is established; nothing else
+//! here writes the file.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -239,10 +240,18 @@ pub enum ConfigError {
     DuplicateMri(String),
     #[error("lab.toml already records another mri for account {0}; it isn't replaced")]
     MriConflict(Alias),
+    #[error("lab.toml already records another mri for service participant {0}; it isn't replaced")]
+    ServiceMriConflict(String),
+    #[error("lab.toml approves no service participant named {0:?}")]
+    UnknownService(String),
+    #[error("not a bot's MRI (28:<lowercase guid>): {0:?}")]
+    NotABotMri(String),
     #[error("can't edit lab.toml: {0}")]
     Edit(String),
     #[error("can't write {}: {source}", path.display())]
     Write { path: PathBuf, source: std::io::Error },
+    #[error("{} changed while an mri was being recorded in it; nothing was written, run it again", .0.display())]
+    Changed(PathBuf),
     #[error("a service participant without a name")]
     EmptyServiceName,
     #[error("service participant {0} is listed more than once")]
@@ -420,14 +429,16 @@ pub enum MriRecord {
 /// Records `mri` as account `alias`'s MRI in the `lab.toml` at `locations.config_file`, once the account's first login
 /// has shown it. Everything else in the file (comments included) stays as it is, and so does the file's mode. The new
 /// text has to pass [`LabConfig::parse`]; it replaces the file in one rename, so a reader sees the old file or the new
-/// one, never half of either.
+/// one, never half of either, and only if the file, read again right before, still holds the text the edit was made
+/// from.
 ///
 /// An MRI is recorded only for an account without one: a different MRI already there is refused, not replaced (the
 /// roster of the fence comes from these MRIs).
 ///
 /// # Errors
 /// When the file can't be read, isn't valid, records another MRI for the account ([`ConfigError::MriConflict`]), or
-/// would become invalid with this one (an empty MRI, one another participant has); or when it can't be written.
+/// would become invalid with this one (an empty MRI, one another participant has); when it changed while the MRI was
+/// being recorded ([`ConfigError::Changed`]); or when it can't be written.
 pub fn record_account_mri(locations: &LabLocations, alias: Alias, mri: &str) -> Result<MriRecord, ConfigError> {
     let path = &locations.config_file;
     let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -443,8 +454,78 @@ pub fn record_account_mri(locations: &LabLocations, alias: Alias, mri: &str) -> 
     }
     let edited = with_account_mri(&text, alias, mri)?;
     LabConfig::parse(&edited, &locations.data_dir)?;
-    replace_file(path, &edited)?;
+    replace_unchanged(path, &text, &edited)?;
     Ok(MriRecord::Recorded)
+}
+
+/// Records `mri` as the MRI of the approved service participant `name` (its `[[service_participants]]` entry in the
+/// `lab.toml` at `locations.config_file`), once it has been established from the sources the M0 plan names. As
+/// [`record_account_mri`]: only for a participant without one, everything else in the file kept, the new text
+/// validated, one rename, only over the text it was made from. Only a bot's MRI is taken (`28:` and a lowercase GUID):
+/// an approved service is never a person.
+///
+/// # Errors
+/// When the file can't be read or isn't valid, approves no service named `name` ([`ConfigError::UnknownService`]),
+/// records another MRI for it ([`ConfigError::ServiceMriConflict`]), `mri` isn't a bot's ([`ConfigError::NotABotMri`]),
+/// another participant has it ([`ConfigError::DuplicateMri`]); when it changed while the MRI was being recorded
+/// ([`ConfigError::Changed`]); or when it can't be written.
+pub fn record_service_mri(locations: &LabLocations, name: &str, mri: &str) -> Result<MriRecord, ConfigError> {
+    let path = &locations.config_file;
+    let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let config = LabConfig::parse(&text, &locations.data_dir)?;
+    if !is_bot_mri(mri) {
+        return Err(ConfigError::NotABotMri(mri.to_owned()));
+    }
+    let service = config
+        .service_participants()
+        .iter()
+        .find(|service| service.name == name)
+        .ok_or_else(|| ConfigError::UnknownService(name.to_owned()))?;
+    match service.mri.as_deref() {
+        Some(recorded) if recorded == mri => return Ok(MriRecord::AlreadyRecorded),
+        Some(_) => return Err(ConfigError::ServiceMriConflict(name.to_owned())),
+        None => {}
+    }
+    let edited = with_service_mri(&text, name, mri)?;
+    LabConfig::parse(&edited, &locations.data_dir)?;
+    replace_unchanged(path, &text, &edited)?;
+    Ok(MriRecord::Recorded)
+}
+
+/// `28:` and a lowercase GUID (`8-4-4-4-12` hex digits), nothing else.
+fn is_bot_mri(mri: &str) -> bool {
+    let Some(guid) = mri.strip_prefix("28:") else {
+        return false;
+    };
+    let groups: Vec<&str> = guid.split('-').collect();
+    groups.len() == 5
+        && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, len)| {
+            group.len() == len
+                && group
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+/// `text` with `mri = "<mri>"` set in the `[[service_participants]]` table named `name`.
+fn with_service_mri(text: &str, name: &str, mri: &str) -> Result<String, ConfigError> {
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error: toml_edit::TomlError| ConfigError::Edit(error.to_string()))?;
+    let service = document
+        .get_mut("service_participants")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+        .and_then(|services| {
+            services
+                .iter_mut()
+                .find(|table| table.get("name").and_then(toml_edit::Item::as_str) == Some(name))
+        })
+        .ok_or_else(|| ConfigError::Edit(format!("no [[service_participants]] table named {name}")))?;
+    service.insert("mri", toml_edit::value(mri));
+    Ok(document.to_string())
 }
 
 /// `text` with `mri = "<mri>"` set in the `[[accounts]]` table of `alias`.
@@ -463,6 +544,21 @@ fn with_account_mri(text: &str, alias: Alias, mri: &str) -> Result<String, Confi
         .ok_or_else(|| ConfigError::Edit(format!("no [[accounts]] table with alias {alias}")))?;
     account.insert("mri", toml_edit::value(mri));
     Ok(document.to_string())
+}
+
+/// Replaces `path` with `edited`, which was made from `read`, the text read from it before: only when the file still
+/// holds `read` when it is read again just before the replacement, so an edit made in between (by hand or by another
+/// writer, such as one taking an approval away) isn't undone by writing back the older text. Otherwise nothing is
+/// written ([`ConfigError::Changed`]).
+fn replace_unchanged(path: &Path, read: &str, edited: &str) -> Result<(), ConfigError> {
+    let now = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if now != read {
+        return Err(ConfigError::Changed(path.to_path_buf()));
+    }
+    replace_file(path, edited)
 }
 
 /// Replaces `path` with `text` through a new file beside it, renamed over it, with the old file's mode.
@@ -512,4 +608,29 @@ fn upn_domain(upn: &str) -> Result<String, ConfigError> {
         return Err(invalid());
     }
     Ok(domain.to_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{ConfigError, replace_unchanged};
+
+    #[test]
+    fn a_file_changed_since_it_was_read_is_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lab.toml");
+        fs::write(&path, "read\n").unwrap();
+        // edited by hand after the writer read it: the writer's text, made from the older one, isn't written back
+        fs::write(&path, "edited in between\n").unwrap();
+        let error = replace_unchanged(&path, "read\n", "read\nmri\n").unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Changed(ref changed) if *changed == path),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "edited in between\n");
+        // as it was read, it is replaced
+        replace_unchanged(&path, "edited in between\n", "edited in between\nmri\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "edited in between\nmri\n");
+    }
 }

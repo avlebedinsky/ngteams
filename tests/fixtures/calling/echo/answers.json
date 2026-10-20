@@ -1,0 +1,37 @@
+{
+  "_synthetic": "Made up, shaped like the echo-call capture of 2026-10-20 (read locally from its sanitized reference copy; docs/protocol/calling-echo.md): what the services answer during the test call. The TURN credentials, the call start's answer (the conversation, its links cut to their names), and the call controller's acceptance callback delivered over Trouter (its links cut to a few). <guid:N> are made-up ids; hosts' region names, credentials and paths are made up.",
+  "trap_tokens": {
+    "tokens": [{"realm": "\"rtcmedia\"", "username": "<token:1>", "password": "<token:2>"}],
+    "expires": 604800
+  },
+  "call_start_answer": {
+    "conversationController": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0?i=0-0-0-0&e=1",
+    "sequenceNumber": 1,
+    "subject": "",
+    "scenario": "UserInitiatedTestCall",
+    "region": "amer",
+    "conversationStartTime": "2000-01-01T00:00:00.0000000Z",
+    "links": {
+      "leave": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/leave?i=0-0-0-0&e=1",
+      "addParticipant": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/addParticipant?i=0-0-0-0&e=1",
+      "updateEndpointMetadata": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/updateEndpointMetadata?i=0-0-0-0&e=1",
+      "getAllParticipants": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/getAllParticipants?i=0-0-0-0&e=1",
+      "subscribe": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/broker-zz-01-prod-aks.broker.skype.com/api/v1/subscribe/<guid:1>/0?i=0-0-0-0"
+    }
+  },
+  "acceptance_callback": {
+    "method": "POST",
+    "path": "/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/03030303/call/acceptance/",
+    "body": {
+      "callAcceptance": {
+        "acceptedCallModalities": [],
+        "links": {
+          "acknowledgement": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/callAcceptance/<guid:5>/1/a1/1/acknowledge?i=0-0-0-0",
+          "callLeg": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/<guid:5>/1/a1/1?i=0-0-0-0&e=1",
+          "mediaRenegotiation": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/<guid:5>/1/a1/1/renegotiate?i=0-0-0-0&e=1",
+          "applyChannelParameters": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/mcProxy/<guid:5>/1/k1/1/applyChannelParameters?i=0-0-0-0&e=1"
+        }
+      }
+    }
+  }
+}

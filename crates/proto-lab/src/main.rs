@@ -16,7 +16,7 @@ use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
 use proto_lab::commands::export;
 use proto_lab::commands::login::{self, LoginOptions};
 use proto_lab::commands::status::{self, AccountStatus};
-use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord};
+use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_service_mri};
 use proto_lab::sanitize::Identities;
 use proto_lab::scenario::{self, RunOptions, ScenarioName};
 
@@ -85,6 +85,15 @@ enum Command {
         /// Refuse the export, writing nothing, on anything the checks find, instead of warning about it.
         #[arg(long)]
         strict: bool,
+    },
+    /// Record an approved service participant's MRI in lab.toml, once it is established (the echo service's: Task 18
+    /// of the M0 plan). Only for a participant lab.toml approves by name and records no MRI for yet, and only a bot's
+    /// MRI (`28:<guid>`).
+    ServiceMri {
+        /// The participant's name in lab.toml, such as `echo`.
+        name: String,
+        /// Its MRI.
+        mri: String,
     },
     /// Run a scenario in the lab profiles under the armed fence; exits non-zero when its goal isn't reached, the fence
     /// was breached, or the fence denied anything the scenario doesn't expect.
@@ -178,6 +187,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             headless,
             timeout,
         } => run_scenario(scenario, headless, timeout).await,
+        Command::ServiceMri { name, mri } => {
+            let outcome = record_service_mri(&LabLocations::from_env()?, &name, &mri)?;
+            match outcome {
+                MriRecord::Recorded => println!("{name}: MRI recorded in lab.toml"),
+                MriRecord::AlreadyRecorded => println!("{name}: MRI already in lab.toml"),
+            }
+            Ok(())
+        }
         Command::Export { capture, name, strict } => {
             let locations = LabLocations::from_env()?;
             let checks = if strict {

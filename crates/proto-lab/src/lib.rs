@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod arming;
 pub mod browser;
 pub mod bundles;
+pub mod calling;
 pub mod capture;
 pub mod cdp;
 pub mod classify;

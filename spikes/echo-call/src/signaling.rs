@@ -1,10 +1,29 @@
-//! Call signaling, shaped from the web client's bundle (version 26260.1717.5229.7049) only.
+//! Call signaling, shaped from the web client's bundle (version 26260.1717.5229.7049), then checked against the Task 18
+//! capture of the web client's test call (2026-10-20, `docs/protocol/calling-echo.md`). Nothing in this module sends
+//! anything.
 //!
-//! **Unconfirmed — needs the Task 18 capture.** Nothing here has been checked against live traffic: the lab accounts
-//! have no Teams license (`docs/backlog/lab-accounts-have-no-teams-license.md`), so no call was ever captured. The
-//! shapes below are what the bundle builds and reads; the endpoint the call start is posted to, its headers, the
-//! callback base URL (our Trouter endpoint) and the way an incoming call is delivered are not known yet, and nothing
-//! in this module sends anything. `docs/spikes/echo-call.md` lists what Task 18 has to confirm.
+//! **What the capture confirmed:** the call start's payload shape below (`participants.from/to`,
+//! `conversationRequest.links`, `callInvitation.callModalities`, the five call callback links, `mediaContent.blob` typed
+//! `application/sdp-ngc-1.0`); the callbacks arriving through Trouter at paths ending in `/call/<name>/` (the full path is
+//! the endpoint's push URL, `/callAgent/<agent id>/<random>/`, then `call/<name>/` or `conversation/<name>/`).
+//!
+//! **What it corrected or added (Task 19 follow-ups; the code below is unchanged):**
+//! - The call start goes to `POST https://api.flightproxy.teams.microsoft.com/api/v2/epconv` with `X-Skypetoken`. Its
+//!   answer is the conversation (`conversationController`, `links`: `leave`, `addParticipant`, `getAllParticipants`, …).
+//! - **The test call names no callee**: `participants.to` is empty and `conversationRequest.scenario` is
+//!   `UserInitiatedTestCall`; the client then adds the echo bot with `POST …/conv/<id>/add` (`to: [{id, participantId}]`,
+//!   `groupChat.threadId` of its 1:1 chat with the bot). [`call_start_body`] puts the callee in `to`, which is a plain
+//!   1:1 call to the bot, not the web client's test call (whether the bot answers that is unconfirmed).
+//! - The blob is not the browser's SDP as is: it is a Teams dialect (`RTP/SAVP`, inline candidates with real ports,
+//!   `a=x-ssrc-range`, `a=x-signaling-fb`, `a=label`, `b=CT`).
+//! - The remote SDP and the call leg's links came with the `call/acceptance/` callback (`callAcceptance.links`:
+//!   `acknowledgement`, `callLeg`, `mediaRenegotiation`, …), acknowledged by a `POST` to its `acknowledgement` link (and
+//!   answered over Trouter with `callAcceptanceAcknowledgement`). No `call/mediaAnswer/` delivery was seen.
+//! - TURN credentials come from `GET https://teams.microsoft.com/trap/tokens`:
+//!   `{"tokens":[{"realm","username","password"}],"expires":<seconds>}` (604800, 7 days; the realm keeps its quotes),
+//!   one level up from [`RelayToken`]'s shape. No relay descriptor (`addresses`, `fqdns`, ports) was seen: the client
+//!   uses fixed URLs on `gateway-world.az.relay.teams.cloud.microsoft` (`turn:` 3478 UDP, `turn:` 443 TCP, `turns:` 443).
+//! - No incoming call was delivered, so the `callNotification` shape stays unconfirmed.
 //!
 //! What the bundle shows, in our words:
 //! - A call starts with one POST whose JSON payload has `participants` (`from`: our id, display name, endpoint id,
@@ -90,7 +109,8 @@ pub struct Endpoint {
 }
 
 /// The JSON payload that starts a call: built only from a call the fence permitted, so its participants are exactly
-/// the permitted ones. `callback_base` is where the service calls us back (our Trouter URL). Unconfirmed.
+/// the permitted ones. `callback_base` is where the service calls us back (our Trouter URL). The shape is confirmed by
+/// the Task 18 capture; putting the echo bot in `to` is not what the web client's test call does (see the module docs).
 #[must_use]
 pub fn call_start_body(call: &Authorized<StartCall>, me: &Endpoint, offer_sdp: &str, callback_base: &str) -> Value {
     let request = call.request();
@@ -217,7 +237,8 @@ pub enum Action {
 /// Our one outgoing call, driven by the deliveries to its callback links. A delivery carries no call id and the links
 /// are the same for every call (see [`call_start_body`]), so nothing here tells our call's deliveries from a late one
 /// of an earlier call or another call's on the same endpoint: every callback delivery is taken as ours. Telling them
-/// apart needs the call id the Task 18 capture should show. Incoming calls are recognized and never acted on.
+/// apart needs more than the capture gave: each callback link carries a random path segment per link and call (the
+/// Task 18 capture), which could tell them apart. Incoming calls are recognized and never acted on.
 #[derive(Debug)]
 pub struct OutgoingCall {
     state: CallState,
@@ -327,7 +348,7 @@ pub struct RelayToken {
     pub credentials: Credentials,
     /// The realm the server is expected to name.
     pub realm: Option<String>,
-    /// As the service gives it (its unit is not confirmed).
+    /// As the service gives it: seconds (604800 in the Task 18 capture, at the top level of the answer).
     pub expires: Option<i64>,
 }
 

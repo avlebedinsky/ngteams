@@ -162,8 +162,9 @@ Rules that keep the mapping fail-closed:
     entry in a team channel (`PUT v1/threads/<channel>/members/<own MRI>`, `{"expiration": <n>}`) and a conversation
     property (`PUT v1/users/ME/conversations/<channel>/properties?name=lastTimeFavorited`). They are `Unknown` because
     channels aren't mapped, and denied; they would be denied by membership too.
-- Calls (`Call`, `CallAnswer`), meetings, invites and channel posts aren't mapped: calling goes through other services
-  (Task 18's capture). The middle tier (`/api/mt/…`, `/api/apps/…`) and CSA (`chatsvcagg`) mutating requests aren't
+- Calls (`Call`, `CallAnswer`), meetings, invites and channel posts aren't mapped here: calling goes through other
+  services. A run that calls (`Classifier::calling`, Task 18) maps only a call's start, as a new call of its caller and
+  callees; every write on an existing call and any answer stay unknown ([calling-echo.md](calling-echo.md)). The middle tier (`/api/mt/…`, `/api/apps/…`) and CSA (`chatsvcagg`) mutating requests aren't
   mapped either; live they were all lookups sent as `POST` (below), denied as `Unknown`.
 
 ## How a run uses it

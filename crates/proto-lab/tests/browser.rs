@@ -82,6 +82,7 @@ fn headed_with_fake_media_still_leaves_the_port_to_chrome() {
         user_data_dir: PathBuf::from("/tmp/profile with space"),
         display: Display::Headed,
         media: Media::Fake { audio: None },
+        user_agent: None,
     };
     let args = strings(&options.args());
 
@@ -108,6 +109,22 @@ fn fake_media_can_play_a_wav_file_as_the_microphone() {
 
     assert!(args.contains(&"--use-fake-device-for-media-stream".to_owned()));
     assert!(args.contains(&"--use-file-for-fake-audio-capture=/lab/tone.wav".to_owned()));
+}
+
+#[test]
+fn a_user_agent_replaces_the_browser_s_own() {
+    let mut options = LaunchOptions::new(PathBuf::from("/p"));
+    assert!(
+        !strings(&options.args())
+            .iter()
+            .any(|arg| arg.starts_with("--user-agent"))
+    );
+    options.user_agent = Some("Mozilla/5.0 (X11; Linux x86_64) Chrome/1.0".to_owned());
+    let args = strings(&options.args());
+
+    assert!(args.contains(&"--user-agent=Mozilla/5.0 (X11; Linux x86_64) Chrome/1.0".to_owned()));
+    // the starting page stays last
+    assert_eq!(args.last().map(String::as_str), Some("about:blank"));
 }
 
 // --- DevToolsActivePort ---

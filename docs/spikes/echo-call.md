@@ -121,6 +121,29 @@ refuses on purpose: the signaling is unconfirmed, and nothing unconfirmed is sen
 | call start, callbacks, TURN tokens | Task 18's capture | `docs/protocol/calling-echo.md` and `tests/fixtures/calling/echo/*.json` exist; then `signaling.rs` is checked against them and `call::start` sends |
 | the live echo: RTT, transport used | all of the above | `echo-call` runs end to end |
 
+## Task 18's capture (2026-10-20): what it settled for this spike
+
+The lab accounts got a license, and `proto-lab run echo-call` captured the web client's own test call
+([calling-echo.md](../protocol/calling-echo.md)). For this spike:
+
+- **Echo MRI**: established and recorded in `lab.toml` (`proto-lab service-mri echo <mri>`), so `call.rs`'s first
+  stop is gone; the bundle's `28:<guid>` candidate was the one the live client uses.
+- **Confirmed**: the call start's payload shape and its callback links, callbacks through Trouter at `…/call/<name>/`,
+  Opus with `useinbandfec`, BUNDLE and rtcp-mux on both sides (question 3 in part), TURN over UDP 3478, TCP 443 and
+  TLS 443 offered (question 5: TLS on 443 is in use, so TURNS matters).
+- **Corrected, for a Task 19 follow-up**: the endpoint is `POST https://api.flightproxy.teams.microsoft.com/api/v2/epconv`
+  with `X-Skypetoken` (question 1); the test call starts a conversation with nobody else in it
+  (`scenario: "UserInitiatedTestCall"`, `to: []`) and adds the echo bot with `…/conv/<id>/add`, where
+  `call_start_body` puts the bot in `to`; the blob is a Teams SDP dialect, not the browser's SDP as is (question 3);
+  the remote SDP and the call leg's links come with the `call/acceptance/` callback and are acknowledged by a `POST`
+  (no `call/mediaAnswer/` was seen); TURN credentials come from `GET https://teams.microsoft.com/trap/tokens`,
+  `{"tokens":[{realm, username, password}],"expires":<seconds>}`, 7 days (question 4), and no relay descriptor
+  appears: the relay is a fixed host. The code is unchanged; `call::start` still refuses to send.
+- **Still open**: the echo never joined in the capture, because the fence denies every write on an existing call (the
+  `add` among them) until it can read a call's members; so whether the echo re-times its playback (question 6) and
+  the round-trip delay through it are still unknown. The same holds for the native client: its follow-ups on the call
+  need that membership read too (`docs/backlog/fence-call-follow-ups.md`).
+
 ## Open questions for M3
 
 1. **Where the call start goes and how it is authenticated.** The bundle builds the payload but the endpoint is

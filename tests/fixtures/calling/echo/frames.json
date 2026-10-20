@@ -1,0 +1,57 @@
+{
+  "_synthetic": "Made up, shaped like the echo-call capture of 2026-10-20 (read locally from its sanitized reference copy; docs/protocol/calling-echo.md): text frames the web client sends on its Trouter sockets during the test call, each with what FrameClassifier::calling makes of it. Tokens, ids, correlation vectors and the endpoint names are made up.",
+  "sockets": {
+    "first": "wss://go.trouter.teams.microsoft.com/v4/c/?tc=%7B%22cv%22%3A%220.0%22%2C%22ua%22%3A%22TeamsCDL%22%7D&auth=true&timeout=40",
+    "regional": "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c?tc=%7B%22cv%22%3A%220.0%22%7D&auth=true&timeout=40"
+  },
+  "cases": [
+    {
+      "name": "authentication on the first socket",
+      "socket": "first",
+      "frame": "5:::{\"name\":\"user.authenticate\",\"args\":[{\"headers\":{\"X-Ms-Test-User\":\"False\",\"Authorization\":\"Bearer <token:1>\",\"X-MS-Migration\":\"True\"}}]}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "authentication on the regional socket, with the reconnect parameters handed over",
+      "socket": "regional",
+      "frame": "5:::{\"name\":\"user.authenticate\",\"args\":[{\"headers\":{\"X-Ms-Test-User\":\"False\",\"Authorization\":\"Bearer <token:1>\",\"X-MS-Migration\":\"True\"},\"connectparams\":{\"issuer\":\"\",\"scae\":\"1\",\"sig\":\"\",\"sr\":\"SyntheticSession000000\",\"sp\":\"pub-ent-zz-01\",\"se\":\"1700000600000\",\"st\":\"1700000000000\"}}]}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "the keep-alive",
+      "socket": "regional",
+      "frame": "5:2+::{\"name\":\"ping\"}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "the client's own activity",
+      "socket": "regional",
+      "frame": "5:1+::{\"name\":\"user.activity\",\"args\":[{\"state\":\"active\",\"cv\":\"SyntheticCorrelation00.0.1\"}]}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "the acknowledgement of the service's message-loss report",
+      "socket": "regional",
+      "frame": "5:3+::{\"name\":\"trouter.processed_message_loss\",\"args\":[{\"droppedIndicators\":[{\"tag\":\"\",\"etag\":\"2000-01-01T00:00:00.0000000Z\"},{\"tag\":\"messaging\",\"etag\":\"2000-01-01T00:00:00.0000001Z\"}]}]}",
+      "expected": "own:trouter_session"
+    },
+    {
+      "name": "a delivery acknowledged with an empty body (unknown: which deliveries an empty success only acknowledges isn't established)",
+      "socket": "first",
+      "frame": "3:::{\"id\":1234567,\"status\":200,\"headers\":{\"MS-CV\":\"SyntheticCorrelation00.1.0\",\"trouter-request\":\"{\\\"id\\\":\\\"x\\\",\\\"src\\\":\\\"y\\\"}\",\"trouter-client\":\"{\\\"cd\\\":2}\"},\"body\":\"\"}",
+      "expected": "unknown"
+    },
+    {
+      "name": "the call acceptance answered over the socket, with the call's next links in the body (a call follow-up: unknown)",
+      "socket": "first",
+      "frame": "3:::{\"id\":7654321,\"status\":200,\"headers\":{\"MS-CV\":\"SyntheticCorrelation00.1.0\",\"trouter-request\":\"{\\\"id\\\":\\\"x\\\",\\\"src\\\":\\\"y\\\"}\",\"trouter-client\":\"{\\\"cd\\\":2}\"},\"body\":\"{\\\"callAcceptanceAcknowledgement\\\":{\\\"links\\\":{\\\"mediaRenegotiation\\\":\\\"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/x/1/call/mediaRenegotiation/\\\"}}}\"}",
+      "expected": "unknown"
+    },
+    {
+      "name": "the disconnect",
+      "socket": "first",
+      "frame": "0::",
+      "expected": "own:trouter_session"
+    }
+  ]
+}

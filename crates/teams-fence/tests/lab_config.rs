@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use std::os::unix::fs::PermissionsExt as _;
 
-use teams_fence::lab::{Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri};
+use teams_fence::lab::{
+    Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri, record_service_mri,
+};
 
 const DATA: &str = "/lab/data";
 
@@ -420,4 +422,96 @@ fn an_invalid_or_missing_file_gets_nothing_recorded() {
     let missing = record_account_mri(&locations, Alias::A, "<mri:a>").unwrap_err();
     assert!(matches!(missing, ConfigError::Read { .. }), "{missing:?}");
     assert!(names_in(dir.path()).unwrap().is_empty());
+}
+
+// --- recording an approved service participant's MRI ---
+
+/// A made-up bot MRI.
+const BOT: &str = "28:00000000-0000-4000-8000-0000000000e0";
+
+#[test]
+fn a_service_mri_is_recorded_for_the_named_service_keeping_the_rest_of_the_file() {
+    let (dir, locations) = lab_file(COMMENTED).unwrap();
+    assert_eq!(
+        record_service_mri(&locations, "echo", BOT).unwrap(),
+        MriRecord::Recorded
+    );
+
+    let text = fs::read_to_string(&locations.config_file).unwrap();
+    for kept in [
+        "# The lab accounts. Passwords never go here.",
+        "# approved by the user",
+        "mri = \"<mri:c>\"",
+    ] {
+        assert!(text.contains(kept), "lost {kept:?}:\n{text}");
+    }
+    let config = LabConfig::load(&locations).unwrap();
+    let echo = config
+        .service_participants()
+        .iter()
+        .find(|service| service.name == "echo")
+        .unwrap();
+    assert_eq!(echo.mri.as_deref(), Some(BOT));
+    // no account changed
+    assert_eq!(config.account(Alias::A).mri, None);
+    let mode = fs::metadata(&locations.config_file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the file's mode is kept");
+    assert_eq!(names_in(dir.path()).unwrap(), ["lab.toml"], "no temporary file is left");
+
+    // the same again changes nothing
+    let before = fs::read_to_string(&locations.config_file).unwrap();
+    assert_eq!(
+        record_service_mri(&locations, "echo", BOT).unwrap(),
+        MriRecord::AlreadyRecorded
+    );
+    assert_eq!(fs::read_to_string(&locations.config_file).unwrap(), before);
+}
+
+#[test]
+fn a_service_mri_is_refused_for_an_unknown_service_another_mri_or_one_not_a_bot_s() {
+    let (dir, locations) = lab_file(COMMENTED).unwrap();
+    let before = fs::read_to_string(&locations.config_file).unwrap();
+
+    // only a service the user approved, by its name in lab.toml
+    let unknown = record_service_mri(&locations, "other", BOT).unwrap_err();
+    assert!(
+        matches!(unknown, ConfigError::UnknownService(ref name) if name == "other"),
+        "{unknown:?}"
+    );
+    // only a bot's MRI: `28:` and a lowercase GUID, nothing else
+    for mri in [
+        "8:orgid:00000000-0000-4000-8000-0000000000e0",
+        "28:",
+        "28:not-a-guid",
+        "28:00000000-0000-4000-8000-0000000000E0",
+        "28:00000000-0000-4000-8000-0000000000e0 ",
+        "28:00000000-0000-4000-8000-0000000000e0,28:00000000-0000-4000-8000-0000000000e1",
+        "28:cloud:00000000-0000-4000-8000-0000000000e0",
+        "",
+    ] {
+        let error = record_service_mri(&locations, "echo", mri).unwrap_err();
+        assert!(matches!(error, ConfigError::NotABotMri(_)), "{mri:?}: {error:?}");
+    }
+    assert_eq!(fs::read_to_string(&locations.config_file).unwrap(), before);
+
+    // once recorded, another MRI isn't put in its place
+    record_service_mri(&locations, "echo", BOT).unwrap();
+    let recorded = fs::read_to_string(&locations.config_file).unwrap();
+    let conflict = record_service_mri(&locations, "echo", "28:00000000-0000-4000-8000-0000000000e1").unwrap_err();
+    assert!(
+        matches!(conflict, ConfigError::ServiceMriConflict(ref name) if name == "echo"),
+        "{conflict:?}"
+    );
+    assert_eq!(fs::read_to_string(&locations.config_file).unwrap(), recorded);
+    assert_eq!(names_in(dir.path()).unwrap(), ["lab.toml"]);
+}
+
+#[test]
+fn a_service_mri_another_participant_has_is_refused() {
+    let text = COMMENTED.replace("mri = \"<mri:c>\"", &format!("mri = \"{BOT}\""));
+    let (_dir, locations) = lab_file(&text).unwrap();
+    let before = fs::read_to_string(&locations.config_file).unwrap();
+    let taken = record_service_mri(&locations, "echo", BOT).unwrap_err();
+    assert!(matches!(taken, ConfigError::DuplicateMri(_)), "{taken:?}");
+    assert_eq!(fs::read_to_string(&locations.config_file).unwrap(), before);
 }

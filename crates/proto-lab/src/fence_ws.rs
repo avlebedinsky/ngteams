@@ -194,6 +194,8 @@ impl FrameRule {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FrameClassifier {
     own: Vec<FrameRule>,
+    /// Whether the calling stack's own-state frames pass ([`FrameClassifier::calling`]).
+    calling: bool,
 }
 
 impl FrameClassifier {
@@ -202,6 +204,16 @@ impl FrameClassifier {
     #[must_use]
     pub fn seeded() -> Self {
         Self::default()
+    }
+
+    /// The seeded list plus the calling stack's own-state frames ([`crate::calling::trouter_frame`]): what a run that
+    /// calls (`echo-call`) needs for the account's own push channel.
+    #[must_use]
+    pub fn calling() -> Self {
+        Self {
+            calling: true,
+            ..Self::seeded()
+        }
     }
 
     /// The same list plus one more own-state rule. Tests use it to stand a local socket in for a Microsoft one.
@@ -215,10 +227,15 @@ impl FrameClassifier {
     /// noticed by whoever is on the other end).
     #[must_use]
     pub fn classify(&self, frame: &Frame) -> Classification {
-        self.own
-            .iter()
-            .find(|rule| rule.matches(frame))
-            .map_or(Classification::Unknown, |rule| Classification::Own(rule.kind))
+        if let Some(rule) = self.own.iter().find(|rule| rule.matches(frame)) {
+            return Classification::Own(rule.kind);
+        }
+        match &frame.payload {
+            Payload::Text(text) if self.calling => {
+                crate::calling::trouter_frame(&frame.url, text).map_or(Classification::Unknown, Classification::Own)
+            }
+            _ => Classification::Unknown,
+        }
     }
 }
 
