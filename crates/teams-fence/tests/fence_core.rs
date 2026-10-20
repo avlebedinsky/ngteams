@@ -819,6 +819,16 @@ fn an_arming_failure_entry_names_the_step_and_its_containment_and_no_ids() {
         containment: Containment::Failed,
     })
     .unwrap();
+    log.record_arming(&ArmingRecord {
+        target_type: "worker",
+        step: Some("Runtime.evaluate"),
+        cause: ArmingCause::ConnectionGone,
+        resume_sent: false,
+        held: true,
+        close: CloseOutcome::ConnectionGone,
+        containment: Containment::Failed,
+    })
+    .unwrap();
 
     let entries = log_entries(&lab.log_path).unwrap();
     let expected = [
@@ -843,6 +853,18 @@ fn an_arming_failure_entry_names_the_step_and_its_containment_and_no_ids() {
             "resume_sent": false,
             "held": true,
             "close": "no_target",
+            "containment": "failed",
+            "message": "a target not armed may have run unguarded",
+        }),
+        serde_json::json!({
+            "verdict": "breach",
+            "event": "arming_failure",
+            "target_type": "worker",
+            "step": "Runtime.evaluate",
+            "cause": "connection_gone",
+            "resume_sent": false,
+            "held": true,
+            "close": "connection_gone",
             "containment": "failed",
             "message": "a target not armed may have run unguarded",
         }),

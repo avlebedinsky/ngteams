@@ -364,10 +364,17 @@ impl ArmError {
         }
     }
 
-    /// How arming failed, as `fence.log` records it.
+    /// How arming failed, as `fence.log` records it. A step that failed because the connection was gone is
+    /// [`ArmingCause::ConnectionGone`], not an answer of the browser's.
     #[must_use]
     pub fn cause(&self) -> ArmingCause {
         match self {
+            Self::Step {
+                source: CdpError::Closed,
+                ..
+            }
+            | Self::Cdp(CdpError::Closed)
+            | Self::ConnectionLost => ArmingCause::ConnectionGone,
             Self::StepTimeout(_) => ArmingCause::NoAnswer,
             Self::Guard(_) => ArmingCause::GuardNotArmed,
             Self::Malformed(_) => ArmingCause::Malformed,
@@ -551,8 +558,10 @@ struct Shared {
     broken: AtomicBool,
     /// [`ArmedBrowser::close`] has asked the browser to close, and decides from its answer whether to kill it.
     closing: AtomicBool,
-    /// The browser was sent `SIGKILL` to contain a target that couldn't be armed or closed ([`Shared::contain`]): the
-    /// connection ending after that is expected. Set and read under the [`Shared::browser`] lock.
+    /// The browser was sent `SIGKILL` to contain a target that couldn't be armed or closed ([`Shared::contain`]), and
+    /// the connection's reader hadn't seen the connection end by then: its end after that is expected. Set and read
+    /// under the [`Shared::browser`] lock. (A socket that dropped just before the signal, its end not read yet, still
+    /// counts as after: an accepted risk, `docs/backlog/containment-kill-cannot-order-an-unread-eof.md`.)
     contained: AtomicBool,
     /// How that containment ended, once it has; every target that needs it waits for the one kill.
     containment: tokio::sync::OnceCell<Containment>,
@@ -581,12 +590,19 @@ impl Shared {
     /// Kills the browser to contain a target that couldn't be armed and whose close wasn't confirmed, once for the
     /// run: every caller gets the outcome of the one kill.
     ///
-    /// The whole process group is sent `SIGKILL` while the fence's connection is still open, so the browser never sees
-    /// that connection drop (which would release every target it holds) while it can still act. Only a group that
-    /// took the signal while the connection was up marks the connection's end as expected; the browser reaped then
-    /// makes it [`Containment::BrowserKilled`]. A browser already gone (the fence is closing, or lost its connection),
-    /// a connection already closed (the browser is still killed, and the loss stays a breach of its own), a group that
-    /// couldn't be signalled or a browser that couldn't be reaped is [`Containment::Failed`].
+    /// The whole process group is sent `SIGKILL` while the fence's connection is still open as far as the fence knows,
+    /// so the browser shouldn't see that connection drop (which would release every target it holds) while it can
+    /// still act. What is checked is that the connection's reader hadn't seen the connection end
+    /// ([`Cdp::is_closed`]) when the group was signalled; only then is the connection's end marked as expected, and
+    /// the browser reaped then makes it [`Containment::BrowserKilled`]. A browser already gone (the fence is closing,
+    /// or lost its connection), a connection already seen closed (the browser is still killed, and the loss stays a
+    /// breach of its own), a group that couldn't be signalled or a browser that couldn't be reaped is
+    /// [`Containment::Failed`].
+    ///
+    /// The check can't order an end the reader hasn't read yet against the signal: a socket Chrome dropped (or that
+    /// broke) just before the kill, its EOF still unread, is classified as contained, though the drop came first and
+    /// could have released a held target. Once the kill is sent the connection always ends, so nothing in userspace
+    /// tells the two apart; this is an accepted risk (`docs/backlog/containment-kill-cannot-order-an-unread-eof.md`).
     async fn contain(&self, cdp: &Cdp) -> Containment {
         *self.containment.get_or_init(|| self.kill_to_contain(cdp)).await
     }
@@ -597,7 +613,8 @@ impl Shared {
             let Some(browser) = slot.take() else {
                 return Containment::Failed;
             };
-            // read before the kill: a connection that ended first may have let the held targets go
+            // read before the kill: a connection seen ending first may have let the held targets go (an end not read
+            // yet can't be seen here; see the doc above)
             let lost_first = cdp.is_closed();
             if browser.start_kill().is_err() || lost_first {
                 return Containment::Failed;
@@ -635,7 +652,8 @@ impl Shared {
     fn mark_lost(&self) {
         let mut taps = self.taps();
         self.lost.store(true, Ordering::SeqCst);
-        // under the browser's lock: a containment kill sets its mark under it before the connection can end
+        // under the browser's lock: a containment kill signals and sets its mark under it, so an end its own signal
+        // caused is read only after the mark
         let expected = {
             let _browser = self.browser();
             self.closing.load(Ordering::SeqCst) || self.contained.load(Ordering::SeqCst)
@@ -1170,11 +1188,13 @@ fn forget(shared: &Shared, session: Option<&SessionId>) {
     }
 }
 
-/// Asks the browser to close a target, waiting up to [`STEP_TIMEOUT`] for the answer.
+/// Asks the browser to close a target, waiting up to [`STEP_TIMEOUT`] for the answer. A connection gone before the
+/// answer is [`CloseOutcome::ConnectionGone`]: the browser never answered.
 async fn close_target(cdp: &Cdp, target_id: &str) -> CloseOutcome {
     let call = cdp.call(None, "Target.closeTarget", json!({"targetId": target_id}));
     match tokio::time::timeout(STEP_TIMEOUT, call).await {
         Err(_) => CloseOutcome::Unanswered,
+        Ok(Err(CdpError::Closed)) => CloseOutcome::ConnectionGone,
         Ok(Ok(result)) if result["success"] != json!(false) => CloseOutcome::Closed,
         Ok(_) => CloseOutcome::Refused,
     }

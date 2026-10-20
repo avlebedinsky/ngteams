@@ -126,12 +126,14 @@ struct RequestEntry<'a> {
 pub enum ArmingCause {
     /// The step got no answer in time.
     NoAnswer,
-    /// The browser answered the step with an error.
+    /// The browser answered the step with an error (or with a message the fence couldn't read).
     Error,
     /// The WebSocket guard didn't report itself armed.
     GuardNotArmed,
     /// The attach event didn't name the target or its session.
     Malformed,
+    /// The fence's connection to the browser was gone before the step was answered: the browser never answered it.
+    ConnectionGone,
 }
 
 /// What `Target.closeTarget` gave for a target that couldn't be armed.
@@ -144,6 +146,8 @@ pub enum CloseOutcome {
     Refused,
     /// No answer in time.
     Unanswered,
+    /// The fence's connection to the browser was gone before an answer came: the browser never answered.
+    ConnectionGone,
     /// There was no target id to close.
     NoTarget,
 }
@@ -155,7 +159,7 @@ pub enum Containment {
     /// The browser confirmed closing it.
     Closed,
     /// Its close wasn't confirmed, so the whole browser was killed (its process group, while the fence's connection
-    /// still held the target) and reaped.
+    /// still held the target as far as the fence could see: its reader hadn't seen the connection end) and reaped.
     BrowserKilled,
     /// Neither: the browser was gone already, or couldn't be killed and reaped.
     Failed,

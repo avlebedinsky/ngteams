@@ -16,10 +16,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, STEP_TIMEOUT, Step, TEAMS_ORIGINS, TargetKind};
+use proto_lab::arming::{
+    ArmError, ArmOptions, ArmedBrowser, ArmedTarget, STEP_TIMEOUT, Step, TEAMS_ORIGINS, TargetKind,
+};
 use proto_lab::browser::{Browser, BrowserError, LaunchOptions};
 use proto_lab::capture::{Capture, Recorder, RtcHooks};
-use proto_lab::cdp::{Cdp, SessionId};
+use proto_lab::cdp::{Cdp, CdpError, SessionId};
 use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, classify, is_mutating};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{DenyCause, HttpFence, MalformedPause, PausedRequest, Verdict};
@@ -1147,7 +1149,8 @@ async fn a_connection_lost_before_the_containment_is_a_breach() {
     let lost = iframe_that_fails(&fake, &armed, "S-lost").await.unwrap();
 
     let failure = &lost.unarmed[0];
-    assert_eq!(failure.close, CloseOutcome::Refused, "{failure:?}");
+    // the fake hung up on the close: the browser never answered it
+    assert_eq!(failure.close, CloseOutcome::ConnectionGone, "{failure:?}");
     assert_eq!(failure.containment, Containment::Failed, "{failure:?}");
     assert!(lost.breached(), "{}", lost.summary());
     // the loss is a breach of its own too
@@ -1167,7 +1170,30 @@ async fn a_connection_lost_before_the_containment_is_a_breach() {
         process::gone(fake.helper().unwrap()).await,
         "the browser outlived its fence"
     );
-    assert_eq!(logged_failures(&lab).unwrap()[0]["verdict"], "breach");
+    let logged = logged_failures(&lab).unwrap();
+    assert_eq!(logged[0]["verdict"], "breach");
+    assert_eq!(logged[0]["close"], "connection_gone");
+}
+
+#[test]
+fn a_step_that_failed_on_a_gone_connection_is_not_logged_as_the_browser_s_answer() {
+    let gone = [
+        ArmError::Step {
+            step: Step::Network,
+            source: CdpError::Closed,
+        },
+        ArmError::Cdp(CdpError::Closed),
+        ArmError::ConnectionLost,
+    ];
+    for error in &gone {
+        assert_eq!(error.cause(), ArmingCause::ConnectionGone, "{error:?}");
+    }
+    let answered = ArmError::Step {
+        step: Step::Network,
+        source: CdpError::Malformed("not JSON".to_owned()),
+    };
+    assert_eq!(answered.cause(), ArmingCause::Error);
+    assert_eq!(ArmError::StepTimeout(Step::Fetch).cause(), ArmingCause::NoAnswer);
 }
 
 #[tokio::test]
