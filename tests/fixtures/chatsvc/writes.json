@@ -1,0 +1,181 @@
+{
+  "_synthetic": "Made up, not captured: chat service requests as the web bundle builds them (docs/protocol/fence-targets.md), each with the write the fence maps it to, or unknown. To be checked against, and joined by, sanitized requests from the load/ab-chat capture once the lab accounts have a Teams license. <guid:a>, <guid:b> are lab accounts' object ids, <guid:x> an outsider's; ids are percent-encoded in paths as the client encodes them. Tests fill in made-up GUIDs.",
+  "base": "https://teams.microsoft.com/api/chatsvc/emea/v1",
+  "cases": [
+    {
+      "name": "a message in a 1:1 chat",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "<p>hello</p>", "messagetype": "RichText/Html", "contenttype": "text", "clientmessageid": "1"},
+      "expect": {"kind": "message", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "a plain-text message in a group chat",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3Agroupchat0001%40thread.v2/messages",
+      "body": {"content": "hello", "messagetype": "Text"},
+      "expect": {"kind": "message", "conversation": "19:groupchat0001@thread.v2"}
+    },
+    {
+      "name": "typing",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "", "messagetype": "Control/Typing", "contenttype": "Application/Message"},
+      "expect": {"kind": "typing", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "typing stopped",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "", "messagetype": "Control/ClearTyping"},
+      "expect": {"kind": "typing", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "an edit",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000",
+      "body": {"content": "<p>edited</p>", "messagetype": "RichText/Html"},
+      "expect": {"kind": "edit", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "a soft delete",
+      "method": "DELETE",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000?behavior=softDelete",
+      "body": null,
+      "expect": {"kind": "delete", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "a reaction",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000/properties?name=emotions",
+      "body": {"emotions": {"key": "like", "value": 1760000000001}},
+      "expect": {"kind": "reaction", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "a reaction taken back",
+      "method": "DELETE",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000000000/properties?name=emotions",
+      "body": {"emotions": {"key": "like"}},
+      "expect": {"kind": "reaction", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "a read receipt",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/properties?name=consumptionhorizon",
+      "body": {"consumptionhorizon": "1760000000000;1760000000000;1"},
+      "expect": {"kind": "read_receipt", "conversation": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+    },
+    {
+      "name": "a new chat",
+      "method": "POST",
+      "path": "/threads",
+      "body": {"members": [{"id": "8:orgid:<guid:a>", "role": "Admin"}, {"id": "8:orgid:<guid:b>", "role": "Admin"}], "properties": {"threadType": "chat", "fixedRoster": true, "uniquerosterthread": true}},
+      "expect": {"kind": "chat_create", "new": true, "added": ["8:orgid:<guid:a>", "8:orgid:<guid:b>"]}
+    },
+    {
+      "name": "members added to a chat",
+      "method": "PUT",
+      "path": "/threads/19%3Agroupchat0001%40thread.v2/members",
+      "body": {"members": [{"id": "8:orgid:<guid:x>", "role": "User"}]},
+      "expect": {"kind": "member_change", "conversation": "19:groupchat0001@thread.v2", "added": ["8:orgid:<guid:x>"]}
+    },
+    {
+      "name": "one member's role changed",
+      "method": "PUT",
+      "path": "/threads/19%3Agroupchat0001%40thread.v2/members/8:orgid:<guid:b>",
+      "body": {"role": "Admin"},
+      "expect": {"kind": "member_change", "conversation": "19:groupchat0001@thread.v2", "added": ["8:orgid:<guid:b>"]}
+    },
+    {
+      "name": "a member removed",
+      "method": "DELETE",
+      "path": "/threads/19%3Agroupchat0001%40thread.v2/members/8:orgid:<guid:b>",
+      "body": null,
+      "expect": {"kind": "member_change", "conversation": "19:groupchat0001@thread.v2"}
+    },
+    {
+      "name": "a channel post (not mapped: channels need a team)",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3Achannel0001%40thread.tacv2/messages",
+      "body": {"content": "hi", "messagetype": "RichText/Html"},
+      "expect": "unknown"
+    },
+    {
+      "name": "a reply in a channel thread",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3Achannel0001%40thread.tacv2%3Bmessageid%3D1760000000000/messages",
+      "body": {"content": "hi", "messagetype": "RichText/Html"},
+      "expect": "unknown"
+    },
+    {
+      "name": "a message of an unknown type",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": {"content": "", "messagetype": "Event/Call"},
+      "expect": "unknown"
+    },
+    {
+      "name": "a message whose body Chrome didn't inline",
+      "method": "POST",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+      "body": null,
+      "expect": "unknown"
+    },
+    {
+      "name": "a new chat without members",
+      "method": "POST",
+      "path": "/threads",
+      "body": {"properties": {"threadType": "chat"}},
+      "expect": "unknown"
+    },
+    {
+      "name": "a conversation property other than the read horizon",
+      "method": "PUT",
+      "path": "/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/properties?name=favorite",
+      "body": {"favorite": true},
+      "expect": "unknown"
+    },
+    {
+      "name": "a thread property (the topic)",
+      "method": "PUT",
+      "path": "/threads/19%3Agroupchat0001%40thread.v2/properties?name=topic",
+      "body": {"topic": "a topic"},
+      "expect": "unknown"
+    },
+    {
+      "name": "every member's property at once",
+      "method": "PUT",
+      "path": "/threads/19%3Agroupchat0001%40thread.v2/members/ALL?selectMemberRoles=User&excludeBots=true",
+      "body": {"role": "User"},
+      "expect": "unknown"
+    },
+    {
+      "name": "an endpoint registration (account-level, not reviewed as own state)",
+      "method": "PUT",
+      "url": "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints/<guid:a>",
+      "body": {"startingTimeSpan": 0},
+      "expect": "unknown"
+    },
+    {
+      "name": "the user's own property",
+      "method": "PUT",
+      "path": "/users/ME/properties?name=userDetails",
+      "body": {"userDetails": "{}"},
+      "expect": "unknown"
+    },
+    {
+      "name": "a draft",
+      "method": "POST",
+      "path": "/users/ME/drafts",
+      "body": {"content": "draft"},
+      "expect": "unknown"
+    },
+    {
+      "name": "a bot invoke",
+      "method": "POST",
+      "path": "/agents/28:<guid:x>/invoke",
+      "body": {"text": "hi"},
+      "expect": "unknown"
+    }
+  ]
+}

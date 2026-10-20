@@ -53,6 +53,8 @@ httpdate = "1.0.3"
 log = "0.4.34"
 # the STUN long-term credential key: MD5(username:realm:password), RFC 8489 9.2.2
 md-5 = "0.11.0"
+# decodes the chat service's path segments (encoded conversation ids) when the fence maps a write
+percent-encoding = "2.3.2"
 # The async-io flavour GPUI's Linux platform takes too: its ashpd and zbus refuse to build with both `async-io` and
 # `tokio` on, and workspace builds unify features, so oo7's default `tokio` would break every workspace build with
 # GPUI in it. async-io runs its own reactor thread, so the futures still run under tokio.

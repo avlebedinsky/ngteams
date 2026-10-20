@@ -10,14 +10,16 @@
 //!
 //! Nothing outside this crate can bend a decision: a lab binary builds its fence only with [`Fence::open_lab`] (the
 //! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed, so its sources are
-//! the ones this crate defines ([`FailClosed`], which denies every write whose scope has to be fetched, until the live
-//! source exists). The `test-support` feature lifts both for tests (`Fence::new` over any `Roster::new`, `FenceLog::from_writer`, any type as a
+//! the ones this crate defines: [`FailClosed`], which denies every write whose scope has to be fetched, and
+//! [`LiveMembershipSource`], which reads a scope's members from Teams' chat service itself, the caller supplying only
+//! the lab account's credential. The `test-support` feature lifts both for tests (`Fence::new` over any `Roster::new`, `FenceLog::from_writer`, any type as a
 //! membership source); only dev-dependencies enable it, and a lab binary refuses to run when a build turned it on
 //! ([`test_support_enabled`]).
 
 mod decision;
 pub mod lab;
 mod log;
+mod membership;
 mod target;
 
 pub use decision::{
@@ -25,6 +27,10 @@ pub use decision::{
     PartialReason, Roster, WritePermit,
 };
 pub use log::{Channel, FenceLog, RequestOutcome, RequestRecord};
+pub use membership::{
+    AFD_HOSTS, ChatCredential, FETCH_TIMEOUT, LiveMembershipSource, LiveSourceError, MAX_BODY, REGIONAL_SUFFIX,
+    chat_service_path, one_to_one_pair, parse_thread,
+};
 pub use target::{Mri, Scope, Target, WriteKind};
 
 /// Whether this build has the `test-support` feature, which lets any code build a fence over any roster and log and

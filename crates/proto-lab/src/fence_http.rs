@@ -21,13 +21,24 @@
 //! its request was already let through at the request stage, and continuing a response sends nothing. So the catch
 //! only ever fails what would otherwise go on; it lets nothing through that the fence would deny, and a fence without
 //! one pauses no response at all (one paused anyway is failed, and fails the run).
+//!
+//! A run can also force a deny ([`HttpFence::force_deny`], [`ForcedDeny`]): a request it matches is denied before it is
+//! classified, whatever it is. That is how a scenario checks, live, that a denied write never leaves the browser.
+//!
+//! For a run that writes, [`HttpFence::with_credentials`] hands the live membership source the lab account's chat
+//! service credential: [`HttpFence::handle`] offers every paused request's URL and headers, from the raw event, to
+//! [`ChatCredential::from_request`] before it builds the [`PausedRequest`], which never holds a header. The raw event,
+//! headers included, has been handed to the run's event watchers and offered to the capture recorder before that.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use regex::Regex;
 use serde_json::{Value, json};
 use teams_auth::redirect::{RedirectError, RedirectUri};
 use teams_auth::secrets::Secret;
-use teams_fence::{Channel, Fence, MembershipSource, RequestOutcome, RequestRecord};
+use teams_fence::{
+    Channel, ChatCredential, Fence, LiveMembershipSource, MembershipSource, RequestOutcome, RequestRecord,
+};
 use tokio::sync::mpsc;
 use url::Url;
 
@@ -43,6 +54,9 @@ pub struct PausedRequest {
     pub url: String,
     /// The body as `postData` carries it. Missing when the request has none, or when Chrome didn't inline it.
     pub body: Option<Vec<u8>>,
+    /// The request's `Network` id (`networkId`), the one the page's `Network` events know it by. Missing when the event
+    /// doesn't give one.
+    pub network_id: Option<String>,
 }
 
 impl PausedRequest {
@@ -58,6 +72,7 @@ impl PausedRequest {
             method: text(&request["method"]).ok_or(MalformedPause("request.method"))?,
             url: text(&request["url"]).ok_or(MalformedPause("request.url"))?,
             body: request["postData"].as_str().map(|body| body.as_bytes().to_vec()),
+            network_id: text(&params["networkId"]),
         })
     }
 }
@@ -81,6 +96,8 @@ pub enum DenyCause {
     /// A WebSocket frame sent through another realm's `send` (not the one whose `WebSocket` made the socket); the guard
     /// dropped it unasked.
     ForeignSocket,
+    /// The run forced a deny on it ([`ForcedDeny`]).
+    Forced,
 }
 
 /// What happens to one request (or, in the WebSocket layer, one frame).
@@ -96,6 +113,77 @@ pub struct Denial {
     pub method: String,
     pub url: String,
     pub cause: DenyCause,
+    /// For a forced deny: the label of the rule that forced it ([`ForcedDeny::labelled`]), if it has one.
+    pub label: Option<String>,
+    /// For a forced deny: the request's `Network` id ([`PausedRequest::network_id`]), if the event gave one.
+    pub network_id: Option<String>,
+}
+
+impl Denial {
+    /// A deny of `method` `url` (its query and fragment dropped) for `cause`, with no label or `Network` id.
+    #[must_use]
+    pub fn new(method: &str, url: &str, cause: DenyCause) -> Self {
+        Self {
+            method: method.to_owned(),
+            url: without_query(url).to_owned(),
+            cause,
+            label: None,
+            network_id: None,
+        }
+    }
+}
+
+/// A deny a run asks for on purpose: every request with this method, a URL the pattern finds a match in, and (when
+/// given) a body holding the text, is denied before it is classified. When several match a request, the first one the
+/// run forced is the one its [`Denial`] names.
+#[derive(Clone, Debug)]
+pub struct ForcedDeny {
+    method: String,
+    url: Regex,
+    body_contains: Option<String>,
+    label: Option<String>,
+}
+
+impl ForcedDeny {
+    /// Requests with `method` (any case) whose URL `url_pattern` (a regular expression) finds a match in.
+    ///
+    /// # Errors
+    /// When the pattern doesn't compile.
+    pub fn new(method: &str, url_pattern: &str) -> Result<Self, regex::Error> {
+        Ok(Self {
+            method: method.to_ascii_uppercase(),
+            url: Regex::new(url_pattern)?,
+            body_contains: None,
+            label: None,
+        })
+    }
+
+    /// Names the rule: a request it denies is kept with this label ([`Denial::label`]), so a run can tell its own
+    /// forced denies from another rule's.
+    #[must_use]
+    pub fn labelled(mut self, label: &str) -> Self {
+        self.label = Some(label.to_owned());
+        self
+    }
+
+    /// Only requests whose body holds `text`.
+    #[must_use]
+    pub fn with_body_containing(mut self, text: &str) -> Self {
+        self.body_contains = Some(text.to_owned());
+        self
+    }
+
+    /// Whether it denies `request`. A body Chrome didn't inline doesn't hold the text.
+    #[must_use]
+    pub fn matches(&self, request: &PausedRequest) -> bool {
+        let body_matches = self.body_contains.as_ref().is_none_or(|text| {
+            request
+                .body
+                .as_deref()
+                .is_some_and(|body| String::from_utf8_lossy(body).contains(text.as_str()))
+        });
+        self.method.eq_ignore_ascii_case(&request.method) && self.url.is_match(&request.url) && body_matches
+    }
 }
 
 /// What [`HttpFence::handle`] did with one paused request or response.
@@ -198,6 +286,9 @@ pub struct HttpFence {
     classifier: Classifier,
     fence: Arc<Fence>,
     members: Arc<dyn MembershipSource + Send>,
+    /// Where the lab account's chat service credential goes, for a run that writes.
+    credentials: Option<Arc<LiveMembershipSource>>,
+    forced: Mutex<Vec<ForcedDeny>>,
     denials: Mutex<Vec<Denial>>,
     catch: Option<RedirectCatch>,
 }
@@ -210,6 +301,8 @@ impl HttpFence {
             classifier,
             fence,
             members,
+            credentials: None,
+            forced: Mutex::new(Vec::new()),
             denials: Mutex::new(Vec::new()),
             catch: None,
         }
@@ -231,8 +324,70 @@ impl HttpFence {
         json!({ "patterns": patterns })
     }
 
-    /// Classifies a request and decides it. Every deny is logged and kept.
+    /// Hands `live` the chat service credential of every paused request that carries one (see the module docs). The
+    /// live source is normally the fence's membership source too.
+    #[must_use]
+    pub fn with_credentials(mut self, live: Arc<LiveMembershipSource>) -> Self {
+        self.credentials = Some(live);
+        self
+    }
+
+    /// Denies every request `rule` matches from now on, before it is classified (see [`ForcedDeny`]).
+    pub fn force_deny(&self, rule: ForcedDeny) {
+        self.forced.lock().unwrap_or_else(PoisonError::into_inner).push(rule);
+    }
+
+    /// Stops every forced deny.
+    pub fn clear_forced(&self) {
+        self.forced.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+
+    /// The first forced deny that matches `request`.
+    fn forced(&self, request: &PausedRequest) -> Option<ForcedDeny> {
+        self.forced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|rule| rule.matches(request))
+            .cloned()
+    }
+
+    /// Offers the request of a `Fetch.requestPaused` event's `params` to the live source as its credential, when the run
+    /// has one ([`Self::with_credentials`]). [`Self::handle`] calls it for every paused request.
+    pub fn offer_credential(&self, params: &Value) {
+        let Some(live) = &self.credentials else {
+            return;
+        };
+        let request = &params["request"];
+        let (Some(url), Some(headers)) = (request["url"].as_str(), request["headers"].as_object()) else {
+            return;
+        };
+        let headers = headers
+            .iter()
+            .filter_map(|(name, value)| Some((name.as_str(), value.as_str()?)));
+        if let Some(credential) = ChatCredential::from_request(url, headers) {
+            live.set_credential(credential);
+        }
+    }
+
+    /// Classifies a request and decides it. Every deny is logged and kept; a forced one comes first.
     pub async fn decide(&self, request: &PausedRequest) -> Verdict {
+        if let Some(rule) = self.forced(request) {
+            let record = RequestRecord {
+                channel: Channel::Http,
+                method: &request.method,
+                url: &request.url,
+                outcome: RequestOutcome::Forced,
+            };
+            // denied whether or not the log takes it
+            let _ = self.fence.log().record_request(&record);
+            self.keep(Denial {
+                label: rule.label,
+                network_id: request.network_id.clone(),
+                ..Denial::new(&request.method, &request.url, DenyCause::Forced)
+            });
+            return Verdict::Deny(DenyCause::Forced);
+        }
         let classification = self
             .classifier
             .classify(&request.method, &request.url, request.body.as_deref());
@@ -249,7 +404,7 @@ impl HttpFence {
         };
         let verdict = judge(&self.fence, self.members.as_ref(), classification, request).await;
         if let Verdict::Deny(cause) = verdict {
-            self.keep(method, url, cause);
+            self.keep(Denial::new(method, url, cause));
         }
         verdict
     }
@@ -263,18 +418,11 @@ impl HttpFence {
         };
         // denied whether or not the log takes it
         let _ = self.fence.log().record_request(&record);
-        self.keep("?", "?", DenyCause::Malformed);
+        self.keep(Denial::new("?", "?", DenyCause::Malformed));
     }
 
-    fn keep(&self, method: &str, url: &str, cause: DenyCause) {
-        self.denials
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Denial {
-                method: method.to_owned(),
-                url: without_query(url).to_owned(),
-                cause,
-            });
+    fn keep(&self, denial: Denial) {
+        self.denials.lock().unwrap_or_else(PoisonError::into_inner).push(denial);
     }
 
     /// Every request denied so far, in order.
@@ -294,6 +442,7 @@ impl HttpFence {
         if at_response_stage(&event.params) {
             return self.handle_response(cdp, session, &event.params).await;
         }
+        self.offer_credential(&event.params);
         let Ok(request) = PausedRequest::from_params(&event.params) else {
             self.deny_malformed();
             if let Some(id) = event.params["requestId"].as_str() {

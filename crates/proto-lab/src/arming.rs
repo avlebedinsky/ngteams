@@ -42,7 +42,9 @@
 //! before it runs.
 //!
 //! If any step fails, or gets no answer within [`STEP_TIMEOUT`], the target is closed and never resumed, and the
-//! failure fails the run. The one exception is a session that is gone before its arming finishes (the browser answers
+//! failure fails the run's verdict ([`ArmedBrowser::verdict`]). Whether it breached the fence is another matter
+//! ([`ArmingFailure::closed_before_it_ran`]): a target closed before its resume ran nothing, while one whose resume was
+//! sent, or that couldn't be closed, counts as a breach ([`crate::session::FenceReport::breached`]). The one exception is a session that is gone before its arming finishes (the browser answers
 //! "Session with given id not found"): its tab closed, or its worker ended. That session has nothing left to arm or
 //! resume, so it is dropped quietly; browser-level `Fetch` stays on regardless.
 //!
@@ -58,9 +60,14 @@
 //! websocket, or the reader stopped on a message it couldn't read) the browser is killed at once and the run fails.
 //! [`ArmedBrowser::close`] lets the browser exit on its own only once the browser has confirmed `Browser.close`;
 //! without that, it kills the browser too.
+//!
+//! Each paused request and each guard request is decided in a task of its own, and a mapped write's decision waits on a
+//! live membership read. So once the browser is down, [`ArmedBrowser::close`] waits (up to [`DECISION_GRACE`]) for the
+//! decisions still running, and [`ArmedBrowser::decisions`], which outlives the browser, then holds every deny of the
+//! run; [`Decisions::undecided`] counts any decision that was still running when the wait ended.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -71,7 +78,7 @@ use tokio::task::JoinHandle;
 use crate::browser::{Browser, BrowserError};
 use crate::capture::{Capture, RTC_BINDING};
 use crate::cdp::{Cdp, CdpError, Event, Events, SessionId};
-use crate::fence_http::{Denial, Handled, HttpFence};
+use crate::fence_http::{Denial, ForcedDeny, Handled, HttpFence};
 use crate::fence_ws::{FrameDenial, GuardScript, UnsanctionedFrame, WsFence};
 
 /// The origins whose service workers are neutralized at the start of every run.
@@ -315,6 +322,15 @@ impl ArmError {
             } if error.code == SESSION_NOT_FOUND
         )
     }
+
+    /// Whether the target's resume was sent: the step that failed is [`Step::Resume`], so its code may be running.
+    #[must_use]
+    pub fn resume_sent(&self) -> bool {
+        matches!(
+            self,
+            Self::Step { step: Step::Resume, .. } | Self::StepTimeout(Step::Resume)
+        )
+    }
 }
 
 /// What arming installs in a target: the WebSocket guard, and the WebRTC hooks when the run records.
@@ -352,6 +368,10 @@ pub async fn neutralize_service_workers(cdp: &Cdp, page: &SessionId, origins: &[
 /// How long arming waits for the blank tab it neutralizes service workers through.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long [`ArmedBrowser::close`] waits, once the browser is down, for the decisions still running: a live membership
+/// read takes up to [`teams_fence::FETCH_TIMEOUT`], and the rest of a decision is quick.
+pub const DECISION_GRACE: Duration = Duration::from_secs(teams_fence::FETCH_TIMEOUT.as_secs() + 5);
+
 /// How to arm a run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArmOptions {
@@ -387,6 +407,19 @@ pub struct ArmingFailure {
     pub error: String,
     /// Whether `Target.closeTarget` closed it. A target that couldn't be closed was never resumed either.
     pub closed: bool,
+    /// Whether its code may have started: the step that failed was the resume itself (`Runtime.runIfWaitingForDebugger`,
+    /// sent and refused or unanswered). Any other failure stops before the resume, so the target never ran.
+    pub may_have_run: bool,
+}
+
+impl ArmingFailure {
+    /// Whether the target was closed before any of its code ran: arming gave up on it before the resume, and closing it
+    /// worked. Nothing of it ran unguarded, so it is no breach of the fence; what it would have done (an iframe's
+    /// content, a worker's job) just doesn't happen, and a run that needed it fails on its own steps.
+    #[must_use]
+    pub fn closed_before_it_ran(&self) -> bool {
+        self.closed && !self.may_have_run
+    }
 }
 
 /// Why a run failed: a denied request or frame, a frame sent without an allow, a target that couldn't be armed, or a
@@ -430,10 +463,18 @@ struct Shared {
     changed: Notify,
     /// The browser, until the fence is closed or dropped, or its connection is lost.
     browser: Mutex<Option<Browser>>,
-    /// The connection's events ended while the fence was up.
+    /// The connection's events ended, for whatever reason.
     lost: AtomicBool,
+    /// The connection's events ended while the fence was up, before [`ArmedBrowser::close`] began: nothing was decided
+    /// after that. (A connection that ends while closing is the close's business: it fails unless the browser
+    /// confirmed.)
+    broken: AtomicBool,
     /// [`ArmedBrowser::close`] has asked the browser to close, and decides from its answer whether to kill it.
     closing: AtomicBool,
+    /// How many decisions (of a paused request or a guard request) are still running, each in a task of its own.
+    deciding: AtomicUsize,
+    /// Notified when the last decision running finishes.
+    settled: Notify,
     /// Where a copy of every event goes ([`ArmedBrowser::watch`]).
     taps: Mutex<Vec<mpsc::UnboundedSender<Event>>>,
 }
@@ -465,12 +506,116 @@ impl Shared {
         self.taps().retain(|tap| tap.send(event.clone()).is_ok());
     }
 
-    /// Marks the connection lost and ends every watch: their senders go, under the same lock [`ArmedBrowser::watch`]
-    /// checks the mark with, so no watch outlives the connection.
+    /// Marks the connection lost (and broken, unless the fence is closing) and ends every watch: their senders go,
+    /// under the same lock [`ArmedBrowser::watch`] checks the mark with, so no watch outlives the connection.
     fn mark_lost(&self) {
         let mut taps = self.taps();
         self.lost.store(true, Ordering::SeqCst);
+        if !self.closing.load(Ordering::SeqCst) {
+            self.broken.store(true, Ordering::SeqCst);
+        }
         taps.clear();
+    }
+
+    fn deciding(&self) -> usize {
+        self.deciding.load(Ordering::SeqCst)
+    }
+
+    /// Waits up to `timeout` for every decision still running to finish.
+    async fn settle(&self, timeout: Duration) {
+        let wait = async {
+            loop {
+                let settled = self.settled.notified();
+                if self.deciding() == 0 {
+                    return;
+                }
+                settled.await;
+            }
+        };
+        // what is still running after that is counted by `Decisions::undecided`
+        let _ = tokio::time::timeout(timeout, wait).await;
+    }
+
+    fn verdict(&self) -> Result<(), RunFailed> {
+        let failed = RunFailed {
+            denials: self.http.denials(),
+            frame_denials: self.ws.denials(),
+            unsanctioned: self.ws.unsanctioned(),
+            failures: self.targets().failures.clone(),
+            connection_lost: self.broken.load(Ordering::SeqCst),
+        };
+        let clean = failed.denials.is_empty()
+            && failed.frame_denials.is_empty()
+            && failed.unsanctioned.is_empty()
+            && failed.failures.is_empty()
+            && !failed.connection_lost;
+        if clean { Ok(()) } else { Err(failed) }
+    }
+}
+
+/// One decision running, counted in [`Shared::deciding`] from before its task is spawned until the task ends (or is
+/// dropped unfinished).
+struct Deciding(Arc<Shared>);
+
+impl Deciding {
+    fn start(shared: &Arc<Shared>) -> Self {
+        shared.deciding.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(shared))
+    }
+}
+
+impl Drop for Deciding {
+    fn drop(&mut self) {
+        if self.0.deciding.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.settled.notify_waiters();
+        }
+    }
+}
+
+/// What the fence decided in a run, read live: it outlives the [`ArmedBrowser`], so a run's denials can be read after
+/// [`ArmedBrowser::close`] has waited for the decisions still running.
+#[derive(Clone)]
+pub struct Decisions(Arc<Shared>);
+
+impl Decisions {
+    /// Every request denied so far.
+    #[must_use]
+    pub fn denials(&self) -> Vec<Denial> {
+        self.0.http.denials()
+    }
+
+    /// Every WebSocket frame denied so far.
+    #[must_use]
+    pub fn frame_denials(&self) -> Vec<FrameDenial> {
+        self.0.ws.denials()
+    }
+
+    /// Every WebSocket frame the browser sent without an allow so far.
+    #[must_use]
+    pub fn unsanctioned_frames(&self) -> Vec<UnsanctionedFrame> {
+        self.0.ws.unsanctioned()
+    }
+
+    /// Every target that couldn't be armed.
+    #[must_use]
+    pub fn failures(&self) -> Vec<ArmingFailure> {
+        self.0.targets().failures.clone()
+    }
+
+    /// How many decisions are still running: after [`ArmedBrowser::close`], the ones its wait gave up on, whose denies
+    /// may be missing from [`Self::denials`] and [`Self::frame_denials`].
+    #[must_use]
+    pub fn undecided(&self) -> usize {
+        self.0.deciding()
+    }
+
+    /// The run's verdict so far, as [`ArmedBrowser::verdict`] gives it; a connection that ends during
+    /// [`ArmedBrowser::close`] doesn't fail it.
+    ///
+    /// # Errors
+    /// [`RunFailed`] listing what failed it.
+    pub fn verdict(&self) -> Result<(), RunFailed> {
+        self.0.verdict()
     }
 }
 
@@ -539,7 +684,10 @@ impl ArmedBrowser {
             changed: Notify::new(),
             browser: Mutex::new(Some(browser)),
             lost: AtomicBool::new(false),
+            broken: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            deciding: AtomicUsize::new(0),
+            settled: Notify::new(),
             taps: Mutex::new(Vec::new()),
         });
         let task = tokio::spawn(handle_events(cdp.clone(), events, Arc::clone(&shared)));
@@ -555,7 +703,8 @@ impl ArmedBrowser {
     }
 
     /// Asks the browser to close (`Browser.close`). Once the browser has confirmed it, waits up to `grace` for it to
-    /// exit and stops it the way [`Browser::wait_or_kill`] does if it doesn't.
+    /// exit and stops it the way [`Browser::wait_or_kill`] does if it doesn't. Then, with the browser down either way,
+    /// waits up to [`DECISION_GRACE`] for the decisions still running, so that [`Self::decisions`] holds them.
     ///
     /// The connection closes as the browser exits, so while closing, the end of the connection doesn't kill the browser
     /// (it would cut a profile's shutdown short); this decides instead, from the browser's answer. Without the browser's
@@ -567,6 +716,12 @@ impl ArmedBrowser {
     /// [`BrowserError::CloseUnconfirmed`] when the browser was killed instead (or had been already, its connection
     /// lost), and [`BrowserError::Stop`] when the browser process can't be reaped.
     pub async fn close(self, grace: Duration) -> Result<(), BrowserError> {
+        let closed = self.shut(grace).await;
+        self.shared.settle(DECISION_GRACE).await;
+        closed
+    }
+
+    async fn shut(&self, grace: Duration) -> Result<(), BrowserError> {
         self.shared.closing.store(true, Ordering::SeqCst);
         let closing = tokio::time::timeout(grace, self.cdp.call(None, "Browser.close", Value::Null)).await;
         let Some(browser) = self.shared.take_browser() else {
@@ -581,6 +736,12 @@ impl ArmedBrowser {
         };
         browser.kill().await?;
         Err(BrowserError::CloseUnconfirmed(unconfirmed))
+    }
+
+    /// What the fence decides in this run, readable after [`Self::close`] too.
+    #[must_use]
+    pub fn decisions(&self) -> Decisions {
+        Decisions(Arc::clone(&self.shared))
     }
 
     /// The connection, for driving the armed targets.
@@ -663,6 +824,16 @@ impl ArmedBrowser {
         self.shared.http.denials()
     }
 
+    /// Denies every request `rule` matches from now on ([`HttpFence::force_deny`]).
+    pub fn force_deny(&self, rule: ForcedDeny) {
+        self.shared.http.force_deny(rule);
+    }
+
+    /// Stops every forced deny ([`HttpFence::clear_forced`]).
+    pub fn clear_forced(&self) {
+        self.shared.http.clear_forced();
+    }
+
     /// Every WebSocket frame denied so far.
     #[must_use]
     pub fn frame_denials(&self) -> Vec<FrameDenial> {
@@ -687,19 +858,7 @@ impl ArmedBrowser {
     /// # Errors
     /// [`RunFailed`] listing them.
     pub fn verdict(&self) -> Result<(), RunFailed> {
-        let failed = RunFailed {
-            denials: self.denials(),
-            frame_denials: self.frame_denials(),
-            unsanctioned: self.unsanctioned_frames(),
-            failures: self.failures(),
-            connection_lost: self.shared.lost(),
-        };
-        let clean = failed.denials.is_empty()
-            && failed.frame_denials.is_empty()
-            && failed.unsanctioned.is_empty()
-            && failed.failures.is_empty()
-            && !failed.connection_lost;
-        if clean { Ok(()) } else { Err(failed) }
+        self.shared.verdict()
     }
 }
 
@@ -732,9 +891,10 @@ fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
     }
     match event.method.as_str() {
         "Fetch.requestPaused" => {
-            let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
+            let (cdp, deciding) = (cdp.clone(), Deciding::start(shared));
             // a request whose target is gone can't be answered; it was never sent either
             tokio::spawn(async move {
+                let shared = &deciding.0;
                 let handled = shared.http.handle(&cdp, &event).await;
                 // only a decided request is a verdict; a caught redirect or a continued login response isn't recorded
                 if let (Some(capture), Ok(Handled::Decided(verdict))) = (&shared.capture, handled) {
@@ -743,9 +903,10 @@ fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
             });
         }
         "Runtime.bindingCalled" => {
-            let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
+            let (cdp, deciding) = (cdp.clone(), Deciding::start(shared));
             // a frame whose context is gone can't be answered; it was never sent either
             tokio::spawn(async move {
+                let shared = &deciding.0;
                 let verdict = shared.ws.handle_binding(&cdp, &event).await;
                 if let (Some(capture), Ok(Some(verdict))) = (&shared.capture, verdict) {
                     capture.ws_verdict(&event, shared.ws.script(), verdict);
@@ -819,6 +980,7 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
                 kind: kind_name,
                 error: error.to_string(),
                 closed,
+                may_have_run: error.resume_sent(),
             });
         }
     }

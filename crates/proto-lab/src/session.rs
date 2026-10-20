@@ -2,9 +2,10 @@
 //! fence, and what its events say about the session.
 //!
 //! [`SessionWatch`] reads the connection's events (from [`crate::arming::ArmedBrowser::watch`]) and tells:
-//! - **loaded**: the page's main frame is on Teams and the web client's authz exchange (its access token for a
-//!   skypetoken, an own-state request the fence lets through) succeeded in that document, which the client does only
-//!   with a working session;
+//! - **loaded**: the page's main frame is on Teams and, in that document, the web client's authz exchange (its access
+//!   token for a skypetoken, an own-state request the fence lets through) succeeded, or a read of the chat service or
+//!   CSA did (a client holding a cached skypetoken skips authz) with no authz refused; the client does either only with
+//!   a working session;
 //! - **refused**: the main frame is on Teams, but Teams forbade the exchange (403) and hasn't allowed one since: a
 //!   signed-in account Teams won't serve, such as one without a Teams license (the web client then offers a trial). An
 //!   expired token (401) isn't a refusal: the client refreshes it and asks again. [`Settling`] gives a refusal
@@ -16,29 +17,35 @@
 //! - and who the page is signed in as ([`Identity`]): the claims of the bearer tokens its requests carry. Only the
 //!   object id, tenant and UPN claims are kept; the token itself never leaves the event.
 //!
-//! [`LabSession`] runs one: the pinned Chrome on the account's profile, headless, armed fail-closed (`FailClosed`: every
-//! mapped write is denied, and nothing is mapped yet), one armed tab, and the events watched.
+//! [`LabSession`] runs one: the pinned Chrome on the account's profile, headless unless asked otherwise, one armed tab,
+//! and the events watched. By default it is armed fail-closed (`FailClosed`: every write whose target has to be
+//! fetched is denied); a run that writes ([`SessionOptions::live_members`]) reads its targets' members live instead
+//! (`LiveMembershipSource`, fed the account's chat service credential from the page's own requests). A run can also be
+//! recorded as a capture ([`SessionOptions::capture`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
-use teams_fence::{FailClosed, Fence, MembershipSource, OpenError};
+use teams_fence::{FailClosed, Fence, LiveMembershipSource, LiveSourceError, MembershipSource, OpenError};
 use tokio::sync::mpsc;
 use url::Url;
 
-use crate::arming::{ArmError, ArmOptions, ArmedBrowser, ArmingFailure, TEAMS_ORIGINS};
-use crate::browser::{Browser, BrowserError, LaunchOptions};
+use crate::arming::{ArmError, ArmOptions, ArmedBrowser, ArmingFailure, DECISION_GRACE, Decisions, TEAMS_ORIGINS};
+use crate::browser::{Browser, BrowserError, Display, LaunchOptions};
+use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
 use crate::classify::{Classification, Classifier, OwnKind};
 use crate::commands::chrome::ChromeBuild;
 use crate::config::{Alias, LabPaths};
-use crate::fence_http::{HttpFence, RedirectCatch};
-use crate::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use crate::fence_http::{Denial, ForcedDeny, HttpFence, RedirectCatch};
+use crate::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
+use crate::scenario::dsl::Driver;
 
 /// Where the web client starts.
 pub const TEAMS_URL: &str = "https://teams.microsoft.com/v2/";
@@ -151,6 +158,11 @@ pub struct SessionWatch {
     /// The method of every authz request seen since the main frame's last navigation, by session and request id. An
     /// answer to a request from before it belongs to the document that went away, and doesn't count.
     authz_requests: HashMap<(Option<SessionId>, String), String>,
+    /// How many reads of the chat service or CSA ([`is_service_read`]) succeeded since the main frame's last navigation:
+    /// any means the client works with tokens it already had (a cached skypetoken skips authz).
+    service_reads_ok: usize,
+    /// Every such read seen since the main frame's last navigation, by session and request id.
+    service_requests: HashSet<(Option<SessionId>, String)>,
     /// How many documents the main frame has committed.
     documents: u64,
     identities: Vec<Identity>,
@@ -169,6 +181,8 @@ impl SessionWatch {
             authz_forbidden: false,
             last_authz: None,
             authz_requests: HashMap::new(),
+            service_reads_ok: 0,
+            service_requests: HashSet::new(),
             documents: 0,
             identities: Vec::new(),
         }
@@ -207,6 +221,8 @@ impl SessionWatch {
         self.authz_ok = false;
         self.authz_forbidden = false;
         self.authz_requests.clear();
+        self.service_reads_ok = 0;
+        self.service_requests.clear();
         self.documents += 1;
     }
 
@@ -224,10 +240,13 @@ impl SessionWatch {
                 request["url"].as_str(),
                 request["method"].as_str(),
             )
-            && is_authz(url)
         {
             let key = (event.session_id.clone(), id.to_owned());
-            self.authz_requests.insert(key, method.to_ascii_uppercase());
+            if is_authz(url) {
+                self.authz_requests.insert(key, method.to_ascii_uppercase());
+            } else if method.eq_ignore_ascii_case("GET") && is_service_read(url) {
+                self.service_requests.insert(key);
+            }
         }
     }
 
@@ -236,12 +255,18 @@ impl SessionWatch {
             return;
         };
         let key = (event.session_id.clone(), id.to_owned());
-        if self.authz_requests.get(&key).is_none_or(|method| method != "POST") {
-            return;
-        }
         let Some(Ok(status)) = event.params["response"]["status"].as_u64().map(u16::try_from) else {
             return;
         };
+        if self.service_requests.contains(&key) {
+            if (200..=299).contains(&status) {
+                self.service_reads_ok += 1;
+            }
+            return;
+        }
+        if self.authz_requests.get(&key).is_none_or(|method| method != "POST") {
+            return;
+        }
         self.last_authz = Some(status);
         match status {
             200..=299 => self.authz_ok = true,
@@ -254,7 +279,9 @@ impl SessionWatch {
     #[must_use]
     pub fn state(&self) -> SessionState {
         match &self.place {
-            Place::Teams if self.authz_ok => SessionState::Loaded,
+            Place::Teams if self.authz_ok || (self.service_reads_ok > 0 && !self.authz_forbidden) => {
+                SessionState::Loaded
+            }
             Place::Teams if self.authz_forbidden => SessionState::Refused(FORBIDDEN),
             Place::SignIn if self.stopped => SessionState::SignInShown,
             Place::Other(host) if self.stopped => SessionState::Elsewhere(host.clone()),
@@ -320,6 +347,18 @@ fn is_authz(url: &str) -> bool {
     Classifier::seeded().classify("POST", url, None) == Classification::Own(OwnKind::Authz)
 }
 
+/// Whether `url` is a read the web client makes only with a working session: the chat service or the chat service
+/// aggregator (CSA) on a Teams origin, `https://<teams origin>/api/{chatsvc,csa}/…`. An account Teams refuses never
+/// gets that far (no skypetoken, no service tokens' use).
+fn is_service_read(url: &str) -> bool {
+    let Ok(url) = Url::parse(url) else {
+        return false;
+    };
+    let origin = url.origin().ascii_serialization();
+    TEAMS_ORIGINS.contains(&origin.as_str())
+        && (url.path().starts_with("/api/chatsvc/") || url.path().starts_with("/api/csa/"))
+}
+
 /// The identity in a request's `Authorization: Bearer` token, if it is a JWT with the claims.
 fn identity_in(headers: &Value) -> Option<Identity> {
     let value = headers
@@ -347,7 +386,8 @@ fn identity_in(headers: &Value) -> Option<Identity> {
     })
 }
 
-/// What the fence did during a run. Denies are expected while it runs fail-closed; a breach is not.
+/// What the fence did during a run. Denies are expected while it runs fail-closed; a breach is not. A target closed
+/// before it ran ([`ArmingFailure::closed_before_it_ran`]) is neither: a warning.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FenceReport {
     /// Denied requests by host.
@@ -355,28 +395,30 @@ pub struct FenceReport {
     pub denied_frames: usize,
     /// Frames the browser sent without an allow.
     pub unsanctioned_frames: usize,
-    /// Targets that couldn't be armed (and were closed).
+    /// Targets that couldn't be armed, closed before they ran or not.
     pub unarmed: Vec<ArmingFailure>,
     /// The fence lost its connection to the browser.
     pub connection_lost: bool,
 }
 
 impl FenceReport {
-    fn of(armed: &ArmedBrowser) -> Self {
+    /// What `decisions` holds so far.
+    #[must_use]
+    pub fn of(decisions: &Decisions) -> Self {
         let mut denied_requests = BTreeMap::new();
-        for denial in armed.denials() {
+        for denial in decisions.denials() {
             let host = Url::parse(&denial.url)
                 .ok()
                 .and_then(|url| url.host_str().map(str::to_owned))
                 .unwrap_or_else(|| "?".to_owned());
             *denied_requests.entry(host).or_default() += 1;
         }
-        let failed = armed.verdict().err();
+        let failed = decisions.verdict().err();
         Self {
             denied_requests,
-            denied_frames: armed.frame_denials().len(),
-            unsanctioned_frames: armed.unsanctioned_frames().len(),
-            unarmed: armed.failures(),
+            denied_frames: decisions.frame_denials().len(),
+            unsanctioned_frames: decisions.unsanctioned_frames().len(),
+            unarmed: decisions.failures(),
             connection_lost: failed.is_some_and(|failed| failed.connection_lost),
         }
     }
@@ -388,10 +430,19 @@ impl FenceReport {
     }
 
     /// Whether anything got past the fence or escaped it: a frame sent without an allow, a target that couldn't be
-    /// armed, a lost connection. Denies are not breaches.
+    /// armed and may have run (its resume was sent, or it couldn't be closed), a lost connection. Denies are not
+    /// breaches, and neither is a target closed before it ran ([`Self::closed_unarmed`]).
     #[must_use]
     pub fn breached(&self) -> bool {
-        self.unsanctioned_frames > 0 || !self.unarmed.is_empty() || self.connection_lost
+        self.unsanctioned_frames > 0
+            || self.unarmed.iter().any(|failure| !failure.closed_before_it_ran())
+            || self.connection_lost
+    }
+
+    /// The targets that couldn't be armed in time and were closed before any of their code ran: no breach, as nothing
+    /// of them ran unguarded, but what they would have done didn't happen.
+    pub fn closed_unarmed(&self) -> impl Iterator<Item = &ArmingFailure> {
+        self.unarmed.iter().filter(|failure| failure.closed_before_it_ran())
     }
 
     /// One line for the operator: the denies by host, then anything worse.
@@ -412,7 +463,15 @@ impl FenceReport {
             let _ = write!(line, "; {} frame(s) sent without an allow", self.unsanctioned_frames);
         }
         for failure in &self.unarmed {
-            let _ = write!(line, "; a {} target not armed ({})", failure.kind, failure.error);
+            if failure.closed_before_it_ran() {
+                let _ = write!(
+                    line,
+                    "; a {} target closed unarmed before it ran ({})",
+                    failure.kind, failure.error
+                );
+            } else {
+                let _ = write!(line, "; a {} target not armed ({})", failure.kind, failure.error);
+            }
         }
         if self.connection_lost {
             line.push_str("; the fence lost its connection");
@@ -436,6 +495,40 @@ pub enum SessionError {
     Arm(#[from] ArmError),
     #[error(transparent)]
     Cdp(#[from] CdpError),
+    #[error("can't record the run: {0}")]
+    Capture(#[from] CaptureError),
+    #[error(
+        "{0} fence decision(s) still undecided {DECISION_GRACE:?} after the browser closed; their denies may be missing"
+    )]
+    Undecided(usize),
+    #[error(transparent)]
+    LiveSource(#[from] LiveSourceError),
+}
+
+/// How a lab session runs.
+#[derive(Clone, Debug)]
+pub struct SessionOptions {
+    /// What the fence makes of each request.
+    pub classifier: Classifier,
+    /// Read write targets' members live ([`LiveMembershipSource`]), for a run that writes; otherwise every write whose
+    /// target has to be fetched is denied ([`FailClosed`]).
+    pub live_members: bool,
+    /// Record the run as a capture of this scenario (`captures/<scenario>/<ts>/` in the lab's data dir).
+    pub capture: Option<String>,
+    pub display: Display,
+}
+
+impl SessionOptions {
+    /// Fail-closed, headless, not recorded.
+    #[must_use]
+    pub fn fail_closed(classifier: Classifier) -> Self {
+        Self {
+            classifier,
+            live_members: false,
+            capture: None,
+            display: Display::Headless,
+        }
+    }
 }
 
 /// How long the browser gets to put its debugging endpoint up.
@@ -445,51 +538,66 @@ const PAGE_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the browser gets to exit after closing.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
-/// One lab account's browser, armed fail-closed, with one tab and its events watched.
+/// One lab account's browser, armed, with one tab and its events watched.
 pub struct LabSession {
     armed: ArmedBrowser,
     page: SessionId,
     events: mpsc::UnboundedReceiver<Event>,
     watch: SessionWatch,
+    /// The run's capture, if it records.
+    recorder: Option<Arc<Recorder>>,
 }
 
 impl LabSession {
-    /// Launches the pinned Chrome headless on `alias`'s profile and arms it before any page loads: the fence from
-    /// `lab.toml` ([`Fence::open_lab`]), no membership source ([`FailClosed`]), `classifier` for requests and the seeded
-    /// frame list. Then opens one armed tab on `about:blank`.
+    /// [`Self::open_with`] fail-closed, headless and not recorded ([`SessionOptions::fail_closed`]).
     ///
     /// # Errors
-    /// When Chrome isn't installed, the fence can't be opened, or the browser can't be launched or armed (it is killed
-    /// then).
+    /// As [`Self::open_with`].
     pub async fn open(paths: &LabPaths, alias: Alias, classifier: Classifier) -> Result<Self, SessionError> {
-        Self::open_with(paths, alias, classifier, None).await
+        Self::open_with(paths, alias, SessionOptions::fail_closed(classifier)).await
     }
 
-    /// [`Self::open`], with the HTTP layer also catching the authorization redirect when `catch` is given
-    /// ([`RedirectCatch`]; `proto-lab auth` only).
+    /// Launches the pinned Chrome on `alias`'s profile and arms it before any page loads: the fence from `lab.toml`
+    /// ([`Fence::open_lab`]), the membership source and request classifier `options` name, and the seeded frame list;
+    /// recording into a new capture when asked. Then opens one armed tab on `about:blank`.
     ///
     /// # Errors
-    /// As [`Self::open`].
-    pub async fn open_with(
-        paths: &LabPaths,
-        alias: Alias,
-        classifier: Classifier,
-        catch: Option<RedirectCatch>,
-    ) -> Result<Self, SessionError> {
+    /// When Chrome isn't installed, the fence, the live source or the capture can't be made, or the browser can't be
+    /// launched or armed (it is killed then).
+    pub async fn open_with(paths: &LabPaths, alias: Alias, options: SessionOptions) -> Result<Self, SessionError> {
         let chrome = ChromeBuild::pinned().executable(&paths.chrome_dir());
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
         }
         let fence = Arc::new(Fence::open_lab()?);
-        let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-        let mut http = HttpFence::new(classifier, Arc::clone(&fence), Arc::clone(&members));
-        if let Some(catch) = catch {
-            http = http.with_redirect_catch(catch);
-        }
+        let (members, http): (Arc<dyn MembershipSource + Send>, _) = if options.live_members {
+            let live = Arc::new(LiveMembershipSource::new()?);
+            let http =
+                HttpFence::new(options.classifier, Arc::clone(&fence), live.clone()).with_credentials(live.clone());
+            (live, http)
+        } else {
+            let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
+            let http = HttpFence::new(options.classifier, Arc::clone(&fence), Arc::clone(&members));
+            (members, http)
+        };
         let guard = GuardScript::generate().map_err(SessionError::Guard)?;
         let ws = WsFence::new(FrameClassifier::seeded(), fence, members, guard);
-        let browser = Browser::launch(&chrome, &LaunchOptions::for_profile(paths, alias), LAUNCH_TIMEOUT).await?;
-        let armed = ArmedBrowser::arm(browser, http, ws, &ArmOptions::default()).await?;
+        let recorder = match &options.capture {
+            Some(scenario) => Some(Arc::new(Recorder::create(&paths.captures_dir(), scenario)?)),
+            None => None,
+        };
+        let launch = LaunchOptions {
+            display: options.display,
+            ..LaunchOptions::for_profile(paths, alias)
+        };
+        let browser = Browser::launch(&chrome, &launch, LAUNCH_TIMEOUT).await?;
+        let armed = match &recorder {
+            Some(recorder) => {
+                let capture = Capture::new(Arc::clone(recorder), RtcHooks::default());
+                ArmedBrowser::arm_capturing(browser, http, ws, &ArmOptions::default(), capture).await?
+            }
+            None => ArmedBrowser::arm(browser, http, ws, &ArmOptions::default()).await?,
+        };
         let events = armed.watch();
         let page = armed.open_page(PAGE_TIMEOUT).await?.session;
         Ok(Self {
@@ -497,7 +605,42 @@ impl LabSession {
             armed,
             page,
             events,
+            recorder,
         })
+    }
+
+    /// A scenario driver on the tab, with its own watch of the events from now on.
+    #[must_use]
+    pub fn driver(&self) -> Driver {
+        Driver::new(self.armed.cdp().clone(), self.page.clone(), self.armed.watch())
+    }
+
+    /// Where the run is recorded, if it is.
+    #[must_use]
+    pub fn capture_dir(&self) -> Option<&Path> {
+        self.recorder.as_deref().map(Recorder::dir)
+    }
+
+    /// Denies every request `rule` matches from now on (an enforcement test).
+    pub fn force_deny(&self, rule: ForcedDeny) {
+        self.armed.force_deny(rule);
+    }
+
+    /// Stops every forced deny.
+    pub fn clear_forced(&self) {
+        self.armed.clear_forced();
+    }
+
+    /// Every request denied so far.
+    #[must_use]
+    pub fn denials(&self) -> Vec<Denial> {
+        self.armed.denials()
+    }
+
+    /// Every WebSocket frame denied so far.
+    #[must_use]
+    pub fn frame_denials(&self) -> Vec<FrameDenial> {
+        self.armed.frame_denials()
     }
 
     /// Navigates the tab.
@@ -565,16 +708,41 @@ impl LabSession {
     /// What the fence did so far.
     #[must_use]
     pub fn report(&self) -> FenceReport {
-        FenceReport::of(&self.armed)
+        FenceReport::of(&self.armed.decisions())
     }
 
-    /// Closes the browser (killing it unless it confirms) and says what the fence did.
+    /// What the fence decides in this session, readable after [`Self::close`] too: the run's final denials are read
+    /// from it once the close has waited for the decisions still running.
+    #[must_use]
+    pub fn decisions(&self) -> Decisions {
+        self.armed.decisions()
+    }
+
+    /// Closes the browser (killing it unless it confirms), waits for the fence's decisions still running, finishes the
+    /// capture, and says what the fence did, every one of those decisions included.
     ///
     /// # Errors
-    /// When the browser had to be killed or couldn't be reaped.
+    /// When the browser had to be killed or couldn't be reaped, the capture lost events, or a decision was still
+    /// running when the wait for them ended ([`SessionError::Undecided`]).
     pub async fn close(self) -> Result<FenceReport, SessionError> {
-        let report = self.report();
-        self.armed.close(CLOSE_GRACE).await?;
-        Ok(report)
+        let decisions = self.armed.decisions();
+        let closed = self.armed.close(CLOSE_GRACE).await;
+        if let Some(recorder) = &self.recorder {
+            recorder.finish()?;
+        }
+        closed?;
+        match decisions.undecided() {
+            0 => Ok(FenceReport::of(&decisions)),
+            undecided => Err(SessionError::Undecided(undecided)),
+        }
+    }
+
+    /// [`Self::close`], also giving the capture's directory.
+    ///
+    /// # Errors
+    /// As [`Self::close`].
+    pub async fn close_recorded(self) -> Result<(FenceReport, Option<PathBuf>), SessionError> {
+        let dir = self.capture_dir().map(Path::to_path_buf);
+        Ok((self.close().await?, dir))
     }
 }

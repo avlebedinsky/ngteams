@@ -8,14 +8,27 @@
 //! - [`Classification::Write`]: a mapped write with its [`Target`], judged by [`teams_fence::Fence::check`];
 //! - [`Classification::Unknown`]: everything else, denied.
 //!
-//! Until the write-target mapping exists (M0 Task 11) nothing maps to [`Classification::Write`], so the fence is
-//! fail-closed: every mutating request outside the own-state list is [`Classification::Unknown`]. Any method other than
-//! the three reading ones counts as mutating, including ones the classifier has never heard of.
+//! The seeded classifier ([`Classifier::seeded`], and [`Classifier::sign_in`] for `login`) maps no writes, so a run
+//! that uses it is fail-closed: every mutating request outside the own-state list is [`Classification::Unknown`]. A
+//! run that writes uses [`Classifier::mapped`], which also maps the chat service's writes on chats
+//! (`docs/protocol/fence-targets.md`): messages, typing, edits, deletes, reactions, read receipts, new chats and member
+//! changes, each to its [`Target`]. Anything the mapping doesn't recognize, a channel or team among them, stays
+//! [`Classification::Unknown`]. Any method other than the three reading ones counts as mutating, including ones the
+//! classifier has never heard of.
 //!
 //! An own-state rule matches the method, the exact origin (scheme, host and port) and the path segment by segment; a
 //! `*` segment stands for exactly one non-empty segment (an Entra tenant). The query plays no part.
 
-use teams_fence::Target;
+use std::collections::HashSet;
+use std::fmt;
+
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Value};
+/// The chat service path of a request URL after its base, from `v1` on, each segment percent-decoded; `None` for
+/// anything but the chat service. It is teams-fence's, so the mapping and the live member read recognize the chat
+/// service by one check.
+pub use teams_fence::chat_service_path;
+use teams_fence::{Mri, Scope, Target, WriteKind};
 use url::Url;
 
 /// A reviewed kind of own-state request: it changes only the signed-in account's own session state.
@@ -135,10 +148,12 @@ const AUTHZ: [(&str, &str); 4] = [
 /// never been captured, so `login` stops at any multi-factor prompt instead.
 const SIGN_IN: [&str; 4] = ["/*/GetCredentialType", "/*/login", "/kmsi", "/*/kmsi"];
 
-/// The classifier: the own-state list (and, from M0 Task 11, the write mapping).
+/// The classifier: the own-state list, and for a run that writes, the write mapping.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Classifier {
     own: Vec<OwnRule>,
+    /// Whether the chat service's writes are mapped ([`Classifier::mapped`]).
+    writes: bool,
 }
 
 impl Classifier {
@@ -157,7 +172,17 @@ impl Classifier {
                 .iter()
                 .map(|(origin, path)| OwnRule::new(OwnKind::Authz, "POST", origin, path)),
         );
-        Self { own }
+        Self { own, writes: false }
+    }
+
+    /// The seeded list plus the write mapping (see the module docs): what a run that writes uses, together with a
+    /// membership source that can read the targets' members (`teams_fence::LiveMembershipSource`).
+    #[must_use]
+    pub fn mapped() -> Self {
+        Self {
+            writes: true,
+            ..Self::seeded()
+        }
     }
 
     /// The seeded list plus Entra's sign-in form ([`OwnKind::EntraSignIn`]): what `proto-lab login` needs to type a
@@ -181,9 +206,10 @@ impl Classifier {
         self
     }
 
-    /// Classifies one request. The body is unused until writes are mapped (M0 Task 11).
+    /// Classifies one request: a read, an own-state request, a mapped write (with [`Classifier::mapped`]; the body
+    /// names what some writes are), or unknown.
     #[must_use]
-    pub fn classify(&self, method: &str, url: &str, _body: Option<&[u8]>) -> Classification {
+    pub fn classify(&self, method: &str, url: &str, body: Option<&[u8]>) -> Classification {
         let method = method.to_ascii_uppercase();
         if !is_mutating(&method) {
             return Classification::Read;
@@ -191,11 +217,177 @@ impl Classifier {
         let Ok(url) = Url::parse(url) else {
             return Classification::Unknown;
         };
-        self.own
-            .iter()
-            .find(|rule| rule.matches(&method, &url))
-            .map_or(Classification::Unknown, |rule| Classification::Own(rule.kind))
+        if let Some(rule) = self.own.iter().find(|rule| rule.matches(&method, &url)) {
+            return Classification::Own(rule.kind);
+        }
+        if self.writes
+            && let Some(target) = map_write(&method, &url, body)
+        {
+            return Classification::Write(target);
+        }
+        Classification::Unknown
     }
+}
+
+/// The write a chat service request makes, if the mapping knows it (`docs/protocol/fence-targets.md`).
+fn map_write(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
+    let path = chat_service_path(url)?;
+    let path: Vec<&str> = path.iter().map(String::as_str).collect();
+    let name = || {
+        url.query_pairs()
+            .find(|(key, _)| key == "name")
+            .map(|(_, value)| value.into_owned())
+    };
+    let on = |kind, chat: &str| chat_scope(chat).map(|scope| Target::new(kind, scope));
+    match (method, path.as_slice()) {
+        ("POST", ["users", "ME", "conversations", chat, "messages"]) => on(message_kind(body?)?, chat),
+        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Edit, chat),
+        ("DELETE", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Delete, chat),
+        ("PUT" | "DELETE", ["users", "ME", "conversations", chat, "messages", _, "properties"])
+            if name()? == "emotions" =>
+        {
+            on(WriteKind::Reaction, chat)
+        }
+        ("PUT", ["users", "ME", "conversations", chat, "properties"]) if name()? == "consumptionhorizon" => {
+            on(WriteKind::ReadReceipt, chat)
+        }
+        ("POST", ["threads"]) => Some(Target::new(WriteKind::ChatCreate, Scope::New).with_added(body_members(body?)?)),
+        ("PUT", ["threads", chat, "members"]) => {
+            Some(on(WriteKind::MemberChange, chat)?.with_added(body_members(body?)?))
+        }
+        ("PUT", ["threads", chat, "members", member]) if is_member(member) => {
+            Some(on(WriteKind::MemberChange, chat)?.with_added([Mri::new(*member)]))
+        }
+        ("DELETE", ["threads", chat, "members", member]) if is_member(member) => on(WriteKind::MemberChange, chat),
+        _ => None,
+    }
+}
+
+/// A chat's conversation id: `19:…@unq.gbl.spaces` (1:1) or `19:…@thread.v2` (group and meeting chats), never a
+/// channel or team (`@thread.tacv2`, `@thread.skype`) or a reply chain within one (`;messageid=`).
+fn chat_scope(id: &str) -> Option<Scope> {
+    let chat = id.starts_with("19:")
+        && (id.ends_with("@unq.gbl.spaces") || id.ends_with("@thread.v2"))
+        && !id.contains([';', '/', '?', '#']);
+    chat.then(|| Scope::Conversation { id: id.to_owned() })
+}
+
+/// What a message post is, by its `messagetype`: typing (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`,
+/// `RichText`, `RichText/…`). Any other type, or a body that isn't a JSON object with one (read by [`strict_json`]), is
+/// unknown.
+fn message_kind(body: &[u8]) -> Option<WriteKind> {
+    let body = strict_json(body)?;
+    match body.get("messagetype")?.as_str()? {
+        "Control/Typing" | "Control/ClearTyping" => Some(WriteKind::Typing),
+        "Text" | "RichText" => Some(WriteKind::Message),
+        kind if kind.starts_with("RichText/") => Some(WriteKind::Message),
+        _ => None,
+    }
+}
+
+/// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the body
+/// isn't read by [`strict_json`], or the list is missing, empty, or has a member that isn't an object with a string id.
+fn body_members(body: &[u8]) -> Option<Vec<Mri>> {
+    let body = strict_json(body)?;
+    let members: Vec<Mri> = body
+        .get("members")?
+        .as_array()?
+        .iter()
+        .map(|member| member.get("id")?.as_str().map(Mri::new))
+        .collect::<Option<_>>()?;
+    (!members.is_empty()).then_some(members)
+}
+
+/// A request body as one JSON value, read so that the fence and the chat service can't read it differently: `None`
+/// for anything but a single JSON value, and for a body in which any object has two keys a case-insensitive reader
+/// could take for one (an exact duplicate, `members` beside `Members`, `id` beside `ID`). A .NET service may bind keys
+/// in any case and keep either duplicate, so such a body is ambiguous and its write stays unknown. With every key
+/// unique in any case, an exact lookup ([`Value::get`]) finds the one key the service binds, or nothing: a key the
+/// fence would miss only because of its case (`Members` alone) reads as missing, which is unknown too.
+fn strict_json(body: &[u8]) -> Option<Value> {
+    let mut reader = serde_json::Deserializer::from_slice(body);
+    let value = Strict.deserialize(&mut reader).ok()?;
+    reader.end().ok()?;
+    Some(value)
+}
+
+/// A key as a case-insensitive reader compares it: upper-cased, then lower-cased, so `ſ` and `K` (Kelvin) fold with
+/// `s` and `k`. Where it folds more than such a reader would (`ß` and `ss`), a body is refused that didn't need to be.
+fn fold(key: &str) -> String {
+    key.to_uppercase().to_lowercase()
+}
+
+/// [`strict_json`]'s reader: a [`Value`], refusing an object with two keys of one [`fold`].
+struct Strict;
+
+impl<'de> DeserializeSeed<'de> for Strict {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Strict {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JSON whose objects have no two keys alike in any case")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(Strict)? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut object = Map::new();
+        let mut seen = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(fold(&key)) {
+                return Err(de::Error::custom("two keys alike in some case"));
+            }
+            let value = map.next_value_seed(Strict)?;
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
+}
+
+/// One member named in a path: an MRI, not the `ALL` every-member form.
+fn is_member(segment: &str) -> bool {
+    segment.contains(':') && !segment.eq_ignore_ascii_case("ALL")
 }
 
 /// Whether a method can change anything: every method but `GET`, `HEAD` and `OPTIONS` (in any case).

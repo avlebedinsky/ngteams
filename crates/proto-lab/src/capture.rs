@@ -478,6 +478,7 @@ fn cause_value(cause: DenyCause) -> Value {
         DenyCause::LogUnavailable => json!("log_unavailable"),
         DenyCause::Malformed => json!("malformed"),
         DenyCause::ForeignSocket => json!("foreign_socket"),
+        DenyCause::Forced => json!("forced"),
         DenyCause::Fenced(reason) => json!({"fenced": serde_json::to_value(reason).unwrap_or(Value::Null)}),
     }
 }
