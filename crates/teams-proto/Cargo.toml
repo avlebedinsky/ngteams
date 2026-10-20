@@ -14,6 +14,8 @@ publish.workspace = true
 test-support = ["teams-fence/test-support"]
 
 [dependencies]
+# the parsed message HTML's tree, walked iteratively (the version scraper takes)
+ego-tree.workspace = true
 # the session's tokens (`Credentials`), `TokenError`, and `Retry-After` read as Entra's and authz's answers are
 teams-auth.workspace = true
 teams-fence.workspace = true
@@ -21,8 +23,14 @@ teams-fence.workspace = true
 percent-encoding.workspace = true
 # the transport's own HTTPS client: no proxy, no redirects, a fixed host allowlist
 reqwest.workspace = true
+# the chat service's message HTML, read into the typed rich-text model
+scraper.workspace = true
+# the chat service's answers, read into the message model (unknown fields kept)
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# a message's ISO times as milliseconds
+time.workspace = true
 # the wait before a throttled read or own-state request is sent again
 tokio = { workspace = true, features = ["time"] }
 url.workspace = true
@@ -33,6 +41,8 @@ url.workspace = true
 teams-fence = { workspace = true, features = ["test-support"] }
 # the transport's tests reach wiremock through the mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
+# the chat reads' tests run against the mock chat service, through the transport's mock origin
+teams-mock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 trybuild.workspace = true
 wiremock.workspace = true

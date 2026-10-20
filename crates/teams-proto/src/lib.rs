@@ -15,6 +15,7 @@
 //! tokens from its `teams-auth` session. Only the `test-support` feature (tests, never a lab binary) points it at a
 //! local mock ([`HttpTransport::with_mock_origin`]).
 
+pub mod chat;
 mod client;
 mod endpoint;
 mod http;

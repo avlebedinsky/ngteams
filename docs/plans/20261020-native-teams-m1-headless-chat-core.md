@@ -533,15 +533,38 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Create: `crates/teams-proto/src/chat/{mod.rs,model.rs,read.rs,html.rs}`, `crates/teams-proto/tests/chat_read.rs`
 - Modify: `Cargo.toml` (the HTML parser in `[workspace.dependencies]`), `crates/teams-proto/Cargo.toml`
 
-- [ ] tests first on the Task 7 fixtures: conversations (1:1, group; channels read but marked read-only), members,
+- [x] tests first on the Task 7 fixtures: conversations (1:1, group; channels read but marked read-only), members,
       messages with versions, edits, deletes, reactions, mentions, quotes, references to received attachments (AMS
       images, file cards; parsed, not fetched); unknown fields kept (`serde(flatten)`), unknown message types as
       `Unknown(String)`, never a parse failure
-- [ ] rich text: parse the HTML content into a small typed model (text runs, mentions, quotes, links, images); unknown
+      (`teams_proto::chat`: `ConversationList`/`MessagePage::from_body`, `Conversation` with `kind()` (`OneToOne`,
+      `Group` from `threadType` `chat` and the id as the fence reads it, `Channel` for `space`, `Notifications`,
+      `Unknown(threadType)`; all but 1:1 and group read-only, a meeting chat included: its `threadType` wasn't seen),
+      `consumption_horizon()`, `last_message()`; `Message` with `sender()`, versions, `edit_time()`/`delete_time()`,
+      `reactions()`, `mentions()` (bundle form, not captured), `quotes()`, `files()` and `ams_references` (entries
+      kept raw: no received attachment was ever captured), `thread_activity()` (the `AddMember` XML); `Thread`,
+      `MemberList`. A property in a form no capture showed is `Field::Unknown(value)`; a list entry that isn't the
+      captured shape goes to the page's `unreadable` and the rest is read. Written in one pass with the tests rather
+      than strictly tests first)
+- [x] rich text: parse the HTML content into a small typed model (text runs, mentions, quotes, links, images); unknown
       markup kept as text; no script, style or event attribute survives
-- [ ] paging and sync: follow the service's own `backwardLink`/`syncState` links only on the same chat base
-- [ ] a 404 with `Location` is an error (`RegionMoved`, logged by status only), not followed (tests on the mock)
-- [ ] `cargo test -p teams-proto` and the gate pass
+      (`scraper` 0.27.0 without default features (html5ever) and `ego-tree` 0.11.0 in `[workspace.dependencies]`,
+      `time` 0.3.55 for the ISO times; `RichText` of `Node::{Text{marks}, Break, Paragraph, Mention, Link, Image,
+      Quote}`; links only `http`/`https`/`mailto`, images only `https`; `script`, `style`, `template`, frames,
+      `object`/`embed` and the head dropped with their content; walked without recursion, containers capped at
+      `MAX_DEPTH` 32, content read up to `MAX_CONTENT` 64 KiB (`truncated`), since html5ever's parse cost grows with
+      the square of the nesting depth)
+- [x] paging and sync: follow the service's own `backwardLink`/`syncState` links only on the same chat base
+      (`ChatReads` over `Client<HttpTransport<_>>`: `conversations`/`conversations_from`, `messages`/`messages_from`,
+      `messages_around`, `thread`, `members`. A link is followed only with the transport's own chat base (scheme,
+      host, port, base path exactly, no fragment) and the path of the read it was handed out for (the same
+      conversation's messages, or the conversation list); else `ChatReadError::Link` and nothing is sent)
+- [x] a 404 with `Location` is an error (`RegionMoved`, logged by status only), not followed (tests on the mock)
+      (`ChatReadError::RegionMoved { status }` keeps no `Location`; tested on wiremock directly, since `teams-mock`
+      has no region hop and was left unchanged; one request reached it)
+- [x] `cargo test -p teams-proto` and the gate pass (parallel run: crate-scoped gate; workspace gate after merge:
+      `cargo fmt --all --check`, `cargo clippy -p teams-proto --all-targets -- -D warnings`, `scripts/lint-report.sh`,
+      `cargo test -p teams-proto -p fence-seal -p fixture-guard`, pinned to 4 cores)
 
 ### Task 11: `teams-store` (SQLite)
 **Files:**
