@@ -460,12 +460,44 @@ fn a_test_call_start_is_unknown_without_the_echo_service_s_mri() {
 }
 
 #[test]
-fn a_call_start_to_named_callees_names_every_one_of_them() {
+fn a_test_call_start_may_name_the_echo_service_and_nobody_else() {
     let classifier = Classifier::calling().with_test_call_callee(Mri::new(ECHO));
-    let other = "8:orgid:00000000-0000-4000-8000-00000000000b";
-    let body = call_start(&format!(r#"{{"id":"{other}","displayName":"B"}}"#), "");
-    let expected = Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(CALLER), Mri::new(other)]);
-    assert_eq!(classify_start(&classifier, &body), Classification::Write(expected));
+    let expected = Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(CALLER), Mri::new(ECHO)]);
+    let test_call = r#","scenario":"UserInitiatedTestCall""#;
+    for to in [
+        format!(r#"{{"id":"{ECHO}"}}"#),
+        format!(r#"{{"id":"{ECHO}","participantId":"00000000-0000-4000-8000-000000000003"}}"#),
+    ] {
+        assert_eq!(
+            classify_start(&classifier, &call_start(&to, test_call)),
+            Classification::Write(expected.clone()),
+            "{to}"
+        );
+    }
+}
+
+#[test]
+fn a_call_start_naming_anyone_but_the_echo_service_is_unknown() {
+    // Only the test call was captured: a call to named people (a lab account included), with or without a scenario, is
+    // a shape nobody reviewed
+    let classifier = Classifier::calling().with_test_call_callee(Mri::new(ECHO));
+    let lab_b = r#"{"id":"8:orgid:00000000-0000-4000-8000-00000000000b","displayName":"B"}"#;
+    let echo = format!(r#"{{"id":"{ECHO}"}}"#);
+    let test_call = r#","scenario":"UserInitiatedTestCall""#;
+    let off = [
+        call_start(lab_b, ""),
+        call_start(lab_b, test_call),
+        call_start(&echo, ""),
+        call_start(&format!("{echo},{lab_b}"), test_call),
+        call_start(&format!("{echo},{echo}"), test_call),
+        call_start(r#"{"id":"28:00000000-0000-4000-8000-0000000000e1"}"#, test_call),
+        // the echo service, with something about it nobody reviewed
+        call_start(&format!(r#"{{"id":"{ECHO}","displayName":"Echo"}}"#), test_call),
+        call_start(&format!(r#"{{"id":"{ECHO}","participantId":1}}"#), test_call),
+    ];
+    for body in &off {
+        assert_eq!(classify_start(&classifier, body), Classification::Unknown, "{body}");
+    }
 }
 
 #[test]
@@ -486,6 +518,40 @@ fn a_call_start_off_the_reviewed_shape_is_unknown() {
         test_call().replace(r#""meetingInfo":null"#, r#""meetingInfo":{"organizerId":"x"}"#),
         test_call().replace(r#""meetingData":null"#, r#""meetingData":{}"#),
         test_call().replace(r#""conversationType":null"#, r#""conversationType":"GroupCall""#),
+        // sharing content into something: a target the fence never counts
+        test_call().replace(
+            r#""contentSharing":null"#,
+            r#""contentSharing":{"threadId":"19:x@thread.v2"}"#,
+        ),
+        // a participant beside the caller and the callees
+        test_call().replace(r#""to":[]"#, r#""to":[],"cc":[{"id":"8:orgid:x"}]"#),
+        // a transfer or replacement of a call that exists: someone the fence never read
+        test_call().replace(
+            r#""callModalities":["Audio"]"#,
+            r#""callModalities":["Audio"],"replaces":{"callId":"x"}"#,
+        ),
+        test_call().replace(
+            r#""callModalities":["Audio"]"#,
+            r#""callModalities":["Audio"],"transferor":{"id":"8:orgid:x"}"#,
+        ),
+        test_call().replace(
+            r#""callModalities":["Audio"]"#,
+            r#""callModalities":["Audio"],"clientTransferContext":"x""#,
+        ),
+        // a key nobody reviewed in the conversation request, the invitation, its media or the caller
+        test_call().replace(r#""subject":null"#, r#""subject":null,"invitees":["8:orgid:x"]"#),
+        test_call().replace(
+            r#""callModalities":["Audio"]"#,
+            r#""callModalities":["Audio"],"target":"8:orgid:x""#,
+        ),
+        test_call().replace(
+            r#""blob":"v=0\r\n""#,
+            r#""blob":"v=0\r\n","participants":["8:orgid:x"]"#,
+        ),
+        test_call().replace(
+            r#""languageId":"en-us""#,
+            r#""languageId":"en-us","onBehalfOf":"8:orgid:x""#,
+        ),
         // a top-level key nobody reviewed
         test_call().replace(
             r#""contentSharing":null,"#,
@@ -587,5 +653,78 @@ fn every_captured_frame_of_the_test_call_is_what_the_fixture_says() {
         let got = FrameClassifier::calling().classify(&text(socket, case["frame"].as_str().unwrap()));
         let want = expected(case["expected"].as_str().unwrap()).expect("an expectation the test knows");
         assert_eq!(got, want, "{}", case["name"]);
+    }
+}
+
+/// The fixture's test call start, filled in.
+fn captured_start() -> Option<serde_json::Value> {
+    let fixture: serde_json::Value = serde_json::from_str(&filled(REQUESTS)).ok()?;
+    let cases = fixture["cases"].as_array()?;
+    let start = cases.iter().find(|case| case["url"] == CONVERSATIONS)?;
+    Some(start["body"].clone())
+}
+
+/// The JSON pointer of every value inside `value` (`at` itself included), objects and arrays walked into.
+fn pointers(value: &serde_json::Value, at: &str, found: &mut Vec<String>) {
+    found.push(at.to_owned());
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, inner) in object {
+                let key = key.replace('~', "~0").replace('/', "~1");
+                pointers(inner, &format!("{at}/{key}"), found);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, inner) in items.iter().enumerate() {
+                pointers(inner, &format!("{at}/{index}"), found);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn classify_captured(start: &serde_json::Value) -> Classification {
+    let classifier = Classifier::calling().with_test_call_callee(Mri::new(format!("28:{ECHO_GUID}")));
+    classify_start(&classifier, &start.to_string())
+}
+
+#[test]
+fn every_object_of_the_test_call_start_refuses_a_key_nobody_reviewed() {
+    let start = captured_start().unwrap();
+    assert!(matches!(classify_captured(&start), Classification::Write(_)));
+    let mut found = Vec::new();
+    pointers(&start, "", &mut found);
+    let mut objects = 0;
+    for pointer in &found {
+        let mut changed = start.clone();
+        let Some(object) = changed.pointer_mut(pointer).and_then(serde_json::Value::as_object_mut) else {
+            continue;
+        };
+        object.insert("unreviewed".to_owned(), serde_json::json!("8:orgid:x"));
+        objects += 1;
+        assert_eq!(classify_captured(&changed), Classification::Unknown, "{pointer:?}");
+    }
+    // the start, the conversation request and its roster, properties and links, the participants and the caller, the
+    // invitation and its links, media content, descriptions, channel parameters, and the rest
+    assert!(objects >= 20, "{objects}");
+}
+
+#[test]
+fn every_value_of_the_test_call_start_is_typed_as_captured() {
+    let start = captured_start().unwrap();
+    let mut found = Vec::new();
+    pointers(&start, "", &mut found);
+    for pointer in found.iter().filter(|pointer| !pointer.is_empty()) {
+        let mut changed = start.clone();
+        let value = changed.pointer_mut(pointer).unwrap();
+        *value = match value {
+            serde_json::Value::Null => serde_json::json!({"threadId": "19:x@thread.v2"}),
+            serde_json::Value::Bool(_) => serde_json::json!("true"),
+            serde_json::Value::Number(_) => serde_json::json!("1"),
+            serde_json::Value::String(_) => serde_json::json!(1),
+            serde_json::Value::Array(_) => serde_json::json!({}),
+            serde_json::Value::Object(_) => serde_json::json!([]),
+        };
+        assert_eq!(classify_captured(&changed), Classification::Unknown, "{pointer:?}");
     }
 }

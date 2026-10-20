@@ -8,8 +8,10 @@
 //!   never answered). Checked against the Task 18 capture: the shapes hold, the test call differs (see `signaling`);
 //! - [`call`]: the flow up to the skypetoken, with the call start through the fence.
 //!
-//! What doesn't: the live call. The lab accounts have no Teams license, so there is no skypetoken, no capture of a
-//! real echo call (Task 18) and no confirmed signaling; `docs/spikes/echo-call.md` has the details.
+//! What doesn't: the live native call. The Task 18 capture (`proto-lab run echo-call`) confirms part of the signaling
+//! (see [`signaling`]), but [`call::start`] still refuses to send, and even the web client's test call gets no echo: the
+//! echo service never joins, because the fence denies every write on a call that exists (adding the echo, the
+//! acknowledgements); `docs/spikes/echo-call.md` has the details.
 
 use std::io;
 

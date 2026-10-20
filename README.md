@@ -112,9 +112,11 @@ cargo run -p proto-lab -- run ab-chat --headless   # a messages b in their 1:1 c
 cargo run -p proto-lab -- run echo-call --headless # a places the test call to the echo service, fake microphone; recorded
 ```
 
-`echo-call` uses the calling classifiers (`Classifier::calling`, `FrameClassifier::calling`): the write mapping plus the
-reviewed own-state the web client's calling stack needs for the account's own endpoint (`crates/proto-lab/src/calling.rs`,
-`docs/protocol/calling-echo.md`). The fence lets the call through only when its participants are a and the echo service,
+`echo-call` uses the calling classifiers (`Classifier::calling`, `FrameClassifier::calling`): the write mapping, the
+reviewed own-state the web client's calling stack needs for the account's own endpoint (its registration, settings and
+policy reads, the Trouter session), and one more write, the test call's start in exactly its captured shape
+(`crates/proto-lab/src/calling.rs`, `docs/protocol/calling-echo.md`). The fence lets the call through only when its
+participants are a and the echo service,
 whose MRI `lab.toml` records once established: `cargo run -p proto-lab -- service-mri echo <mri>` (only a bot's
 `28:<guid>`, only for a service `lab.toml` approves by name and records no MRI for yet).
 

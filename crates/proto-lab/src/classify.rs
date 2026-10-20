@@ -207,8 +207,10 @@ impl Classifier {
         }
     }
 
-    /// The write mapping ([`Classifier::mapped`]) plus the calling stack's own-state (`crate::calling`): the account's
-    /// own endpoint registration. What a run that calls (`echo-call`) uses.
+    /// The write mapping ([`Classifier::mapped`]) plus the calling stack's own-state (`crate::calling::own_request`:
+    /// the account's own endpoint registration and settings/policy reads) and one more write, the web client's test
+    /// call start (`crate::calling::call_start`, a [`WriteKind::Call`] on [`Scope::New`] the fence judges, mapped only
+    /// with [`Classifier::with_test_call_callee`]). What a run that calls (`echo-call`) uses.
     #[must_use]
     pub fn calling() -> Self {
         Self {

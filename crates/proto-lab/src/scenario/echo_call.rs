@@ -69,8 +69,8 @@ const TEST_CALL_BUTTON_QUERY: &str =
 pub const HANG_UP: Selector<'static> = Selector::Css(HANG_UP_CSS);
 const HANG_UP_CSS: &str = r#"#hangup-button, [data-tid="hangup-main-btn"]"#;
 
-/// The call start's URL, as the fence's verdicts name it (`crate::calling::call_start`).
-pub const CALL_START_URL: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/epconv";
+/// The call start's URL, as the fence's verdicts name it: the one `crate::calling::call_start` maps.
+pub use crate::calling::CALL_START_URL;
 
 /// How long the app bar, and later the Devices page, get to show up.
 pub const PAGE_OPEN: Duration = Duration::from_secs(75);

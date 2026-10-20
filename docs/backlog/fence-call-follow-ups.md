@@ -1,6 +1,6 @@
 ---
 worth: yes
-where: crates/proto-lab/src/calling.rs:437
+where: crates/proto-lab/src/calling.rs:636
 added: 2026-10-20
 ---
 # the fence can't judge writes on an existing call, so the echo never joins
