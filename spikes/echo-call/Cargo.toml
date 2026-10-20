@@ -1,0 +1,33 @@
+[package]
+name = "echo-call"
+description = "Spike 3b: a native echo call — TURN client (RFC 8656), str0m through the relay, signaling shaped from the bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+crc32fast.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+md-5.workspace = true
+media-loop.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+str0m.workspace = true
+teams-auth.workspace = true
+teams-fence.workspace = true
+teams-proto.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+fixture-guard.workspace = true
+tempfile.workspace = true
+# the call-flow tests build fences over test rosters
+teams-fence = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

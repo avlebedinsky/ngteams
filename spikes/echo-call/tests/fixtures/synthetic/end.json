@@ -1,0 +1,5 @@
+{
+  "_synthetic": "SYNTHETIC, not a capture: written by hand (Task 19) from the callback paths in the web client's bundle. Unconfirmed: needs the Task 18 capture.",
+  "path": "/call/end/",
+  "body": { "callEnd": { "code": 0, "phrase": "call ended" } }
+}

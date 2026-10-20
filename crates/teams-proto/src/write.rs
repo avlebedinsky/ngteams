@@ -1,6 +1,8 @@
 //! Mutating requests ([`Mutating`]) and the pairing of one with the permit issued for its target ([`Authorized`]).
 
-use teams_fence::{Scope, Target, WriteKind, WritePermit};
+use std::collections::BTreeSet;
+
+use teams_fence::{Mri, Scope, Target, WriteKind, WritePermit};
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
 /// [`Authorized`], next to a [`WritePermit`] issued for exactly that target.
@@ -19,6 +21,7 @@ mod sealed {
     pub trait Sealed {}
 
     impl Sealed for super::SendMessage {}
+    impl Sealed for super::StartCall {}
 }
 
 /// A mutating request together with the permit for its target. The only way to make one is [`Authorized::new`],
@@ -118,5 +121,43 @@ impl Mutating for SendMessage {
                 id: self.conversation.clone(),
             },
         )
+    }
+}
+
+/// Places a new call: the caller rings the callees. The call doesn't exist yet, so its target is [`Scope::New`] and its
+/// participants are exactly the caller and the callees, all of which the fence judges. There is no request here that
+/// answers an incoming call ([`WriteKind::CallAnswer`]): a lab client never answers one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartCall {
+    caller: Mri,
+    callees: BTreeSet<Mri>,
+}
+
+impl StartCall {
+    #[must_use]
+    pub fn new(caller: Mri, callees: impl IntoIterator<Item = Mri>) -> Self {
+        Self {
+            caller,
+            callees: callees.into_iter().collect(),
+        }
+    }
+
+    /// The account placing the call.
+    #[must_use]
+    pub fn caller(&self) -> &Mri {
+        &self.caller
+    }
+
+    /// Everyone the call rings.
+    #[must_use]
+    pub fn callees(&self) -> &BTreeSet<Mri> {
+        &self.callees
+    }
+}
+
+impl Mutating for StartCall {
+    fn target(&self) -> Target {
+        Target::new(WriteKind::Call, Scope::New)
+            .with_added(std::iter::once(self.caller.clone()).chain(self.callees.iter().cloned()))
     }
 }

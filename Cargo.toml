@@ -8,6 +8,7 @@ members = [
     "crates/teams-auth",
     "crates/teams-fence",
     "crates/teams-proto",
+    "spikes/echo-call",
     "spikes/gpui-video",
     "spikes/media-loop",
 ]
@@ -27,6 +28,8 @@ teams-proto = { path = "crates/teams-proto" }
 media-loop = { path = "spikes/media-loop" }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
+# STUN FINGERPRINT (CRC-32) for the echo call's TURN client
+crc32fast = "1.5.2"
 # gzip only, on the zlib-rs backend zip already uses
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
@@ -38,9 +41,13 @@ gpui-pre = { version = "=0.3.9", default-features = false, features = ["wayland"
 gpui-pre-platform = { version = "=0.3.9", default-features = false, features = ["wayland"] }
 # GPUI's `RenderImage` frames are `image` buffers: the version GPUI already links.
 image = { version = "0.25.10", default-features = false }
+# STUN MESSAGE-INTEGRITY (HMAC-SHA1 over a long-term key) for the echo call's TURN client
+hmac = "0.13.0"
 # a Retry-After given as an HTTP date
 httpdate = "1.0.3"
 log = "0.4.34"
+# the STUN long-term credential key: MD5(username:realm:password), RFC 8489 9.2.2
+md-5 = "0.11.0"
 # The async-io flavour GPUI's Linux platform takes too: its ashpd and zbus refuse to build with both `async-io` and
 # `tokio` on, and workspace builds unify features, so oo7's default `tokio` would break every workspace build with
 # GPUI in it. async-io runs its own reactor thread, so the futures still run under tokio.
@@ -53,6 +60,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 rustix = { version = "1.1.5", features = ["process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha1 = "0.11.0"
 sha2 = "0.11.1"
 # sans-IO WebRTC; rust-crypto does DTLS and SRTP in pure Rust (no OpenSSL), but dimpl generates its certificate with
 # rcgen on aws-lc-rs, so the aws-lc-sys C build stays; no example web server
