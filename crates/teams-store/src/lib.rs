@@ -24,7 +24,7 @@ pub mod state;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 pub use conversations::{Conversation, ConversationKind, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange};
@@ -33,6 +33,8 @@ pub use schema::SCHEMA_VERSION;
 pub use state::{ReadHorizon, SyncState};
 
 /// How long a write waits for another connection's lock (a second process on the same account) before it fails.
+/// Every transaction takes the write lock when it begins (`BEGIN IMMEDIATE`), so one that reads before it writes
+/// waits here too, rather than failing at once when another connection wrote in between.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What a store operation can fail with.
@@ -42,6 +44,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("store file {}: {source}", path.display())]
     File { path: PathBuf, source: std::io::Error },
+    #[error("the store's journal mode is {0}, not wal")]
+    NotWal(String),
     #[error("the store's schema version {found} is newer than this build's {supported}")]
     SchemaTooNew { found: u32, supported: u32 },
     #[error("no conversation {0} in the store")]
@@ -81,14 +85,20 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`StoreError::File`] when the file or its directory can't be made private, [`StoreError::SchemaTooNew`] for a
-    /// store written by a newer build, [`StoreError::Sqlite`] when SQLite refuses it.
+    /// [`StoreError::File`] when the file or its directory can't be made private, [`StoreError::NotWal`] when SQLite
+    /// keeps another journal mode, [`StoreError::SchemaTooNew`] for a store written by a newer build,
+    /// [`StoreError::Sqlite`] when SQLite refuses it.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         file::prepare(path)?;
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let mut conn = Connection::open_with_flags(path, flags)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
+        conn.set_transaction_behavior(TransactionBehavior::Immediate);
+        // SQLite answers with the mode it took: the old one when it can't switch
+        let mode = conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(StoreError::NotWal(mode));
+        }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         schema::migrate(&mut conn)?;
@@ -110,15 +120,6 @@ impl Store {
     /// [`StoreError::Sqlite`] when the version can't be read.
     pub fn schema_version(&self) -> Result<u32, StoreError> {
         schema::version(&self.conn)
-    }
-
-    /// SQLite's journal mode (`wal` once open).
-    ///
-    /// # Errors
-    ///
-    /// [`StoreError::Sqlite`] when the mode can't be read.
-    pub fn journal_mode(&self) -> Result<String, StoreError> {
-        Ok(self.conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?)
     }
 
     fn require_conversation(conn: &Connection, id: &str) -> Result<(), StoreError> {

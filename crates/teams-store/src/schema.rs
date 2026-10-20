@@ -1,8 +1,10 @@
 //! Migrations, applied in order on open. The schema version is SQLite's `user_version`; migration `n` (1-based) takes
-//! the store from version `n - 1` to `n` in one transaction, so a failed one leaves the store where it was. A
+//! the store from version `n - 1` to `n` in one transaction, so a failed one leaves the store where it was. Each
+//! transaction reads the version under the write lock, so two processes opening a new store at once apply each
+//! migration once. A
 //! migration once released is never edited: a change is a new file appended to [`MIGRATIONS`].
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::StoreError;
 
@@ -18,18 +20,20 @@ pub(crate) fn version(conn: &Connection) -> Result<u32, StoreError> {
 
 /// Applies every migration past the store's version; refuses a store from a newer build.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
-    let found = version(conn)?;
-    if found > SCHEMA_VERSION {
-        return Err(StoreError::SchemaTooNew {
-            found,
-            supported: SCHEMA_VERSION,
-        });
-    }
-    for (to, sql) in (1..=SCHEMA_VERSION).zip(MIGRATIONS).skip(found as usize) {
-        let tx = conn.transaction()?;
+    loop {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let found = version(&tx)?;
+        if found > SCHEMA_VERSION {
+            return Err(StoreError::SchemaTooNew {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        let Some(sql) = MIGRATIONS.get(found as usize) else {
+            return Ok(());
+        };
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", to)?;
+        tx.pragma_update(None, "user_version", found + 1)?;
         tx.commit()?;
     }
-    Ok(())
 }

@@ -335,16 +335,20 @@ impl Store {
 
     /// Adopts a row into this run as pending, with its `clientmessageid` unchanged: the explicit resend of a row an
     /// earlier run left, or of one that was denied or failed. For a row left `sending`, the caller first looks for its
-    /// `clientmessageid` in a sync: the earlier attempt may have arrived.
+    /// `clientmessageid` in a sync: the earlier attempt may have arrived. This run's own pending or sending row is
+    /// refused: it is waiting for its attempt (and its `not_before`) or has one in flight, and a second attempt
+    /// beside it could send the command twice.
     ///
     /// # Errors
     ///
-    /// [`StoreError::UnknownOutboxEntry`] for no such row, [`StoreError::OutboxNotSendable`] for a row already sent,
-    /// [`StoreError::Sqlite`] when the write fails.
+    /// [`StoreError::UnknownOutboxEntry`] for no such row, [`StoreError::OutboxNotSendable`] for a row already sent or
+    /// one of this run still pending or sending, [`StoreError::Sqlite`] when the write fails.
     pub fn resend(&mut self, id: i64) -> Result<OutboxEntry, StoreError> {
         let tx = self.conn.transaction()?;
         let row = entry(&tx, id)?;
-        if row.state == OutboxState::Sent {
+        let ours_in_progress =
+            row.run_id == self.run_id && matches!(row.state, OutboxState::Pending | OutboxState::Sending);
+        if row.state == OutboxState::Sent || ours_in_progress {
             return Err(StoreError::OutboxNotSendable { id, state: row.state });
         }
         tx.execute(

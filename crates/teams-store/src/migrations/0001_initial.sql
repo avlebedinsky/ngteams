@@ -42,6 +42,9 @@ CREATE TABLE messages (
     compose_time INTEGER,
     edit_time INTEGER,
     delete_time INTEGER,
+    -- the version of the newest whole reaction set merged in: a reaction with no row was absent then, so a change
+    -- to it from before then is ignored
+    reactions_as_of INTEGER,
     PRIMARY KEY (conversation_id, id)
 ) STRICT;
 
@@ -49,14 +52,16 @@ CREATE INDEX messages_by_arrival ON messages (conversation_id, arrival_time DESC
 CREATE INDEX messages_by_client_id ON messages (conversation_id, client_message_id)
     WHERE client_message_id IS NOT NULL;
 
--- One row per (message, reaction, user). A removal stays as a row with `present` 0, so an older change that
--- arrives later can't bring the reaction back.
+-- One row per (message, reaction, user), the latest change winning. A removal stays as a row with `present` 0, so
+-- an older change that arrives later can't bring the reaction back. `changed` orders the changes: a per-user change's
+-- own time, or the version of the whole set it came in; `time` is when the reaction was set.
 CREATE TABLE reactions (
     conversation_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
     reaction TEXT NOT NULL,
     user_mri TEXT NOT NULL,
     time INTEGER NOT NULL,
+    changed INTEGER NOT NULL,
     present INTEGER NOT NULL CHECK (present IN (0, 1)),
     PRIMARY KEY (conversation_id, message_id, reaction, user_mri),
     FOREIGN KEY (conversation_id, message_id) REFERENCES messages (conversation_id, id) ON DELETE CASCADE

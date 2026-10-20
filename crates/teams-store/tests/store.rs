@@ -69,7 +69,40 @@ fn a_new_store_is_migrated_to_the_latest_schema_in_wal_mode() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = open(&dir).expect("open the store");
     assert_eq!(store.schema_version().expect("schema version"), SCHEMA_VERSION);
-    assert_eq!(store.journal_mode().expect("journal mode"), "wal");
+    // WAL is kept in the file: a second connection sees it
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    let mode: String = raw
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .expect("journal mode");
+    assert_eq!(mode, "wal");
+    drop(store);
+}
+
+#[test]
+fn two_processes_opening_a_new_store_at_once_both_open_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    for _ in 0..8 {
+        if let Some(parent) = path.parent() {
+            drop(std::fs::remove_dir_all(parent));
+        }
+        let barrier = std::sync::Barrier::new(2);
+        let opened: Vec<Result<Store, StoreError>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        Store::open(&path)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("join")).collect()
+        });
+        for store in opened {
+            let store = store.expect("both open the new store");
+            assert_eq!(store.schema_version().expect("schema version"), SCHEMA_VERSION);
+        }
+    }
 }
 
 #[test]
@@ -144,6 +177,37 @@ fn a_conversation_upsert_keeps_the_newest_version() {
     newer.topic = Some("newer".to_owned());
     assert_eq!(store.upsert_conversation(&newer).expect("newer"), Applied::Updated);
     assert_eq!(store.conversation(GROUP).expect("read"), Some(newer));
+}
+
+#[test]
+fn a_later_last_activity_is_taken_whatever_the_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = open(&dir).expect("open the store");
+    let mut chat = conversation(GROUP, ConversationKind::Group, 10);
+    chat.topic = Some("kept".to_owned());
+    chat.last_activity = Some(1_000);
+    store.upsert_conversation(&chat).expect("insert");
+    let mut same = chat.clone();
+    same.topic = Some("not taken".to_owned());
+    same.last_activity = Some(2_000);
+    assert_eq!(
+        store.upsert_conversation(&same).expect("same version"),
+        Applied::Ignored
+    );
+    let mut older = chat.clone();
+    older.version = 9;
+    older.last_activity = Some(1_500);
+    assert_eq!(
+        store.upsert_conversation(&older).expect("older version"),
+        Applied::Ignored
+    );
+    older.last_activity = None;
+    store.upsert_conversation(&older).expect("no activity");
+    let stored = store.conversation(GROUP).expect("read").expect("group");
+    assert_eq!(
+        (stored.version, stored.topic.as_deref(), stored.last_activity),
+        (10, Some("kept"), Some(2_000))
+    );
 }
 
 #[test]
@@ -397,6 +461,110 @@ fn a_newer_message_version_with_its_reactions_replaces_them() {
     text_only.version = 1300;
     store.upsert_message(&text_only, None).expect("no set");
     assert_eq!(store.reactions(CHAT, "1000").expect("read"), replaced.to_vec());
+}
+
+fn reaction(key: &str, user: &str, time: i64) -> teams_store::Reaction {
+    teams_store::Reaction {
+        key: key.to_owned(),
+        user: user.to_owned(),
+        time,
+    }
+}
+
+fn keys_and_users(store: &Store, message_id: &str) -> Result<Vec<(String, String)>, StoreError> {
+    Ok(store
+        .reactions(CHAT, message_id)?
+        .into_iter()
+        .map(|r| (r.key, r.user))
+        .collect())
+}
+
+#[test]
+fn a_removed_reaction_stays_removed_after_a_set_leaves_it_out_and_its_add_arrives_late() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    let first = message("1000", 1000, "hi", 1000, PEER);
+    store.upsert_message(&first, None).expect("message");
+    let late_add = ReactionChange::add(CHAT, "1000", "like", ME, 1100);
+    store.apply_reaction(&late_add).expect("add");
+    store
+        .apply_reaction(&ReactionChange::remove(CHAT, "1000", "like", ME, 1200))
+        .expect("remove");
+    let mut newer = first;
+    newer.version = 1300;
+    store
+        .upsert_message(&newer, Some(&[reaction("heart", PEER, 1250)]))
+        .expect("a newer version without our like");
+    assert_eq!(store.apply_reaction(&late_add).expect("late add"), Applied::Ignored);
+    assert_eq!(
+        keys_and_users(&store, "1000").expect("read"),
+        [("heart".to_owned(), PEER.to_owned())]
+    );
+}
+
+#[test]
+fn a_reaction_a_newer_set_dropped_isnt_brought_back_by_its_late_add() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    let first = message("1000", 1000, "hi", 1000, PEER);
+    store
+        .upsert_message(&first, Some(&[reaction("like", ME, 1100)]))
+        .expect("with our like");
+    let mut newer = first;
+    newer.version = 1200;
+    store.upsert_message(&newer, Some(&[])).expect("like dropped");
+    assert!(store.reactions(CHAT, "1000").expect("read").is_empty());
+    let late = ReactionChange::add(CHAT, "1000", "like", ME, 1100);
+    assert_eq!(store.apply_reaction(&late).expect("late add"), Applied::Ignored);
+    // a user the set never named, whose add predates it, stays out too
+    let unseen = ReactionChange::add(CHAT, "1000", "laugh", THIRD, 1150);
+    assert_eq!(store.apply_reaction(&unseen).expect("unseen add"), Applied::Ignored);
+    assert!(store.reactions(CHAT, "1000").expect("read").is_empty());
+    // a change after the set does count
+    let after = ReactionChange::add(CHAT, "1000", "laugh", THIRD, 1250);
+    assert_eq!(store.apply_reaction(&after).expect("add after"), Applied::Inserted);
+    assert_eq!(
+        keys_and_users(&store, "1000").expect("read"),
+        [("laugh".to_owned(), THIRD.to_owned())]
+    );
+}
+
+#[test]
+fn a_set_and_per_user_changes_leave_the_same_reactions_in_either_order() {
+    let first = message("1000", 1000, "hi", 1000, PEER);
+    let mut snapshot = first.clone();
+    snapshot.version = 1250;
+    // the set was read at 1250: our like (1100) is in it, the peer's heart (1300) came after it
+    let set = [reaction("like", ME, 1100)];
+    let changes = [
+        ReactionChange::add(CHAT, "1000", "like", ME, 1100),
+        ReactionChange::add(CHAT, "1000", "heart", PEER, 1300),
+        ReactionChange::add(CHAT, "1000", "laugh", THIRD, 1150),
+        ReactionChange::remove(CHAT, "1000", "laugh", THIRD, 1200),
+    ];
+    let expected = [
+        ("heart".to_owned(), PEER.to_owned()),
+        ("like".to_owned(), ME.to_owned()),
+    ];
+    for set_first in [true, false] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = with_chat(&dir).expect("a store with the chat");
+        store.upsert_message(&first, None).expect("message");
+        if set_first {
+            store.upsert_message(&snapshot, Some(&set)).expect("set");
+        }
+        for change in &changes {
+            store.apply_reaction(change).expect("change");
+        }
+        if !set_first {
+            store.upsert_message(&snapshot, Some(&set)).expect("set");
+        }
+        assert_eq!(
+            keys_and_users(&store, "1000").expect("read"),
+            expected,
+            "set first: {set_first}"
+        );
+    }
 }
 
 #[test]
@@ -764,6 +932,39 @@ fn rows_left_by_an_earlier_run_are_not_sent_until_resent_explicitly() {
     assert_eq!(adopted.client_message_id, "2", "the resend keeps its clientmessageid");
     assert_eq!(store.outbox_due(0).expect("due").len(), 1);
     assert!(store.resend(sent).is_err(), "a sent row can't be resent");
+}
+
+#[test]
+fn this_runs_own_pending_or_in_flight_row_cant_be_resent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = open(&dir).expect("open the store");
+    let id = store.enqueue(&send("1001")).expect("enqueue").id;
+    let refused = |store: &mut Store, state| {
+        let error = store.resend(id).expect_err("ours, not finished");
+        assert!(matches!(error, StoreError::OutboxNotSendable { state: found, .. } if found == state));
+    };
+    refused(&mut store, OutboxState::Pending);
+    store.begin_attempt(id).expect("begin");
+    refused(&mut store, OutboxState::Sending);
+    assert!(store.outbox_due(i64::MAX).expect("due").is_empty(), "no second attempt");
+    let retry = AttemptOutcome::Retry {
+        not_before: 5_000,
+        error: "429".to_owned(),
+    };
+    store.finish_attempt(id, &retry).expect("retry");
+    refused(&mut store, OutboxState::Pending);
+    assert!(store.outbox_due(4_999).expect("due").is_empty(), "Retry-After kept");
+    // a failed row of this run can be resent
+    store.begin_attempt(id).expect("begin");
+    store
+        .finish_attempt(
+            id,
+            &AttemptOutcome::Failed {
+                error: "400".to_owned(),
+            },
+        )
+        .expect("failed");
+    assert_eq!(store.resend(id).expect("resend").state, OutboxState::Pending);
 }
 
 #[test]

@@ -87,7 +87,8 @@ fn conversation_from_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {
 
 impl Store {
     /// Writes a conversation unless the stored one is as new or newer (by `version`). `last_activity` keeps the newer
-    /// of the two.
+    /// of the two whatever the version: an as-new or older version that brings a later last activity is
+    /// [`Applied::Ignored`] for its versioned fields, and its last activity is still taken.
     ///
     /// # Errors
     ///
@@ -130,7 +131,16 @@ impl Store {
                 )?;
                 Applied::Updated
             }
-            Some(_) => Applied::Ignored,
+            Some(_) => {
+                // the version's fields stay, but a later last activity is still taken
+                tx.execute(
+                    "UPDATE conversations
+                     SET last_activity = MAX(COALESCE(last_activity, ?2), COALESCE(?2, last_activity))
+                     WHERE id = ?1",
+                    params![conversation.id, conversation.last_activity],
+                )?;
+                Applied::Ignored
+            }
         };
         tx.commit()?;
         Ok(applied)

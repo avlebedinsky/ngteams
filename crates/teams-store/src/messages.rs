@@ -155,34 +155,131 @@ fn write_message(conn: &Connection, message: &Message) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Replaces a message's reactions with `reactions` (all set), or drops them all.
-fn replace_reactions(conn: &Connection, message: &Message, reactions: &[Reaction]) -> rusqlite::Result<()> {
-    conn.execute(
-        "DELETE FROM reactions WHERE conversation_id = ?1 AND message_id = ?2",
-        params![message.conversation_id, message.id],
-    )?;
-    let mut insert = conn.prepare_cached(
-        "INSERT INTO reactions (conversation_id, message_id, reaction, user_mri, time, present)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1)
-         ON CONFLICT DO UPDATE SET time = MAX(time, excluded.time)",
-    )?;
-    for reaction in reactions {
-        insert.execute(params![
-            message.conversation_id,
-            message.id,
-            reaction.key,
-            reaction.user,
-            reaction.time
-        ])?;
+/// One fact about one user's reaction: set or removed, ordered by `changed`.
+struct ReactionFact<'a> {
+    key: &'a str,
+    user: &'a str,
+    /// When the reaction was set (kept on a removal).
+    time: i64,
+    /// What orders it against the stored row: a per-user change's time, or the version of the set it came in.
+    changed: i64,
+    present: bool,
+}
+
+impl ReactionFact<'_> {
+    /// Whether it wins over a stored row last changed at `changed`: the later change wins, and of two at the same
+    /// time the removal, so the result doesn't depend on which came first.
+    fn wins_over(&self, changed: i64, present: bool) -> bool {
+        self.changed > changed || (self.changed == changed && present && !self.present)
     }
+}
+
+/// Writes one reaction fact unless the stored row (or, with no row, the newest whole set that left it out) is as
+/// new or newer.
+fn apply_reaction_fact(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    fact: &ReactionFact<'_>,
+) -> rusqlite::Result<Applied> {
+    let stored: Option<(i64, bool)> = conn
+        .query_row(
+            "SELECT changed, present FROM reactions
+             WHERE conversation_id = ?1 AND message_id = ?2 AND reaction = ?3 AND user_mri = ?4",
+            params![conversation_id, message_id, fact.key, fact.user],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let applied = match stored {
+        Some((changed, present)) if fact.wins_over(changed, present) => Applied::Updated,
+        Some(_) => return Ok(Applied::Ignored),
+        None => {
+            let left_out_at: Option<i64> = conn.query_row(
+                "SELECT reactions_as_of FROM messages WHERE conversation_id = ?1 AND id = ?2",
+                params![conversation_id, message_id],
+                |row| row.get(0),
+            )?;
+            // with no row, the reaction was absent when that set was taken
+            if left_out_at.is_some_and(|as_of| !fact.wins_over(as_of, false)) {
+                return Ok(Applied::Ignored);
+            }
+            Applied::Inserted
+        }
+    };
+    conn.execute(
+        "INSERT INTO reactions (conversation_id, message_id, reaction, user_mri, time, changed, present)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT DO UPDATE SET time = excluded.time, changed = excluded.changed, present = excluded.present",
+        params![
+            conversation_id,
+            message_id,
+            fact.key,
+            fact.user,
+            fact.time,
+            fact.changed,
+            fact.present
+        ],
+    )?;
+    Ok(applied)
+}
+
+/// Merges a message's whole reaction set as of its `version`: each reaction in it is set, and each stored one not in
+/// it removed, at that version, unless the stored row changed later; a reaction with no row is taken as absent from
+/// then on.
+fn merge_reactions(conn: &Connection, message: &Message, reactions: &[Reaction]) -> rusqlite::Result<()> {
+    let (conversation_id, message_id, as_of) = (message.conversation_id.as_str(), message.id.as_str(), message.version);
+    let stored: Vec<(String, String, i64)> = {
+        let mut statement = conn.prepare_cached(
+            "SELECT reaction, user_mri, time FROM reactions WHERE conversation_id = ?1 AND message_id = ?2",
+        )?;
+        let rows = statement.query_map(params![conversation_id, message_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let left_out = stored
+        .iter()
+        .filter(|(key, user, _)| !reactions.iter().any(|r| &r.key == key && &r.user == user));
+    for (key, user, time) in left_out {
+        let removed = ReactionFact {
+            key,
+            user,
+            time: *time,
+            changed: as_of,
+            present: false,
+        };
+        apply_reaction_fact(conn, conversation_id, message_id, &removed)?;
+    }
+    for reaction in reactions {
+        let set = ReactionFact {
+            key: &reaction.key,
+            user: &reaction.user,
+            time: reaction.time,
+            changed: as_of.max(reaction.time),
+            present: true,
+        };
+        apply_reaction_fact(conn, conversation_id, message_id, &set)?;
+    }
+    conn.execute(
+        "UPDATE messages SET reactions_as_of = MAX(COALESCE(reactions_as_of, ?3), ?3)
+         WHERE conversation_id = ?1 AND id = ?2",
+        params![conversation_id, message_id, as_of],
+    )?;
     Ok(())
 }
 
 impl Store {
     /// Writes a message unless the stored one is as new or newer (by `version`), and moves the conversation's last
     /// activity up to its arrival. A deleted message (`delete_time` set) is stored without content, properties or
-    /// reactions. `reactions`, when given, is the message's whole reaction set at this version and replaces the
-    /// stored one; when not, the stored reactions stay.
+    /// reactions.
+    ///
+    /// `reactions`, when given, is the message's whole reaction set as of its `version` (the chat service's time of
+    /// the change, in milliseconds, on the clock reaction times use). It is merged per user, like a
+    /// [`ReactionChange`] for each reaction in it and a removal for each stored one not in it, all at that version:
+    /// a stored change that is later stays, and a reaction left out stays absent against a later-arriving older
+    /// change, so a set and the per-user changes leave the same rows in whichever order they arrive. A stale
+    /// version's set is merged too and changes only what is older than it. When not given, the stored reactions
+    /// stay.
     ///
     /// # Errors
     ///
@@ -201,20 +298,26 @@ impl Store {
         let applied = match stored {
             None => Applied::Inserted,
             Some(version) if message.version > version => Applied::Updated,
-            Some(_) => return Ok(Applied::Ignored),
+            Some(_) => Applied::Ignored,
         };
-        write_message(&tx, message)?;
-        if message.delete_time.is_some() {
-            replace_reactions(&tx, message, &[])?;
-        } else if let Some(reactions) = reactions {
-            replace_reactions(&tx, message, reactions)?;
+        if applied != Applied::Ignored {
+            write_message(&tx, message)?;
+        }
+        let reactions = if message.delete_time.is_some() {
+            Some(&[][..])
+        } else {
+            reactions
+        };
+        if let Some(reactions) = reactions {
+            merge_reactions(&tx, message, reactions)?;
         }
         tx.commit()?;
         Ok(applied)
     }
 
-    /// Applies one user's reaction change unless a change at the same or a later time is stored. A change on a
-    /// deleted message is ignored.
+    /// Applies one user's reaction change unless a change at the same or a later time is stored (of two at the same
+    /// time, the removal wins), or the newest whole reaction set merged in left the reaction out and is as new or
+    /// newer. A change on a deleted message is ignored.
     ///
     /// # Errors
     ///
@@ -238,33 +341,14 @@ impl Store {
             Some(Some(_deleted)) => return Ok(Applied::Ignored),
             Some(None) => {}
         }
-        let key = params![change.conversation_id, change.message_id, change.key, change.user];
-        let stored: Option<i64> = tx
-            .query_row(
-                "SELECT time FROM reactions
-                 WHERE conversation_id = ?1 AND message_id = ?2 AND reaction = ?3 AND user_mri = ?4",
-                key,
-                |row| row.get(0),
-            )
-            .optional()?;
-        let applied = match stored {
-            None => Applied::Inserted,
-            Some(time) if change.time > time => Applied::Updated,
-            Some(_) => return Ok(Applied::Ignored),
+        let fact = ReactionFact {
+            key: &change.key,
+            user: &change.user,
+            time: change.time,
+            changed: change.time,
+            present: change.present,
         };
-        tx.execute(
-            "INSERT INTO reactions (conversation_id, message_id, reaction, user_mri, time, present)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT DO UPDATE SET time = excluded.time, present = excluded.present",
-            params![
-                change.conversation_id,
-                change.message_id,
-                change.key,
-                change.user,
-                change.time,
-                change.present
-            ],
-        )?;
+        let applied = apply_reaction_fact(&tx, &change.conversation_id, &change.message_id, &fact)?;
         tx.commit()?;
         Ok(applied)
     }
