@@ -66,7 +66,7 @@ pub enum Kind {
 /// GUIDs that may appear anywhere: Microsoft's first-party app ids, the same in every tenant and published in
 /// Microsoft's own documentation and clients (the protocol notes name them), and the nil GUID. Nothing else: a tenant,
 /// user or object id is never public.
-pub const PUBLIC_GUIDS: [&str; 5] = [
+pub const PUBLIC_GUIDS: [&str; 6] = [
     // Teams, native (desktop and mobile) client
     "1fec8e78-bce4-4aaf-ab1b-5451cc387264",
     // Teams, web client
@@ -75,6 +75,8 @@ pub const PUBLIC_GUIDS: [&str; 5] = [
     "8ec6bc83-69c8-4392-8f08-b3c986009232",
     // Teams meeting artifacts app
     "6bc3b958-689b-49f5-9006-36d165f30e00",
+    // Substrate search: the resource of the `https://outlook.office.com/search` token (docs/spikes/auth.md)
+    "66a88757-258c-4c72-893c-3e8bed4d6899",
     "00000000-0000-0000-0000-000000000000",
 ];
 

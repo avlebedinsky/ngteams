@@ -71,7 +71,7 @@ use tokio::task::JoinHandle;
 use crate::browser::{Browser, BrowserError};
 use crate::capture::{Capture, RTC_BINDING};
 use crate::cdp::{Cdp, CdpError, Event, Events, SessionId};
-use crate::fence_http::{Denial, HttpFence};
+use crate::fence_http::{Denial, Handled, HttpFence};
 use crate::fence_ws::{FrameDenial, GuardScript, UnsanctionedFrame, WsFence};
 
 /// The origins whose service workers are neutralized at the start of every run.
@@ -735,8 +735,9 @@ fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
             let (cdp, shared) = (cdp.clone(), Arc::clone(shared));
             // a request whose target is gone can't be answered; it was never sent either
             tokio::spawn(async move {
-                let verdict = shared.http.handle(&cdp, &event).await;
-                if let (Some(capture), Ok(verdict)) = (&shared.capture, verdict) {
+                let handled = shared.http.handle(&cdp, &event).await;
+                // only a decided request is a verdict; a caught redirect or a continued login response isn't recorded
+                if let (Some(capture), Ok(Handled::Decided(verdict))) = (&shared.capture, handled) {
                     capture.http_verdict(&event, verdict);
                 }
             });

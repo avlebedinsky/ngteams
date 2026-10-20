@@ -365,8 +365,8 @@ hand with kinds the sanitizer convention doesn't define: `<code:1>` and `<verifi
 PKCE verifier), `<token:skype>` (the skypetoken), `<skypeid:a>`, and `<client-version>`, which has no id at all. The
 skypetoken placeholder isn't a JWT, so a test of the `exp` expiry rule has to build an unsigned JWT at run time (the
 fixture guard rejects committed ones). Tests should treat every placeholder as an opaque string, never match on its
-text: sanitized captures exported by `proto-lab export` will replace these files and may name or number the
-placeholders differently.
+text: synthetic fixtures written from the reference copies `proto-lab export` makes (captures never enter the repo, not
+even sanitized) will replace these files and may name or number the placeholders differently.
 
 | File | Exchange |
 |---|---|
