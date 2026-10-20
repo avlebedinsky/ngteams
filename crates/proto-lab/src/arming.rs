@@ -123,7 +123,13 @@ pub enum TargetKind {
     Worker,
     SharedWorker,
     ServiceWorker,
-    /// Any other type (`browser_ui`, `webview`, worklets, ones newer than this code); armed like a page would be,
+    /// An audio, paint, layout or animation worklet (`worklet`). Its global scope has no network API (no `fetch`,
+    /// `XMLHttpRequest`, `WebSocket`, `EventSource` or `sendBeacon`) and its session no `Fetch`, `Network`, `Runtime` or
+    /// `Target` domain; the module it runs is fetched by its document, through that document's fence. It is only
+    /// resumed. (The web client's calling stack runs its audio in one, seen 2026-10-20.) Worklets that fetch by
+    /// themselves have other types (`shared_storage_worklet`, `auction_worklet`) and are [`TargetKind::Other`].
+    Worklet,
+    /// Any other type (`browser_ui`, `webview`, other worklets, ones newer than this code); armed like a page would be,
     /// minus the page-only steps, and closed if that fails.
     Other(String),
 }
@@ -137,6 +143,7 @@ impl TargetKind {
             "worker" => Self::Worker,
             "shared_worker" => Self::SharedWorker,
             "service_worker" => Self::ServiceWorker,
+            "worklet" => Self::Worklet,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -174,6 +181,8 @@ impl TargetKind {
                 Step::AutoAttach,
                 Step::Resume,
             ],
+            // nothing to arm: no network of its own, and none of the domains the other steps use
+            Self::Worklet => &[Step::Resume],
             // the browser's own pages (`browser_ui`, `background_page`) need `Runtime.enable` for the binding to be there
             // when the guard runs (checked on Chrome 155)
             Self::Other(_) => &[

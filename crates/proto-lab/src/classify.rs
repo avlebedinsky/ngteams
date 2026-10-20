@@ -41,6 +41,16 @@ pub enum OwnKind {
     /// Entra's sign-in form: the username lookup, the password and "Stay signed in?". Only `proto-lab login` allows
     /// it ([`Classifier::sign_in`]).
     EntraSignIn,
+    /// The account's own Trouter (push channel) session: authenticating its own endpoint's socket. Only a run that
+    /// calls allows it ([`crate::fence_ws::FrameClassifier::calling`], `crate::calling`).
+    TrouterSession,
+    /// Registering the account's own endpoint (its Trouter URL) with the registrar, which makes it reachable. Only a
+    /// run that calls allows it ([`Classifier::calling`], `crate::calling`).
+    EndpointRegistration,
+    /// Reading the account's own settings and policies from the middle tier, which takes the names to read as a
+    /// `POST` body. The calling stack stays off until it knows the calling policy. Only a run that calls allows it
+    /// ([`Classifier::calling`], `crate::calling`).
+    SettingsRead,
 }
 
 impl OwnKind {
@@ -51,6 +61,9 @@ impl OwnKind {
             Self::EntraToken => "entra_token",
             Self::Authz => "authz",
             Self::EntraSignIn => "entra_sign_in",
+            Self::TrouterSession => "trouter_session",
+            Self::EndpointRegistration => "endpoint_registration",
+            Self::SettingsRead => "settings_read",
         }
     }
 }
@@ -154,6 +167,10 @@ pub struct Classifier {
     own: Vec<OwnRule>,
     /// Whether the chat service's writes are mapped ([`Classifier::mapped`]).
     writes: bool,
+    /// Whether the calling stack's own-state passes and call starts are mapped ([`Classifier::calling`]).
+    calling: bool,
+    /// The participant the web client's test call is for: the echo service `lab.toml` approves.
+    test_call_callee: Option<Mri>,
 }
 
 impl Classifier {
@@ -172,7 +189,12 @@ impl Classifier {
                 .iter()
                 .map(|(origin, path)| OwnRule::new(OwnKind::Authz, "POST", origin, path)),
         );
-        Self { own, writes: false }
+        Self {
+            own,
+            writes: false,
+            calling: false,
+            test_call_callee: None,
+        }
     }
 
     /// The seeded list plus the write mapping (see the module docs): what a run that writes uses, together with a
@@ -183,6 +205,24 @@ impl Classifier {
             writes: true,
             ..Self::seeded()
         }
+    }
+
+    /// The write mapping ([`Classifier::mapped`]) plus the calling stack's own-state (`crate::calling`): the account's
+    /// own endpoint registration. What a run that calls (`echo-call`) uses.
+    #[must_use]
+    pub fn calling() -> Self {
+        Self {
+            calling: true,
+            ..Self::mapped()
+        }
+    }
+
+    /// The participant the web client's test call is for, which its start doesn't name (`crate::calling::call_start`):
+    /// the echo service `lab.toml` approves. Without one, a test call start is unknown.
+    #[must_use]
+    pub fn with_test_call_callee(mut self, callee: Mri) -> Self {
+        self.test_call_callee = Some(callee);
+        self
     }
 
     /// The seeded list plus Entra's sign-in form ([`OwnKind::EntraSignIn`]): what `proto-lab login` needs to type a
@@ -219,6 +259,14 @@ impl Classifier {
         };
         if let Some(rule) = self.own.iter().find(|rule| rule.matches(&method, &url)) {
             return Classification::Own(rule.kind);
+        }
+        if self.calling {
+            if let Some(kind) = crate::calling::own_request(&method, &url, body) {
+                return Classification::Own(kind);
+            }
+            if let Some(target) = crate::calling::call_start(&method, &url, body, self.test_call_callee.as_ref()) {
+                return Classification::Write(target);
+            }
         }
         if self.writes
             && let Some(target) = map_write(&method, &url, body)
@@ -304,7 +352,7 @@ fn body_members(body: &[u8]) -> Option<Vec<Mri>> {
 /// in any case and keep either duplicate, so such a body is ambiguous and its write stays unknown. With every key
 /// unique in any case, an exact lookup ([`Value::get`]) finds the one key the service binds, or nothing: a key the
 /// fence would miss only because of its case (`Members` alone) reads as missing, which is unknown too.
-fn strict_json(body: &[u8]) -> Option<Value> {
+pub(crate) fn strict_json(body: &[u8]) -> Option<Value> {
     let mut reader = serde_json::Deserializer::from_slice(body);
     let value = Strict.deserialize(&mut reader).ok()?;
     reader.end().ok()?;

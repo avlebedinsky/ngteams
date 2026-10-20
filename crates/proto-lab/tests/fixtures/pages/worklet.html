@@ -1,0 +1,15 @@
+<!doctype html>
+<title>worklet</title>
+<script>
+  // an audio worklet, as a web client's calling stack runs its audio in one; an offline context needs no device
+  window.result = null;
+  const context = new OfflineAudioContext(1, 4800, 48000);
+  context.audioWorklet
+    .addModule('/pages/worklet.js')
+    .then(() => {
+      const node = new AudioWorkletNode(context, 'lab-tone');
+      node.connect(context.destination);
+      return context.startRendering();
+    })
+    .then((buffer) => { window.result = 'rendered ' + buffer.length; }, (error) => { window.result = 'error ' + error.name; });
+</script>

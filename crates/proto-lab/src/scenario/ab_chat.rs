@@ -27,10 +27,12 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::browser::Media;
 use crate::classify::Classifier;
 use crate::commands::status::account_status;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::{Denial, DenyCause, ForcedDeny, without_query};
+use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions, SessionState, TEAMS_URL};
 
 use regex::Regex;
@@ -143,9 +145,12 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
         classifier: Classifier::mapped(),
+        frames: FrameClassifier::seeded(),
         live_members: true,
         capture: Some(ScenarioName::AbChat.as_str().to_owned()),
         display: options.display,
+        media: Media::System,
+        user_agent: None,
     };
     let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
@@ -372,7 +377,7 @@ async fn no_probe_deny(a: &LabSession, drive_a: &Driver) -> ScenarioError {
 /// Saves what `session`'s tab shows as `failure.png` (mode `0600`) in its capture dir, outside the repository, for the
 /// diagnosis of a failed run; a note saying where, or why not. `None` for a run that isn't recorded. A page that doesn't
 /// answer within [`DIAGNOSIS_WAIT`] gets no screenshot: the run goes on to close the browsers.
-async fn save_screenshot(alias: Alias, session: &LabSession) -> Option<String> {
+pub(crate) async fn save_screenshot(alias: Alias, session: &LabSession) -> Option<String> {
     let path = session.capture_dir()?.join("failure.png");
     let mut driver = session.driver();
     driver.set_call_timeout(DIAGNOSIS_WAIT);
@@ -398,7 +403,7 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Opens the web client in `session` and waits for it to load.
-async fn load(alias: Alias, session: &mut LabSession, timeout: Duration) -> Result<(), ScenarioError> {
+pub(crate) async fn load(alias: Alias, session: &mut LabSession, timeout: Duration) -> Result<(), ScenarioError> {
     session.navigate(TEAMS_URL).await?;
     let state = session.settle(timeout).await;
     if state == SessionState::Loaded {

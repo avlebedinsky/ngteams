@@ -63,6 +63,9 @@ pub struct LaunchOptions {
     pub user_data_dir: PathBuf,
     pub display: Display,
     pub media: Media,
+    /// The `User-Agent` the browser sends instead of its own (`--user-agent`). Headless Chrome names itself
+    /// `HeadlessChrome`, and the Teams web client doesn't offer calls to that browser.
+    pub user_agent: Option<String>,
 }
 
 impl LaunchOptions {
@@ -73,6 +76,7 @@ impl LaunchOptions {
             user_data_dir,
             display: Display::Headless,
             media: Media::System,
+            user_agent: None,
         }
     }
 
@@ -98,6 +102,9 @@ impl LaunchOptions {
             if let Some(audio) = audio {
                 args.push(flag("--use-file-for-fake-audio-capture=", audio.as_os_str()));
             }
+        }
+        if let Some(agent) = &self.user_agent {
+            args.push(format!("--user-agent={agent}").into());
         }
         args.push("about:blank".into());
         args

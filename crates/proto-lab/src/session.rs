@@ -37,7 +37,7 @@ use tokio::sync::mpsc;
 use url::Url;
 
 use crate::arming::{ArmError, ArmOptions, ArmedBrowser, ArmingFailure, DECISION_GRACE, Decisions, TEAMS_ORIGINS};
-use crate::browser::{Browser, BrowserError, Display, LaunchOptions};
+use crate::browser::{Browser, BrowserError, Display, LaunchOptions, Media};
 use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
 use crate::classify::{Classification, Classifier, OwnKind};
@@ -510,12 +510,19 @@ pub enum SessionError {
 pub struct SessionOptions {
     /// What the fence makes of each request.
     pub classifier: Classifier,
+    /// What the fence makes of each WebSocket frame.
+    pub frames: FrameClassifier,
     /// Read write targets' members live ([`LiveMembershipSource`]), for a run that writes; otherwise every write whose
     /// target has to be fetched is denied ([`FailClosed`]).
     pub live_members: bool,
     /// Record the run as a capture of this scenario (`captures/<scenario>/<ts>/` in the lab's data dir).
     pub capture: Option<String>,
     pub display: Display,
+    /// The browser's camera and microphone: the system's (and a prompt), or Chrome's fake devices, the microphone
+    /// playing a WAV file (`echo-call`).
+    pub media: Media,
+    /// The `User-Agent` the browser sends instead of its own ([`LaunchOptions::user_agent`]).
+    pub user_agent: Option<String>,
 }
 
 impl SessionOptions {
@@ -524,9 +531,12 @@ impl SessionOptions {
     pub fn fail_closed(classifier: Classifier) -> Self {
         Self {
             classifier,
+            frames: FrameClassifier::seeded(),
             live_members: false,
             capture: None,
             display: Display::Headless,
+            media: Media::System,
+            user_agent: None,
         }
     }
 }
@@ -608,13 +618,15 @@ impl LabSession {
             None => http,
         };
         let guard = GuardScript::generate().map_err(SessionError::Guard)?;
-        let ws = WsFence::new(FrameClassifier::seeded(), fence, members, guard);
+        let ws = WsFence::new(options.frames, fence, members, guard);
         let recorder = match &options.capture {
             Some(scenario) => Some(Arc::new(Recorder::create(&paths.captures_dir(), scenario)?)),
             None => None,
         };
         let launch = LaunchOptions {
             display: options.display,
+            media: options.media.clone(),
+            user_agent: options.user_agent.clone(),
             ..LaunchOptions::for_profile(paths, alias)
         };
         let browser = Browser::launch(&chrome, &launch, LAUNCH_TIMEOUT).await?;

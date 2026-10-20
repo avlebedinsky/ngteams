@@ -109,7 +109,14 @@ leaves `failed` there with the reason.
 ```sh
 cargo run -p proto-lab -- run load --headless      # account a loads the web client, fail-closed; recorded
 cargo run -p proto-lab -- run ab-chat --headless   # a messages b in their 1:1 chat, after a live enforcement test
+cargo run -p proto-lab -- run echo-call --headless # a places the test call to the echo service, fake microphone; recorded
 ```
+
+`echo-call` uses the calling classifiers (`Classifier::calling`, `FrameClassifier::calling`): the write mapping plus the
+reviewed own-state the web client's calling stack needs for the account's own endpoint (`crates/proto-lab/src/calling.rs`,
+`docs/protocol/calling-echo.md`). The fence lets the call through only when its participants are a and the echo service,
+whose MRI `lab.toml` records once established: `cargo run -p proto-lab -- service-mri echo <mri>` (only a bot's
+`28:<guid>`, only for a service `lab.toml` approves by name and records no MRI for yet).
 
 `run` exits non-zero when the scenario's goal isn't reached, the fence was breached, or the fence denied anything the
 scenario doesn't expect (`load` expects every deny; `ab-chat` only its forced probe and telemetry). Runs are recorded

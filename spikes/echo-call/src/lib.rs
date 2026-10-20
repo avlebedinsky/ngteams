@@ -5,7 +5,7 @@
 //!   the allocation;
 //! - [`echo`]: the tone probe that measures the echo over any media path;
 //! - [`signaling`]: the call start and the callbacks as the bundle shapes them, and the incoming-call policy (ignored,
-//!   never answered). Unconfirmed — needs the Task 18 capture;
+//!   never answered). Checked against the Task 18 capture: the shapes hold, the test call differs (see `signaling`);
 //! - [`call`]: the flow up to the skypetoken, with the call start through the fence.
 //!
 //! What doesn't: the live call. The lab accounts have no Teams license, so there is no skypetoken, no capture of a

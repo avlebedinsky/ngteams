@@ -409,6 +409,20 @@ fn every_kind_of_target_is_resumed_last_and_only_dedicated_workers_skip_fetch() 
 }
 
 #[test]
+fn a_worklet_is_only_resumed_and_other_worklet_kinds_are_armed_in_full() {
+    // an audio, paint or animation worklet (`worklet`) has no network API of its own and no Fetch, Network, Runtime or
+    // Target domain to arm; its module comes through its document's requests, which that document's fence pauses
+    assert_eq!(TargetKind::from_type("worklet"), TargetKind::Worklet);
+    assert_eq!(TargetKind::Worklet.steps(), &[Step::Resume]);
+    // worklets that can fetch by themselves are no `worklet`: they stay fully armed, closed if that fails
+    for name in ["shared_storage_worklet", "auction_worklet"] {
+        let kind = TargetKind::from_type(name);
+        assert_eq!(kind, TargetKind::Other(name.to_owned()));
+        assert!(kind.steps().contains(&Step::Fetch), "{name}");
+    }
+}
+
+#[test]
 fn the_default_run_neutralizes_the_teams_origins() {
     assert_eq!(
         ArmOptions::default().service_worker_origins,
@@ -1288,7 +1302,7 @@ async fn a_paused_request_is_answered_on_the_session_it_paused_on() {
 const STEP: Duration = Duration::from_secs(15);
 
 /// The local pages, under `/pages/`.
-const PAGES: [(&str, &str, &str); 10] = [
+const PAGES: [(&str, &str, &str); 12] = [
     ("fence.html", include_str!("fixtures/pages/fence.html"), "text/html"),
     (
         "dedicated-worker.js",
@@ -1321,6 +1335,12 @@ const PAGES: [(&str, &str, &str); 10] = [
         "service-worker-probe.html",
         include_str!("fixtures/pages/service-worker-probe.html"),
         "text/html",
+    ),
+    ("worklet.html", include_str!("fixtures/pages/worklet.html"), "text/html"),
+    (
+        "worklet.js",
+        include_str!("fixtures/pages/worklet.js"),
+        "text/javascript",
     ),
     ("favicon.ico", "", "image/x-icon"),
 ];
@@ -1597,6 +1617,33 @@ async fn a_get_passes_and_an_own_post_reaches_the_server() {
             .filter(|entry| entry["own"] == "authz")
             .count();
         assert!(own_entries >= 1, "the own request is in fence.log");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_audio_worklet_is_resumed_without_an_arming_failure() {
+    let server = serve_pages().await;
+    with_run(&server, Classifier::seeded(), async |run| {
+        let cdp = run.armed.cdp();
+        let page = run.armed.open_page(STEP).await?;
+        navigate(cdp, &page, &format!("{}/pages/worklet.html", server.uri())).await?;
+        // the worklet's processor ran, so its target was resumed
+        let result = evaluate_until(cdp, &page.session, "window.result").await?;
+        assert_eq!(result, "rendered 4800");
+        assert!(
+            run.armed
+                .targets()
+                .iter()
+                .any(|target| target.kind == TargetKind::Worklet),
+            "the worklet was attached and armed: {:?}",
+            run.armed.targets()
+        );
+        assert!(run.armed.failures().is_empty(), "{:?}", run.armed.failures());
+        // its module came through the page's fence
+        assert_eq!(received(&server, "/pages/worklet.js").await, ["GET /pages/worklet.js"]);
         Ok(())
     })
     .await
