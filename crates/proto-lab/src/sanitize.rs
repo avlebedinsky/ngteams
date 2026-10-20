@@ -1,5 +1,6 @@
 //! The sanitizer: what a raw capture ([`crate::capture`]) goes through before `proto-lab export` writes its local
-//! reference copy (outside the repository, with the fixture guard run on the result). It is defence in depth: no
+//! reference copy (outside the repository, with the fixture guard run on the result and its findings reported). It is
+//! defence in depth: no
 //! capture enters the repository, not even sanitized; committed fixtures are written synthetic-from-capture with
 //! made-up values. Its known gaps are in `docs/backlog/sanitizer-defence-in-depth-known-gaps.md`.
 //!
@@ -34,13 +35,13 @@
 //!   runs of letters and digits, so punctuation never sticks to one (`Doe, Jane` gives `Doe`), but none of a part
 //!   that is an identifier (an email or UPN, an MRI, a URL, a GUID, a domain: `jane.doe@contoso.com` is replaced whole
 //!   and gives no `com`) and no run of digits alone (`sanitize/words.rs`); a "Last, First" name also stands for
-//!   "First Last". A name is never replaced inside a public protocol host (`teams.microsoft.com`); one replaced inside
-//!   any other host destroys it, so [`sanitize_capture`] reports the event and the export refuses. A name found in form
-//!   data is learned both as written and form-decoded
-//!   (`Marguerite+Fakename` also as `Marguerite Fakename`; `%2B` stays a plus), only here: to every other rule `+`
-//!   stays `+`, so a base64 secret isn't split. A name only ever seen under a generic key such as `name` isn't learned.
-//!   Every name value is also kept as it was found ([`Sanitizer::learned_names`]), for the export's own check
-//!   ([`check_names`], `sanitize/backstop.rs`) that no word of one is left.
+//!   "First Last". A name is never replaced inside a host: a public protocol host (`teams.microsoft.com`) holds none,
+//!   and replacing a word of any other host would destroy it, so there the name is left and [`sanitize_capture`]
+//!   reports the event (the export warns about it). A name found in form data is learned both as written and
+//!   form-decoded (`Marguerite+Fakename` also as `Marguerite Fakename`; `%2B` stays a plus), only here: to every other
+//!   rule `+` stays `+`, so a base64 secret isn't split. A name only ever seen under a generic key such as `name` isn't
+//!   learned. Every name value is also kept as it was found ([`Sanitizer::learned_names`]), for the export's own check
+//!   ([`check_names`], `sanitize/backstop.rs`) of whether a word of one is left.
 //!
 //! **Every rule sees every layer of encoding** (`sanitize/layers.rs`). Text rules run on a text as written, then again
 //! with one layer of escapes decoded (percent escapes, `%25XX` being one more layer, as UTF-8; backslash escapes; HTML
@@ -56,8 +57,8 @@
 //! the identifier rules as well (maps keyed by MRI).
 //!
 //! Sanitizing is idempotent: placeholders are never matched again, so a sanitized capture comes out unchanged.
-//! Whatever this misses, the export's name check and the fixture guard are the last checks before a fixture is
-//! written.
+//! Whatever this misses, the export's name check and the fixture guard report: they are the last checks on the
+//! reference copy, which only refuse it under `--strict`.
 
 mod backstop;
 mod layers;
@@ -348,9 +349,12 @@ struct State {
     found_names: HashMap<String, String>,
     names_regex: Option<Regex>,
     names_changed: bool,
-    /// How many times a name or a learned passcode was replaced inside a host that isn't a public one (`words.rs`):
-    /// sanitizing did destroy that host, and the export refuses ([`Sanitized::name_in_host`]).
+    /// How many times a name was left inside a host that isn't a public one (`words.rs`), so as not to destroy that
+    /// host ([`Sanitized::name_in_host`]).
     name_in_host: usize,
+    /// How many times a learned passcode was replaced inside a host that isn't a public one (`meeting.rs`): a secret is
+    /// redacted even there, and that host is gone ([`Sanitized::passcode_in_host`]).
+    passcode_in_host: usize,
     /// Meetings' codes (`meeting.rs`).
     meetings: Table,
     /// The codes learned, as their digits.
@@ -730,13 +734,16 @@ pub fn sanitize_events(events: &[Value], identities: &Identities) -> Result<Vec<
 pub struct Sanitized {
     pub events: Vec<Value>,
     pub names: LearnedNames,
-    /// The events (from 1) where a name or a learned passcode was replaced inside a host other than a public protocol
-    /// host (`https://<name:1>.example.test/`): the host is gone, so the export refuses rather than write it.
+    /// The events (from 1) where a word of a name was left inside a host other than a public protocol host
+    /// (`https://jane.example.test/`): replacing it would have destroyed the host.
     pub name_in_host: Vec<usize>,
+    /// The events (from 1) where a learned passcode was replaced inside a host other than a public protocol host: the
+    /// secret is gone, and so is that host.
+    pub passcode_in_host: Vec<usize>,
 }
 
-/// As [`sanitize_events`], also handing back the names found ([`Sanitizer::learned_names`]) and where a name took a
-/// host's place.
+/// As [`sanitize_events`], also handing back the names found ([`Sanitizer::learned_names`]), where a name was left
+/// inside a host and where a passcode took a host's place.
 ///
 /// # Errors
 /// As [`Sanitizer::new`] and [`Sanitizer::sanitize`].
@@ -747,17 +754,22 @@ pub fn sanitize_capture(events: &[Value], identities: &Identities) -> Result<San
     }
     let mut out = Vec::with_capacity(events.len());
     let mut name_in_host = Vec::new();
+    let mut passcode_in_host = Vec::new();
     for (index, event) in events.iter().enumerate() {
-        let before = sanitizer.state.name_in_host;
+        let before = (sanitizer.state.name_in_host, sanitizer.state.passcode_in_host);
         out.push(sanitizer.sanitize(event)?);
-        if sanitizer.state.name_in_host > before {
+        if sanitizer.state.name_in_host > before.0 {
             name_in_host.push(index + 1);
+        }
+        if sanitizer.state.passcode_in_host > before.1 {
+            passcode_in_host.push(index + 1);
         }
     }
     Ok(Sanitized {
         events: out,
         names: sanitizer.learned_names(),
         name_in_host,
+        passcode_in_host,
     })
 }
 
@@ -1219,7 +1231,7 @@ fn fields(rules: &Rules, state: &mut State, text: &str) -> Edits {
 /// goes on from the next character, so nothing inside it is skipped.
 ///
 /// A match inside a public protocol host (`teams.microsoft.com`, `words.rs`) is no name and stays. One inside any
-/// other host is replaced, and counted ([`State::name_in_host`]): that host is gone, and the export refuses.
+/// other host stays too, so the host isn't destroyed, and is counted ([`State::name_in_host`]).
 fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
     let Some(regex) = &state.names_regex else {
         return Vec::new();
@@ -1235,13 +1247,10 @@ fn names(_: &Rules, state: &mut State, text: &str) -> Edits {
             at = next;
             continue;
         };
-        match host_of(&hosts, &(start..end)) {
-            Some(true) => {
-                at = next;
-                continue;
-            }
-            Some(false) => in_host += 1,
-            None => {}
+        if let Some(public) = host_of(&hosts, &(start..end)) {
+            in_host += usize::from(!public);
+            at = next;
+            continue;
         }
         edits.push((start..end, format!("<name:{label}>")));
         at = end;

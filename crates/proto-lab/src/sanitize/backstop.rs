@@ -6,23 +6,28 @@
 //! Each value is decoded (fully, and with form decoding where a `+` is a space and `%2B` a plus) and split into words
 //! the way the sanitizer reads a name (`words.rs`: runs of letters and digits, any script, of 3 characters or more,
 //! none from a part that is an identifier such as `jane.doe@contoso.com`, no digits alone); each, lowercased, is looked
-//! for, anywhere but in a public protocol host (`teams.microsoft.com`), whose labels are never a name's. Every line
-//! of the output is checked as written and again after each layer of escapes is decoded (percent escapes, backslash
-//! escapes, HTML character references, a `+` being a separator like any other character that isn't a letter or a
-//! digit), up to [`CHECK_ROUNDS`] layers; a line that still holds escapes after that can't be checked and is refused
-//! as such. Placeholders written as is (`<name:1>`) are no words; one that only appears once escapes are decoded is.
+//! for, anywhere but in a public protocol host (`teams.microsoft.com`), whose labels are never a name's. One found
+//! inside any other host is reported apart ([`NameFinding::InHost`]): the sanitizer leaves names there on purpose, so
+//! as not to destroy the host. Every line of the output is checked as written and again after each layer of escapes is
+//! decoded (percent escapes, backslash escapes, HTML character references, a `+` being a separator like any other
+//! character that isn't a letter or a digit), up to [`CHECK_ROUNDS`] layers; a line that still holds escapes after
+//! that can't be checked and is reported as such. Placeholders written as is (`<name:1>`) are no words; one that only
+//! appears once escapes are decoded is.
 //!
 //! What it covers, honestly: names the sanitizer found under a name field (or replaced whole there). A word shorter
 //! than 3 characters, and a name never seen under a name field (only ever in free prose), are outside it. A word of a
-//! name that is also an ordinary word ("Mark", a channel called "General") left anywhere fails the check too: the export
-//! is refused rather than guessed about.
+//! name that is also an ordinary word ("Mark", a channel called "General") left anywhere is reported too, rather than
+//! guessed about. The export warns about what the check finds, and refuses on it only under `--strict`.
 
 use std::collections::HashMap;
 use std::fmt;
 
 use super::KINDS;
 use super::layers::decode_once;
-use super::words::{MIN_WORD, learnable_words, without_public_hosts};
+use std::iter;
+use std::ops::Range;
+
+use super::words::{MIN_WORD, host_of, hosts, learnable_words};
 
 /// How many layers of escapes [`check_names`] decodes in a line (more than the sanitizer's rules do, so it also sees
 /// what they never reached).
@@ -76,6 +81,8 @@ pub enum NameFinding {
     /// A word of the name `label` (`<name:1>`) on `line` (from 1), seen once `layer` layers of escapes were decoded
     /// (0: as written).
     Name { line: usize, layer: usize, label: String },
+    /// As [`Self::Name`], inside a host that isn't a public protocol host, where the sanitizer leaves names.
+    InHost { line: usize, layer: usize, label: String },
     /// `line` still holds escapes after [`CHECK_ROUNDS`] layers: it couldn't be checked.
     TooDeep { line: usize },
 }
@@ -84,6 +91,9 @@ impl fmt::Display for NameFinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Name { line, layer, label } => write!(formatter, "line {line}: {label} (layer {layer})"),
+            Self::InHost { line, layer, label } => {
+                write!(formatter, "line {line}: {label} inside a host (layer {layer})")
+            }
             Self::TooDeep { line } => write!(
                 formatter,
                 "line {line}: still encoded after {CHECK_ROUNDS} layers, can't be checked"
@@ -110,17 +120,20 @@ pub fn check_names(names: &LearnedNames, text: &str) -> Vec<NameFinding> {
 
 /// One line, at every layer; a name is reported once per line, at the first layer it shows in.
 fn check_line(words: &HashMap<String, String>, longest: usize, line: usize, text: &str, found: &mut Vec<NameFinding>) {
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: Vec<(&str, bool)> = Vec::new();
     let mut report = |layer: usize, text: &str| {
-        for label in hits(words, longest, text) {
-            if !seen.contains(&label) {
-                seen.push(label);
-                found.push(NameFinding::Name {
-                    line,
-                    layer,
-                    label: label.to_owned(),
-                });
+        for hit in hits(words, longest, text) {
+            if seen.contains(&hit) {
+                continue;
             }
+            seen.push(hit);
+            let (label, in_host) = hit;
+            let label = label.to_owned();
+            found.push(if in_host {
+                NameFinding::InHost { line, layer, label }
+            } else {
+                NameFinding::Name { line, layer, label }
+            });
         }
     };
     let mut current = without_placeholders(text);
@@ -138,25 +151,43 @@ fn check_line(words: &HashMap<String, String>, longest: usize, line: usize, text
     }
 }
 
-/// The labels of the names whose words `text` holds, outside its public protocol hosts.
-fn hits<'a>(words: &'a HashMap<String, String>, longest: usize, text: &str) -> Vec<&'a str> {
+/// The labels of the names whose words `text` holds outside its public protocol hosts, each with whether it is inside
+/// another host.
+fn hits<'a>(words: &'a HashMap<String, String>, longest: usize, text: &str) -> Vec<(&'a str, bool)> {
     let mut labels = Vec::new();
-    let text = without_public_hosts(text);
-    for word in name_words(&text) {
+    let hosts = hosts(text);
+    for range in name_words(text) {
+        let word = &text[range.clone()];
         if word.chars().count() > longest {
             continue;
         }
-        if let Some(label) = words.get(&word.to_lowercase()) {
-            labels.push(label.as_str());
+        let Some(label) = words.get(&word.to_lowercase()) else {
+            continue;
+        };
+        match host_of(&hosts, &range) {
+            Some(true) => {}
+            Some(false) => labels.push((label.as_str(), true)),
+            None => labels.push((label.as_str(), false)),
         }
     }
     labels
 }
 
-/// The words of 3 characters or more: runs of letters and digits.
-fn name_words(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|char: char| !char.is_alphanumeric())
-        .filter(|word| word.chars().count() >= MIN_WORD)
+/// Where the words of 3 characters or more are: runs of letters and digits. A host is a run of letters, digits, `-`
+/// and `.`, so a word lies wholly inside one or wholly outside.
+fn name_words(text: &str) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    let mut start = None;
+    for (index, char) in text.char_indices().chain(iter::once((text.len(), ' '))) {
+        if char.is_alphanumeric() {
+            start.get_or_insert(index);
+        } else if let Some(begin) = start.take()
+            && text[begin..index].chars().count() >= MIN_WORD
+        {
+            found.push(begin..index);
+        }
+    }
+    found
 }
 
 /// `text` decoded as far as [`check_names`] looks.

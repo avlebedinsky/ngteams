@@ -7,7 +7,7 @@
 //! Public Suffix List). The identifier rules replace those whole; their pieces (`com`, `contoso`, `orgid`) are no
 //! person's name, and learning them would replace every host and path that holds them. A dotted part that may be a
 //! person's (`jane.wu`, `Mei.Li`, `Doe.CA`) gives its words, but never a lowercase last label that is a top-level
-//! domain (`contoso.com` gives `contoso`; a host that holds it is then refused by the export, not left). A run of
+//! domain (`contoso.com` gives `contoso`; the sanitizer leaves it inside a host, and the export warns). A run of
 //! digits alone is no word of a name either.
 //!
 //! A host in a text is a run of letters, digits, `-` and `.` whose last label is a top-level domain (of the Public
@@ -191,17 +191,4 @@ pub(super) fn host_of(hosts: &[(Range<usize>, bool)], range: &Range<usize>) -> O
         .iter()
         .find(|(host, _)| host.start <= range.start && range.end <= host.end)
         .map(|(_, public)| *public)
-}
-
-/// `text` with every public protocol host made spaces.
-pub(super) fn without_public_hosts(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for (host, _) in hosts(text).into_iter().filter(|(_, public)| *public) {
-        out.push_str(&text[last..host.start]);
-        out.push(' ');
-        last = host.end;
-    }
-    out.push_str(&text[last..]);
-    out
 }

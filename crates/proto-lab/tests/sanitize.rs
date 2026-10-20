@@ -10,7 +10,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 use fixture_guard::{Guard, Kind};
-use proto_lab::commands::export::{self, ExportError, Layout};
+use proto_lab::commands::export::{self, Checks, ExportError, Layout};
 use proto_lab::config::Alias;
 use proto_lab::sanitize::{
     CHECK_ROUNDS, Identities, KnownAccount, KnownService, LearnedNames, NameFinding, Sanitizer, check_names,
@@ -1164,11 +1164,13 @@ fn a_passcode_of_letters_only_is_learned_and_replaced_everywhere() {
         json!({"content": "Use aBcDeF to join, or ZqNBBm, or KWBXPQ"}),
         // a status word under a passcode's key is redacted where it is, and nowhere else
         json!({"passcodePolicy": "required", "meetingPasscode": "enabled", "text": "required and enabled"}),
-        // a learned passcode that is a host's label too: the host would be destroyed, so the export refuses
+        // a learned passcode that is a host's label too: a secret is redacted even there, and the event is reported
         json!({"url": "https://abcdef.example.test/x"}),
     ];
     let sanitized = sanitize_capture(&events, &Identities::default()).unwrap();
-    assert_eq!(sanitized.name_in_host, [6]);
+    assert_eq!(sanitized.passcode_in_host, [6]);
+    assert_eq!(sanitized.name_in_host, Vec::<usize>::new());
+    assert_eq!(sanitized.events[5]["url"], "https://<token:1>.example.test/x");
     let out = sanitized.events;
     assert_eq!(
         out[0]["joinUrl"],
@@ -1328,7 +1330,14 @@ fn an_email_shaped_display_name_leaves_every_host_intact() {
     // and an export of it is written with every host as it was
     let dir = tempfile::tempdir().unwrap();
     let capture = write_capture(dir.path(), &events).unwrap();
-    let exported = export::export(&capture, "hosts", &dir.path().join("fixtures"), &Identities::default()).unwrap();
+    let exported = export::export(
+        &capture,
+        "hosts",
+        &dir.path().join("fixtures"),
+        &Identities::default(),
+        Checks::Warn,
+    )
+    .unwrap();
     assert_urls_intact(&fs::read_to_string(exported.path).unwrap(), &urls, 1);
 }
 
@@ -1353,18 +1362,38 @@ fn a_name_word_in_a_public_protocol_host_is_kept() {
 }
 
 #[test]
-fn a_name_word_in_any_other_host_is_reported() {
+fn a_name_word_in_any_other_host_is_left_and_reported() {
     let events = [
         json!({"displayName": "Jane Quill"}),
         json!({"ok": "nothing here"}),
         json!({"url": "https://quill.example.test/a", "text": "Quill"}),
         // a lookalike of a public host is no public host
         json!({"url": "https://teams.microsoft.com.quill.example.test/b"}),
+        // encoded, as a query value
+        json!({"next": "https%3A%2F%2Fapi.quill.example.test%2Fc%3Fq%3DQuill"}),
     ];
     let out = sanitize_capture(&events, &Identities::default()).unwrap();
-    assert_eq!(out.name_in_host, [3, 4]);
-    // replaced all the same: nothing is left of the name
-    assert_eq!(out.events[2]["url"], "https://<name:1>.example.test/a");
+    assert_eq!(out.name_in_host, [3, 4, 5]);
+    assert_eq!(out.passcode_in_host, Vec::<usize>::new());
+    // every host stays as it was; the name is replaced everywhere else
+    assert_eq!(out.events[2]["url"], "https://quill.example.test/a");
+    assert_eq!(out.events[2]["text"], "<name:1>");
+    assert_eq!(out.events[3]["url"], "https://teams.microsoft.com.quill.example.test/b");
+    assert_eq!(
+        out.events[4]["next"],
+        "https%3A%2F%2Fapi.quill.example.test%2Fc%3Fq%3D<name:1>"
+    );
+    // the name check tells a word left in a host from one left anywhere else
+    let found = check_names(&out.names, &as_jsonl(&out.events));
+    assert_eq!(
+        found,
+        [3, 4, 5].map(|line| NameFinding::InHost {
+            line,
+            layer: 0,
+            label: "<name:1>".to_owned()
+        })
+    );
+    assert!(!format!("{found:?} {}", found[0]).to_lowercase().contains("quill"));
 }
 
 // --- the export's check for names ---
@@ -1437,6 +1466,7 @@ fn the_name_check_sees_through_every_layer_of_encoding() {
         .iter()
         .map(|finding| match finding {
             NameFinding::Name { line, layer, .. } => (*line, *layer),
+            NameFinding::InHost { line, .. } => panic!("line {line} in a host"),
             NameFinding::TooDeep { line } => panic!("line {line} too deep"),
         })
         .collect();
@@ -1484,7 +1514,7 @@ fn export_writes_the_sanitized_capture_under_the_reference_name() {
     let dir = tempfile::tempdir().unwrap();
     let fixtures = dir.path().join("reference");
     let capture = write_capture(dir.path(), &capture()).unwrap();
-    let exported = export::export(&capture, "calls/echo", &fixtures, &identities()).unwrap();
+    let exported = export::export(&capture, "calls/echo", &fixtures, &identities(), Checks::Warn).unwrap();
     assert_eq!(exported.path, fixtures.join("calls/echo.jsonl"));
     assert_eq!(exported.events, capture_len());
     let written = fs::read_to_string(&exported.path).unwrap();
@@ -1503,6 +1533,7 @@ fn export_writes_the_sanitized_capture_under_the_reference_name() {
         "auth/authz.json",
         &fixtures,
         &identities(),
+        Checks::Warn,
     )
     .unwrap();
     let array: Vec<Value> = serde_json::from_str(&fs::read_to_string(&exported.path).unwrap()).unwrap();
@@ -1514,11 +1545,11 @@ fn capture_len() -> usize {
 }
 
 #[test]
-fn a_fixture_the_guard_refuses_is_not_written() {
+fn under_strict_a_fixture_the_guard_refuses_is_not_written() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tests/fixtures/leak.jsonl");
     let text = format!("{{\"ok\":1}}\n{{\"authorization\":\"Bearer {JWT}\"}}\n");
-    let error = export::write_reference(&path, &text).unwrap_err();
+    let error = export::write_reference(&path, &text, Checks::Strict).unwrap_err();
     let ExportError::Refused(found) = &error else {
         panic!("expected a refusal, got {error}");
     };
@@ -1531,8 +1562,24 @@ fn a_fixture_the_guard_refuses_is_not_written() {
     // an existing fixture of that name stays as it was
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{\"old\":true}\n").unwrap();
-    export::write_reference(&path, &text).unwrap_err();
+    export::write_reference(&path, &text, Checks::Strict).unwrap_err();
     assert_eq!(fs::read_to_string(&path).unwrap(), "{\"old\":true}\n");
+    let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["leak.jsonl"]);
+}
+
+#[test]
+fn without_strict_what_the_guard_finds_is_handed_back_and_the_copy_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reference/leak.jsonl");
+    let text = format!("{{\"ok\":1}}\n{{\"authorization\":\"Bearer {JWT}\"}}\n");
+    let found = export::write_reference(&path, &text, Checks::Warn).unwrap();
+    assert!(found.contains(&(2, Kind::Jwt)), "{found:?}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    assert_eq!(mode(&path).unwrap(), 0o600);
     let names: Vec<_> = fs::read_dir(path.parent().unwrap())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -1546,7 +1593,7 @@ fn a_fixture_that_cant_be_put_in_place_leaves_no_staging_file() {
     // a non-empty directory where the fixture should go: the rename fails
     let path = dir.path().join("taken.jsonl");
     fs::create_dir_all(path.join("inside")).unwrap();
-    let error = export::write_reference(&path, "{\"ok\":1}\n").unwrap_err();
+    let error = export::write_reference(&path, "{\"ok\":1}\n", Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::Io { .. }), "{error}");
     let mut names: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
@@ -1571,7 +1618,7 @@ fn an_export_with_names_in_it_is_written_without_them() {
     let dir = tempfile::tempdir().unwrap();
     let fixtures = dir.path().join("fixtures");
     let capture = write_capture(dir.path(), &named_capture()).unwrap();
-    let exported = export::export(&capture, "people", &fixtures, &Identities::default()).unwrap();
+    let exported = export::export(&capture, "people", &fixtures, &Identities::default(), Checks::Warn).unwrap();
     let written = fs::read_to_string(&exported.path).unwrap().to_lowercase();
     for gone in ["doe", "jane", "odalys", "quennell"] {
         assert!(!written.contains(gone), "{gone} survived: {written}");
@@ -1583,7 +1630,7 @@ fn an_export_with_names_in_it_is_written_without_them() {
 }
 
 #[test]
-fn an_export_with_a_name_left_writes_nothing() {
+fn under_strict_an_export_with_a_name_left_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let fixtures = dir.path().join("fixtures");
     let capture = write_capture(dir.path(), &named_capture()).unwrap();
@@ -1596,7 +1643,7 @@ fn an_export_with_a_name_left_writes_nothing() {
         sanitized.events[2]["text"] = json!("thanks Doe");
         Ok(sanitized)
     };
-    let error = export::export_with(&capture, "people", &fixtures, leaky).unwrap_err();
+    let error = export::export_with(&capture, "people", &fixtures, Checks::Strict, leaky).unwrap_err();
     let ExportError::NameLeft(found) = &error else {
         panic!("expected a name left, got {error}");
     };
@@ -1622,15 +1669,34 @@ fn an_export_with_a_name_left_writes_nothing() {
         .collect();
     assert_eq!(names, ["people.jsonl"]);
     // the same seam with the real sanitizer writes the fixture: the check refuses only what is left
-    export::export_with(&capture, "people", &fixtures, |events| {
+    let exported = export::export_with(&capture, "people", &fixtures, Checks::Strict, |events| {
         sanitize_capture(events, &Identities::default())
     })
     .unwrap();
+    assert!(exported.warnings.is_empty(), "{:?}", exported.warnings);
     assert_ne!(fs::read_to_string(&path).unwrap(), "{\"old\":true}\n");
+
+    // without --strict the leaky copy is written, and the name left is a warning that never shows it
+    let exported = export::export_with(&capture, "people", &fixtures, Checks::Warn, leaky).unwrap();
+    assert!(fs::read_to_string(&path).unwrap().contains("thanks Doe"));
+    assert_eq!(
+        exported.warnings.names,
+        [NameFinding::Name {
+            line: 3,
+            layer: 0,
+            label: "<name:1>".to_owned()
+        }]
+    );
+    let summary = exported.warnings.summary().join("\n");
+    assert!(
+        summary.contains("outside any host 1 time(s) (<name:1> x1) on line(s) 3"),
+        "{summary}"
+    );
+    assert!(!summary.to_lowercase().contains("doe"), "{summary}");
 }
 
 #[test]
-fn an_export_that_would_put_a_name_in_a_host_writes_nothing() {
+fn under_strict_an_export_with_a_name_in_a_host_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let fixtures = dir.path().join("fixtures");
     let events = [
@@ -1641,7 +1707,7 @@ fn an_export_that_would_put_a_name_in_a_host_writes_nothing() {
     let path = fixtures.join("hosts.jsonl");
     fs::create_dir_all(&fixtures).unwrap();
     fs::write(&path, "{\"old\":true}\n").unwrap();
-    let error = export::export(&capture, "hosts", &fixtures, &Identities::default()).unwrap_err();
+    let error = export::export(&capture, "hosts", &fixtures, &Identities::default(), Checks::Strict).unwrap_err();
     let ExportError::NameInHost(events) = &error else {
         panic!("expected a name in a host, got {error}");
     };
@@ -1657,6 +1723,85 @@ fn an_export_that_would_put_a_name_in_a_host_writes_nothing() {
     assert_eq!(names, ["hosts.jsonl"]);
 }
 
+/// The hosts of [`whole_capture_with_a_host_name`]: two of them hold its person's surname as a label.
+const QUILL_URLS: [&str; 3] = [
+    "https://quill.example.test/a",
+    "wss://edge.quill.example.test/v1",
+    "https://teams.microsoft.com/api/x",
+];
+
+/// The whole planted capture, with a person whose surname is also a label of the hosts it talks to, written under
+/// `dir`; with its events and the number of the first event (from 1) that holds the surname in a host.
+fn whole_capture_with_a_host_name(dir: &Path) -> TestResult<(std::path::PathBuf, Vec<Value>, usize)> {
+    let mut events = capture();
+    events.extend([
+        json!({"displayName": "Jane Quill"}),
+        json!({"url": QUILL_URLS[0], "text": "thanks Quill"}),
+        json!({"urls": QUILL_URLS, "body": "<p>Quill said hi</p>"}),
+    ]);
+    let first = events.len() - 1;
+    Ok((write_capture(dir, &events)?, events, first))
+}
+
+#[test]
+fn a_whole_capture_with_a_name_that_is_a_host_label_is_written_with_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let (capture, events, first) = whole_capture_with_a_host_name(dir.path()).unwrap();
+    let exported = export::export(
+        &capture,
+        "whole",
+        &dir.path().join("reference"),
+        &identities(),
+        Checks::Warn,
+    )
+    .unwrap();
+    assert_eq!(exported.events, events.len());
+    assert_eq!(mode(&exported.path).unwrap(), 0o600);
+    let written = fs::read_to_string(&exported.path).unwrap();
+    // every host is as it was; the name is gone from everywhere else
+    assert_urls_intact(&written, &QUILL_URLS[..1], 2);
+    assert_urls_intact(&written, &QUILL_URLS[1..], 1);
+    let lines: Vec<&str> = written.lines().collect();
+    assert!(lines[first - 1].contains("thanks <name:"), "{}", lines[first - 1]);
+    assert!(lines[first].contains("<p><name:"), "{}", lines[first]);
+    // the warnings say where, never what
+    let warnings = &exported.warnings;
+    assert_eq!(warnings.name_in_host, [first, first + 1]);
+    assert_eq!(warnings.passcode_in_host, Vec::<usize>::new());
+    let in_host = |finding: &NameFinding| matches!(finding, NameFinding::InHost { line, .. } if *line >= first);
+    assert!(warnings.names.iter().all(in_host), "{:?}", warnings.names);
+    assert_eq!(warnings.guard, []);
+    let summary = warnings.summary().join("\n").to_lowercase();
+    let expected = format!(
+        "left inside a host (not replaced, so the host stays intact) in 2 event(s): {first}, {}",
+        first + 1
+    );
+    assert!(summary.contains(&expected), "{summary}");
+    assert!(!summary.contains("quill") && !summary.contains("jane"), "{summary}");
+}
+
+#[test]
+fn under_strict_or_inside_a_work_tree_the_whole_capture_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (capture, _, first) = whole_capture_with_a_host_name(dir.path()).unwrap();
+    let reference = dir.path().join("reference");
+    let error = export::export(&capture, "strict", &reference, &identities(), Checks::Strict).unwrap_err();
+    assert!(
+        matches!(&error, ExportError::NameInHost(found) if found == &[first, first + 1]),
+        "{error}"
+    );
+    assert!(!reference.join("strict.jsonl").exists());
+
+    // a destination inside a work tree is refused either way
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    for checks in [Checks::Warn, Checks::Strict] {
+        let error = export::export(&capture, "whole", &repo.join("reference"), &identities(), checks).unwrap_err();
+        assert!(matches!(error, ExportError::InsideRepository(_)), "{error}");
+    }
+    assert!(!repo.join("reference").exists());
+}
+
 #[test]
 fn an_export_never_writes_a_meeting_passcode() {
     let dir = tempfile::tempdir().unwrap();
@@ -1667,7 +1812,7 @@ fn an_export_never_writes_a_meeting_passcode() {
         json!({"url": format!("https://x.example.invalid/r?target={}", enc(&enc(&link)))}),
     ];
     let capture = write_capture(dir.path(), &events).unwrap();
-    let exported = export::export(&capture, "meeting", &fixtures, &Identities::default()).unwrap();
+    let exported = export::export(&capture, "meeting", &fixtures, &Identities::default(), Checks::Warn).unwrap();
     let written = fs::read_to_string(exported.path).unwrap();
     for gone in [MEETING_CODE, MEETING_PASSCODE] {
         assert!(!written.contains(gone), "{gone} was written: {written}");
@@ -1676,18 +1821,31 @@ fn an_export_never_writes_a_meeting_passcode() {
         written.contains("https://teams.microsoft.com/meet/<meeting:1>?p=<token:1>"),
         "{written}"
     );
-    // a sanitizer that misses the passcode: the fixture guard refuses the export
+    // a sanitizer that misses the passcode: under --strict the fixture guard refuses the export
     let leaky = |events: &[Value]| {
         let mut sanitized = sanitize_capture(events, &Identities::default())?;
         sanitized.events[0]["joinUrl"] = json!(meeting_link());
         Ok(sanitized)
     };
-    let error = export::export_with(&capture, "leak", &fixtures, leaky).unwrap_err();
+    let error = export::export_with(&capture, "leak", &fixtures, Checks::Strict, leaky).unwrap_err();
     assert!(
         matches!(&error, ExportError::Refused(found) if found.contains(&(1, Kind::MeetingLink))),
         "{error}"
     );
     assert!(!fixtures.join("leak.jsonl").exists());
+    // without it the copy is written and the guard's finding is a warning, by kind and line
+    let exported = export::export_with(&capture, "leak", &fixtures, Checks::Warn, leaky).unwrap();
+    assert!(
+        exported.warnings.guard.contains(&(1, Kind::MeetingLink)),
+        "{:?}",
+        exported.warnings
+    );
+    let summary = exported.warnings.summary().join("\n");
+    assert!(summary.contains("MeetingLink x"), "{summary}");
+    assert!(
+        !summary.contains(MEETING_PASSCODE) && !summary.contains(MEETING_CODE),
+        "{summary}"
+    );
 }
 
 #[test]
@@ -1722,7 +1880,14 @@ fn a_malformed_capture_is_refused_with_its_line() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("events.jsonl");
     fs::write(&file, format!("{{\"a\":1}}\n\nnot json {JWT}\n")).unwrap();
-    let error = export::export(&file, "x", &dir.path().join("fixtures"), &Identities::default()).unwrap_err();
+    let error = export::export(
+        &file,
+        "x",
+        &dir.path().join("fixtures"),
+        &Identities::default(),
+        Checks::Warn,
+    )
+    .unwrap_err();
     assert!(matches!(error, ExportError::Malformed { line: 3, .. }), "{error}");
     assert!(!error.to_string().contains(JWT));
     assert!(!dir.path().join("fixtures").exists());
@@ -1744,7 +1909,7 @@ fn export_writes_a_private_reference_copy_under_the_lab_data_dir() {
     fs::create_dir_all(&reference).unwrap();
     fs::set_permissions(&reference, fs::Permissions::from_mode(0o755)).unwrap();
     let capture = write_capture(dir.path(), &capture()).unwrap();
-    let exported = export::export(&capture, "calls/echo", &reference, &identities()).unwrap();
+    let exported = export::export(&capture, "calls/echo", &reference, &identities(), Checks::Warn).unwrap();
     assert_eq!(exported.path, reference.join("calls/echo.jsonl"));
     assert_eq!(mode(&exported.path).unwrap(), 0o600);
     assert_eq!(mode(&reference.join("calls")).unwrap(), 0o700);
@@ -1772,7 +1937,7 @@ fn export_refuses_a_destination_inside_a_git_work_tree() {
         outside.join("link/reference"),
     ];
     for reference in &inside {
-        let error = export::export(&capture, "calls/echo", reference, &identities()).unwrap_err();
+        let error = export::export(&capture, "calls/echo", reference, &identities(), Checks::Warn).unwrap_err();
         assert!(
             matches!(error, ExportError::InsideRepository(_)),
             "{reference:?}: {error}"
@@ -1781,7 +1946,7 @@ fn export_refuses_a_destination_inside_a_git_work_tree() {
             !reference.join("calls").exists(),
             "{reference:?}: nothing may be written"
         );
-        let error = export::write_reference(&reference.join("x.jsonl"), "{\"ok\":1}\n").unwrap_err();
+        let error = export::write_reference(&reference.join("x.jsonl"), "{\"ok\":1}\n", Checks::Warn).unwrap_err();
         assert!(
             matches!(error, ExportError::InsideRepository(_)),
             "{reference:?}: {error}"
@@ -1793,12 +1958,19 @@ fn export_refuses_a_destination_inside_a_git_work_tree() {
     // this repository's own tests/fixtures is refused before the capture is even read
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     let missing = dir.path().join("no-such-capture");
-    let error = export::export(&missing, "never-written", &fixtures, &identities()).unwrap_err();
+    let error = export::export(&missing, "never-written", &fixtures, &identities(), Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::InsideRepository(_)), "{error}");
     assert!(!fixtures.join("never-written.jsonl").exists());
 
     // and the same export outside every repository is written
-    let exported = export::export(&capture, "calls/echo", &outside.join("reference"), &identities()).unwrap();
+    let exported = export::export(
+        &capture,
+        "calls/echo",
+        &outside.join("reference"),
+        &identities(),
+        Checks::Warn,
+    )
+    .unwrap();
     assert!(exported.path.is_file());
 }
 
@@ -1814,15 +1986,15 @@ fn a_dotdot_cannot_lead_the_reference_copy_into_a_work_tree() {
     // a `..` right after a directory that doesn't exist yet: where it leads is only known once that directory is
     // created, so it is refused and nothing is created
     let unresolvable = base.join("lab-new/../repo/tests/fixtures");
-    let error = export::export(&capture, "calls/echo", &unresolvable, &identities()).unwrap_err();
+    let error = export::export(&capture, "calls/echo", &unresolvable, &identities(), Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::Unresolvable(_)), "{error}");
-    let error = export::write_reference(&unresolvable.join("x.jsonl"), "{\"ok\":1}\n").unwrap_err();
+    let error = export::write_reference(&unresolvable.join("x.jsonl"), "{\"ok\":1}\n", Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::Unresolvable(_)), "{error}");
     assert!(!base.join("lab-new").exists() && !repo.join("tests").exists());
 
     // a `..` after a directory that exists is resolved, and where it leads is checked
     let into_repo = base.join("outside/../repo/reference");
-    let error = export::export(&capture, "calls/echo", &into_repo, &identities()).unwrap_err();
+    let error = export::export(&capture, "calls/echo", &into_repo, &identities(), Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::InsideRepository(_)), "{error}");
     assert!(!repo.join("reference").exists());
 
@@ -1832,6 +2004,7 @@ fn a_dotdot_cannot_lead_the_reference_copy_into_a_work_tree() {
         "calls/echo",
         &base.join("outside/../lab/reference"),
         &identities(),
+        Checks::Warn,
     )
     .unwrap();
     assert_eq!(exported.path, base.join("lab/reference/calls/echo.jsonl"));
@@ -1855,12 +2028,13 @@ fn a_symlinked_destination_is_refused() {
     fs::create_dir_all(&reference).unwrap();
     std::os::unix::fs::symlink(repo.join("tests/fixtures"), reference.join("calls")).unwrap();
     std::os::unix::fs::symlink(elsewhere.join("target.jsonl"), repo.join("tests/fixtures/echo.jsonl")).unwrap();
-    let error = export::export(&capture, "calls/echo", &reference, &identities()).unwrap_err();
+    let error = export::export(&capture, "calls/echo", &reference, &identities(), Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::SymlinkDestination(_)), "{error}");
-    let error = export::write_reference(&reference.join("calls/echo.jsonl"), "{\"ok\":1}\n").unwrap_err();
+    let error = export::write_reference(&reference.join("calls/echo.jsonl"), "{\"ok\":1}\n", Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::SymlinkDestination(_)), "{error}");
     // and without that link, the linked directory is still seen to be inside the repository
-    let error = export::write_reference(&reference.join("calls/other.jsonl"), "{\"ok\":1}\n").unwrap_err();
+    let error =
+        export::write_reference(&reference.join("calls/other.jsonl"), "{\"ok\":1}\n", Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::InsideRepository(_)), "{error}");
     let names: Vec<_> = fs::read_dir(repo.join("tests/fixtures"))
         .unwrap()
@@ -1882,7 +2056,7 @@ fn a_symlinked_destination_is_refused() {
     let lab = base.join("lab2");
     fs::create_dir_all(&lab).unwrap();
     std::os::unix::fs::symlink(elsewhere.join("target.jsonl"), lab.join("echo.jsonl")).unwrap();
-    let error = export::export(&capture, "echo", &lab, &identities()).unwrap_err();
+    let error = export::export(&capture, "echo", &lab, &identities(), Checks::Warn).unwrap_err();
     assert!(matches!(error, ExportError::SymlinkDestination(_)), "{error}");
     assert_eq!(
         fs::read_to_string(elsewhere.join("target.jsonl")).unwrap(),
