@@ -399,6 +399,14 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
         read, react; b's receipt came during its reaction); exit 1 only on nine denied `isread` puts on a's own
         activity feed (`48:notifications`), reviewed afterwards and added to the expected-deny list with the
         `composeExtension/fetchCommands` bot invokes (both stay denied).
+      - 21:37Z (after the review fixes: b's probe check, case-folded optional keys, `crossPostChannels`/`onbehalfof`
+        only in their captured forms): **exit 0**, `ab-chat-full: ok`. Enforcement passed on both sides (a's probe
+        denied and failed in a's page; b's copy of the chat had a's message and not the probe); every step done (a:
+        send, edit, react, unreact, reply, react to the reply, delete; b: read, react; b sent no read receipt within
+        30 s). `fence.log`: 26 allowed writes, all on the a–b chat (6 message, 4 typing, 2 edit, 2 delete, 8
+        reaction, 4 read receipt), 20 own Entra token posts, 13 forced denies (the probes), 888 unclassified denies,
+        all expected by the reviewed list; no breach. The web client's posts and edits kept `crossPostChannels: []`
+        and `onbehalfof: null` (none fell to `Unknown`). No lab browser left.
 
 ### Task 8: Group chats under the fence (a, b, c)
 **Files:**
