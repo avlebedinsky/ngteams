@@ -15,9 +15,15 @@ These hold for every agent and every change, with no exceptions.
 - **Nothing runs live against the tenant before the browser fence is armed** (M0 Tasks 6–7): HTTP interception on
   every host and target, the WebSocket guard, the service worker neutralized. Until the write-target mapping exists
   (M0 Task 11) the fence runs fail-closed: every mutating request is denied except the seeded own-state list.
-- **Raw captures and tokens never enter the repo.** Captures live under `~/.local/share/teams-lab/captures/`;
-  fixtures are committed only after sanitizing, and the fixture guard (`crates/fixture-guard`) must pass on
-  `tests/fixtures/` and `docs/`. Tokens never reach logs or stdout: print only aud, exp, scopes and tenant.
+- **Captures and tokens never enter the repo, not even sanitized.** Captures live under
+  `~/.local/share/teams-lab/captures/`. `proto-lab export` only writes a sanitized local reference copy under
+  `~/.local/share/teams-lab/reference/` (it refuses any destination inside a git work tree). Committed fixtures are
+  written synthetic-from-capture: read the reference copy locally, write a fixture of the same shape with made-up
+  values, and mark it synthetic (a top-level `"_synthetic"` note in JSON, on the first line of JSONL, a
+  `_synthetic:` first-line header in other text). The fixture guard (`crates/fixture-guard`) must pass on
+  `tests/fixtures/` and `docs/`, and every fixture in `tests/fixtures/` must carry the marker. The sanitizer is
+  defence in depth, not permission to commit its output. Tokens never reach logs or stdout: print only aud, exp,
+  scopes and tenant.
 - **Agents never build or run a personal build and never receive the user's tokens.** Lab binaries get a
   `WritePermit` only from `teams-fence`: their fence comes from `Fence::open_lab` (roster from `lab.toml`, the lab's
   `fence.log`), and `teams-fence`'s `test-support` feature (any roster, any log, fake membership sources) is enabled

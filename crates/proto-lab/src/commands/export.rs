@@ -1,24 +1,29 @@
-//! `proto-lab export <capture> <fixture-name>`: a raw capture ([`crate::capture`]) made into a committed fixture.
+//! `proto-lab export <capture> <name>`: a raw capture ([`crate::capture`]) made into a sanitized **reference copy**
+//! under the lab's data dir (`reference/<name>.jsonl`), outside any repository.
+//!
+//! Captures never enter the repository, not even sanitized: the sanitizer is defence in depth, not a proof. A committed
+//! fixture is written by hand, synthetic-from-capture: an agent reads the reference copy locally and writes a fixture
+//! of the same shape with made-up values, which declares itself synthetic (`"_synthetic"`, checked by the fixture
+//! guard). The reference copy is what it reads, so it still goes through every check, and a refusal still writes
+//! nothing.
 //!
 //! The capture's events are sanitized as one capture ([`crate::sanitize`]), and the result goes to
-//! `tests/fixtures/<fixture-name>`: JSONL by default (`.jsonl` is added to a name without an extension), or one
-//! pretty-printed JSON array for a name ending in `.json`. If sanitizing had to replace a name inside a host (a name
-//! word that is also a label of a host other than a public protocol host, `https://<name:1>.example.test/`), the export
-//! fails naming the events, since that host would be destroyed in the fixture. Before anything is written, the text is
-//! checked for every
-//! name the sanitizer found in the capture ([`check_names`], at every layer of encoding, apart from the sanitizer's own
-//! replacing): if a word of one is still there, nothing is written and the export fails, naming the lines and the
-//! names' placeholders, never the names. Then the fixture guard scans the text:
-//! if it finds anything, nothing is written (an existing fixture of that name stays as it was) and the export fails,
-//! naming the lines and what was found, never the values. The file is written next to its final name, scanned once more
-//! as it lies on disk, and only then renamed into place, so a refusal at either scan leaves an existing fixture as it
-//! was.
-//!
-//! By default fixtures go to the `tests/fixtures` of the cargo workspace around the current directory (the nearest
-//! `Cargo.toml` above it with a `[workspace]` table), never to a member crate's own `tests/fixtures`.
+//! `<reference dir>/<name>`: JSONL by default (`.jsonl` is added to a name without an extension), or one
+//! pretty-printed JSON array for a name ending in `.json`. A destination inside a git work tree (a directory at or above
+//! it holds `.git`, as written or with symlinks resolved) is refused before anything is read. If sanitizing had to
+//! replace a name inside a host (a name word that is also a label of a host other than a public protocol host,
+//! `https://<name:1>.example.test/`), the export fails naming the events, since that host would be destroyed. Before
+//! anything is written, the text is checked for every name the sanitizer found in the capture ([`check_names`], at
+//! every layer of encoding, apart from the sanitizer's own replacing): if a word of one is still there, nothing is
+//! written and the export fails, naming the lines and the names' placeholders, never the names. Then the fixture guard
+//! scans the text: if it finds anything, nothing is written (an existing copy of that name stays as it was) and the
+//! export fails, naming the lines and what was found, never the values. The file is written next to its final name
+//! (`0600`, in directories created `0700`), scanned once more as it lies on disk, and only then renamed into place, so
+//! a refusal at either scan leaves an existing copy as it was.
 
-use std::fs;
-use std::io;
+use std::fs::{self, DirBuilder, OpenOptions, Permissions};
+use std::io::{self, Write as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use fixture_guard::{Guard, Kind};
@@ -27,17 +32,29 @@ use serde_json::Value;
 use crate::capture::EVENTS_FILE;
 use crate::sanitize::{Identities, NameFinding, Sanitized, check_names, sanitize_capture};
 
-/// Where fixtures live, relative to the repository root.
-pub const FIXTURES_DIR: &str = "tests/fixtures";
+/// Where reference copies live, relative to the lab's data dir.
+pub const REFERENCE_DIR: &str = "reference";
+
+/// The reference dir under the lab's data dir `data_dir`.
+#[must_use]
+pub fn reference_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(REFERENCE_DIR)
+}
 
 /// Why an export failed. None of these carries a value from the capture.
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
     #[error(
-        "not a fixture name (a relative path of letters, digits, '.', '-' and '_', no segment starting with '.', \
+        "not a reference name (a relative path of letters, digits, '.', '-' and '_', no segment starting with '.', \
          ending in .jsonl, .json or no extension): {0:?}"
     )]
     BadName(String),
+    #[error(
+        "{} is inside a git work tree; captures never enter a repository, not even sanitized, so the reference copy \
+         goes under the lab's data dir",
+        .0.display()
+    )]
+    InsideRepository(PathBuf),
     #[error("{}: {source}", path.display())]
     Io { path: PathBuf, source: io::Error },
     #[error("{}:{line}: not a JSON event", path.display())]
@@ -55,8 +72,6 @@ pub enum ExportError {
         events(.0)
     )]
     NameInHost(Vec<usize>),
-    #[error("no cargo workspace with a {FIXTURES_DIR} in {} or above it; pass --fixtures-dir", .0.display())]
-    NoFixturesDir(PathBuf),
 }
 
 fn findings(found: &[(usize, Kind)]) -> String {
@@ -84,14 +99,14 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> ExportError + '_ {
     }
 }
 
-/// A fixture written.
+/// A reference copy written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exported {
     pub path: PathBuf,
     pub events: usize,
 }
 
-/// How a fixture is laid out.
+/// How a reference copy is laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
     /// One event per line.
@@ -100,12 +115,12 @@ pub enum Layout {
     Json,
 }
 
-/// Where a fixture named `name` goes under `fixtures_dir`, and its layout.
+/// Where a reference copy named `name` goes under `reference_dir`, and its layout.
 ///
 /// # Errors
 /// [`ExportError::BadName`] for an absolute path, an empty segment, a segment starting with `.` (`..` included), a
 /// character outside letters, digits, `.`, `-` and `_`, or an extension other than `.jsonl` and `.json`.
-pub fn fixture_path(fixtures_dir: &Path, name: &str) -> Result<(PathBuf, Layout), ExportError> {
+pub fn reference_path(reference_dir: &Path, name: &str) -> Result<(PathBuf, Layout), ExportError> {
     let bad = || ExportError::BadName(name.to_owned());
     let segments: Vec<&str> = name.split('/').collect();
     let valid = segments.iter().all(|segment| {
@@ -122,7 +137,37 @@ pub fn fixture_path(fixtures_dir: &Path, name: &str) -> Result<(PathBuf, Layout)
         Some((_, "json")) => (name.to_owned(), Layout::Json),
         Some(_) => return Err(bad()),
     };
-    Ok((fixtures_dir.join(relative), layout))
+    Ok((reference_dir.join(relative), layout))
+}
+
+/// Refuses `path` when it is inside a git work tree: a directory at or above it (as written, made absolute, and with
+/// symlinks resolved on the part that exists) holds a `.git` entry, a directory or a worktree's `.git` file.
+///
+/// # Errors
+/// [`ExportError::InsideRepository`]; [`ExportError::Io`] when the current directory can't be read for a relative
+/// path.
+pub fn refuse_inside_repository(path: &Path) -> Result<(), ExportError> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir().map_err(io_at(path))?.join(path)
+    };
+    let resolved = absolute
+        .ancestors()
+        .find_map(|existing| fs::canonicalize(existing).ok());
+    let inside = [Some(absolute.as_path()), resolved.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|candidate| {
+            candidate
+                .ancestors()
+                .any(|dir| fs::symlink_metadata(dir.join(".git")).is_ok())
+        });
+    if inside {
+        Err(ExportError::InsideRepository(path.to_owned()))
+    } else {
+        Ok(())
+    }
 }
 
 /// The events of a capture: its directory (holding `events.jsonl`) or the file itself. Blank lines are skipped.
@@ -148,7 +193,7 @@ pub fn read_capture(capture: &Path) -> Result<Vec<Value>, ExportError> {
         .collect()
 }
 
-/// The fixture's text.
+/// The reference copy's text.
 #[must_use]
 pub fn render(events: &[Value], layout: Layout) -> String {
     match layout {
@@ -168,14 +213,17 @@ pub fn render(events: &[Value], layout: Layout) -> String {
     }
 }
 
-/// Writes `text` to `path` only if the fixture guard finds nothing in it: scanned before anything touches the disk,
-/// written to a staging file beside `path`, scanned again as it lies there, and only then renamed into place. Whatever
-/// fails, the staging file is removed and an existing fixture at `path` stays as it was.
+/// Writes `text` to `path` only if it is outside every git work tree ([`refuse_inside_repository`]) and the fixture
+/// guard finds nothing in it: scanned before anything touches the disk, written (`0600`, missing directories created
+/// `0700`) to a staging file beside `path`, scanned again as it lies there, and only then renamed into place. Whatever
+/// fails, the staging file is removed and an existing file at `path` stays as it was.
 ///
 /// # Errors
-/// [`ExportError::Refused`] listing what the guard found, with nothing written; [`ExportError::Io`] when the file
-/// can't be written; [`ExportError::GuardPattern`] when the guard can't be built.
-pub fn write_fixture(path: &Path, text: &str) -> Result<(), ExportError> {
+/// [`ExportError::InsideRepository`] and [`ExportError::Refused`] (listing what the guard found), with nothing
+/// written; [`ExportError::Io`] when the file can't be written; [`ExportError::GuardPattern`] when the guard can't be
+/// built.
+pub fn write_reference(path: &Path, text: &str) -> Result<(), ExportError> {
+    refuse_inside_repository(path)?;
     let guard = Guard::new().map_err(ExportError::GuardPattern)?;
     let found = guard.scan_text(text);
     if !found.is_empty() {
@@ -184,7 +232,7 @@ pub fn write_fixture(path: &Path, text: &str) -> Result<(), ExportError> {
     let parent = path
         .parent()
         .ok_or_else(|| ExportError::BadName(path.display().to_string()))?;
-    fs::create_dir_all(parent).map_err(io_at(parent))?;
+    private_dir(parent)?;
     let file_name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
     let staging = parent.join(format!(".{file_name}.export-{}", std::process::id()));
     let placed = stage(&guard, &staging, text).and_then(|()| fs::rename(&staging, path).map_err(io_at(path)));
@@ -194,9 +242,30 @@ pub fn write_fixture(path: &Path, text: &str) -> Result<(), ExportError> {
     placed
 }
 
-/// Writes the staging file and scans it as it lies on disk.
+/// Creates `dir` and its missing parents `0700`, and makes `dir` itself `0700` when it already existed.
+fn private_dir(dir: &Path) -> Result<(), ExportError> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(io_at(dir))?;
+    fs::set_permissions(dir, Permissions::from_mode(0o700)).map_err(io_at(dir))
+}
+
+/// Writes the staging file (`0600`) and scans it as it lies on disk.
 fn stage(guard: &Guard, staging: &Path, text: &str) -> Result<(), ExportError> {
-    fs::write(staging, text).map_err(io_at(staging))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(staging)
+        .map_err(io_at(staging))?;
+    // a leftover staging file keeps its old mode through `open`
+    file.set_permissions(Permissions::from_mode(0o600))
+        .map_err(io_at(staging))?;
+    file.write_all(text.as_bytes()).map_err(io_at(staging))?;
+    drop(file);
     let found = guard.scan_paths(&[staging]).map_err(io_at(staging))?;
     if found.is_empty() {
         Ok(())
@@ -207,19 +276,21 @@ fn stage(guard: &Guard, staging: &Path, text: &str) -> Result<(), ExportError> {
     }
 }
 
-/// Exports a capture: reads it, sanitizes it as one capture, checks the names found in it ([`check_names`]), and
-/// writes it as fixture `name` under `fixtures_dir` through [`write_fixture`].
+/// Exports a capture: refuses a destination inside a git work tree, reads the capture, sanitizes it as one capture,
+/// checks the names found in it ([`check_names`]), writes it as reference copy `name` under `reference_dir` through
+/// [`write_reference`], and makes `reference_dir` `0700`.
 ///
 /// # Errors
-/// As [`fixture_path`], [`read_capture`] and [`write_fixture`]; [`ExportError::NameInHost`] when a name took a host's
-/// place, and [`ExportError::NameLeft`] when a name is left, with nothing written.
+/// As [`reference_path`], [`refuse_inside_repository`], [`read_capture`] and [`write_reference`];
+/// [`ExportError::NameInHost`] when a name took a host's place, and [`ExportError::NameLeft`] when a name is left, with
+/// nothing written.
 pub fn export(
     capture: &Path,
     name: &str,
-    fixtures_dir: &Path,
+    reference_dir: &Path,
     identities: &Identities,
 ) -> Result<Exported, ExportError> {
-    export_with(capture, name, fixtures_dir, |events| {
+    export_with(capture, name, reference_dir, |events| {
         sanitize_capture(events, identities)
     })
 }
@@ -232,10 +303,11 @@ pub fn export(
 pub fn export_with(
     capture: &Path,
     name: &str,
-    fixtures_dir: &Path,
+    reference_dir: &Path,
     sanitize: impl FnOnce(&[Value]) -> Result<Sanitized, regex::Error>,
 ) -> Result<Exported, ExportError> {
-    let (path, layout) = fixture_path(fixtures_dir, name)?;
+    let (path, layout) = reference_path(reference_dir, name)?;
+    refuse_inside_repository(&path)?;
     let events = read_capture(capture)?;
     let sanitized = sanitize(&events).map_err(ExportError::Pattern)?;
     if !sanitized.name_in_host.is_empty() {
@@ -246,33 +318,11 @@ pub fn export_with(
     if !left.is_empty() {
         return Err(ExportError::NameLeft(left));
     }
-    write_fixture(&path, &text)?;
+    write_reference(&path, &text)?;
+    // `write_reference` made what was missing `0700`; the reference dir is too, even when it was there before
+    fs::set_permissions(reference_dir, Permissions::from_mode(0o700)).map_err(io_at(reference_dir))?;
     Ok(Exported {
         path,
         events: sanitized.events.len(),
-    })
-}
-
-/// The repository's `tests/fixtures`: that of the cargo workspace around `start`, the nearest directory at or above it
-/// whose `Cargo.toml` has a `[workspace]` table. A member crate's own `tests/fixtures` is never picked.
-///
-/// # Errors
-/// [`ExportError::NoFixturesDir`] when there is no workspace above `start`, or it has no `tests/fixtures`.
-pub fn find_fixtures_dir(start: &Path) -> Result<PathBuf, ExportError> {
-    start
-        .ancestors()
-        .find(|dir| is_workspace_root(dir))
-        .map(|dir| dir.join(FIXTURES_DIR))
-        .filter(|fixtures| fixtures.is_dir())
-        .ok_or_else(|| ExportError::NoFixturesDir(start.to_owned()))
-}
-
-/// Whether `dir` has a `Cargo.toml` with a `[workspace]` table (or a `[workspace.*]` one, which implies it).
-fn is_workspace_root(dir: &Path) -> bool {
-    fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|manifest| {
-        manifest.lines().any(|line| {
-            let line = line.trim();
-            line == "[workspace]" || line.starts_with("[workspace.")
-        })
     })
 }

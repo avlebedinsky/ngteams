@@ -1480,9 +1480,9 @@ fn write_capture(dir: &Path, events: &[Value]) -> TestResult<std::path::PathBuf>
 }
 
 #[test]
-fn export_writes_the_sanitized_capture_under_the_fixture_name() {
+fn export_writes_the_sanitized_capture_under_the_reference_name() {
     let dir = tempfile::tempdir().unwrap();
-    let fixtures = dir.path().join("tests/fixtures");
+    let fixtures = dir.path().join("reference");
     let capture = write_capture(dir.path(), &capture()).unwrap();
     let exported = export::export(&capture, "calls/echo", &fixtures, &identities()).unwrap();
     assert_eq!(exported.path, fixtures.join("calls/echo.jsonl"));
@@ -1518,7 +1518,7 @@ fn a_fixture_the_guard_refuses_is_not_written() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tests/fixtures/leak.jsonl");
     let text = format!("{{\"ok\":1}}\n{{\"authorization\":\"Bearer {JWT}\"}}\n");
-    let error = export::write_fixture(&path, &text).unwrap_err();
+    let error = export::write_reference(&path, &text).unwrap_err();
     let ExportError::Refused(found) = &error else {
         panic!("expected a refusal, got {error}");
     };
@@ -1531,7 +1531,7 @@ fn a_fixture_the_guard_refuses_is_not_written() {
     // an existing fixture of that name stays as it was
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{\"old\":true}\n").unwrap();
-    export::write_fixture(&path, &text).unwrap_err();
+    export::write_reference(&path, &text).unwrap_err();
     assert_eq!(fs::read_to_string(&path).unwrap(), "{\"old\":true}\n");
     let names: Vec<_> = fs::read_dir(path.parent().unwrap())
         .unwrap()
@@ -1546,7 +1546,7 @@ fn a_fixture_that_cant_be_put_in_place_leaves_no_staging_file() {
     // a non-empty directory where the fixture should go: the rename fails
     let path = dir.path().join("taken.jsonl");
     fs::create_dir_all(path.join("inside")).unwrap();
-    let error = export::write_fixture(&path, "{\"ok\":1}\n").unwrap_err();
+    let error = export::write_reference(&path, "{\"ok\":1}\n").unwrap_err();
     assert!(matches!(error, ExportError::Io { .. }), "{error}");
     let mut names: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
@@ -1701,7 +1701,7 @@ fn fixture_names_stay_inside_the_fixtures_dir() {
     ];
     for (name, relative, layout) in ok {
         assert_eq!(
-            export::fixture_path(fixtures, name).unwrap(),
+            export::reference_path(fixtures, name).unwrap(),
             (fixtures.join(relative), layout),
             "{name}"
         );
@@ -1711,7 +1711,7 @@ fn fixture_names_stay_inside_the_fixtures_dir() {
     ];
     for name in bad {
         assert!(
-            matches!(export::fixture_path(fixtures, name), Err(ExportError::BadName(_))),
+            matches!(export::reference_path(fixtures, name), Err(ExportError::BadName(_))),
             "{name:?} was accepted"
         );
     }
@@ -1728,28 +1728,76 @@ fn a_malformed_capture_is_refused_with_its_line() {
     assert!(!dir.path().join("fixtures").exists());
 }
 
+fn mode(path: &Path) -> TestResult<u32> {
+    use std::os::unix::fs::PermissionsExt as _;
+    Ok(fs::metadata(path)?.permissions().mode() & 0o777)
+}
+
 #[test]
-fn the_fixtures_dir_is_found_from_inside_the_repository() {
+fn export_writes_a_private_reference_copy_under_the_lab_data_dir() {
+    use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/x\"]\n").unwrap();
-    fs::create_dir_all(dir.path().join("tests/fixtures")).unwrap();
-    // a member crate with test fixtures of its own is not where exports go
-    fs::create_dir_all(dir.path().join("crates/x/src")).unwrap();
-    fs::create_dir_all(dir.path().join("crates/x/tests/fixtures")).unwrap();
-    fs::write(dir.path().join("crates/x/Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-    for start in ["crates/x/src", "crates/x", "crates/x/tests/fixtures", "", "tests"] {
-        let found = export::find_fixtures_dir(&dir.path().join(start)).unwrap();
-        assert_eq!(found, dir.path().join("tests/fixtures"), "from {start:?}");
+    let data_dir = dir.path().join("teams-lab");
+    let reference = export::reference_dir(&data_dir);
+    assert_eq!(reference, data_dir.join("reference"));
+    // a reference dir that was there with a wider mode is made private too
+    fs::create_dir_all(&reference).unwrap();
+    fs::set_permissions(&reference, fs::Permissions::from_mode(0o755)).unwrap();
+    let capture = write_capture(dir.path(), &capture()).unwrap();
+    let exported = export::export(&capture, "calls/echo", &reference, &identities()).unwrap();
+    assert_eq!(exported.path, reference.join("calls/echo.jsonl"));
+    assert_eq!(mode(&exported.path).unwrap(), 0o600);
+    assert_eq!(mode(&reference.join("calls")).unwrap(), 0o700);
+    assert_eq!(mode(&reference).unwrap(), 0o700);
+}
+
+#[test]
+fn export_refuses_a_destination_inside_a_git_work_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let capture = write_capture(dir.path(), &capture()).unwrap();
+    // a repository (`.git` dir), a linked worktree (`.git` file), and a symlink from outside into a repository
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(repo.join("sub")).unwrap();
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(worktree.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(repo.join("sub"), outside.join("link")).unwrap();
+    let inside = [
+        repo.join("tests/fixtures"),
+        repo.clone(),
+        worktree.join("deep/reference"),
+        outside.join("link/reference"),
+    ];
+    for reference in &inside {
+        let error = export::export(&capture, "calls/echo", reference, &identities()).unwrap_err();
+        assert!(
+            matches!(error, ExportError::InsideRepository(_)),
+            "{reference:?}: {error}"
+        );
+        assert!(
+            !reference.join("calls").exists(),
+            "{reference:?}: nothing may be written"
+        );
+        let error = export::write_reference(&reference.join("x.jsonl"), "{\"ok\":1}\n").unwrap_err();
+        assert!(
+            matches!(error, ExportError::InsideRepository(_)),
+            "{reference:?}: {error}"
+        );
+        assert!(!reference.join("x.jsonl").exists());
     }
-    // a workspace without tests/fixtures has none, even when a member does
-    fs::remove_dir_all(dir.path().join("tests")).unwrap();
-    assert!(matches!(
-        export::find_fixtures_dir(&dir.path().join("crates/x/src")),
-        Err(ExportError::NoFixturesDir(_))
-    ));
-    let elsewhere = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        export::find_fixtures_dir(elsewhere.path()),
-        Err(ExportError::NoFixturesDir(_))
-    ));
+    assert!(!repo.join("tests").exists() && !worktree.join("deep").exists() && !repo.join("sub/reference").exists());
+
+    // this repository's own tests/fixtures is refused before the capture is even read
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let missing = dir.path().join("no-such-capture");
+    let error = export::export(&missing, "never-written", &fixtures, &identities()).unwrap_err();
+    assert!(matches!(error, ExportError::InsideRepository(_)), "{error}");
+    assert!(!fixtures.join("never-written.jsonl").exists());
+
+    // and the same export outside every repository is written
+    let exported = export::export(&capture, "calls/echo", &outside.join("reference"), &identities()).unwrap();
+    assert!(exported.path.is_file());
 }

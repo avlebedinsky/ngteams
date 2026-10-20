@@ -1,6 +1,6 @@
 [package]
 name = "fixture-guard"
-description = "Scans committed fixtures and docs for tokens, email addresses and real MRIs"
+description = "Scans committed fixtures and docs for tokens, email addresses and real MRIs, and checks fixtures are synthetic"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 regex.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

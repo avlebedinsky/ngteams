@@ -1,9 +1,10 @@
-//! The fixture guard: scans files meant for the repository (sanitized fixtures, docs) for what must never be committed,
-//! such as JWTs, `Bearer` and skypetoken values, OAuth tokens, email addresses, real MRIs, GUIDs (other than
-//! Microsoft's public app ids), signed URLs' signatures, and Teams meetings' join credentials (a join link's code or
-//! `p` passcode, a meeting id or a passcode under its key or label, in any language Teams writes an invitation in:
-//! [`labels`]). It is the backstop behind the sanitizer: what the sanitizer misses fails the export instead of being
-//! committed.
+//! The fixture guard: scans files meant for the repository (synthetic fixtures, docs) and `proto-lab export`'s local
+//! reference copies for what must never be committed, such as JWTs, `Bearer` and skypetoken values, OAuth tokens,
+//! email addresses, real MRIs, GUIDs (other than Microsoft's public app ids), signed URLs' signatures, and Teams
+//! meetings' join credentials (a join link's code or `p` passcode, a meeting id or a passcode under its key or label,
+//! in any language Teams writes an invitation in: [`labels`]). It is the backstop behind the sanitizer and behind
+//! hand-written fixtures: what either lets through fails instead of being committed. Every committed fixture also has
+//! to declare itself synthetic ([`synthetic`]).
 //!
 //! Each line is scanned twice: as written, and decoded the way captures hide text, layer after layer: `%XX` percent
 //! escapes (`8%3Aorgid%3A…`, `someone%40contoso.com`), backslash escapes of a JSON or JavaScript string (`\"`,
@@ -12,8 +13,8 @@
 //! Sanitized placeholders (`<user:a>`,`<mri:b>`, `<guid:1>`, `<token:1>`) and prose that only names these things pass.
 //! A finding reports where and what, never the matched value, so the report itself cannot leak it.
 //!
-//! The repo-wide check is `tests/fixture_guard.rs`; `proto-lab export` (M0 Task 9) runs the same scan before it
-//! writes a fixture.
+//! The repo-wide checks are in `tests/fixture_guard.rs` (the scan on `tests/fixtures/` and `docs/`, the synthetic
+//! marker on `tests/fixtures/`); `proto-lab export` (M0 Task 9) runs the same scan before it writes a reference copy.
 
 use std::fmt;
 use std::fs;
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 
 pub mod labels;
+pub mod synthetic;
 
 use self::labels::{Label, Labels, is_passcode_value};
 

@@ -1,5 +1,7 @@
-//! The sanitizer: what a raw capture ([`crate::capture`]) has to go through before any of it may enter the repository
-//! as a fixture (`proto-lab export`, which also runs the fixture guard on the result).
+//! The sanitizer: what a raw capture ([`crate::capture`]) goes through before `proto-lab export` writes its local
+//! reference copy (outside the repository, with the fixture guard run on the result). It is defence in depth: no
+//! capture enters the repository, not even sanitized; committed fixtures are written synthetic-from-capture with
+//! made-up values. Its known gaps are in `docs/backlog/sanitizer-defence-in-depth-known-gaps.md`.
 //!
 //! It works on the capture's JSON events, with one [`Sanitizer`] per capture, so every placeholder is stable within the
 //! capture: the same email, MRI, GUID or name gets the same placeholder in every event.

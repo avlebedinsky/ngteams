@@ -43,9 +43,11 @@ they're skipped, unless `GPUI_SMOKE_REQUIRE=1`. They run the window once on ever
 ## Captures and fixtures
 
 A recorded run writes `captures/<scenario>/<ts>/events.jsonl` under the lab's data dir, never into the repo (the format
-is described in `crates/proto-lab/src/capture.rs`). `cargo run -p proto-lab -- export <capture> <fixture-name>`
-sanitizes one into the repository's `tests/fixtures/<fixture-name>.jsonl` (or one JSON array for a `.json` name; the
-workspace root is found from the current directory, even inside a crate, or `--fixtures-dir` names another) and writes
+is described in `crates/proto-lab/src/capture.rs`). Captures never enter the repo, not even sanitized.
+
+`cargo run -p proto-lab -- export <capture> <name>` sanitizes one into a local **reference copy**,
+`reference/<name>.jsonl` under the lab's data dir (`~/.local/share/teams-lab/reference/` by default; one JSON array for
+a `.json` name; the file `0600`, its directories `0700`). It refuses any destination inside a git work tree. It writes
 nothing unless no word (3 characters or more) of a name found in the capture is left in the result, at any layer of
 encoding, and the fixture guard passes it. A word of a name that is also an ordinary word left anywhere refuses the
 export too; a name never seen under a name field, or a shorter word, is outside that check. A word of a name that is
@@ -53,6 +55,15 @@ also a label of a host (other than a public Microsoft protocol host such as `tea
 for a name) refuses it as well, rather than writing the host destroyed. Teams meeting codes and join passcodes (of
 letters only too) become `<meeting:N>` and `<token:N>` wherever they show, invitations read in every language the web
 client has locale strings for, and the fixture guard refuses a join link, a meeting id or a passcode left in the clear.
+The sanitizer is defence in depth, with known gaps (`docs/backlog/sanitizer-defence-in-depth-known-gaps.md`).
+
+Committed fixtures in `tests/fixtures/` are written **synthetic-from-capture**: an agent reads the reference copy
+locally and writes a fixture of the same shape with made-up values. Every fixture declares itself synthetic: a JSON
+file has a top-level `"_synthetic"` note (what it is shaped like, that the values are made up), a JSONL file has one
+on its first line (a header line of its own, or on every line), and any other text file starts with a `_synthetic: …`
+line in its own comment syntax. `cargo test -p fixture-guard` fails on an unmarked fixture
+(`committed_fixtures_are_marked_synthetic`) and on anything the guard finds in `tests/fixtures/` or `docs/`
+(`committed_fixtures_and_docs_are_clean`). Crate-local test inputs (`crates/*/tests/fixtures/`) are not fixtures.
 
 ## Test-only builds
 

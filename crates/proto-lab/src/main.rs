@@ -1,7 +1,8 @@
 //! `proto-lab`: the protocol lab harness CLI.
 //!
 //! `login` and `status` arrive with the armed fence (M0 Task 8); see
-//! `docs/plans/20261019-native-teams-m0-lab-and-spikes.md`. `export` turns a capture into a sanitized fixture.
+//! `docs/plans/20261019-native-teams-m0-lab-and-spikes.md`. `export` turns a capture into a sanitized
+//! reference copy outside the repository, read to write a synthetic fixture.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -33,18 +34,15 @@ enum Command {
         #[command(subcommand)]
         command: BundlesCommand,
     },
-    /// Sanitize a capture into a fixture under tests/fixtures; nothing is written unless the fixture guard passes it.
+    /// Sanitize a capture into a reference copy under the lab's reference/ dir, outside any repository, to read when
+    /// writing a synthetic fixture; nothing is written unless every check and the fixture guard pass it.
     Export {
         /// The capture: its directory (or its events.jsonl), as a path or relative to the lab's captures dir
         /// (`<scenario>/<ts>`).
         capture: PathBuf,
-        /// The fixture's path under tests/fixtures, such as `auth/authz`; `.jsonl` is added without an extension,
-        /// and a `.json` name gets one JSON array.
-        fixture_name: String,
-        /// The fixtures dir; by default the `tests/fixtures` of the cargo workspace around the current directory (the
-        /// repository's, never a member crate's own).
-        #[arg(long)]
-        fixtures_dir: Option<PathBuf>,
+        /// The copy's path under the reference dir, such as `auth/authz`; `.jsonl` is added without an extension, and
+        /// a `.json` name gets one JSON array.
+        name: String,
     },
 }
 
@@ -107,11 +105,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Chrome { command } => run_chrome(command, &paths).await,
         Command::Bundles { command } => run_bundles(command, &paths).await,
-        Command::Export {
-            capture,
-            fixture_name,
-            fixtures_dir,
-        } => run_export(&locations, &paths, &capture, &fixture_name, fixtures_dir),
+        Command::Export { capture, name } => run_export(&locations, &paths, &capture, &name),
     }
 }
 
@@ -119,8 +113,7 @@ fn run_export(
     locations: &LabLocations,
     paths: &LabPaths,
     capture: &Path,
-    fixture_name: &str,
-    fixtures_dir: Option<PathBuf>,
+    name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // the lab's own accounts get their alias as placeholder label; without a lab.toml every identity gets a number
     let identities = match LabConfig::load(locations) {
@@ -136,12 +129,14 @@ fn run_export(
     } else {
         paths.captures_dir().join(capture)
     };
-    let fixtures_dir = match fixtures_dir {
-        Some(dir) => dir,
-        None => export::find_fixtures_dir(&std::env::current_dir()?)?,
-    };
-    let exported = export::export(&capture, fixture_name, &fixtures_dir, &identities)?;
-    println!("exported {} event(s) to {}", exported.events, exported.path.display());
+    let reference_dir = export::reference_dir(paths.data_dir());
+    let exported = export::export(&capture, name, &reference_dir, &identities)?;
+    println!(
+        "wrote a sanitized reference copy of {} event(s) to {}; it stays outside the repository: read it to write a \
+         synthetic fixture (same shape, made-up values, a \"_synthetic\" marker)",
+        exported.events,
+        exported.path.display()
+    );
     Ok(())
 }
 

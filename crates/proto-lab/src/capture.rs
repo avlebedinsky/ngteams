@@ -1,6 +1,7 @@
 //! The capture recorder: what an armed run saw, as JSONL under `captures/<scenario>/<ts>/` in the lab's data dir,
-//! outside the repository. Raw captures hold tokens and real identities; they never enter the repo, and only
-//! `proto-lab export` ([`crate::sanitize`] and the fixture guard) turns one into a fixture.
+//! outside the repository. Raw captures hold tokens and real identities; they never enter the repo, not even
+//! sanitized. `proto-lab export` ([`crate::sanitize`] and the fixture guard) turns one into a local reference copy,
+//! from which an agent writes a synthetic fixture with made-up values.
 //!
 //! A run records when it is armed with a [`Capture`] ([`crate::arming::ArmedBrowser::arm_capturing`]). The arming then
 //! also installs the WebRTC hooks ([`RtcHooks`], `assets/rtc_hooks.js`) in every page and iframe target, the same way

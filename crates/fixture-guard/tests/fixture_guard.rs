@@ -1,9 +1,10 @@
-//! The fixture guard: a planted secret is found, placeholders and prose are not, and the repo's committed fixtures and
-//! docs are clean.
+//! The fixture guard: a planted secret is found, placeholders and prose are not, an unmarked fixture is flagged, and
+//! the repo's committed fixtures and docs are clean and its fixtures all marked synthetic.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use fixture_guard::synthetic;
 use fixture_guard::{Guard, Kind};
 
 // Synthetic, unsigned: header {"alg":"none","typ":"JWT"}, payload {"sub":"planted"}.
@@ -289,4 +290,79 @@ fn committed_fixtures_and_docs_are_clean() {
         "secrets in committed files:\n{}",
         report.join("\n")
     );
+}
+
+#[test]
+fn committed_fixtures_are_marked_synthetic() {
+    let unmarked = synthetic::unmarked(&repo_root().join("tests/fixtures")).unwrap();
+    let report: Vec<String> = unmarked.iter().map(|path| path.display().to_string()).collect();
+    assert!(
+        unmarked.is_empty(),
+        "fixtures that don't declare themselves synthetic (captures never enter the repo, not even sanitized; write \
+         the fixture by hand with made-up values and a \"_synthetic\" note):\n{}",
+        report.join("\n")
+    );
+}
+
+#[test]
+fn a_marked_fixture_passes_and_an_unmarked_one_is_flagged() {
+    let marked = [
+        (
+            "a.json",
+            "{\n  \"_synthetic\": \"made up, shaped like a chat thread read\",\n  \"id\": 1\n}\n",
+        ),
+        ("b.jsonl", "{\"_synthetic\": \"made up\"}\n{\"seq\": 1}\n{\"seq\": 2}\n"),
+        (
+            "c.jsonl",
+            "\n{\"_synthetic\": \"made up\", \"seq\": 1}\n{\"_synthetic\": \"made up\", \"seq\": 2}\n",
+        ),
+        ("d.txt", "# _synthetic: made up\nrest\n"),
+        ("e.html", "<!-- _synthetic: made up page -->\n<p>hi</p>\n"),
+        ("sub/f.json", "{\"_synthetic\": \"made up\"}"),
+    ];
+    let unmarked = [
+        // a sanitized export as it would have been committed before: no marker
+        ("g.jsonl", "{\"seq\": 1, \"user\": \"<user:a>\"}\n"),
+        ("h.json", "{\"id\": 1}\n"),
+        // the marker only in a later line, nested, empty, not text, or in an array
+        ("i.jsonl", "{\"seq\": 1}\n{\"_synthetic\": \"made up\"}\n"),
+        ("j.json", "{\"inner\": {\"_synthetic\": \"made up\"}}\n"),
+        ("k.json", "{\"_synthetic\": \"  \"}\n"),
+        ("l.json", "{\"_synthetic\": true}\n"),
+        ("m.json", "[{\"_synthetic\": \"made up\"}]\n"),
+        ("n.json", "not json, _synthetic: made up\n"),
+        // a text file whose header is not on the first line, or has no text
+        ("o.txt", "rest\n# _synthetic: made up\n"),
+        ("p.html", "<!-- _synthetic: -->\n"),
+        ("q.bin", "\u{0}\u{1}"),
+        ("r.txt", ""),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in marked.iter().chain(&unmarked) {
+        let path = dir.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    fs::write(dir.path().join("s.bin"), [0xff_u8, 0xfe, 0x00]).unwrap();
+    // `.gitkeep` is not a fixture; a symlink is never a marked one
+    fs::write(dir.path().join(".gitkeep"), "").unwrap();
+    fs::create_dir_all(dir.path().join("empty")).unwrap();
+    fs::write(dir.path().join("empty/.gitkeep"), "").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("a.json"), dir.path().join("t.json")).unwrap();
+
+    let found = synthetic::unmarked(dir.path()).unwrap();
+
+    let mut expected: Vec<PathBuf> = unmarked
+        .iter()
+        .map(|(name, _)| dir.path().join(name))
+        .chain(["s.bin", "t.json"].map(|name| dir.path().join(name)))
+        .collect();
+    expected.sort();
+    assert_eq!(found, expected);
+    // one file as the root works too
+    assert_eq!(
+        synthetic::unmarked(&dir.path().join("a.json")).unwrap(),
+        Vec::<PathBuf>::new()
+    );
+    assert!(synthetic::unmarked(&dir.path().join("missing")).is_err());
 }
