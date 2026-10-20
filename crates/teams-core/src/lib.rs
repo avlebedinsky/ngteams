@@ -14,6 +14,6 @@
 pub mod outbox;
 
 pub use outbox::{
-    Clock, Command, ConversationSync, MAX_ATTEMPTS, Outbox, OutboxError, Received, SyncError, enqueue,
-    new_client_message_id,
+    CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, Outbox, OutboxError, Received,
+    SentDue, SyncError, Unsynced, enqueue, new_client_message_id,
 };

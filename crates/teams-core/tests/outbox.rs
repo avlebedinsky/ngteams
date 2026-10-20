@@ -20,7 +20,8 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
-    Clock, Command, ConversationSync, MAX_ATTEMPTS, Outbox, OutboxError, SyncError, enqueue, new_client_message_id,
+    CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, Outbox, OutboxError,
+    SyncError, enqueue, new_client_message_id,
 };
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_proto::{
@@ -393,6 +394,10 @@ fn hello() -> Command {
     }
 }
 
+fn millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap()
+}
+
 async fn send(setup: &Setup, store: &mut Store, row: &OutboxEntry) -> OutboxEntry {
     setup.outbox.send(store, &setup.sync, row.id).await.unwrap()
 }
@@ -609,11 +614,19 @@ async fn a_429_waits_its_retry_after_before_a_new_attempt_with_the_same_client_m
     // not due yet: nothing goes out
     assert_eq!(send(&setup, &mut store, &row).await, waiting);
     setup.advance(Duration::from_millis(6_999));
-    assert!(setup.outbox.send_due(&mut store, &setup.sync).await.unwrap().is_empty());
+    assert!(
+        setup
+            .outbox
+            .send_due(&mut store, &setup.sync)
+            .await
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     assert_eq!(setup.posted().await.len(), 1);
 
     setup.advance(Duration::from_millis(1));
-    let sent = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+    let sent = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap().rows;
 
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].state, OutboxState::Sent);
@@ -785,14 +798,86 @@ async fn a_check_that_cant_sync_sends_nothing_and_leaves_the_row_waiting() {
     let waiting = store.outbox_entry(row.id).unwrap().unwrap();
     assert_eq!(waiting.state, OutboxState::Pending);
     assert_eq!(waiting.attempts, 1);
+    assert_eq!(waiting.failed_checks, 1);
+    assert_eq!(waiting.not_before, Some(setup.now() + millis(CHECK_RETRY_WAIT)));
     assert!(setup.posted().await.is_empty());
 
-    // once the sync works again, the check runs first and the row goes out
+    // not retried at once: it waits its backoff
     setup.sync.fails.store(false, Ordering::SeqCst);
+    assert_eq!(send(&setup, &mut store, &row).await, waiting);
+    assert_eq!(setup.sync.calls(), [0]);
+
+    // once it is due and the sync works again, the check runs first and the row goes out
+    setup.advance(CHECK_RETRY_WAIT);
     let sent = send(&setup, &mut store, &row).await;
     assert_eq!(sent.state, OutboxState::Sent);
     assert_eq!(setup.sync.calls(), [0, 0]);
     assert_eq!(setup.posted().await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_row_whose_check_cant_sync_doesnt_hold_up_the_rows_after_it() {
+    let setup = setup().await;
+    setup.created().await;
+    // the first row's post times out, and its chat can't be synced to look for it
+    setup.fault(Fault::DropRequest);
+    setup.sync.fails.store(true, Ordering::SeqCst);
+    let mut store = setup.open_store();
+    let stuck = enqueue(&mut store, &hello()).unwrap();
+    let next = enqueue(&mut store, &hello()).unwrap();
+
+    let done = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+
+    assert_eq!(done.rows.len(), 2);
+    assert_eq!((done.rows[0].id, done.rows[0].state), (stuck.id, OutboxState::Pending));
+    assert_eq!((done.rows[1].id, done.rows[1].state), (next.id, OutboxState::Sent));
+    let unsynced: Vec<i64> = done.unsynced.iter().map(|unsynced| unsynced.id).collect();
+    assert_eq!(unsynced, [stuck.id]);
+    assert_eq!(setup.posted().await, std::slice::from_ref(&next.client_message_id));
+
+    // the stuck row isn't due again at once, so the next call has nothing to do
+    let again = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+    assert!(again.rows.is_empty() && again.unsynced.is_empty(), "{again:?}");
+    assert_eq!(setup.sync.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn a_row_whose_check_keeps_failing_waits_longer_each_time_and_is_given_up() {
+    let setup = setup().await;
+    setup.created().await;
+    setup.fault(Fault::DropRequest);
+    setup.sync.fails.store(true, Ordering::SeqCst);
+    let mut store = setup.open_store();
+    enqueue(&mut store, &hello()).unwrap();
+
+    let mut wait = CHECK_RETRY_WAIT;
+    for failed in 1..MAX_FAILED_CHECKS {
+        let done = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+        assert_eq!(done.unsynced.len(), 1, "check {failed}");
+        let waiting = &done.rows[0];
+        assert_eq!(waiting.state, OutboxState::Pending, "check {failed}");
+        assert_eq!(waiting.failed_checks, failed);
+        assert_eq!(waiting.not_before, Some(setup.now() + millis(wait)), "check {failed}");
+        setup.advance(wait);
+        wait *= 2;
+    }
+    let done = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+
+    let failed = &done.rows[0];
+    assert_eq!(failed.state, OutboxState::Failed);
+    assert_eq!(failed.failed_checks, MAX_FAILED_CHECKS);
+    assert!(
+        failed
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("given up after 5 checks"),
+        "{failed:?}"
+    );
+    assert_eq!(failed.attempts, 1, "nothing went out after the lost post");
+    assert!(setup.posted().await.is_empty());
+    assert_eq!(setup.sync.calls().len(), usize::try_from(MAX_FAILED_CHECKS).unwrap());
+    assert!(store.outbox_due(i64::MAX).unwrap().is_empty());
 }
 
 // --- our own message coming back ---
@@ -916,7 +1001,13 @@ async fn rows_an_earlier_run_left_pending_are_not_sent_on_start_and_go_out_only_
     let mut store = setup.open_store();
 
     assert!(
-        setup.outbox.send_due(&mut store, &setup.sync).await.unwrap().is_empty(),
+        setup
+            .outbox
+            .send_due(&mut store, &setup.sync)
+            .await
+            .unwrap()
+            .rows
+            .is_empty(),
         "nothing on start"
     );
     let error = setup.outbox.send(&mut store, &setup.sync, row.id).await.unwrap_err();
@@ -932,7 +1023,7 @@ async fn rows_an_earlier_run_left_pending_are_not_sent_on_start_and_go_out_only_
 
     let adopted = store.resend(row.id).unwrap();
     assert_eq!(adopted.client_message_id, row.client_message_id);
-    let sent = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+    let sent = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap().rows;
 
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].state, OutboxState::Sent);
@@ -983,8 +1074,66 @@ async fn a_row_an_earlier_run_left_in_flight_that_didnt_arrive_goes_out_with_its
 
     assert_eq!(after.state, OutboxState::Sent);
     assert_eq!(after.attempts, 2);
+    assert_eq!(after.attempts_since_resend(), 1);
     assert_eq!(setup.sync.calls(), [0], "looked for first");
     assert_eq!(setup.posted().await, std::slice::from_ref(&row.client_message_id));
+}
+
+#[tokio::test]
+async fn a_row_given_up_and_resent_gets_its_attempts_again() {
+    let setup = setup().await;
+    setup.answer(429).await;
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &hello()).unwrap();
+    let mut last = send(&setup, &mut store, &row).await;
+    while last.state == OutboxState::Pending {
+        setup.advance(Duration::from_secs(60));
+        last = send(&setup, &mut store, &row).await;
+    }
+    assert_eq!((last.state, last.attempts), (OutboxState::Failed, MAX_ATTEMPTS));
+
+    let resent = store.resend(row.id).unwrap();
+    assert_eq!((resent.attempts, resent.attempts_since_resend()), (MAX_ATTEMPTS, 0));
+    let waiting = send(&setup, &mut store, &row).await;
+
+    assert_eq!(
+        waiting.state,
+        OutboxState::Pending,
+        "a 429 on the resend waits: {waiting:?}"
+    );
+    assert_eq!(waiting.not_before, Some(setup.now() + millis(DEFAULT_RETRY_WAIT)));
+    assert_eq!(waiting.attempts_since_resend(), 1);
+    assert_eq!(
+        setup.sync.calls().len(),
+        usize::try_from(MAX_ATTEMPTS).unwrap(),
+        "the resent row, attempted before, was looked for first"
+    );
+    assert_eq!(setup.posted().await.len(), usize::try_from(MAX_ATTEMPTS + 1).unwrap());
+}
+
+#[tokio::test]
+async fn another_runs_pending_row_is_refused_even_while_it_waits_for_its_retry_after() {
+    let setup = setup().await;
+    let row = {
+        let mut earlier = setup.open_store();
+        let row = enqueue(&mut earlier, &hello()).unwrap();
+        earlier.begin_attempt(row.id).unwrap();
+        let retry = AttemptOutcome::Retry {
+            not_before: START + 60_000,
+            error: "HTTP 429".to_owned(),
+        };
+        earlier.finish_attempt(row.id, &retry).unwrap();
+        row
+    };
+    let mut store = setup.open_store();
+
+    let error = setup.outbox.send(&mut store, &setup.sync, row.id).await.unwrap_err();
+
+    assert!(
+        matches!(error, OutboxError::OtherRun { id, .. } if id == row.id),
+        "{error:?}"
+    );
+    assert_eq!(setup.members.reads(), 0);
 }
 
 // --- the engine's runtime ---

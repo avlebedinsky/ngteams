@@ -12,15 +12,18 @@
 //!   arrived: before the next attempt the conversation is synced ([`ConversationSync`]) and searched for the row's
 //!   `clientmessageid`; found, the row is sent and nothing goes out again; not found, a new attempt goes out with the
 //!   same `clientmessageid` (whether the service dedupes by it is unverified, so the check comes first). Every
-//!   attempt after the first starts with that check, whatever ended the one before. A row is given up (failed) after
-//!   [`MAX_ATTEMPTS`].
+//!   attempt after the first starts with that check, whatever ended the one before. A check that can't sync sends
+//!   nothing: the row waits [`CHECK_RETRY_WAIT`], doubled for each check of its that failed before. A row is given up
+//!   (failed) after [`MAX_ATTEMPTS`] attempts or [`MAX_FAILED_CHECKS`] checks that couldn't sync, both counted since
+//!   it was made or last resent.
 //! - **Our own message coming back** ([`Outbox::receive`], for a Trouter delivery and a sync alike) is stored once
 //!   (by its id and version) and matched by its `clientmessageid` to its row, which becomes sent with the message's
 //!   id; it may come back before the post's answer does, and the answer then changes nothing.
 //! - **No resend across runs**: a run sends only its own rows ([`teams_store::Store::outbox_due`]); rows an earlier
 //!   process left pending or in flight are listed by [`teams_store::Store::outbox_left_by_earlier_runs`] and go out
-//!   again only after an explicit [`teams_store::Store::resend`], which keeps their `clientmessageid`. An adopted row
-//!   that had an attempt begins with the sync check above, so a message the earlier run got through isn't sent twice.
+//!   again only after an explicit [`teams_store::Store::resend`], which keeps their `clientmessageid` and starts their
+//!   budget over. An adopted row that had an attempt (in any run) begins with the sync check above, so a message an
+//!   earlier attempt got through isn't sent twice.
 //!
 //! The commands are those whose sealed request exists in `teams-proto` (a message post for now); M1 Task 12 adds the
 //! other chat writes. The sync the timeout check relies on is the [`ConversationSync`] seam, which M1 Task 17's
@@ -37,11 +40,20 @@ use teams_auth::token::TokenError;
 use teams_fence::{Denied, Fence, MembershipSource, Mri};
 use teams_proto::{Authorized, DEFAULT_RETRY_WAIT, HttpError, Mutating, Response, SendMessage, Transport};
 use teams_store::{
-    Applied, AttemptOutcome, Message, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState, Reaction, Store, StoreError,
+    Applied, AttemptOutcome, CheckFailed, Message, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState, Reaction,
+    Store, StoreError,
 };
 
-/// The most attempts a row gets, throttled ones included; after the last it is failed.
+/// The most attempts a row gets since it was made or last resent ([`Store::resend`]), throttled ones included; after
+/// the last it is failed.
 pub const MAX_ATTEMPTS: u32 = 5;
+
+/// The most checks before a new attempt that can fail to sync since a row was made or last resent; at the last the row
+/// is failed, since whether its earlier attempt arrived can't be told.
+pub const MAX_FAILED_CHECKS: u32 = 5;
+
+/// How long a row waits after its first check that couldn't sync; each later one doubles it.
+pub const CHECK_RETRY_WAIT: Duration = Duration::from_secs(30);
 
 /// How many fresh `clientmessageid`s a command is tried with when one is taken already.
 const CLIENT_MESSAGE_ID_TRIES: usize = 3;
@@ -97,7 +109,7 @@ pub enum OutboxError {
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The conversation couldn't be synced before a new attempt, so whether the last one arrived is unknown: nothing was
-    /// sent, and the row waits as it is.
+    /// sent, and the row waits (or, at [`MAX_FAILED_CHECKS`], is failed).
     #[error("the conversation couldn't be synced, so outbox row {id} wasn't sent again: {source}")]
     Sync {
         id: i64,
@@ -111,6 +123,22 @@ pub enum OutboxError {
     Random(getrandom::Error),
     #[error("the command can't be stored: {0}")]
     Payload(#[source] serde_json::Error),
+}
+
+/// What one [`Outbox::send_due`] did.
+#[derive(Debug, Default)]
+pub struct SentDue {
+    /// Every due row as it ended up, oldest first; one whose check couldn't sync is here too, waiting or failed.
+    pub rows: Vec<OutboxEntry>,
+    /// The rows whose check before a new attempt couldn't sync, so nothing was sent for them.
+    pub unsynced: Vec<Unsynced>,
+}
+
+/// A row whose check before a new attempt couldn't sync its conversation.
+#[derive(Debug)]
+pub struct Unsynced {
+    pub id: i64,
+    pub source: SyncError,
 }
 
 /// A message stored by [`Outbox::receive`]: what the store did with it, and the outbox row it was matched to (ours).
@@ -202,32 +230,40 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// Sends every row of this run that is due, oldest first, as [`Outbox::send`] does; returns the rows as they
-    /// end up.
+    /// end up. A row whose check can't sync doesn't hold up the rows after it: it is listed in
+    /// [`SentDue::unsynced`] and waits (see the module docs).
     ///
     /// # Errors
     ///
-    /// The first of [`Outbox::send`]'s; the rows after it wait for the next call.
-    pub async fn send_due<S: ConversationSync>(
-        &self,
-        store: &mut Store,
-        sync: &S,
-    ) -> Result<Vec<OutboxEntry>, OutboxError> {
+    /// [`OutboxError::Store`] when the store fails; the rows after it wait for the next call.
+    pub async fn send_due<S: ConversationSync>(&self, store: &mut Store, sync: &S) -> Result<SentDue, OutboxError> {
         let due = store.outbox_due((self.clock)())?;
-        let mut done = Vec::with_capacity(due.len());
+        let mut done = SentDue {
+            rows: Vec::with_capacity(due.len()),
+            unsynced: Vec::new(),
+        };
         for row in due {
-            done.push(self.send(store, sync, row.id).await?);
+            match self.send(store, sync, row.id).await {
+                Ok(row) => done.rows.push(row),
+                Err(OutboxError::Sync { id, source }) => {
+                    done.rows.push(entry(store, id)?);
+                    done.unsynced.push(Unsynced { id, source });
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(done)
     }
 
     /// Sends one row of this run, if it is pending and due: attempts until it is sent, denied or failed, or waits
-    /// for a `Retry-After` (see the module docs). A row that isn't due comes back as it is.
+    /// for a `Retry-After` (see the module docs). A row of this run that isn't due, and a row of any run that isn't
+    /// pending, comes back as it is.
     ///
     /// # Errors
     ///
-    /// [`OutboxError::OtherRun`] for a pending row of another run (nothing is sent), [`OutboxError::Sync`] when the
-    /// check before a new attempt can't sync (nothing is sent, the row waits), [`OutboxError::Store`] when the store
-    /// fails.
+    /// [`OutboxError::OtherRun`] for a pending row of another run, due or not (nothing is sent),
+    /// [`OutboxError::Sync`] when the check before a new attempt can't sync (nothing is sent, the row waits or, at
+    /// [`MAX_FAILED_CHECKS`], is failed), [`OutboxError::Store`] when the store fails.
     pub async fn send<S: ConversationSync>(
         &self,
         store: &mut Store,
@@ -237,11 +273,11 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         let mut refreshed = false;
         loop {
             let row = entry(store, id)?;
+            if row.state == OutboxState::Pending && row.run_id != store.run_id() {
+                return Err(OutboxError::OtherRun { id, run_id: row.run_id });
+            }
             if !self.is_due(&row) {
                 return Ok(row);
-            }
-            if row.run_id != store.run_id() {
-                return Err(OutboxError::OtherRun { id, run_id: row.run_id });
             }
             if row.attempts > 0
                 && let Some(arrived) = self.look_for_arrival(store, sync, &row).await?
@@ -303,7 +339,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// Before a new attempt: syncs the row's conversation and looks for its `clientmessageid` among our messages.
-    /// Found, the row is sent; `None` when it wasn't found (or a row of its kind can't be looked for).
+    /// Found, the row is sent; `None` when it wasn't found (or a row of its kind can't be looked for). A sync that fails
+    /// leaves the row waiting its backoff, or fails it ([`Outbox::check_failed`]), and is returned as
+    /// [`OutboxError::Sync`].
     async fn look_for_arrival<S: ConversationSync>(
         &self,
         store: &mut Store,
@@ -313,9 +351,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         let Some(conversation) = findable(row) else {
             return Ok(None);
         };
-        sync.sync_conversation(store, conversation)
-            .await
-            .map_err(|source| OutboxError::Sync { id: row.id, source })?;
+        if let Err(source) = sync.sync_conversation(store, conversation).await {
+            let after = self.check_failed(store, row, &source)?;
+            if after.state == OutboxState::Sent {
+                // the sync matched it before it failed
+                return Ok(Some(after));
+            }
+            return Err(OutboxError::Sync { id: row.id, source });
+        }
         let current = entry(store, row.id)?;
         if current.state != OutboxState::Pending {
             // the sync's own receive matched it
@@ -325,6 +368,30 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             Some(message) if self.is_mine(&message) => Ok(store.outbox_arrived(&row.client_message_id, &message.id)?),
             _ => Ok(None),
         }
+    }
+
+    /// A check that couldn't sync: the row waits its backoff, or is failed at its last check.
+    fn check_failed(
+        &self,
+        store: &mut Store,
+        row: &OutboxEntry,
+        source: &SyncError,
+    ) -> Result<OutboxEntry, OutboxError> {
+        let failed = row.failed_checks.saturating_add(1);
+        let error =
+            format!("the conversation couldn't be synced to look for it ({source}); whether it arrived is unknown");
+        let outcome = if failed >= MAX_FAILED_CHECKS {
+            CheckFailed::GiveUp {
+                error: format!("{error}, so it isn't sent again; given up after {failed} checks"),
+            }
+        } else {
+            let doubled = CHECK_RETRY_WAIT.saturating_mul(2_u32.saturating_pow(failed - 1));
+            CheckFailed::Wait {
+                not_before: (self.clock)().saturating_add(i64::try_from(doubled.as_millis()).unwrap_or(i64::MAX)),
+                error,
+            }
+        };
+        Ok(store.check_failed(row.id, &outcome)?)
     }
 
     /// One attempt: the row's request, a fresh permit for its target, and the transport.
@@ -413,11 +480,12 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    /// Another attempt after `wait`, unless the row has had all of its attempts.
+    /// Another attempt after `wait`, unless the row has had all of its attempts since it was made or last resent.
     fn retry(&self, row: &OutboxEntry, wait: Duration, error: String) -> AttemptOutcome {
-        if row.attempts >= MAX_ATTEMPTS {
+        let attempts = row.attempts_since_resend();
+        if attempts >= MAX_ATTEMPTS {
             return AttemptOutcome::Failed {
-                error: format!("{error}; given up after {} attempts", row.attempts),
+                error: format!("{error}; given up after {attempts} attempts"),
             };
         }
         let wait = i64::try_from(wait.as_millis()).unwrap_or(i64::MAX);
