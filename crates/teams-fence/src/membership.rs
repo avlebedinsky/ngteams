@@ -15,8 +15,8 @@
 //! cross-check is the evidence that the list is the whole membership and not a view filtered by the caller's
 //! permissions. Every other scope (group and meeting chats, channels, teams, calls) is
 //! [`PartialReason::Unsupported`] until evidence shows how its full membership can be confirmed. For group chats a
-//! live read was made (M1 Task 8): the thread read and the member list agree and carry a `totalMemberCount`, but a
-//! 3-member chat can't show that neither is a caller-visible subset or a page, so they stay unsupported
+//! live read was made (M1 Task 8): the thread read and the member list agree, and the member list carries a
+//! `totalMemberCount`, but a 3-member chat can't show that neither is a caller-visible subset or a page, so they stay unsupported
 //! (`docs/backlog/group-chat-member-read-completeness.md`).
 //!
 //! Anything less than a clean answer is [`Membership::Partial`]: no credential yet, a failed or slow request, a

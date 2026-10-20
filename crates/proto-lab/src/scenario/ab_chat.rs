@@ -345,33 +345,78 @@ pub async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), Scen
 /// that a's compose box belongs to that chat) after it was sent, and that very post, found by its `Network` id, must
 /// fail in a's page as blocked by the fence.
 async fn enforce(a: &LabSession, drive_a: &mut Driver, probe: &str, chat: &Regex) -> Result<(), ScenarioError> {
-    let message_post = Regex::new(MESSAGE_POST).map_err(|error| setup(error.to_string()))?;
-    let this_run = |denial: &Denial| {
-        denial.cause == DenyCause::Forced
-            && denial.label.as_deref() == Some(THIS_RUN_PROBE)
-            && message_post.is_match(&denial.url)
-            && chat.is_match(&denial.url)
-    };
+    let this_run = ForcedPost::new(THIS_RUN_PROBE, chat).map_err(|error| setup(error.to_string()))?;
     send(drive_a, "a (the probe)", probe).await?;
-    let deadline = tokio::time::Instant::now() + PROBE_FAIL;
-    let denial = loop {
-        if let Some(denial) = a.denials().into_iter().find(|denial| this_run(denial)) {
-            break denial;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(no_probe_deny(a, drive_a).await);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+    let Some(denial) = this_run.wait(a).await else {
+        return Err(no_probe_deny(a, drive_a).await);
     };
+    failed_in_page(drive_a, &denial, "a's probe post").await
+}
+
+/// A forced deny, under one label ([`Denial::label`]), of a message post ([`MESSAGE_POST`]) whose URL names one chat:
+/// what a live enforcement test waits for.
+pub struct ForcedPost<'a> {
+    label: &'a str,
+    /// Finds the chat in a URL.
+    chat: &'a Regex,
+    message_post: Regex,
+}
+
+impl<'a> ForcedPost<'a> {
+    /// A forced deny under `label` of a message post whose URL `chat` finds a match in.
+    ///
+    /// # Errors
+    /// Never: [`MESSAGE_POST`] is fixed.
+    pub fn new(label: &'a str, chat: &'a Regex) -> Result<Self, regex::Error> {
+        Ok(Self {
+            label,
+            chat,
+            message_post: Regex::new(MESSAGE_POST)?,
+        })
+    }
+
+    /// Whether `denial` is one.
+    #[must_use]
+    pub fn matches(&self, denial: &Denial) -> bool {
+        denial.cause == DenyCause::Forced
+            && denial.label.as_deref() == Some(self.label)
+            && self.message_post.is_match(&denial.url)
+            && self.chat.is_match(&denial.url)
+    }
+
+    /// Waits up to [`PROBE_FAIL`] for `session`'s fence to deny one; `None` when it didn't.
+    pub(crate) async fn wait(&self, session: &LabSession) -> Option<Denial> {
+        let deadline = tokio::time::Instant::now() + PROBE_FAIL;
+        loop {
+            if let Some(denial) = session.denials().into_iter().find(|denial| self.matches(denial)) {
+                return Some(denial);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+}
+
+/// Checks that the request the fence denied as `denial`, found by its `Network` id, failed in `driver`'s page as
+/// blocked by the fence (`net::ERR_BLOCKED_BY_CLIENT`) within [`PROBE_FAIL`]. `what` names the request in the errors.
+///
+/// # Errors
+/// When the deny names no `Network` request, the request doesn't fail in time, the one that failed isn't the denied
+/// one, or it failed otherwise.
+pub(crate) async fn failed_in_page(driver: &mut Driver, denial: &Denial, what: &str) -> Result<(), ScenarioError> {
     let network_id = denial.network_id.as_deref().ok_or_else(|| {
-        setup("the fence's deny of the probe names no Network request: can't tell it failed in a's page".to_owned())
+        setup(format!(
+            "the fence's deny of {what} names no Network request: can't tell it failed in the page"
+        ))
     })?;
-    let failed = drive_a
-        .wait_for_failure_of("a's probe post fails in the page", network_id, PROBE_FAIL)
+    let failed = driver
+        .wait_for_failure_of(&format!("{what} fails in the page"), network_id, PROBE_FAIL)
         .await?;
     if !failed.method.eq_ignore_ascii_case(&denial.method) || without_query(&failed.url) != denial.url {
         return Err(setup(format!(
-            "the request {network_id} that failed in a's page is {} {}, not the denied {} {}",
+            "the request {network_id} that failed in the page is {} {}, not the denied {} {}",
             failed.method,
             without_query(&failed.url),
             denial.method,
@@ -381,7 +426,7 @@ async fn enforce(a: &LabSession, drive_a: &mut Driver, probe: &str, chat: &Regex
     let error = failed.failed.unwrap_or_default();
     if !error.contains("ERR_BLOCKED_BY_CLIENT") {
         return Err(setup(format!(
-            "a's probe post failed with {error}, not as blocked by the fence"
+            "{what} failed with {error}, not as blocked by the fence"
         )));
     }
     Ok(())
@@ -436,7 +481,18 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Opens the web client in `session` and waits for it to load.
 pub(crate) async fn load(alias: Alias, session: &mut LabSession, timeout: Duration) -> Result<(), ScenarioError> {
-    session.navigate(TEAMS_URL).await?;
+    load_at(alias, session, TEAMS_URL, timeout).await
+}
+
+/// Opens the web client in `session` at `url` (the client, or one of its deep links) and waits up to `timeout` for it
+/// to load.
+pub(crate) async fn load_at(
+    alias: Alias,
+    session: &mut LabSession,
+    url: &str,
+    timeout: Duration,
+) -> Result<(), ScenarioError> {
+    session.navigate(url).await?;
     let state = session.settle(timeout).await;
     if state == SessionState::Loaded {
         return Ok(());

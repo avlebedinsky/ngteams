@@ -263,29 +263,8 @@ pub fn record_abc_chat(paths: &LabPaths, id: &str) -> Result<ChatRecord, ChatsEr
          abc = {}\n",
         toml::Value::String(id.to_owned())
     );
-    write_new_or_replace(&path, &text).map_err(|source| ChatsError::Write { path, source })?;
+    write_through_new_file(&path, &text, 0o600).map_err(|source| ChatsError::Write { path, source })?;
     Ok(ChatRecord::Recorded)
-}
-
-/// Writes `text` to `path` through `<path>.<pid>.new` (mode `0600`) renamed over it.
-fn write_new_or_replace(path: &Path, text: &str) -> std::io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".{}.new", std::process::id()));
-    let temporary = PathBuf::from(temporary);
-    let written = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    written
 }
 
 /// Where the config file and the default data dir are.
@@ -702,11 +681,17 @@ fn replace_file(path: &Path, text: &str) -> Result<(), ConfigError> {
         source,
     };
     let mode = fs::metadata(path).map_err(write_error)?.permissions().mode() & 0o7777;
+    write_through_new_file(path, text, mode).map_err(write_error)
+}
+
+/// Writes `text` to `path` (made or replaced) through a new file beside it, `<path>.<pid>.new` with `mode`, renamed
+/// over it; when that fails, the new file is removed and `path` is untouched.
+fn write_through_new_file(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".{}.new", std::process::id()));
     let temporary = PathBuf::from(temporary);
     let written = (|| {
-        // owner-only until it has the old file's mode, which may be stricter still
+        // owner-only until it has `mode`, which may be stricter still
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -721,7 +706,7 @@ fn replace_file(path: &Path, text: &str) -> Result<(), ConfigError> {
         // whatever was left of the new file; the old one is untouched
         let _ = fs::remove_file(&temporary);
     }
-    written.map_err(write_error)
+    written
 }
 
 fn check_mri(mri: Option<&str>, owner: impl FnOnce() -> String) -> Result<(), ConfigError> {

@@ -1,12 +1,16 @@
 //! The `abc-chat` scenario's offline parts: its deep links, how it finds the group chat a first message went to, its
 //! forced-deny labels and how it judges denies. Every id here is made up.
 
-use proto_lab::fence_http::{Denial, DenyCause};
-use proto_lab::scenario::ab_chat::{EARLIER_RUN_PROBE, PROBE_MARKER, THIS_RUN_PROBE};
+use proto_lab::config::LabPaths;
+use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
+use proto_lab::scenario::ab_chat::{EARLIER_RUN_PROBE, ForcedPost, PROBE_MARKER, THIS_RUN_PROBE, probe_text};
 use proto_lab::scenario::abc_chat::{
-    EXPECTED_FORCED, FIRST_MESSAGE, chat_link_by_id, first_message_text, group_chat_of_message_post, messaging_blocked,
-    new_chat_link, policy,
+    ANY_GROUP_CHAT, EXPECTED_FORCED, FIRST_MESSAGE, THIS_RUN_FIRST_MESSAGE, chat_link_by_id, first_message_text,
+    forced_denies, group_chat_of_message_post, messaging_blocked, new_chat_link, policy, record_creation,
 };
+use proto_lab::scenario::{ScenarioError, ScenarioName, ScenarioReport};
+use regex::Regex;
+use teams_fence::lab::LabChats;
 
 const GROUP: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
 const GROUP_ENCODED: &str = "19%3A0123456789abcdef0123456789abcdef%40thread.v2";
@@ -31,9 +35,123 @@ fn the_deep_links_name_the_accounts_by_mri_or_the_chat_by_its_id() {
 fn the_first_message_is_a_probe_to_every_scenario_that_denies_an_earlier_run_s_probe() {
     let text = first_message_text("nonce-1");
     assert!(text.starts_with(PROBE_MARKER), "{text}");
-    assert!(text.ends_with("nonce-1"));
-    // this run's probe first, then the first message, then any earlier probe: a deny names the first rule matched
-    assert_eq!(EXPECTED_FORCED, [THIS_RUN_PROBE, FIRST_MESSAGE, EARLIER_RUN_PROBE]);
+    assert!(text.ends_with("nonce-1."));
+    // ended, so a nonce that begins with another doesn't hold the other's text
+    assert!(!first_message_text("nonce-12").contains(&text));
+    // this run's probe and first message first, then any first message, then any earlier probe: a deny names the first
+    // rule matched
+    assert_eq!(
+        EXPECTED_FORCED,
+        [THIS_RUN_PROBE, THIS_RUN_FIRST_MESSAGE, FIRST_MESSAGE, EARLIER_RUN_PROBE]
+    );
+}
+
+/// A message post of `text` to the group chat, as `Fetch.requestPaused` would show it.
+fn message_post_of(text: &str) -> PausedRequest {
+    PausedRequest {
+        request_id: "interception-1".to_owned(),
+        method: "POST".to_owned(),
+        url: format!("{BASE}/users/ME/conversations/{GROUP_ENCODED}/messages"),
+        body: Some(format!(r#"{{"content":"<p>{text}</p>","messagetype":"RichText/Html"}}"#).into_bytes()),
+        network_id: Some("network-1".to_owned()),
+    }
+}
+
+#[test]
+fn only_this_run_s_texts_are_denied_under_this_run_s_labels() {
+    let rules = forced_denies("nonce-2");
+    // the label of the first rule that matches, as the fence names a forced deny
+    let label = |request: &PausedRequest| {
+        rules
+            .iter()
+            .find(|rule| rule.matches(request))
+            .and_then(|rule| rule.label().map(str::to_owned))
+    };
+    let cases = [
+        (probe_text("nonce-2"), THIS_RUN_PROBE),
+        (first_message_text("nonce-2"), THIS_RUN_FIRST_MESSAGE),
+        // an earlier creation run's first message, sent again on load: not this run's, even when its nonce begins with
+        // this one
+        (first_message_text("nonce-1"), FIRST_MESSAGE),
+        (first_message_text("nonce-23"), FIRST_MESSAGE),
+        (probe_text("nonce-1"), EARLIER_RUN_PROBE),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(label(&message_post_of(&text)).as_deref(), Some(expected), "{text}");
+        let put = PausedRequest {
+            method: "PUT".to_owned(),
+            ..message_post_of(&text)
+        };
+        assert_eq!(label(&put).as_deref(), Some(expected), "PUT {text}");
+    }
+    assert_eq!(label(&message_post_of("lab message nonce-2")), None);
+}
+
+#[test]
+fn the_creation_run_waits_for_this_run_s_first_message_only() -> Result<(), regex::Error> {
+    let any_group = Regex::new(ANY_GROUP_CHAT)?;
+    let this_run = ForcedPost::new(THIS_RUN_FIRST_MESSAGE, &any_group)?;
+    let message_post = format!("{BASE}/users/ME/conversations/{GROUP_ENCODED}/messages");
+    let forced = |label: &str| Denial {
+        label: Some(label.to_owned()),
+        ..Denial::new("POST", &message_post, DenyCause::Forced)
+    };
+    assert!(this_run.matches(&forced(THIS_RUN_FIRST_MESSAGE)));
+    // an earlier chat's first message, sent again when a's page loaded, names that chat: never this run's
+    assert!(!this_run.matches(&forced(FIRST_MESSAGE)));
+    assert!(!this_run.matches(&forced(EARLIER_RUN_PROBE)));
+    // not forced, or not a message post
+    assert!(!this_run.matches(&Denial::new("POST", &message_post, DenyCause::Unclassified)));
+    let properties = format!("{BASE}/users/ME/conversations/{GROUP_ENCODED}/properties");
+    assert!(!this_run.matches(&Denial {
+        label: Some(THIS_RUN_FIRST_MESSAGE.to_owned()),
+        ..Denial::new("PUT", &properties, DenyCause::Forced)
+    }));
+    Ok(())
+}
+
+#[test]
+fn a_creation_run_that_failed_after_the_chat_existed_keeps_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(dir.path().to_path_buf());
+    let mut report = ScenarioReport::new(ScenarioName::AbcChat);
+    // the first message's deny named the chat, then the post didn't fail in the page as blocked
+    let failed = Err(ScenarioError::Setup(
+        "a's first message post failed with net::ERR_FAILED".to_owned(),
+    ));
+    let chat_id = record_creation(&paths, Some(GROUP.to_owned()), failed, &mut report);
+    assert_eq!(chat_id.as_deref(), Some(GROUP));
+    assert!(report.failed());
+    assert!(report.failures[0].contains("ERR_FAILED"), "{:?}", report.failures);
+    // so the next run messages this chat instead of creating another
+    assert_eq!(LabChats::load(&paths).unwrap().abc.as_deref(), Some(GROUP));
+}
+
+#[test]
+fn a_creation_run_that_never_saw_the_deny_records_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(dir.path().to_path_buf());
+    let mut report = ScenarioReport::new(ScenarioName::AbcChat);
+    let failed = Err(ScenarioError::Setup("no message post denied".to_owned()));
+    assert_eq!(record_creation(&paths, None, failed, &mut report), None);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(LabChats::load(&paths).unwrap().abc, None);
+}
+
+#[test]
+fn a_creation_run_that_can_t_record_the_chat_fails_and_says_where_its_id_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = LabPaths::new(dir.path().to_path_buf());
+    let other = "19:fedcba9876543210fedcba9876543210@thread.v2";
+    std::fs::write(paths.chats_file(), format!("abc = \"{other}\"\n")).unwrap();
+    let mut report = ScenarioReport::new(ScenarioName::AbcChat);
+    let chat_id = record_creation(&paths, Some(GROUP.to_owned()), Ok(()), &mut report);
+    assert_eq!(chat_id.as_deref(), Some(GROUP));
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    assert!(report.failures[0].contains("fence.log"), "{}", report.failures[0]);
+    // the chat's id stays out of the report: it is lab data
+    assert!(!report.failures[0].contains(GROUP), "{}", report.failures[0]);
+    assert_eq!(LabChats::load(&paths).unwrap().abc.as_deref(), Some(other));
 }
 
 #[test]

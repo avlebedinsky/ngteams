@@ -221,8 +221,11 @@ Rules that keep the mapping fail-closed:
   loaded before the chat existed says the user isn't in it.
 - `abc-chat` (M1 Task 8) creates the a–b–c group chat once, from account a: it opens the web client straight at the
   new-chat deep link for b and c (a deep link reloads the whole client), sends a first message carrying the marker
-  `lab fence probe abc-chat first message `, force-denied under its own label, and records the chat's id (from that
-  denied post's URL) in the lab's `chats.toml`. The marker begins with `ab-chat`'s probe marker, so `ab-chat` and
+  `lab fence probe abc-chat first message ` and the run's nonce, force-denied under a label of this run's own (an
+  earlier creation run's first message, sent again on load, is denied under another, so it can't stand in for this
+  run's), and records the chat's id (from that denied post's URL) in the lab's `chats.toml` as soon as the deny names
+  it, even when the run fails after that: the chat exists by then, and a run without its id would create another one.
+  The marker begins with `ab-chat`'s probe marker, so `ab-chat` and
   `abc-chat` force-deny the first message, as expected, when the web client sends it again; any other scenario on a's
   profile sees the fence deny it as a write to a group chat (`Partial(Unsupported)`), unexpected there. Once the id is recorded, a run would
   message the chat (a's probe, then a real message that b and c must show), but it refuses to start while
