@@ -240,6 +240,31 @@ fn an_existing_file_readable_by_others_is_tightened() {
     assert_eq!(mode(&path).expect("mode"), 0o600);
 }
 
+#[test]
+fn a_directory_at_the_store_path_is_refused_and_keeps_its_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    std::fs::create_dir_all(&path).expect("a directory at the store path");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    let refused = open(&dir).expect_err("a directory is not a store");
+    assert!(matches!(refused, StoreError::File { .. }), "{refused:?}");
+    assert_eq!(mode(&path).expect("mode"), 0o755);
+}
+
+#[test]
+fn a_link_to_a_directory_at_the_store_path_is_refused_and_its_target_keeps_its_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    let target = dir.path().join("elsewhere");
+    std::fs::create_dir(&target).expect("the link's target");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("the store's directory");
+    std::os::unix::fs::symlink(&target, &path).expect("a link at the store path");
+    let refused = open(&dir).expect_err("a directory is not a store");
+    assert!(matches!(refused, StoreError::File { .. }), "{refused:?}");
+    assert_eq!(mode(&target).expect("mode"), 0o755);
+}
+
 // --- conversations and members ---
 
 #[test]

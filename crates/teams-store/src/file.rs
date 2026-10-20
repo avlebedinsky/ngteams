@@ -66,9 +66,15 @@ pub(crate) fn prepare(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Takes away the group's and others' access to the file at `path`, by path (see the module docs).
+/// Takes away the group's and others' access to the file at `path`, by path (see the module docs). Anything but a
+/// regular file there (a directory, or a link to one) is refused with its mode left as it was: `0600` on a directory
+/// would take away its owner's traversal, and SQLite can't use it as a store anyway.
 fn tighten(path: &Path) -> std::io::Result<()> {
-    if std::fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(ErrorKind::InvalidInput, "not a regular file"));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
         std::fs::set_permissions(path, Permissions::from_mode(FILE_MODE))?;
     }
     Ok(())
