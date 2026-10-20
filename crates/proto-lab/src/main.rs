@@ -286,6 +286,11 @@ async fn run_probe_chat(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let partner = with.unwrap_or(if alias == Alias::A { Alias::B } else { Alias::A });
+    let reference_dir = export::reference_dir(config.paths().data_dir());
+    // a bad `--save` name or destination fails here, before the refresh and the reads go out
+    if let Some(name) = save {
+        export::check_destination(&reference_dir, name)?;
+    }
     let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
     let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
     let request = probe::ProbeRequest {
@@ -301,7 +306,6 @@ async fn run_probe_chat(
     let Some(name) = save else {
         return Ok(());
     };
-    let reference_dir = export::reference_dir(config.paths().data_dir());
     let identities = Identities::from_lab(&config);
     let exported = export::export_events(
         &report.reference_events(),

@@ -12,7 +12,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use proto_lab::commands::export::{self, Checks, ExportError};
 use proto_lab::commands::probe::{
-    CONVERSATIONS_PATH, ChatProbe, HeaderForm, IC3_RESOURCE, Origin, ProbeError, ProbeRequest, probe_chat,
+    CONVERSATIONS_PATH, Challenge, ChatProbe, HIDDEN, HeaderForm, IC3_RESOURCE, Origin, ProbeError, ProbeRequest,
+    probe_chat,
 };
 use proto_lab::config::{Alias, LabConfig};
 use proto_lab::sanitize::Identities;
@@ -139,6 +140,12 @@ fn conversations() -> Value {
 /// The chat service: the conversation list (one page, the web client's query) and the a–b chat's thread.
 async fn chat_service(list: ResponseTemplate) -> MockServer {
     let server = MockServer::start().await;
+    mount_chat_service(&server, list).await;
+    server
+}
+
+/// [`chat_service`] on a server already started (a test that needs its address in an answer).
+async fn mount_chat_service(server: &MockServer, list: ResponseTemplate) {
     Mock::given(method("GET"))
         .and(path(format!("{CHAT_PREFIX}/{CONVERSATIONS_PATH}")))
         .and(query_param("view", "msnp24Equivalent"))
@@ -146,15 +153,14 @@ async fn chat_service(list: ResponseTemplate) -> MockServer {
         .and(query_param("startTime", "1"))
         .and(query_param("targetType", "All"))
         .respond_with(list)
-        .mount(&server)
+        .mount(server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("{CHAT_PREFIX}/v1/threads/{AB_CHAT}")))
         .and(query_param("view", "msnp24Equivalent"))
         .respond_with(ResponseTemplate::new(200).set_body_json(thread()))
-        .mount(&server)
+        .mount(server)
         .await;
-    server
 }
 
 fn request<'a>(config: &'a LabConfig, chat: &MockServer) -> ProbeRequest<'a> {
@@ -273,9 +279,92 @@ async fn a_region_hop_is_reported_by_its_host_and_never_followed() -> TestResult
     assert!(text.contains("404"), "{text}");
     assert!(text.contains("emea.ng.msg.teams.microsoft.com"), "{text}");
     assert!(!text.contains("secretish"), "{text}");
-    // nothing but the probe's own five reads reached the chat service
+    // the probe's own five reads, no more (a 404 isn't followed by any client; the 3xx case is below)
     let requests = chat.received_requests().await.ok_or("no recording")?;
     assert_eq!(requests.len(), HeaderForm::ALL.len() + 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_redirect_is_reported_by_its_status_and_host_and_never_followed() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    let entra = entra(&ic3_token()).await;
+    // the redirect points at the mock itself, at a path that answers: a client that follows it would be recorded there
+    let chat = MockServer::start().await;
+    let followed = "/followed";
+    Mock::given(method("GET"))
+        .and(path(followed))
+        .respond_with(ResponseTemplate::new(200).set_body_json(conversations()))
+        .mount(&chat)
+        .await;
+    let location = format!("{}{followed}?secretish=1", chat.uri());
+    mount_chat_service(
+        &chat,
+        ResponseTemplate::new(307).insert_header("Location", location.as_str()),
+    )
+    .await;
+    let probe = run(&config, &entra, &chat).await?;
+    let text = shown(&probe);
+    assert!(text.contains("307"), "{text}");
+    assert!(text.contains("Location on 127.0.0.1 (not followed)"), "{text}");
+    assert!(!text.contains("secretish"), "{text}");
+    assert!(!text.contains(BODY_MARKER), "{text}");
+    let requests = chat.received_requests().await.ok_or("no recording")?;
+    assert!(
+        requests.iter().all(|request| request.url.path() != followed),
+        "the redirect was followed"
+    );
+    assert_eq!(requests.len(), HeaderForm::ALL.len() + 1);
+    Ok(())
+}
+
+#[test]
+fn a_challenge_shows_only_name_shaped_names_and_never_a_value_fragment() {
+    // an escaped quote inside a quoted value doesn't end it, and the real `error` that follows is read
+    let challenge = Challenge::read(r#"Bearer realm="lab \"private\" tenant", error="invalid_token""#);
+    assert_eq!(challenge.scheme, "Bearer");
+    assert_eq!(challenge.parameters, ["realm", "error"]);
+    assert_eq!(challenge.error.as_deref(), Some("invalid_token"));
+
+    // a token68 is no list of names
+    let challenge = Challenge::read("Negotiate YIIabc+/==");
+    assert_eq!(challenge.scheme, "Negotiate");
+    assert_eq!(challenge.parameters, [HIDDEN]);
+
+    // a name with anything but letters, digits, '-', '_' and '.' before its '=' may be part of a value
+    let challenge = Challenge::read(r#"Bearer x"y=1, no value here, error=insufficient_claims, a b=2"#);
+    assert_eq!(challenge.parameters, [HIDDEN, HIDDEN, "error", HIDDEN]);
+    assert_eq!(challenge.error.as_deref(), Some("insufficient_claims"));
+
+    // text after a quoted value up to the next comma is no parameter of its own; nor is a scheme that isn't name-shaped
+    let challenge = Challenge::read(r#"realm="a"leak=1, error="x y""#);
+    assert_eq!(challenge.scheme, HIDDEN);
+    let challenge = Challenge::read(r#"Bearer realm="a"leak=1, error="x y""#);
+    assert_eq!(challenge.parameters, ["realm", "error"]);
+    assert_eq!(
+        challenge.error, None,
+        "an error value that isn't a plain code isn't shown"
+    );
+    let shown = format!("{challenge:?}");
+    assert!(!shown.contains("leak") && !shown.contains("x y"), "{shown}");
+}
+
+#[test]
+fn a_bad_save_name_or_destination_is_refused_before_anything_is_read() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let reference_dir = dir.path().join("reference");
+    for name in ["../x", "a.txt", "/abs", "chat/.hidden"] {
+        let refused = export::check_destination(&reference_dir, name);
+        assert!(matches!(refused, Err(ExportError::BadName(_))), "{name}: {refused:?}");
+    }
+    let repository = tempfile::tempdir()?;
+    std::fs::create_dir(repository.path().join(".git"))?;
+    let refused = export::check_destination(&repository.path().join("reference"), "chat/probe-a");
+    assert!(matches!(refused, Err(ExportError::InsideRepository(_))), "{refused:?}");
+    let path = export::check_destination(&reference_dir, "chat/probe-a")?;
+    assert!(path.ends_with("reference/chat/probe-a.jsonl"), "{}", path.display());
+    assert!(!reference_dir.exists(), "a check writes nothing");
     Ok(())
 }
 

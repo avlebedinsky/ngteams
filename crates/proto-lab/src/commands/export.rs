@@ -353,6 +353,18 @@ pub fn refuse_inside_repository(path: &Path) -> Result<PathBuf, ExportError> {
     }
 }
 
+/// Where a reference copy named `name` would be written under `reference_dir`, refused as an export refuses it (a bad
+/// name, a destination inside a git work tree or a symlink): for a caller to check before it does the work whose
+/// result it exports, so a bad name or destination fails before anything is read. The export checks again before it
+/// writes.
+///
+/// # Errors
+/// As [`reference_path`] and [`refuse_inside_repository`].
+pub fn check_destination(reference_dir: &Path, name: &str) -> Result<PathBuf, ExportError> {
+    let (path, _) = reference_path(reference_dir, name)?;
+    refuse_inside_repository(&path)
+}
+
 /// `path` made absolute, with every `..` resolved the way the kernel does: against the real directory it follows,
 /// symlinks resolved. A `..` after a directory that doesn't exist (yet) is refused, since where it leads would only be
 /// known once that directory is created.
@@ -533,8 +545,7 @@ pub fn export_with(
     checks: Checks,
     sanitize: impl FnOnce(&[Value]) -> Result<Sanitized, regex::Error>,
 ) -> Result<Exported, ExportError> {
-    let (path, _) = reference_path(reference_dir, name)?;
-    refuse_inside_repository(&path)?;
+    check_destination(reference_dir, name)?;
     let events = read_capture(capture)?;
     export_events_with(&events, name, reference_dir, checks, sanitize)
 }

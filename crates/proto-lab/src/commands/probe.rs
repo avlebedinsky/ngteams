@@ -17,7 +17,9 @@
 //!
 //! `--save <name>` hands the conversation-list answers ([`ChatProbe::reference_events`]) to
 //! [`export::export_events`](crate::commands::export::export_events): sanitized as one capture, written as a local
-//! reference copy under the lab's `reference/` dir, refused inside any git work tree, as `export` does.
+//! reference copy under the lab's `reference/` dir, refused inside any git work tree, as `export` does. The name and
+//! the destination are checked ([`export::check_destination`](crate::commands::export::check_destination)) before
+//! any request goes out.
 //!
 //! A test reaches a local mock instead of the chat service only through [`Origin::Mock`], which a build without
 //! `teams-fence`'s `test-support` feature refuses (and the `proto-lab` binary refuses to run in such a build).
@@ -160,7 +162,9 @@ pub enum ProbeError {
 }
 
 /// A `WWW-Authenticate` challenge as far as it may be shown: its scheme, its parameters' names, and the value of its
-/// `error` parameter (`insufficient_claims` and the like), never the others' values.
+/// `error` parameter (`insufficient_claims` and the like), never the others' values. A scheme or a name that isn't
+/// [`is_name`]-shaped, and anything that isn't a `name=value` pair (a token68 such as `Negotiate YIIabc==`), is shown
+/// as [`HIDDEN`]: it may be part of a value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Challenge {
     pub scheme: String,
@@ -168,12 +172,16 @@ pub struct Challenge {
     pub error: Option<String>,
 }
 
+/// What a challenge shows in place of a scheme, a name or an item that may be part of a value.
+pub const HIDDEN: &str = "?";
+
 impl Challenge {
-    /// Reads one challenge header value: `<scheme> name="value", name=value, …`.
+    /// Reads one challenge header value: `<scheme> name="value", name=value, …` (RFC 7235: a quoted value may hold
+    /// commas and `\`-escaped characters), or `<scheme> <token68>`.
     #[must_use]
     pub fn read(value: &str) -> Self {
         let value = value.trim();
-        let (scheme, rest) = value.split_once(' ').unwrap_or((value, ""));
+        let (scheme, rest) = value.split_once([' ', '\t']).unwrap_or((value, ""));
         let mut parameters = Vec::new();
         let mut error = None;
         for (name, value) in parameters_of(rest) {
@@ -183,31 +191,81 @@ impl Challenge {
             parameters.push(name);
         }
         Self {
-            scheme: scheme.to_owned(),
+            scheme: shown_name(scheme).to_owned(),
             parameters,
             error,
         }
     }
 }
 
-/// The `name=value` pairs of a challenge's parameter list, quoted values unquoted (a quoted value may hold commas).
+/// The `name=value` pairs of a challenge's parameter list, quoted values unquoted and unescaped. A name that isn't
+/// [`is_name`]-shaped becomes [`HIDDEN`]; so does an item without a `=`, and a token68 (the whole list), with no
+/// value.
 fn parameters_of(text: &str) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    let mut rest = text.trim_start_matches([',', ' ']);
-    while let Some((name, after)) = rest.split_once('=') {
-        let name = name.trim().to_owned();
-        let after = after.trim_start();
-        let (value, next) = if let Some(quoted) = after.strip_prefix('"') {
-            let end = quoted.find('"').unwrap_or(quoted.len());
-            (&quoted[..end], quoted.get(end + 1..).unwrap_or(""))
-        } else {
-            let end = after.find(',').unwrap_or(after.len());
-            (&after[..end], &after[end..])
-        };
-        pairs.push((name, value.trim().to_owned()));
-        rest = next.trim_start_matches([',', ' ']);
+    let text = text.trim();
+    if is_token68(text) {
+        return vec![(HIDDEN.to_owned(), String::new())];
     }
-    pairs
+    let mut pairs = Vec::new();
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start_matches([',', ' ', '\t']);
+        if rest.is_empty() {
+            return pairs;
+        }
+        let Some(equals) = rest.find(['=', ',']).filter(|&at| rest[at..].starts_with('=')) else {
+            pairs.push((HIDDEN.to_owned(), String::new()));
+            rest = rest.find(',').map_or("", |at| &rest[at..]);
+            continue;
+        };
+        let name = shown_name(rest[..equals].trim()).to_owned();
+        let (value, next) = value_at(rest[equals + 1..].trim_start());
+        pairs.push((name, value));
+        // anything between the value and the next comma is not a parameter of its own
+        rest = next.find(',').map_or("", |at| &next[at..]);
+    }
+}
+
+/// A parameter's value at the start of `text` and what follows it: a quoted string (its `\` escapes undone, ended by
+/// the first unescaped `"`, or by the end of `text`) or the text up to the next comma.
+fn value_at(text: &str) -> (String, &str) {
+    let Some(quoted) = text.strip_prefix('"') else {
+        let end = text.find(',').unwrap_or(text.len());
+        return (text[..end].trim().to_owned(), &text[end..]);
+    };
+    let mut value = String::new();
+    let mut chars = quoted.char_indices();
+    while let Some((at, char)) = chars.next() {
+        match char {
+            '\\' => value.extend(chars.next().map(|(_, escaped)| escaped)),
+            '"' => return (value, &quoted[at + 1..]),
+            _ => value.push(char),
+        }
+    }
+    (value, "")
+}
+
+/// `name` when it may be shown ([`is_name`]), [`HIDDEN`] otherwise.
+fn shown_name(name: &str) -> &str {
+    if is_name(name) { name } else { HIDDEN }
+}
+
+/// A scheme or parameter name that may be shown: short, letters, digits, `-`, `_` and `.` only (a subset of an RFC
+/// 7230 token).
+fn is_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// An RFC 7235 token68: letters, digits, `-`, `.`, `_`, `~`, `+`, `/`, then only `=` padding.
+fn is_token68(text: &str) -> bool {
+    let body = text.trim_end_matches('=');
+    !body.is_empty()
+        && body
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/'))
 }
 
 /// An OAuth error code: short, letters, digits and `_` only.

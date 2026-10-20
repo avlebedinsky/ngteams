@@ -130,9 +130,11 @@ enum Scheme {
     Bearer,
 }
 
-/// The lab account's chat service credential: the token a request of the armed lab page carried (a skypetoken or an
-/// Entra bearer token, see [`ChatCredential::from_request`]), and the chat service base that request went to. `Debug`
-/// never shows the token, and it is wiped when dropped.
+/// The lab account's chat service credential, a token and the chat service base it is sent to, from one of two
+/// sources: the token a request of the armed lab page carried (a skypetoken or an Entra bearer token) and the base
+/// that request went to ([`ChatCredential::from_request`]), or a native client's own `ic3` Entra token and the chat
+/// base its region GTMs give ([`ChatCredential::bearer`]). `Debug` never shows the token, and it is wiped when
+/// dropped.
 #[derive(Clone)]
 pub struct ChatCredential {
     base: ChatBase,
@@ -279,7 +281,7 @@ impl LiveMembershipSource {
         })
     }
 
-    /// Uses `credential` for every read from now on (the newest one the page sent wins).
+    /// Uses `credential` for every read from now on, in place of any set before (the newest one wins).
     pub fn set_credential(&self, credential: ChatCredential) {
         *self.credential.lock().unwrap_or_else(PoisonError::into_inner) = Some(credential);
     }
