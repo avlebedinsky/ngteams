@@ -80,6 +80,13 @@ no region file was written.
 We never call `…/authz/signuptrial`. `AuthzClient` refuses any endpoint whose last path segment isn't `authz`, and the
 fence's own-state rule matches `authz` as a whole path.
 
+**Update 2026-10-20: licensed (Business Basic) — status ok, skypetoken for a/b/c, region `amer`, partition
+`amer03`.** After the three accounts got Microsoft 365 Business Basic, `proto-lab status` printed `ok` for each (the
+fence denied nothing for a and b, one telemetry request to `teams.events.data.microsoft.com` for c), and
+`proto-lab auth a|b|c` got a skypetoken for each: 112 regional endpoints, expiry ~2–2.3 h, the same as the refreshed
+`api.spaces.skype.com` token's. The fence denied nothing during `auth`. The license blocker below is gone; the backlog
+item is closed.
+
 ## The redirect catch
 
 The catch only adds denials:
