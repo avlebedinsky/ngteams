@@ -427,8 +427,23 @@ both-headers form is still unknown, since no request sent both.
 For us this means: chat goes with the `ic3` Entra token and STM, as the web client does. The fence's live membership
 read (Task 11) is not that form: it sends back the page's `ic3` bearer token with only an `Accept` header, no
 `X-MS-Migration` and no `BehaviorOverride` (`fence-targets.md`). Its `GET v1/threads/<id>` succeeded that way in the
-`ab-chat` runs, so the chat service took the web client's CAE `ic3` token without STM on at least that read; whether
-STM is needed anywhere in chat is open, and so is whether our non-CAE token works (question 8). The skypetoken is
+`ab-chat` runs, so the chat service took the web client's CAE `ic3` token without STM on at least that read.
+
+**Live (M1 Task 3, 2026-10-20, `proto-lab probe chat a` and `b`):** the chat service takes **our** `ic3` token too
+(the native client's, from the stored refresh token, no `xms_cc`, a ~2 h lifetime) and does not care about the extra
+headers on reads: one page of the conversation list
+(`GET v1/users/ME/conversations?view=msnp24Equivalent&pageSize=200&startTime=1&targetType=All`, the bundle's
+`myconversations` request) answered 200 in all four forms, the token with
+both `X-MS-Migration: True` and `BehaviorOverride: redirectAs404`, with either one alone, and with neither; and the
+fence's own read (`GET v1/threads/<the a–b chat>?view=msnp24Equivalent`, token and `Accept` only) was complete with
+both members, for a and for b. No 401, no `WWW-Authenticate`, no migration header in any answer; the answer headers
+were `cache-control`, `content-length`, `content-type`, `contextid`, `date`, `ms-cv`, `pragma`, `x-cache`,
+`x-ms-latency`, `x-msedge-ref`. The page's body is `{conversations, _metadata: {totalCount, syncState,
+forwardLink}}` (5 conversations for a); the two pages are kept as local reference copies
+(`reference/chat/probe-conversations-{a,b}.jsonl`) for the chat notes, never in the repo. So M1's native client
+sends chat requests in the web client's form (the `ic3` bearer token, `X-MS-Migration: True`,
+`BehaviorOverride: redirectAs404`): all of them work on reads, and that is the form whose behaviour (a region hop
+as a 404 with `Location`) the web client relies on. The skypetoken is
 still needed for the few middle-tier calls above, the TURN credentials and the AMS exchanges, so authz stays part of
 sign-in. Whether chat still accepts the skypetoken form is unknown and not needed.
 
@@ -458,10 +473,14 @@ sign-in. Whether chat still accepts the skypetoken form is unknown and not neede
 7. ~~Trouter's credential under STM (skypetoken vs IC3 Entra token)~~ **Answered (capture):** the `ic3` Entra token
    with `X-MS-Migration: True`, sent inside the first socket frame (`user.authenticate`), not in a header of the
    handshake. Whether trouter accepts it was not seen: the WebSocket guard denied the frame.
-8. Does the chat service accept **our** `ic3` token (native client, no CAE) the way it accepts the web client's? The
-   captures only show the web client's token; Task 14 got an `ic3` token for every lab account but didn't use it.
+8. ~~Does the chat service accept **our** `ic3` token (native client, no CAE) the way it accepts the web client's?~~
+   **Answered (live, M1 Task 3): yes.** For a and b, our non-CAE `ic3` token read the conversation list (200 with and
+   without `X-MS-Migration`, with and without `BehaviorOverride`) and the a–b chat's thread (complete), with no claims
+   challenge and no protocol named in a 401 ([STM](#skype-token-migration-stm)). So M1 needs neither CAE (`xms_cc`
+   `CP1` and claims-challenge handling) nor the `https://ic3-non-cae.teams.office.com` audience.
 9. How does a region hop (a 404 with `Location`) look on the wire? None happened: the lab's home region matches its
-   GTMs.
+   GTMs. M1 Task 3's probe saw none either: every read on `chatServiceAfd` (`<AFD host>/api/chatsvc/amer`) answered
+   200, with no `Location`, with and without `BehaviorOverride: redirectAs404`.
 
 ## To confirm by capture
 
@@ -485,7 +504,9 @@ The `load` and `ab-chat` captures of 2026-10-19/20 (M0 Task 11) settled what the
 - [x] whether any request carries `X-MS-Migration: True` with an IC3 Entra token: yes, chat, the AMS `aadtokenauth`
       exchange, `/trap/tokens` and trouter's authenticate frame ([STM](#skype-token-migration-stm));
 - [ ] the shape of a 401 claims challenge: none happened. The only 401s were middle-tier image requests without their
-      cookie, with a plain `WWW-Authenticate: Bearer authorization_uri="…"`. Still open;
+      cookie, with a plain `WWW-Authenticate: Bearer authorization_uri="…"`. Still open. M1 Task 3's probe with our
+      own non-CAE `ic3` token got no 401 at all on the chat service, so nothing in M1 depends on it: CAE's claims
+      challenges are meant for a client that advertises `CP1`, which ours doesn't (question 8);
 - [x] the body of the 403 the lab accounts got before the license: `errorCode` `UserLicenseNotPresentTrialEligible`
       and a `message`, nothing else (Task 14's own exchange and the web client's, under [Errors](#errors)).
 

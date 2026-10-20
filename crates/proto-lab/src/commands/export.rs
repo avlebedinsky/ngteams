@@ -533,10 +533,40 @@ pub fn export_with(
     checks: Checks,
     sanitize: impl FnOnce(&[Value]) -> Result<Sanitized, regex::Error>,
 ) -> Result<Exported, ExportError> {
+    let (path, _) = reference_path(reference_dir, name)?;
+    refuse_inside_repository(&path)?;
+    let events = read_capture(capture)?;
+    export_events_with(&events, name, reference_dir, checks, sanitize)
+}
+
+/// [`export`] of events that aren't a capture on disk, such as the answers `proto-lab probe` read: the same name and
+/// path checks (a destination inside a git work tree refused before anything is written), the same sanitizing as one
+/// capture, the same name check and fixture guard, the same reference dir.
+///
+/// # Errors
+/// As [`export`], but for reading a capture.
+pub fn export_events(
+    events: &[Value],
+    name: &str,
+    reference_dir: &Path,
+    identities: &Identities,
+    checks: Checks,
+) -> Result<Exported, ExportError> {
+    export_events_with(events, name, reference_dir, checks, |events| {
+        sanitize_capture(events, identities)
+    })
+}
+
+fn export_events_with(
+    events: &[Value],
+    name: &str,
+    reference_dir: &Path,
+    checks: Checks,
+    sanitize: impl FnOnce(&[Value]) -> Result<Sanitized, regex::Error>,
+) -> Result<Exported, ExportError> {
     let (path, layout) = reference_path(reference_dir, name)?;
     let path = refuse_inside_repository(&path)?;
-    let events = read_capture(capture)?;
-    let sanitized = sanitize(&events).map_err(ExportError::Pattern)?;
+    let sanitized = sanitize(events).map_err(ExportError::Pattern)?;
     let text = render(&sanitized.events, layout);
     let mut warnings = Warnings {
         name_in_host: sanitized.name_in_host,

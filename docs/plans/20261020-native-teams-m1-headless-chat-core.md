@@ -165,7 +165,8 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 
 ## Technical Details
 - **Chat requests** (base = GTM `chatServiceAfd`): headers as the web client sends them (`Authorization: Bearer <ic3>`,
-  `X-MS-Migration: True`, `BehaviorOverride: redirectAs404`; the exact set fixed by Task 3). A 404 with `Location` (a
+  `X-MS-Migration: True`, `BehaviorOverride: redirectAs404`; the exact set fixed by Task 3: the service took our
+  non-CAE token in every combination of the two extra headers, so the web client's full set stays). A 404 with `Location` (a
   region hop, never seen) is an error logged by status only, not followed, until a capture shows its shape; following
   it later must move the fence's `ChatCredential` base with the reads and writes.
 - **Message post** (`POST v1/users/ME/conversations/<id>/messages`): `content` (HTML), `messagetype` `RichText/Html`,
@@ -259,22 +260,35 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Modify: `crates/proto-lab/src/{main.rs,commands.rs}`, `crates/teams-fence/src/membership.rs` (a `ChatCredential`
   constructor from a bearer token and a base), `docs/protocol/auth.md`
 
-- [ ] tests first: `ChatCredential::bearer(base, token)` accepts only a base `teams_fence::chat_service_path` accepts;
+- [x] tests first: `ChatCredential::bearer(base, token)` accepts only a base `teams_fence::chat_service_path` accepts;
       its `Debug` prints no token
-- [ ] tests first (wiremock): `proto-lab probe chat <alias>` refreshes the account's `ic3` token from the stored
+- [x] tests first (wiremock): `proto-lab probe chat <alias>` refreshes the account's `ic3` token from the stored
       refresh token and sends only `GET`s to the chat base from the account's region GTMs: the chat service's own
       conversation-list read (one page; the path from the bundle mapping, recorded in `chat.md` by Task 7) and the
       fence's 1:1 thread read through `LiveMembershipSource` with that `ChatCredential`; it prints statuses, header
       names and token claims only (aud, exp, scopes, tenant), never a token or a body
-- [ ] `--save <name>` writes the GET bodies as local reference copies under `~/.local/share/teams-lab/reference/`,
+      (the bundle's `myconversations` read: `GET v1/users/ME/conversations?view=msnp24Equivalent&pageSize=200&
+      startTime=1&targetType=All`, made once per header form; the 1:1 chat is the one with `--with`, b for a and a for
+      b and c by default; a test reaches the mock only through `Origin::Mock`, refused without `test-support`)
+- [x] `--save <name>` writes the GET bodies as local reference copies under `~/.local/share/teams-lab/reference/`,
       through the same path checks as `export` (refuses any destination inside a git work tree)
-- [ ] live, a and b: with and without `X-MS-Migration`, with and without `BehaviorOverride`; record which form the
+      (the conversation-list answers, through the new `export::export_events`: the same sanitizer, name check, guard
+      and path checks as `export`; the thread read's body stays inside `LiveMembershipSource`, which returns only a
+      verdict)
+- [x] live, a and b: with and without `X-MS-Migration`, with and without `BehaviorOverride`; record which form the
       service accepts; save the conversation-list page as a reference copy for Task 7
-- [ ] if it refuses a non-CAE token (a 401 naming a protocol or a claims challenge): decide with Codex between
+      (2026-10-20, `target/lab` normal build, `proto-lab probe chat a --save chat/probe-conversations-a` and the same
+      for b: our non-CAE `ic3` token (~2 h, no `xms_cc`) got 200 on the conversation list in **all four** forms, and
+      the fence's thread read of the a–b chat was complete, for both accounts; no 401, no `WWW-Authenticate`, no
+      `Location`. Reference copies `reference/chat/probe-conversations-{a,b}.jsonl`, the export's checks found
+      nothing. The native client keeps the web client's form: `Authorization: Bearer <ic3>`, `X-MS-Migration: True`,
+      `BehaviorOverride: redirectAs404`)
+- [x] if it refuses a non-CAE token (a 401 naming a protocol or a claims challenge): decide with Codex between
       advertising CAE (`xms_cc` `CP1` on the refresh grant plus claims-challenge handling) and the non-CAE audience
       `https://ic3-non-cae.teams.office.com`; record the decision here and in `auth.md` question 8
-- [ ] answer `auth.md` question 8 and the claims-challenge item; note what was seen of a region hop
-- [ ] `cargo test -p proto-lab -p teams-fence` and the gate pass
+      (not needed: the service took the non-CAE token; neither CAE nor the non-CAE audience, recorded in `auth.md`)
+- [x] answer `auth.md` question 8 and the claims-challenge item; note what was seen of a region hop
+- [x] `cargo test -p proto-lab -p teams-fence` and the gate pass
 
 ### Task 4: `teams-auth` session: per-audience tokens and renewal
 **Files:**

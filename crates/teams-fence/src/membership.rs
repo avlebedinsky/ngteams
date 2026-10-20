@@ -5,7 +5,8 @@
 //! service hosts, no caller-chosen path or query) and parses the answer. The caller supplies only the lab account's
 //! credential ([`ChatCredential`]), taken from a request the armed lab page itself sent to the chat service: its token
 //! (an Entra bearer token, as the web client sends today, or a skypetoken) and the chat service base that request went
-//! to. A made-up credential gets a 401 and a deny; nothing the
+//! to; or, for a native client, its own `ic3` Entra token and the chat base from the account's region GTMs
+//! ([`ChatCredential::bearer`]). A made-up credential gets a 401 and a deny; nothing the
 //! caller supplies can make up a member list.
 //!
 //! **What is supported** (M0 Task 11, from the web bundle; see `docs/protocol/fence-targets.md`): only 1:1 chats,
@@ -178,6 +179,26 @@ impl ChatCredential {
         is_token(token).then(|| Self {
             base,
             scheme,
+            token: Zeroizing::new(token.to_owned()),
+        })
+    }
+
+    /// The credential of a native client: its own Entra access token for the chat service (`ic3`), sent back as
+    /// `Authorization: Bearer <token>`, and the chat service base it reads from, as the account's region GTMs give it
+    /// (`chatServiceAfd`, `https://<AFD host>/api/chatsvc/<region>`, or a regional `chatService` host), one trailing
+    /// slash allowed. `Some` only for a base that is exactly a base [`chat_service_path`] accepts a request under:
+    /// nothing before or after it (no whitespace: a caller trims a GTM value first), no path beyond the base, no
+    /// query or fragment; and a token-shaped token.
+    #[must_use]
+    pub fn bearer(base: &str, token: &str) -> Option<Self> {
+        if base.contains(['?', '#']) || base.trim() != base {
+            return None;
+        }
+        let probe = Url::parse(&format!("{}/v1", base.strip_suffix('/').unwrap_or(base))).ok()?;
+        let (base, rest) = ChatBase::split(&probe)?;
+        (rest.is_empty() && is_token(token)).then(|| Self {
+            base,
+            scheme: Scheme::Bearer,
             token: Zeroizing::new(token.to_owned()),
         })
     }

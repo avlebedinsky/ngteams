@@ -320,7 +320,7 @@ impl AuthReport {
     }
 }
 
-fn summary_line(summary: Option<&TokenSummary>, now: SystemTime) -> String {
+pub(crate) fn summary_line(summary: Option<&TokenSummary>, now: SystemTime) -> String {
     let Some(summary) = summary else {
         return "an opaque token (no claims to show)".to_owned();
     };

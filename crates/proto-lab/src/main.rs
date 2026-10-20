@@ -15,6 +15,7 @@ use proto_lab::commands::auth::{self, AuthOptions, KEYRING_APPLICATION};
 use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
 use proto_lab::commands::export;
 use proto_lab::commands::login::{self, LoginOptions};
+use proto_lab::commands::probe;
 use proto_lab::commands::status::{self, AccountStatus};
 use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_service_mri};
 use proto_lab::sanitize::Identities;
@@ -63,6 +64,12 @@ enum Command {
         /// substrate).
         #[arg(long)]
         audiences: bool,
+    },
+    /// Read-only probes of Teams' services with a lab account's own tokens. Prints statuses, header names and token
+    /// claims only (aud, exp, scopes, tenant), never a token or a body.
+    Probe {
+        #[command(subcommand)]
+        command: ProbeCommand,
     },
     /// Whether each lab account's session still works: `ok` or `login needed`, per account. Signs nothing in.
     Status {
@@ -119,6 +126,24 @@ enum ChromeCommand {
 }
 
 #[derive(Subcommand)]
+enum ProbeCommand {
+    /// Whether the chat service takes the account's own `ic3` token: refreshes it from the stored refresh token, reads
+    /// one page of the conversation list in each header form (with and without `X-MS-Migration` and `BehaviorOverride`)
+    /// and the 1:1 chat's thread the way the fence reads it. GETs only.
+    Chat {
+        /// The lab account: a, b or c.
+        alias: Alias,
+        /// The other account of the 1:1 chat whose thread is read; b for a, a for b and c by default.
+        #[arg(long)]
+        with: Option<Alias>,
+        /// Also write the conversation-list answers as a sanitized local reference copy under the lab's reference/
+        /// dir, such as `chat/conversations-a` (never inside a git work tree).
+        #[arg(long)]
+        save: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum BundlesCommand {
     /// Unpack desktop-assets and client-bindings from a Teams MSIX into the lab's bundles/<version>/ and index them.
     Import {
@@ -166,6 +191,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Login { alias, timeout } => run_login(alias, timeout).await,
         Command::Status { aliases, timeout } => run_status(aliases, timeout).await,
+        Command::Probe {
+            command: ProbeCommand::Chat { alias, with, save },
+        } => run_probe_chat(alias, with, save.as_deref()).await,
         Command::Auth {
             alias,
             timeout,
@@ -249,6 +277,48 @@ async fn run_auth(alias: Alias, options: &AuthOptions) -> Result<(), Box<dyn std
         }
         Some(Err(_)) => Err(format!("{alias}: no skypetoken").into()),
     }
+}
+
+async fn run_probe_chat(
+    alias: Alias,
+    with: Option<Alias>,
+    save: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = LabConfig::load(&LabLocations::from_env()?)?;
+    let partner = with.unwrap_or(if alias == Alias::A { Alias::B } else { Alias::A });
+    let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
+    let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
+    let request = probe::ProbeRequest {
+        config: &config,
+        alias,
+        partner,
+        origin: probe::Origin::ChatService,
+    };
+    let report = probe::probe_chat(&store, &tokens, request, teams_fence::LiveMembershipSource::new()?).await?;
+    for line in report.lines(std::time::SystemTime::now()) {
+        println!("{line}");
+    }
+    let Some(name) = save else {
+        return Ok(());
+    };
+    let reference_dir = export::reference_dir(config.paths().data_dir());
+    let identities = Identities::from_lab(&config);
+    let exported = export::export_events(
+        &report.reference_events(),
+        name,
+        &reference_dir,
+        &identities,
+        export::Checks::Warn,
+    )?;
+    for line in exported.warnings.summary() {
+        eprintln!("warning: {line}");
+    }
+    println!(
+        "{alias}: wrote a sanitized reference copy of {} read(s) to {}; it stays outside the repository",
+        exported.events,
+        exported.path.display()
+    );
+    Ok(())
 }
 
 async fn run_status(aliases: Vec<Alias>, timeout: u64) -> Result<(), Box<dyn std::error::Error>> {

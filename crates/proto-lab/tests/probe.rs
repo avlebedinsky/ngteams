@@ -1,0 +1,410 @@
+//! `proto-lab probe chat`: our own `ic3` token from the stored refresh token, then only `GET`s to the chat base from
+//! the account's region GTMs (the conversation list in every header form, and the fence's 1:1 thread read through
+//! `LiveMembershipSource`), and a report of statuses, header names and token claims only. Against wiremock: Entra on
+//! one mock server, the chat service on another, reached through the `test-support` mock origin. Every value here is
+//! made up.
+
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use proto_lab::commands::export::{self, Checks, ExportError};
+use proto_lab::commands::probe::{
+    CONVERSATIONS_PATH, ChatProbe, HeaderForm, IC3_RESOURCE, Origin, ProbeError, ProbeRequest, probe_chat,
+};
+use proto_lab::config::{Alias, LabConfig};
+use proto_lab::sanitize::Identities;
+use serde_json::{Value, json};
+use teams_auth::refresh::refresh_token_key;
+use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore as _};
+use teams_auth::token::{EntraConfig, TokenClient, TokenError};
+use teams_fence::{LiveMembershipSource, Membership};
+use wiremock::matchers::{body_string_contains, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+const GUID_A: &str = "0000000a-0000-4000-8000-00000000000a";
+const GUID_B: &str = "0000000b-0000-4000-8000-00000000000b";
+const TENANT: &str = "00000000-0000-4000-8000-0000000000ff";
+const UPN_A: &str = "bot-a@lab.example.com";
+const REFRESH_TOKEN: &str = "made-up-refresh-token-0123456789";
+/// A word only the chat service's answers hold: it must never be printed.
+const BODY_MARKER: &str = "PlantedBodyMarker";
+const AB_CHAT: &str = "19:0000000a-0000-4000-8000-00000000000a_0000000b-0000-4000-8000-00000000000b@unq.gbl.spaces";
+const CHAT_PREFIX: &str = "/api/chatsvc/amer";
+
+fn lab_toml(data_dir: &Path) -> String {
+    format!(
+        "data_dir = \"{}\"\n\n\
+         [[accounts]]\nalias = \"a\"\nupn = \"{UPN_A}\"\nmri = \"8:orgid:{GUID_A}\"\n\n\
+         [[accounts]]\nalias = \"b\"\nupn = \"bot-b@lab.example.com\"\nmri = \"8:orgid:{GUID_B}\"\n\n\
+         [[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\n",
+        data_dir.display()
+    )
+}
+
+/// A lab in a temp dir, with a's region record holding `chat_base` as its `chatServiceAfd` GTM.
+fn lab(dir: &Path, chat_base: Option<&str>) -> TestResult<LabConfig> {
+    let config = LabConfig::parse(&lab_toml(dir), dir)?;
+    let mut gtms = json!({"middleTier": "https://teams.microsoft.com/api/mt/part/amer-03"});
+    if let Some(base) = chat_base {
+        gtms["chatServiceAfd"] = json!(base);
+    }
+    let record = json!({"region": "amer", "partition": "amer03", "regionGtms": gtms, "account": "a"});
+    let file = proto_lab::commands::auth::region_file(config.paths(), Alias::A);
+    std::fs::create_dir_all(file.parent().ok_or("no parent")?)?;
+    std::fs::write(&file, record.to_string())?;
+    Ok(config)
+}
+
+fn unix(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs())
+}
+
+/// An unsigned access token for `ic3`, built at run time.
+fn ic3_token() -> String {
+    let part = |value: &Value| URL_SAFE_NO_PAD.encode(value.to_string());
+    let claims = json!({
+        "aud": IC3_RESOURCE,
+        "exp": unix(SystemTime::now() + Duration::from_secs(7_200)),
+        "scp": "Teams.AccessAsUser.All",
+        "tid": TENANT,
+    });
+    format!(
+        "{}.{}.c2ln",
+        part(&json!({"alg": "RS256", "typ": "JWT"})),
+        part(&claims)
+    )
+}
+
+/// Entra's answer to a refresh grant for `ic3`, and nothing else.
+async fn entra(token: &str) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth2/v2.0/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .and(body_string_contains("ic3.teams.office.com%2F.default"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "token_type": "Bearer",
+            "scope": "https://ic3.teams.office.com/Teams.AccessAsUser.All https://ic3.teams.office.com/.default",
+            "expires_in": 7_000,
+            "ext_expires_in": 7_000,
+            "access_token": token,
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn store() -> TestResult<MemorySecretStore> {
+    let store = MemorySecretStore::new();
+    store
+        .put(&refresh_token_key(UPN_A), &Secret::new(REFRESH_TOKEN))
+        .await?;
+    Ok(store)
+}
+
+fn tokens(entra: &MockServer) -> TestResult<TokenClient> {
+    Ok(TokenClient::new(
+        EntraConfig::teams_native().with_authority(entra.uri()),
+    )?)
+}
+
+fn thread() -> Value {
+    json!({
+        "id": AB_CHAT,
+        "type": "Thread",
+        "properties": {"threadType": "chat", "uniquerosterthread": "true"},
+        "members": [
+            {"id": format!("8:orgid:{GUID_A}"), "role": "Admin"},
+            {"id": format!("8:orgid:{GUID_B}"), "role": "Admin"},
+        ],
+        "version": 1_760_000_000_000_u64,
+    })
+}
+
+fn conversations() -> Value {
+    json!({
+        "conversations": [{
+            "id": AB_CHAT,
+            "lastMessage": {"content": BODY_MARKER, "from": format!("8:orgid:{GUID_B}")},
+        }],
+        "_metadata": {"totalCount": 1},
+    })
+}
+
+/// The chat service: the conversation list (one page, the web client's query) and the a–b chat's thread.
+async fn chat_service(list: ResponseTemplate) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("{CHAT_PREFIX}/{CONVERSATIONS_PATH}")))
+        .and(query_param("view", "msnp24Equivalent"))
+        .and(query_param("pageSize", "200"))
+        .and(query_param("startTime", "1"))
+        .and(query_param("targetType", "All"))
+        .respond_with(list)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{CHAT_PREFIX}/v1/threads/{AB_CHAT}")))
+        .and(query_param("view", "msnp24Equivalent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(thread()))
+        .mount(&server)
+        .await;
+    server
+}
+
+fn request<'a>(config: &'a LabConfig, chat: &MockServer) -> ProbeRequest<'a> {
+    ProbeRequest {
+        config,
+        alias: Alias::A,
+        partner: Alias::B,
+        origin: Origin::Mock(chat.uri()),
+    }
+}
+
+async fn run(config: &LabConfig, entra: &MockServer, chat: &MockServer) -> TestResult<ChatProbe> {
+    let source = LiveMembershipSource::with_mock_origin(&chat.uri())?;
+    Ok(probe_chat(&store().await?, &tokens(entra)?, request(config, chat), source).await?)
+}
+
+fn shown(probe: &ChatProbe) -> String {
+    format!("{}\n{probe:?}", probe.lines(SystemTime::now()).join("\n"))
+}
+
+#[tokio::test]
+async fn the_probe_reads_with_our_own_ic3_token_in_every_header_form_and_sends_only_gets() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    let token = ic3_token();
+    let entra = entra(&token).await;
+    let chat = chat_service(
+        ResponseTemplate::new(200)
+            .insert_header("ContextId", "tcid=0")
+            .set_body_json(conversations()),
+    )
+    .await;
+    let probe = run(&config, &entra, &chat).await?;
+
+    // the conversation list once per header form, then the fence's thread read: every one a GET with our token
+    let requests = chat.received_requests().await.ok_or("no recording")?;
+    assert_eq!(requests.len(), HeaderForm::ALL.len() + 1);
+    let bearer = format!("Bearer {token}");
+    for request in &requests {
+        assert_eq!(request.method.as_str(), "GET");
+        assert_eq!(
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(bearer.as_str())
+        );
+    }
+    let has = |index: usize, name: &str| requests[index].headers.contains_key(name);
+    for (index, form) in HeaderForm::ALL.iter().enumerate() {
+        assert_eq!(has(index, "x-ms-migration"), form.migration, "{form:?}");
+        assert_eq!(has(index, "behavioroverride"), form.behavior_override, "{form:?}");
+    }
+    let thread_read = &requests[HeaderForm::ALL.len()];
+    assert_eq!(thread_read.url.path(), format!("{CHAT_PREFIX}/v1/threads/{AB_CHAT}"));
+    assert!(!thread_read.headers.contains_key("x-ms-migration"));
+
+    assert!(matches!(probe.thread, Membership::Complete(_)), "{:?}", probe.thread);
+    assert_eq!(probe.conversations.len(), HeaderForm::ALL.len());
+    let text = shown(&probe);
+    assert!(!text.contains(&token), "{text}");
+    assert!(!text.contains(BODY_MARKER), "{text}");
+    assert!(!text.contains(REFRESH_TOKEN), "{text}");
+    assert!(!text.contains(GUID_A) && !text.contains(GUID_B), "{text}");
+    assert!(text.contains(&format!("aud {IC3_RESOURCE}")), "{text}");
+    assert!(text.contains("Teams.AccessAsUser.All"), "{text}");
+    assert!(text.contains(TENANT), "{text}");
+    assert!(text.contains("200"), "{text}");
+    assert!(text.contains("contextid"), "{text}");
+    assert!(!text.contains("tcid=0"), "header values aren't shown: {text}");
+    assert!(text.contains("complete"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refusal_shows_its_status_and_the_challenge_s_parameter_names_but_no_values() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    let entra = entra(&ic3_token()).await;
+    let claims = "eyJhY2Nlc3NfdG9rZW4iOnsibmJmIjp7ImVzc2VudGlhbCI6dHJ1ZX19fQ";
+    let challenge = format!(
+        "Bearer authorization_uri=\"https://login.microsoftonline.com/common/oauth2/authorize\", \
+         error=\"insufficient_claims\", claims=\"{claims}\""
+    );
+    let chat = chat_service(
+        ResponseTemplate::new(401)
+            .insert_header("WWW-Authenticate", challenge.as_str())
+            .set_body_string(BODY_MARKER),
+    )
+    .await;
+    let probe = run(&config, &entra, &chat).await?;
+    let text = shown(&probe);
+    assert!(text.contains("401"), "{text}");
+    assert!(text.contains("insufficient_claims"), "{text}");
+    for name in ["authorization_uri", "error", "claims"] {
+        assert!(text.contains(name), "{name}: {text}");
+    }
+    assert!(!text.contains(claims), "{text}");
+    assert!(!text.contains("oauth2/authorize"), "{text}");
+    assert!(!text.contains(BODY_MARKER), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_region_hop_is_reported_by_its_host_and_never_followed() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    let entra = entra(&ic3_token()).await;
+    let chat = chat_service(ResponseTemplate::new(404).insert_header(
+        "Location",
+        "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations?secretish=1",
+    ))
+    .await;
+    let probe = run(&config, &entra, &chat).await?;
+    let text = shown(&probe);
+    assert!(text.contains("404"), "{text}");
+    assert!(text.contains("emea.ng.msg.teams.microsoft.com"), "{text}");
+    assert!(!text.contains("secretish"), "{text}");
+    // nothing but the probe's own five reads reached the chat service
+    let requests = chat.received_requests().await.ok_or("no recording")?;
+    assert_eq!(requests.len(), HeaderForm::ALL.len() + 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_gtm_value_with_stray_whitespace_is_trimmed() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some(" https://teams.microsoft.com/api/chatsvc/amer/ "))?;
+    let entra = entra(&ic3_token()).await;
+    let chat = chat_service(ResponseTemplate::new(200).set_body_json(conversations())).await;
+    let probe = run(&config, &entra, &chat).await?;
+    assert!(matches!(probe.thread, Membership::Complete(_)), "{:?}", probe.thread);
+    assert_eq!(probe.base, "https://teams.microsoft.com/api/chatsvc/amer");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_base_that_isnt_the_chat_service_is_refused_before_any_request() -> TestResult {
+    for base in [
+        None,
+        Some("https://evil.example.com/api/chatsvc/amer"),
+        Some("https://teams.microsoft.com/api/mt/part/amer-03"),
+        Some("https://teams.microsoft.com/api/chatsvc/amer?x=1"),
+        Some("http://teams.microsoft.com/api/chatsvc/amer"),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let config = lab(dir.path(), base)?;
+        let entra = entra(&ic3_token()).await;
+        let chat = chat_service(ResponseTemplate::new(200).set_body_json(conversations())).await;
+        let error = run(&config, &entra, &chat).await.err().ok_or("probed")?;
+        let error = error.downcast::<ProbeError>()?;
+        assert!(
+            matches!(*error, ProbeError::NoChatBase | ProbeError::NotAChatBase(_)),
+            "{base:?}: {error}"
+        );
+        for server in [&entra, &chat] {
+            let requests = server.received_requests().await.ok_or("no recording")?;
+            assert!(requests.is_empty(), "{base:?}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_a_stored_refresh_token_nothing_reaches_the_chat_service() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    let entra = entra(&ic3_token()).await;
+    let chat = chat_service(ResponseTemplate::new(200).set_body_json(conversations())).await;
+    let source = LiveMembershipSource::with_mock_origin(&chat.uri())?;
+    let error = probe_chat(
+        &MemorySecretStore::new(),
+        &tokens(&entra)?,
+        request(&config, &chat),
+        source,
+    )
+    .await
+    .err()
+    .ok_or("probed")?;
+    assert!(
+        matches!(error, ProbeError::Token(TokenError::NotSignedIn { .. })),
+        "{error}"
+    );
+    assert!(chat.received_requests().await.ok_or("no recording")?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_account_without_an_mri_or_the_same_account_twice_is_refused() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    let entra = entra(&ic3_token()).await;
+    let chat = chat_service(ResponseTemplate::new(200).set_body_json(conversations())).await;
+    for (alias, partner) in [(Alias::A, Alias::C), (Alias::A, Alias::A)] {
+        let source = LiveMembershipSource::with_mock_origin(&chat.uri())?;
+        let probe = ProbeRequest {
+            alias,
+            partner,
+            ..request(&config, &chat)
+        };
+        let error = probe_chat(&store().await?, &tokens(&entra)?, probe, source)
+            .await
+            .err()
+            .ok_or("probed")?;
+        assert!(
+            matches!(error, ProbeError::NoMri(_) | ProbeError::NoChat(..)),
+            "{alias} {partner}: {error}"
+        );
+    }
+    assert!(entra.received_requests().await.ok_or("no recording")?.is_empty());
+    assert!(chat.received_requests().await.ok_or("no recording")?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn saving_writes_a_sanitized_reference_copy_and_never_inside_a_repository() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
+    let token = ic3_token();
+    let entra = entra(&token).await;
+    let chat = chat_service(ResponseTemplate::new(200).set_body_json(conversations())).await;
+    let probe = run(&config, &entra, &chat).await?;
+    let events = probe.reference_events();
+    // one event per conversation-list read, each with its form, status and answer
+    assert_eq!(events.len(), HeaderForm::ALL.len());
+    let identities = Identities::from_lab(&config);
+
+    let reference_dir = export::reference_dir(config.paths().data_dir());
+    let exported = export::export_events(&events, "chat/probe-a", &reference_dir, &identities, Checks::Warn)?;
+    let text = std::fs::read_to_string(&exported.path)?;
+    assert!(exported.path.starts_with(&reference_dir), "{}", exported.path.display());
+    assert_eq!(std::fs::metadata(&exported.path)?.permissions().mode() & 0o777, 0o600);
+    assert!(text.contains(BODY_MARKER), "the answer is kept: {text}");
+    assert!(
+        text.contains("<mri:b>"),
+        "the lab's MRIs become their placeholders: {text}"
+    );
+    assert!(!text.contains(GUID_A) && !text.contains(GUID_B), "{text}");
+    assert!(!text.contains(&token), "{text}");
+    assert!(
+        !text.contains("127.0.0.1"),
+        "the mock origin isn't what was recorded: {text}"
+    );
+
+    // a reference dir inside a git work tree is refused, and nothing is written there
+    let repository = tempfile::tempdir()?;
+    std::fs::create_dir(repository.path().join(".git"))?;
+    let inside = repository.path().join("reference");
+    let refused = export::export_events(&events, "chat/probe-a", &inside, &identities, Checks::Warn);
+    assert!(matches!(refused, Err(ExportError::InsideRepository(_))), "{refused:?}");
+    assert!(!inside.exists());
+    Ok(())
+}

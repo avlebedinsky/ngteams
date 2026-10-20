@@ -9,7 +9,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use teams_fence::{
     ChatCredential, DenyReason, Fence, FenceLog, FetchFailure, LiveMembershipSource, MAX_BODY, Membership,
-    MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind, one_to_one_pair, parse_thread,
+    MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind, chat_service_path, one_to_one_pair,
+    parse_thread,
 };
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -517,5 +518,79 @@ async fn the_fence_allows_a_lab_only_one_to_one_chat_and_denies_one_with_an_outs
         .err()
         .ok_or("allowed")?;
     assert_eq!(*denied.reason(), DenyReason::Outsiders { count: 1 });
+    Ok(())
+}
+
+#[test]
+fn a_bearer_credential_from_a_base_takes_only_a_base_the_chat_service_path_check_takes() {
+    let accepted = [
+        "https://teams.microsoft.com/api/chatsvc/amer",
+        "https://teams.microsoft.com/api/chatsvc/amer/",
+        "https://teams.cloud.microsoft/api/chatsvc/emea",
+        "https://amer.ng.msg.teams.microsoft.com",
+        "https://amer.ng.msg.teams.microsoft.com/",
+    ];
+    for base in accepted {
+        // the same base under `v1` is a chat service URL to the write mapping's check too
+        let request = format!("{}/v1/users/ME/conversations", base.trim_end_matches('/'));
+        let parsed = url::Url::parse(&request).ok();
+        assert!(parsed.as_ref().and_then(chat_service_path).is_some(), "{base}");
+        assert!(ChatCredential::bearer(base, TOKEN).is_some(), "{base}");
+    }
+    let refused = [
+        "http://teams.microsoft.com/api/chatsvc/amer",
+        "https://teams.microsoft.com:8443/api/chatsvc/amer",
+        "https://user:pw@teams.microsoft.com/api/chatsvc/amer",
+        "https://teams.microsoft.com/api/chatsvc/AMER",
+        "https://teams.microsoft.com/api/chatsvc",
+        "https://teams.microsoft.com/api/mt/part/amer-03",
+        "https://teams.microsoft.com/api/chatsvc/amer/v1",
+        "https://teams.microsoft.com/api/chatsvc/amer/extra",
+        "https://teams.microsoft.com/api/chatsvc/amer//",
+        "https://teams.microsoft.com/api/chatsvc/amer?x=1",
+        "https://teams.microsoft.com/api/chatsvc/amer#v1",
+        "https://teams.microsoft.com.example.com/api/chatsvc/amer",
+        "https://msg.teams.microsoft.com",
+        "https://amer.ng.msg.teams.microsoft.com/api",
+        "https://chatsvcagg.teams.microsoft.com/api/csa/amer",
+        " https://teams.microsoft.com/api/chatsvc/amer",
+        "https://teams.microsoft.com/api/chatsvc/amer ",
+        "",
+        "not a url",
+    ];
+    for base in refused {
+        assert!(ChatCredential::bearer(base, TOKEN).is_none(), "{base:?}");
+    }
+    // the token has to be token-shaped, as one from a request
+    for token in ["abc", "Bearer x", "a\r\nX-Other: 1aaaaaaaaaaaaaaaaaaaaaaa", ""] {
+        assert!(
+            ChatCredential::bearer("https://teams.microsoft.com/api/chatsvc/amer", token).is_none(),
+            "{token:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_bearer_credential_from_a_base_reads_there_with_the_token_and_never_shows() -> TestResult {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/chatsvc/amer/v1/threads/{}", chat_id())))
+        .and(query_param("view", "msnp24Equivalent"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(thread()?))
+        .mount(&server)
+        .await;
+    let credential =
+        ChatCredential::bearer("https://teams.microsoft.com/api/chatsvc/amer", TOKEN).ok_or("no credential")?;
+    let shown = format!("{credential:?}");
+    assert!(!shown.contains(TOKEN), "{shown}");
+    assert!(shown.contains("<redacted>"), "{shown}");
+    assert!(shown.contains("Bearer"), "{shown}");
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential(credential);
+    assert_eq!(
+        source.members(&chat()).await,
+        Membership::Complete(vec![mri(GUID_A), mri(GUID_B)])
+    );
     Ok(())
 }
