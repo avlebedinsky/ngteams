@@ -1,15 +1,19 @@
 [package]
 name = "fence-seal"
-description = "Compile checks against teams-fence without its test-support feature: no other crate can mint a WritePermit, and a lab binary has a membership source"
+description = "Compile checks against teams-fence and teams-proto without their test-support features: no other crate can mint a WritePermit or send a request outside the native request policy, and a lab binary has a membership source"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-# The checks need teams-fence as a lab binary sees it. trybuild builds its cases with this crate's dev-dependencies
-# and features, and the other crates' dev-dependencies enable test-support, so the cases live here, where nothing does.
+# The checks need teams-fence and teams-proto as a lab binary sees them. trybuild builds its cases with this crate's
+# dev-dependencies and features, and the other crates' dev-dependencies enable test-support, so the cases live here,
+# where nothing does. teams-proto comes without its test-support feature too (it would turn on teams-fence's).
 [dev-dependencies]
+# an own-state request's body, in the case that tries to implement one
+serde_json.workspace = true
 teams-fence.workspace = true
+teams-proto.workspace = true
 trybuild.workspace = true
 
 [lints]

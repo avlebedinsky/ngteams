@@ -12,7 +12,8 @@ use teams_fence::{
     WritePermit,
 };
 use teams_proto::{
-    AddToCall, Authorized, Client, ConversationUrl, Mutating, SendMessage, StartCall, Transport, WriteError,
+    AddToCall, Authorized, Client, ConversationUrl, Mutating, OwnState, Read, Response, SendMessage, StartCall,
+    Transport, WriteError,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -77,23 +78,45 @@ struct Never;
 impl Transport for Recording {
     type Error = Never;
 
-    fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> impl Future<Output = Result<(), Never>> + Send {
+    fn read<R: Read>(&self, _request: &R) -> impl Future<Output = Result<Response, Never>> + Send {
+        future::ready(Ok(Response::new(200, "{}")))
+    }
+
+    fn own_state<R: OwnState>(&self, _request: &R) -> impl Future<Output = Result<Response, Never>> + Send {
+        future::ready(Ok(Response::new(200, "{}")))
+    }
+
+    fn deliver<R: Mutating + Send>(
+        &self,
+        write: Authorized<R>,
+    ) -> impl Future<Output = Result<Response, Never>> + Send {
         let target = write.permit().target().clone();
         self.delivered
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(target);
-        future::ready(Ok(()))
+        future::ready(Ok(Response::new(201, "")))
     }
 }
 
-/// Fails every delivery.
+/// Fails every request.
 struct Offline;
 
 impl Transport for Offline {
     type Error = io::Error;
 
-    fn deliver<R: Mutating + Send>(&self, _write: Authorized<R>) -> impl Future<Output = Result<(), io::Error>> + Send {
+    fn read<R: Read>(&self, _request: &R) -> impl Future<Output = Result<Response, io::Error>> + Send {
+        future::ready(Err(io::Error::other("offline")))
+    }
+
+    fn own_state<R: OwnState>(&self, _request: &R) -> impl Future<Output = Result<Response, io::Error>> + Send {
+        future::ready(Err(io::Error::other("offline")))
+    }
+
+    fn deliver<R: Mutating + Send>(
+        &self,
+        _write: Authorized<R>,
+    ) -> impl Future<Output = Result<Response, io::Error>> + Send {
         future::ready(Err(io::Error::other("offline")))
     }
 }
@@ -116,11 +139,12 @@ async fn a_permit_for_the_request_target_is_delivered() {
     let client = Client::new(Recording::default());
     let permit = check(message_to(CHAT_X)).await.expect("a lab-only target is allowed");
 
-    client
+    let answer = client
         .write(SendMessage::new(CHAT_X, "hello"), permit)
         .await
         .expect("matching permit");
 
+    assert_eq!(answer.status(), 201, "the transport's answer comes back");
     assert_eq!(client.transport().delivered(), vec![message_to(CHAT_X)]);
 }
 

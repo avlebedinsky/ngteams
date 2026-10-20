@@ -322,24 +322,43 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Modify: `crates/teams-proto/{Cargo.toml,src/lib.rs,src/client.rs,src/write.rs}`, `crates/fence-seal/Cargo.toml`
   (`teams-proto` as a dependency, without `test-support`), `crates/fence-seal/tests/*`, `Cargo.toml` (workspace deps)
 
-- [ ] tests first (trybuild in `fence-seal`): the transport sends only `Read` (GET), `OwnState` (a sealed, reviewed
+- [x] tests first (trybuild in `fence-seal`): the transport sends only `Read` (GET), `OwnState` (a sealed, reviewed
       list) or `Authorized<Mutating>`; a non-GET request of any other kind doesn't compile, and `OwnState` can't be
       implemented outside `teams-proto`
-- [ ] `Mutating` gains a sealed wire form (method, path relative to the chat base, body), and `Transport::deliver`
+      (`Transport` has exactly `read`, `own_state` and `deliver`; a `Read` names only a `Service` and an `Endpoint`, so
+      any type may implement it and it is always a `GET` with no body; `proto_raw_request` shows a post shaped as a
+      read is accepted neither as an own-state request nor as a write, and that the test-only `ProbeOwnState` is
+      absent from a normal build)
+- [x] `Mutating` gains a sealed wire form (method, path relative to the chat base, body), and `Transport::deliver`
       returns the answer (status, the headers a write needs such as `Location`, a capped body)
-- [ ] the HTTP transport (reqwest): fixed host allowlist (chat service hosts as `teams_fence::chat_service_path`,
+      (`Wire`, made only by the sealed supertrait; `SendMessage` posts `content`, `messagetype` `RichText/Html`,
+      `contenttype` `Text` for now, Tasks 12–13 complete the body; `StartCall`/`AddToCall` have no native route
+      (`HttpError::NoRoute`) before M3. `Response`: status, `Location`, `Retry-After`, `Content-Type`, body up to
+      `MAX_BODY` (4 MiB); its `Debug` shows the body's length only)
+- [x] the HTTP transport (reqwest): fixed host allowlist (chat service hosts as `teams_fence::chat_service_path`,
       registrar, Trouter), no redirects, no proxy, `https` only, timeouts, body caps; per-service credentials from the
       Task 4 session; the transport's part of the retry table. Entra and authz are not on it (they stay in
       `teams-auth`'s own clients); AMS isn't either (nothing in M1 fetches from it unless Task 20 adds it)
-- [ ] tests first: `teams-proto` gets a `test-support` feature (`["teams-fence/test-support"]`) and only under it a
+      (`HttpTransport<C: Credentials>`, `Credentials` implemented for `teams_auth::session::Session`; chat service:
+      `Bearer <ic3>`, `X-MS-Migration`, `BehaviorOverride`; registrar on the chat base's AFD host: `Bearer <ic3>`,
+      `X-MS-Migration` (from the echo-call capture, recorded in `auth.md`); Trouter's HTTP side: no credential. Reads and
+      own-state: one retry in all, after a 401 (the session refreshes the refused token) or a 429/503 (`Retry-After`,
+      capped at 30 s, 1 s without one); a write's answer comes back whatever its status, never resent, a 401 refreshes
+      the token for the outbox's next attempt)
+- [x] tests first: `teams-proto` gets a `test-support` feature (`["teams-fence/test-support"]`) and only under it a
       mock origin (plain `http` on loopback) for the transport; a `fence-seal` case proves a normal build can't set it
-- [ ] every `OwnState` request is logged to `fence.log` (channel, method, URL without query) before it is sent; one
+- [x] every `OwnState` request is logged to `fence.log` (channel, method, URL without query) before it is sent; one
       that can't be logged isn't sent
-- [ ] the own-state list starts empty; each entry is added only by the task that captured and reviewed it, in its
+      (each send, a retry included, as a `RequestRecord` with `RequestOutcome::Own(<kind>)`; the URL logged is the one
+      built and checked, never the mock's)
+- [x] the own-state list starts empty; each entry is added only by the task that captured and reviewed it, in its
       exact shape (method, origin, path, body schema)
-- [ ] tests on wiremock (through the mock origin): reads, a permitted write and its returned answer, an own-state
+- [x] tests on wiremock (through the mock origin): reads, a permitted write and its returned answer, an own-state
       request, 401/429 handling, the refusals; mutation-check the log rule
-- [ ] `cargo test -p teams-proto -p fence-seal` and the gate pass
+      (mutation-checked: sending an own-state request whose log failed, and logging it after the send, each fail the
+      tests)
+- [x] `cargo test -p teams-proto -p fence-seal` and the gate pass
+      (no new workspace dependency was needed; `teams_auth::token::retry_after` became public for the transport)
 
 ### Task 6: The fixture guard's passcode gaps before M1's fixtures
 **Files:**

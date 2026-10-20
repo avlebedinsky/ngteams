@@ -1,10 +1,13 @@
-//! Compile checks against `teams-fence` as a lab binary sees it, without the `test-support` feature. The cases under
-//! `tests/ui/` must fail: no crate other than `teams-fence` can mint a `WritePermit`, since a fence comes only from
-//! `Fence::open_lab` (the roster from `lab.toml`, the log at the lab's `fence.log`) and `MembershipSource` is sealed.
-//! The cases under `tests/pass/` must build and run: the sources `teams-fence` defines (`FailClosed`, and
-//! `LiveMembershipSource` with a credential parsed from a chat service request) are usable, so a lab binary can arm the
-//! browser fence; the live source's local-mock origin is not (`tests/ui/live_mock_origin.rs`). This library is empty.
+//! Compile checks against `teams-fence` and `teams-proto` as a lab binary sees them, without their `test-support`
+//! features. The cases under `tests/ui/` must fail: no crate other than `teams-fence` can mint a `WritePermit`, since a
+//! fence comes only from `Fence::open_lab` (the roster from `lab.toml`, the log at the lab's `fence.log`) and
+//! `MembershipSource` is sealed; and the native transport sends only a `Read`, an `OwnState` request (a sealed list no
+//! other crate adds to) or an `Authorized` write, to its allowlisted hosts only (`tests/ui/proto_*.rs`: no request of
+//! another class, no own-state entry from outside, no mock origin). The cases under `tests/pass/` must build and run:
+//! the sources `teams-fence` defines (`FailClosed`, and `LiveMembershipSource` with a credential parsed from a chat
+//! service request) are usable, so a lab binary can arm the browser fence; the live source's local-mock origin is not
+//! (`tests/ui/live_mock_origin.rs`). This library is empty.
 //!
 //! They live in a crate of their own because trybuild builds each case with the dev-dependencies and features of the
-//! crate that runs it, and the crates whose tests mint permits (`teams-fence`, `teams-proto`, `proto-lab`) enable
-//! `test-support` there.
+//! crate that runs it, and the crates whose tests mint permits or reach a mock (`teams-fence`, `teams-proto`,
+//! `proto-lab`) enable `test-support` there.

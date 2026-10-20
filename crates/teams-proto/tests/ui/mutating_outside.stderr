@@ -13,11 +13,13 @@ help: the trait `teams_proto::write::sealed::Sealed` is not implemented for `Els
 help: the following other types implement trait `teams_proto::write::sealed::Sealed`
  --> src/write.rs
   |
-  |     impl Sealed for super::SendMessage {}
+  |     impl Sealed for super::SendMessage {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SendMessage`
-  |     impl Sealed for super::StartCall {}
+...
+  |     impl Sealed for super::StartCall {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `StartCall`
-  |     impl Sealed for super::AddToCall {}
+...
+  |     impl Sealed for super::AddToCall {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AddToCall`
 note: required by a bound in `Mutating`
  --> src/write.rs

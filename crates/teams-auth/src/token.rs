@@ -537,8 +537,10 @@ pub(crate) fn seconds(value: Option<&Value>) -> Option<Duration> {
     Some(Duration::from_secs(seconds))
 }
 
-/// `Retry-After` as delta-seconds or an HTTP date (Entra's and authz's answers alike).
-pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+/// `Retry-After` as delta-seconds or an HTTP date (Entra's and authz's answers alike, and `teams-proto`'s transport
+/// reads the chat service's the same way); a date in the past is no wait.
+#[must_use]
+pub fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = value.parse() {
         return Some(Duration::from_secs(seconds));

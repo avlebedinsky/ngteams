@@ -1,22 +1,41 @@
 [package]
 name = "teams-proto"
-description = "Teams internal API requests; every mutating one takes a WritePermit from teams-fence"
+description = "Teams internal API requests and the native HTTP transport; every mutating request takes a WritePermit from teams-fence"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Tests only, through dev-dependencies: `HttpTransport::with_mock_origin` (plain `http` to a loopback mock instead of
+# the service hosts) and `ProbeOwnState` (an own-state request for the transport's tests; the reviewed list itself is
+# empty). It turns on `teams-fence/test-support`, so `teams_fence::test_support_enabled()` reports it and a lab binary
+# built with it refuses to run.
+test-support = ["teams-fence/test-support"]
+
 [dependencies]
+# the session's tokens (`Credentials`), `TokenError`, and `Retry-After` read as Entra's and authz's answers are
+teams-auth.workspace = true
 teams-fence.workspace = true
+# the allowlist compares a built URL's decoded path with the endpoint's segments
+percent-encoding.workspace = true
+# the transport's own HTTPS client: no proxy, no redirects, a fixed host allowlist
+reqwest.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+# the wait before a throttled read or own-state request is sent again
+tokio = { workspace = true, features = ["time"] }
 url.workspace = true
 
 [dev-dependencies]
 # the tests mint permits from a fence over a test roster and a fake membership source; the trybuild cases here see it
 # too, so the cases that need it off live in crates/fence-seal
 teams-fence = { workspace = true, features = ["test-support"] }
-tokio = { workspace = true, features = ["macros", "rt"] }
+# the transport's tests reach wiremock through the mock origin
+teams-proto = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 trybuild.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true

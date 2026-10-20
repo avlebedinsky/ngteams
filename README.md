@@ -17,9 +17,9 @@ GPUI, an audio call). The plan is `docs/plans/completed/20261019-native-teams-m0
 | path | contents |
 |---|---|
 | `crates/teams-fence` | the write fence: a write is allowed only when every participant of its target, read fresh, is a lab account or an approved service; the lab config (`lab.toml`), `fence.log`, the membership sources (`FailClosed`, `LiveMembershipSource`) |
-| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, and a lab binary has its membership sources |
+| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit` or send a request outside the native request policy, and a lab binary has its membership sources |
 | `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`) |
-| `crates/teams-proto` | Teams internal API requests; the mutating ones (`SendMessage`, `StartCall`, `AddToCall`) need a `WritePermit` for their exact target |
+| `crates/teams-proto` | Teams internal API requests and the native HTTP transport: reads (`GET`), a sealed own-state list (empty so far, logged to `fence.log`), and mutating requests (`SendMessage`, `StartCall`, `AddToCall`) that need a `WritePermit` for their exact target; a fixed host allowlist, `https` only, no proxy, no redirects |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and checks each fixture's `_synthetic` marker |
 | `spikes/gpui-video` | GPUI on niri (smoke window in a private weston + nested niri), then a 3×3 grid of 720p video (M0 Tasks 15–16) |

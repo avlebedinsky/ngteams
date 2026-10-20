@@ -1,27 +1,89 @@
 //! Mutating requests ([`Mutating`]) and the pairing of one with the permit issued for its target ([`Authorized`]).
 
+use serde_json::{Value, json};
 use teams_fence::{Mri, Scope, Target, WriteKind, WritePermit};
 use url::Url;
+
+use crate::endpoint::{Endpoint, Method};
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
 /// [`Authorized`], next to a [`WritePermit`] issued for exactly that target.
 ///
 /// The trait is sealed: only this crate's own requests implement it. The permit check in [`Authorized::new`] holds
 /// only as far as `target()` describes what the request really writes, so `target()` is computed from the request's
-/// own immutable fields, and the wire request a transport sends must be built from those same fields.
+/// own immutable fields, and the wire request a transport sends is built from those same fields: its sealed [`Wire`]
+/// form, which only this crate can make or read.
 pub trait Mutating: sealed::Sealed {
     /// The target this request writes to: what the fence must have judged for the permit to cover it.
     fn target(&self) -> Target;
 }
 
 mod sealed {
-    /// The seal on [`Mutating`](super::Mutating): a public trait no other crate can name, implemented for this crate's
-    /// requests only.
-    pub trait Sealed {}
+    use super::{Endpoint, Method, Wire, json};
 
-    impl Sealed for super::SendMessage {}
-    impl Sealed for super::StartCall {}
-    impl Sealed for super::AddToCall {}
+    /// The seal on [`Mutating`](super::Mutating): a public trait no other crate can name, implemented for this crate's
+    /// requests only. It also carries the request's wire form, built from the same fields as its target.
+    pub trait Sealed {
+        /// What the transport sends for this request on the chat service; `None` for a request the native transport
+        /// has no route for.
+        fn wire(&self) -> Option<Wire>;
+    }
+
+    /// `POST v1/users/ME/conversations/<conversation>/messages`, the message as the web client posts it
+    /// (`docs/protocol/fence-targets.md`): for now the HTML `content` with `messagetype` `RichText/Html` and
+    /// `contenttype` `Text`. M1 Tasks 12–13 complete the body (`clientmessageid`, `imdisplayname`, `properties`).
+    impl Sealed for super::SendMessage {
+        fn wire(&self) -> Option<Wire> {
+            Some(Wire {
+                method: Method::Post,
+                endpoint: Endpoint::new(["v1", "users", "ME", "conversations", &self.conversation, "messages"]),
+                body: Some(json!({
+                    "content": self.content,
+                    "messagetype": "RichText/Html",
+                    "contenttype": "Text",
+                })),
+            })
+        }
+    }
+
+    /// Calls go to the call controller and the conversation service, not the chat service: the native transport has no
+    /// route for them before M3 (`docs/backlog/fence-call-follow-ups.md`).
+    impl Sealed for super::StartCall {
+        fn wire(&self) -> Option<Wire> {
+            None
+        }
+    }
+
+    /// As [`StartCall`](super::StartCall): no native route yet.
+    impl Sealed for super::AddToCall {
+        fn wire(&self) -> Option<Wire> {
+            None
+        }
+    }
+}
+
+/// A mutating request as the transport sends it: its method, its endpoint under the chat base and its JSON body.
+/// Sealed: only this crate's requests make one, from the same fields their [`Mutating::target`] comes from, and only
+/// this crate reads one, so a permit for one target can't carry another request's wire form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wire {
+    method: Method,
+    endpoint: Endpoint,
+    body: Option<Value>,
+}
+
+impl Wire {
+    pub(crate) fn method(&self) -> Method {
+        self.method
+    }
+
+    pub(crate) fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    pub(crate) fn body(&self) -> Option<&Value> {
+        self.body.as_ref()
+    }
 }
 
 /// A mutating request together with the permit for its target. The only way to make one is [`Authorized::new`],
@@ -59,6 +121,11 @@ impl<R: Mutating> Authorized<R> {
     #[must_use]
     pub fn permit(&self) -> &WritePermit {
         &self.permit
+    }
+
+    /// The request's wire form, for the transport.
+    pub(crate) fn wire(&self) -> Option<Wire> {
+        sealed::Sealed::wire(&self.request)
     }
 }
 

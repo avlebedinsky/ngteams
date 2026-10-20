@@ -1842,7 +1842,9 @@ dependencies = [
 name = "fence-seal"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "teams-fence",
+ "teams-proto",
  "trybuild",
 ]
 
@@ -6130,11 +6132,17 @@ dependencies = [
 name = "teams-proto"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
+ "reqwest",
+ "serde_json",
+ "teams-auth",
  "teams-fence",
+ "teams-proto",
  "thiserror 2.0.21",
  "tokio",
  "trybuild",
  "url",
+ "wiremock",
 ]
 
 [[package]]
