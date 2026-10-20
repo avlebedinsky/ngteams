@@ -1,0 +1,278 @@
+# Trouter: the push channel for messaging
+
+Status: 2026-10-20, M1 Task 14. Written from live runs of `proto-lab run ab-trouter --headless` (accounts a and b,
+Chrome for Testing 155 headless, the fence armed with the **messaging set**, below), from M0's `echo-call` runs
+(`calling-echo.md`), and from the web bundle `26260.1717.5229.7049` (read locally, notes in our own words). The
+captures stay outside the repository; the fixtures in `tests/fixtures/trouter/` are synthetic, shaped like them
+(`session.json`: one socket's frames both ways; `registration.json`: both stacks' registrations; `deliveries.json`:
+the chat deliveries and the web client's answers). Ids, tokens, host numbers and addresses below are placeholders.
+
+The code: the scenario is `crates/proto-lab/src/scenario/ab_trouter.rs` (`ab-trouter`, and `ab-trouter-quiet`, which
+also holds back `user.activity`); what the fence lets through is `crates/proto-lab/src/calling.rs`
+(`messaging_request`, `trouter_frame`) behind `Classifier::messaging` and `FrameClassifier::messaging`.
+
+## Outcome
+
+- Chat events reach the messaging stack's own socket as `POST /v4/f/<endpoint>/messaging` deliveries, `async` with a
+  15-minute lifetime: new messages, typing, the chat's update, edits, reactions, deletes. a's message showed in b's
+  open chat 3.5–4 s after a's compose box let it go (typing and the client's own rendering included; the delivery
+  itself came 200–250 ms after the message's `originalarrivaltime`), an edit 1.2–1.3 s after a sent it.
+- **Unanswered deliveries cost a bounded replay on every reconnect, nothing more**: deliveries stay unanswered, and
+  the native client builds no response path ([Answering deliveries](#answering-deliveries)).
+- **`user.activity` is not needed** for deliveries; the native client doesn't send it in M1
+  ([`user.activity` and presence](#useractivity-and-presence)).
+- The web client never re-authenticates an open socket; a renewed token takes a reconnect
+  ([Token renewal](#token-renewal-on-a-live-socket)).
+
+## The messaging set (what the fence lets out)
+
+A run that chats over the push channel uses `Classifier::messaging` and `FrameClassifier::messaging`:
+
+- the write mapping of `ab-chat` (`Classifier::mapped`, members read live);
+- the registrar registration of the **messaging stack's** endpoint only: `appId` exactly `TeamsCDLWebWorker` and
+  `templateKey` `TeamsCDLWebWorker_<digits and dots>` (`2.6` and `2.7` were seen), in the reviewed shape
+  (`calling::messaging_request`). The calling stack's (`SkypeSpacesWeb`) stays unknown: it makes the account reachable
+  for calls. Its denial, and its retries, are expected in this scenario's verdict (`TROUTER_RUN_REQUESTS`);
+- the Trouter session's own frames on any Trouter socket (`calling::trouter_frame`, the same frames `echo-call`
+  allows): `user.authenticate`, `ping`, the client's own `user.activity` (`active`/`inactive` only; the account showing
+  online is accepted, the user's decision of 2026-10-19), `trouter.processed_message_loss` and the disconnect `0::`;
+- nothing else: no settings reads, no call, and **no answer to any delivery** (`3:::` frames stay unknown and denied).
+
+## Connect and the regional move
+
+- The client opens `wss://go.trouter.teams.microsoft.com/v4/c?tc=<json>&timeout=40&epid=<endpoint guid>&ccid=…&
+  cor_id=<guid>&con_num=<ms>_<n>`. `tc` names the client (`"ua":"TeamsCDL"` for the messaging stack,
+  `"SkypeSpaces"` for the calling stack, plus its version). `timeout=40` is the ping interval in seconds. The
+  handshake carries no credential.
+- The service answers `1::` (socket.io 0.9 connect). The client must authenticate at once: once, with the
+  authentication held about 1.5 s for the fence's decision under load, the service closed the socket with
+  `0:::{"reason":"timeout"}` 1.1 s after `1::`; the client opened a new socket and authenticated in time.
+- After `trouter.connected` (below) the client keeps the regional host and reconnects straight to `reconnectUrl`
+  (`wss://<name>-t.trouter.teams.microsoft.com:443/v4/c`) next time, sending the cached `connectparams` in its
+  `user.authenticate`. The cache survives a page load and even a browser restart (it lives in the profile): b's
+  sockets reconnected to the same two regional hosts with the same endpoint ids in runs 45 minutes apart. Per the bundle
+  the cache is dropped when `se` is less than an hour away, the service URL changes, three connects in a row fail, or
+  the service disconnects twice for a duplicate within 10 s.
+- Each stack opens its own socket and its own endpoint (`epid`), and one page load can leave one socket per document:
+  b had two `TeamsCDL` sockets (one per page load) and one `SkypeSpaces` socket.
+
+## Authentication: the first frame
+
+`5:::{"name":"user.authenticate","args":[{"headers":{"X-Ms-Test-User":"False","Authorization":"Bearer <ic3 token>",
+"X-MS-Migration":"True"},"connectparams":{"issuer":"","scae":"1","sig":"","sr":"<endpoint id>","sp":"<regional
+name>","se":"<ms>","st":"<ms>"}}]}`
+
+- The token is the `https://ic3.teams.office.com` one (the web client's is a CAE token, `xms_cc` `CP1`, living about
+  24 hours); the registrar takes the same token. The calling stack's socket sends only `Authorization` and
+  `X-MS-Migration`.
+- `connectparams` is what an earlier `trouter.connected` handed over, sent back as it came; a first connect has none.
+- Whether the service takes **our** non-CAE `ic3` token on Trouter is not tested yet (it does on the chat service,
+  `auth.md` question 8): that is Task 16's first live step.
+
+## `trouter.connected`: the endpoint
+
+`5:1::{"name":"trouter.connected","args":[{…}]}` with:
+
+| field | meaning |
+|---|---|
+| `id` | the endpoint (connection) id; the last part of the push URLs |
+| `ccid` | a short form of `id` |
+| `url`, `surl` | the push URLs, `https://<name>-f.trouter.teams.microsoft.com:8443/v4/f/<id>/` and the same on `:3443`; the registration names `surl` |
+| `curlb` | `https://<name>-t.trouter.teams.microsoft.com:443`, a base for client-to-client links |
+| `healthUrl` | `…-t…:443/v4/h` |
+| `reconnectUrl` | `wss://<name>-t…:443/v4/c`, where the next connect goes |
+| `registrarUrl` | a v3 registrar on another host (`…/registrar/<geo>/v3/registrations`); the web client still registers through `<teams>/registrar/prod/V2/registrations` |
+| `socketio` | `https://<name>-t…:443/` |
+| `ttl` | seconds the connection's parameters stay valid (about 6.4 days: `se` minus now) |
+| `dur` | `"1"` |
+| `connectparams` | `issuer`, `scae`, `sig`, `sr` (the endpoint id), `sp` (the regional name), `se`/`st` (expiry and start, ms) |
+
+## Keep-alives and acknowledgements
+
+- The client sends `5:<n>+::{"name":"ping"}` every 40 s per socket; the service answers `6:::<n>+["pong"]` within
+  about 100 ms. Every event the client sends with `+` (ping, `user.activity`, `processed_message_loss`) is
+  acknowledged with `6:::<n>+[…]`. Per the bundle a pong missing for 5 s makes the client reconnect at once, and a
+  `user.activity` not acknowledged within 10 s does too.
+- The client also pings right after every answer it sends to a delivery (seen: each denied answer was followed by a
+  ping within 100 ms).
+- The bundle keeps a 72 s socket.io heartbeat timeout; any packet resets it.
+
+## Message loss
+
+On connect the service sends `5:<n>::{"name":"trouter.message_loss","args":[{"droppedIndicators":[{"tag":"messaging",
+"etag":"<time>"},…]}]}`, sometimes twice or three times. The messaging stack saw only the `messaging` tag; the calling
+stack's socket also saw `""`, `messagingsync`, `pinnedchannel` and `tps`. The client acknowledges each report with
+`trouter.processed_message_loss` carrying the same indicators. Per the bundle the `messaging` tag makes the chat
+layer run a delta sync (it missed pushes while away), and a new connection id does too. For the native client: a
+`messaging` loss report means "catch up now" (Task 17), then acknowledge it.
+
+## Registration and its TTL
+
+`POST <teams>/registrar/prod/V2/registrations` (both `teams.microsoft.com` and `teams.cloud.microsoft` were used),
+`Authorization: Bearer <ic3>`, `X-MS-Migration: True`, `X-Ms-Test-User: False`, JSON:
+
+```json
+{"clientDescription":{"appId":"TeamsCDLWebWorker","aesKey":"","languageId":"en-US","platform":"chrome",
+ "templateKey":"TeamsCDLWebWorker_2.6","platformUIVersion":"<version>"},
+ "registrationId":"<guid>","nodeId":"",
+ "transports":{"TROUTER":[{"context":"","path":"<surl>","ttl":3600}]}}
+```
+
+- Answer `202`, empty body. The `registrationId` is the socket's `epid`.
+- The messaging stack registered on every `trouter.connected` (every page load and reconnect). Per the bundle it
+  registers again 30 s before the TTL ends (3600 s by default), retries a failed registration after 123 s, and
+  deletes its registration only on a sign-out-like stop (a normal stop leaves it to expire).
+- The calling stack registers its own socket as `SkypeSpacesWeb` (`SkypeSpacesWeb_2.6`); denied, it retried every few
+  seconds for the whole run.
+
+## Deliveries
+
+Chat events reach the **messaging stack's** socket as socket.io messages:
+
+`3:::{"id":<number>,"method":"POST","url":"/v4/f/<endpoint id>/messaging","headers":{…},"body":"<json text>"}`
+
+- Headers: `X-Trouter-Delivery-Control: async; ttl=900; flow=messaging; prio=normal` (typing adds
+  `resilience=nostorenoloss`), `X-Microsoft-Skype-Message-ID` (a GUID per delivery), `trouter-request`
+  (`{"id":"<guid>","src":"<address>","port":3443}`), `Trouter-Timeout` / `Trouter-TimeoutMs` (about 117 s), `MS-CV`,
+  `traceparent`, `Content-Type: text/xml` (the body is JSON nonetheless), `Content-Length`, `Host`, `User-Agent`
+  (`Skype-NotificationHub/…`), `X-IC3-Needle` (a server-side trace) and `__RequestTunnelId__`.
+- The body is an `EventMessage`: `time`, `type`, `resourceLink` (`https://notifications.skype.net/v1/users/ME/
+  conversations/<chat>/messages/<id>`), `resourceType`, `resource`, sometimes `mentiontypes`, and `isactive`.
+- Resource types seen, in the order a's actions caused them:
+
+| a's action | `resourceType` | `resource` |
+|---|---|---|
+| typing | `NewMessage` | a message of `messagetype` `Control/Typing`, empty content, `contenttype` `Application/Message` |
+| the message | `NewMessage` | the message as the chat service stores it: `id`, `version`, `clientmessageid` (a's own), `content` (HTML), `messagetype` `RichText/Html`, `from` (a `contacts/8:orgid:<guid>` link), `imdisplayname`, `originalarrivaltime`, `composetime`, `sequenceId`, `properties` (`mentions`, `cards`, `links`, `files` as JSON text, `formatVariant`, `languageStamp`), `conversationLink`, `to` (the chat id), `threadtype` |
+| (follows the message) | `ConversationUpdate` | the chat: `id`, `lastMessage` (the message again; its `mentions` as a JSON array this time, plus `ams_references`), `lastUpdatedMessageId`/`Version`, `properties` (`lastimreceivedtime`, `addedBy`, an AI reply suggestion), `threadProperties` (`uniquerosterthread`, `rosterVersion`, `lastSequenceId`, `threadType`, `tenantid`, …), `version`, `propertiesUpdated`, `memberProperties` |
+| the edit | `MessageUpdate` | the same message id with a new `version`, the new `content` and `properties.edittime` |
+| a reaction | `MessageUpdate` | the same message, a new `version`, and `properties.emotions`: the whole set, `[{"key":"like","users":[{"mri":"8:orgid:<guid>","time":<ms>,"value":"<ms>"}]}]` |
+| a reaction removed | `MessageUpdate` | `emotions` with the key kept and its `users` empty |
+| a delete | `MessageUpdate` | the same message id, a new `version`, empty `content`, `properties` only `deletetime`, `importance`, `subject` |
+| a reply with a quote | `NewMessage` | `content` starting with the quote's `<blockquote itemscope itemtype="http://schema.skype.com/Reply" …>`, `properties.qtdMsgs` and `hasValidMsgReferences` |
+
+The reaction, removal, delete and reply rows come from deliveries b's endpoints got as stored replays of an
+`ab-chat-full` run (Task 7, the same a–b chat); `ab-trouter`'s own reaction step never found the client's reaction
+control (below). A reaction by b to a's message reaches b's own endpoints too: an account's endpoints get its own
+events.
+
+The native client turns these into typed events (Task 16): a `NewMessage` whose `messagetype` is `Control/…` is a
+signal (typing), not a message; a message's own `clientmessageid` matches it to our outbox row (Task 13).
+
+## Answering deliveries
+
+The web client answers each chat delivery `3:::{"id":<the delivery's id>,"status":200,"headers":{"MS-CV":"<its
+MS-CV>.0","trouter-request":"<echoed>","trouter-client":"{\"cd\":<ms spent>}"},"body":""}` and pings right after.
+The messaging set denies every answer (unknown), so every run showed what an endpoint that never answers gets:
+
+- **On a stable socket, nothing more.** Each live delivery came once; in 16 minutes of observation after the last one
+  (two runs) none came again. The socket stayed up, every ping was answered within about 100 ms, and later deliveries
+  kept coming promptly (an edit showed on b 1.2–1.3 s after a sent it, after earlier deliveries had gone unanswered).
+- **On every new connection, a replay.** When an endpoint connects (and every other endpoint the account still has
+  registered: registrations live an hour, and each web page load made a new one), the service delivers again, as
+  stored deliveries, the account's non-typing chat events of the last 15 minutes or so that went unanswered: events
+  delivered live to an open socket and left unanswered, and events from while the account was offline. A stored
+  delivery's `trouter-request` gains `"mstore":true,"flow":"messaging","seq":<n>`, its `Trouter-Timeout` is `7500`,
+  and it adds `Connection: keep-alive`; its `id` stays the same from one connect of an endpoint to the next, and each
+  endpoint gets its own copy. One run's live, unanswered message, conversation update and edit were replayed at b's
+  connects 9, 12.5 and 13.5 minutes later and not at 19 minutes, which fits `ttl=900`; typing
+  (`resilience=nostorenoloss`) was never stored. The bursts seen held 3 to 14 events.
+- **Under socket churn, retries.** In `ab-trouter-quiet` the web client reconnected about every 10 s (its own
+  `user.activity` never got an acknowledgement, below). A live unanswered delivery was then sent again on each new
+  socket with a fresh `id` for about 95–120 s, and then joined the stored set, replayed on every connect (36 times in
+  about 6 minutes).
+- No throttling, no socket closed by the service, no stop of deliveries, and no expected test event missing, in any
+  run.
+
+**Decision** (Claude and Codex, 2026-10-20; `discussions/task-14-unanswered-deliveries` in the plan run's state):
+no operational harm was shown under these conditions. The cost of not answering is the bounded replay on reconnect,
+which the native client absorbs by design: it syncs every chat after every reconnect anyway (Task 17) and stores by
+id and version (Task 11), so a replay adds no new state. The answers therefore **stay unanswered** and no response
+path is built (Task 15's `DeliveryResponse` is struck); M0's rule stands. What the native client must do instead
+(Task 16): apply replays idempotently by conversation, message id and version (the transport's
+`X-Microsoft-Skype-Message-ID` is at most a hint) so that neither a replay nor its meeting with the sync produces a
+repeated user-visible effect; keep reconnects rare (one endpoint, no `user.activity` acknowledgement to wait for). How
+newly found offline messages are notified is M2's.
+
+## `user.activity` and presence
+
+- The web client sends `5:<n>+::{"name":"user.activity","args":[{"state":"active","cv":"<cv>"}]}` right after
+  `trouter.connected` (the bundle: again 10 s later, and on every change; only `active` and `inactive`), and the
+  service acknowledges it. The bundle shows no idle timer in the Trouter layer: the chat layer reports active when it
+  starts and inactive when it stops.
+- `ab-trouter-quiet` held every `user.activity` back. The service still delivered live chat events to sockets that
+  had never sent one. What changed was the web client: per the bundle it reconnects when its activity event isn't
+  acknowledged within 10 s, so it reconnected about every 10 s for the whole run, with the replays above. That is the
+  web client's own dependency, not the service's: a client that never sends the event has no acknowledgement to wait
+  for.
+- **Decision** (same discussion): the native client sends no `user.activity` in M1; it is not on the reviewed
+  `OwnFrame` list (Task 15). Revisit only if a long-lived native session without it shows the service closing the
+  socket or delivering less.
+- Presence (for M2), not settled here: alongside `user.activity` the web client PUTs its presence endpoint,
+  `PUT <teams>/ups/<geo>/v1/me/endpoints/` with `{"id":"<the Trouter epid>","availability":"Available","activity":
+  "Available","activityReporting":"Transport","deviceType":"Web"}`, and subscribes to others' presence
+  (`POST …/ups/<geo>/v1/pubsub/subscriptions/<epid>`). The fence denied both in every run (they are on the run's
+  expected list), and other people's presence reads were denied too, so what makes an account show online (the PUT,
+  the activity, or both) was not tested.
+
+## Reconnect parameters and backoff (from the bundle)
+
+- Backoff `1000 · 2^n` ms, ±20 % jitter, capped at 300 s for the messaging stack (30 s elsewhere); the count resets
+  after a long quiet spell; a connect times out after 20 s.
+- The service can disconnect with a reason (`{"reason":…,"claims":…}`): `unauthorized` (reconnect with a fresh token;
+  `claims` is a CAE challenge), `skypetoken-deprecated` (stop), `dup` (reconnect at once).
+- `trouter.reconnect` `{"target":"self"|"host","url":…}` asks the client to reconnect (make-before-break for `self`,
+  to `url` for `host`). Not seen live.
+
+## Token renewal on a live socket
+
+- Not captured live: the web client's `ic3` token lives about 24 hours (CAE), so no run renews it on an open socket.
+- Per the bundle the client **never re-authenticates an open socket**: `user.authenticate` is sent once per connect,
+  and a renewed token is used at the next connect. An expired token surfaces as a service disconnect with reason
+  `unauthorized`, after which the client reconnects with a fresh token.
+- For the native client, whose `ic3` token lives about 2 hours: reconnect (a new socket, a new `user.authenticate`
+  with the cached `connectparams`, a new registration) before the token expires, and treat an `unauthorized`
+  disconnect the same way. Task 16 tests it with a fake clock on the mock; whether the service closes an open socket
+  when its token expires is open (it may keep it, since it checked the token once).
+
+## Live runs
+
+All on 2026-10-20 (UTC), `proto-lab run ab-trouter[-quiet] --headless` from a normal build, accounts a and b, the
+machine shared with other agents' builds (load average 15–30 for runs 1–9, 2–4 for runs 10–12). Every write the
+fence allowed in these runs was on the a–b 1:1 chat (messages, typing, edits, read receipts), both of whose members
+are lab accounts; the probe was force-denied and failed in a's page in every run that got that far.
+
+| run | start | outcome |
+|---|---|---|
+| 1 | 19:09 | a's browser killed to contain an iframe not armed in time (contained, no breach); failed at a's compose box; the calling stack's registration and presence denied as unexpected (now `TROUTER_RUN_REQUESTS`) |
+| 2 | 19:23 | **breached**: b, an iframe whose resume got no answer within 10 s (resume sent); browser killed. Its capture and `fence.log` show nothing sent unguarded (b's 3 frames all allowed, no mutating request answered without a verdict) |
+| 3 | 19:29 | failed at a's compose box (60 s; under load) |
+| 4 | 19:40 | **breached**: a, two `browser_ui` targets (Chrome's own omnibox pages, not held at attach) whose auto-attach got no answer; b contained a worker. Nothing sent unguarded |
+| 5 | 20:13 | message and edit delivered; b's check of the edit failed on a no-break space the editor put in; two unexpected deny classes (activity feed read state, agent invocation; now listed). No breach |
+| 6 | 20:24 | failed at a's compose box (load ~30) |
+| 7 | 20:28 | **breached**: b, an iframe whose resume got no answer within 10 s; browser killed. Capture and `fence.log`: nothing sent unguarded |
+| 8 | 20:29 | a's browser killed to contain a worker (contained); a didn't load |
+| 9 | 20:34 | message delivered; the edit's hover landed elsewhere; 16 min observed: no redelivery on the open socket |
+| 10 | 20:54 | `ab-trouter-quiet`: message and edit delivered; `user.activity` denied 37 times; the web client reconnected about every 10 s; reaction control not found |
+| 11 | 21:00 | message and edit delivered; the connect replayed run 10's unanswered events; 16 min observed: no redelivery |
+| 12 | 21:20 | as run 11; the reaction's fallback (the "more options" menu) found no reaction control either |
+
+Runs 1–4 were made by an earlier agent on this task before it was cut off; their printed output was kept. No run
+exited 0: each failed on a step of the web client's UI (a's compose box under load, the reaction control) or on an
+arming timeout, never on an unexpected deny after run 5. The three breached runs count as breaches (the CLAUDE.md
+rule: a resume sent, or a target not held, is a breach); the later clean runs are reported next to them, not in their
+place.
+
+## Open
+
+- Whether the service takes our own non-CAE `ic3` token on Trouter and the registrar (Task 16).
+- What the service does when a token expires on an open socket.
+- The v3 registrar (`registrarUrl`) the service hands over; the web client doesn't use it.
+- Accepted delivery answers might reduce the reconnect replay; not tested under the current policy (every answer is
+  denied). Revisit only if the replay measurably impairs the native client.
+- Whether a long-lived native session without `user.activity` is treated differently (the sockets that never sent
+  one here lived seconds to minutes).
+- What makes an account show online ([presence](#useractivity-and-presence)).
+- `ab-trouter`'s reaction step: the client's reaction control (`default-reaction-*` in the bundle) showed neither on
+  hover nor in the message's "more options" menu in this build; the reaction delivery's shape came from replayed
+  `ab-chat-full` events instead.

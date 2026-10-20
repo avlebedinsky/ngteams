@@ -490,26 +490,47 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Modify: `crates/proto-lab/src/{calling.rs,classify.rs,fence_ws.rs}` (a messaging own-state set),
   `crates/proto-lab/tests/calling.rs`
 
-- [ ] tests first: a messaging own-state set for `proto-lab` (the Trouter frames of an `ab-chat`-style run) that
+- [x] tests first: a messaging own-state set for `proto-lab` (the Trouter frames of an `ab-chat`-style run) that
       allows the registrar registration only as `TeamsCDLWebWorker`, never `SkypeSpacesWeb`, and lets the web
       client's own `user.activity` out (presence showing is accepted); the `calling` set stays as it is
-- [ ] capture (web client, `ab-chat`-style run with that set): b's Trouter session while a sends, edits and reacts;
+      (`Classifier::messaging`, `FrameClassifier::messaging` and `.without_activity()`, `calling::messaging_request`;
+      the scenarios `ab-trouter` and `ab-trouter-quiet` in `scenario/ab_trouter.rs`, judged by the Task 1 list plus
+      their own `TROUTER_RUN_REQUESTS`)
+- [x] capture (web client, `ab-chat`-style run with that set): b's Trouter session while a sends, edits and reacts;
       the registrar registration of the messaging stack; the deliveries for chat events (method, url, headers, body
       shape); the token renewal on a live socket (re-authenticate or reconnect)
-- [ ] answer, with evidence, whether leaving chat deliveries unanswered harms the client: redelivery volume and timing,
+      (⚠️ two gaps, recorded in `trouter.md`: `ab-trouter`'s reaction step never found the client's reaction control,
+      so the reaction, removal and delete delivery shapes come from an `ab-chat-full` run's events replayed to b's
+      endpoints; the renewal was not capturable live, the web client's CAE `ic3` token living ~24 h, so it rests on
+      the bundle: no re-authentication of an open socket, a renewed token takes a reconnect)
+- [x] answer, with evidence, whether leaving chat deliveries unanswered harms the client: redelivery volume and timing,
       the socket closed, deliveries throttled or stopped. Decide with Codex; record it in `trouter.md`
-- [ ] if it does harm: decide with Codex which delivery responses only acknowledge a chat event; that becomes a
+      (no operational harm shown: on a stable socket no redelivery in 16 min, no close, throttling or stop; on every
+      reconnect a replay of ≤ ~15 min of unanswered chat events (`mstore`, `ttl=900`), absorbed by the catch-up sync
+      and idempotent store; decided with Codex, transcript in the run's `discussions/task-14-unanswered-deliveries`)
+- [x] if it does harm: decide with Codex which delivery responses only acknowledge a chat event; that becomes a
       decision for the user (it revises the M0 rule that delivery responses stay denied). If it doesn't, deliveries
       stay unanswered and no response path is built. Nothing call-related is ever answered
-- [ ] `user.activity`: whether the session needs it (does the service treat an endpoint that never sends it
+      (it doesn't: deliveries stay unanswered, no response path, so Task 15's `DeliveryResponse` box is to be struck
+      and the user decision after Task 14 doesn't arise)
+- [x] `user.activity`: whether the session needs it (does the service treat an endpoint that never sends it
       differently: deliveries, keep-alive, timeouts); if it does, it becomes a reviewed `OwnFrame` entry in its exact
       shape. Record what makes an account show as online (for M2's presence)
-- [ ] write `trouter.md` in our own words: connect and regional move, `user.authenticate` in the first frame (the
+      (it doesn't: `ab-trouter-quiet` sockets that never sent it got live deliveries; only the web client's own 10 s
+      ack wait made it reconnect. No `OwnFrame` entry. Online presence: the web client's UPS endpoint `PUT` and
+      `user.activity` recorded, which of them makes an account show online untested since the fence denies the PUT)
+- [x] write `trouter.md` in our own words: connect and regional move, `user.authenticate` in the first frame (the
       `ic3` token, `X-MS-Migration`), keep-alives, `trouter.connected` push URLs, registration and its TTL,
       deliveries, reconnect parameters, token renewal, presence
-- [ ] synthetic fixtures; `cargo test -p fixture-guard` passes; live run recorded (a breached run as in Development
+- [x] synthetic fixtures; `cargo test -p fixture-guard` passes; live run recorded (a breached run as in Development
       Approach)
-- [ ] `cargo test -p proto-lab` and the gate pass
+      (`tests/fixtures/trouter/{session,registration,deliveries}.json`. Live, 2026-10-20 19:09–21:37 UTC, 12 runs of
+      `ab-trouter[-quiet]`, table in `trouter.md`: **3 breached** (runs 2, 7: an iframe's resume unanswered within
+      10 s; run 4: two `browser_ui` targets' auto-attach unanswered; captures and `fence.log` show nothing sent
+      unguarded), 2 contained, 3 failed on a's compose box under load; runs 5 and 9–12 clean: message delivered to b
+      by push in every one, the edit in 5 and 10–12, no unexpected deny after run 5. None exited 0 (the reaction
+      step). Every allowed write was on the a–b 1:1 chat)
+- [x] `cargo test -p proto-lab` and the gate pass (parallel run: crate-scoped gate; workspace gate after merge)
 
 ### Task 15: The Trouter frame policy
 **Files:**

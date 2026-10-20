@@ -13,7 +13,9 @@
 //! run that writes uses [`Classifier::mapped`], which also maps the chat service's writes on chats
 //! (`docs/protocol/fence-targets.md`): messages, typing, edits, deletes, reactions, read receipts, new chats and member
 //! changes, each to its [`Target`]. Anything the mapping doesn't recognize, a channel or team among them, stays
-//! [`Classification::Unknown`]. Any method other than the three reading ones counts as mutating, including ones the
+//! [`Classification::Unknown`]. A run that chats over the push channel adds the messaging stack's endpoint
+//! registration ([`Classifier::messaging`]); a run that calls, the calling stack's own-state and its call start
+//! ([`Classifier::calling`]). Any method other than the three reading ones counts as mutating, including ones the
 //! classifier has never heard of.
 //!
 //! An own-state rule matches the method, the exact origin (scheme, host and port) and the path segment by segment; a
@@ -42,10 +44,12 @@ pub enum OwnKind {
     /// it ([`Classifier::sign_in`]).
     EntraSignIn,
     /// The account's own Trouter (push channel) session: authenticating its own endpoint's socket. Only a run that
-    /// calls allows it ([`crate::fence_ws::FrameClassifier::calling`], `crate::calling`).
+    /// calls or chats allows it ([`crate::fence_ws::FrameClassifier::calling`],
+    /// [`crate::fence_ws::FrameClassifier::messaging`], `crate::calling`).
     TrouterSession,
     /// Registering the account's own endpoint (its Trouter URL) with the registrar, which makes it reachable. Only a
-    /// run that calls allows it ([`Classifier::calling`], `crate::calling`).
+    /// run that calls allows it for both stacks ([`Classifier::calling`]); a run that chats, for the messaging stack's
+    /// endpoint only ([`Classifier::messaging`], `crate::calling`).
     EndpointRegistration,
     /// Reading the account's own settings and policies from the middle tier, which takes the names to read as a
     /// `POST` body. The calling stack stays off until it knows the calling policy. Only a run that calls allows it
@@ -169,6 +173,8 @@ pub struct Classifier {
     writes: bool,
     /// Whether the calling stack's own-state passes and call starts are mapped ([`Classifier::calling`]).
     calling: bool,
+    /// Whether the messaging stack's endpoint registration passes ([`Classifier::messaging`]).
+    messaging: bool,
     /// The participant the web client's test call is for: the echo service `lab.toml` approves.
     test_call_callee: Option<Mri>,
 }
@@ -193,6 +199,7 @@ impl Classifier {
             own,
             writes: false,
             calling: false,
+            messaging: false,
             test_call_callee: None,
         }
     }
@@ -215,6 +222,18 @@ impl Classifier {
     pub fn calling() -> Self {
         Self {
             calling: true,
+            ..Self::mapped()
+        }
+    }
+
+    /// The write mapping ([`Classifier::mapped`]) plus the messaging stack's endpoint registration
+    /// (`crate::calling::messaging_request`: the account's own messaging endpoint, never the calling stack's), so its
+    /// chat events reach its Trouter socket. What a run that chats over the push channel (`ab-trouter`) uses, with
+    /// [`crate::fence_ws::FrameClassifier::messaging`].
+    #[must_use]
+    pub fn messaging() -> Self {
+        Self {
+            messaging: true,
             ..Self::mapped()
         }
     }
@@ -261,6 +280,11 @@ impl Classifier {
         };
         if let Some(rule) = self.own.iter().find(|rule| rule.matches(&method, &url)) {
             return Classification::Own(rule.kind);
+        }
+        if self.messaging
+            && let Some(kind) = crate::calling::messaging_request(&method, &url, body)
+        {
+            return Classification::Own(kind);
         }
         if self.calling {
             if let Some(kind) = crate::calling::own_request(&method, &url, body) {

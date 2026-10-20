@@ -1,0 +1,90 @@
+{
+  "_synthetic": "Made up, shaped like the registrar registrations in the ab-trouter capture of 2026-10-20 (read locally; docs/protocol/trouter.md): each stack's registration of its own Trouter endpoint, with what Classifier::messaging makes of it (expected), and the registrar's answer. The request carries Authorization: Bearer (an ic3 token), X-MS-Migration: True and X-Ms-Test-User: False. Ids, endpoint names, the token and the client version are made up; <guid:N> stands for a made-up GUID the test fills in.",
+  "answer": {
+    "status": 202,
+    "body": ""
+  },
+  "cases": [
+    {
+      "name": "the messaging stack's endpoint",
+      "method": "POST",
+      "url": "https://teams.microsoft.com/registrar/prod/V2/registrations",
+      "body": {
+        "clientDescription": {
+          "appId": "TeamsCDLWebWorker",
+          "aesKey": "",
+          "languageId": "en-US",
+          "platform": "chrome",
+          "templateKey": "TeamsCDLWebWorker_2.6",
+          "platformUIVersion": "1/1"
+        },
+        "registrationId": "<guid:1>",
+        "nodeId": "",
+        "transports": {
+          "TROUTER": [
+            {
+              "context": "",
+              "path": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/",
+              "ttl": 3600
+            }
+          ]
+        }
+      },
+      "expected": "own:endpoint_registration"
+    },
+    {
+      "name": "the messaging stack's endpoint from a newer client, on the other origin",
+      "method": "POST",
+      "url": "https://teams.cloud.microsoft/registrar/prod/V2/registrations",
+      "body": {
+        "clientDescription": {
+          "appId": "TeamsCDLWebWorker",
+          "aesKey": "",
+          "languageId": "en-US",
+          "platform": "chrome",
+          "templateKey": "TeamsCDLWebWorker_2.7",
+          "platformUIVersion": "1/2"
+        },
+        "registrationId": "<guid:2>",
+        "nodeId": "",
+        "transports": {
+          "TROUTER": [
+            {
+              "context": "",
+              "path": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000B/",
+              "ttl": 3600
+            }
+          ]
+        }
+      },
+      "expected": "own:endpoint_registration"
+    },
+    {
+      "name": "the calling stack's endpoint (its own socket): never in a run that only chats",
+      "method": "POST",
+      "url": "https://teams.microsoft.com/registrar/prod/V2/registrations",
+      "body": {
+        "clientDescription": {
+          "appId": "SkypeSpacesWeb",
+          "aesKey": "",
+          "languageId": "en-US",
+          "platform": "chrome",
+          "templateKey": "SkypeSpacesWeb_2.6",
+          "platformUIVersion": "1/1"
+        },
+        "registrationId": "<guid:3>",
+        "nodeId": "",
+        "transports": {
+          "TROUTER": [
+            {
+              "context": "",
+              "path": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000C/",
+              "ttl": 3600
+            }
+          ]
+        }
+      },
+      "expected": "unknown"
+    }
+  ]
+}

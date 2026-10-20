@@ -194,8 +194,11 @@ impl FrameRule {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FrameClassifier {
     own: Vec<FrameRule>,
-    /// Whether the calling stack's own-state frames pass ([`FrameClassifier::calling`]).
-    calling: bool,
+    /// Whether the Trouter session's own-state frames pass ([`FrameClassifier::calling`],
+    /// [`FrameClassifier::messaging`]).
+    trouter: bool,
+    /// Whether the client's own `user.activity` is held back ([`FrameClassifier::without_activity`]).
+    no_activity: bool,
 }
 
 impl FrameClassifier {
@@ -211,9 +214,32 @@ impl FrameClassifier {
     #[must_use]
     pub fn calling() -> Self {
         Self {
-            calling: true,
+            trouter: true,
             ..Self::seeded()
         }
+    }
+
+    /// The seeded list plus the Trouter session's own-state frames ([`crate::calling::trouter_frame`]: authenticate,
+    /// keep-alives, the client's own `user.activity`, the loss acknowledgement, the disconnect): what a run that chats
+    /// over the push channel (`ab-trouter`) needs. The same frames as [`FrameClassifier::calling`]; what sets the two
+    /// runs apart is which endpoint each may register ([`crate::classify::Classifier::messaging`]). Responses to
+    /// deliveries stay unknown (`docs/protocol/trouter.md`).
+    #[must_use]
+    pub fn messaging() -> Self {
+        Self {
+            trouter: true,
+            ..Self::seeded()
+        }
+    }
+
+    /// The same classifier, but every `user.activity` event is [`Classification::Unknown`] (denied): what
+    /// `ab-trouter-quiet` uses to see whether the service treats an endpoint that never reports its activity
+    /// differently (`docs/protocol/trouter.md`). It only takes away; an own-state rule ([`FrameClassifier::with_own`])
+    /// still passes what it matches.
+    #[must_use]
+    pub fn without_activity(mut self) -> Self {
+        self.no_activity = true;
+        self
     }
 
     /// The same list plus one more own-state rule. Tests use it to stand a local socket in for a Microsoft one.
@@ -231,7 +257,10 @@ impl FrameClassifier {
             return Classification::Own(rule.kind);
         }
         match &frame.payload {
-            Payload::Text(text) if self.calling => {
+            Payload::Text(text) if self.no_activity && crate::calling::is_activity_event(text) => {
+                Classification::Unknown
+            }
+            Payload::Text(text) if self.trouter => {
                 crate::calling::trouter_frame(&frame.url, text).map_or(Classification::Unknown, Classification::Own)
             }
             _ => Classification::Unknown,

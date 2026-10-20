@@ -294,7 +294,7 @@ impl Steps<'_> {
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-fn deny_probes(session: &LabSession, probe: &str) -> Result<(), ScenarioError> {
+pub(crate) fn deny_probes(session: &LabSession, probe: &str) -> Result<(), ScenarioError> {
     let any_url = |method| ForcedDeny::new(method, ".").map_err(|error| setup(error.to_string()));
     for method in ["POST", "PUT"] {
         session.force_deny(any_url(method)?.with_body_containing(probe).labelled(THIS_RUN_PROBE));
@@ -344,7 +344,12 @@ pub async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), Scen
 /// this run's rule ([`THIS_RUN_PROBE`]), a message post to the a–b chat (`chat` finds its id in the URL: the evidence
 /// that a's compose box belongs to that chat) after it was sent, and that very post, found by its `Network` id, must
 /// fail in a's page as blocked by the fence.
-async fn enforce(a: &LabSession, drive_a: &mut Driver, probe: &str, chat: &Regex) -> Result<(), ScenarioError> {
+pub(crate) async fn enforce(
+    a: &LabSession,
+    drive_a: &mut Driver,
+    probe: &str,
+    chat: &Regex,
+) -> Result<(), ScenarioError> {
     let message_post = Regex::new(MESSAGE_POST).map_err(|error| setup(error.to_string()))?;
     let this_run = |denial: &Denial| {
         denial.cause == DenyCause::Forced

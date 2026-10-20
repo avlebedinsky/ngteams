@@ -119,7 +119,7 @@ fn path_matches(pattern: &str, path: &str) -> bool {
 }
 
 /// The web client's own origins.
-const TEAMS: Hosts = Hosts::Exact(&["teams.microsoft.com", "teams.cloud.microsoft"]);
+pub const TEAMS: Hosts = Hosts::Exact(&["teams.microsoft.com", "teams.cloud.microsoft"]);
 
 const MIDDLE_TIER: &str = "a middle-tier lookup the client posts (profiles, settings, policies, entitlements): no \
                            state changes, and the scenario reads the chat from the chat service, not from these";
@@ -392,6 +392,8 @@ pub struct Review {
     forced: &'static [&'static str],
     /// Each finds a mapped target of the scenario in a URL.
     mapped: Vec<Regex>,
+    /// Classes this scenario expects besides the list ([`Review::expecting_requests`]).
+    requests: &'static [ExpectedRequest],
 }
 
 impl Review {
@@ -401,6 +403,7 @@ impl Review {
         Self {
             forced: &[],
             mapped: Vec::new(),
+            requests: &[],
         }
     }
 
@@ -408,6 +411,14 @@ impl Review {
     #[must_use]
     pub const fn expecting_forced(mut self, labels: &'static [&'static str]) -> Self {
         self.forced = labels;
+        self
+    }
+
+    /// Expects the denies of these classes too, under the same conditions as the list's: classes only one scenario
+    /// meets (`ab-trouter`'s calling-stack registration and presence, which come up only once the push channel is).
+    #[must_use]
+    pub const fn expecting_requests(mut self, requests: &'static [ExpectedRequest]) -> Self {
+        self.requests = requests;
         self
     }
 
@@ -429,7 +440,7 @@ impl Review {
         }
         denial.cause == DenyCause::Unclassified
             && !self.mapped.iter().any(|names| names.is_match(&denial.url))
-            && request_class(denial).is_some()
+            && (request_class(denial).is_some() || self.requests.iter().any(|entry| entry.covers(denial)))
     }
 
     /// Whether `denial` is expected: a frame on a listed socket, denied as [`DenyCause::Unclassified`].

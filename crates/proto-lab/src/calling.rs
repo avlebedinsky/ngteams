@@ -17,6 +17,12 @@
 //! call that exists (adding a participant, acknowledgements, leaving) stay unknown: the fence can't read a call's
 //! members yet (`docs/backlog/fence-call-follow-ups.md`).
 //!
+//! A run that chats (M1 Task 14, `docs/protocol/trouter.md`) uses a narrower **messaging set**: the same Trouter
+//! session frames ([`trouter_frame`], `user.activity` included: the account shows online while the client runs,
+//! accepted by the user) and the registration of the messaging stack's endpoint only ([`messaging_request`],
+//! [`MESSAGING_APP`]), never the calling stack's, no settings reads and no call. Deliveries stay unanswered in both
+//! sets.
+//!
 //! Every recognizer reads the whole frame or body strictly ([`crate::classify`]'s reader: one JSON value, no two keys
 //! alike in any case) and answers `None` for anything off the reviewed shape, which the fence then denies as unknown.
 
@@ -122,6 +128,10 @@ const EFFECTIVE_POLICIES: [&str; 37] = [
 
 /// The registrar's path for an endpoint's registration.
 const REGISTRATIONS: &str = "/registrar/prod/V2/registrations";
+
+/// The app the messaging stack registers its endpoint as (`clientDescription.appId`), and the start of its template
+/// (`templateKey`, `TeamsCDLWebWorker_<version>`). The calling stack registers as `SkypeSpacesWeb`.
+pub const MESSAGING_APP: &str = "TeamsCDLWebWorker";
 
 /// What a text frame on a socket at `url` is to a run that calls: [`OwnKind::TrouterSession`] for the Trouter
 /// session's own frames (see the module docs), `None` for anything else.
@@ -235,6 +245,14 @@ fn is_authenticate(json: &str) -> bool {
         })
 }
 
+/// Whether a text frame is an acknowledged event named `user.activity`, whatever its argument: what
+/// [`crate::fence_ws::FrameClassifier::without_activity`] holds back, to see how the service treats an endpoint that
+/// never reports its activity.
+#[must_use]
+pub fn is_activity_event(text: &str) -> bool {
+    acknowledged_event(text).is_some_and(|event| event.get("name").and_then(Value::as_str) == Some("user.activity"))
+}
+
 /// Whether `object` has every key of `required`, no key outside `required` and `optional`, and only strings.
 fn exactly_strings(object: &Map<String, Value>, required: &[&str], optional: &[&str]) -> bool {
     required.iter().all(|key| object.contains_key(*key))
@@ -273,6 +291,41 @@ pub fn own_request(method: &str, url: &Url, body: Option<&[u8]>) -> Option<OwnKi
         Settings::Policies => is_name_list(body),
     };
     read.then_some(OwnKind::SettingsRead)
+}
+
+/// What a mutating request is to a run that chats ([`crate::classify::Classifier::messaging`]), on the web client's
+/// origins: [`OwnKind::EndpointRegistration`] for registering the **messaging** stack's endpoint only (the reviewed
+/// registration whose app is [`MESSAGING_APP`] and whose template is `TeamsCDLWebWorker_<version>`), so the account's
+/// chat events reach its Trouter socket. Never the calling stack's (`SkypeSpacesWeb`), which makes the account
+/// reachable for calls; nothing else (`None`).
+#[must_use]
+pub fn messaging_request(method: &str, url: &Url, body: Option<&[u8]>) -> Option<OwnKind> {
+    let teams = TEAMS_ORIGINS.contains(&url.origin().ascii_serialization().as_str());
+    if method != "POST" || !teams || url.path() != REGISTRATIONS {
+        return None;
+    }
+    let body = body?;
+    (is_registration(body) && registers_messaging(body)).then_some(OwnKind::EndpointRegistration)
+}
+
+/// Whether a registration ([`is_registration`]) describes the messaging stack: its app exactly [`MESSAGING_APP`], its
+/// template [`MESSAGING_APP`], `_` and a version of digits and dots.
+fn registers_messaging(body: &[u8]) -> bool {
+    let Some(registration) = strict_json(body) else {
+        return false;
+    };
+    let field = |key| {
+        registration
+            .pointer(&format!("/clientDescription/{key}"))
+            .and_then(Value::as_str)
+    };
+    let version = field("templateKey")
+        .and_then(|template| template.strip_prefix(MESSAGING_APP))
+        .and_then(|rest| rest.strip_prefix('_'));
+    field("appId") == Some(MESSAGING_APP)
+        && version.is_some_and(|version| {
+            !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+        })
 }
 
 /// The account's own settings, which the middle tier answers to a `POST` naming what to read.
