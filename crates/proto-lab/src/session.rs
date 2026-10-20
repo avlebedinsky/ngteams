@@ -565,6 +565,29 @@ impl LabSession {
     /// When Chrome isn't installed, the fence, the live source or the capture can't be made, or the browser can't be
     /// launched or armed (it is killed then).
     pub async fn open_with(paths: &LabPaths, alias: Alias, options: SessionOptions) -> Result<Self, SessionError> {
+        Self::open_armed(paths, alias, options, None).await
+    }
+
+    /// [`Self::open`], with the HTTP layer also catching the authorization redirect ([`RedirectCatch`]; `proto-lab
+    /// auth` only).
+    ///
+    /// # Errors
+    /// As [`Self::open_with`].
+    pub async fn open_catching(
+        paths: &LabPaths,
+        alias: Alias,
+        classifier: Classifier,
+        catch: RedirectCatch,
+    ) -> Result<Self, SessionError> {
+        Self::open_armed(paths, alias, SessionOptions::fail_closed(classifier), Some(catch)).await
+    }
+
+    async fn open_armed(
+        paths: &LabPaths,
+        alias: Alias,
+        options: SessionOptions,
+        catch: Option<RedirectCatch>,
+    ) -> Result<Self, SessionError> {
         let chrome = ChromeBuild::pinned().executable(&paths.chrome_dir());
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
@@ -579,6 +602,10 @@ impl LabSession {
             let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
             let http = HttpFence::new(options.classifier, Arc::clone(&fence), Arc::clone(&members));
             (members, http)
+        };
+        let http = match catch {
+            Some(catch) => http.with_redirect_catch(catch),
+            None => http,
         };
         let guard = GuardScript::generate().map_err(SessionError::Guard)?;
         let ws = WsFence::new(FrameClassifier::seeded(), fence, members, guard);

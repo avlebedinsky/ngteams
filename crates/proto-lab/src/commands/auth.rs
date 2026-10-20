@@ -212,7 +212,7 @@ async fn redirect_through_profile(
     timeout: Duration,
 ) -> Result<(Secret, FenceReport), AuthError> {
     let (catch, mut caught) = RedirectCatch::new(&entra.authorize_endpoint(), entra.redirect_uri())?;
-    let mut session = LabSession::open_with(paths, alias, Classifier::seeded(), Some(catch)).await?;
+    let mut session = LabSession::open_catching(paths, alias, Classifier::seeded(), catch).await?;
     let redirect = within(timeout, async {
         session.navigate(authorization.url()).await?;
         wait_for_redirect(&mut session, &mut caught).await
