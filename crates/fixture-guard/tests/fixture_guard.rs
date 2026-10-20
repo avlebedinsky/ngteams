@@ -182,6 +182,26 @@ fn a_meetings_join_credentials_are_detected() {
             "{\"body\":\"Passcode:\u{a0}<span class=\\\"x\\\">Qx7Rt2</span>\"}",
             Kind::Passcode,
         ),
+        // A passcode of letters only, of either case.
+        (r#"{"passcode":"aBcDeF"}"#, Kind::Passcode),
+        ("<p>Passcode: <b>kwbxpq</b></p>", Kind::Passcode),
+        // An invitation in another language, its labels as the bundle's locale strings spell them.
+        ("Code secret\u{a0}: <span>hTqWmz</span>", Kind::Passcode),
+        ("Секретный код собрания: pqrstu", Kind::Passcode),
+        ("会議のパスコード: AbCdEf", Kind::Passcode),
+        ("Kod dostępu: XyZwQp", Kind::Passcode),
+        // A meeting's code after its label, in any of those languages.
+        ("<p>Meeting ID: <span>355 123 456 789</span></p>", Kind::MeetingId),
+        ("Besprechungs-ID: 355 123 456 789", Kind::MeetingId),
+        ("ID de la réunion\u{a0}: 366222333444", Kind::MeetingId),
+        ("Идентификатор собрания: 377 111 222 333", Kind::MeetingId),
+        ("Conference ID: 987654321#", Kind::MeetingId),
+        // A join link's passcode behind an escaped `&`, the code already a placeholder.
+        (r"/meet/<meeting:1>?anon=true\u0026p=hQzRtW", Kind::MeetingLink),
+        (r"/meet/<meeting:1>?anon=true\x26p=hQzRtW", Kind::MeetingLink),
+        ("/meet/<meeting:1>?anon=true&#38;p=hQzRtW", Kind::MeetingLink),
+        ("/meet/<meeting:1>?anon=true&#x26;p=hQzRtW", Kind::MeetingLink),
+        (r"/meet/<meeting:1>?anon=true\\u0026p=hQzRtW", Kind::MeetingLink),
     ];
     assert_detected(&Guard::new().unwrap(), &cases);
 }
@@ -212,6 +232,9 @@ fn placeholders_and_prose_pass() {
         "a `/meet/` link's `p` parameter is its passcode",
         r#"{"passcode":"<token:1>","isPasscodeRequired":true,"passcodeLength":"short"}"#,
         "Passcode: <b><token:3></b>, the passcode: required",
+        r#"{"passcodePolicy":"enabled","passcode":"none","meetingPw":"null"}"#,
+        "Meeting ID: <meeting:1>, Besprechungs-ID: <meeting:2>, the meeting ID: 12345",
+        r"/meet/<meeting:1>?anon=true\u0026p=<token:1>",
     ];
     let guard = Guard::new().unwrap();
     for text in clean {

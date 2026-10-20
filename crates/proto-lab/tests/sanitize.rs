@@ -530,6 +530,7 @@ fn the_fixture_guard_finds_nothing_in_a_sanitized_capture() {
             Kind::Email,
             Kind::Guid,
             Kind::Jwt,
+            Kind::MeetingId,
             Kind::MeetingLink,
             Kind::Mri,
             Kind::OauthToken,
@@ -711,6 +712,31 @@ const CYRILLIC_NAME: &str = "Дмитрий Иванов";
 const COMMA_NAME: &str = "Doe, Jane";
 /// A name only ever seen in a form body, `+` for its space.
 const FORM_ONLY_NAME: &str = "Odalys Quennell";
+/// A dotted display name that ends in a two-letter label, which is no domain.
+const DOTTED_NAME: &str = "mirela.wu";
+/// A meeting whose passcode has no digit, its link, and the same passcode on its own in free text.
+const ALPHA_CODE: &str = "2468013579135";
+const ALPHA_PASSCODE: &str = "ZqNBBm";
+/// A meeting whose passcode only shows one layer of decoding after its code: in raw text, `&` escaped as `\u0026`.
+const LATE_CODE: &str = "3579246801357";
+const LATE_PASSCODE: &str = "hQzRtW";
+/// A French invitation, its labels as the bundle's locale strings spell them (a no-break space before the colon).
+const FRENCH_CODE: &str = "366 222 333 444";
+const FRENCH_PASSCODE: &str = "hTqWmz";
+
+fn alpha_link() -> String {
+    format!("https://teams.microsoft.com/meet/{ALPHA_CODE}?anon=true&p={ALPHA_PASSCODE}")
+}
+
+fn late_link() -> String {
+    format!(r"https://teams.microsoft.com/meet/{LATE_CODE}?anon=true\u0026p={LATE_PASSCODE}")
+}
+
+fn french_invitation() -> String {
+    format!(
+        "<div>ID de la réunion\u{a0}: <span>{FRENCH_CODE}</span></div><div>Code secret\u{a0}: <span>{FRENCH_PASSCODE}</span></div>"
+    )
+}
 
 /// Percent-encodes every byte but the unreserved ones (as `encodeURIComponent` does, and a little more).
 fn enc(text: &str) -> String {
@@ -794,6 +820,35 @@ fn planted() -> Vec<(&'static str, String, Vec<String>)> {
             meeting_link(),
             vec![MEETING_CODE.to_owned(), MEETING_PASSCODE.to_owned()],
         ),
+        // a passcode of letters only, in a link and again on its own in free text
+        (
+            "joinUrl",
+            alpha_link(),
+            vec![ALPHA_CODE.to_owned(), ALPHA_PASSCODE.to_owned()],
+        ),
+        (
+            "text",
+            format!("use {ALPHA_PASSCODE} to join"),
+            vec![ALPHA_PASSCODE.to_owned()],
+        ),
+        // a passcode that shows one layer of decoding after its code
+        (
+            "text",
+            late_link(),
+            vec![LATE_CODE.to_owned(), LATE_PASSCODE.to_owned()],
+        ),
+        // an invitation in French
+        (
+            "body",
+            french_invitation(),
+            vec![
+                FRENCH_CODE.to_owned(),
+                FRENCH_CODE.replace(' ', ""),
+                FRENCH_PASSCODE.to_owned(),
+            ],
+        ),
+        // the first name of a dotted display name (`mirela.wu`, learned from JSON)
+        ("text", "Thanks Mirela".to_owned(), vec!["mirela".to_owned()]),
     ]
 }
 
@@ -804,6 +859,7 @@ fn encoded_capture() -> Vec<Value> {
         json!({"type": "response_body", "body": json!({"displayName": ACCENTED_NAME}).to_string()}),
         json!({"type": "response_body", "body": json!({"value": [{"displayName": COMMA_NAME}]}).to_string()}),
         json!({"type": "request_body", "postData": format!("displayName={}&next=1", form_enc(FORM_ONLY_NAME))}),
+        json!({"type": "response_body", "body": json!({"displayName": DOTTED_NAME}).to_string()}),
     ];
     for (key, value, _) in planted() {
         let query = format!("https://svc.example.invalid/p?{key}={}&next=1", enc(&value));
@@ -1099,7 +1155,140 @@ fn a_meetings_code_and_passcode_are_found_under_their_keys_in_invitations_and_ev
     assert_eq!(Guard::new().unwrap().scan_text(&as_jsonl(&out)), []);
 }
 
+#[test]
+fn a_passcode_of_letters_only_is_learned_and_replaced_everywhere() {
+    let events = [
+        json!({"joinUrl": format!("https://teams.microsoft.com/meet/{MEETING_CODE}?p=aBcDeF")}),
+        json!({"meetingData": {"passcode": "ZqNBBm"}}),
+        json!({"body": "<p>Meeting ID: 355 123 456 789<br>Passcode: <b>kwbxpq</b></p>"}),
+        json!({"content": "Use aBcDeF to join, or ZqNBBm, or KWBXPQ"}),
+        // a status word under a passcode's key is redacted where it is, and nowhere else
+        json!({"passcodePolicy": "required", "meetingPasscode": "enabled", "text": "required and enabled"}),
+        // a learned passcode that is a host's label too: the host would be destroyed, so the export refuses
+        json!({"url": "https://abcdef.example.test/x"}),
+    ];
+    let sanitized = sanitize_capture(&events, &Identities::default()).unwrap();
+    assert_eq!(sanitized.name_in_host, [6]);
+    let out = sanitized.events;
+    assert_eq!(
+        out[0]["joinUrl"],
+        "https://teams.microsoft.com/meet/<meeting:1>?p=<token:1>"
+    );
+    assert_eq!(out[3]["content"], "Use <token:1> to join, or <token:2>, or <token:3>");
+    assert_eq!(out[4]["text"], "required and enabled");
+    assert_eq!(Guard::new().unwrap().scan_text(&as_jsonl(&out)), []);
+    // the guard finds each passcode of letters only that the sanitizer would have left
+    let guard = Guard::new().unwrap();
+    for raw in [&events[1], &events[2]] {
+        let kinds: Vec<Kind> = guard
+            .scan_text(&raw.to_string())
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .collect();
+        assert!(kinds.contains(&Kind::Passcode), "{raw}: {kinds:?}");
+    }
+}
+
+#[test]
+fn an_invitation_in_another_language_gives_up_its_code_and_passcode() {
+    let legacy = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0?context=%7b%7d";
+    let events = [
+        // German and Russian, their labels as the bundle's locale strings spell them
+        json!({"body": "<p>Besprechungs-ID: 355 123 456 789<br>Passcode: QxbRtz</p>"}),
+        json!({"body": "Идентификатор собрания: 377 111 222 333\nСекретный код: pqrstu"}),
+        json!({"body": french_invitation()}),
+        // labels no list has, in an invitation with a join link that holds neither code nor passcode
+        json!({"body": format!(
+            "<a href=\"{legacy}\">Join</a><br><span>Besprechungsnummer: 388 999 000 111</span><br><span>Kennung: <b>WxYzAb</b></span><br><span>Ort: Online</span>"
+        )}),
+        json!({"text": format!(
+            "codes 355123456789 377111222333 {} 388999000111, passcodes QxbRtz pqrstu {FRENCH_PASSCODE} WxYzAb",
+            FRENCH_CODE.replace(' ', "")
+        )}),
+        // a value that may be a word, given away only by the structure: replaced after a label, not as a word
+        json!({"note": "Ort: Online", "status": "online"}),
+    ];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    assert_eq!(
+        out[0]["body"],
+        "<p>Besprechungs-ID: <meeting:1><br>Passcode: <token:1></p>"
+    );
+    assert_eq!(
+        out[1]["body"],
+        "Идентификатор собрания: <meeting:2>\nСекретный код: <token:2>"
+    );
+    assert_eq!(
+        out[2]["body"],
+        "<div>ID de la réunion\u{a0}: <span><meeting:3></span></div><div>Code secret\u{a0}: <span><token:3></span></div>"
+    );
+    assert_eq!(
+        out[3]["body"],
+        "<a href=\"https://teams.microsoft.com/l/meetup-join/19%3a<thread:1>%40thread.v2/0?context=%7b%7d\">Join</a><br><span>Besprechungsnummer: <meeting:4></span><br><span>Kennung: <b><token:4></b></span><br><span>Ort: <token:5></span>"
+    );
+    assert_eq!(
+        out[4]["text"],
+        "codes <meeting:1> <meeting:2> <meeting:3> <meeting:4>, passcodes <token:1> <token:2> <token:3> <token:4>"
+    );
+    assert_eq!(out[5], json!({"note": "Ort: <token:5>", "status": "online"}));
+    let guard = Guard::new().unwrap();
+    assert_eq!(guard.scan_text(&as_jsonl(&out)), []);
+    // the guard finds the localized labels' values the sanitizer would have left
+    for raw in &events[..3] {
+        let kinds: Vec<Kind> = guard
+            .scan_text(&raw.to_string())
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .collect();
+        assert!(kinds.contains(&Kind::MeetingId), "{raw}: {kinds:?}");
+        assert!(kinds.contains(&Kind::Passcode), "{raw}: {kinds:?}");
+    }
+}
+
+#[test]
+fn a_passcode_a_layer_after_its_code_is_replaced_and_found_by_the_guard() {
+    // raw text, not JSON: its `&` is escaped as `\u0026`
+    let events = [json!({"text": format!("join at {} now", late_link())})];
+    let out = sanitize_events(&events, &Identities::default()).unwrap();
+    assert_eq!(
+        out[0]["text"],
+        r"join at https://teams.microsoft.com/meet/<meeting:1>?anon=true\u0026p=<token:1> now"
+    );
+    let guard = Guard::new().unwrap();
+    assert_eq!(guard.scan_text(&as_jsonl(&out)), []);
+    // a sanitizer that took only the code leaves a link the guard refuses, in each form of its `&`
+    for left in [
+        r"/meet/<meeting:1>?anon=true\u0026p=hQzRtW",
+        r"/meet/<meeting:1>?anon=true\x26p=hQzRtW",
+        "/meet/<meeting:1>?anon=true&#38;p=hQzRtW",
+        "/meet/<meeting:1>?anon=true&#x26;p=hQzRtW",
+    ] {
+        let kinds: Vec<Kind> = guard.scan_text(left).into_iter().map(|(_, kind)| kind).collect();
+        assert_eq!(kinds, [Kind::MeetingLink], "{left}");
+    }
+}
+
 // --- names and hosts ---
+
+#[test]
+fn a_dotted_display_name_is_a_name_and_not_a_domain() {
+    let events = [
+        json!({"displayName": "jane.wu"}),
+        json!({"displayName": "Mei.Li"}),
+        json!({"displayName": "Ann Doe.CA"}),
+        json!({"displayName": "Lab (lab.example.org)"}),
+        json!({"text": "Thanks Jane, Mei, Ann and Doe; see https://www.example.org/x"}),
+    ];
+    let out = sanitize_capture(&events, &Identities::default()).unwrap();
+    assert_eq!(
+        out.events[4]["text"],
+        "Thanks <name:1>, <name:2>, <name:3> and <name:3>; see https://www.example.org/x"
+    );
+    assert_eq!(out.name_in_host, Vec::<usize>::new());
+    assert_eq!(check_names(&out.names, &as_jsonl(&out.events)), []);
+    // the export's check knows the first name too
+    let names = names_in(&[json!({"displayName": "jane.wu"})]).unwrap();
+    assert_eq!(check_names(&names, "{\"text\":\"Thanks Jane\"}\n").len(), 1);
+}
 
 /// Every URL of `urls` in `text`, as often as `times`.
 fn assert_urls_intact(text: &str, urls: &[&str], times: usize) {

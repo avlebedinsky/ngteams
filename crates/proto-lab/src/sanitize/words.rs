@@ -3,12 +3,15 @@
 //!
 //! A name value's words are its runs of letters and digits of [`MIN_WORD`] characters or more, apart from those of a
 //! part that is an identifier: an email or UPN (`jane.doe@contoso.com`), an MRI (`8:orgid:…`, `28:…`, `tel:…`), a URL,
-//! a GUID, or a domain (`lab.example.org`). The identifier rules replace those whole; their pieces (`com`, `contoso`,
-//! `orgid`) are no person's name, and learning them would replace every host and path that holds them. A run of digits
-//! alone is no word of a name either.
+//! a GUID, or a host name (`lab.example.org`: three labels or more, lowercase, the last a top-level domain of the
+//! Public Suffix List). The identifier rules replace those whole; their pieces (`com`, `contoso`, `orgid`) are no
+//! person's name, and learning them would replace every host and path that holds them. A dotted part that may be a
+//! person's (`jane.wu`, `Mei.Li`, `Doe.CA`) gives its words, but never a lowercase last label that is a top-level
+//! domain (`contoso.com` gives `contoso`; a host that holds it is then refused by the export, not left). A run of
+//! digits alone is no word of a name either.
 //!
-//! A host is a run of letters, digits, `-` and `.` whose last label is a top-level domain ([`TLDS`] or any two
-//! letters). One under [`PUBLIC_DOMAINS`] (`teams.microsoft.com`, `login.microsoftonline.com`) is a public protocol
+//! A host in a text is a run of letters, digits, `-` and `.` whose last label is a top-level domain (of the Public
+//! Suffix List, a reserved one, or any two letters). One under [`PUBLIC_DOMAINS`] (`teams.microsoft.com`, `login.microsoftonline.com`) is a public protocol
 //! host: its labels are never a name's (a group called "Microsoft Teams" doesn't make `teams.microsoft.com` a name),
 //! so the sanitizer leaves them and the check doesn't look in them. A lookalike that only holds one
 //! (`teams.microsoft.com.example.test`) isn't one.
@@ -62,43 +65,26 @@ const PUBLIC_DOMAINS: [&str; 37] = [
     "trouter.io",
 ];
 
-/// Top-level domains a host may end in, besides every two-letter one; the reserved and local ones included.
-const TLDS: [&str; 26] = [
-    "com",
-    "net",
-    "org",
-    "edu",
-    "gov",
-    "mil",
-    "int",
-    "info",
-    "biz",
-    "io",
-    "ai",
-    "app",
-    "dev",
-    "cloud",
-    "microsoft",
-    "office",
-    "live",
-    "skype",
-    "azure",
-    "test",
-    "example",
-    "invalid",
-    "localhost",
-    "local",
-    "internal",
-    "arpa",
-];
+/// Top-level domains of names reserved for tests, documentation and local networks, which the Public Suffix List
+/// doesn't hold.
+const RESERVED_TLDS: [&str; 6] = ["test", "example", "invalid", "localhost", "local", "internal"];
 
 /// The words of a name value (see the module docs).
 pub(super) fn learnable_words(name: &str) -> Vec<&str> {
     name.split(is_part_break)
         .filter(|part| !is_identifier(part))
-        .flat_map(|part| part.split(|char: char| !char.is_alphanumeric()))
+        .flat_map(|part| without_host_tld(part).split(|char: char| !char.is_alphanumeric()))
         .filter(|word| word.chars().count() >= MIN_WORD && !word.chars().all(|char| char.is_ascii_digit()))
         .collect()
+}
+
+/// A dotted part of a name without its last label when that is a top-level domain written as a host writes one
+/// (lowercase: `contoso.com` gives `contoso`), so a name never teaches `com` and rewrites every host that ends in it.
+fn without_host_tld(part: &str) -> &str {
+    match part.trim_end_matches(TRAILING).rsplit_once('.') {
+        Some((rest, last)) if !last.bytes().any(|byte| byte.is_ascii_uppercase()) && is_known_tld(last) => rest,
+        _ => part,
+    }
 }
 
 /// What separates the parts of a name: spaces, brackets, quotes and list punctuation, never `.`, `@`, `:`, `/` or `-`,
@@ -111,16 +97,29 @@ fn is_part_break(char: char) -> bool {
         )
 }
 
-/// Whether a part of a name is an identifier: an email, an MRI, a URL, a GUID or a domain.
+/// Punctuation around a part of a name that is no part of an identifier in it.
+const TRAILING: [char; 5] = ['.', '\'', '!', '?', ':'];
+
+/// Whether a part of a name is an identifier: an email, an MRI, a URL, a GUID or a host name.
 fn is_identifier(part: &str) -> bool {
-    let part = part.trim_matches(|char: char| matches!(char, '.' | '\'' | '!' | '?' | ':'));
+    let part = part.trim_matches(TRAILING);
     let email = part
         .rsplit_once('@')
         .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'));
     let mri = part.split_once(':').is_some_and(|(prefix, rest)| {
         !rest.is_empty() && (prefix.eq_ignore_ascii_case("tel") || prefix.bytes().all(|byte| byte.is_ascii_digit()))
     });
-    email || mri || part.contains("://") || has_guid(part) || is_domain(part)
+    email || mri || part.contains("://") || has_guid(part) || is_host_name(part)
+}
+
+/// Whether a dotted part of a name is a host name and no person's dotted name: three labels or more, written as a
+/// host writes them (lowercase), the last a known top-level domain (`lab.example.org`). A name may hold dots too, and
+/// one of two labels (`jane.wu`, `mei.li`, `Doe.CA`) or one with capitals (`Jane.Doe.HR`) is a person's, so its
+/// words are learned: when unsure, a word too many is replaced, never a name left.
+fn is_host_name(part: &str) -> bool {
+    let labels: Vec<&str> = part.split('.').collect();
+    let lowercase = !part.bytes().any(|byte| byte.is_ascii_uppercase());
+    labels.len() >= 3 && lowercase && is_domain(part) && labels.last().is_some_and(|last| is_known_tld(last))
 }
 
 /// Whether `text` holds a GUID (`8-4-4-4-12` hex digits).
@@ -132,7 +131,8 @@ fn has_guid(text: &str) -> bool {
         })
 }
 
-/// Whether `token` is a domain: labels of letters, digits and `-`, at least two, the last a top-level domain.
+/// Whether `token` is shaped as a domain: labels of letters, digits and `-`, at least two, the last one of letters,
+/// two of them or a known top-level domain. Broad on purpose: it finds the hosts in a text (see the module docs).
 fn is_domain(token: &str) -> bool {
     let labels: Vec<&str> = token.split('.').collect();
     let well_formed = labels
@@ -142,8 +142,18 @@ fn is_domain(token: &str) -> bool {
 }
 
 fn is_tld(label: &str) -> bool {
+    let letters = label.bytes().all(|byte| byte.is_ascii_alphabetic());
+    letters && (label.len() == 2 || is_known_tld(label))
+}
+
+/// Whether `label` is a top-level domain of the Public Suffix List (ICANN's and the reserved ones above), in any case.
+fn is_known_tld(label: &str) -> bool {
     let lower = label.to_ascii_lowercase();
-    lower.bytes().all(|byte| byte.is_ascii_lowercase()) && (lower.len() == 2 || TLDS.contains(&lower.as_str()))
+    let shaped = !lower.is_empty() && lower.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    let listed = || {
+        psl::suffix(lower.as_bytes()).is_some_and(|suffix| suffix.is_known() && suffix.as_bytes() == lower.as_bytes())
+    };
+    shaped && (RESERVED_TLDS.contains(&lower.as_str()) || listed())
 }
 
 fn is_public(host: &str) -> bool {

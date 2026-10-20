@@ -1,12 +1,13 @@
 //! The fixture guard: scans files meant for the repository (sanitized fixtures, docs) for what must never be committed,
 //! such as JWTs, `Bearer` and skypetoken values, OAuth tokens, email addresses, real MRIs, GUIDs (other than
 //! Microsoft's public app ids), signed URLs' signatures, and Teams meetings' join credentials (a join link's code or
-//! `p` passcode, a passcode under its key or label). It is the backstop behind the sanitizer: what the sanitizer
-//! misses fails the export instead of being committed.
+//! `p` passcode, a meeting id or a passcode under its key or label, in any language Teams writes an invitation in:
+//! [`labels`]). It is the backstop behind the sanitizer: what the sanitizer misses fails the export instead of being
+//! committed.
 //!
-//! Each line is scanned twice: as written, and decoded the way captures hide text, with `%XX` percent escapes decoded
-//! (`8%3Aorgid%3A…`, `someone%40contoso.com`) and backslash escapes of a JSON string body removed
-//! (`{"body":"{\"refresh_token\":…}"}`).
+//! Each line is scanned twice: as written, and decoded the way captures hide text, layer after layer: `%XX` percent
+//! escapes (`8%3Aorgid%3A…`, `someone%40contoso.com`), backslash escapes of a JSON or JavaScript string (`\"`,
+//! `\u0026`, `\x26`) and HTML character references (`&amp;`, `&#38;`, `&#x26;`, `&nbsp;`).
 //!
 //! Sanitized placeholders (`<user:a>`,`<mri:b>`, `<guid:1>`, `<token:1>`) and prose that only names these things pass.
 //! A finding reports where and what, never the matched value, so the report itself cannot leak it.
@@ -17,9 +18,14 @@
 use std::fmt;
 use std::fs;
 use std::io;
+use std::iter;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
+
+pub mod labels;
+
+use self::labels::{Label, Labels, is_passcode_value};
 
 /// What a finding looks like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,8 +51,12 @@ pub enum Kind {
     /// A Teams meeting join link that still holds its code (`/meet/1234567890123`, also under `/v2/meet/`, `/lm/meet/`)
     /// or a passcode (`p=` in the query of a `/meet/`, `/l/meetup-join/` or `/l/meetnow-join` link), on any host.
     MeetingLink,
-    /// A meeting passcode under its key or label (`"passcode":"…"`, `meetingPw=…`, an invitation's `Passcode: …`,
-    /// HTML tags between): 4 to 64 letters and digits, a digit among them.
+    /// A meeting's code (6 digits or more, in groups or not) after its label in any language Teams writes an
+    /// invitation in (`Meeting ID: 355 123 456 789`, `Besprechungs-ID: …`, `"conferenceId":"…"`; [`labels`]).
+    MeetingId,
+    /// A meeting passcode under its key or label in any of those languages (`"passcode":"…"`, `meetingPw=…`, an
+    /// invitation's `Passcode: …` or `Code secret : …`, HTML tags between): 4 to 64 letters and digits of any mix,
+    /// other than a literal or a setting ([`labels::NOT_A_PASSCODE`]).
     Passcode,
 }
 
@@ -82,8 +92,6 @@ impl fmt::Display for Finding {
 const GUID: &str = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 /// A token-shaped value: 20 or more URL-safe base64/JWT characters. Placeholders start with `<`, so they never match.
 const VALUE: &str = r"[A-Za-z0-9._\-]{20,}";
-/// An HTML tag between a label and its value (`</span><span class="x">`), never a placeholder (`<token:1>`).
-const TAG: &str = r"</?[A-Za-z][A-Za-z0-9]*(?:\s[^<>]*)?/?>";
 /// The shortest meeting code in a link.
 const MEETING_CODE_MIN: usize = 6;
 /// Reserved documentation domains (RFC 2606), which a fixture or doc may use freely.
@@ -93,6 +101,8 @@ const RESERVED_DOMAINS: [&str; 3] = ["example.com", "example.org", "example.net"
 #[derive(Debug)]
 pub struct Guard {
     rules: Vec<(Kind, Regex)>,
+    /// The values after labels: [`Kind::MeetingId`] and [`Kind::Passcode`].
+    labels: Labels,
 }
 
 impl Guard {
@@ -136,18 +146,15 @@ impl Guard {
                 r#"(?i)/(?:(?:v2/|lm/)?meet/([A-Za-z0-9]*)|l/meet(?:up|now)-join\b)((?:[^\s"'<>\\`]|<[a-z]+:[A-Za-z0-9]+>)*)"#
                     .to_owned(),
             ),
-            (
-                Kind::Passcode,
-                format!(
-                    r#"(?i)(?:passcode|meetingpw)["']?(?:\s|{TAG})*[:=](?:\s|["']|{TAG}|&nbsp;)*([A-Za-z0-9]{{4,64}})\b"#
-                ),
-            ),
         ];
         let rules = patterns
             .into_iter()
             .map(|(kind, pattern)| Regex::new(&pattern).map(|regex| (kind, regex)))
             .collect::<Result<_, _>>()?;
-        Ok(Self { rules })
+        Ok(Self {
+            rules,
+            labels: Labels::new()?,
+        })
     }
 
     /// Every hit in `text`, as (1-based line, kind), at most one per kind and line, in line order. A line is checked
@@ -157,17 +164,32 @@ impl Guard {
         let mut found = Vec::new();
         for (index, line) in text.lines().enumerate() {
             let decoded = decode(line);
+            let forms = iter::once(line).chain(decoded.as_deref());
             for (kind, regex) in &self.rules {
-                if matches_line(*kind, regex, line)
-                    || decoded
-                        .as_deref()
-                        .is_some_and(|decoded| matches_line(*kind, regex, decoded))
-                {
+                if forms.clone().any(|form| matches_line(*kind, regex, form)) {
                     found.push((index + 1, *kind));
+                }
+            }
+            for kind in [Kind::MeetingId, Kind::Passcode] {
+                if forms.clone().any(|form| self.labelled(kind, form)) {
+                    found.push((index + 1, kind));
                 }
             }
         }
         found
+    }
+
+    /// Whether `line` holds a meeting's code after its label ([`Kind::MeetingId`]) or a passcode after its label or key
+    /// ([`Kind::Passcode`]: a whole run of letters and digits, one cut short by a letter of another script is none).
+    fn labelled(&self, kind: Kind, line: &str) -> bool {
+        self.labels.values(line).iter().any(|value| match (kind, value.label) {
+            (Kind::MeetingId, Label::MeetingId) => true,
+            (Kind::Passcode, Label::Passcode) => {
+                let whole = !line[value.value.end..].starts_with(char::is_alphanumeric);
+                whole && is_passcode_value(&line[value.value.clone()])
+            }
+            _ => false,
+        })
     }
 
     /// Scans each root, a file or a directory walked recursively, and returns every hit in path order. Symlinks are
@@ -216,10 +238,9 @@ fn at(path: &Path, error: &io::Error) -> io::Error {
 /// How many nested encodings are peeled off at most (`%253A` → `%3A` → `:`).
 const DECODE_ROUNDS: usize = 4;
 
-/// `line` with percent escapes decoded and backslash escapes removed, repeated until nothing changes, or `None` when
-/// the line has neither.
+/// `line` decoded (see [`decode_once`]), repeated until nothing changes, or `None` when the line has no escape.
 fn decode(line: &str) -> Option<String> {
-    if !line.contains(['%', '\\']) {
+    if !line.contains(['%', '\\', '&']) {
         return None;
     }
     let mut current = line.to_owned();
@@ -233,38 +254,96 @@ fn decode(line: &str) -> Option<String> {
     Some(current)
 }
 
-/// One decoding pass: `%XX` becomes its byte; a backslash is dropped, and `\n`, `\r`, `\t` become a space so the words
-/// around them stay apart.
+/// One decoding pass: `%XX` becomes its byte; `\uXXXX` (a surrogate pair too) and `\xXX` their character, `\n`,
+/// `\r` and `\t` a space so the words around them stay apart, and any other backslash is dropped; an HTML character
+/// reference (`&amp;`, `&#38;`, `&#x26;`, `&nbsp;`) becomes its character.
 fn decode_once(line: &str) -> String {
     let bytes = line.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while let Some(&byte) = bytes.get(i) {
-        match byte {
-            b'%' => {
-                if let (Some(high), Some(low)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
-                    out.push(high << 4 | low);
-                    i += 3;
-                } else {
-                    out.push(byte);
-                    i += 1;
-                }
-            }
-            b'\\' => {
-                if matches!(bytes.get(i + 1), Some(b'n' | b'r' | b't')) {
-                    out.push(b' ');
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => {
-                out.push(byte);
-                i += 1;
-            }
-        }
+        let escape = match byte {
+            b'%' => percent(bytes, i),
+            b'\\' => Some(backslash(line, i)),
+            b'&' => reference(line, i),
+            _ => None,
+        };
+        let (decoded, len) = escape.unwrap_or_else(|| (vec![byte], 1));
+        out.extend_from_slice(&decoded);
+        i += len;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A percent escape at `at`: its byte, and its length.
+fn percent(bytes: &[u8], at: usize) -> Option<(Vec<u8>, usize)> {
+    let (high, low) = (hex(bytes.get(at + 1))?, hex(bytes.get(at + 2))?);
+    Some((vec![high << 4 | low], 3))
+}
+
+/// A backslash escape at `at`: what it stands for, and its length.
+fn backslash(line: &str, at: usize) -> (Vec<u8>, usize) {
+    let rest = &line[at + 1..];
+    let escaped = match rest.as_bytes().first() {
+        Some(b'n' | b'r' | b't') => Some((' ', 1)),
+        Some(b'u') => unicode_escape(rest),
+        Some(b'x') => hex_number(rest.get(1..3))
+            .and_then(|value| u8::try_from(value).ok())
+            .map(|value| (char::from(value), 3)),
+        _ => None,
+    };
+    match escaped {
+        Some((char, len)) => (char.to_string().into_bytes(), 1 + len),
+        None => (Vec::new(), 1),
+    }
+}
+
+/// The character of a `uXXXX` escape (`rest` starts at the `u`), a surrogate pair (`uD83D\uDE00`) as one, and how
+/// much of `rest` it takes.
+fn unicode_escape(rest: &str) -> Option<(char, usize)> {
+    let unit = hex_number(rest.get(1..5))?;
+    if !(0xD800..0xDC00).contains(&unit) {
+        return char::from_u32(unit).map(|char| (char, 5));
+    }
+    let low = rest
+        .get(5..7)
+        .filter(|escape| *escape == "\\u")
+        .and_then(|_| hex_number(rest.get(7..11)))
+        .filter(|low| (0xDC00..0xE000).contains(low))?;
+    char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)).map(|char| (char, 11))
+}
+
+/// The value of a run of hex digits, `None` for anything else.
+fn hex_number(digits: Option<&str>) -> Option<u32> {
+    let digits = digits.filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
+    u32::from_str_radix(digits, 16).ok()
+}
+
+/// An HTML character reference at `at`: its character, and its length.
+fn reference(line: &str, at: usize) -> Option<(Vec<u8>, usize)> {
+    let rest = &line[at + 1..];
+    let end = rest.bytes().take(10).position(|byte| byte == b';')?;
+    let body = &rest[..end];
+    let char = match body {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => char::from(0xa0_u8),
+        _ => {
+            let number = body.strip_prefix('#')?;
+            let value = match number.strip_prefix(['x', 'X']) {
+                Some(digits) => hex_number(Some(digits))?,
+                None => number
+                    .parse()
+                    .ok()
+                    .filter(|_| number.bytes().all(|byte| byte.is_ascii_digit()))?,
+            };
+            char::from_u32(value)?
+        }
+    };
+    Some((char.to_string().into_bytes(), end + 2))
 }
 
 /// The value of an ASCII hex digit.
@@ -286,11 +365,6 @@ fn matches_line(kind: Kind, regex: &Regex, line: &str) -> bool {
                 .get(1)
                 .is_some_and(|code| is_meeting_code(code.as_str(), &line[code.end()..]));
             code || captures.get(2).is_some_and(|rest| has_passcode(rest.as_str()))
-        }),
-        Kind::Passcode => regex.captures_iter(line).any(|captures| {
-            captures
-                .get(1)
-                .is_some_and(|value| value.as_str().bytes().any(|byte| byte.is_ascii_digit()))
         }),
         _ => regex.is_match(line),
     }

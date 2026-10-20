@@ -51,7 +51,7 @@ pub enum ExportError {
     #[error("a name found in the capture is still in the sanitized text, nothing was written: {}", name_findings(.0))]
     NameLeft(Vec<NameFinding>),
     #[error(
-        "a name found in the capture is also a label of a host, which replacing it would destroy, nothing was written: {}",
+        "a name or passcode found in the capture is also a label of a host, which replacing it would destroy, nothing was written: {}",
         events(.0)
     )]
     NameInHost(Vec<usize>),

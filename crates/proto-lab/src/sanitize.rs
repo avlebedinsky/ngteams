@@ -12,9 +12,11 @@
 //!   (base64 bodies that aren't UTF-8 text, binary WebSocket frames in CDP events and in the fence's verdicts, `bytes`)
 //!   becomes `<binary:LEN>`.
 //! - **Teams meetings** (`sanitize/meeting.rs`): a join link's passcode (`/meet/<code>?p=…`) and any passcode under its
-//!   key or an invitation's label become `<token:N>`; the meeting's code (its numeric id, in the link, under
-//!   `meetingCode`/`joinMeetingId`/`*conferenceId`, after `Meeting ID:`) `<meeting:N>`. Both are learned across the
-//!   capture and replaced wherever else they show.
+//!   key or an invitation's label become `<token:N>`, of letters only too; the meeting's code (its numeric id, in the
+//!   link, under `meetingCode`/`joinMeetingId`/`*conferenceId`, after `Meeting ID:`) `<meeting:N>`. Invitations are
+//!   read in every language Teams writes them in, and by their structure next to a join link. Both are learned across
+//!   the capture (at every layer of encoding, so a passcode that only shows a layer after its code is learned too) and
+//!   replaced wherever else they show.
 //! - **Identifiers become placeholders**: emails `<user:N>`, MRIs `<mri:N>` (`8:orgid:…`, `8:live:…`, `28:…`, phone
 //!   `4:…`, `tel:`), conversation ids `19:<thread:N>@thread.v2`, GUIDs `<guid:N>`, tenant domains
 //!   (`*.onmicrosoft.com`, `*.sharepoint.com`, the lab's own) `<domain:N>`, IP addresses other than loopback `<ip:N>`,
@@ -344,8 +346,8 @@ struct State {
     found_names: HashMap<String, String>,
     names_regex: Option<Regex>,
     names_changed: bool,
-    /// How many times a name was replaced inside a host that isn't a public one (`words.rs`): sanitizing did destroy
-    /// that host, and the export refuses ([`Sanitized::name_in_host`]).
+    /// How many times a name or a learned passcode was replaced inside a host that isn't a public one (`words.rs`):
+    /// sanitizing did destroy that host, and the export refuses ([`Sanitized::name_in_host`]).
     name_in_host: usize,
     /// Meetings' codes (`meeting.rs`).
     meetings: Table,
@@ -353,6 +355,9 @@ struct State {
     codes: HashSet<String>,
     /// The passcodes learned: lowercased, with the passcode as found.
     passcodes: HashMap<String, String>,
+    /// Values that may be words (`Online`) that only an invitation's structure gave away (`meeting.rs`), lowercased:
+    /// replaced where they follow a label, not everywhere.
+    weak_passcodes: HashSet<String>,
     passcodes_regex: Option<Regex>,
     passcodes_changed: bool,
 }
@@ -528,7 +533,9 @@ impl Sanitizer {
             (Mode::Code | Mode::NumericCode, Value::String(_) | Value::Number(_)) => {
                 self.state.learn_code(&scalar_text(value));
             }
-            (Mode::Passcode, Value::String(_) | Value::Number(_)) => self.state.learn_passcode(&scalar_text(value)),
+            (Mode::Passcode, Value::String(_) | Value::Number(_)) if meeting::names_passcode(key) => {
+                self.state.learn_passcode(&scalar_text(value));
+            }
             (_, Value::String(text)) if base64 && is_body_key(key) => {
                 if let Some(text) = base64_text(text) {
                     self.learn(&Value::String(text));
@@ -721,8 +728,8 @@ pub fn sanitize_events(events: &[Value], identities: &Identities) -> Result<Vec<
 pub struct Sanitized {
     pub events: Vec<Value>,
     pub names: LearnedNames,
-    /// The events (from 1) where a name was replaced inside a host other than a public protocol host
-    /// (`https://<name:1>.example.test/`): the host is gone, so the export refuses rather than write it.
+    /// The events (from 1) where a name or a learned passcode was replaced inside a host other than a public protocol
+    /// host (`https://<name:1>.example.test/`): the host is gone, so the export refuses rather than write it.
     pub name_in_host: Vec<usize>,
 }
 

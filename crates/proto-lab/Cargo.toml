@@ -12,6 +12,7 @@ clap.workspace = true
 fixture-guard.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
+psl.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rustix.workspace = true

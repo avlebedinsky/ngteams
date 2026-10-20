@@ -50,8 +50,9 @@ nothing unless no word (3 characters or more) of a name found in the capture is 
 encoding, and the fixture guard passes it. A word of a name that is also an ordinary word left anywhere refuses the
 export too; a name never seen under a name field, or a shorter word, is outside that check. A word of a name that is
 also a label of a host (other than a public Microsoft protocol host such as `teams.microsoft.com`, which is never taken
-for a name) refuses it as well, rather than writing the host destroyed. Teams meeting codes and join passcodes become
-`<meeting:N>` and `<token:N>`, and the fixture guard refuses a join link or passcode left in the clear.
+for a name) refuses it as well, rather than writing the host destroyed. Teams meeting codes and join passcodes (of
+letters only too) become `<meeting:N>` and `<token:N>` wherever they show, invitations read in every language the web
+client has locale strings for, and the fixture guard refuses a join link, a meeting id or a passcode left in the clear.
 
 ## Test-only builds
 
