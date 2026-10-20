@@ -317,7 +317,37 @@ fn a_one_to_one_chat_id_names_its_two_members() {
 }
 
 #[test]
-fn a_credential_comes_only_from_a_chat_service_request_with_a_skypetoken() {
+fn a_bearer_token_on_a_chat_service_request_is_a_credential_too() {
+    let bearer = format!("Bearer {TOKEN}");
+    let lower_bearer = format!("bearer {TOKEN}");
+    let by_bearer = [("authorization", bearer.as_str())];
+    let by_lower_bearer = [("Authorization", lower_bearer.as_str())];
+    for url in [
+        AFD_REQUEST,
+        "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Anotifications",
+    ] {
+        assert!(ChatCredential::from_request(url, by_bearer).is_some(), "{url}");
+        assert!(ChatCredential::from_request(url, by_lower_bearer).is_some(), "{url}");
+    }
+    // a bearer token on any other service isn't a chat service credential
+    assert!(
+        ChatCredential::from_request(
+            "https://teams.cloud.microsoft/api/mt/part/amer-03/beta/users/",
+            by_bearer
+        )
+        .is_none()
+    );
+    assert!(
+        ChatCredential::from_request(
+            "https://teams.cloud.microsoft/api/csa/amer/api/v3/teams/users/me",
+            by_bearer
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn a_credential_comes_only_from_a_chat_service_request_with_a_token() {
     let auth = format!("skypetoken={TOKEN}");
     let by_auth = [("authentication", auth.as_str())];
     let by_header = [("X-Skypetoken", TOKEN)];
@@ -349,13 +379,25 @@ fn a_credential_comes_only_from_a_chat_service_request_with_a_skypetoken() {
     for url in refused {
         assert!(ChatCredential::from_request(url, by_auth).is_none(), "{url}");
     }
-    // the token has to be a skypetoken in a header this crate reads, and token-shaped
-    let bearer = format!("Bearer {TOKEN}");
+    // the token has to be in a header this crate reads, in its scheme, and token-shaped
+    let basic = format!("Basic {TOKEN}");
+    let bare = TOKEN.to_owned();
+    let bearer_in_authentication = format!("Bearer {TOKEN}");
     let short = "skypetoken=abc";
+    let short_bearer = "Bearer abc";
     let injected = format!("skypetoken={TOKEN}\r\nX-Other: 1");
+    let injected_bearer = format!("Bearer {TOKEN}\r\nX-Other: 1");
     let spaced = format!("skypetoken={TOKEN} extra");
+    let spaced_bearer = format!("Bearer {TOKEN} extra");
+    let skype_in_authorization = format!("skypetoken={TOKEN}");
     for headers in [
-        vec![("Authorization", bearer.as_str())],
+        vec![("Authorization", basic.as_str())],
+        vec![("Authorization", bare.as_str())],
+        vec![("Authorization", short_bearer)],
+        vec![("Authorization", injected_bearer.as_str())],
+        vec![("Authorization", spaced_bearer.as_str())],
+        vec![("Authorization", skype_in_authorization.as_str())],
+        vec![("Authentication", bearer_in_authentication.as_str())],
         vec![("Authentication", short)],
         vec![("Authentication", injected.as_str())],
         vec![("Authentication", spaced.as_str())],
@@ -394,6 +436,42 @@ async fn the_read_goes_to_the_credentials_region_and_the_regional_host_has_no_pr
             "{request}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bearer_credential_reads_with_the_bearer_token_and_never_shows() -> TestResult {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/chatsvc/amer/v1/threads/{}", chat_id())))
+        .and(query_param("view", "msnp24Equivalent"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(thread()?))
+        .mount(&server)
+        .await;
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    let bearer = format!("Bearer {TOKEN}");
+    let credential = ChatCredential::from_request(
+        "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Anotifications",
+        [("Accept", "*/*"), ("Authorization", bearer.as_str())],
+    )
+    .ok_or("no credential")?;
+    let shown = format!("{credential:?}");
+    assert!(!shown.contains(TOKEN), "{shown}");
+    assert!(shown.contains("Bearer"), "{shown}");
+    source.set_credential(credential);
+    assert_eq!(
+        source.members(&chat()).await,
+        Membership::Complete(vec![mri(GUID_A), mri(GUID_B)])
+    );
+    // the mock answers only a read that carries the bearer token: the request sent no skypetoken
+    let requests = server.received_requests().await.ok_or("no recording")?;
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.headers.contains_key("authentication")),
+        "a skypetoken header was sent"
+    );
     Ok(())
 }
 

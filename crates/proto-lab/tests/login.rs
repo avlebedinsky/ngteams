@@ -329,6 +329,69 @@ fn the_web_client_has_loaded_once_its_authz_exchange_succeeds_on_teams() {
 }
 
 #[test]
+fn a_client_with_a_cached_skypetoken_has_loaded_once_a_service_read_succeeds() {
+    // no authz exchange: the client still held a skypetoken from an earlier run and went straight to its services
+    const CSA: &str = "https://teams.cloud.microsoft/api/csa/amer/api/v1/teams/users/me/pinnedChannels";
+    const CHATSVC: &str = "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/48%3Anotifications";
+    for url in [CSA, CHATSVC] {
+        let events = [
+            navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+            request(PAGE, "s1", "GET", url, &json!({})),
+            response(PAGE, "s1", url, 200),
+        ];
+        assert_eq!(watch(&events[..2]).state(), SessionState::Loading, "{url}");
+        assert_eq!(watch(&events).state(), SessionState::Loaded, "{url}");
+    }
+    // a failed read, a read of another service, a write, or a read from before the last navigation proves nothing
+    let not_loaded = [
+        vec![
+            navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+            request(PAGE, "s1", "GET", CHATSVC, &json!({})),
+            response(PAGE, "s1", CHATSVC, 404),
+        ],
+        vec![
+            navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+            request(
+                PAGE,
+                "s1",
+                "GET",
+                "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/tenantsv2",
+                &json!({}),
+            ),
+            response(
+                PAGE,
+                "s1",
+                "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/tenantsv2",
+                200,
+            ),
+        ],
+        vec![
+            navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+            request(PAGE, "s1", "PUT", CHATSVC, &json!({})),
+            response(PAGE, "s1", CHATSVC, 200),
+        ],
+        vec![
+            navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+            request(PAGE, "s1", "GET", CSA, &json!({})),
+            navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+            response(PAGE, "s1", CSA, 200),
+        ],
+    ];
+    for events in not_loaded {
+        assert_eq!(watch(&events).state(), SessionState::Loading);
+    }
+    // a refused authz still reads as a refusal, whatever else answered
+    let refused = [
+        navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),
+        request(PAGE, "r1", "POST", AUTHZ, &json!({})),
+        response(PAGE, "r1", AUTHZ, 403),
+        request(PAGE, "s1", "GET", CSA, &json!({})),
+        response(PAGE, "s1", CSA, 200),
+    ];
+    assert_eq!(watch(&refused).state(), SessionState::Refused(403));
+}
+
+#[test]
 fn an_authz_exchange_from_a_worker_counts_too() {
     let events = [
         navigated(PAGE, MAIN, None, "https://teams.microsoft.com/v2/"),

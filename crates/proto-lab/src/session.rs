@@ -2,9 +2,10 @@
 //! fence, and what its events say about the session.
 //!
 //! [`SessionWatch`] reads the connection's events (from [`crate::arming::ArmedBrowser::watch`]) and tells:
-//! - **loaded**: the page's main frame is on Teams and the web client's authz exchange (its access token for a
-//!   skypetoken, an own-state request the fence lets through) succeeded in that document, which the client does only
-//!   with a working session;
+//! - **loaded**: the page's main frame is on Teams and, in that document, the web client's authz exchange (its access
+//!   token for a skypetoken, an own-state request the fence lets through) succeeded, or a read of the chat service or
+//!   CSA did (a client holding a cached skypetoken skips authz) with no authz refused; the client does either only with
+//!   a working session;
 //! - **refused**: the main frame is on Teams, but Teams forbade the exchange (403) and hasn't allowed one since: a
 //!   signed-in account Teams won't serve, such as one without a Teams license (the web client then offers a trial). An
 //!   expired token (401) isn't a refusal: the client refreshes it and asks again. [`Settling`] gives a refusal
@@ -22,7 +23,7 @@
 //! (`LiveMembershipSource`, fed the account's chat service credential from the page's own requests). A run can also be
 //! recorded as a capture ([`SessionOptions::capture`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -157,6 +158,11 @@ pub struct SessionWatch {
     /// The method of every authz request seen since the main frame's last navigation, by session and request id. An
     /// answer to a request from before it belongs to the document that went away, and doesn't count.
     authz_requests: HashMap<(Option<SessionId>, String), String>,
+    /// How many reads of the chat service or CSA ([`is_service_read`]) succeeded since the main frame's last navigation:
+    /// any means the client works with tokens it already had (a cached skypetoken skips authz).
+    service_reads_ok: usize,
+    /// Every such read seen since the main frame's last navigation, by session and request id.
+    service_requests: HashSet<(Option<SessionId>, String)>,
     /// How many documents the main frame has committed.
     documents: u64,
     identities: Vec<Identity>,
@@ -175,6 +181,8 @@ impl SessionWatch {
             authz_forbidden: false,
             last_authz: None,
             authz_requests: HashMap::new(),
+            service_reads_ok: 0,
+            service_requests: HashSet::new(),
             documents: 0,
             identities: Vec::new(),
         }
@@ -213,6 +221,8 @@ impl SessionWatch {
         self.authz_ok = false;
         self.authz_forbidden = false;
         self.authz_requests.clear();
+        self.service_reads_ok = 0;
+        self.service_requests.clear();
         self.documents += 1;
     }
 
@@ -230,10 +240,13 @@ impl SessionWatch {
                 request["url"].as_str(),
                 request["method"].as_str(),
             )
-            && is_authz(url)
         {
             let key = (event.session_id.clone(), id.to_owned());
-            self.authz_requests.insert(key, method.to_ascii_uppercase());
+            if is_authz(url) {
+                self.authz_requests.insert(key, method.to_ascii_uppercase());
+            } else if method.eq_ignore_ascii_case("GET") && is_service_read(url) {
+                self.service_requests.insert(key);
+            }
         }
     }
 
@@ -242,12 +255,18 @@ impl SessionWatch {
             return;
         };
         let key = (event.session_id.clone(), id.to_owned());
-        if self.authz_requests.get(&key).is_none_or(|method| method != "POST") {
-            return;
-        }
         let Some(Ok(status)) = event.params["response"]["status"].as_u64().map(u16::try_from) else {
             return;
         };
+        if self.service_requests.contains(&key) {
+            if (200..=299).contains(&status) {
+                self.service_reads_ok += 1;
+            }
+            return;
+        }
+        if self.authz_requests.get(&key).is_none_or(|method| method != "POST") {
+            return;
+        }
         self.last_authz = Some(status);
         match status {
             200..=299 => self.authz_ok = true,
@@ -260,7 +279,9 @@ impl SessionWatch {
     #[must_use]
     pub fn state(&self) -> SessionState {
         match &self.place {
-            Place::Teams if self.authz_ok => SessionState::Loaded,
+            Place::Teams if self.authz_ok || (self.service_reads_ok > 0 && !self.authz_forbidden) => {
+                SessionState::Loaded
+            }
             Place::Teams if self.authz_forbidden => SessionState::Refused(FORBIDDEN),
             Place::SignIn if self.stopped => SessionState::SignInShown,
             Place::Other(host) if self.stopped => SessionState::Elsewhere(host.clone()),
@@ -324,6 +345,18 @@ impl Settling {
 /// Whether `url` is one of Teams' authz endpoints.
 fn is_authz(url: &str) -> bool {
     Classifier::seeded().classify("POST", url, None) == Classification::Own(OwnKind::Authz)
+}
+
+/// Whether `url` is a read the web client makes only with a working session: the chat service or the chat service
+/// aggregator (CSA) on a Teams origin, `https://<teams origin>/api/{chatsvc,csa}/…`. An account Teams refuses never
+/// gets that far (no skypetoken, no service tokens' use).
+fn is_service_read(url: &str) -> bool {
+    let Ok(url) = Url::parse(url) else {
+        return false;
+    };
+    let origin = url.origin().ascii_serialization();
+    TEAMS_ORIGINS.contains(&origin.as_str())
+        && (url.path().starts_with("/api/chatsvc/") || url.path().starts_with("/api/csa/"))
 }
 
 /// The identity in a request's `Authorization: Bearer` token, if it is a JWT with the claims.

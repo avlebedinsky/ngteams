@@ -437,12 +437,18 @@ fn the_credential_is_taken_only_from_a_chat_service_request_that_carries_one() -
     let live = Arc::new(LiveMembershipSource::new()?);
     let http = HttpFence::new(Classifier::mapped(), Arc::new(fence(&[])), live.clone()).with_credentials(live.clone());
     let auth = json!({"Authentication": format!("skypetoken={TOKEN}")});
+    // the web client sends the chat service an Entra bearer token (2026-10-20 capture), the middle tier one too
+    let bearer = json!({"authorization": format!("Bearer {TOKEN}")});
     for (url, headers) in [
         ("https://teams.microsoft.com/api/mt/emea/beta/users/", &auth),
+        (
+            "https://teams.cloud.microsoft/api/mt/part/amer-03/beta/users/tenantsv2",
+            &bearer,
+        ),
         ("https://example.com/api/chatsvc/emea/v1/users/ME/conversations", &auth),
         (
             "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations",
-            &json!({"Authorization": format!("Bearer {TOKEN}")}),
+            &json!({"Authorization": format!("Basic {TOKEN}")}),
         ),
     ] {
         http.offer_credential(&paused_params("GET", url, headers));
@@ -454,6 +460,15 @@ fn the_credential_is_taken_only_from_a_chat_service_request_that_carries_one() -
         &auth,
     ));
     assert!(live.has_credential());
+    let by_bearer = Arc::new(LiveMembershipSource::new()?);
+    HttpFence::new(Classifier::mapped(), Arc::new(fence(&[])), by_bearer.clone())
+        .with_credentials(by_bearer.clone())
+        .offer_credential(&paused_params(
+            "GET",
+            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Anotifications",
+            &bearer,
+        ));
+    assert!(by_bearer.has_credential());
     // a fence without `with_credentials` takes none
     let other = Arc::new(LiveMembershipSource::new()?);
     let plain = HttpFence::new(Classifier::mapped(), Arc::new(fence(&[])), other.clone());

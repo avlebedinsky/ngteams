@@ -3,8 +3,9 @@
 //! [`LiveMembershipSource`] owns the whole read: it builds the request from the [`Scope`] (the scope id is one
 //! encoded path segment), sends it with its own HTTPS client (no proxy, no redirects, a fixed allowlist of chat
 //! service hosts, no caller-chosen path or query) and parses the answer. The caller supplies only the lab account's
-//! credential ([`ChatCredential`]), taken from a request the armed lab page itself sent to the chat service: the
-//! skypetoken and the chat service base that request went to. A made-up credential gets a 401 and a deny; nothing the
+//! credential ([`ChatCredential`]), taken from a request the armed lab page itself sent to the chat service: its token
+//! (an Entra bearer token, as the web client sends today, or a skypetoken) and the chat service base that request went
+//! to. A made-up credential gets a 401 and a deny; nothing the
 //! caller supplies can make up a member list.
 //!
 //! **What is supported** (M0 Task 11, from the web bundle; see `docs/protocol/fence-targets.md`): only 1:1 chats,
@@ -118,11 +119,23 @@ fn is_region(region: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-/// The lab account's chat service credential: the skypetoken a request of the armed lab page carried, and the chat
-/// service base that request went to. `Debug` never shows the token, and it is wiped when dropped.
+/// How a chat service request carried its token, and so how the live read sends it back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scheme {
+    /// `Authentication: skypetoken=<token>` (or `X-Skypetoken: <token>`): the skypetoken from authz.
+    Skype,
+    /// `Authorization: Bearer <token>`: an Entra access token for the chat service. The web client seen on 2026-10-20
+    /// sends one (audience `https://ic3.teams.office.com`) on every chat service request, and no skypetoken there.
+    Bearer,
+}
+
+/// The lab account's chat service credential: the token a request of the armed lab page carried (a skypetoken or an
+/// Entra bearer token, see [`ChatCredential::from_request`]), and the chat service base that request went to. `Debug`
+/// never shows the token, and it is wiped when dropped.
 #[derive(Clone)]
 pub struct ChatCredential {
     base: ChatBase,
+    scheme: Scheme,
     token: Zeroizing<String>,
 }
 
@@ -134,6 +147,7 @@ impl fmt::Debug for ChatCredential {
         };
         f.debug_struct("ChatCredential")
             .field("base", &base)
+            .field("scheme", &self.scheme)
             .field("token", &"<redacted>")
             .finish()
     }
@@ -141,28 +155,50 @@ impl fmt::Debug for ChatCredential {
 
 impl ChatCredential {
     /// The credential of one request the page sent, given its URL and headers: `Some` only for a request to the chat
-    /// service (an allowed host and path, see [`AFD_HOSTS`] and [`REGIONAL_SUFFIX`]) that carries a skypetoken, as
-    /// `Authentication: skypetoken=<token>` or `X-Skypetoken: <token>` (header names in any case). Every other header
-    /// is ignored: this crate decides how the token is sent.
+    /// service (an allowed host and path, see [`AFD_HOSTS`] and [`REGIONAL_SUFFIX`]) that carries a token: a
+    /// skypetoken as `Authentication: skypetoken=<token>` or `X-Skypetoken: <token>`, or an Entra access token as
+    /// `Authorization: Bearer <token>` (the scheme word in any case). Header names in any case; the first header that
+    /// carries a token wins. Every other header is ignored: this crate decides how the token is sent back, in the form
+    /// the page used.
     pub fn from_request<'a>(url: &str, headers: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<Self> {
         let (base, _) = ChatBase::split(&Url::parse(url).ok()?)?;
-        let token = headers.into_iter().find_map(|(name, value)| {
+        let (scheme, token) = headers.into_iter().find_map(|(name, value)| {
+            let value = value.trim();
             if name.eq_ignore_ascii_case("authentication") {
-                value.trim().strip_prefix("skypetoken=")
+                value.strip_prefix("skypetoken=").map(|token| (Scheme::Skype, token))
             } else if name.eq_ignore_ascii_case("x-skypetoken") {
-                Some(value.trim())
+                Some((Scheme::Skype, value))
+            } else if name.eq_ignore_ascii_case("authorization") {
+                let (word, token) = value.split_once(' ')?;
+                word.eq_ignore_ascii_case("bearer").then_some((Scheme::Bearer, token))
             } else {
                 None
             }
         })?;
         is_token(token).then(|| Self {
             base,
+            scheme,
             token: Zeroizing::new(token.to_owned()),
         })
     }
+
+    /// The header the live read sends the token in, in the page's form: its name and value.
+    fn header(&self) -> (&'static str, Zeroizing<String>) {
+        match self.scheme {
+            Scheme::Skype => (
+                "Authentication",
+                Zeroizing::new(format!("skypetoken={}", self.token.as_str())),
+            ),
+            Scheme::Bearer => (
+                "Authorization",
+                Zeroizing::new(format!("Bearer {}", self.token.as_str())),
+            ),
+        }
+    }
 }
 
-/// A skypetoken: a JWT, so URL-safe base64 and dots, and nothing that could break out of a header.
+/// A token: a JWT (a skypetoken or an Entra access token), so URL-safe base64 and dots, and nothing that could break
+/// out of a header.
 fn is_token(token: &str) -> bool {
     (20..=16 * 1024).contains(&token.len())
         && token
@@ -275,13 +311,14 @@ impl LiveMembershipSource {
         }
     }
 
-    /// One GET with the skypetoken, its body read up to [`MAX_BODY`]; the client's timeout covers the whole read.
+    /// One GET with the credential's token, its body read up to [`MAX_BODY`]; the client's timeout covers the whole
+    /// read.
     async fn fetch(&self, url: Url, credential: &ChatCredential) -> Result<Vec<u8>, PartialReason> {
-        let header = Zeroizing::new(format!("skypetoken={}", credential.token.as_str()));
+        let (name, value) = credential.header();
         let mut response = self
             .client
             .get(url)
-            .header("Authentication", header.as_str())
+            .header(name, value.as_str())
             .header("Accept", "application/json")
             .send()
             .await

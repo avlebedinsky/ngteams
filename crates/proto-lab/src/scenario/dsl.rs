@@ -18,6 +18,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use base64::Engine as _;
 use regex::Regex;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -479,8 +480,26 @@ impl Driver {
         }
     }
 
+    /// A PNG of what the tab shows now, for a failed run's diagnosis. It shows the page as the account sees it (names,
+    /// messages), so it belongs in the run's capture dir, never in the repository.
+    ///
+    /// # Errors
+    /// When the browser doesn't take it or its answer isn't base64.
+    pub async fn screenshot(&self, step: &str) -> Result<Vec<u8>, StepError> {
+        let result = self
+            .call(step, "Page.captureScreenshot", json!({"format": "png"}))
+            .await?;
+        let data = result["data"].as_str().unwrap_or_default();
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|error| StepError::Failed {
+                step: step.to_owned(),
+                reason: format!("the screenshot isn't base64: {error}"),
+            })
+    }
+
     /// Evaluates `expression` in the tab's page and gives its value. An exception in the page reads as `null`.
-    async fn evaluate(&self, step: &str, expression: &str) -> Result<Value, StepError> {
+    pub(crate) async fn evaluate(&self, step: &str, expression: &str) -> Result<Value, StepError> {
         let result = self
             .call(
                 step,

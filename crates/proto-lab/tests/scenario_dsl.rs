@@ -13,7 +13,9 @@ use proto_lab::classify::{Classifier, OwnKind, OwnRule};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
 use proto_lab::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
-use proto_lab::scenario::ab_chat::{MESSAGE_POST, chat_link, message_text, probe_text};
+use proto_lab::scenario::ab_chat::{
+    MESSAGE_POST, PROBE_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id, probe_text,
+};
 use proto_lab::scenario::dsl::{Driver, RequestPattern, Selector, StepError};
 use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
 use proto_lab::session::FenceReport;
@@ -320,17 +322,53 @@ fn a_writing_scenario_expects_only_forced_and_telemetry_denies() {
     assert!(DenyPolicy::AllExpected.unexpected(&all).is_empty());
 }
 
+const LOW: &str = "8:orgid:0000000a-0000-4000-8000-000000000001";
+const HIGH: &str = "8:orgid:0000000B-0000-4000-8000-000000000002";
+const CHAT: &str = "19:0000000a-0000-4000-8000-000000000001_0000000b-0000-4000-8000-000000000002@unq.gbl.spaces";
+
+#[test]
+fn ab_chat_finds_the_one_to_one_chat_by_its_members() {
+    let (low, high, chat) = (LOW, HIGH, CHAT);
+    // the object ids sorted and lowercased, whichever account comes first
+    assert_eq!(one_to_one_id(low, high).as_deref(), Some(chat));
+    assert_eq!(one_to_one_id(high, low).as_deref(), Some(chat));
+    for (first, second) in [(low, low), (low, ""), ("28:bot", high), ("8:orgid:not-a-guid", high)] {
+        assert_eq!(one_to_one_id(first, second), None, "{first} {second}");
+    }
+    assert_eq!(
+        chat_link(high),
+        "https://teams.microsoft.com/l/chat/0/0?users=8%3Aorgid%3A0000000B-0000-4000-8000-000000000002"
+    );
+}
+
+#[test]
+fn ab_chat_knows_the_chat_in_a_url() -> TestResult {
+    let chat = CHAT;
+    let opened = chat_requests(chat)?;
+    let names = chat_url(chat)?;
+    let post = format!("https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/{chat}/messages")
+        .replace("19:", "19%3A")
+        .replace("@unq", "%40unq");
+    assert!(names.is_match(&post));
+    assert!(!names.is_match(&post.replace("0000000b", "0000000c")));
+    let plain = format!("https://teams.microsoft.com/api/chatsvc/amer/v1/threads/{chat}?view=msnp24Equivalent");
+    let encoded = plain.replace("19:", "19%3A").replace("@unq", "%40unq");
+    assert!(opened.matches("GET", &plain));
+    assert!(opened.matches("GET", &encoded));
+    assert!(!opened.matches("POST", &plain));
+    assert!(!opened.matches("GET", &plain.replace("0000000b", "0000000c")));
+    Ok(())
+}
+
 #[test]
 fn scenario_names_and_ab_chat_texts() {
     assert_eq!(ScenarioName::Load.as_str(), "load");
     assert_eq!(ScenarioName::AbChat.to_string(), "ab-chat");
-    assert_eq!(
-        chat_link("labbot2@example.com"),
-        "https://teams.microsoft.com/l/chat/0/0?users=labbot2%40example.com"
-    );
     let (probe, message) = (probe_text("n1"), message_text("n1"));
     assert!(probe.contains("n1") && message.contains("n1"));
     assert!(!message.contains(&probe) && !probe.contains(&message));
+    assert!(probe.starts_with(PROBE_MARKER));
+    assert!(!message.contains(PROBE_MARKER.trim()));
 }
 
 fn account(denials: Vec<Denial>, fence: FenceReport) -> AccountRun {
