@@ -9,8 +9,13 @@
 //! attempt may not have reached the service yet, so no sync could tell whether a second attempt sends it twice.
 //!
 //! States: `pending` → [`Store::begin_attempt`] → `sending` → [`Store::finish_attempt`] → `sent`, `denied`, `failed`
-//! (all final) or back to `pending` for a retry after `not_before`. Our message coming back (Trouter or a sync) marks
-//! its row `sent` whatever state it is in ([`Store::outbox_arrived`]).
+//! (all final) or back to `pending` for a retry after `not_before`. A check before a new attempt that couldn't be made
+//! ([`Store::check_failed`]) leaves a pending row waiting until a later `not_before`, or fails it. Our message coming
+//! back (Trouter or a sync) marks its row `sent` whatever state it is in ([`Store::outbox_arrived`]).
+//!
+//! A row's budget counts from when it was made or last resent: `attempts` counts every attempt it ever had (whether
+//! it was attempted at all), [`OutboxEntry::attempts_since_resend`] those since, and `failed_checks` the checks since
+//! that couldn't be made.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -129,8 +134,13 @@ pub struct OutboxEntry {
     pub kind: OutboxKind,
     pub payload: String,
     pub state: OutboxState,
-    /// How many attempts were begun.
+    /// How many attempts were begun, over the row's whole life (a resend included).
     pub attempts: u32,
+    /// `attempts` when the row was last resent ([`Store::resend`]); 0 for a row never resent.
+    pub attempts_at_resend: u32,
+    /// Checks before a new attempt that couldn't be made ([`Store::check_failed`]) since the row was made or last
+    /// resent.
+    pub failed_checks: u32,
     /// No attempt before this time (milliseconds): a `Retry-After`.
     pub not_before: Option<i64>,
     /// Why the last attempt didn't send it.
@@ -139,6 +149,23 @@ pub struct OutboxEntry {
     pub message_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl OutboxEntry {
+    /// The attempts begun since the row was made or last resent.
+    #[must_use]
+    pub fn attempts_since_resend(&self) -> u32 {
+        self.attempts.saturating_sub(self.attempts_at_resend)
+    }
+}
+
+/// What becomes of a pending row whose check before a new attempt couldn't be made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckFailed {
+    /// It stays pending, not due before `not_before`.
+    Wait { not_before: i64, error: String },
+    /// It is failed: nothing more goes out for it until an explicit resend.
+    GiveUp { error: String },
 }
 
 /// How an attempt ended.
@@ -161,7 +188,8 @@ pub enum AttemptOutcome {
 }
 
 const OUTBOX_COLUMNS: &str = "id, run_id, client_message_id, conversation_id, kind, payload, state, attempts, \
-                              not_before, last_error, message_id, created_at, updated_at";
+                              not_before, last_error, message_id, created_at, updated_at, attempts_at_resend, \
+                              failed_checks";
 
 fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<OutboxEntry> {
     Ok(OutboxEntry {
@@ -178,6 +206,8 @@ fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<OutboxEntry> {
         message_id: row.get(10)?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        attempts_at_resend: row.get(13)?,
+        failed_checks: row.get(14)?,
     })
 }
 
@@ -352,8 +382,41 @@ impl Store {
         Ok(updated)
     }
 
+    /// Records that the check before a new attempt on one of this run's pending rows couldn't be made (its
+    /// conversation couldn't be synced): nothing was sent, its `failed_checks` goes up, and it waits until `not_before`
+    /// or is failed. A row already `sent` (the check's sync matched our message before it failed) stays as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::UnknownOutboxEntry`] for no such row, [`StoreError::OutboxNotSendable`] for a row that isn't
+    /// pending or belongs to another run, [`StoreError::Sqlite`] when the write fails.
+    pub fn check_failed(&mut self, id: i64, outcome: &CheckFailed) -> Result<OutboxEntry, StoreError> {
+        let tx = self.conn.transaction()?;
+        let row = entry(&tx, id)?;
+        if row.state == OutboxState::Sent {
+            return Ok(row);
+        }
+        if row.state != OutboxState::Pending || row.run_id != self.run_id {
+            return Err(StoreError::OutboxNotSendable { id, state: row.state });
+        }
+        let (state, not_before, error) = match outcome {
+            CheckFailed::Wait { not_before, error } => (OutboxState::Pending, Some(*not_before), error),
+            CheckFailed::GiveUp { error } => (OutboxState::Failed, None, error),
+        };
+        tx.execute(
+            "UPDATE outbox SET state = ?2, not_before = ?3, last_error = ?4, failed_checks = failed_checks + 1,
+                 updated_at = ?5
+             WHERE id = ?1",
+            params![id, state, not_before, error, now_ms()],
+        )?;
+        let updated = entry(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Adopts a row into this run as pending, with its `clientmessageid` unchanged: the explicit resend of a row a run
-    /// that has ended left, or of one that was denied or failed. For a row left `sending`, the caller first looks for
+    /// that has ended left, or of one that was denied or failed. Its budget starts over (`attempts_at_resend` becomes
+    /// its `attempts`, `failed_checks` 0); `attempts` stays, so a row that was attempted is still known to be. For a row left `sending`, the caller first looks for
     /// its `clientmessageid` in a sync: the ended run's attempt may have arrived. A pending or sending row of a run
     /// whose store is open, this one or another, is refused: it is waiting for its attempt (and its `not_before`) or
     /// has one in flight that may not have reached the service yet, and a second attempt beside it could send the
@@ -381,7 +444,9 @@ impl Store {
             });
         }
         tx.execute(
-            "UPDATE outbox SET run_id = ?2, state = ?3, not_before = NULL, updated_at = ?4 WHERE id = ?1",
+            "UPDATE outbox SET run_id = ?2, state = ?3, not_before = NULL, attempts_at_resend = attempts,
+                 failed_checks = 0, updated_at = ?4
+             WHERE id = ?1",
             params![id, self.run_id, OutboxState::Pending, now_ms()],
         )?;
         let updated = entry(&tx, id)?;

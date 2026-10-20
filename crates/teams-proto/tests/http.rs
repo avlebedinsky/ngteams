@@ -309,6 +309,31 @@ async fn a_permitted_write_is_posted_in_its_wire_form_and_its_answer_comes_back(
 }
 
 #[tokio::test]
+async fn a_message_with_a_client_message_id_is_posted_with_it_and_the_same_target() {
+    let setup = setup().await;
+    Mock::given(method("POST"))
+        .and(path(MESSAGES))
+        .and(body_json(json!({
+            "content": "<p>hello</p>",
+            "messagetype": "RichText/Html",
+            "contenttype": "Text",
+            "clientmessageid": "1234567890123456789",
+        })))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&setup.server)
+        .await;
+    let request = SendMessage::new(CHAT, "<p>hello</p>").with_client_message_id("1234567890123456789");
+    assert_eq!(request.client_message_id(), Some("1234567890123456789"));
+    assert_eq!(request.target(), SendMessage::new(CHAT, "other").target());
+    let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
+
+    let answer = Client::new(setup.transport).write(request, permit).await.unwrap();
+
+    assert_eq!(answer.status(), 201);
+}
+
+#[tokio::test]
 async fn a_write_refused_with_401_comes_back_unsent_again_and_the_token_is_refreshed() {
     let setup = setup().await;
     Mock::given(method("POST"))

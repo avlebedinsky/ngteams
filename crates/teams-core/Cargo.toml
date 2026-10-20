@@ -1,0 +1,32 @@
+[package]
+name = "teams-core"
+description = "The native client's core: commands go out through the outbox and the fence (sync and the engine come in M1 Tasks 17-18)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# a fresh `clientmessageid` for each command, from the system random source
+getrandom.workspace = true
+serde.workspace = true
+# a command's outbox payload, and a message post's answer (`OriginalArrivalTime`)
+serde_json.workspace = true
+# a throttled token (`TokenError::Throttled`) waits like a throttled post
+teams-auth.workspace = true
+teams-fence.workspace = true
+teams-proto.workspace = true
+teams-store.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# the tests' fence runs over a test roster, a test log and fake membership sources
+teams-fence = { workspace = true, features = ["test-support"] }
+# the transport reaches wiremock through its mock origin
+teams-proto = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+wiremock.workspace = true
+
+[lints]
+workspace = true

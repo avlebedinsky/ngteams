@@ -31,7 +31,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 pub use conversations::{Conversation, ConversationKind, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange};
-pub use outbox::{AttemptOutcome, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
+pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
 pub use schema::SCHEMA_VERSION;
 pub use state::{ReadHorizon, SyncState};
 

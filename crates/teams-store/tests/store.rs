@@ -5,8 +5,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use teams_store::{
-    Applied, AttemptOutcome, Conversation, ConversationKind, Member, Message, NewOutboxEntry, OutboxKind, OutboxState,
-    ReactionChange, ReadHorizon, SCHEMA_VERSION, Store, StoreError, SyncState,
+    Applied, AttemptOutcome, CheckFailed, Conversation, ConversationKind, Member, Message, NewOutboxEntry, OutboxKind,
+    OutboxState, ReactionChange, ReadHorizon, SCHEMA_VERSION, Store, StoreError, SyncState,
 };
 
 const ME: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -1144,6 +1144,127 @@ fn this_runs_own_pending_or_in_flight_row_cant_be_resent() {
         )
         .expect("failed");
     assert_eq!(store.resend(id).expect("resend").state, OutboxState::Pending);
+}
+
+#[test]
+fn a_check_that_couldnt_be_made_defers_or_fails_a_pending_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = open(&dir).expect("open the store");
+    let id = store.enqueue(&send("1001")).expect("enqueue").id;
+    let first = CheckFailed::Wait {
+        not_before: 0,
+        error: "no sync".to_owned(),
+    };
+    assert_eq!(store.check_failed(id, &first).expect("a pending row").failed_checks, 1);
+    store.begin_attempt(id).expect("begin");
+    let in_flight = store.check_failed(
+        id,
+        &CheckFailed::GiveUp {
+            error: "no sync".to_owned(),
+        },
+    );
+    assert!(
+        matches!(
+            in_flight,
+            Err(StoreError::OutboxNotSendable {
+                state: OutboxState::Sending,
+                ..
+            })
+        ),
+        "only a pending row is checked: {in_flight:?}"
+    );
+    let retry = AttemptOutcome::Retry {
+        not_before: 0,
+        error: "timed out".to_owned(),
+    };
+    store.finish_attempt(id, &retry).expect("retry");
+
+    let wait = CheckFailed::Wait {
+        not_before: 5_000,
+        error: "no sync".to_owned(),
+    };
+    let waiting = store.check_failed(id, &wait).expect("wait");
+    assert_eq!((waiting.state, waiting.not_before), (OutboxState::Pending, Some(5_000)));
+    assert_eq!((waiting.failed_checks, waiting.attempts), (2, 1));
+    assert_eq!(waiting.last_error.as_deref(), Some("no sync"));
+    assert!(store.outbox_due(4_999).expect("due").is_empty());
+
+    let give_up = CheckFailed::GiveUp {
+        error: "given up".to_owned(),
+    };
+    let failed = store.check_failed(id, &give_up).expect("give up");
+    assert_eq!((failed.state, failed.failed_checks), (OutboxState::Failed, 3));
+    assert!(store.outbox_due(i64::MAX).expect("due").is_empty());
+    assert!(store.check_failed(id, &give_up).is_err(), "a failed row isn't checked");
+
+    // a row our message came back for stays sent
+    let sent = store.enqueue(&send("1002")).expect("enqueue").id;
+    store.outbox_arrived("1002", "2000").expect("arrived");
+    let after = store.check_failed(sent, &wait).expect("sent");
+    assert_eq!((after.state, after.failed_checks), (OutboxState::Sent, 0));
+}
+
+#[test]
+fn a_resend_starts_the_rows_budget_over_and_keeps_its_attempt_count() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = open(&dir).expect("open the store");
+    let id = store.enqueue(&send("1001")).expect("enqueue").id;
+    for _ in 0..2 {
+        store.begin_attempt(id).expect("begin");
+        let retry = AttemptOutcome::Retry {
+            not_before: 0,
+            error: "timed out".to_owned(),
+        };
+        store.finish_attempt(id, &retry).expect("retry");
+    }
+    let give_up = CheckFailed::GiveUp {
+        error: "no sync".to_owned(),
+    };
+    let failed = store.check_failed(id, &give_up).expect("give up");
+    assert_eq!(
+        (failed.attempts, failed.attempts_since_resend(), failed.failed_checks),
+        (2, 2, 1)
+    );
+
+    let resent = store.resend(id).expect("resend");
+
+    assert_eq!(resent.state, OutboxState::Pending);
+    assert_eq!(
+        (resent.attempts, resent.attempts_at_resend),
+        (2, 2),
+        "attempted before: still known"
+    );
+    assert_eq!((resent.attempts_since_resend(), resent.failed_checks), (0, 0));
+    assert_eq!(store.begin_attempt(id).expect("begin").attempts_since_resend(), 1);
+}
+
+#[test]
+fn a_store_of_the_first_schema_is_migrated_with_its_outbox_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("store dir");
+    let raw = rusqlite::Connection::open(&path).expect("create directly");
+    raw.execute_batch(include_str!("../src/migrations/0001_initial.sql"))
+        .expect("the first migration");
+    raw.pragma_update(None, "user_version", 1).expect("version 1");
+    raw.execute_batch(
+        "INSERT INTO runs (id, started_at) VALUES (1, 0);
+         INSERT INTO outbox (run_id, client_message_id, conversation_id, kind, payload, state, attempts, created_at,
+             updated_at)
+         VALUES (1, '1001', NULL, 'send', '{}', 'failed', 3, 0, 0);",
+    )
+    .expect("a row of the first schema");
+    drop(raw);
+
+    let store = Store::open(&path).expect("open and migrate");
+
+    assert_eq!(store.schema_version().expect("schema version"), SCHEMA_VERSION);
+    let row = store
+        .outbox_by_client_message_id("1001")
+        .expect("read")
+        .expect("the row");
+    assert_eq!((row.attempts, row.attempts_at_resend, row.failed_checks), (3, 0, 0));
+    assert_eq!(row.attempts_since_resend(), 3);
 }
 
 #[test]

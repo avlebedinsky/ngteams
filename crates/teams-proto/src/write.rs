@@ -31,17 +31,22 @@ mod sealed {
 
     /// `POST v1/users/ME/conversations/<conversation>/messages`, the message as the web client posts it
     /// (`docs/protocol/fence-targets.md`): for now the HTML `content` with `messagetype` `RichText/Html` and
-    /// `contenttype` `Text`. M1 Tasks 12–13 complete the body (`clientmessageid`, `imdisplayname`, `properties`).
+    /// `contenttype` `Text`, and the `clientmessageid` when the request has one (the outbox's, M1 Task 13). M1 Task 12
+    /// completes the body (`imdisplayname`, `properties`).
     impl Sealed for super::SendMessage {
         fn wire(&self) -> Option<Wire> {
+            let mut body = json!({
+                "content": self.content,
+                "messagetype": "RichText/Html",
+                "contenttype": "Text",
+            });
+            if let (Some(id), Some(fields)) = (&self.client_message_id, body.as_object_mut()) {
+                fields.insert("clientmessageid".to_owned(), id.as_str().into());
+            }
             Some(Wire {
                 method: Method::Post,
                 endpoint: Endpoint::new(["v1", "users", "ME", "conversations", &self.conversation, "messages"]),
-                body: Some(json!({
-                    "content": self.content,
-                    "messagetype": "RichText/Html",
-                    "contenttype": "Text",
-                })),
+                body: Some(body),
             })
         }
     }
@@ -157,6 +162,7 @@ impl TargetMismatch {
 pub struct SendMessage {
     conversation: String,
     content: String,
+    client_message_id: Option<String>,
 }
 
 impl SendMessage {
@@ -165,7 +171,22 @@ impl SendMessage {
         Self {
             conversation: conversation.into(),
             content: content.into(),
+            client_message_id: None,
         }
+    }
+
+    /// The same message posted with `clientmessageid` `id`: the id the outbox gives a command and keeps across its
+    /// attempts, by which the message is recognised when it comes back. It isn't part of the target.
+    #[must_use]
+    pub fn with_client_message_id(mut self, id: impl Into<String>) -> Self {
+        self.client_message_id = Some(id.into());
+        self
+    }
+
+    /// The `clientmessageid` it is posted with, if any.
+    #[must_use]
+    pub fn client_message_id(&self) -> Option<&str> {
+        self.client_message_id.as_deref()
     }
 
     /// The conversation id the message goes to.
