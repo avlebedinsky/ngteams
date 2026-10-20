@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, not captured: the chat service's thread read as the web bundle builds it (GET v1/threads/<id>?view=msnp24Equivalent) and the members array it reads. To be replaced by a sanitized export of the load/ab-chat capture once the lab accounts have a Teams license. <guid:a> and <guid:b> stand for the two lab accounts' object ids; tests fill in made-up GUIDs.",
+  "_synthetic": "Made up, not captured: the chat service's thread read as the web bundle builds it (GET v1/threads/<id>?view=msnp24Equivalent) and the members array it reads. To be rewritten as a synthetic fixture (same shape, made-up values) from the reference copy of a load/ab-chat capture, read locally; captures never enter the repo, not even sanitized. <guid:a> and <guid:b> stand for the two lab accounts' object ids; tests fill in made-up GUIDs.",
   "request": {
     "method": "GET",
     "path": "/api/chatsvc/<region>/v1/threads/19:<guid:a>_<guid:b>@unq.gbl.spaces",

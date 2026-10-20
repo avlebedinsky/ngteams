@@ -3,11 +3,12 @@
 //!
 //! Every exchange comes from a fixture under `tests/fixtures/auth/` (one `{request, response}` per file, see
 //! `docs/protocol/auth.md`). The tests take their inputs from the fixture's request (client ID, redirect, code, refresh
-//! token, scope, endpoint path) and their expectations from its response, so a sanitized export from a real capture
-//! with the same file name and shape drops in for the synthetic one. The only value the tests supply themselves is the
-//! PKCE verifier, since a fixture's verifier is a placeholder, and the code exchange's ID token: a fixture's is a
-//! placeholder too (the fixture guard refuses committed JWTs), so the code tests build an unsigned one at run time with
-//! the claims each case needs.
+//! token, scope, endpoint path) and their expectations from its response, so a fixture rewritten synthetic-from-capture
+//! (written by hand from a local reference copy with the same file name and shape, made-up values; captures never
+//! enter the repo) drops in for a made-up one. The only value the tests supply themselves is the PKCE verifier, since
+//! a fixture's verifier is a placeholder, and the code exchange's ID token: a fixture's is a placeholder too (the
+//! fixture guard refuses committed JWTs), so the code tests build an unsigned one at run time with the claims each case
+//! needs.
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;

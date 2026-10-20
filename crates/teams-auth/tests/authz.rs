@@ -2,8 +2,9 @@
 //! from the answer, the refusals, and storing the skypetoken.
 //!
 //! The answers come from the fixtures under `tests/fixtures/auth/` (`authz-*.json`, see `docs/protocol/auth.md`); the
-//! tests read their expectations from the fixture, so a sanitized export from a real capture drops in. A skypetoken
-//! that is a JWT (for the `exp` rule) is built unsigned at run time: the fixture guard keeps JWTs out of the repo.
+//! tests read their expectations from the fixture, so a fixture rewritten synthetic-from-capture (written by hand from
+//! a local reference copy, same shape, made-up values; captures never enter the repo) drops in. A skypetoken that is a
+//! JWT (for the `exp` rule) is built unsigned at run time: the fixture guard keeps JWTs out of the repo.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

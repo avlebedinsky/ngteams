@@ -21,21 +21,25 @@ starts with `v1/` (endpoint registration with `v2/`). Conversation and thread id
 segment.
 
 For the lab tenant the client uses the Front Door form with the region `amer`, on whichever Teams origin the page is
-on (`teams.cloud.microsoft` after the client moves there, `teams.microsoft.com` after a deep link reloads it); no
-`.msg.teams.microsoft.com` host was seen.
+on (`teams.cloud.microsoft` after the client moves there, `teams.microsoft.com` after a deep link reloads it). It sent
+no request to a `.msg.teams.microsoft.com` host. That host form showed up only as data: authz's `chatService` GTM
+(`https://amer.ng.msg.teams.microsoft.com`, auth.md's Region GTMs), and the `Location` header of the 201 answers to
+`POST v1/threads` and to message posts, which names the new resource on that host with a `/v1/…` path.
 
 Credential: the web client sends the chat service an **Entra bearer token**, `Authorization: Bearer <token>` whose
 audience is `https://ic3.teams.office.com` (scope `Teams.AccessAsUser.All`), on every chat service request, and no
-skypetoken there. The bundle and auth.md's service table also name `Authentication: skypetoken=<skypetoken>`; the
-fence's live read accepts either and sends back the form the page used. No `RegistrationToken` was sent: the client
-registered no endpoint.
+skypetoken there. The bundle also names `Authentication: skypetoken=<skypetoken>`, which the captures never showed
+(auth.md's service table); the fence's live read accepts either and sends back the form the page used. No
+`RegistrationToken` was sent: the client registered no endpoint.
 
 What the fence accepts as the chat service (the mapping and the live read share one check,
 `teams_fence::chat_service_path`): `https` only, no port, no user info, and either an AFD host of the commercial cloud
 (`teams.microsoft.com`, `teams.cloud.microsoft`) with `/api/chatsvc/<region>/v1/…`, the region 1–32 lowercase letters,
 digits or `-`, or a host ending in `.msg.teams.microsoft.com` with `/v1/…`, each label of its name before that suffix
-non-empty letters, digits or `-`. The `.msg` host form is the historical regional chat host; the bundle doesn't name it
-(the GTM value comes at runtime), so it is to confirm.
+non-empty letters, digits or `-`. The `.msg` host form is the regional chat host: the bundle doesn't name it (the GTM
+value comes at runtime), but the captures did, as the `chatService` GTM and in `Location` answers (above), with `/v1/…`
+straight under the host. The web client never sent a request there, so the fence has only ever judged the AFD form
+live.
 
 ### Ids
 
@@ -218,5 +222,6 @@ captures stay outside the repository and no fixture was exported from them.
       `augloop.office.com` and `go.trouter.teams.microsoft.com` sockets. The chat works without them, though a chat
       partner shows as "Unknown User" (no profile lookup).
 
-The synthetic fixtures in `tests/fixtures/chatsvc/` stay until a sanitized export of these captures replaces them
-(after the sanitizer fix in progress).
+The synthetic fixtures in `tests/fixtures/chatsvc/` stay until they are rewritten synthetic-from-capture: written by
+hand from a local reference copy of these captures, with the same shape and made-up values. Captures never enter the
+repo, not even sanitized.

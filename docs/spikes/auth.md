@@ -141,9 +141,11 @@ Without `--features live` the live tests aren't built, and without `PROTO_LAB_LI
 
 ## What remains
 
-- **The authz fixture.** `tests/fixtures/auth/authz-ok.json` is still synthetic (its `expiresIn` of 86400 and its
-  short GTM table aren't what a live answer looks like). Replace it with a sanitized export of the web client's
-  capture (Task 11 `load`), which also settles which authz endpoint and headers the web client itself uses.
+- ~~**The authz fixture.**~~ **Done (Task 12 capture follow-up).** `tests/fixtures/auth/authz-ok.json` is now
+  written synthetic-from-capture: by hand from a local reference copy of the web client's `load` capture, with the
+  same layout and made-up values (an `expiresIn` of a CAE-length token, 30 of the 112 GTMs); captures never enter the
+  repo, not even sanitized. The authz endpoint and headers the web client itself uses are in the auth notes'
+  **Capture** notes (`docs/protocol/auth.md`, Request).
 - **Renewal.** `AuthzKind::TokenRefresh` exists, but nothing schedules renewal yet. That belongs to the M1 client, and
   it must refresh the `api.spaces.skype.com` token before each exchange, since the skypetoken expires with it.
 - **The user's own account** may face stricter Conditional Access than the bot accounts (auth notes' open question

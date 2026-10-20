@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made-up values shaped like an Entra v2 code redemption for the native Teams client; not from a capture. See docs/protocol/auth.md.",
+  "_synthetic": "Written from a capture's reference copy (the web client's own code redemption, load capture of 2026-10-20, read locally via proto-lab export), values made up, as the native Teams client's request: the form is ours (native client, nativeclient redirect, no client_info), and the answer has the captured fields and headers minus refresh_token_expires_in and client_info, which only the web client's SPA request gets (the CA probe saw neither for the native client). See docs/protocol/auth.md.",
   "request": {
     "method": "POST",
     "url": "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
@@ -18,14 +18,17 @@
   "response": {
     "status": 200,
     "headers": {
+      "cache-control": "no-store, no-cache",
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store, no-cache"
+      "expires": "-1",
+      "pragma": "no-cache",
+      "x-ms-request-id": "<guid:30>"
     },
     "body": {
       "token_type": "Bearer",
-      "scope": "https://api.spaces.skype.com/Authorization.ReadWrite https://api.spaces.skype.com/Region.ReadWrite https://api.spaces.skype.com/user_impersonation",
-      "expires_in": 8000,
-      "ext_expires_in": 8000,
+      "scope": "https://api.spaces.skype.com/Authorization.ReadWrite https://api.spaces.skype.com/Region.ReadWrite https://api.spaces.skype.com/user_impersonation https://api.spaces.skype.com/.default",
+      "expires_in": 8123,
+      "ext_expires_in": 8123,
       "access_token": "<token:1>",
       "refresh_token": "<token:2>",
       "id_token": "<token:3>"
