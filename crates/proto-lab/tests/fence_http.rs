@@ -20,8 +20,11 @@ use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TEAMS_ORIGI
 use proto_lab::browser::{Browser, BrowserError, LaunchOptions};
 use proto_lab::cdp::{Cdp, SessionId};
 use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, classify, is_mutating};
+use proto_lab::config::Alias;
 use proto_lab::fence_http::{DenyCause, HttpFence, MalformedPause, PausedRequest, Verdict};
 use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport};
+use proto_lab::session::FenceReport;
 use serde_json::{Value, json};
 use teams_fence::{
     DenyReason, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope, Target, WriteKind,
@@ -247,6 +250,7 @@ fn paused(method: &str, url: &str) -> PausedRequest {
         method: method.to_owned(),
         url: url.to_owned(),
         body: None,
+        network_id: None,
     }
 }
 
@@ -541,6 +545,9 @@ const SHORT_LIVED: &str = "S-short";
 /// The session whose WebSocket guard reports that it has no binding to ask through.
 const UNGUARDED: &str = "S-unguarded";
 
+/// The target the browser won't close.
+const STUCK: &str = "T-stuck";
+
 async fn answer_fake(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     command: &Value,
@@ -576,6 +583,8 @@ fn fake_reply(command: &Value, refuse: fn(&str, Option<&str>) -> bool) -> Value 
     }
     let result = match method {
         "Target.createTarget" => json!({"targetId": "T-new"}),
+        // the browser won't close the stuck target
+        "Target.closeTarget" if command["params"]["targetId"] == STUCK => json!({"success": false}),
         "Target.closeTarget" => json!({"success": true}),
         // the WebSocket guard reports itself armed, except where the binding is missing
         "Runtime.evaluate" if session == Some(UNGUARDED) => {
@@ -830,6 +839,117 @@ async fn a_target_that_cannot_be_armed_is_closed_and_never_resumed() {
     assert!(armed.targets().iter().all(|target| target.session.as_str() != "S9"));
     let failed = armed.verdict().unwrap_err();
     assert_eq!(failed.failures.len(), 1);
+}
+
+/// `S-held`'s and `S-stuck`'s `Page.enable` and `S-ran`'s resume are refused (and [`STUCK`] isn't closed).
+fn refuse_held_and_ran(method: &str, session: Option<&str>) -> bool {
+    (method == "Page.enable" && matches!(session, Some("S-held" | "S-stuck")))
+        || (method == "Runtime.runIfWaitingForDebugger" && session == Some("S-ran"))
+}
+
+/// Attaches an iframe through the page's session and waits until it has failed to arm; gives what the fence did.
+async fn iframe_that_fails(fake: &FakeBrowser, armed: &ArmedBrowser, session: &str) -> TestResult<FenceReport> {
+    let target = format!("T{}", session.trim_start_matches('S'));
+    fake.event(
+        Some("S-page"),
+        "Target.attachedToTarget",
+        &attached(session, &target, "iframe"),
+    )?;
+    let wait = async {
+        loop {
+            if !armed.failures().is_empty() {
+                return FenceReport::of(&armed.decisions());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    Ok(tokio::time::timeout(Duration::from_secs(5), wait)
+        .await
+        .map_err(|_| format!("{session} didn't fail"))?)
+}
+
+#[tokio::test]
+async fn a_target_closed_before_it_ran_is_a_warning_not_a_breach() {
+    let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let held = iframe_that_fails(&fake, &armed, "S-held").await.unwrap();
+
+    assert!(
+        !fake
+            .methods_on(Some("S-held"))
+            .contains(&"Runtime.runIfWaitingForDebugger".to_owned())
+    );
+    assert!(
+        held.unarmed[0].closed && !held.unarmed[0].may_have_run,
+        "{:?}",
+        held.unarmed
+    );
+    assert!(!held.breached(), "{}", held.summary());
+    assert_eq!(held.closed_unarmed().count(), 1);
+    assert!(
+        held.summary().contains("iframe target closed unarmed before it ran"),
+        "{}",
+        held.summary()
+    );
+    // the run's strict verdict still lists it
+    assert_eq!(armed.verdict().unwrap_err().failures.len(), 1);
+    // a scenario warns about it and doesn't fail on it
+    let mut report = ScenarioReport::new(ScenarioName::AbChat);
+    let run = AccountRun {
+        alias: Alias::A,
+        fence: held,
+        denials: Vec::new(),
+        frame_denials: Vec::new(),
+        capture: None,
+    };
+    report.add_account(run, DenyPolicy::AllExpected);
+    assert!(!report.failed(), "{:?}", report.failures);
+    let warned = |note: &String| note.contains("warning") && note.contains("1 target(s)");
+    assert!(report.notes.iter().any(warned), "{:?}", report.notes);
+}
+
+#[tokio::test]
+async fn a_target_whose_resume_was_sent_may_have_run_and_is_a_breach() {
+    let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let ran = iframe_that_fails(&fake, &armed, "S-ran").await.unwrap();
+
+    assert!(
+        ran.unarmed[0].closed && ran.unarmed[0].may_have_run,
+        "{:?}",
+        ran.unarmed
+    );
+    assert!(ran.breached(), "{}", ran.summary());
+    assert_eq!(ran.closed_unarmed().count(), 0);
+    let mut report = ScenarioReport::new(ScenarioName::AbChat);
+    let run = AccountRun {
+        alias: Alias::A,
+        fence: ran,
+        denials: Vec::new(),
+        frame_denials: Vec::new(),
+        capture: None,
+    };
+    report.add_account(run, DenyPolicy::AllExpected);
+    assert!(
+        report.failures.iter().any(|failure| failure.contains("breached")),
+        "{:?}",
+        report.failures
+    );
+}
+
+#[tokio::test]
+async fn a_target_that_could_not_be_closed_is_a_breach() {
+    let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let stuck = iframe_that_fails(&fake, &armed, "S-stuck").await.unwrap();
+
+    assert!(
+        !stuck.unarmed[0].closed && !stuck.unarmed[0].may_have_run,
+        "{:?}",
+        stuck.unarmed
+    );
+    assert!(stuck.breached(), "{}", stuck.summary());
+    assert_eq!(stuck.closed_unarmed().count(), 0);
 }
 
 #[tokio::test]

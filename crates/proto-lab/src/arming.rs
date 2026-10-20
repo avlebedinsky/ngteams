@@ -42,7 +42,9 @@
 //! before it runs.
 //!
 //! If any step fails, or gets no answer within [`STEP_TIMEOUT`], the target is closed and never resumed, and the
-//! failure fails the run. The one exception is a session that is gone before its arming finishes (the browser answers
+//! failure fails the run's verdict ([`ArmedBrowser::verdict`]). Whether it breached the fence is another matter
+//! ([`ArmingFailure::closed_before_it_ran`]): a target closed before its resume ran nothing, while one whose resume was
+//! sent, or that couldn't be closed, counts as a breach ([`crate::session::FenceReport::breached`]). The one exception is a session that is gone before its arming finishes (the browser answers
 //! "Session with given id not found"): its tab closed, or its worker ended. That session has nothing left to arm or
 //! resume, so it is dropped quietly; browser-level `Fetch` stays on regardless.
 //!
@@ -320,6 +322,15 @@ impl ArmError {
             } if error.code == SESSION_NOT_FOUND
         )
     }
+
+    /// Whether the target's resume was sent: the step that failed is [`Step::Resume`], so its code may be running.
+    #[must_use]
+    pub fn resume_sent(&self) -> bool {
+        matches!(
+            self,
+            Self::Step { step: Step::Resume, .. } | Self::StepTimeout(Step::Resume)
+        )
+    }
 }
 
 /// What arming installs in a target: the WebSocket guard, and the WebRTC hooks when the run records.
@@ -396,6 +407,19 @@ pub struct ArmingFailure {
     pub error: String,
     /// Whether `Target.closeTarget` closed it. A target that couldn't be closed was never resumed either.
     pub closed: bool,
+    /// Whether its code may have started: the step that failed was the resume itself (`Runtime.runIfWaitingForDebugger`,
+    /// sent and refused or unanswered). Any other failure stops before the resume, so the target never ran.
+    pub may_have_run: bool,
+}
+
+impl ArmingFailure {
+    /// Whether the target was closed before any of its code ran: arming gave up on it before the resume, and closing it
+    /// worked. Nothing of it ran unguarded, so it is no breach of the fence; what it would have done (an iframe's
+    /// content, a worker's job) just doesn't happen, and a run that needed it fails on its own steps.
+    #[must_use]
+    pub fn closed_before_it_ran(&self) -> bool {
+        self.closed && !self.may_have_run
+    }
 }
 
 /// Why a run failed: a denied request or frame, a frame sent without an allow, a target that couldn't be armed, or a
@@ -954,6 +978,7 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
                 kind: kind_name,
                 error: error.to_string(),
                 closed,
+                may_have_run: error.resume_sent(),
             });
         }
     }

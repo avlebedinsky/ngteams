@@ -156,12 +156,20 @@ impl ScenarioReport {
     }
 
     /// Adds an account's run, judged by `policy`: a breach or an unexpected deny, of a request or a WebSocket frame,
-    /// fails the scenario.
+    /// fails the scenario. A target closed before it ran ([`FenceReport::closed_unarmed`]) is a warning in the notes:
+    /// the scenario fails on it only through a step that needed it.
     pub fn add_account(&mut self, run: AccountRun, policy: DenyPolicy) {
         let alias = run.alias;
         if run.fence.breached() {
             self.failures
                 .push(format!("{alias}: the fence was breached ({})", run.fence.summary()));
+        }
+        // no breach: nothing of them ran; a step that needed one of them has failed the run already
+        let closed = run.fence.closed_unarmed().count();
+        if closed > 0 {
+            self.notes.push(format!(
+                "{alias}: warning: {closed} target(s) not armed in time were closed before they ran (no breach)"
+            ));
         }
         for denial in policy.unexpected(&run.denials) {
             self.failures.push(format!(

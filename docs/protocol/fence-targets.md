@@ -176,9 +176,11 @@ Rules that keep the mapping fail-closed:
   middle tier's `fetchShortProfile`, a `POST` the fence denies, and never opens the chat; by the chat's id a page that
   loaded before the chat existed says the user isn't in it.
 - `ab-chat`'s live enforcement test forces a deny (`ForcedDeny`) on every write carrying the probe marker, from before
-  the page loads to the end of the run (so an earlier run's unsent probe, sent again on load, is denied too): the probe
-  post to the a–b chat must fail in the page with `net::ERR_BLOCKED_BY_CLIENT`, and b's copy of the chat must hold the
-  real message and not the probe.
+  the page loads to the end of the run (so an earlier run's unsent probe, sent again on load, is denied too). This
+  run's probe carries a run-unique nonce and has a labelled forced deny of its own ahead of the marker's, so the
+  evidence is this run's probe only: a deny under that label of a post to the a–b chat, and the same request, found by
+  the `networkId` the paused event gives (the page's `Network` request id), failing in the page with
+  `net::ERR_BLOCKED_BY_CLIENT`; then b's copy of the chat must hold the real message and not the probe.
 
 ## What the captures showed
 

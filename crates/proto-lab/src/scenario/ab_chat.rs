@@ -5,13 +5,14 @@
 //! members, read fresh, are all lab accounts. The steps:
 //! 1. Before anything loads, a's fence force-denies every write carrying [`PROBE_MARKER`] (`deny_probes`), for the
 //!    whole run: the web client keeps a send that failed and sends it again on a later load, so an earlier run's probe
-//!    would otherwise go out now.
+//!    would otherwise go out now. This run's probe ([`probe_text`] of a run-unique [`nonce`]) has a forced deny of its
+//!    own, labelled [`THIS_RUN_PROBE`], so its deny can't be mistaken for an earlier run's probe sent again.
 //! 2. a and b open the web client; both must load.
 //! 3. a opens the chat with b ([`chat_link`] by b's MRI), which the client starts with a `POST v1/threads` (a chat
 //!    create the fence judges by the members in its body) the first time.
-//! 4. **Live enforcement test**: a sends a probe. The fence must force-deny a message post to the a–b chat (its id in
-//!    the URL: the compose box belongs to that chat), and the post must fail in a's page with
-//!    `net::ERR_BLOCKED_BY_CLIENT`.
+//! 4. **Live enforcement test**: a sends this run's probe. The fence must force-deny, by this run's rule, a message post
+//!    to the a–b chat (its id in the URL: the compose box belongs to that chat), and that very post (by its `Network`
+//!    id) must fail in a's page with `net::ERR_BLOCKED_BY_CLIENT`.
 //! 5. a sends the real message. b then opens the chat with a and must show it within [`DELIVERY`], and must not show
 //!    the probe: b reads the chat's history from the service, so the probe missing there means it never got there.
 //! 6. After the run: no deny but the forced ones and telemetry ([`DenyPolicy::ForcedAnd`] with [`TELEMETRY_HOSTS`]).
@@ -20,18 +21,21 @@
 //! hundreds of requests the fence doesn't map (middle-tier lookups posted as `POST`, presence, the user's own
 //! properties, the push channel's frames, …) and denies, as in `load`; until they are reviewed they count as
 //! unexpected and the run exits non-zero. A failed run leaves each page's screenshot as `failure.png` in its capture.
+//!
+//! Every call to a page is bounded ([`super::dsl::CALL_TIMEOUT`], shorter for the failure's diagnosis): a page that
+//! stops answering fails the step, and the run still closes both browsers and finishes both captures.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::classify::Classifier;
 use crate::commands::status::account_status;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::{DenyCause, ForcedDeny};
+use crate::fence_http::{Denial, DenyCause, ForcedDeny, without_query};
 use crate::session::{LabSession, SessionOptions, SessionState, TEAMS_URL};
 
 use regex::Regex;
 
-use super::dsl::{Driver, RequestPattern, Selector};
+use super::dsl::{Driver, RequestPattern, Selector, StepError};
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
 
 /// The message compose box's selector: the web client's rich-text editor (seen on 2026-10-20).
@@ -46,6 +50,12 @@ const COMPOSE_STATE: &str =
 
 /// What every probe text starts with ([`probe_text`]); `deny_probes` denies any write that carries it.
 pub const PROBE_MARKER: &str = "lab fence probe ";
+
+/// The label of the forced deny of this run's probe ([`crate::fence_http::Denial::label`]).
+pub const THIS_RUN_PROBE: &str = "this run's probe";
+
+/// How long the failure's diagnosis (the compose box's state, a screenshot) may wait for a page.
+const DIAGNOSIS_WAIT: Duration = Duration::from_secs(10);
 
 /// How many times [`send`] presses Enter before it gives up, and how long it waits after each press.
 const SEND_TRIES: u32 = 3;
@@ -147,8 +157,9 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         }
     };
     let mut report = ScenarioReport::new(ScenarioName::AbChat);
+    let nonce = nonce();
     // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
-    if let Err(error) = deny_probes(&a) {
+    if let Err(error) = deny_probes(&a, &probe_text(&nonce)) {
         report.failures.push(error.to_string());
     }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
@@ -157,6 +168,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
         chat_id: chat_id.as_deref(),
+        nonce: &nonce,
         options,
     };
     let outcome = steps.run(&mut a, &mut b, &mut report).await;
@@ -181,6 +193,8 @@ struct Steps<'a> {
     mri_b: &'a str,
     /// The a–b chat's id, from the lab config's MRIs; `None` when they aren't recorded.
     chat_id: Option<&'a str>,
+    /// This run's [`nonce`], in its probe and its message.
+    nonce: &'a str,
     options: RunOptions,
 }
 
@@ -208,13 +222,12 @@ impl Steps<'_> {
             .await?;
         drive_a.wait_for("a's compose box", COMPOSE, CHAT_OPEN).await?;
 
-        let nonce = nonce();
-        let probe = probe_text(&nonce);
+        let probe = probe_text(self.nonce);
         enforce(a, &mut drive_a, &probe, &names_chat).await?;
         report
             .notes
             .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
-        let message = message_text(&nonce);
+        let message = message_text(self.nonce);
         send(&mut drive_a, "a (the message)", &message).await?;
         // b opens the chat once a has written to it, so b reads the chat's history from the service: the real message
         // showing there without the probe is the evidence that the probe never reached the service
@@ -242,38 +255,47 @@ impl Steps<'_> {
 
 /// Forces a deny ([`ForcedDeny`]) on every `POST` or `PUT` of `session` whose body holds [`PROBE_MARKER`], whatever
 /// its URL: this run's probe (a client that put the first message into the chat's creation is stopped too), and any
-/// earlier run's probe the client still holds as unsent and sends again once it loads.
+/// earlier run's probe the client still holds as unsent and sends again once it loads. This run's `probe` gets its
+/// rule first, labelled [`THIS_RUN_PROBE`]: a deny names the first rule that matched it, so only this run's probe is
+/// denied under that label.
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-fn deny_probes(session: &LabSession) -> Result<(), ScenarioError> {
+fn deny_probes(session: &LabSession, probe: &str) -> Result<(), ScenarioError> {
+    let any_url = |method| ForcedDeny::new(method, ".").map_err(|error| setup(error.to_string()));
     for method in ["POST", "PUT"] {
-        session.force_deny(
-            ForcedDeny::new(method, ".")
-                .map_err(|error| setup(error.to_string()))?
-                .with_body_containing(PROBE_MARKER),
-        );
+        session.force_deny(any_url(method)?.with_body_containing(probe).labelled(THIS_RUN_PROBE));
+    }
+    for method in ["POST", "PUT"] {
+        session.force_deny(any_url(method)?.with_body_containing(PROBE_MARKER));
     }
     Ok(())
 }
 
-/// Types `text` into the compose box and sends it with Enter, and waits until the compose box no longer holds it: a
-/// client still settling the chat can drop an Enter, so it is pressed again, up to [`SEND_TRIES`] times in all.
-async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), ScenarioError> {
+/// Types `text` into the compose box ([`COMPOSE`]) and sends it with Enter, and waits until the compose box no longer
+/// holds it: a client still settling the chat can drop an Enter, so it is pressed again, up to [`SEND_TRIES`] times in
+/// all. Each wait is bounded, the page's answers included: a page that stops answering fails the send.
+///
+/// # Errors
+/// When the compose box isn't there, the page refuses the input, or the box still holds `text` after the last try.
+pub async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), ScenarioError> {
     driver.type_into(&format!("{who} types"), COMPOSE, text).await?;
-    let holds = format!(
-        "(document.querySelector({})?.innerText ?? '').includes({})",
+    let sent = format!(
+        "!(document.querySelector({})?.innerText ?? '').includes({})",
         serde_json::Value::String(COMPOSE_CSS.to_owned()),
         serde_json::Value::String(text.to_owned())
     );
+    let step = format!("{who} sends");
     for _ in 0..SEND_TRIES {
         driver.press_enter(&format!("{who} presses Enter")).await?;
-        let deadline = tokio::time::Instant::now() + SEND_WAIT;
-        while tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            if driver.evaluate(&format!("{who} sends"), &holds).await? != serde_json::Value::Bool(true) {
-                return Ok(());
-            }
+        match driver
+            .wait_until_true(&step, &sent, "the compose box to let the text go", SEND_WAIT)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            // a dropped Enter, or a page too busy to answer: press again
+            Err(StepError::Timeout { .. }) => {}
+            Err(error) => return Err(error.into()),
         }
     }
     Err(setup(format!(
@@ -281,44 +303,44 @@ async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), Scenario
     )))
 }
 
-/// The live enforcement test: with [`deny_probes`] in place, a sends `probe`. The fence must force-deny a message post
-/// to the a–b chat (`chat` finds its id in the URL: the evidence that a's compose box belongs to that chat) after it
-/// was sent, and that post must fail in a's page as blocked by the fence.
+/// The live enforcement test: with [`deny_probes`] in place, a sends `probe`, this run's. The fence must force-deny, by
+/// this run's rule ([`THIS_RUN_PROBE`]), a message post to the a–b chat (`chat` finds its id in the URL: the evidence
+/// that a's compose box belongs to that chat) after it was sent, and that very post, found by its `Network` id, must
+/// fail in a's page as blocked by the fence.
 async fn enforce(a: &LabSession, drive_a: &mut Driver, probe: &str, chat: &Regex) -> Result<(), ScenarioError> {
     let message_post = Regex::new(MESSAGE_POST).map_err(|error| setup(error.to_string()))?;
-    let to_chat = |denial: &crate::fence_http::Denial| {
-        denial.cause == DenyCause::Forced && message_post.is_match(&denial.url) && chat.is_match(&denial.url)
+    let this_run = |denial: &Denial| {
+        denial.cause == DenyCause::Forced
+            && denial.label.as_deref() == Some(THIS_RUN_PROBE)
+            && message_post.is_match(&denial.url)
+            && chat.is_match(&denial.url)
     };
-    // an earlier run's unsent probe, resent on load, may have been denied already
-    let before = a.denials().iter().filter(|denial| to_chat(denial)).count();
     send(drive_a, "a (the probe)", probe).await?;
     let deadline = tokio::time::Instant::now() + PROBE_FAIL;
     let denial = loop {
-        if let Some(denial) = a.denials().into_iter().filter(|denial| to_chat(denial)).nth(before) {
+        if let Some(denial) = a.denials().into_iter().find(|denial| this_run(denial)) {
             break denial;
         }
         if tokio::time::Instant::now() >= deadline {
-            let elsewhere = a
-                .denials()
-                .iter()
-                .filter(|denial| denial.cause == DenyCause::Forced)
-                .count();
-            let page = drive_a
-                .evaluate("the compose state", COMPOSE_STATE)
-                .await
-                .unwrap_or_default();
-            return Err(setup(format!(
-                "no message post of the probe to the a–b chat was denied within {PROBE_FAIL:?} ({elsewhere} other \
-                 forced deny(s); compose box holds {page} characters)"
-            )));
+            return Err(no_probe_deny(a, drive_a).await);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
-    let exact = format!("^{}$", regex::escape(&denial.url));
-    let post = RequestPattern::new(Some(&denial.method), &exact).map_err(|error| setup(error.to_string()))?;
+    let network_id = denial.network_id.as_deref().ok_or_else(|| {
+        setup("the fence's deny of the probe names no Network request: can't tell it failed in a's page".to_owned())
+    })?;
     let failed = drive_a
-        .wait_for_failed_request("a's probe post fails in the page", &post, PROBE_FAIL)
+        .wait_for_failure_of("a's probe post fails in the page", network_id, PROBE_FAIL)
         .await?;
+    if !failed.method.eq_ignore_ascii_case(&denial.method) || without_query(&failed.url) != denial.url {
+        return Err(setup(format!(
+            "the request {network_id} that failed in a's page is {} {}, not the denied {} {}",
+            failed.method,
+            without_query(&failed.url),
+            denial.method,
+            denial.url
+        )));
+    }
     let error = failed.failed.unwrap_or_default();
     if !error.contains("ERR_BLOCKED_BY_CLIENT") {
         return Err(setup(format!(
@@ -328,11 +350,33 @@ async fn enforce(a: &LabSession, drive_a: &mut Driver, probe: &str, chat: &Regex
     Ok(())
 }
 
+/// The error of an enforcement test whose probe wasn't denied in time, with what a's run shows instead: its other
+/// forced denies, and how much the compose box holds (asked for [`DIAGNOSIS_WAIT`] at most).
+async fn no_probe_deny(a: &LabSession, drive_a: &Driver) -> ScenarioError {
+    let elsewhere = a
+        .denials()
+        .iter()
+        .filter(|denial| denial.cause == DenyCause::Forced)
+        .count();
+    let page = tokio::time::timeout(DIAGNOSIS_WAIT, drive_a.evaluate("the compose state", COMPOSE_STATE))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    setup(format!(
+        "no message post of this run's probe to the a–b chat was denied within {PROBE_FAIL:?} ({elsewhere} other \
+         forced deny(s); compose box holds {page} characters)"
+    ))
+}
+
 /// Saves what `session`'s tab shows as `failure.png` (mode `0600`) in its capture dir, outside the repository, for the
-/// diagnosis of a failed run; a note saying where, or why not. `None` for a run that isn't recorded.
+/// diagnosis of a failed run; a note saying where, or why not. `None` for a run that isn't recorded. A page that doesn't
+/// answer within [`DIAGNOSIS_WAIT`] gets no screenshot: the run goes on to close the browsers.
 async fn save_screenshot(alias: Alias, session: &LabSession) -> Option<String> {
     let path = session.capture_dir()?.join("failure.png");
-    let saved = match session.driver().screenshot("a screenshot of the failure").await {
+    let mut driver = session.driver();
+    driver.set_call_timeout(DIAGNOSIS_WAIT);
+    let saved = match driver.screenshot("a screenshot of the failure").await {
         Ok(png) => write_private(&path, &png).map_err(|error| error.to_string()),
         Err(error) => Err(error.to_string()),
     };

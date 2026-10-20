@@ -17,7 +17,7 @@ use proto_lab::cdp::SessionId;
 use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, chat_service_path};
 use proto_lab::fence_http::{DenyCause, ForcedDeny, HttpFence, PausedRequest, Verdict};
 use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
-use proto_lab::scenario::dsl::{Driver, RequestPattern, Selector};
+use proto_lab::scenario::dsl::{Driver, RequestPattern, SeenRequest, Selector};
 use serde_json::{Value, json};
 use teams_fence::{
     ChatCredential, DenyReason, FailClosed, Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri,
@@ -351,6 +351,7 @@ fn message_to(chat: &str) -> PausedRequest {
         method: "POST".to_owned(),
         url: format!("https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{chat}/messages"),
         body: Some(br#"{"messagetype":"RichText/Html","content":"<p>hi</p>"}"#.to_vec()),
+        network_id: None,
     }
 }
 
@@ -418,6 +419,7 @@ async fn a_new_chat_is_judged_by_its_members_without_a_read() -> TestResult {
                 .to_string()
                 .into_bytes(),
         ),
+        network_id: None,
     }
     };
     assert_eq!(
@@ -489,6 +491,7 @@ fn a_forced_deny_matches_method_url_and_body_text() -> TestResult {
         method: method.to_owned(),
         url: url.to_owned(),
         body: body.map(|body| body.as_bytes().to_vec()),
+        network_id: None,
     };
     assert!(rule.matches(&request(
         "POST",
@@ -512,13 +515,31 @@ async fn a_forced_deny_comes_before_classification_and_is_logged() -> TestResult
     let send = |body: &str| PausedRequest {
         request_id: "r".to_owned(),
         method: "POST".to_owned(),
-        url: "http://127.0.0.1:9/api/send".to_owned(),
+        url: "http://127.0.0.1:9/api/send?x=1".to_owned(),
         body: Some(body.as_bytes().to_vec()),
+        network_id: Some("net-1".to_owned()),
     };
     assert_eq!(http.decide(&send("probe")).await, Verdict::Allow);
+    http.force_deny(
+        ForcedDeny::new("POST", "/api/send")?
+            .with_body_containing("probe run-1")
+            .labelled("this run"),
+    );
     http.force_deny(ForcedDeny::new("POST", "/api/send")?.with_body_containing("probe"));
     assert_eq!(http.decide(&send("probe")).await, Verdict::Deny(DenyCause::Forced));
+    assert_eq!(
+        http.decide(&send("probe run-1")).await,
+        Verdict::Deny(DenyCause::Forced)
+    );
     assert_eq!(http.decide(&send("other")).await, Verdict::Allow);
+    // each deny names the first rule that matched it, and the request by its Network id
+    let labels: Vec<_> = http.denials().into_iter().map(|denial| denial.label).collect();
+    assert_eq!(labels, [None, Some("this run".to_owned())]);
+    assert!(
+        http.denials()
+            .iter()
+            .all(|denial| denial.network_id.as_deref() == Some("net-1") && denial.url == "http://127.0.0.1:9/api/send")
+    );
     http.clear_forced();
     assert_eq!(http.decide(&send("probe")).await, Verdict::Allow);
     let log = std::fs::read_to_string(&log_path)?;
@@ -527,9 +548,9 @@ async fn a_forced_deny_comes_before_classification_and_is_logged() -> TestResult
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|entry| entry["reason"] == "forced")
         .collect();
-    assert_eq!(forced.len(), 1, "{log}");
+    assert_eq!(forced.len(), 2, "{log}");
     assert_eq!(forced[0]["verdict"], "deny");
-    assert_eq!(http.denials().len(), 1);
+    assert_eq!(http.denials().len(), 2);
     Ok(())
 }
 
@@ -595,7 +616,11 @@ async fn forced_deny_run(armed: &ArmedBrowser, server: &MockServer) -> TestResul
     let page = armed.open_page(Duration::from_secs(15)).await?.session;
     let mut driver = Driver::new(armed.cdp().clone(), page.clone(), armed.watch());
     let posts = RequestPattern::new(Some("POST"), "/api/send$")?;
-    armed.force_deny(ForcedDeny::new("POST", "/api/send$")?.with_body_containing("probe-7"));
+    armed.force_deny(
+        ForcedDeny::new("POST", "/api/send$")?
+            .with_body_containing("probe-7")
+            .labelled("probe-7"),
+    );
 
     send_from_page(&mut driver, server, "probe-7").await?;
     let denied = driver
@@ -604,7 +629,7 @@ async fn forced_deny_run(armed: &ArmedBrowser, server: &MockServer) -> TestResul
     let error = denied.failed.clone().unwrap_or_default();
     assert!(error.contains("ERR_BLOCKED_BY_CLIENT"), "{denied:?}");
     assert_eq!(page_results(armed, &page).await?, json!(["error TypeError"]));
-    assert!(armed.denials().iter().any(|denial| denial.cause == DenyCause::Forced));
+    the_deny_names_the_request(armed, &mut driver, &denied).await?;
     assert!(!server_got_send(server).await, "the denied probe reached the server");
 
     // the same post without the probe goes out
@@ -615,6 +640,22 @@ async fn forced_deny_run(armed: &ArmedBrowser, server: &MockServer) -> TestResul
         .await?;
     assert!(sent.url.ends_with("/api/send"));
     wait_for_send(server).await
+}
+
+/// The forced deny names its rule's label and the page's own request (`denied`) by its `Network` id.
+async fn the_deny_names_the_request(armed: &ArmedBrowser, driver: &mut Driver, denied: &SeenRequest) -> TestResult {
+    let forced = armed
+        .denials()
+        .into_iter()
+        .find(|denial| denial.cause == DenyCause::Forced)
+        .ok_or("no forced deny")?;
+    assert_eq!(forced.label.as_deref(), Some("probe-7"));
+    let network_id = forced.network_id.ok_or("the forced deny has no Network id")?;
+    let failed = driver
+        .wait_for_failure_of("the probe by its id", &network_id, Duration::from_secs(5))
+        .await?;
+    assert_eq!(failed.request_id, denied.request_id);
+    Ok(())
 }
 
 /// Waits up to 5 s for the server to get a post.

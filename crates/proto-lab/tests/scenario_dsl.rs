@@ -14,7 +14,7 @@ use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
 use proto_lab::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
 use proto_lab::scenario::ab_chat::{
-    MESSAGE_POST, PROBE_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id, probe_text,
+    self, MESSAGE_POST, PROBE_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id, probe_text,
 };
 use proto_lab::scenario::dsl::{Driver, RequestPattern, Selector, StepError};
 use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport, TELEMETRY_HOSTS};
@@ -241,6 +241,42 @@ async fn a_wait_runs_out_even_when_the_page_stops_answering() -> TestResult {
 }
 
 #[tokio::test]
+async fn ab_chat_sends_and_a_stalled_page_fails_its_steps_in_time() -> TestResult {
+    with_page(async |run| {
+        run.driver
+            .wait_for_tid("the box", "box", Duration::from_secs(5))
+            .await?;
+        // the page's box is a compose box: Enter sends and empties it
+        ab_chat::send(&mut run.driver, "a", "hello lab").await?;
+        run.driver
+            .wait_for_text("the echo", "sent: hello lab", Duration::from_secs(5))
+            .await?;
+
+        run.driver.set_call_timeout(Duration::from_secs(1));
+        run.driver.click("hang the page", Selector::Tid("hang")).await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let started = std::time::Instant::now();
+        let error = ab_chat::send(&mut run.driver, "a", "never sent")
+            .await
+            .err()
+            .ok_or("a stalled page took a send")?;
+        assert!(error.to_string().contains("timed out"), "{error}");
+        let error = run
+            .driver
+            .shows_text("a stalled page", "x")
+            .await
+            .err()
+            .ok_or("a stalled page answered")?;
+        assert!(matches!(error, StepError::Timeout { .. }), "{error:?}");
+        // a screenshot of a stalled page either comes or times out: it never hangs
+        let _ = run.driver.screenshot("a screenshot of a stalled page").await;
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn typing_and_enter_send_and_the_text_shows() -> TestResult {
     with_page(async |run| {
         run.driver
@@ -278,11 +314,7 @@ fn a_request_pattern_matches_method_and_url() -> TestResult {
 }
 
 fn denial(url: &str, cause: DenyCause) -> Denial {
-    Denial {
-        method: "POST".to_owned(),
-        url: url.to_owned(),
-        cause,
-    }
+    Denial::new("POST", url, cause)
 }
 
 #[test]

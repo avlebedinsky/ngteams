@@ -39,6 +39,9 @@ pub struct PausedRequest {
     pub url: String,
     /// The body as `postData` carries it. Missing when the request has none, or when Chrome didn't inline it.
     pub body: Option<Vec<u8>>,
+    /// The request's `Network` id (`networkId`), the one the page's `Network` events know it by. Missing when the event
+    /// doesn't give one.
+    pub network_id: Option<String>,
 }
 
 impl PausedRequest {
@@ -54,6 +57,7 @@ impl PausedRequest {
             method: text(&request["method"]).ok_or(MalformedPause("request.method"))?,
             url: text(&request["url"]).ok_or(MalformedPause("request.url"))?,
             body: request["postData"].as_str().map(|body| body.as_bytes().to_vec()),
+            network_id: text(&params["networkId"]),
         })
     }
 }
@@ -94,15 +98,35 @@ pub struct Denial {
     pub method: String,
     pub url: String,
     pub cause: DenyCause,
+    /// For a forced deny: the label of the rule that forced it ([`ForcedDeny::labelled`]), if it has one.
+    pub label: Option<String>,
+    /// For a forced deny: the request's `Network` id ([`PausedRequest::network_id`]), if the event gave one.
+    pub network_id: Option<String>,
+}
+
+impl Denial {
+    /// A deny of `method` `url` (its query and fragment dropped) for `cause`, with no label or `Network` id.
+    #[must_use]
+    pub fn new(method: &str, url: &str, cause: DenyCause) -> Self {
+        Self {
+            method: method.to_owned(),
+            url: without_query(url).to_owned(),
+            cause,
+            label: None,
+            network_id: None,
+        }
+    }
 }
 
 /// A deny a run asks for on purpose: every request with this method, a URL the pattern finds a match in, and (when
-/// given) a body holding the text, is denied before it is classified.
+/// given) a body holding the text, is denied before it is classified. When several match a request, the first one the
+/// run forced is the one its [`Denial`] names.
 #[derive(Clone, Debug)]
 pub struct ForcedDeny {
     method: String,
     url: Regex,
     body_contains: Option<String>,
+    label: Option<String>,
 }
 
 impl ForcedDeny {
@@ -115,7 +139,16 @@ impl ForcedDeny {
             method: method.to_ascii_uppercase(),
             url: Regex::new(url_pattern)?,
             body_contains: None,
+            label: None,
         })
+    }
+
+    /// Names the rule: a request it denies is kept with this label ([`Denial::label`]), so a run can tell its own
+    /// forced denies from another rule's.
+    #[must_use]
+    pub fn labelled(mut self, label: &str) -> Self {
+        self.label = Some(label.to_owned());
+        self
     }
 
     /// Only requests whose body holds `text`.
@@ -181,12 +214,14 @@ impl HttpFence {
         self.forced.lock().unwrap_or_else(PoisonError::into_inner).clear();
     }
 
-    fn forced(&self, request: &PausedRequest) -> bool {
+    /// The first forced deny that matches `request`.
+    fn forced(&self, request: &PausedRequest) -> Option<ForcedDeny> {
         self.forced
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .any(|rule| rule.matches(request))
+            .find(|rule| rule.matches(request))
+            .cloned()
     }
 
     /// Offers the request of a `Fetch.requestPaused` event's `params` to the live source as its credential, when the run
@@ -209,7 +244,7 @@ impl HttpFence {
 
     /// Classifies a request and decides it. Every deny is logged and kept; a forced one comes first.
     pub async fn decide(&self, request: &PausedRequest) -> Verdict {
-        if self.forced(request) {
+        if let Some(rule) = self.forced(request) {
             let record = RequestRecord {
                 channel: Channel::Http,
                 method: &request.method,
@@ -218,7 +253,11 @@ impl HttpFence {
             };
             // denied whether or not the log takes it
             let _ = self.fence.log().record_request(&record);
-            self.keep(&request.method, &request.url, DenyCause::Forced);
+            self.keep(Denial {
+                label: rule.label,
+                network_id: request.network_id.clone(),
+                ..Denial::new(&request.method, &request.url, DenyCause::Forced)
+            });
             return Verdict::Deny(DenyCause::Forced);
         }
         let classification = self
@@ -237,7 +276,7 @@ impl HttpFence {
         };
         let verdict = judge(&self.fence, self.members.as_ref(), classification, request).await;
         if let Verdict::Deny(cause) = verdict {
-            self.keep(method, url, cause);
+            self.keep(Denial::new(method, url, cause));
         }
         verdict
     }
@@ -251,18 +290,11 @@ impl HttpFence {
         };
         // denied whether or not the log takes it
         let _ = self.fence.log().record_request(&record);
-        self.keep("?", "?", DenyCause::Malformed);
+        self.keep(Denial::new("?", "?", DenyCause::Malformed));
     }
 
-    fn keep(&self, method: &str, url: &str, cause: DenyCause) {
-        self.denials
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Denial {
-                method: method.to_owned(),
-                url: without_query(url).to_owned(),
-                cause,
-            });
+    fn keep(&self, denial: Denial) {
+        self.denials.lock().unwrap_or_else(PoisonError::into_inner).push(denial);
     }
 
     /// Every request denied so far, in order.

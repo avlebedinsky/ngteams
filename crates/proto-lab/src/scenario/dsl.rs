@@ -13,7 +13,10 @@
 //! - [`Driver::wait_for_text`]: the page shows a text;
 //! - [`Driver::navigate`], [`Driver::click`], [`Driver::type_into`], [`Driver::press_enter`].
 //!
-//! A wait that runs out fails with [`StepError::Timeout`], naming the step, how long it waited and what for.
+//! A wait that runs out fails with [`StepError::Timeout`], naming the step, how long it waited and what for. So does
+//! any call to the page that gets no answer within the driver's call timeout ([`CALL_TIMEOUT`] unless
+//! [`Driver::set_call_timeout`] sets another): a page that stops answering (a busy renderer, a modal dialog) fails the
+//! step instead of hanging the run before its teardown.
 
 use std::fmt;
 use std::time::Duration;
@@ -27,6 +30,9 @@ use crate::cdp::{Cdp, CdpError, Event, SessionId};
 
 /// How often a wait on the page looks again.
 pub const POLL: Duration = Duration::from_millis(200);
+
+/// How long one call to the page (an evaluation, an input, a navigation, a screenshot) may go unanswered.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a step failed.
 #[derive(Debug, thiserror::Error)]
@@ -153,6 +159,8 @@ pub struct Driver {
     /// The first request a request wait may match.
     cursor: usize,
     closed: bool,
+    /// How long one call to the page may go unanswered.
+    call_timeout: Duration,
 }
 
 impl Driver {
@@ -166,7 +174,13 @@ impl Driver {
             requests: Vec::new(),
             cursor: 0,
             closed: false,
+            call_timeout: CALL_TIMEOUT,
         }
+    }
+
+    /// Gives each call to the page `timeout` to answer from now on, instead of [`CALL_TIMEOUT`].
+    pub fn set_call_timeout(&mut self, timeout: Duration) {
+        self.call_timeout = timeout;
     }
 
     /// Every request seen so far.
@@ -329,17 +343,43 @@ impl Driver {
         request: &SeenRequest,
         timeout: Duration,
     ) -> Result<String, StepError> {
-        let deadline = tokio::time::Instant::now() + timeout;
         let waiting_for = format!("{} {} to fail", request.method, request.url);
+        let this = |seen: &SeenRequest| seen.session == request.session && seen.request_id == request.request_id;
+        self.wait_failed(step, &waiting_for, timeout, this)
+            .await
+            .map(|seen| seen.failed.unwrap_or_default())
+    }
+
+    /// Waits up to `timeout` for the request with the `Network` request id `request_id` (on any session) to fail, and
+    /// gives it: the request a `Fetch.requestPaused` event names by its `networkId`.
+    ///
+    /// # Errors
+    /// [`StepError::Timeout`] when it hasn't failed in time, [`StepError::Failed`] when it got a response instead.
+    pub async fn wait_for_failure_of(
+        &mut self,
+        step: &str,
+        request_id: &str,
+        timeout: Duration,
+    ) -> Result<SeenRequest, StepError> {
+        let waiting_for = format!("the request {request_id} to fail");
+        self.wait_failed(step, &waiting_for, timeout, |seen| seen.request_id == request_id)
+            .await
+    }
+
+    /// Waits up to `timeout` for the first seen request `this` picks to fail, and gives it.
+    async fn wait_failed(
+        &mut self,
+        step: &str,
+        waiting_for: &str,
+        timeout: Duration,
+        this: impl Fn(&SeenRequest) -> bool,
+    ) -> Result<SeenRequest, StepError> {
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
             self.drain();
-            let seen = self
-                .requests
-                .iter()
-                .find(|seen| seen.session == request.session && seen.request_id == request.request_id);
-            if let Some(seen) = seen {
-                if let Some(error) = &seen.failed {
-                    return Ok(error.clone());
+            if let Some(seen) = self.requests.iter().find(|seen| this(seen)) {
+                if seen.failed.is_some() {
+                    return Ok(seen.clone());
                 }
                 if let Some(status) = seen.status {
                     return Err(StepError::Failed {
@@ -351,7 +391,7 @@ impl Driver {
                     });
                 }
             }
-            self.wait_for_events(step, deadline, timeout, &waiting_for).await?;
+            self.wait_for_events(step, deadline, timeout, waiting_for).await?;
         }
     }
 
@@ -440,7 +480,11 @@ impl Driver {
             .find(|seen| seen.session.as_ref() == session && seen.request_id == id)
     }
 
-    async fn wait_until_true(
+    /// Waits up to `timeout` for `expression` to be `true` in the page; `waiting_for` says what for, in the error.
+    ///
+    /// # Errors
+    /// [`StepError::Timeout`] when it isn't in time, or the page doesn't answer in time.
+    pub async fn wait_until_true(
         &mut self,
         step: &str,
         expression: &str,
@@ -484,7 +528,7 @@ impl Driver {
     /// messages), so it belongs in the run's capture dir, never in the repository.
     ///
     /// # Errors
-    /// When the browser doesn't take it or its answer isn't base64.
+    /// When the browser doesn't take it within the call timeout, or its answer isn't base64.
     pub async fn screenshot(&self, step: &str) -> Result<Vec<u8>, StepError> {
         let result = self
             .call(step, "Page.captureScreenshot", json!({"format": "png"}))
@@ -510,10 +554,16 @@ impl Driver {
         Ok(result["result"]["value"].clone())
     }
 
+    /// Sends `method` to the tab and waits up to the call timeout for its answer.
     async fn call(&self, step: &str, method: &str, params: Value) -> Result<Value, StepError> {
-        self.cdp
-            .call(Some(&self.page), method, params)
+        let call = self.cdp.call(Some(&self.page), method, params);
+        tokio::time::timeout(self.call_timeout, call)
             .await
+            .map_err(|_| StepError::Timeout {
+                step: step.to_owned(),
+                waited: self.call_timeout,
+                waiting_for: format!("the page to answer {method}"),
+            })?
             .map_err(|source| StepError::Cdp {
                 step: step.to_owned(),
                 source,

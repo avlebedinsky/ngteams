@@ -386,7 +386,8 @@ fn identity_in(headers: &Value) -> Option<Identity> {
     })
 }
 
-/// What the fence did during a run. Denies are expected while it runs fail-closed; a breach is not.
+/// What the fence did during a run. Denies are expected while it runs fail-closed; a breach is not. A target closed
+/// before it ran ([`ArmingFailure::closed_before_it_ran`]) is neither: a warning.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FenceReport {
     /// Denied requests by host.
@@ -394,7 +395,7 @@ pub struct FenceReport {
     pub denied_frames: usize,
     /// Frames the browser sent without an allow.
     pub unsanctioned_frames: usize,
-    /// Targets that couldn't be armed (and were closed).
+    /// Targets that couldn't be armed, closed before they ran or not.
     pub unarmed: Vec<ArmingFailure>,
     /// The fence lost its connection to the browser.
     pub connection_lost: bool,
@@ -429,10 +430,19 @@ impl FenceReport {
     }
 
     /// Whether anything got past the fence or escaped it: a frame sent without an allow, a target that couldn't be
-    /// armed, a lost connection. Denies are not breaches.
+    /// armed and may have run (its resume was sent, or it couldn't be closed), a lost connection. Denies are not
+    /// breaches, and neither is a target closed before it ran ([`Self::closed_unarmed`]).
     #[must_use]
     pub fn breached(&self) -> bool {
-        self.unsanctioned_frames > 0 || !self.unarmed.is_empty() || self.connection_lost
+        self.unsanctioned_frames > 0
+            || self.unarmed.iter().any(|failure| !failure.closed_before_it_ran())
+            || self.connection_lost
+    }
+
+    /// The targets that couldn't be armed in time and were closed before any of their code ran: no breach, as nothing
+    /// of them ran unguarded, but what they would have done didn't happen.
+    pub fn closed_unarmed(&self) -> impl Iterator<Item = &ArmingFailure> {
+        self.unarmed.iter().filter(|failure| failure.closed_before_it_ran())
     }
 
     /// One line for the operator: the denies by host, then anything worse.
@@ -453,7 +463,15 @@ impl FenceReport {
             let _ = write!(line, "; {} frame(s) sent without an allow", self.unsanctioned_frames);
         }
         for failure in &self.unarmed {
-            let _ = write!(line, "; a {} target not armed ({})", failure.kind, failure.error);
+            if failure.closed_before_it_ran() {
+                let _ = write!(
+                    line,
+                    "; a {} target closed unarmed before it ran ({})",
+                    failure.kind, failure.error
+                );
+            } else {
+                let _ = write!(line, "; a {} target not armed ({})", failure.kind, failure.error);
+            }
         }
         if self.connection_lost {
             line.push_str("; the fence lost its connection");
