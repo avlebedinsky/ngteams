@@ -9,10 +9,10 @@ Status: 2026-10-19, M0 Task 12. Written from static analysis only, with no live 
   x86_64 disassembly of `OneAuthProvider::Initialize`);
 - the CA probe of 2026-10-19 (`docs/spikes/ca-probe.md`), the only live result so far.
 
-The capture confirmation the plan asks for is blocked: the lab accounts have no Teams license, so authz answers 403 and
-the web client never loads (`docs/backlog/lab-accounts-have-no-teams-license.md`). Everything below that isn't from the
-CA probe is what the client code says it does. The points that need a capture are listed in
-[To confirm by capture](#to-confirm-by-capture).
+Update 2026-10-20: the lab accounts now have a Teams license (Microsoft 365 Business Basic), and `proto-lab auth`'s
+own authz exchange succeeds for all 3 (`docs/spikes/auth.md`). What that exchange showed is marked **Live** below.
+Everything else that isn't from the CA probe is what the client code says it does; the points that still need a
+capture of the web client are listed in [To confirm by capture](#to-confirm-by-capture).
 
 ## The two layers
 
@@ -187,13 +187,31 @@ The client reads these top-level fields:
 
 The client treats a GTM table shorter than a minimum length as missing and refuses to cache it.
 
+**Live (2026-10-20, our own exchange for lab a, b, c, all alike).** The headers of the table above minus
+`x-ms-client-type`, `x-ms-client-version` and `X-Client-UI-Language`, no body: 200. The answer's top-level fields were
+exactly `tokens`, `region`, `partition`, `regionGtms`, `regionSettings`, `licenseDetails`, `isMultiGeo` (false) and
+`ocdiRedirect` (the string `MicrosoftDefault`). No `userRegion`, `userPartition`, `regionOverride`,
+`consumerLicenseDetails` or top-level `skypeToken` object.
+
+- `tokens` holds three fields: `skypeToken`, `expiresIn` and `tokenType` (`SkypeToken`).
+- The skypetoken is a JWT (about 3 KB) with the claims `aad_appid`, `aad_iat`, `aad_pft`, `aad_uti`, `acct`,
+  `altsecid`, `csi`, `exp`, `iat`, `rgn`, `scp`, `skypeid` and `tid`; no `nbf`. `rgn` matched `region`.
+- **Its `exp` is the `exp` of the Entra token that was exchanged, to the second**, and `expiresIn` is that `exp` minus
+  the skypetoken's `iat` (one second short of it). So the lifetime is whatever the Entra token had left, about 2–2.5 h
+  for a fresh one, not 24 hours. A skypetoken can't outlive its Entra token: renewing it means refreshing the
+  `api.spaces.skype.com` token first, and exchanging an old Entra token gives a short skypetoken.
+- `region` `amer`, `partition` `amer03` for all 3 accounts.
+- `regionSettings`: five flags (`isAppsDiscoveryEnabled`, `isContactMigrationEnabled`, `isFederationEnabled`,
+  `isOutOfOfficeIntegrationEnabled`, `isUnifiedPresenceEnabled`). `licenseDetails`: 38 fields, among them
+  `isTeamsEnabled` and `isTeamsSmb` true, `isFreemium` and `isTrial` false.
+
 ### Errors
 
 - **403**: the user may not use Teams. The body is JSON with `errorCode` and `message`. The codes the client knows
   include `UserLicenseNotPresentTrialEligible`, `UserLicenseNotPresentTrialExpired`,
   `UserLicenseNotPresentTrialHardBlocked`, `TeamsDisabledForTenantForbidden`, `TrialLicenseDisabledForTenantForbidden`,
-  `UserNotFoundInSkypeTeam`, `UserChatDisabled`, and admin variants. The lab accounts get this today; the "start
-  trial" page Task 8 saw points to `UserLicenseNotPresentTrialEligible`.
+  `UserNotFoundInSkypeTeam`, `UserChatDisabled`, and admin variants. The lab accounts got
+  `UserLicenseNotPresentTrialEligible` before they were licensed; the "start trial" page Task 8 saw was that refusal.
 - **401**: the Entra token was refused; refresh it (with claims, if challenged) and retry.
 - **Retries** (`enableAuthzRetriesAndThrottleClients` on in prod): retryable statuses (throttling, 5xx) are retried with
   exponential backoff and jitter, and the failure is cached for a short TTL so callers don't hammer authz. 403 and
@@ -207,6 +225,22 @@ Names it uses, most-used first: `middleTier`, `mtImageService`, `groupsServiceV2
 `chatServiceAfd`, `chatSvcAggAfd`, `virtualEventsService`, `userProfileService`, `teamsPushServiceAfd`, `mcpService`,
 `iC3LocationService`, `consumerLicenses`, `authService`, `appsSuggestionService`, `searchService`, `graphService`, and a
 few rarer ones. We persist the whole object as returned, not a fixed list.
+
+**Live (2026-10-20):** 112 entries for each of a, b and c. Present from the list above: `middleTier`,
+`mtImageService`, `urlpV2`, `urlp`, `amsV2`, `presenceUPS`, `ams`, `userIntelligenceService`, `unifiedPresence`,
+`peopleProfileService`, `chatService`, `chatServiceAfd`, `chatSvcAggAfd`, `virtualEventsService`, `userProfileService`,
+`teamsPushServiceAfd`, `mcpService`, `iC3LocationService`, `appsSuggestionService`. Absent: `groupsServiceV2`,
+`consumerLicenses`, `authService`, `searchService` (there is a `search`) and `graphService`, so code that wants them
+needs a fallback. Many of the others are `…S2S` and `calling…` entries. Some bases as given (no trailing slash):
+
+| Name | Base URL |
+|---|---|
+| `chatServiceAfd` | `https://teams.microsoft.com/api/chatsvc/amer` |
+| `chatService` | `https://amer.ng.msg.teams.microsoft.com` |
+| `middleTier` | `https://teams.microsoft.com/api/mt/part/amer-03` |
+| `ams` | `https://us-api.asm.skype.com` |
+| `unifiedPresence` | `https://presence.teams.microsoft.com` |
+| `teamsPushServiceAfd` | `https://teams.microsoft.com/api/tps` |
 
 Chat specifics: prod sets `useChatServiceAfd`, so the chat base URL is `chatServiceAfd` (falling back to `chatService`
 if absent). Chat and presence requests carry `BehaviorOverride: redirectAs404`; a wrong region answers 404 with a
@@ -279,7 +313,9 @@ later if enforcement is turned on.
    `docs/spikes/auth.md`): yes.** One refresh grant each gave a token for `chatsvcagg`, presence, `ic3`, Graph,
    Outlook, Outlook search and substrate, for all 3 lab accounts, with no Conditional Access block. SharePoint wasn't
    asked: it needs a site host.
-2. What is the real `tokens.expiresIn` of a skypetoken (the client defaults to 24 hours only in the authzcore path)?
+2. ~~What is the real `tokens.expiresIn` of a skypetoken (the client defaults to 24 hours only in the authzcore
+   path)?~~ **Answered (2026-10-20, live):** the skypetoken carries `exp`, equal to the exchanged Entra token's `exp`;
+   `expiresIn` is the same lifetime in seconds, about 2–2.5 h for a fresh Entra token (see [Response](#response)).
 3. Which runtime setting makes macOS use `nativeclient` instead of `msauth.com.microsoft.teams2://auth`? It doesn't
    matter while `nativeclient` works for us.
 4. Does presence accept a token whose audience is the presence origin, or does it want `api.spaces.skype.com`? The
@@ -292,14 +328,16 @@ later if enforcement is turned on.
 
 ## To confirm by capture
 
-Blocked until the lab accounts get a Teams license (`docs/backlog/lab-accounts-have-no-teams-license.md`). With a
-license, the `load` capture of account A (Task 11) should show:
+The lab accounts are licensed now, so the `load` capture of account A (Task 11) can be taken. It should show:
 
-- [ ] the authz POST: URL (authz, not authzcore), the headers above, an empty body, status 200;
-- [ ] the authz response: `tokens.skypeToken`, `tokens.expiresIn`, `region`, `partition`, the `regionGtms` names and
-      their hosts for our tenant, `licenseDetails`;
-- [ ] that `api.spaces.skype.com` is the authz audience (the CA probe already showed this audience works for the
-      native client);
+- [ ] the authz POST the web client makes: URL (authz, not authzcore), the headers above, an empty body, status 200.
+      Our own POST to authz with an empty body and without the `x-ms-client-*` headers gets 200 (Live, under
+      [Response](#response)); which endpoint and headers the web client itself uses still needs the capture;
+- [x] the authz response: `tokens.skypeToken`, `tokens.expiresIn`, `region`, `partition`, the `regionGtms` names and
+      their hosts, `licenseDetails`. Confirmed by our own exchange for all 3 accounts (Live, under
+      [Response](#response) and [Region GTMs](#region-gtms));
+- [x] that `api.spaces.skype.com` is the authz audience: authz turns a token for it into a skypetoken (our own
+      exchange, all 3 accounts);
 - [ ] the chat service host the client really uses (`chatServiceAfd` vs `chatService`) and whether a 404 `Location`
       region hop happens;
 - [ ] which middle-tier requests carry both `Authorization: Bearer` and `x-skypetoken`, and which carry

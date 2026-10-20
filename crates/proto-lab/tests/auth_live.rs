@@ -74,8 +74,6 @@ async fn every_lab_account_signs_in_natively_and_refreshes() {
 }
 
 #[tokio::test]
-#[ignore = "blocked: the lab accounts have no Teams license, authz answers 403 UserLicenseNotPresentTrialEligible \
-            (docs/backlog/lab-accounts-have-no-teams-license.md)"]
 async fn every_lab_account_gets_a_skypetoken() {
     let Some(config) = live().unwrap() else {
         return;
@@ -90,6 +88,12 @@ async fn every_lab_account_gets_a_skypetoken() {
             None => panic!("{alias}: no exchange"),
         };
         assert!(skypetoken.expires_at > SystemTime::now(), "{alias}");
+        // authz never lets a skypetoken outlive the access token it was given: its `exp` is that token's `exp`
+        let spaces_expiry = report.refreshed.as_ref().and_then(|summary| summary.expires_at);
+        assert!(
+            spaces_expiry.is_some_and(|exp| skypetoken.expires_at <= exp),
+            "{alias}: the skypetoken outlives the api.spaces.skype.com token"
+        );
         assert!(
             !skypetoken.region.endpoints.is_empty(),
             "{alias}: no regional endpoints"

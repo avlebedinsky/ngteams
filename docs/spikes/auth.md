@@ -69,7 +69,7 @@ are the answers to one refresh grant each, the same for a, b and c:
 The Graph and Outlook tokens can send messages and mail, so they are as sensitive as the skypetoken. In M0 the lab only
 reads their claims. Any use of them is a write path that has to go through the fence like everything else.
 
-### Skypetoken: refused for all 3 accounts (blocked)
+### Skypetoken before the license: refused for all 3 accounts
 
 authz answered **403 with `errorCode` `UserLicenseNotPresentTrialEligible`** for a, b and c, in each CLI run and in
 the live test. This is the same refusal `proto-lab login` saw from the web client in Task 8. Now the error code is
@@ -84,8 +84,23 @@ fence's own-state rule matches `authz` as a whole path.
 `amer03`.** After the three accounts got Microsoft 365 Business Basic, `proto-lab status` printed `ok` for each (the
 fence denied nothing for a and b, one telemetry request to `teams.events.data.microsoft.com` for c), and
 `proto-lab auth a|b|c` got a skypetoken for each: 112 regional endpoints, expiry ~2–2.3 h, the same as the refreshed
-`api.spaces.skype.com` token's. The fence denied nothing during `auth`. The license blocker below is gone; the backlog
+`api.spaces.skype.com` token's. The fence denied nothing during `auth`. The license blocker is gone; the backlog
 item is closed.
+
+### Skypetoken, live test: passed for all 3 accounts
+
+`every_lab_account_gets_a_skypetoken` (`crates/proto-lab/tests/auth_live.rs`) is a normal live test now and passes for
+a, b and c: each signs in under the armed fence (0 requests and 0 frames denied), refreshes, and gets a skypetoken
+that is stored in the in-memory store, with region `amer`, partition `amer03` and 112 regional endpoints. We sent no
+`x-ms-client-type` or `x-ms-client-version` header and authz didn't need them.
+
+**The expiry is real, not a bug.** The skypetoken's expiry always equals the refreshed `api.spaces.skype.com` token's
+because authz issues it that way: its JWT `exp` is the exchanged Entra token's `exp` to the second, and the answer's
+`expiresIn` is the same lifetime counted from the skypetoken's `iat` (one second short). `authz.rs` reads the JWT
+`exp` first and `expiresIn` only as a fallback, and here both give the same time, so there is nothing to fix. The
+live test now asserts it: a skypetoken never outlives the access token it came from. What it means for renewal: a
+skypetoken lasts only as long as the Entra token it was made from, so renewal has to refresh that token first. The
+answer's full shape is in `docs/protocol/auth.md` (Response, Region GTMs).
 
 ## The redirect catch
 
@@ -118,24 +133,19 @@ cargo build -p proto-lab
 target/debug/proto-lab auth a                  # Entra, refresh, skypetoken
 target/debug/proto-lab auth a --audiences      # plus one token per other audience
 target/debug/proto-lab auth a --no-skypetoken  # Entra only
-PROTO_LAB_LIVE=1 cargo test -p proto-lab --features live --test auth_live                     # a, b, c: Entra + refresh
-PROTO_LAB_LIVE=1 cargo test -p proto-lab --features live --test auth_live -- --include-ignored  # also the skypetoken
+PROTO_LAB_LIVE=1 cargo test -p proto-lab --features live --test auth_live  # a, b, c: Entra + refresh, skypetoken
 ```
 
-Without `PROTO_LAB_LIVE=1` the live tests skip, so `cargo test --all-features` stays offline. The skypetoken test is
-`#[ignore]` until the license blocker is gone.
+Without `--features live` the live tests aren't built, and without `PROTO_LAB_LIVE=1` they skip, so
+`cargo test --all-features` stays offline.
 
 ## What remains
 
-- **The skypetoken, live.** Blocked on a Teams license or the Exploratory trial for the lab accounts
-  (`docs/backlog/lab-accounts-have-no-teams-license.md`). Once they have Teams, run the ignored live test. It should
-  pass as it is, then:
-  - record the real `tokens.expiresIn` and whether the skypetoken carries `exp` (auth notes' open question 2);
-  - confirm the region and the `regionGtms` names, and replace `tests/fixtures/auth/authz-ok.json` with a sanitized
-    export.
-- **Headers.** We send no `x-ms-client-type` or `x-ms-client-version`. authz didn't object before refusing the license,
-  but whether a licensed account's exchange needs them is unknown until then.
-- **Renewal.** `AuthzKind::TokenRefresh` exists, but nothing schedules renewal yet. That belongs to the M1 client.
+- **The authz fixture.** `tests/fixtures/auth/authz-ok.json` is still synthetic (its `expiresIn` of 86400 and its
+  short GTM table aren't what a live answer looks like). Replace it with a sanitized export of the web client's
+  capture (Task 11 `load`), which also settles which authz endpoint and headers the web client itself uses.
+- **Renewal.** `AuthzKind::TokenRefresh` exists, but nothing schedules renewal yet. That belongs to the M1 client, and
+  it must refresh the `api.spaces.skype.com` token before each exchange, since the skypetoken expires with it.
 - **The user's own account** may face stricter Conditional Access than the bot accounts (auth notes' open question
   6). Not testable in M0.
 - **CAE.** We don't advertise CAE (`xms_cc`), so our tokens are ordinary ones, and claims challenges aren't handled.
