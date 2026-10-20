@@ -14,7 +14,7 @@ and each round's findings were new mechanisms. The last round, on `m0-task-9-cap
   passcode) survives sanitizing. `p` is in neither secret-key list, and the value is shorter than the 32-character
   opaque-token minimum. The numeric meeting id survives too. So export would write a join credential.
 - **MAJOR `crates/proto-lab/src/sanitize.rs:721`**: `name_variants` splits names on punctuation, so from an
-  email-shaped display name (`jane.doe@contoso.com`) it learns domain labels such as `com` and replaces them everywhere.
+  email-shaped display name (`jane.doe@example.com`) it learns domain labels such as `com` and replaces them everywhere.
   Every `*.com` host in the capture becomes `<name:N>`. The export still succeeds and the fixture is useless.
 
 Full findings: `~/.local/state/plan-exec-revmux/20261019-native-teams-m0-lab-and-spikes/task9-r4-findings.txt`.
