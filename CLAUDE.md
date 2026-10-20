@@ -20,8 +20,9 @@ These hold for every agent and every change, with no exceptions.
   `~/.local/share/teams-lab/reference/` (it refuses any destination inside a git work tree). Committed fixtures are
   written synthetic-from-capture: read the reference copy locally, write a fixture of the same shape with made-up
   values, and mark it synthetic (a top-level `"_synthetic"` note in JSON, on the first line of JSONL, a
-  `_synthetic:` first-line header in other text). The fixture guard (`crates/fixture-guard`) must pass on
-  `tests/fixtures/` and `docs/`, and every fixture in `tests/fixtures/` must carry the marker. The sanitizer is
+  `_synthetic:` first-line header in other text). The fixture guard (`crates/fixture-guard`) must pass on every
+  `tests/fixtures/` (top-level, crates', spikes') and `docs/`, and every fixture in them must carry the marker, apart
+  from the non-Teams test inputs listed in `fixture_guard::synthetic::TEST_INPUTS`. The sanitizer is
   defence in depth, not permission to commit its output. Tokens never reach logs or stdout: print only aud, exp,
   scopes and tenant.
 - **Agents never build or run a personal build and never receive the user's tokens.** Lab binaries get a

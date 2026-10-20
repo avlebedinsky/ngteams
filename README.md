@@ -15,9 +15,9 @@ contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-auth` | PKCE code exchange, token refresh and storage, skypetoken |
 | `crates/teams-proto` | Teams internal API requests; mutating ones need a `WritePermit` |
 | `crates/proto-lab` | the lab harness CLI |
-| `crates/fixture-guard` | scans `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs |
+| `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs |
 | `spikes/gpui-video` | GPUI spike: the Wayland smoke window (M0 Task 15), then video rendering |
-| `tests/fixtures/` | sanitized captures |
+| `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike |
 | `docs/protocol/`, `docs/spikes/` | protocol notes and spike write-ups |
 | `tools/` | interim Node tools (lab sign-in, Conditional Access probe) |
 
@@ -47,7 +47,8 @@ is described in `crates/proto-lab/src/capture.rs`). Captures never enter the rep
 
 `cargo run -p proto-lab -- export <capture> <name>` sanitizes one into a local **reference copy**,
 `reference/<name>.jsonl` under the lab's data dir (`~/.local/share/teams-lab/reference/` by default; one JSON array for
-a `.json` name; the file `0600`, its directories `0700`). It refuses any destination inside a git work tree. It writes
+a `.json` name; the file `0600`, its directories `0700`). It refuses any destination inside a git work tree (checked
+with `..` and symlinks resolved), a destination that is a symlink, and a `..` after a directory not yet created. It writes
 nothing unless no word (3 characters or more) of a name found in the capture is left in the result, at any layer of
 encoding, and the fixture guard passes it. A word of a name that is also an ordinary word left anywhere refuses the
 export too; a name never seen under a name field, or a shorter word, is outside that check. A word of a name that is
@@ -57,13 +58,16 @@ letters only too) become `<meeting:N>` and `<token:N>` wherever they show, invit
 client has locale strings for, and the fixture guard refuses a join link, a meeting id or a passcode left in the clear.
 The sanitizer is defence in depth, with known gaps (`docs/backlog/sanitizer-defence-in-depth-known-gaps.md`).
 
-Committed fixtures in `tests/fixtures/` are written **synthetic-from-capture**: an agent reads the reference copy
-locally and writes a fixture of the same shape with made-up values. Every fixture declares itself synthetic: a JSON
-file has a top-level `"_synthetic"` note (what it is shaped like, that the values are made up), a JSONL file has one
-on its first line (a header line of its own, or on every line), and any other text file starts with a `_synthetic: …`
-line in its own comment syntax. `cargo test -p fixture-guard` fails on an unmarked fixture
-(`committed_fixtures_are_marked_synthetic`) and on anything the guard finds in `tests/fixtures/` or `docs/`
-(`committed_fixtures_and_docs_are_clean`). Crate-local test inputs (`crates/*/tests/fixtures/`) are not fixtures.
+Committed fixtures are written **synthetic-from-capture**: an agent reads the reference copy locally and writes a
+fixture of the same shape with made-up values. Fixtures live in any `tests/fixtures/` of the workspace: the top-level
+one, a crate's, a spike's (`spikes/*/tests/fixtures/`). Every fixture declares itself synthetic: a JSON file has a
+top-level `"_synthetic"` note (what it is shaped like, that the values are made up), a JSONL file has one on its first
+line (a header line of its own, or on every line), and any other text file starts with a `_synthetic: …` line, bare or
+after its own comment opener. Only an empty `.gitkeep` is not a fixture. `cargo test -p fixture-guard` fails on an
+unmarked fixture (`committed_fixtures_are_marked_synthetic`) and on anything the guard finds in any `tests/fixtures/`
+or `docs/` (`committed_fixtures_and_docs_are_clean`). The only directories exempt from the marker are test inputs that
+are not shaped like anything Teams sends, listed in `fixture_guard::synthetic::TEST_INPUTS` (proto-lab's test pages
+and mini bundle); the guard still scans them.
 
 ## Test-only builds
 

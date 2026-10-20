@@ -273,17 +273,27 @@ fn a_single_file_root_is_scanned() {
     assert_eq!(findings[0].kind, Kind::Email);
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+fn repo_root() -> std::io::Result<PathBuf> {
+    fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+/// Every fixture directory of the workspace (the top-level one, every crate's and spike's), as the repo-wide checks
+/// see them; the top-level one and proto-lab's are always among them, so a discovery that finds nothing fails here.
+fn workspace_fixture_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let dirs = synthetic::fixture_dirs(root)?;
+    for expected in ["tests/fixtures", "crates/proto-lab/tests/fixtures"] {
+        assert!(dirs.contains(&root.join(expected)), "{expected} not found in {dirs:?}");
+    }
+    Ok(dirs)
 }
 
 #[test]
 fn committed_fixtures_and_docs_are_clean() {
-    let root = repo_root();
-    let findings = Guard::new()
-        .unwrap()
-        .scan_paths(&[&root.join("tests/fixtures"), &root.join("docs")])
-        .unwrap();
+    let root = repo_root().unwrap();
+    let mut roots = workspace_fixture_dirs(&root).unwrap();
+    roots.push(root.join("docs"));
+    let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    let findings = Guard::new().unwrap().scan_paths(&roots).unwrap();
     let report: Vec<String> = findings.iter().map(ToString::to_string).collect();
     assert!(
         findings.is_empty(),
@@ -294,7 +304,13 @@ fn committed_fixtures_and_docs_are_clean() {
 
 #[test]
 fn committed_fixtures_are_marked_synthetic() {
-    let unmarked = synthetic::unmarked(&repo_root().join("tests/fixtures")).unwrap();
+    let root = repo_root().unwrap();
+    workspace_fixture_dirs(&root).unwrap();
+    // the exclusions name directories that exist, so a moved one doesn't leave a stale exception behind
+    for dir in synthetic::TEST_INPUTS {
+        assert!(root.join(dir).is_dir(), "TEST_INPUTS names a missing directory: {dir}");
+    }
+    let unmarked = synthetic::unmarked_in_workspace(&root).unwrap();
     let report: Vec<String> = unmarked.iter().map(|path| path.display().to_string()).collect();
     assert!(
         unmarked.is_empty(),
@@ -319,6 +335,9 @@ fn a_marked_fixture_passes_and_an_unmarked_one_is_flagged() {
         ("d.txt", "# _synthetic: made up\nrest\n"),
         ("e.html", "<!-- _synthetic: made up page -->\n<p>hi</p>\n"),
         ("sub/f.json", "{\"_synthetic\": \"made up\"}"),
+        ("f2.js", "  // _synthetic: made up worker\nself.onmessage = () => {};\n"),
+        ("f3.txt", "_synthetic: made up\n"),
+        ("f4.css", "/* _synthetic: made up */\n"),
     ];
     let unmarked = [
         // a sanitized export as it would have been committed before: no marker
@@ -336,6 +355,12 @@ fn a_marked_fixture_passes_and_an_unmarked_one_is_flagged() {
         ("p.html", "<!-- _synthetic: -->\n"),
         ("q.bin", "\u{0}\u{1}"),
         ("r.txt", ""),
+        // `_synthetic:` inside the data or a longer word on the first line is not a header
+        ("u.txt", "Bearer x, note_synthetic: made up\n"),
+        ("v.yaml", "value: \"_synthetic: made up\"\n"),
+        ("w.txt", "# note _synthetic: made up\n"),
+        // a `.gitkeep` with content is a file like any other
+        ("keep/.gitkeep", "captured: real data\n"),
     ];
     let dir = tempfile::tempdir().unwrap();
     for (name, text) in marked.iter().chain(&unmarked) {
@@ -365,4 +390,126 @@ fn a_marked_fixture_passes_and_an_unmarked_one_is_flagged() {
         Vec::<PathBuf>::new()
     );
     assert!(synthetic::unmarked(&dir.path().join("missing")).is_err());
+}
+
+/// A workspace with fixture dirs of every kind, and dirs that aren't fixture dirs: `(path, content)`.
+const WORKSPACE: [(&str, &str); 14] = [
+    // marked fixtures: top level, a spike's, a crate's
+    ("tests/fixtures/auth/ok.json", "{\"_synthetic\": \"made up\"}\n"),
+    ("tests/fixtures/.gitkeep", ""),
+    (
+        "spikes/echo-call/tests/fixtures/synthetic/end.json",
+        "{\"_synthetic\": \"made up\"}\n",
+    ),
+    (
+        "crates/teams-proto/tests/fixtures/chats.jsonl",
+        "{\"_synthetic\": \"made up\"}\n",
+    ),
+    // unmarked ones in each kind of fixture dir, a crate's beside its test inputs included
+    ("tests/fixtures/leak.json", "{\"id\": 1}\n"),
+    (
+        "spikes/echo-call/tests/fixtures/synthetic/planted.json",
+        "{\"id\": 1}\n",
+    ),
+    ("spikes/other/tests/fixtures/capture.jsonl", "{\"seq\": 1}\n"),
+    ("crates/proto-lab/tests/fixtures/stray.json", "{\"id\": 1}\n"),
+    // test inputs listed in TEST_INPUTS carry no marker and are skipped
+    ("crates/proto-lab/tests/fixtures/pages/blank.html", "<p>hi</p>\n"),
+    (
+        "crates/proto-lab/tests/fixtures/mini-bundle/AppxManifest.xml",
+        "<Package/>\n",
+    ),
+    // build output, package caches and dot-directories are not walked
+    ("target/debug/tests/fixtures/x.json", "{\"id\": 1}\n"),
+    ("tools/x/node_modules/y/tests/fixtures/x.json", "{\"id\": 1}\n"),
+    (".claude/worktrees/w/tests/fixtures/x.json", "{\"id\": 1}\n"),
+    // a `fixtures` dir that isn't under `tests` is not a fixture dir
+    ("crates/teams-proto/src/fixtures/x.json", "{\"id\": 1}\n"),
+];
+
+/// Writes `files` under `workspace`.
+fn plant(workspace: &Path, files: &[(&str, &str)]) -> std::io::Result<()> {
+    for (name, text) in files {
+        let path = workspace.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, text)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn every_fixture_dir_of_a_workspace_is_checked_apart_from_test_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    plant(workspace, &WORKSPACE).unwrap();
+    let joined = |names: &[&str]| -> Vec<PathBuf> { names.iter().map(|name| workspace.join(name)).collect() };
+
+    let dirs = synthetic::fixture_dirs(workspace).unwrap();
+    assert_eq!(
+        dirs,
+        joined(&[
+            "crates/proto-lab/tests/fixtures",
+            "crates/teams-proto/tests/fixtures",
+            "spikes/echo-call/tests/fixtures",
+            "spikes/other/tests/fixtures",
+            "tests/fixtures",
+        ])
+    );
+    assert_eq!(
+        synthetic::unmarked_in_workspace(workspace).unwrap(),
+        joined(&[
+            "crates/proto-lab/tests/fixtures/stray.json",
+            "spikes/echo-call/tests/fixtures/synthetic/planted.json",
+            "spikes/other/tests/fixtures/capture.jsonl",
+            "tests/fixtures/leak.json",
+        ])
+    );
+}
+
+#[test]
+fn the_guard_scans_every_fixture_dir_test_inputs_included() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    plant(workspace, &WORKSPACE).unwrap();
+    let token = format!("{{\"_synthetic\": \"made up\", \"token\": \"{JWT}\"}}\n");
+    plant(
+        workspace,
+        &[
+            ("spikes/echo-call/tests/fixtures/synthetic/token.json", &token),
+            (
+                "crates/proto-lab/tests/fixtures/pages/leak.html",
+                "<p>someone@contoso.com</p>\n",
+            ),
+            // outside every fixture dir: not scanned by this pass
+            (
+                "crates/teams-proto/src/fixtures/leak.json",
+                "{\"to\": \"someone@contoso.com\"}\n",
+            ),
+        ],
+    )
+    .unwrap();
+    let dirs = synthetic::fixture_dirs(workspace).unwrap();
+    let roots: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+    let flagged: Vec<(PathBuf, Kind)> = Guard::new()
+        .unwrap()
+        .scan_paths(&roots)
+        .unwrap()
+        .into_iter()
+        .map(|finding| (finding.path, finding.kind))
+        .collect();
+    assert_eq!(
+        flagged,
+        [
+            (
+                workspace.join("crates/proto-lab/tests/fixtures/pages/leak.html"),
+                Kind::Email
+            ),
+            (
+                workspace.join("spikes/echo-call/tests/fixtures/synthetic/token.json"),
+                Kind::Jwt
+            ),
+        ]
+    );
 }

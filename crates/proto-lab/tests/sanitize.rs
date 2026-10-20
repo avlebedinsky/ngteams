@@ -1801,3 +1801,91 @@ fn export_refuses_a_destination_inside_a_git_work_tree() {
     let exported = export::export(&capture, "calls/echo", &outside.join("reference"), &identities()).unwrap();
     assert!(exported.path.is_file());
 }
+
+#[test]
+fn a_dotdot_cannot_lead_the_reference_copy_into_a_work_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(dir.path()).unwrap();
+    let capture = write_capture(&base, &capture()).unwrap();
+    let repo = base.join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(base.join("outside")).unwrap();
+
+    // a `..` right after a directory that doesn't exist yet: where it leads is only known once that directory is
+    // created, so it is refused and nothing is created
+    let unresolvable = base.join("lab-new/../repo/tests/fixtures");
+    let error = export::export(&capture, "calls/echo", &unresolvable, &identities()).unwrap_err();
+    assert!(matches!(error, ExportError::Unresolvable(_)), "{error}");
+    let error = export::write_reference(&unresolvable.join("x.jsonl"), "{\"ok\":1}\n").unwrap_err();
+    assert!(matches!(error, ExportError::Unresolvable(_)), "{error}");
+    assert!(!base.join("lab-new").exists() && !repo.join("tests").exists());
+
+    // a `..` after a directory that exists is resolved, and where it leads is checked
+    let into_repo = base.join("outside/../repo/reference");
+    let error = export::export(&capture, "calls/echo", &into_repo, &identities()).unwrap_err();
+    assert!(matches!(error, ExportError::InsideRepository(_)), "{error}");
+    assert!(!repo.join("reference").exists());
+
+    // a `..` that stays outside every repository is written, to the path it resolves to
+    let exported = export::export(
+        &capture,
+        "calls/echo",
+        &base.join("outside/../lab/reference"),
+        &identities(),
+    )
+    .unwrap();
+    assert_eq!(exported.path, base.join("lab/reference/calls/echo.jsonl"));
+    assert!(exported.path.is_file());
+}
+
+#[test]
+fn a_symlinked_destination_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(dir.path()).unwrap();
+    let capture = write_capture(&base, &capture()).unwrap();
+    let repo = base.join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(repo.join("tests/fixtures")).unwrap();
+    let elsewhere = base.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(elsewhere.join("target.jsonl"), "{\"old\":true}\n").unwrap();
+
+    // a reference subdirectory linked into the repository, where the file is an in-repo link to a file outside it
+    let reference = base.join("lab/reference");
+    fs::create_dir_all(&reference).unwrap();
+    std::os::unix::fs::symlink(repo.join("tests/fixtures"), reference.join("calls")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("target.jsonl"), repo.join("tests/fixtures/echo.jsonl")).unwrap();
+    let error = export::export(&capture, "calls/echo", &reference, &identities()).unwrap_err();
+    assert!(matches!(error, ExportError::SymlinkDestination(_)), "{error}");
+    let error = export::write_reference(&reference.join("calls/echo.jsonl"), "{\"ok\":1}\n").unwrap_err();
+    assert!(matches!(error, ExportError::SymlinkDestination(_)), "{error}");
+    // and without that link, the linked directory is still seen to be inside the repository
+    let error = export::write_reference(&reference.join("calls/other.jsonl"), "{\"ok\":1}\n").unwrap_err();
+    assert!(matches!(error, ExportError::InsideRepository(_)), "{error}");
+    let names: Vec<_> = fs::read_dir(repo.join("tests/fixtures"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["echo.jsonl"]);
+    assert!(
+        fs::symlink_metadata(repo.join("tests/fixtures/echo.jsonl"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("target.jsonl")).unwrap(),
+        "{\"old\":true}\n"
+    );
+
+    // a destination that is a link is refused outside every repository too
+    let lab = base.join("lab2");
+    fs::create_dir_all(&lab).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("target.jsonl"), lab.join("echo.jsonl")).unwrap();
+    let error = export::export(&capture, "echo", &lab, &identities()).unwrap_err();
+    assert!(matches!(error, ExportError::SymlinkDestination(_)), "{error}");
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("target.jsonl")).unwrap(),
+        "{\"old\":true}\n"
+    );
+}

@@ -10,7 +10,8 @@
 //! The capture's events are sanitized as one capture ([`crate::sanitize`]), and the result goes to
 //! `<reference dir>/<name>`: JSONL by default (`.jsonl` is added to a name without an extension), or one
 //! pretty-printed JSON array for a name ending in `.json`. A destination inside a git work tree (a directory at or above
-//! it holds `.git`, as written or with symlinks resolved) is refused before anything is read. If sanitizing had to
+//! it holds `.git`, as written or with symlinks resolved, `..` resolved too) is refused before anything is read, as is
+//! one that is a symlink or has a `..` after a directory that doesn't exist yet. If sanitizing had to
 //! replace a name inside a host (a name word that is also a label of a host other than a public protocol host,
 //! `https://<name:1>.example.test/`), the export fails naming the events, since that host would be destroyed. Before
 //! anything is written, the text is checked for every name the sanitizer found in the capture ([`check_names`], at
@@ -24,7 +25,7 @@
 use std::fs::{self, DirBuilder, OpenOptions, Permissions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use fixture_guard::{Guard, Kind};
 use serde_json::Value;
@@ -55,6 +56,13 @@ pub enum ExportError {
         .0.display()
     )]
     InsideRepository(PathBuf),
+    #[error("{} is a symlink; a reference copy is written as a file of its own, never through a link", .0.display())]
+    SymlinkDestination(PathBuf),
+    #[error(
+        "{} has a '..' after a directory that doesn't exist, so where it leads can't be checked for a git work tree",
+        .0.display()
+    )]
+    Unresolvable(PathBuf),
     #[error("{}: {source}", path.display())]
     Io { path: PathBuf, source: io::Error },
     #[error("{}:{line}: not a JSON event", path.display())]
@@ -140,22 +148,23 @@ pub fn reference_path(reference_dir: &Path, name: &str) -> Result<(PathBuf, Layo
     Ok((reference_dir.join(relative), layout))
 }
 
-/// Refuses `path` when it is inside a git work tree: a directory at or above it (as written, made absolute, and with
-/// symlinks resolved on the part that exists) holds a `.git` entry, a directory or a worktree's `.git` file.
+/// Refuses `path` when it is inside a git work tree, and returns the path to write to otherwise: `path` made absolute
+/// with every `..` resolved ([`normalize`]). Refused: a destination that is a symlink, and one where a directory at or
+/// above it holds a `.git` entry (a directory or a worktree's `.git` file), checked on the normalized path as it reads
+/// and on the deepest existing directory that will hold the file, with its symlinks resolved.
 ///
 /// # Errors
-/// [`ExportError::InsideRepository`]; [`ExportError::Io`] when the current directory can't be read for a relative
-/// path.
-pub fn refuse_inside_repository(path: &Path) -> Result<(), ExportError> {
-    let absolute = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir().map_err(io_at(path))?.join(path)
-    };
-    let resolved = absolute
-        .ancestors()
-        .find_map(|existing| fs::canonicalize(existing).ok());
-    let inside = [Some(absolute.as_path()), resolved.as_deref()]
+/// [`ExportError::InsideRepository`], [`ExportError::SymlinkDestination`], [`ExportError::Unresolvable`];
+/// [`ExportError::Io`] when the current directory can't be read for a relative path.
+pub fn refuse_inside_repository(path: &Path) -> Result<PathBuf, ExportError> {
+    let normal = normalize(path)?;
+    if fs::symlink_metadata(&normal).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(ExportError::SymlinkDestination(path.to_owned()));
+    }
+    // the directory the file goes in, resolved as far as it exists: the rest is created under it
+    let holder = normal.parent().unwrap_or(&normal);
+    let resolved = holder.ancestors().find_map(|existing| fs::canonicalize(existing).ok());
+    let inside = [Some(normal.as_path()), resolved.as_deref()]
         .into_iter()
         .flatten()
         .any(|candidate| {
@@ -166,8 +175,34 @@ pub fn refuse_inside_repository(path: &Path) -> Result<(), ExportError> {
     if inside {
         Err(ExportError::InsideRepository(path.to_owned()))
     } else {
-        Ok(())
+        Ok(normal)
     }
+}
+
+/// `path` made absolute, with every `..` resolved the way the kernel does: against the real directory it follows,
+/// symlinks resolved. A `..` after a directory that doesn't exist (yet) is refused, since where it leads would only be
+/// known once that directory is created.
+///
+/// # Errors
+/// [`ExportError::Unresolvable`]; [`ExportError::Io`] when the current directory can't be read for a relative path.
+fn normalize(path: &Path) -> Result<PathBuf, ExportError> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir().map_err(io_at(path))?.join(path)
+    };
+    let mut normal = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let real = fs::canonicalize(&normal).map_err(|_| ExportError::Unresolvable(path.to_owned()))?;
+                normal = real.parent().map_or_else(|| real.clone(), Path::to_owned);
+            }
+            other => normal.push(other),
+        }
+    }
+    Ok(normal)
 }
 
 /// The events of a capture: its directory (holding `events.jsonl`) or the file itself. Blank lines are skipped.
@@ -213,17 +248,18 @@ pub fn render(events: &[Value], layout: Layout) -> String {
     }
 }
 
-/// Writes `text` to `path` only if it is outside every git work tree ([`refuse_inside_repository`]) and the fixture
-/// guard finds nothing in it: scanned before anything touches the disk, written (`0600`, missing directories created
-/// `0700`) to a staging file beside `path`, scanned again as it lies there, and only then renamed into place. Whatever
-/// fails, the staging file is removed and an existing file at `path` stays as it was.
+/// Writes `text` to `path` only if it is outside every git work tree ([`refuse_inside_repository`], whose normalized
+/// path is the one written) and the fixture guard finds nothing in it: scanned before anything touches the disk,
+/// written (`0600`, missing directories created `0700`) to a staging file beside `path`, scanned again as it lies
+/// there, and only then renamed into place. Whatever fails, the staging file is removed and an existing file at `path`
+/// stays as it was.
 ///
 /// # Errors
-/// [`ExportError::InsideRepository`] and [`ExportError::Refused`] (listing what the guard found), with nothing
+/// As [`refuse_inside_repository`], and [`ExportError::Refused`] (listing what the guard found), with nothing
 /// written; [`ExportError::Io`] when the file can't be written; [`ExportError::GuardPattern`] when the guard can't be
 /// built.
 pub fn write_reference(path: &Path, text: &str) -> Result<(), ExportError> {
-    refuse_inside_repository(path)?;
+    let path = &refuse_inside_repository(path)?;
     let guard = Guard::new().map_err(ExportError::GuardPattern)?;
     let found = guard.scan_text(text);
     if !found.is_empty() {
@@ -307,7 +343,7 @@ pub fn export_with(
     sanitize: impl FnOnce(&[Value]) -> Result<Sanitized, regex::Error>,
 ) -> Result<Exported, ExportError> {
     let (path, layout) = reference_path(reference_dir, name)?;
-    refuse_inside_repository(&path)?;
+    let path = refuse_inside_repository(&path)?;
     let events = read_capture(capture)?;
     let sanitized = sanitize(&events).map_err(ExportError::Pattern)?;
     if !sanitized.name_in_host.is_empty() {

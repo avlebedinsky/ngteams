@@ -13,8 +13,9 @@
 //! Sanitized placeholders (`<user:a>`,`<mri:b>`, `<guid:1>`, `<token:1>`) and prose that only names these things pass.
 //! A finding reports where and what, never the matched value, so the report itself cannot leak it.
 //!
-//! The repo-wide checks are in `tests/fixture_guard.rs` (the scan on `tests/fixtures/` and `docs/`, the synthetic
-//! marker on `tests/fixtures/`); `proto-lab export` (M0 Task 9) runs the same scan before it writes a reference copy.
+//! The repo-wide checks are in `tests/fixture_guard.rs` (the scan on every `tests/fixtures/` of the workspace and on
+//! `docs/`, the synthetic marker on those fixture dirs: [`synthetic::fixture_dirs`]); `proto-lab export` (M0 Task 9)
+//! runs the same scan before it writes a reference copy.
 
 use std::fmt;
 use std::fs;
