@@ -175,6 +175,8 @@ pub enum BrowserError {
     Stop(#[source] std::io::Error),
     #[error("the browser didn't confirm closing ({0}); it was killed")]
     CloseUnconfirmed(String),
+    #[error("can't signal the browser's process group: {0}")]
+    Signal(#[source] std::io::Error),
 }
 
 const ACTIVE_PORT: &str = "DevToolsActivePort";
@@ -277,6 +279,28 @@ impl Browser {
     /// [`BrowserError::Stop`] when the process can't be reaped.
     pub async fn kill(mut self) -> Result<ExitStatus, BrowserError> {
         self.group.signal(Signal::KILL);
+        self.child.wait().await.map_err(BrowserError::Stop)
+    }
+
+    /// Sends `SIGKILL` to the browser's whole process group at once and returns without waiting: from here on no
+    /// process of the group runs again. [`Self::reap`] waits for the browser after it.
+    ///
+    /// # Errors
+    /// [`BrowserError::Signal`] when the group can't be signalled: it is gone already (the browser exited by itself), or
+    /// its id was never known.
+    pub fn start_kill(&self) -> Result<(), BrowserError> {
+        let group = self
+            .group
+            .0
+            .ok_or_else(|| BrowserError::Signal(std::io::Error::other("the browser's process group isn't known")))?;
+        kill_process_group(group, Signal::KILL).map_err(|errno| BrowserError::Signal(errno.into()))
+    }
+
+    /// Waits for the browser to exit, after [`Self::start_kill`].
+    ///
+    /// # Errors
+    /// [`BrowserError::Stop`] when the process can't be reaped.
+    pub async fn reap(mut self) -> Result<ExitStatus, BrowserError> {
         self.child.wait().await.map_err(BrowserError::Stop)
     }
 }

@@ -23,6 +23,17 @@
 //! A WebSocket frame the audit saw leave the browser without an allow is logged the same way, with the verdict
 //! `breach` and the reason `sent_without_allow`.
 //!
+//! So is a target the browser fence couldn't arm ([`ArmingRecord`]): its type, the step that failed and how, whether
+//! its resume had been sent, whether it attached held (`waitingForDebugger`), what closing it gave and how it was
+//! contained, with the verdict `breach` when it may have run unguarded and `contained` when it can't have. No target
+//! or session id, no URL:
+//!
+//! ```json
+//! {"ts_ms":1760000000000,"verdict":"contained","event":"arming_failure","target_type":"worker",
+//!  "step":"Network.enable","cause":"no_answer","resume_sent":false,"held":true,"close":"refused",
+//!  "containment":"browser_killed","message":"a target not armed in time was contained before it ran"}
+//! ```
+//!
 //! Every entry ends with a newline. After a failed append the log refuses every later entry (so every later allow is
 //! denied), because a half-written record would run into the next one. When an existing file doesn't end with a
 //! newline, [`FenceLog::open`] terminates that last line first: it stays as one line that isn't JSON (a record whose
@@ -107,6 +118,93 @@ struct RequestEntry<'a> {
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'static str>,
+}
+
+/// How an arming step failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArmingCause {
+    /// The step got no answer in time.
+    NoAnswer,
+    /// The browser answered the step with an error.
+    Error,
+    /// The WebSocket guard didn't report itself armed.
+    GuardNotArmed,
+    /// The attach event didn't name the target or its session.
+    Malformed,
+}
+
+/// What `Target.closeTarget` gave for a target that couldn't be armed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseOutcome {
+    /// The browser confirmed it.
+    Closed,
+    /// The browser answered with an error or `success: false` (Chrome 155 refuses to close a dedicated worker).
+    Refused,
+    /// No answer in time.
+    Unanswered,
+    /// There was no target id to close.
+    NoTarget,
+}
+
+/// How a target that couldn't be armed was kept from running unguarded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Containment {
+    /// The browser confirmed closing it.
+    Closed,
+    /// Its close wasn't confirmed, so the whole browser was killed (its process group, while the fence's connection
+    /// still held the target) and reaped.
+    BrowserKilled,
+    /// Neither: the browser was gone already, or couldn't be killed and reaped.
+    Failed,
+}
+
+/// A target the browser fence couldn't arm, and how it was contained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArmingRecord<'a> {
+    /// `TargetInfo.type`.
+    pub target_type: &'a str,
+    /// The CDP method of the step that failed; `None` when the attach event itself was malformed.
+    pub step: Option<&'a str>,
+    pub cause: ArmingCause,
+    /// The step that failed was the resume (`Runtime.runIfWaitingForDebugger`): the target's code may have started.
+    pub resume_sent: bool,
+    /// It attached held, waiting for the debugger. One that didn't was running before its arming began.
+    pub held: bool,
+    pub close: CloseOutcome,
+    pub containment: Containment,
+}
+
+impl ArmingRecord<'_> {
+    /// Whether the target's code may have run: its resume was sent, or it wasn't held when it attached.
+    #[must_use]
+    pub fn may_have_run(&self) -> bool {
+        self.resume_sent || !self.held
+    }
+
+    /// Whether anything of it may have run unguarded: it may have run, or it couldn't be contained. A held target that
+    /// was never resumed and was closed, or killed with the browser, is no breach.
+    #[must_use]
+    pub fn breach(&self) -> bool {
+        self.may_have_run() || self.containment == Containment::Failed
+    }
+}
+
+#[derive(Serialize)]
+struct ArmingEntry<'a> {
+    ts_ms: u64,
+    verdict: &'static str,
+    event: &'static str,
+    target_type: &'a str,
+    step: Option<&'a str>,
+    cause: ArmingCause,
+    resume_sent: bool,
+    held: bool,
+    close: CloseOutcome,
+    containment: Containment,
+    message: &'static str,
 }
 
 /// The append-only decision log.
@@ -213,6 +311,32 @@ impl FenceLog {
             url: redact_url(request.url),
             own,
             reason,
+            message,
+        })
+    }
+
+    /// Appends one target the browser fence couldn't arm, as a single line, and flushes it. Once an append has failed,
+    /// every later one fails too.
+    ///
+    /// # Errors
+    /// When the entry can't be written, or an earlier append failed.
+    pub fn record_arming(&self, record: &ArmingRecord<'_>) -> io::Result<()> {
+        let (verdict, message) = if record.breach() {
+            ("breach", "a target not armed may have run unguarded")
+        } else {
+            ("contained", "a target not armed in time was contained before it ran")
+        };
+        self.append(&ArmingEntry {
+            ts_ms: now_ms(),
+            verdict,
+            event: "arming_failure",
+            target_type: record.target_type,
+            step: record.step,
+            cause: record.cause,
+            resume_sent: record.resume_sent,
+            held: record.held,
+            close: record.close,
+            containment: record.containment,
             message,
         })
     }

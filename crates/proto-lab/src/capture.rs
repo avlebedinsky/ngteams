@@ -30,6 +30,9 @@
 //!   `setRemoteDescription` with the description, `addIceCandidate` and `icecandidate` with the candidate, the state
 //!   changes, `stats` with every `getStats()` entry, `close`, and `<method>:error`), `ts` and `data`; `context` is the
 //!   execution context.
+//! - `arming_failure`: a target the fence couldn't arm, as `fence.log` records it (`target_type`, `step`, `cause`,
+//!   `resume_sent`, `held`, `close`, `containment` and `verdict` `breach` or `contained`), plus its `session`,
+//!   `target_id` and `error`.
 //!
 //! The directory is made `0700` and the file `0600`.
 
@@ -43,6 +46,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
+use crate::arming::ArmingFailure;
 use crate::cdp::{Cdp, Event, SessionId};
 use crate::fence_http::{DenyCause, Verdict};
 use crate::fence_ws::{GuardRequest, GuardScript, Payload};
@@ -426,6 +430,25 @@ impl Capture {
             entry["request"] = request.clone();
         }
         self.recorder.record(entry);
+    }
+
+    /// Records a target the fence couldn't arm, as `fence.log` does, plus its session, target id and error.
+    pub(crate) fn arming_failure(&self, session: Option<&SessionId>, failure: &ArmingFailure) {
+        let record = failure.record();
+        self.recorder.record(json!({
+            "type": "arming_failure",
+            "session": session.map(SessionId::as_str),
+            "target_id": failure.target_id,
+            "target_type": record.target_type,
+            "step": record.step,
+            "cause": record.cause,
+            "resume_sent": record.resume_sent,
+            "held": record.held,
+            "close": record.close,
+            "containment": record.containment,
+            "verdict": if record.breach() { "breach" } else { "contained" },
+            "error": failure.error,
+        }));
     }
 
     /// Records the fence's decision on one WebSocket frame the guard asked about.

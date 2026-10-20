@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use fixture_guard::Guard;
 use teams_fence::lab::LabConfig;
 use teams_fence::{
-    Channel, DenyReason, FailClosed, Fence, FenceLog, FetchFailure, Membership, MembershipFuture, MembershipSource,
-    Mri, OpenError, PartialReason, RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind,
+    ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, DenyReason, FailClosed, Fence, FenceLog,
+    FetchFailure, Membership, MembershipFuture, MembershipSource, Mri, OpenError, PartialReason, RequestOutcome,
+    RequestRecord, Roster, Scope, Target, WriteKind,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -759,6 +760,121 @@ fn request_entries_share_the_log_with_write_decisions_and_its_failure_mode() {
     assert!(log.record_request(&record).is_err(), "and so does every later one");
     let text = written.lock().unwrap().clone();
     assert!(!text.contains(&b'\n'), "nothing after the half-written entry");
+}
+
+// --- targets the browser fence couldn't arm ---
+
+fn held_worker(close: CloseOutcome, containment: Containment) -> ArmingRecord<'static> {
+    ArmingRecord {
+        target_type: "worker",
+        step: Some("Network.enable"),
+        cause: ArmingCause::NoAnswer,
+        resume_sent: false,
+        held: true,
+        close,
+        containment,
+    }
+}
+
+#[test]
+fn an_arming_failure_is_a_breach_only_when_the_target_may_have_run_or_was_not_contained() {
+    let closed = held_worker(CloseOutcome::Closed, Containment::Closed);
+    assert!(!closed.may_have_run() && !closed.breach());
+    let killed = held_worker(CloseOutcome::Unanswered, Containment::BrowserKilled);
+    assert!(
+        !killed.may_have_run() && !killed.breach(),
+        "held, never resumed, killed with the browser"
+    );
+    let refused = held_worker(CloseOutcome::Refused, Containment::BrowserKilled);
+    assert!(!refused.breach());
+
+    let loose = held_worker(CloseOutcome::Unanswered, Containment::Failed);
+    assert!(!loose.may_have_run() && loose.breach(), "not contained");
+    let resumed = ArmingRecord {
+        step: Some("Runtime.runIfWaitingForDebugger"),
+        resume_sent: true,
+        ..closed
+    };
+    assert!(resumed.may_have_run() && resumed.breach(), "its resume was sent");
+    let running = ArmingRecord { held: false, ..killed };
+    assert!(
+        running.may_have_run() && running.breach(),
+        "it was running before its arming began"
+    );
+}
+
+#[test]
+fn an_arming_failure_entry_names_the_step_and_its_containment_and_no_ids() {
+    let lab = try_lab().unwrap();
+    let log = lab.fence.log();
+    log.record_arming(&held_worker(CloseOutcome::Refused, Containment::BrowserKilled))
+        .unwrap();
+    log.record_arming(&ArmingRecord {
+        target_type: "iframe",
+        step: None,
+        cause: ArmingCause::Malformed,
+        resume_sent: false,
+        held: true,
+        close: CloseOutcome::NoTarget,
+        containment: Containment::Failed,
+    })
+    .unwrap();
+
+    let entries = log_entries(&lab.log_path).unwrap();
+    let expected = [
+        serde_json::json!({
+            "verdict": "contained",
+            "event": "arming_failure",
+            "target_type": "worker",
+            "step": "Network.enable",
+            "cause": "no_answer",
+            "resume_sent": false,
+            "held": true,
+            "close": "refused",
+            "containment": "browser_killed",
+            "message": "a target not armed in time was contained before it ran",
+        }),
+        serde_json::json!({
+            "verdict": "breach",
+            "event": "arming_failure",
+            "target_type": "iframe",
+            "step": null,
+            "cause": "malformed",
+            "resume_sent": false,
+            "held": true,
+            "close": "no_target",
+            "containment": "failed",
+            "message": "a target not armed may have run unguarded",
+        }),
+    ];
+    assert_eq!(entries.len(), expected.len());
+    for (entry, expected) in entries.iter().zip(&expected) {
+        let mut entry = entry.clone();
+        let ts = entry.as_object_mut().unwrap().remove("ts_ms").unwrap();
+        assert!(ts.as_u64().is_some_and(|ts| ts > 0));
+        assert_eq!(&entry, expected);
+    }
+}
+
+#[test]
+fn arming_entries_share_the_log_s_failure_mode() {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let sink = FillsUp {
+        written: Arc::clone(&written),
+        budget: 30,
+        failed: false,
+    };
+    let log = FenceLog::from_writer(sink);
+    let record = held_worker(CloseOutcome::Closed, Containment::Closed);
+    assert!(log.record_arming(&record).is_err(), "a half-written entry fails");
+    assert!(log.record_arming(&record).is_err(), "and so does every later one");
+    let request = RequestRecord {
+        channel: Channel::Http,
+        method: "GET",
+        url: "https://example.com/",
+        outcome: RequestOutcome::Unclassified,
+    };
+    assert!(log.record_request(&request).is_err(), "and every other kind of entry");
 }
 
 /// A `lab.toml` with MRIs for accounts a and b but not c, and for one of two service participants.

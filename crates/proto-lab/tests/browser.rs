@@ -825,3 +825,290 @@ async fn a_new_worker_target_is_held_until_run_if_waiting_for_debugger() {
 
     outcome.expect("the held-worker run took over 90 s").unwrap();
 }
+
+// --- a real browser: what lets a target held by `waitForDebuggerOnStart` go ---
+//
+// Whether a target the fence gave up on before its resume, and couldn't close, can still run (`proto_lab::arming`).
+// The held target is a cross-site iframe (an out-of-process frame: a target of its own) or a dedicated worker, whose
+// script fetches `/ran/<case>` and sends `ran:<case>` over a WebSocket as soon as it runs; the servers count what
+// arrives. Nothing here goes through the fence: the page's requests go straight to the servers.
+
+/// How long a held target is watched for sending nothing.
+const QUIET: Duration = Duration::from_secs(2);
+
+/// What the test WebSocket server got, as text.
+type Frames = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A WebSocket server on 127.0.0.1 that keeps every text frame it gets.
+async fn frame_server() -> TestResult<(u16, Frames)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let frames = Frames::default();
+    let seen = std::sync::Arc::clone(&frames);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(keep_frames(stream, std::sync::Arc::clone(&seen)));
+        }
+    });
+    Ok((port, frames))
+}
+
+async fn keep_frames(stream: tokio::net::TcpStream, seen: Frames) {
+    let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+        return;
+    };
+    while let Some(Ok(message)) = socket.next().await {
+        if let Ok(text) = message.to_text() {
+            let mut frames = seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            frames.push(text.to_owned());
+        }
+    }
+}
+
+async fn serve(server: &MockServer, route: &str, body: String, content_type: &str) {
+    Mock::given(method("GET"))
+        .and(path(route))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, content_type))
+        .mount(server)
+        .await;
+}
+
+/// Serves `case`: `/outer/<case>.html` (the page with the cross-site iframe, `localhost` against the page's
+/// `127.0.0.1`), `/inner/<case>.html` (the iframe), `/worker/<case>.html` (a page starting the worker),
+/// `/worker/<case>.js` (the worker) and `/ran/<case>`.
+async fn serve_case(server: &MockServer, ws_port: u16, case: &str) {
+    let port = server.address().port();
+    let run = format!(
+        "fetch('/ran/{case}'); const socket = new WebSocket('ws://127.0.0.1:{ws_port}/{case}'); \
+         socket.onopen = () => socket.send('ran:{case}');"
+    );
+    let outer = format!("<!doctype html><iframe src=\"http://localhost:{port}/inner/{case}.html\"></iframe>");
+    serve(server, &format!("/outer/{case}.html"), outer, "text/html").await;
+    let inner = format!("<!doctype html><script>{run}</script>");
+    serve(server, &format!("/inner/{case}.html"), inner, "text/html").await;
+    let starter = format!("<!doctype html><script>new Worker('/worker/{case}.js')</script>");
+    serve(server, &format!("/worker/{case}.html"), starter, "text/html").await;
+    serve(server, &format!("/worker/{case}.js"), run, "text/javascript").await;
+    serve(server, &format!("/ran/{case}"), "ok".to_owned(), "text/plain").await;
+}
+
+/// A target held by its page's auto-attach.
+struct Held {
+    page: SessionId,
+    page_target: String,
+    session: SessionId,
+    target: String,
+}
+
+/// Opens a page whose auto-attach holds its children, loads `url` in it and waits for the held child of type `kind`.
+async fn load_held(cdp: &Cdp, events: &mut Events, url: String, kind: &str) -> TestResult<Held> {
+    let created = cdp
+        .call(None, "Target.createTarget", json!({"url": "about:blank"}))
+        .await?;
+    let page_target = created["targetId"].as_str().ok_or("no targetId")?.to_owned();
+    let attach = json!({"targetId": page_target, "flatten": true});
+    let page = session_of(&cdp.call(None, "Target.attachToTarget", attach).await?)?;
+    let hold = json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true});
+    cdp.call(Some(&page), "Target.setAutoAttach", hold).await?;
+    let navigate = tokio::spawn({
+        let (cdp, page) = (cdp.clone(), page.clone());
+        async move { cdp.call(Some(&page), "Page.navigate", json!({ "url": url })).await }
+    });
+    let attached = next_event(cdp, events, "the held child's attach", |event| {
+        event.method == "Target.attachedToTarget"
+            && event.session_id.as_ref() == Some(&page)
+            && event.params["targetInfo"]["type"] == kind
+    })
+    .await?;
+    navigate.await??;
+    assert_eq!(attached.params["waitingForDebugger"], json!(true));
+    let target = attached.params["targetInfo"]["targetId"]
+        .as_str()
+        .ok_or("no targetId")?;
+    Ok(Held {
+        page,
+        page_target,
+        session: session_of(&attached.params)?,
+        target: target.to_owned(),
+    })
+}
+
+/// How many `/ran/<case>` requests and `ran:<case>` frames arrived.
+async fn arrivals(server: &MockServer, frames: &Frames, case: &str) -> (usize, usize) {
+    let fetched = served(server, &format!("/ran/{case}")).await;
+    let marker = format!("ran:{case}");
+    let frames = frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    (fetched, frames.iter().filter(|frame| **frame == marker).count())
+}
+
+/// Fails if anything of `case` arrives within [`QUIET`].
+async fn stays_quiet(server: &MockServer, frames: &Frames, case: &str) -> TestResult {
+    tokio::time::sleep(QUIET).await;
+    match arrivals(server, frames, case).await {
+        (0, 0) => Ok(()),
+        seen => Err(format!("the held {case} target ran: (requests, frames) = {seen:?}").into()),
+    }
+}
+
+/// Waits until both the request and the frame of `case` have arrived.
+async fn runs(server: &MockServer, frames: &Frames, case: &str) -> TestResult {
+    let poll = async {
+        while arrivals(server, frames, case).await != (1, 1) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(STEP, poll)
+        .await
+        .map_err(|_| format!("the {case} target didn't run within {STEP:?}").into())
+}
+
+/// The target's `TargetInfo` as `Target.getTargets` lists it, if it does.
+async fn listed(cdp: &Cdp, target: &str) -> TestResult<Option<Value>> {
+    let targets = cdp.call(None, "Target.getTargets", Value::Null).await?;
+    let infos = targets["targetInfos"].as_array().ok_or("no targetInfos")?;
+    Ok(infos.iter().find(|info| info["targetId"] == target).cloned())
+}
+
+/// One connection to the browser and the servers the held targets would reach.
+struct Bench<'a> {
+    cdp: Cdp,
+    events: Events,
+    server: &'a MockServer,
+    frames: &'a Frames,
+}
+
+impl Bench<'_> {
+    /// Loads `case` with its child of type `kind` (`iframe` or `worker`) held.
+    async fn held(&mut self, case: &str, kind: &str) -> TestResult<Held> {
+        let page = if kind == "worker" { "worker" } else { "outer" };
+        let url = format!("{}/{page}/{case}.html", self.server.uri());
+        load_held(&self.cdp, &mut self.events, url, kind).await
+    }
+
+    async fn stays_quiet(&self, case: &str) -> TestResult {
+        stays_quiet(self.server, self.frames, case).await
+    }
+}
+
+/// Left alone, a held target sends nothing; a held out-of-process frame isn't even listed by `Target.getTargets`, so
+/// that can't tell held from gone.
+async fn left_alone(bench: &mut Bench<'_>) -> TestResult {
+    let held = bench.held("held", "iframe").await?;
+    bench.stays_quiet("held").await?;
+    assert_eq!(listed(&bench.cdp, &held.target).await?, None);
+    Ok(())
+}
+
+/// Chrome refuses to close a dedicated worker, and the worker stays held.
+async fn a_refused_close(bench: &mut Bench<'_>) -> TestResult {
+    let worker = bench.held("worker", "worker").await?;
+    let close = json!({"targetId": worker.target});
+    let refused = bench.cdp.call(None, "Target.closeTarget", close).await;
+    let unsupported = |error: &RemoteError| error.message.contains("doesn't support closing");
+    assert!(
+        matches!(&refused, Err(CdpError::Remote { error, .. }) if unsupported(error)),
+        "{refused:?}"
+    );
+    bench.stays_quiet("worker").await?;
+    let info = listed(&bench.cdp, &worker.target).await?.ok_or("the worker is gone")?;
+    assert_eq!(info["attached"], json!(true), "still attached, and still held");
+    Ok(())
+}
+
+/// Closing a held iframe closes its whole tab.
+async fn an_iframe_closed(bench: &mut Bench<'_>) -> TestResult {
+    let closed = bench.held("close", "iframe").await?;
+    let close = json!({"targetId": closed.target});
+    let answer = bench.cdp.call(None, "Target.closeTarget", close).await?;
+    assert_eq!(answer["success"], json!(true));
+    bench.stays_quiet("close").await?;
+    assert_eq!(
+        listed(&bench.cdp, &closed.page_target).await?,
+        None,
+        "the tab went with it"
+    );
+    Ok(())
+}
+
+/// Its session detached through its parent's: no re-attach, and it stays held.
+async fn its_session_detached(bench: &mut Bench<'_>) -> TestResult {
+    let detached = bench.held("detach", "iframe").await?;
+    let detach = json!({"sessionId": detached.session.as_str()});
+    bench
+        .cdp
+        .call(Some(&detached.page), "Target.detachFromTarget", detach)
+        .await?;
+    bench.stays_quiet("detach").await
+}
+
+/// Its parent navigates away.
+async fn its_parent_navigating(bench: &mut Bench<'_>) -> TestResult {
+    let left = bench.held("navigate", "iframe").await?;
+    let blank = json!({"url": "about:blank"});
+    bench.cdp.call(Some(&left.page), "Page.navigate", blank).await?;
+    bench.stays_quiet("navigate").await
+}
+
+/// What the fence can do to a target it gave up on, or what can happen around it, without letting it go.
+async fn nothing_lets_it_go(browser: &Browser, server: &MockServer, frames: &Frames) -> TestResult {
+    let (cdp, events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
+    let mut bench = Bench {
+        cdp,
+        events,
+        server,
+        frames,
+    };
+    left_alone(&mut bench).await?;
+    a_refused_close(&mut bench).await?;
+    an_iframe_closed(&mut bench).await?;
+    its_session_detached(&mut bench).await?;
+    its_parent_navigating(&mut bench).await?;
+    // and the first one is still held after all that
+    bench.stays_quiet("held").await
+}
+
+/// The two things that do let a held target go: its parent's auto-attach turned off, and its connection dropping.
+async fn what_lets_it_go(browser: &Browser, server: &MockServer, frames: &Frames) -> TestResult {
+    let (cdp, mut events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
+    let base = server.uri();
+    let parent = load_held(&cdp, &mut events, format!("{base}/outer/autooff.html"), "iframe").await?;
+    stays_quiet(server, frames, "autooff").await?;
+    let off = json!({"autoAttach": false, "waitForDebuggerOnStart": false});
+    cdp.call(Some(&parent.page), "Target.setAutoAttach", off).await?;
+    runs(server, frames, "autooff").await?;
+
+    let (other, mut other_events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
+    load_held(&other, &mut other_events, format!("{base}/outer/drop.html"), "iframe").await?;
+    stays_quiet(server, frames, "drop").await?;
+    drop((other, other_events));
+    runs(server, frames, "drop").await?;
+
+    // closing is best effort: the connection may drop before the reply
+    let _ = cdp.call(None, "Browser.close", Value::Null).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_held_target_runs_only_once_its_parent_s_auto_attach_ends_or_its_connection_drops() {
+    let Some(chrome) = common::chrome_or_skip() else {
+        return;
+    };
+    let profile = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let (ws_port, frames) = frame_server().await.unwrap();
+    for case in ["held", "worker", "close", "detach", "navigate", "autooff", "drop"] {
+        serve_case(&server, ws_port, case).await;
+    }
+    let browser = Browser::launch(&chrome, &LaunchOptions::new(profile.path().join("p")), STEP)
+        .await
+        .unwrap();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(150), async {
+        nothing_lets_it_go(&browser, &server, &frames).await?;
+        what_lets_it_go(&browser, &server, &frames).await
+    })
+    .await;
+    browser.wait_or_kill(Duration::from_secs(10)).await.unwrap();
+
+    outcome.expect("the held-target run took over 150 s").unwrap();
+}

@@ -41,12 +41,21 @@
 //! while paused answers no `Network` or `Runtime` command on either session until it runs, so it could never be armed
 //! before it runs.
 //!
-//! If any step fails, or gets no answer within [`STEP_TIMEOUT`], the target is closed and never resumed, and the
-//! failure fails the run's verdict ([`ArmedBrowser::verdict`]). Whether it breached the fence is another matter
-//! ([`ArmingFailure::closed_before_it_ran`]): a target closed before its resume ran nothing, while one whose resume was
-//! sent, or that couldn't be closed, counts as a breach ([`crate::session::FenceReport::breached`]). The one exception is a session that is gone before its arming finishes (the browser answers
-//! "Session with given id not found"): its tab closed, or its worker ended. That session has nothing left to arm or
-//! resume, so it is dropped quietly; browser-level `Fetch` stays on regardless.
+//! If any step fails, or gets no answer within [`STEP_TIMEOUT`], the target is never resumed: it is closed, and if the
+//! close isn't confirmed within [`STEP_TIMEOUT`] (Chrome 155 refuses to close a dedicated worker; closing an iframe
+//! closes its whole tab) the browser is killed, its whole process group at once while this connection still holds the
+//! target. The failure fails the run's verdict ([`ArmedBrowser::verdict`]) and goes to `fence.log` and the capture
+//! ([`teams_fence::ArmingRecord`]). Whether it breached the fence is another matter
+//! ([`ArmingFailure::contained_before_it_ran`]). A target held by `waitForDebuggerOnStart` stays held until it is
+//! resumed, its parent's auto-attach is turned off, or the connection holding it drops; a refused close, a detach of
+//! its session or its parent navigating don't release it (checked on Chrome 155, `tests/browser.rs`). The fence does
+//! none of those to a target it gave up on, and a lost connection kills the browser and is a breach of its own. So a
+//! held target contained (closed, or killed with the browser) before its resume ran nothing; one whose resume was
+//! sent, one that wasn't held when it attached (it was running already), or one that could be neither closed nor
+//! killed counts as a breach ([`crate::session::FenceReport::breached`]). The one exception is a session that is gone
+//! before its arming finishes (the browser answers "Session with given id not found"): its tab closed, or its worker
+//! ended. That session has nothing left to arm or resume, so it is dropped quietly; browser-level `Fetch` stays on
+//! regardless.
 //!
 //! A request therefore pauses on its target's session first and on the browser session after that, and each layer
 //! decides it on its own ([`crate::fence_http::HttpFence`]); a deny at either fails it. A WebSocket frame waits in the
@@ -62,9 +71,10 @@
 //! without that, it kills the browser too.
 //!
 //! Each paused request and each guard request is decided in a task of its own, and a mapped write's decision waits on a
-//! live membership read. So once the browser is down, [`ArmedBrowser::close`] waits (up to [`DECISION_GRACE`]) for the
-//! decisions still running, and [`ArmedBrowser::decisions`], which outlives the browser, then holds every deny of the
-//! run; [`Decisions::undecided`] counts any decision that was still running when the wait ended.
+//! live membership read; each target is armed (and, failing that, contained and recorded) in a task of its own too. So
+//! once the browser is down, [`ArmedBrowser::close`] waits (up to [`DECISION_GRACE`]) for the decisions and armings
+//! still running, and [`ArmedBrowser::decisions`], which outlives the browser, then holds every deny and arming failure
+//! of the run; [`Decisions::undecided`] counts any decision or arming that was still running when the wait ended.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -72,6 +82,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use teams_fence::{ArmingCause, ArmingRecord, CloseOutcome, Containment};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
@@ -235,7 +246,9 @@ pub enum Step {
 }
 
 impl Step {
-    fn method(self) -> &'static str {
+    /// The CDP method the step sends.
+    #[must_use]
+    pub fn method(self) -> &'static str {
         match self {
             Self::Fetch => "Fetch.enable",
             Self::Network => "Network.enable",
@@ -340,6 +353,27 @@ impl ArmError {
             Self::Step { step: Step::Resume, .. } | Self::StepTimeout(Step::Resume)
         )
     }
+
+    /// The arming step that failed, if a step did.
+    #[must_use]
+    pub fn step(&self) -> Option<Step> {
+        match self {
+            Self::Step { step, .. } | Self::StepTimeout(step) => Some(*step),
+            Self::Guard(_) => Some(Step::Guard),
+            _ => None,
+        }
+    }
+
+    /// How arming failed, as `fence.log` records it.
+    #[must_use]
+    pub fn cause(&self) -> ArmingCause {
+        match self {
+            Self::StepTimeout(_) => ArmingCause::NoAnswer,
+            Self::Guard(_) => ArmingCause::GuardNotArmed,
+            Self::Malformed(_) => ArmingCause::Malformed,
+            _ => ArmingCause::Error,
+        }
+    }
 }
 
 /// What arming installs in a target: the WebSocket guard, and the WebRTC hooks when the run records.
@@ -377,8 +411,9 @@ pub async fn neutralize_service_workers(cdp: &Cdp, page: &SessionId, origins: &[
 /// How long arming waits for the blank tab it neutralizes service workers through.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long [`ArmedBrowser::close`] waits, once the browser is down, for the decisions still running: a live membership
-/// read takes up to [`teams_fence::FETCH_TIMEOUT`], and the rest of a decision is quick.
+/// How long [`ArmedBrowser::close`] waits, once the browser is down, for the decisions and armings still running: a live
+/// membership read takes up to [`teams_fence::FETCH_TIMEOUT`], and the rest of a decision is quick; a failed arming's
+/// close waits up to [`STEP_TIMEOUT`] (and the steps of an arming fail at once on a connection that is gone).
 pub const DECISION_GRACE: Duration = Duration::from_secs(teams_fence::FETCH_TIMEOUT.as_secs() + 5);
 
 /// How to arm a run.
@@ -406,7 +441,7 @@ pub struct ArmedTarget {
     pub parent: Option<SessionId>,
 }
 
-/// A target that couldn't be armed.
+/// A target that couldn't be armed, and how it was contained.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArmingFailure {
     /// Missing when the attach event didn't name one.
@@ -414,20 +449,56 @@ pub struct ArmingFailure {
     /// `TargetInfo.type`.
     pub kind: String,
     pub error: String,
-    /// Whether `Target.closeTarget` closed it. A target that couldn't be closed was never resumed either.
-    pub closed: bool,
-    /// Whether its code may have started: the step that failed was the resume itself (`Runtime.runIfWaitingForDebugger`,
-    /// sent and refused or unanswered). Any other failure stops before the resume, so the target never ran.
-    pub may_have_run: bool,
+    /// The step that failed; `None` when the attach event was malformed.
+    pub step: Option<Step>,
+    pub cause: ArmingCause,
+    /// The step that failed was the resume itself (`Runtime.runIfWaitingForDebugger`, sent and refused or unanswered),
+    /// so the target's code may have started. Any other failure stops before the resume.
+    pub resume_sent: bool,
+    /// The attach event said `waitingForDebugger`: the target was held. One that wasn't was running already.
+    pub held: bool,
+    /// What `Target.closeTarget` gave.
+    pub close: CloseOutcome,
+    /// How it was kept from running: closed, or, when its close wasn't confirmed, killed with the whole browser.
+    pub containment: Containment,
 }
 
 impl ArmingFailure {
-    /// Whether the target was closed before any of its code ran: arming gave up on it before the resume, and closing it
-    /// worked. Nothing of it ran unguarded, so it is no breach of the fence; what it would have done (an iframe's
-    /// content, a worker's job) just doesn't happen, and a run that needed it fails on its own steps.
+    /// The failure as `fence.log` records it.
     #[must_use]
-    pub fn closed_before_it_ran(&self) -> bool {
-        self.closed && !self.may_have_run
+    pub fn record(&self) -> ArmingRecord<'_> {
+        ArmingRecord {
+            target_type: &self.kind,
+            step: self.step.map(Step::method),
+            cause: self.cause,
+            resume_sent: self.resume_sent,
+            held: self.held,
+            close: self.close,
+            containment: self.containment,
+        }
+    }
+
+    /// Whether the target's code may have started: its resume was sent, or it wasn't held when it attached.
+    #[must_use]
+    pub fn may_have_run(&self) -> bool {
+        self.record().may_have_run()
+    }
+
+    /// Whether the target was contained before any of its code ran: it attached held, arming gave up on it before the
+    /// resume, and it was closed, or killed with the browser. A held target stays held until it is resumed, its
+    /// parent's auto-attach is turned off or the connection holding it drops (checked on Chrome 155: not when its
+    /// close is refused, its session detached or its parent navigates), and the fence does none of these to it; so
+    /// nothing of it ran unguarded, and it is no breach. What it would have done (an iframe's content, a worker's job)
+    /// just doesn't happen, and a run that needed it fails on its own steps.
+    #[must_use]
+    pub fn contained_before_it_ran(&self) -> bool {
+        !self.record().breach()
+    }
+
+    /// Whether the browser was killed to contain it.
+    #[must_use]
+    pub fn browser_killed(&self) -> bool {
+        self.containment == Containment::BrowserKilled
     }
 }
 
@@ -480,7 +551,13 @@ struct Shared {
     broken: AtomicBool,
     /// [`ArmedBrowser::close`] has asked the browser to close, and decides from its answer whether to kill it.
     closing: AtomicBool,
-    /// How many decisions (of a paused request or a guard request) are still running, each in a task of its own.
+    /// The browser was sent `SIGKILL` to contain a target that couldn't be armed or closed ([`Shared::contain`]): the
+    /// connection ending after that is expected. Set and read under the [`Shared::browser`] lock.
+    contained: AtomicBool,
+    /// How that containment ended, once it has; every target that needs it waits for the one kill.
+    containment: tokio::sync::OnceCell<Containment>,
+    /// How many decisions (of a paused request or a guard request) and target armings are still running, each in a
+    /// task of its own.
     deciding: AtomicUsize,
     /// Notified when the last decision running finishes.
     settled: Notify,
@@ -493,8 +570,45 @@ impl Shared {
         self.targets.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn browser(&self) -> MutexGuard<'_, Option<Browser>> {
+        self.browser.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn take_browser(&self) -> Option<Browser> {
-        self.browser.lock().unwrap_or_else(PoisonError::into_inner).take()
+        self.browser().take()
+    }
+
+    /// Kills the browser to contain a target that couldn't be armed and whose close wasn't confirmed, once for the
+    /// run: every caller gets the outcome of the one kill.
+    ///
+    /// The whole process group is sent `SIGKILL` while the fence's connection is still open, so the browser never sees
+    /// that connection drop (which would release every target it holds) while it can still act. Only a group that
+    /// took the signal while the connection was up marks the connection's end as expected; the browser reaped then
+    /// makes it [`Containment::BrowserKilled`]. A browser already gone (the fence is closing, or lost its connection),
+    /// a connection already closed (the browser is still killed, and the loss stays a breach of its own), a group that
+    /// couldn't be signalled or a browser that couldn't be reaped is [`Containment::Failed`].
+    async fn contain(&self, cdp: &Cdp) -> Containment {
+        *self.containment.get_or_init(|| self.kill_to_contain(cdp)).await
+    }
+
+    async fn kill_to_contain(&self, cdp: &Cdp) -> Containment {
+        let browser = {
+            let mut slot = self.browser();
+            let Some(browser) = slot.take() else {
+                return Containment::Failed;
+            };
+            // read before the kill: a connection that ended first may have let the held targets go
+            let lost_first = cdp.is_closed();
+            if browser.start_kill().is_err() || lost_first {
+                return Containment::Failed;
+            }
+            self.contained.store(true, Ordering::SeqCst);
+            browser
+        };
+        match browser.reap().await {
+            Ok(_) => Containment::BrowserKilled,
+            Err(_) => Containment::Failed,
+        }
     }
 
     /// Kills the browser and every process it started, unless it was taken already.
@@ -515,12 +629,18 @@ impl Shared {
         self.taps().retain(|tap| tap.send(event.clone()).is_ok());
     }
 
-    /// Marks the connection lost (and broken, unless the fence is closing) and ends every watch: their senders go,
-    /// under the same lock [`ArmedBrowser::watch`] checks the mark with, so no watch outlives the connection.
+    /// Marks the connection lost (and broken, unless the fence is closing or killed the browser to contain a target)
+    /// and ends every watch: their senders go, under the same lock [`ArmedBrowser::watch`] checks the mark with, so no
+    /// watch outlives the connection.
     fn mark_lost(&self) {
         let mut taps = self.taps();
         self.lost.store(true, Ordering::SeqCst);
-        if !self.closing.load(Ordering::SeqCst) {
+        // under the browser's lock: a containment kill sets its mark under it before the connection can end
+        let expected = {
+            let _browser = self.browser();
+            self.closing.load(Ordering::SeqCst) || self.contained.load(Ordering::SeqCst)
+        };
+        if !expected {
             self.broken.store(true, Ordering::SeqCst);
         }
         taps.clear();
@@ -611,8 +731,9 @@ impl Decisions {
         self.0.targets().failures.clone()
     }
 
-    /// How many decisions are still running: after [`ArmedBrowser::close`], the ones its wait gave up on, whose denies
-    /// may be missing from [`Self::denials`] and [`Self::frame_denials`].
+    /// How many decisions and target armings are still running: after [`ArmedBrowser::close`], the ones its wait gave up
+    /// on, whose denies or failures may be missing from [`Self::denials`], [`Self::frame_denials`] and
+    /// [`Self::failures`].
     #[must_use]
     pub fn undecided(&self) -> usize {
         self.0.deciding()
@@ -695,6 +816,8 @@ impl ArmedBrowser {
             lost: AtomicBool::new(false),
             broken: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            contained: AtomicBool::new(false),
+            containment: tokio::sync::OnceCell::new(),
             deciding: AtomicUsize::new(0),
             settled: Notify::new(),
             taps: Mutex::new(Vec::new()),
@@ -705,7 +828,7 @@ impl ArmedBrowser {
         armed.cdp.call(None, "Target.setAutoAttach", hold_new_targets()).await?;
         let blank = armed.open_page(SETUP_TIMEOUT).await?;
         neutralize_service_workers(&armed.cdp, &blank.session, &options.service_worker_origins).await?;
-        if !close_target(&armed.cdp, &blank.target_id).await {
+        if close_target(&armed.cdp, &blank.target_id).await != CloseOutcome::Closed {
             return Err(ArmError::SetupNotClosed);
         }
         Ok(armed)
@@ -734,9 +857,12 @@ impl ArmedBrowser {
         self.shared.closing.store(true, Ordering::SeqCst);
         let closing = tokio::time::timeout(grace, self.cdp.call(None, "Browser.close", Value::Null)).await;
         let Some(browser) = self.shared.take_browser() else {
-            return Err(BrowserError::CloseUnconfirmed(
-                "the fence had lost its connection".to_owned(),
-            ));
+            let why = if self.shared.contained.load(Ordering::SeqCst) {
+                "the browser had been killed to contain a target not armed in time"
+            } else {
+                "the fence had lost its connection"
+            };
+            return Err(BrowserError::CloseUnconfirmed(why.to_owned()));
         };
         let unconfirmed = match closing {
             Ok(Ok(_)) => return browser.wait_or_kill(grace).await.map(drop),
@@ -930,7 +1056,13 @@ fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
             if let Some(session) = event.params["sessionId"].as_str() {
                 shared.targets().attached.insert(SessionId::new(session));
             }
-            tokio::spawn(on_attached(cdp.clone(), Arc::clone(shared), event));
+            // counted like a decision, so that closing waits for a failure's containment and its record
+            let (cdp, deciding) = (cdp.clone(), Deciding::start(shared));
+            tokio::spawn(async move {
+                let shared = Arc::clone(&deciding.0);
+                on_attached(cdp, shared, event).await;
+                drop(deciding);
+            });
         }
         "Target.detachedFromTarget" => {
             if let Some(session) = event.params["sessionId"].as_str() {
@@ -951,6 +1083,7 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
     let kind_name = info["type"].as_str().unwrap_or("?").to_owned();
     let target_id = info["targetId"].as_str().map(str::to_owned);
     let session = event.params["sessionId"].as_str().map(SessionId::new);
+    let held = event.params["waitingForDebugger"] == json!(true);
     let outcome = match (&target_id, &session) {
         (Some(target_id), Some(session)) => {
             let kind = TargetKind::from_type(&kind_name);
@@ -980,20 +1113,54 @@ async fn on_attached(cdp: Cdp, shared: Arc<Shared>, event: Event) {
         Err(error) if error.session_gone() => forget(&shared, session.as_ref()),
         Err(error) => {
             forget(&shared, session.as_ref());
-            let closed = match &target_id {
-                Some(id) => close_target(&cdp, id).await,
-                None => false,
-            };
-            shared.targets().failures.push(ArmingFailure {
-                target_id,
-                kind: kind_name,
-                error: error.to_string(),
-                closed,
-                may_have_run: error.resume_sent(),
-            });
+            let failure = contain_unarmed(&cdp, &shared, target_id, kind_name, held, &error).await;
+            record_failure(&shared, session.as_ref(), failure);
         }
     }
     shared.changed.notify_waiters();
+}
+
+/// Closes a target that couldn't be armed, and kills the browser when the close isn't confirmed (a refused, failed or
+/// unanswered close, or no target id): a target that can't be closed is contained only by ending the browser it is held
+/// in ([`Shared::contain`]). Chrome 155 refuses to close a dedicated worker, and closing an iframe closes its whole tab.
+async fn contain_unarmed(
+    cdp: &Cdp,
+    shared: &Shared,
+    target_id: Option<String>,
+    kind: String,
+    held: bool,
+    error: &ArmError,
+) -> ArmingFailure {
+    let close = match &target_id {
+        Some(id) => close_target(cdp, id).await,
+        None => CloseOutcome::NoTarget,
+    };
+    let containment = if close == CloseOutcome::Closed {
+        Containment::Closed
+    } else {
+        shared.contain(cdp).await
+    };
+    ArmingFailure {
+        target_id,
+        kind,
+        error: error.to_string(),
+        step: error.step(),
+        cause: error.cause(),
+        resume_sent: error.resume_sent(),
+        held,
+        close,
+        containment,
+    }
+}
+
+/// Records a target that couldn't be armed in `fence.log` and the capture, then among the run's failures.
+fn record_failure(shared: &Shared, session: Option<&SessionId>, failure: ArmingFailure) {
+    // the failure fails the run's verdict whether or not the log takes it
+    let _ = shared.http.log().record_arming(&failure.record());
+    if let Some(capture) = &shared.capture {
+        capture.arming_failure(session, &failure);
+    }
+    shared.targets().failures.push(failure);
 }
 
 /// Drops a session that won't be armed from the attached set: if its target can't be closed, no detach may come.
@@ -1003,8 +1170,12 @@ fn forget(shared: &Shared, session: Option<&SessionId>) {
     }
 }
 
-async fn close_target(cdp: &Cdp, target_id: &str) -> bool {
-    cdp.call(None, "Target.closeTarget", json!({"targetId": target_id}))
-        .await
-        .is_ok_and(|result| result["success"] != json!(false))
+/// Asks the browser to close a target, waiting up to [`STEP_TIMEOUT`] for the answer.
+async fn close_target(cdp: &Cdp, target_id: &str) -> CloseOutcome {
+    let call = cdp.call(None, "Target.closeTarget", json!({"targetId": target_id}));
+    match tokio::time::timeout(STEP_TIMEOUT, call).await {
+        Err(_) => CloseOutcome::Unanswered,
+        Ok(Ok(result)) if result["success"] != json!(false) => CloseOutcome::Closed,
+        Ok(_) => CloseOutcome::Refused,
+    }
 }

@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TEAMS_ORIGINS, TargetKind};
+use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, STEP_TIMEOUT, Step, TEAMS_ORIGINS, TargetKind};
 use proto_lab::browser::{Browser, BrowserError, LaunchOptions};
+use proto_lab::capture::{Capture, Recorder, RtcHooks};
 use proto_lab::cdp::{Cdp, SessionId};
 use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, classify, is_mutating};
 use proto_lab::config::Alias;
@@ -27,7 +28,8 @@ use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport};
 use proto_lab::session::FenceReport;
 use serde_json::{Value, json};
 use teams_fence::{
-    DenyReason, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope, Target, WriteKind,
+    ArmingCause, CloseOutcome, Containment, DenyReason, Fence, FenceLog, Membership, MembershipFuture,
+    MembershipSource, Mri, Roster, Scope, Target, WriteKind,
 };
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
@@ -543,6 +545,14 @@ async fn serve_fake(
                 if command["method"] == "Browser.close" && refuse("Browser.close", None) {
                     return Ok(());
                 }
+                // so does closing the lost target: the connection drops before its close is answered
+                if command["method"] == "Target.closeTarget" && command["params"]["targetId"] == LOST {
+                    return Ok(());
+                }
+                // the silent target's close is never answered
+                if command["method"] == "Target.closeTarget" && command["params"]["targetId"] == SILENT {
+                    continue;
+                }
                 answer_fake(&mut socket, &command, refuse).await?;
             }
             event = pushed.recv() => {
@@ -559,8 +569,14 @@ const SHORT_LIVED: &str = "S-short";
 /// The session whose WebSocket guard reports that it has no binding to ask through.
 const UNGUARDED: &str = "S-unguarded";
 
-/// The target the browser won't close.
+/// The prefix of the targets the browser won't close (`success: false`).
 const STUCK: &str = "T-stuck";
+
+/// The target whose close the browser never answers.
+const SILENT: &str = "T-silent";
+
+/// The target whose close the browser hangs up on.
+const LOST: &str = "T-lost";
 
 async fn answer_fake(
     socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
@@ -598,7 +614,13 @@ fn fake_reply(command: &Value, refuse: fn(&str, Option<&str>) -> bool) -> Value 
     let result = match method {
         "Target.createTarget" => json!({"targetId": "T-new"}),
         // the browser won't close the stuck target
-        "Target.closeTarget" if command["params"]["targetId"] == STUCK => json!({"success": false}),
+        "Target.closeTarget"
+            if command["params"]["targetId"]
+                .as_str()
+                .is_some_and(|target| target.starts_with(STUCK)) =>
+        {
+            json!({"success": false})
+        }
         "Target.closeTarget" => json!({"success": true}),
         // the WebSocket guard reports itself armed, except where the binding is missing
         "Runtime.evaluate" if session == Some(UNGUARDED) => {
@@ -816,7 +838,7 @@ fn refuse_fetch_on_s9(method: &str, session: Option<&str>) -> bool {
 #[tokio::test]
 async fn a_target_that_cannot_be_armed_is_closed_and_never_resumed() {
     let fake = FakeBrowser::start(refuse_fetch_on_s9).await.unwrap();
-    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let (armed, lab) = arm_fake(&fake, &[]).await.unwrap();
 
     fake.event(None, "Target.attachedToTarget", &attached("S9", "T9", "service_worker"))
         .unwrap();
@@ -848,38 +870,93 @@ async fn a_target_that_cannot_be_armed_is_closed_and_never_resumed() {
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].target_id.as_deref(), Some("T9"));
     assert_eq!(failures[0].kind, "service_worker");
-    assert!(failures[0].closed);
+    assert_eq!(failures[0].step, Some(Step::Fetch));
+    assert_eq!(failures[0].cause, ArmingCause::Error);
+    assert!(failures[0].held && !failures[0].resume_sent);
+    assert_eq!(failures[0].close, CloseOutcome::Closed);
+    assert_eq!(failures[0].containment, Containment::Closed);
+    assert!(failures[0].contained_before_it_ran());
     assert!(failures[0].error.contains("Fetch"), "{}", failures[0].error);
     assert!(armed.targets().iter().all(|target| target.session.as_str() != "S9"));
     let failed = armed.verdict().unwrap_err();
     assert_eq!(failed.failures.len(), 1);
+    // recorded in fence.log before it is listed
+    let entries = log_entries(&lab.log_path).unwrap();
+    let recorded: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| entry["event"] == "arming_failure")
+        .collect();
+    assert_eq!(recorded.len(), 1, "{entries:?}");
+    assert_eq!(recorded[0]["verdict"], "contained");
+    assert_eq!(recorded[0]["target_type"], "service_worker");
+    assert_eq!(recorded[0]["step"], "Fetch.enable");
+    assert_eq!(recorded[0]["close"], "closed");
+    assert_eq!(recorded[0]["containment"], "closed");
+    assert!(
+        process::running(fake.helper().unwrap()),
+        "a confirmed close kills nothing"
+    );
 }
 
-/// `S-held`'s and `S-stuck`'s `Page.enable` and `S-ran`'s resume are refused (and [`STUCK`] isn't closed).
+/// The sessions whose `Page.enable` is refused; each one's target is `T-<name>` (so `S-stuck`'s is [`STUCK`], which the
+/// browser won't close, `S-silent`'s [`SILENT`] and `S-lost`'s [`LOST`]).
+const FAILS_EARLY: [&str; 6] = ["S-held", "S-running", "S-stuck", "S-stuck2", "S-silent", "S-lost"];
+
+/// [`FAILS_EARLY`]'s `Page.enable` and `S-ran`'s resume are refused.
 fn refuse_held_and_ran(method: &str, session: Option<&str>) -> bool {
-    (method == "Page.enable" && matches!(session, Some("S-held" | "S-stuck")))
+    (method == "Page.enable" && session.is_some_and(|session| FAILS_EARLY.contains(&session)))
         || (method == "Runtime.runIfWaitingForDebugger" && session == Some("S-ran"))
 }
 
-/// Attaches an iframe through the page's session and waits until it has failed to arm; gives what the fence did.
-async fn iframe_that_fails(fake: &FakeBrowser, armed: &ArmedBrowser, session: &str) -> TestResult<FenceReport> {
-    let target = format!("T{}", session.trim_start_matches('S'));
-    fake.event(
-        Some("S-page"),
-        "Target.attachedToTarget",
-        &attached(session, &target, "iframe"),
-    )?;
+/// Waits up to `within` until `count` targets have failed to arm; gives what the fence did.
+async fn failed(armed: &ArmedBrowser, count: usize, within: Duration) -> TestResult<FenceReport> {
     let wait = async {
         loop {
-            if !armed.failures().is_empty() {
+            if armed.failures().len() >= count {
                 return FenceReport::of(&armed.decisions());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
-    Ok(tokio::time::timeout(Duration::from_secs(5), wait)
+    Ok(tokio::time::timeout(within, wait)
         .await
-        .map_err(|_| format!("{session} didn't fail"))?)
+        .map_err(|_| format!("{count} target(s) didn't fail within {within:?}"))?)
+}
+
+/// Attaches an iframe held through the page's session (`T-<name>` for `S-<name>`).
+fn attach_iframe(fake: &FakeBrowser, session: &str, held: bool) -> TestResult {
+    let target = format!("T{}", session.trim_start_matches('S'));
+    let mut params = attached(session, &target, "iframe");
+    params["waitingForDebugger"] = json!(held);
+    fake.event(Some("S-page"), "Target.attachedToTarget", &params)
+}
+
+/// Attaches a held iframe through the page's session and waits until it has failed to arm; gives what the fence did.
+async fn iframe_that_fails(fake: &FakeBrowser, armed: &ArmedBrowser, session: &str) -> TestResult<FenceReport> {
+    attach_iframe(fake, session, true)?;
+    failed(armed, 1, Duration::from_secs(5)).await
+}
+
+/// The arming failures `fence.log` holds.
+fn logged_failures(lab: &Lab) -> TestResult<Vec<Value>> {
+    Ok(log_entries(&lab.log_path)?
+        .into_iter()
+        .filter(|entry| entry["event"] == "arming_failure")
+        .collect())
+}
+
+/// How a scenario judges an account whose fence did `fence`.
+fn judged(fence: FenceReport) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::AbChat);
+    let run = AccountRun {
+        alias: Alias::A,
+        fence,
+        denials: Vec::new(),
+        frame_denials: Vec::new(),
+        capture: None,
+    };
+    report.add_account(run, &DenyPolicy::AllExpected);
+    report
 }
 
 #[tokio::test]
@@ -893,13 +970,13 @@ async fn a_target_closed_before_it_ran_is_a_warning_not_a_breach() {
             .methods_on(Some("S-held"))
             .contains(&"Runtime.runIfWaitingForDebugger".to_owned())
     );
-    assert!(
-        held.unarmed[0].closed && !held.unarmed[0].may_have_run,
-        "{:?}",
-        held.unarmed
-    );
+    let failure = &held.unarmed[0];
+    assert_eq!(failure.close, CloseOutcome::Closed, "{failure:?}");
+    assert_eq!(failure.containment, Containment::Closed, "{failure:?}");
+    assert!(!failure.may_have_run(), "{failure:?}");
     assert!(!held.breached(), "{}", held.summary());
-    assert_eq!(held.closed_unarmed().count(), 1);
+    assert!(!held.browser_killed());
+    assert_eq!(held.contained_unarmed().count(), 1);
     assert!(
         held.summary().contains("iframe target closed unarmed before it ran"),
         "{}",
@@ -908,15 +985,7 @@ async fn a_target_closed_before_it_ran_is_a_warning_not_a_breach() {
     // the run's strict verdict still lists it
     assert_eq!(armed.verdict().unwrap_err().failures.len(), 1);
     // a scenario warns about it and doesn't fail on it
-    let mut report = ScenarioReport::new(ScenarioName::AbChat);
-    let run = AccountRun {
-        alias: Alias::A,
-        fence: held,
-        denials: Vec::new(),
-        frame_denials: Vec::new(),
-        capture: None,
-    };
-    report.add_account(run, &DenyPolicy::AllExpected);
+    let report = judged(held);
     assert!(!report.failed(), "{:?}", report.failures);
     let warned = |note: &String| note.contains("warning") && note.contains("1 target(s)");
     assert!(report.notes.iter().any(warned), "{:?}", report.notes);
@@ -928,22 +997,12 @@ async fn a_target_whose_resume_was_sent_may_have_run_and_is_a_breach() {
     let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
     let ran = iframe_that_fails(&fake, &armed, "S-ran").await.unwrap();
 
-    assert!(
-        ran.unarmed[0].closed && ran.unarmed[0].may_have_run,
-        "{:?}",
-        ran.unarmed
-    );
+    let failure = &ran.unarmed[0];
+    assert!(failure.resume_sent && failure.may_have_run(), "{failure:?}");
+    assert_eq!(failure.containment, Containment::Closed, "{failure:?}");
     assert!(ran.breached(), "{}", ran.summary());
-    assert_eq!(ran.closed_unarmed().count(), 0);
-    let mut report = ScenarioReport::new(ScenarioName::AbChat);
-    let run = AccountRun {
-        alias: Alias::A,
-        fence: ran,
-        denials: Vec::new(),
-        frame_denials: Vec::new(),
-        capture: None,
-    };
-    report.add_account(run, &DenyPolicy::AllExpected);
+    assert_eq!(ran.contained_unarmed().count(), 0);
+    let report = judged(ran);
     assert!(
         report.failures.iter().any(|failure| failure.contains("breached")),
         "{:?}",
@@ -952,18 +1011,187 @@ async fn a_target_whose_resume_was_sent_may_have_run_and_is_a_breach() {
 }
 
 #[tokio::test]
-async fn a_target_that_could_not_be_closed_is_a_breach() {
+async fn a_target_that_was_not_held_may_have_run_and_is_a_breach() {
     let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
-    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let (armed, lab) = arm_fake(&fake, &[]).await.unwrap();
+    // attached running, as a target already there when auto-attach was turned on is
+    attach_iframe(&fake, "S-running", false).unwrap();
+    let running = failed(&armed, 1, Duration::from_secs(5)).await.unwrap();
+
+    let failure = &running.unarmed[0];
+    assert!(
+        !failure.held && !failure.resume_sent && failure.may_have_run(),
+        "{failure:?}"
+    );
+    assert_eq!(failure.containment, Containment::Closed, "{failure:?}");
+    assert!(running.breached(), "{}", running.summary());
+    let logged = logged_failures(&lab).unwrap();
+    assert_eq!(logged.len(), 1);
+    assert_eq!(logged[0]["verdict"], "breach");
+    assert_eq!(logged[0]["held"], false);
+}
+
+/// Arms the fake browser with a recording fence; gives the recorder too.
+async fn arm_fake_capturing(fake: &FakeBrowser, lab: &Lab) -> TestResult<(ArmedBrowser, Arc<Recorder>)> {
+    let recorder = Arc::new(Recorder::create(&lab.log_path.with_file_name("captures"), "test")?);
+    let capture = Capture::new(Arc::clone(&recorder), RtcHooks::new(Duration::from_secs(1)));
+    let options = ArmOptions {
+        service_worker_origins: Vec::new(),
+    };
+    let http = http_fence(lab, Classifier::seeded(), &[]);
+    let armed = ArmedBrowser::arm_capturing(fake.launch().await?, http, ws_fence(lab)?, &options, capture).await?;
+    Ok((armed, recorder))
+}
+
+#[tokio::test]
+async fn a_target_whose_close_is_refused_is_contained_by_killing_the_browser() {
+    let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
+    let lab = lab().unwrap();
+    let (armed, recorder) = arm_fake_capturing(&fake, &lab).await.unwrap();
+    let helper = fake.helper().unwrap();
     let stuck = iframe_that_fails(&fake, &armed, "S-stuck").await.unwrap();
 
+    let failure = &stuck.unarmed[0];
+    assert_eq!(failure.close, CloseOutcome::Refused, "{failure:?}");
+    assert_eq!(failure.containment, Containment::BrowserKilled, "{failure:?}");
+    assert!(!failure.may_have_run(), "{failure:?}");
     assert!(
-        !stuck.unarmed[0].closed && !stuck.unarmed[0].may_have_run,
-        "{:?}",
-        stuck.unarmed
+        !process::running(helper),
+        "the browser's whole group is gone once it is listed"
     );
-    assert!(stuck.breached(), "{}", stuck.summary());
-    assert_eq!(stuck.closed_unarmed().count(), 0);
+    assert!(!stuck.breached(), "{}", stuck.summary());
+    assert!(stuck.browser_killed());
+    assert!(
+        stuck
+            .summary()
+            .contains("iframe target killed with the browser unarmed before it ran"),
+        "{}",
+        stuck.summary()
+    );
+    // the kill ends the connection, which isn't a loss of the fence's
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!armed.verdict().unwrap_err().connection_lost);
+    // no breach, but the run is over: the scenario fails on it
+    let report = judged(FenceReport::of(&armed.decisions()));
+    assert!(
+        !report.failures.iter().any(|failure| failure.contains("breached")),
+        "{:?}",
+        report.failures
+    );
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|failure| failure.contains("killed to contain")),
+        "{:?}",
+        report.failures
+    );
+    // recorded in fence.log and the capture
+    let logged = logged_failures(&lab).unwrap();
+    assert_eq!(logged.len(), 1);
+    assert_eq!(logged[0]["verdict"], "contained");
+    assert_eq!(logged[0]["close"], "refused");
+    assert_eq!(logged[0]["containment"], "browser_killed");
+    let error = armed.close(Duration::from_millis(100)).await.unwrap_err();
+    assert!(error.to_string().contains("killed to contain"), "{error}");
+    recorder.finish().unwrap();
+    let captured: Vec<Value> = std::fs::read_to_string(recorder.events_file())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|entry: &Value| entry["type"] == "arming_failure")
+        .collect();
+    assert_eq!(captured.len(), 1, "{captured:?}");
+    assert_eq!(captured[0]["target_id"], STUCK);
+    assert_eq!(captured[0]["session"], "S-stuck");
+    assert_eq!(captured[0]["step"], "Page.enable");
+    assert_eq!(captured[0]["containment"], "browser_killed");
+    assert_eq!(captured[0]["verdict"], "contained");
+}
+
+#[tokio::test]
+async fn an_unanswered_close_is_given_up_on_and_the_browser_killed() {
+    let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+    let helper = fake.helper().unwrap();
+    attach_iframe(&fake, "S-silent", true).unwrap();
+    let silent = failed(&armed, 1, STEP_TIMEOUT + Duration::from_secs(5)).await.unwrap();
+
+    let failure = &silent.unarmed[0];
+    assert_eq!(failure.close, CloseOutcome::Unanswered, "{failure:?}");
+    assert_eq!(failure.containment, Containment::BrowserKilled, "{failure:?}");
+    assert!(!process::running(helper));
+    assert!(!silent.breached(), "{}", silent.summary());
+}
+
+#[tokio::test]
+async fn targets_that_cannot_be_closed_at_once_share_one_kill() {
+    let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
+    let (armed, lab) = arm_fake(&fake, &[]).await.unwrap();
+    attach_iframe(&fake, "S-stuck", true).unwrap();
+    attach_iframe(&fake, "S-stuck2", true).unwrap();
+    let both = failed(&armed, 2, Duration::from_secs(5)).await.unwrap();
+
+    for failure in &both.unarmed {
+        assert_eq!(failure.close, CloseOutcome::Refused, "{failure:?}");
+        assert_eq!(failure.containment, Containment::BrowserKilled, "{failure:?}");
+    }
+    assert!(!both.breached(), "{}", both.summary());
+    assert_eq!(logged_failures(&lab).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_connection_lost_before_the_containment_is_a_breach() {
+    let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
+    let (armed, lab) = arm_fake(&fake, &[]).await.unwrap();
+    let lost = iframe_that_fails(&fake, &armed, "S-lost").await.unwrap();
+
+    let failure = &lost.unarmed[0];
+    assert_eq!(failure.close, CloseOutcome::Refused, "{failure:?}");
+    assert_eq!(failure.containment, Containment::Failed, "{failure:?}");
+    assert!(lost.breached(), "{}", lost.summary());
+    // the loss is a breach of its own too
+    let report = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let report = FenceReport::of(&armed.decisions());
+            if report.connection_lost {
+                return report;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(report.breached());
+    assert!(
+        process::gone(fake.helper().unwrap()).await,
+        "the browser outlived its fence"
+    );
+    assert_eq!(logged_failures(&lab).unwrap()[0]["verdict"], "breach");
+}
+
+#[tokio::test]
+async fn closing_the_fence_waits_for_a_containment_and_its_record() {
+    let fake = FakeBrowser::start(refuse_held_and_ran).await.unwrap();
+    let (armed, lab) = arm_fake(&fake, &[]).await.unwrap();
+    let decisions = armed.decisions();
+    attach_iframe(&fake, "S-silent", true).unwrap();
+    fake.sent("the silent target's close", |command| {
+        command["method"] == "Target.closeTarget" && command["params"]["targetId"] == SILENT
+    })
+    .await
+    .unwrap();
+
+    armed.close(Duration::from_millis(100)).await.unwrap();
+
+    // the close took the browser while the containment waited on the close's answer: nothing left to kill it with
+    let failures = decisions.failures();
+    assert_eq!(failures.len(), 1, "the failure is listed once closing returns");
+    assert_eq!(failures[0].close, CloseOutcome::Unanswered);
+    assert_eq!(failures[0].containment, Containment::Failed);
+    assert_eq!(decisions.undecided(), 0);
+    assert!(FenceReport::of(&decisions).breached());
+    assert_eq!(logged_failures(&lab).unwrap().len(), 1);
 }
 
 #[tokio::test]

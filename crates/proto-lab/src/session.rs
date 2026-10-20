@@ -386,8 +386,9 @@ fn identity_in(headers: &Value) -> Option<Identity> {
     })
 }
 
-/// What the fence did during a run. Denies are expected while it runs fail-closed; a breach is not. A target closed
-/// before it ran ([`ArmingFailure::closed_before_it_ran`]) is neither: a warning.
+/// What the fence did during a run. Denies are expected while it runs fail-closed; a breach is not. A target contained
+/// before it ran ([`ArmingFailure::contained_before_it_ran`]) is neither: a warning (and when the browser had to be
+/// killed for it, a failed run).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FenceReport {
     /// Denied requests by host.
@@ -395,7 +396,7 @@ pub struct FenceReport {
     pub denied_frames: usize,
     /// Frames the browser sent without an allow.
     pub unsanctioned_frames: usize,
-    /// Targets that couldn't be armed, closed before they ran or not.
+    /// Targets that couldn't be armed, contained before they ran or not.
     pub unarmed: Vec<ArmingFailure>,
     /// The fence lost its connection to the browser.
     pub connection_lost: bool,
@@ -430,19 +431,26 @@ impl FenceReport {
     }
 
     /// Whether anything got past the fence or escaped it: a frame sent without an allow, a target that couldn't be
-    /// armed and may have run (its resume was sent, or it couldn't be closed), a lost connection. Denies are not
-    /// breaches, and neither is a target closed before it ran ([`Self::closed_unarmed`]).
+    /// armed and may have run (its resume was sent, it wasn't held when it attached, or it could be neither closed nor
+    /// killed with the browser), a lost connection. Denies are not breaches, and neither is a target contained before
+    /// it ran ([`Self::contained_unarmed`]).
     #[must_use]
     pub fn breached(&self) -> bool {
         self.unsanctioned_frames > 0
-            || self.unarmed.iter().any(|failure| !failure.closed_before_it_ran())
+            || self.unarmed.iter().any(|failure| !failure.contained_before_it_ran())
             || self.connection_lost
     }
 
-    /// The targets that couldn't be armed in time and were closed before any of their code ran: no breach, as nothing
-    /// of them ran unguarded, but what they would have done didn't happen.
-    pub fn closed_unarmed(&self) -> impl Iterator<Item = &ArmingFailure> {
-        self.unarmed.iter().filter(|failure| failure.closed_before_it_ran())
+    /// The targets that couldn't be armed in time and were contained (closed, or killed with the browser) before any of
+    /// their code ran: no breach, as nothing of them ran unguarded, but what they would have done didn't happen.
+    pub fn contained_unarmed(&self) -> impl Iterator<Item = &ArmingFailure> {
+        self.unarmed.iter().filter(|failure| failure.contained_before_it_ran())
+    }
+
+    /// Whether the browser was killed to contain a target that couldn't be armed or closed: the run ended there.
+    #[must_use]
+    pub fn browser_killed(&self) -> bool {
+        self.unarmed.iter().any(ArmingFailure::browser_killed)
     }
 
     /// One line for the operator: the denies by host, then anything worse.
@@ -463,10 +471,15 @@ impl FenceReport {
             let _ = write!(line, "; {} frame(s) sent without an allow", self.unsanctioned_frames);
         }
         for failure in &self.unarmed {
-            if failure.closed_before_it_ran() {
+            if failure.contained_before_it_ran() {
+                let how = if failure.browser_killed() {
+                    "killed with the browser"
+                } else {
+                    "closed"
+                };
                 let _ = write!(
                     line,
-                    "; a {} target closed unarmed before it ran ({})",
+                    "; a {} target {how} unarmed before it ran ({})",
                     failure.kind, failure.error
                 );
             } else {

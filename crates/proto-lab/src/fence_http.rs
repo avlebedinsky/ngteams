@@ -315,6 +315,11 @@ impl HttpFence {
         self
     }
 
+    /// The fence's `fence.log`, for what the browser fence records beside its decisions (a target it couldn't arm).
+    pub(crate) fn log(&self) -> &teams_fence::FenceLog {
+        self.fence.log()
+    }
+
     /// The `Fetch.enable` params for the browser session: every request at the request stage, plus, with a redirect
     /// catch, the responses of the login origin.
     #[must_use]

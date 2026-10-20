@@ -224,17 +224,34 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
   `crates/teams-fence/tests/log.rs` (or the crate's existing log tests)
 - Delete: `docs/backlog/arming-timeout-under-load-counts-as-breach.md` (when done)
 
-- [ ] settle the backlog item before any live run of this plan relies on a breach verdict: tests first (Chrome 155,
+- [x] settle the backlog item before any live run of this plan relies on a breach verdict: tests first (Chrome 155,
       a page whose held iframe sends a request and a frame as soon as it runs) on what happens to a target held by
       `waitForDebuggerOnStart` whose arming gave up before the resume and whose close failed or went unanswered
-- [ ] tests first: `fence.log` gains an arming-failure record (target type, failed step, whether it was the resume,
+      (`tests/browser.rs::a_held_target_runs_only_once_its_parent_s_auto_attach_ends_or_its_connection_drops`: a held
+      cross-site iframe or dedicated worker sends nothing when left alone, when its close is refused — Chrome 155
+      refuses to close a dedicated worker —, when its session is detached or its parent navigates; it runs once its
+      parent's auto-attach is turned off or the connection holding it drops. Closing a held iframe closes its whole tab.
+      A held out-of-process iframe isn't listed by `Target.getTargets`, so that can't tell held from gone)
+- [x] tests first: `fence.log` gains an arming-failure record (target type, failed step, whether it was the resume,
       close result), written by `teams-fence` like `RequestRecord`; the capture records the same
-- [ ] then, by that evidence, either make an unconfirmed close before the resume a warning (re-checked with
+      (`teams_fence::ArmingRecord`: also the cause, whether the target attached held, and the containment; verdict
+      `breach` or `contained`)
+- [x] then, by that evidence, either make an unconfirmed close before the resume a warning (re-checked with
       `Target.getTargets`) or confirm the close (retry, or kill the browser). Nothing is loosened without that
       evidence; decide with Codex if it is ambiguous
-- [ ] live: `proto-lab run ab-chat --headless` exits 0 with goal, enforcement, no breach and lab-only writes as
+      (decided with Codex: **kill the browser**. `getTargets` gives no "still held" signal, so no re-check; a close
+      not confirmed within `STEP_TIMEOUT` makes the fence `SIGKILL` the browser's whole process group while its
+      connection still holds the target, then reap it. A held, never-resumed target closed or killed that way is a
+      warning, not a breach, and a killed browser fails the run; resume sent, not held at attach, or neither closed
+      nor killed (browser already gone, connection lost first, kill or reap failed) stays a breach. Closing the fence
+      now waits for armings too)
+- [x] live: `proto-lab run ab-chat --headless` exits 0 with goal, enforcement, no breach and lab-only writes as
       before (with Task 1's list); record the run in this plan
-- [ ] `cargo test -p proto-lab -p teams-fence` and the gate pass; delete the backlog item
+      (2026-10-20 19:11, load average ~32, `target/lab` normal build: exit 0; goal reached, enforcement passed (probe
+      denied and failed in a's page, b's copy has the message and not the probe), no breach, no arming failure; a 329
+      and b 232 denies, all expected; `fence.log`: the only mapped allows are 2 messages and 4 typing on the a–b 1:1
+      chat, both of whose members are lab accounts; 10 forced denies)
+- [x] `cargo test -p proto-lab -p teams-fence` and the gate pass; delete the backlog item
 
 ### Task 3: Does the chat service take our own `ic3` token? (read-only)
 **Files:**

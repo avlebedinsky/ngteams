@@ -267,6 +267,12 @@ impl Cdp {
         }
     }
 
+    /// Whether the connection is gone: the reader saw it end, and every command fails with [`CdpError::Closed`].
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.replies.pending().closed
+    }
+
     /// A handle that sends every command to one attached target.
     #[must_use]
     pub fn session(&self, id: SessionId) -> Session {

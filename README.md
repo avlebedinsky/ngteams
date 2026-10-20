@@ -48,7 +48,7 @@ outside the repo:
 | `…/captures/<scenario>/<ts>/events.jsonl` | recorded runs (format in `crates/proto-lab/src/capture.rs`) |
 | `…/reference/<name>` | sanitized reference copies made by `export`, read locally to write synthetic fixtures |
 | `…/bundles/<version>/` | the unpacked web bundle and its `index.jsonl` |
-| `…/fence.log` | JSONL: every fence decision of every run (allows, denies, breaches, with reasons; no tokens, no participants' MRIs, scope ids verbatim) |
+| `…/fence.log` | JSONL: every fence decision of every run (allows, denies, breaches, with reasons; no tokens, no participants' MRIs, scope ids verbatim), and every target the browser fence couldn't arm (its type, failed step, close and containment) |
 | `…/auth/<alias>.json` | the account's region, partition, region GTMs and skypetoken expiry from `auth` (`0600`) |
 | `…/status-<alias>.json` | `login`'s steps, and why it stopped |
 | `…/media/tone-440.wav` | the fake microphone's tone for `echo-call` |
@@ -101,7 +101,10 @@ also asks for a token for each other Teams audience, `--no-skypetoken` stops aft
 
 **`run`** exits non-zero when the scenario's goal isn't reached, the fence was breached, or the fence denied something
 the scenario doesn't expect. Runs are recorded under `captures/<scenario>/<ts>/`. Without `--headless` the browsers
-are visible.
+are visible. A target the fence can't arm in time (a step unanswered for 10 s under load) is never resumed: it is
+closed, or, when its close isn't confirmed, the browser is killed. That is a warning, not a breach (the target was held
+and never ran), but a killed browser fails the run; a target whose resume was sent, one that wasn't held, or one that
+could be neither closed nor killed is a breach. Each such target is in `fence.log` and the capture.
 
 - `load`: account a loads the web client, fail-closed; every deny is expected.
 - `ab-chat`: a and b; a opens the a–b 1:1 chat by b's MRI and sends a message, and b must show it. First, a live
