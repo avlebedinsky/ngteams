@@ -5,15 +5,19 @@
 //! - [`outbox`]: commands as outbox rows with a `clientmessageid` of their own, each attempt a fresh `Fence::check`,
 //!   the outbox's part of the plan's retry table, our own messages matched to their rows when they come back, and no
 //!   resend across runs.
+//! - [`sync`]: the catch-up sync, on start and after every reconnect of the push channel: the conversation list and
+//!   each changed conversation's messages read through the service's own sync links and stored once, through the
+//!   outbox's [`Outbox::receive`]; it fills the outbox's [`ConversationSync`] seam.
 //!
-//! Catch-up sync (M1 Task 17) fills the outbox's [`ConversationSync`] seam; the engine (Task 18) owns the store and
-//! runs the outbox on its own runtime.
+//! The engine (Task 18) owns the store and runs the outbox and the catch-up on its own runtime.
 //!
-//! M1 Task 13 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
+//! M1 Tasks 13 and 17 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
 
 pub mod outbox;
+pub mod sync;
 
 pub use outbox::{
     CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, Outbox, OutboxError, Received,
     SentDue, SyncError, Unsynced, enqueue, new_client_message_id,
 };
+pub use sync::{CatchUp, CatchUpError, CatchUpReport, ConversationFailed, Gaps, MAX_PAGES, Synced};

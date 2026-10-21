@@ -6332,10 +6332,12 @@ name = "teams-core"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
+ "reqwest",
  "serde",
  "serde_json",
  "teams-auth",
  "teams-fence",
+ "teams-mock",
  "teams-proto",
  "teams-store",
  "tempfile",
