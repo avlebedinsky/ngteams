@@ -223,7 +223,8 @@ events.
 
 The native client turns these into typed events (Task 16, `teams_trouter::events`): a `NewMessage` whose
 `messagetype` is `Control/Typing` is a signal (typing), not a message, and so is every other `Control/…` one
-(`Control/ClearTyping`, which the web client sends, is typing's end; one no capture showed is `Unknown`); a message's own `clientmessageid` matches it
+(`Control/ClearTyping`, known from the bundle only, is typing's end when one is delivered: the web client sent none in
+three `chat-shapes` runs, [chat.md](chat.md#typing-chat-shapes); one no capture showed is `Unknown`); a message's own `clientmessageid` matches it
 to our outbox row (Task 13). A `MessageUpdate` carries the whole message, so what changed is told from it the way
 every one in the captures of runs 12 and 13 (below; both accounts' sockets) could be told (read locally, the times
 compared, none printed): an

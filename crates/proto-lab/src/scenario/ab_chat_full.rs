@@ -586,7 +586,7 @@ pub fn mentions(body: Option<&str>, mri: &str) -> bool {
 }
 
 /// Empties the compose box: everything selected, then deleted.
-async fn clear_compose(drive: &mut Driver) -> Result<(), StepError> {
+pub(crate) async fn clear_compose(drive: &mut Driver) -> Result<(), StepError> {
     drive.type_into("a goes back to the compose box", COMPOSE, "").await?;
     drive.press("a selects the compose box's text", Key::SELECT_ALL).await?;
     drive.press("a deletes it", Key::BACKSPACE).await

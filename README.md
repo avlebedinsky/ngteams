@@ -188,7 +188,8 @@ the run.
   (the Trouter session frames and the messaging stack's registration only), observed for 16 minutes; the quiet one
   holds back every `user.activity` (`docs/protocol/trouter.md`).
 - `chat-shapes`: a and b under the messaging classifier, as `ab-trouter`: a sets and takes back each quick reaction
-  the hover bar offers, types for 30 s, pauses and empties its compose box while b's open chat records its typing
+  the hover bar offers, types for 45 s, leaves the text for 35 s, empties its compose box and waits 15 s more
+  (`TYPE_FOR`, `PAUSE`, `AFTER_EMPTYING`) while b's open chat records its typing
   indicator, sends a message of three lines with a link, and mentions b in the recorded group chat
   (`docs/protocol/chat.md`).
 - `echo-call`: account a places the web client's test call to the echo service, with a fake microphone playing a

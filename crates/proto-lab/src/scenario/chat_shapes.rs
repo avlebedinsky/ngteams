@@ -70,8 +70,9 @@ pub const TYPE_EVERY: Duration = Duration::from_millis(500);
 /// post about 16 s after its last message, whenever its typing began, so the step starts past that.
 pub const QUIET_BEFORE_TYPING: Duration = Duration::from_secs(20);
 
-/// How long a types in the typing step: long enough for several typing posts (the first run showed one about every
-/// 16 s).
+/// How long a types in the typing step: long enough for several typing posts at the rate the bundle's throttle allows
+/// (one per 6 s). The recorded runs sent none while a typed, keys pressed or text inserted, and why is not known
+/// (`docs/protocol/chat.md`, "Typing (chat-shapes)").
 pub const TYPE_FOR: Duration = Duration::from_secs(45);
 
 /// How long a leaves its typed text in the compose box, typing nothing, before it empties the box: longer than b's
@@ -567,8 +568,8 @@ impl Shapes {
             ..TypingRun::default()
         };
         let typing = Instant::now();
-        // keys pressed, not text inserted: the client's typing signal follows the editor's key events, and in the run
-        // that inserted the text (2026-10-21) it sent no typing post in 45 s of it
+        // keys pressed, not text inserted: the run that inserted the text (2026-10-21) sent no typing post in 45 s of
+        // it, so key presses were tried; they brought none while a typed either, and why is not known (chat.md)
         while typing.elapsed() < TYPE_FOR {
             drive.press("a types a character", TYPED_KEY).await?;
             tokio::time::sleep(TYPE_EVERY).await;
@@ -744,11 +745,9 @@ async fn react(
     Ok(list(caused.into_iter()))
 }
 
-/// Empties the compose box: everything selected, then deleted, and the box must be empty.
+/// Empties the compose box ([`super::ab_chat_full::clear_compose`]), and the box must be empty.
 async fn empty_compose(drive: &mut Driver) -> Result<(), ScenarioError> {
-    drive.type_into("a goes back to its compose box", COMPOSE, "").await?;
-    drive.press("a selects the compose box's text", Key::SELECT_ALL).await?;
-    drive.press("a deletes it", Key::BACKSPACE).await?;
+    super::ab_chat_full::clear_compose(drive).await?;
     let empty = format!(
         "(document.querySelector({})?.innerText ?? '').trim() === ''",
         js_string(COMPOSE_CSS)
