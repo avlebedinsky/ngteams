@@ -38,12 +38,12 @@ These hold for every agent and every change, with no exceptions.
   its reason and tests first. Its shape is the host, the method, the path, every query parameter and its value, the
   headers that change what the request does, and the body schema. A query parameter or body field the capture didn't
   show makes the request `Unknown`, as does anything the fence can't read with certainty, and any other shape of the
-  same endpoint stays `Unknown` and denied. A path-only matcher doesn't qualify: `OwnRule` and `UrlPattern` ignore the
-  query and `classify` checks own rules before `map_write`, so such a rule on a message's `properties` path would pass
-  a reaction (`?name=emotions`) unfenced. An allowance never takes a request the write mapping would classify. What
-  it allows is logged to `fence.log`. For example, the mention picker's profile lookups of lab accounts may be
-  allowed; the people search, whose results list other tenant users, and bot invokes, whose body carries the
-  account's token, may not.
+  same endpoint stays `Unknown` and denied. A path-only matcher doesn't qualify: `UrlPattern` ignores the query, an
+  `OwnRule` with `QueryRule::Any` takes any query, and `classify` checks own rules before `map_write`, so such a rule
+  on a message's `properties` path would pass a reaction (`?name=emotions`) unfenced. An allowance never takes a
+  request the write mapping would classify. What it allows is logged to `fence.log`. For example, the mention picker's
+  profile lookups of lab accounts may be allowed; the people search, whose results list other tenant users, and bot
+  invokes, whose body carries the account's token, may not.
 - **Nothing runs live against the tenant before the browser fence is armed** (M0 Tasks 6–7): HTTP interception on
   every host and target, the WebSocket guard, the service worker neutralized. Until the write-target mapping exists
   (M0 Task 11) the fence runs fail-closed: every mutating request is denied except the seeded own-state list.
