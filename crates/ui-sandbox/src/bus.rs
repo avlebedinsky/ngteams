@@ -368,7 +368,8 @@ impl PrivateBus {
         records(&self.records).tray_hosts.clone()
     }
 
-    /// The process ids of every connection on the bus but the daemon's own (the fakes' included).
+    /// The process ids of every connection on the bus but the daemon's own (the fakes' included). A connection that
+    /// left between the listing and its lookup (a short-lived one, as niri's screenshot notification) is skipped.
     ///
     /// # Errors
     /// The bus can't be asked.
@@ -377,8 +378,10 @@ impl PrivateBus {
         let proxy = DBusProxy::new(connection)?;
         let mut pids = Vec::new();
         for name in proxy.list_names()? {
-            if name.starts_with(':') {
-                pids.push(proxy.get_connection_unix_process_id(BusName::from(name))?);
+            if name.starts_with(':')
+                && let Some(pid) = unless_gone(proxy.get_connection_unix_process_id(BusName::from(name)))?
+            {
+                pids.push(pid);
             }
         }
         pids.sort_unstable();
@@ -387,9 +390,29 @@ impl PrivateBus {
     }
 }
 
+/// A lookup's answer, `None` when the name it asked about has no owner any more.
+fn unless_gone<T>(answer: zbus::fdo::Result<T>) -> zbus::fdo::Result<Option<T>> {
+    match answer {
+        Ok(value) => Ok(Some(value)),
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lookup_skips_only_a_name_that_left() {
+        assert_eq!(unless_gone(Ok(7_u32)), Ok(Some(7)));
+        assert_eq!(
+            unless_gone::<u32>(Err(zbus::fdo::Error::NameHasNoOwner(":1.9".into()))),
+            Ok(None)
+        );
+        let denied = zbus::fdo::Error::AccessDenied("no".into());
+        assert_eq!(unless_gone::<u32>(Err(denied.clone())), Err(denied));
+    }
 
     #[test]
     fn an_address_value_escapes_what_dbus_reserves() {
