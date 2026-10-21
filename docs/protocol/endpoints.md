@@ -1,11 +1,12 @@
 # Endpoints: every request the project has seen or uses
 
-Status: 2026-10-21, M1 (after Task 20). One row per endpoint the lab has seen the web client send, a lab command sent
-itself, the native client sends, or the bundle names and a note relies on. The notes in this directory explain the
-endpoints; this file only lists them, so that "which endpoints do we know, and what happens to each" has one answer.
-Built from the protocol notes, the code (`proto-lab`'s classifiers, its reviewed expected-deny list and read-by-`POST`
-list, `teams-proto`'s reads, writes and frames, `teams-auth`) and a local count of the captures under the lab's data
-dir (method, host and path pattern only, ids normalised; nothing of a capture is copied here).
+Status: 2026-10-21, M1 (after Tasks 16 and 20). One row per endpoint the lab has seen the web client send, a lab
+command sent itself, the native client sends, or the bundle names and a note relies on. The notes in this directory
+explain the endpoints; this file only lists them, so that "which endpoints do we know, and what happens to each" has
+one answer. Built from the protocol notes, the code (`proto-lab`'s classifiers, its reviewed expected-deny list and
+read-by-`POST` list, `teams-proto`'s reads, writes and frames, `teams-trouter`, `teams-auth`) and a local count of the
+captures under the lab's data dir (method, host and path pattern only, ids normalised; nothing of a capture is copied
+here).
 
 **Kept current by every task that touches an endpoint.** A task that captures, maps, allowlists, expects or uses a
 new endpoint, or changes how one is treated, adds or updates its row here in the same change. To add a row: put it
@@ -21,7 +22,8 @@ reviewed**, and keeps that until a note describes it.
 - **Browser fence** is what the lab browser's fence does with the web client's request (`crates/proto-lab`):
   - `read`: `GET`, `HEAD` and `OPTIONS` change nothing others see and pass in every classifier;
   - `mapped <WriteKind> → <Target>`: a write `Classifier::mapped` (and so `calling`, `messaging`) maps, allowed only
-    with a permit from `Fence::check` after a fresh member read;
+    with a permit from `Fence::check`: an existing target after a fresh member read, a new one (`Scope::New`: a chat's
+    creation, the test call's start) by its proposed participants, with no member read;
   - `own-state <kind>`: on the reviewed own-state list (`OwnKind`), with the classifiers that have it;
   - `read-by-POST <entry>`: on `post_read::POST_READS`, let through only when every MRI it names is a lab account;
   - `expected deny: <class>`: `Unknown` and denied, and on the writing scenarios' reviewed expected-deny list
@@ -31,9 +33,11 @@ reviewed**, and keeps that until a note describes it.
   A frame on a socket is judged by `FrameClassifier` the same way (`own-state trouter_session` or `Unknown`).
 - **Native** is what the native client does with it (`crates/teams-proto`, `crates/teams-auth`): `Read`, `OwnState`,
   `Authorized<Mutating>` (a sealed write sent only with its permit), `OwnFrame` (a sealed frame logged to `fence.log`
-  first), `teams-auth` (its own HTTP client, not the transport), or **not on the allowlist** (the transport reaches only
-  the chat service, the registrar and Trouter's HTTP side, so it can't send it at all). The transport's own-state list
-  (`OwnState`) is still empty.
+  first), `teams-auth` (its own HTTP client, not the transport), `teams-trouter` (the push socket, its own WSS
+  connection to the Trouter hosts only, sending nothing but `OwnFrame`s through its `FrameSink`), or **not on the
+  allowlist** (the transport reaches only the chat service, the registrar and Trouter's HTTP side, so it can't send it
+  at all). The transport's own-state list (`OwnState`) has one entry, the messaging stack's `EndpointRegistration`.
+  The native push channel (Task 16) is tested on `teams-mock` only; its first live run is Task 19's.
 - **Notes · task**: the note that describes it, and the task that captured, mapped or built it (M0 or M1 task number).
 - **Evidence**: `seen` (in the lab's captures, with the scenarios), `probe` (a `proto-lab` command's own live request),
   `bundle only` (named in the web bundle `26260.1717.5229.7049`, never on the wire), or `seen, not reviewed` (in the
@@ -160,23 +164,24 @@ sends as a `POST`; every `GET` passes as a read.
 
 | Method | Path | What it does | Browser fence | Native | Notes · task | Evidence |
 |---|---|---|---|---|---|---|
-| `POST` | `registrations` (`appId` `TeamsCDLWebWorker`) | registers the messaging stack's Trouter endpoint, so chat events reach it | own-state `endpoint_registration` in `Classifier::messaging` (reviewed shape) and `Classifier::calling`; denied Unknown elsewhere | not on the allowlist yet: `Service::Registrar` is routed, but no `OwnState` entry exists | [trouter.md](trouter.md#registration-and-its-ttl) · M0 T18, M1 T14 | seen (`ab-trouter`, `ab-trouter-quiet`, `echo-call`) |
-| `POST` | `registrations` (`appId` `SkypeSpacesWeb`) | registers the calling stack's endpoint: makes the account reachable for calls | own-state `endpoint_registration` in `Classifier::calling` only; expected deny (`ab-trouter`'s calling-stack registration) | not used | [calling-echo.md](calling-echo.md#what-has-to-be-up-before-a-call) · M0 T18, M1 T14 | seen |
+| `POST` | `registrations` (`appId` `TeamsCDLWebWorker`) | registers the messaging stack's Trouter endpoint, so chat events reach it | own-state `endpoint_registration` in `Classifier::messaging` (reviewed shape) and `Classifier::calling`; denied Unknown elsewhere | `OwnState` (`EndpointRegistration`, the messaging stack only, `templateKey` `TeamsCDLWebWorker_2.6`), sent by `teams-trouter` through the transport on every `trouter.connected`, renewed 30 s before its 3600 s TTL ends, retried 123 s after a failure | [trouter.md](trouter.md#registration-and-its-ttl), [the native client](trouter.md#the-native-client-m1-task-16) · M0 T18, M1 T14, T16 | seen (`ab-trouter`, `ab-trouter-quiet`, `echo-call`) |
+| `POST` | `registrations` (`appId` `SkypeSpacesWeb`) | registers the calling stack's endpoint: makes the account reachable for calls | own-state `endpoint_registration` in `Classifier::calling` only; expected deny (`ab-trouter`'s calling-stack registration) | not used (`teams-trouter` never makes it: it would make the account reachable for calls) | [calling-echo.md](calling-echo.md#what-has-to-be-up-before-a-call) · M0 T18, M1 T14 | seen |
 | `POST` | `<geo>/v3/registrations` on the host `trouter.connected` names | a v3 registrar the service hands over; the web client doesn't use it | denied Unknown | not used | [trouter.md](trouter.md#trouterconnected-the-endpoint) · M1 T14 | seen as data only |
 
 ## Trouter (`go.trouter.teams.microsoft.com`, `<name>-t.trouter.teams.microsoft.com`)
 
 | Method | Path | What it does | Browser fence | Native | Notes · task | Evidence |
 |---|---|---|---|---|---|---|
-| `GET` | `https://go.trouter.teams.microsoft.com/` `?check&epid&tc&cor_id` | a reachability probe before connecting | read | not used (`Service::Trouter` is routed, nothing reads it) | [auth.md](auth.md#audience--service-table) · M0 T11 | seen (all) |
-| `WS` | `wss://go.trouter.teams.microsoft.com/v4/c` (also `/v4/c/`) `?tc&timeout&epid&ccid&cor_id&con_num` | the push socket (socket.io 0.9), one per stack | socket allowed; frames judged per frame (next rows) | the socket is Task 16's, not on this branch; frames only through `FrameSink` | [trouter.md](trouter.md#connect-and-the-regional-move) · M0 T18, M1 T14 | seen (all) |
-| `WS` | `wss://<name>-t.trouter.teams.microsoft.com/v4/c` | the regional socket after `trouter.connected` (`reconnectUrl`) | as above | as above | [trouter.md](trouter.md#connect-and-the-regional-move) · M1 T14 | seen |
-| frame | `5:::{"name":"user.authenticate",…}` | authenticates the socket with the `ic3` token and the cached `connectparams` | own-state `trouter_session` (`FrameClassifier::calling`, `messaging`); expected deny: Trouter frames elsewhere | `OwnFrame` `trouter_authenticate` | [trouter.md](trouter.md#authentication-the-first-frame) · M0 T18, M1 T14, T15 | seen |
-| frame | `5:<n>+::{"name":"ping"}`, `…trouter.processed_message_loss…`, `0::` | keep-alive, message-loss acknowledgement, disconnect | own-state `trouter_session` (as above) | `OwnFrame` `trouter_ping`, `trouter_message_loss_ack`, `trouter_disconnect` | [trouter.md](trouter.md#what-the-native-client-may-send-m1-task-15) · M1 T14, T15 | seen |
-| frame | `5:<n>+::{"name":"user.activity",…}` (`active`, `inactive`) | reports the client active (the account shows online) | own-state `trouter_session` (held back in `ab-trouter-quiet`) | not used (no `OwnFrame`) | [trouter.md](trouter.md#useractivity-and-presence) · M1 T14 | seen |
-| frame | `3:::{"id":…,"status":200,…}` | the answer to a delivery | denied Unknown (every scenario) | not used (no response path) | [trouter.md](trouter.md#answering-deliveries) · M0 T18, M1 T14 | seen |
-| inbound | `POST /v4/f/<endpoint>/messaging` (a `3:::` delivery) | a chat event pushed to the endpoint (`NewMessage`, `MessageUpdate`, `ConversationUpdate`) | received, not judged | received (Task 16) | [trouter.md](trouter.md#deliveries) · M1 T14 | seen |
-| inbound | `trouter.reconnect`, a disconnect with a reason | the service asks for a reconnect or closes | received | not used | [trouter.md](trouter.md#reconnect-parameters-and-backoff-from-the-bundle) · M1 T14 | bundle only |
+| `GET` | `https://go.trouter.teams.microsoft.com/` `?check&epid&tc&cor_id` | a reachability probe before connecting | read | not used (`Service::Trouter` is routed, nothing reads it; `teams-trouter` connects without the probe) | [auth.md](auth.md#audience--service-table) · M0 T11 | seen (all) |
+| `WS` | `wss://go.trouter.teams.microsoft.com/v4/c` (also `/v4/c/`) `?tc&timeout&epid&ccid&cor_id&con_num` | the push socket (socket.io 0.9), one per stack | socket allowed; frames judged per frame (next rows) | `teams-trouter`'s socket (`/v4/c`, `?tc&timeout&epid&cor_id&con_num` as the messaging stack's, no `ccid`; the web client's `Origin`, no credential in the handshake; the system's TLS verifier); frames only through `FrameSink` | [trouter.md](trouter.md#connect-and-the-regional-move), [the native client](trouter.md#the-native-client-m1-task-16) · M0 T18, M1 T14, T16 | seen (all) |
+| `WS` | `wss://<name>-t.trouter.teams.microsoft.com/v4/c` | the regional socket after `trouter.connected` (`reconnectUrl`) | as above | `teams-trouter`'s socket, to a `<name>-t` host under `.trouter.teams.microsoft.com` only (a fixed allowlist, port 443), with the `connectparams`, until they near their expiry or connects keep failing | [trouter.md](trouter.md#connect-and-the-regional-move), [the native client](trouter.md#the-native-client-m1-task-16) · M1 T14, T16 | seen |
+| frame | `5:::{"name":"user.authenticate",…}` | authenticates the socket with the `ic3` token and the cached `connectparams` | own-state `trouter_session` (`FrameClassifier::calling`, `messaging`); expected deny: Trouter frames elsewhere | `OwnFrame` `trouter_authenticate`, sent by `teams-trouter` once per connect, right after `1::` (never again on an open socket) | [trouter.md](trouter.md#authentication-the-first-frame) · M0 T18, M1 T14, T15, T16 | seen |
+| frame | `5:<n>+::{"name":"ping"}`, `…trouter.processed_message_loss…`, `0::` | keep-alive, message-loss acknowledgement, disconnect | own-state `trouter_session` (as above) | `OwnFrame` `trouter_ping` (every 40 s), `trouter_message_loss_ack` (once the owner caught up), `trouter_disconnect` (on a stop or a renewal), sent by `teams-trouter` | [trouter.md](trouter.md#what-the-native-client-may-send-m1-task-15), [the native client](trouter.md#the-native-client-m1-task-16) · M1 T14, T15, T16 | seen |
+| frame | `5:<n>+::{"name":"user.activity",…}` (`active`, `inactive`) | reports the client active (the account shows online) | own-state `trouter_session`; held back in `ab-trouter-quiet` (Unknown and denied there; expected deny: Trouter frames, so the run doesn't fail on it) | not used (no `OwnFrame`; `teams-trouter` doesn't send it) | [trouter.md](trouter.md#useractivity-and-presence) · M1 T14 | seen |
+| frame | `3:::{"id":…,"status":200,…}` | the answer to a delivery | Unknown and denied in every scenario; expected deny: Trouter frames, so a run doesn't fail on it | not used: `teams-trouter` leaves every delivery unanswered, an incoming call's included (no response path) | [trouter.md](trouter.md#answering-deliveries) · M0 T18, M1 T14, T16 | seen |
+| inbound | `POST /v4/f/<endpoint>/messaging` (a `3:::` delivery) | a chat event pushed to the endpoint (`NewMessage`, `MessageUpdate`, `ConversationUpdate`) | received, not judged | received by `teams-trouter`, never answered, turned into typed chat events (`teams_trouter::ChatEvent`: message, typing, edit, delete, reaction, read horizon, the chat's update; anything else `Unknown`, logged by kind only); a `callNotification` or a delivery at another path is ignored | [trouter.md](trouter.md#deliveries), [the native client](trouter.md#the-native-client-m1-task-16) · M1 T14, T16 | seen |
+| inbound | `1::`, `5:::{"name":"trouter.connected",…}`, `5:::{"name":"trouter.message_loss",…}`, `6:::<n>+` | the socket is open; the endpoint, its push URL, the regional `reconnectUrl` and `connectparams`; pushes were lost; a ping's answer | received | `teams-trouter`: authenticates after `1::`, registers and moves to the regional host on `trouter.connected`, hands a loss report on for a catch-up, a pong missing 5 s means a reconnect | [trouter.md](trouter.md#trouterconnected-the-endpoint), [message loss](trouter.md#message-loss), [keep-alives](trouter.md#keep-alives-and-acknowledgements) · M1 T14, T16 | seen |
+| inbound | `trouter.reconnect`, a disconnect with a reason | the service asks for a reconnect or closes | received | `teams-trouter`: a disconnect's reason decides (`unauthorized`: reconnect with a new token; `dup`: reconnect at once, never twice within 10 s; `skypetoken-deprecated`: stop; else a backoff); `trouter.reconnect` is left alone (not seen live) | [trouter.md](trouter.md#reconnect-parameters-and-backoff-from-the-bundle), [the native client](trouter.md#the-native-client-m1-task-16) · M1 T14, T16 | bundle only |
 
 ## AMS and the async gateway (`us-prod.asyncgw.teams.microsoft.com`, `us-api.asm.skype.com`)
 
@@ -208,12 +213,12 @@ Services behind the flight proxy are addressed as `ep/<service host>/…`, each 
 | `GET` | `https://teams.microsoft.com/trap/tokens` | TURN relay credentials, valid 7 days | read | not on `teams-proto`'s allowlist; the `spikes/echo-call` spike reads its answer (`TrapTokens`) | [calling-echo.md](calling-echo.md#the-turn-credentials), [echo-call.md](../spikes/echo-call.md) · M0 T18, T19 | seen (all) |
 | `POST` | `epconv` | starts a call (the test call: `UserInitiatedTestCall`, no callee) | mapped `Call` → `New` + caller and the echo service (`Classifier::calling`, reviewed shape); denied Unknown elsewhere | `Authorized<Mutating>` (`StartCall`), no route in the transport (`wire` is `None`); the `spikes/echo-call` spike builds its body from an `Authorized<StartCall>` and sends nothing | [calling-echo.md](calling-echo.md#the-call-step-by-step), [echo-call.md](../spikes/echo-call.md) · M0 T18, T19 | seen (`echo-call`) |
 | `GET` | `ep/<broker>/api/v1/subscribe/<id>/<n>` `?i` | long-polls the call's events | read | not on the allowlist | [calling-echo.md](calling-echo.md#the-call-step-by-step) · M0 T18 | seen (`echo-call`) |
-| `POST` | `ep/<conv>/conv/<conversation>/add` `?i&e` | invites the echo service into the call | denied (Unknown, or partial for want of a call member read) | `Authorized<Mutating>` (`AddToCall`), no native route | [calling-echo.md](calling-echo.md#the-call-step-by-step), `docs/backlog/fence-call-follow-ups.md` · M0 T18 | seen (`echo-call`) |
+| `POST` | `ep/<conv>/conv/<conversation>/add` `?i&e` | invites the echo service into the call | denied Unknown (call follow-ups aren't mapped) | `Authorized<Mutating>` (`AddToCall`), which the fence denies as partial today (no call member read); no native route | [calling-echo.md](calling-echo.md#the-call-step-by-step), `docs/backlog/fence-call-follow-ups.md` · M0 T18 | seen (`echo-call`) |
 | `PUT` | `ep/<conv>/conv/<conversation>/updateEndpointMetadata` `?i&e` | updates the caller's endpoint metadata | denied Unknown | not used | [calling-echo.md](calling-echo.md#the-call-step-by-step) · M0 T18 | seen (`echo-call`) |
 | `POST` | `ep/<conv>/conv/<conversation>/leave` `?i&e` | hangs up | denied Unknown | not used | [calling-echo.md](calling-echo.md#the-call-step-by-step) · M0 T18 | seen (`echo-call`) |
 | `POST` | `ep/<cc>/cc/v1/mcProxy/<call>/…/applyChannelParameters` `?i&e` | a media line's send capabilities | denied Unknown | not used | [calling-echo.md](calling-echo.md#the-call-step-by-step) · M0 T18 | seen (`echo-call`) |
 | `POST` | `ep/<cc>/cc/v1/callAcceptance/<call>/…/acknowledge` `?i` | acknowledges the call controller's acceptance | denied Unknown | not used | [calling-echo.md](calling-echo.md#the-call-step-by-step) · M0 T18 | seen (`echo-call`) |
-| `POST` | `ep/<conv>/conv/<conversation>/getAllParticipants` `?i&e` | lists a call's or lobby's participants (empty for the test call) | sent once from inside the fence as a probe | not used | [calling-echo.md](calling-echo.md#open) · M0 T18 | probe |
+| `POST` | `ep/<conv>/conv/<conversation>/getAllParticipants` `?i&e` | lists a call's or lobby's participants (empty for the test call) | denied Unknown (no allowance) | not used | [calling-echo.md](calling-echo.md#open) · M0 T18 | probe (sent once from inside the fence, 2026-10-20) |
 | `POST` | the call's `acceptance` link | answers an incoming call | denied Unknown, never mapped (`CallAnswer`); no scenario clicks answer | not used (no request type) | [calling-echo.md](calling-echo.md#what-has-to-be-up-before-a-call) · M0 T18 | bundle only |
 | `GET` | `https://api.interfaces.records.teams.microsoft.com/Teams.VoiceApps/obo-accounts/<guid>` | voice app accounts acting for the user | read | not on the allowlist | this file | seen, not reviewed (`echo-call`) |
 
