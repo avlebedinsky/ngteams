@@ -98,6 +98,20 @@ pub trait ConversationSync: Sync {
         store: &'a mut Store,
         conversation: &'a str,
     ) -> impl Future<Output = Result<(), SyncError>> + Send + 'a;
+
+    /// As [`ConversationSync::sync_conversation`], for a message we sent no earlier than `since` (milliseconds since
+    /// the Unix epoch: the row's `created_at`); the outbox's check calls this one. A sync that reads the newest
+    /// messages a page at a time reads back until it reaches one older than `since`, and fails when it can't, so a
+    /// message we sent is never missed for being more than a page back. By default it is
+    /// [`ConversationSync::sync_conversation`], for a sync that reads everything at once.
+    fn sync_conversation_since<'a>(
+        &'a self,
+        store: &'a mut Store,
+        conversation: &'a str,
+        _since: i64,
+    ) -> impl Future<Output = Result<(), SyncError>> + Send + 'a {
+        self.sync_conversation(store, conversation)
+    }
 }
 
 /// The time in milliseconds since the Unix epoch, as the outbox reads it for `not_before`.
@@ -351,7 +365,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         let Some(conversation) = findable(row) else {
             return Ok(None);
         };
-        if let Err(source) = sync.sync_conversation(store, conversation).await {
+        if let Err(source) = sync.sync_conversation_since(store, conversation, row.created_at).await {
             let after = self.check_failed(store, row, &source)?;
             if after.state == OutboxState::Sent {
                 // the sync matched it before it failed
@@ -543,7 +557,7 @@ fn message_id(answer: &Response) -> Option<String> {
 }
 
 /// Milliseconds since the Unix epoch.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();

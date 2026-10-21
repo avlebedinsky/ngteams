@@ -9,9 +9,11 @@
 //! - **A conversation's messages** ([`CatchUp::sync_messages`]): the first read is the newest page, whose
 //!   `backwardLink` is kept for older history ([`CatchUp::load_older`]); every later one follows the conversation's
 //!   sync link, which brings what changed since. A sync answer that has a `backwardLink` of its own (never captured) is
-//!   followed while its pages bring anything new or newer, so a gap longer than a page is read through to what the
-//!   store had; past [`MAX_PAGES`] the rest is left as older history. A conversation the store doesn't know yet is
-//!   first read as a thread.
+//!   followed to its end, so a gap longer than a page is read through whatever its pages hold: a page that changes
+//!   nothing (its messages came as deliveries, or by an earlier attempt that failed further back) doesn't stop it.
+//!   Past [`MAX_PAGES`] the link left is kept as the conversation's `backwardLink` ([`CatchUp::load_older`] reads on
+//!   from it), so the sync link moves on only past what is stored or kept to be read. A conversation the store
+//!   doesn't know yet is first read as a thread.
 //! - **One path for what comes in** ([`CatchUp::receive_message`]): a message as read (a sync page, or the resource of
 //!   a Trouter delivery) becomes a store row and goes through [`Outbox::receive`], which stores it by its id and
 //!   version and matches our own to its outbox row by `clientmessageid`. So a delivery and a sync that bring the same
@@ -24,7 +26,10 @@
 //!   channel is connected first and the catch-up runs after, so nothing falls between the two: what arrives after the
 //!   connect comes as a delivery, what came before by the catch-up, and what comes both ways is stored once.
 //! - **The outbox's check** ([`ConversationSync`]): before a new attempt whose earlier one may have arrived, the outbox
-//!   syncs the conversation through [`CatchUp::sync_messages`] and looks for the row's `clientmessageid`.
+//!   syncs the conversation through [`CatchUp::sync_messages`] and looks for the row's `clientmessageid`. When that
+//!   read stopped with older pages left (a first read is one page, a long sync answer [`MAX_PAGES`]), it pages back
+//!   until a page reaches a message older than the row (less [`CLOCK_SKEW_MS`]), and fails after [`MAX_PAGES`] more,
+//!   so the row waits rather than going out twice.
 //!
 //! Every read is a `GET` through the native transport (`teams_proto::chat::ChatReads`), and every link is the
 //! service's own, followed only on the same chat base. Nothing here writes to the service.
@@ -41,10 +46,15 @@ use teams_store::{
     Applied, Conversation, ConversationKind, Member, Message, Reaction, ReadHorizon, Store, StoreError, SyncState,
 };
 
-use crate::outbox::{Clock, ConversationSync, Outbox, OutboxError, Received, SyncError};
+use crate::outbox::{Clock, ConversationSync, Outbox, OutboxError, Received, SyncError, now_ms};
 
-/// The most pages one read follows: the conversation list's `forwardLink`s, or a sync answer's `backwardLink`s.
+/// The most pages one read follows: the conversation list's `forwardLink`s, a sync answer's `backwardLink`s, or the
+/// older pages the outbox's check reads.
 pub const MAX_PAGES: usize = 50;
+
+/// How far the service's clock (a message's arrival time) may be behind ours (an outbox row's `created_at`): the
+/// outbox's check reads back to a message older than its row by this much. Five minutes, Kerberos's default tolerance.
+pub const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 
 /// What a catch-up can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +68,27 @@ pub enum CatchUpError {
     /// The conversation list ran past [`MAX_PAGES`] pages: its sync link wasn't moved on.
     #[error("the conversation list ran past {MAX_PAGES} pages, so its sync link wasn't moved on")]
     TooManyPages,
+    /// The outbox's check paged back [`MAX_PAGES`] pages without reaching a message older than its row: whether the
+    /// row's message arrived can't be told.
+    #[error("the outbox's check read {MAX_PAGES} older pages without reaching its row's time")]
+    CheckFellShort,
+}
+
+/// Where a read of a conversation's messages stopped (for the outbox's check).
+#[derive(Clone, Copy, Debug)]
+enum Reach {
+    /// Everything it was to read is stored: a sync answer read to its end, or a first page with nothing older.
+    Whole,
+    /// Older pages are left behind the kept `backwardLink`; the oldest arrival time its last page had (none when that
+    /// page had no message whose time could be read).
+    Older(Option<i64>),
+}
+
+/// A sync answer's `backwardLink` the walk didn't follow, past [`MAX_PAGES`].
+struct Left {
+    link: String,
+    /// The oldest arrival time the last page read had.
+    oldest: Option<i64>,
 }
 
 /// What a sync did with the messages it read.
@@ -289,6 +320,11 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// [`CatchUpError::Read`] when a read fails, [`CatchUpError::Store`] or [`CatchUpError::Outbox`] when the store
     /// does; the sync state then stays as it was.
     pub async fn sync_messages(&self, store: &mut Store, conversation: &str) -> Result<Synced, CatchUpError> {
+        Ok(self.sync_reach(store, conversation).await?.0)
+    }
+
+    /// [`CatchUp::sync_messages`], with where it stopped.
+    async fn sync_reach(&self, store: &mut Store, conversation: &str) -> Result<(Synced, Reach), CatchUpError> {
         if store.conversation(conversation)?.is_none() {
             self.add_conversation(store, conversation).await?;
         }
@@ -299,21 +335,20 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         };
         let page = reads.messages_from(conversation, &link).await?;
         let mut synced = self.apply_page(store, conversation, &page)?;
-        let left = if synced.changed() > 0 {
-            self.follow_back(store, &reads, conversation, page.backward_link(), &mut synced)
-                .await?
-        } else {
-            None
-        };
+        let left = self
+            .follow_back(store, &reads, conversation, &page, &mut synced)
+            .await?;
+        let reach = left.as_ref().map_or(Reach::Whole, |left| Reach::Older(left.oldest));
         let state = SyncState {
             conversation_id: conversation.to_owned(),
             sync_link: page.sync_state().map(str::to_owned).or(Some(link)),
             history_complete: kept.history_complete && left.is_none(),
-            backward_link: left.or(kept.backward_link),
+            // the gap's unread part comes first: `load_older` reads on from it
+            backward_link: left.map(|left| left.link).or(kept.backward_link),
             updated: (self.clock)(),
         };
         store.set_sync_state(&state)?;
-        Ok(synced)
+        Ok((synced, reach))
     }
 
     /// Reads the next older page of a conversation's history, from the `backwardLink` its sync kept; `None` when there
@@ -323,6 +358,11 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     ///
     /// As [`CatchUp::sync_messages`].
     pub async fn load_older(&self, store: &mut Store, conversation: &str) -> Result<Option<Synced>, CatchUpError> {
+        Ok(self.older_page(store, conversation).await?.map(|(synced, _)| synced))
+    }
+
+    /// [`CatchUp::load_older`], with where it stopped.
+    async fn older_page(&self, store: &mut Store, conversation: &str) -> Result<Option<(Synced, Reach)>, CatchUpError> {
         let Some(kept) = store.sync_state(conversation)? else {
             return Ok(None);
         };
@@ -332,6 +372,11 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         let page = ChatReads::new(&self.client).messages_from(conversation, &link).await?;
         let synced = self.apply_page(store, conversation, &page)?;
         let older = page.backward_link().map(str::to_owned);
+        let reach = if older.is_some() {
+            Reach::Older(oldest_arrival(&page))
+        } else {
+            Reach::Whole
+        };
         let state = SyncState {
             history_complete: older.is_none(),
             backward_link: older,
@@ -339,7 +384,29 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             ..kept
         };
         store.set_sync_state(&state)?;
-        Ok(Some(synced))
+        Ok(Some((synced, reach)))
+    }
+
+    /// The outbox's check (see the module docs): syncs `conversation`, then, when that stopped with older pages left,
+    /// pages back until a page reaches a message older than `since` less [`CLOCK_SKEW_MS`].
+    async fn sync_since(&self, store: &mut Store, conversation: &str, since: i64) -> Result<(), CatchUpError> {
+        let stop = since.saturating_sub(CLOCK_SKEW_MS);
+        let (_, mut reach) = self.sync_reach(store, conversation).await?;
+        let mut pages = 0;
+        while let Reach::Older(oldest) = reach {
+            if oldest.is_some_and(|oldest| oldest < stop) {
+                return Ok(());
+            }
+            if pages == MAX_PAGES {
+                return Err(CatchUpError::CheckFellShort);
+            }
+            reach = self
+                .older_page(store, conversation)
+                .await?
+                .map_or(Reach::Whole, |(_, reach)| reach);
+            pages += 1;
+        }
+        Ok(())
     }
 
     /// Stores a message that came in (a sync page's entry, or a Trouter delivery's resource) in `conversation`,
@@ -369,7 +436,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         store: &mut Store,
         reads: &ChatReads<'_, C>,
         conversation: &str,
-    ) -> Result<Synced, CatchUpError> {
+    ) -> Result<(Synced, Reach), CatchUpError> {
         let page = reads.messages(conversation, self.page_size).await?;
         let synced = self.apply_page(store, conversation, &page)?;
         let state = SyncState {
@@ -380,31 +447,35 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             updated: (self.clock)(),
         };
         store.set_sync_state(&state)?;
-        Ok(synced)
+        let reach = if page.backward_link().is_some() {
+            Reach::Older(oldest_arrival(&page))
+        } else {
+            Reach::Whole
+        };
+        Ok((synced, reach))
     }
 
-    /// Follows a sync answer's `backwardLink`s while each page brings anything new or newer; returns the link left
+    /// Follows a sync answer's `backwardLink`s from its first page to their end, whatever each page brings (a page
+    /// that changes nothing may still have older messages behind it the store never had); returns the link left
     /// unfollowed at [`MAX_PAGES`], if any.
     async fn follow_back(
         &self,
         store: &mut Store,
         reads: &ChatReads<'_, C>,
         conversation: &str,
-        link: Option<&str>,
+        first: &MessagePage,
         synced: &mut Synced,
-    ) -> Result<Option<String>, CatchUpError> {
-        let mut link = link.map(str::to_owned);
+    ) -> Result<Option<Left>, CatchUpError> {
+        let mut link = first.backward_link().map(str::to_owned);
+        let mut oldest = oldest_arrival(first);
         while let Some(next) = link {
             if synced.pages >= MAX_PAGES {
-                return Ok(Some(next));
+                return Ok(Some(Left { link: next, oldest }));
             }
             let page = reads.messages_from(conversation, &next).await?;
-            let brought = self.apply_page(store, conversation, &page)?;
-            synced.add(brought);
-            link = page
-                .backward_link()
-                .filter(|_| brought.changed() > 0)
-                .map(str::to_owned);
+            synced.add(self.apply_page(store, conversation, &page)?);
+            oldest = oldest_arrival(&page);
+            link = page.backward_link().map(str::to_owned);
         }
         Ok(None)
     }
@@ -498,22 +569,17 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         Ok(())
     }
 
-    /// A chat's members, read as a thread when the list's `rosterVersion` is newer than the stored one (or there is
-    /// none stored, or the list's can't be read while none is stored). Channels and other read-only conversations
-    /// keep none.
+    /// A chat's members, read as a thread when the list's `rosterVersion` is newer than the stored one, or there is
+    /// none stored, or the list's can't be read (it may be newer). A list without one keeps the stored members.
+    /// Channels and other read-only conversations keep none.
     async fn refresh_members(&self, store: &mut Store, listed: &chat::Conversation) -> Result<(), CatchUpError> {
         if listed.is_read_only() {
             return Ok(());
         }
-        let listed_roster = listed
-            .thread_properties
-            .get("rosterVersion")
-            .and_then(number)
-            .and_then(|version| i64::try_from(version).ok());
-        let newer = match (store.roster_version(&listed.id)?, listed_roster) {
+        let newer = match (store.roster_version(&listed.id)?, listed.roster_version()) {
             (None, _) => true,
-            (Some(stored), Some(listed)) => listed > stored,
-            (Some(_), None) => false,
+            (Some(_), Field::Absent) => false,
+            (Some(stored), listed) => known_i64(&listed).is_none_or(|listed| listed > stored),
         };
         if newer {
             let thread = ChatReads::new(&self.client).thread(&listed.id).await?;
@@ -528,6 +594,17 @@ impl<C: Credentials, T: Transport<Error = HttpError> + Send> ConversationSync fo
         self.sync_messages(store, conversation)
             .await
             .map(|_| ())
+            .map_err(SyncError::from)
+    }
+
+    async fn sync_conversation_since(
+        &self,
+        store: &mut Store,
+        conversation: &str,
+        since: i64,
+    ) -> Result<(), SyncError> {
+        self.sync_since(store, conversation, since)
+            .await
             .map_err(SyncError::from)
     }
 }
@@ -577,7 +654,7 @@ fn message_row(conversation: &str, message: &chat::Message) -> Option<Message> {
         return None;
     }
     let version = known_i64(&message.version)?;
-    let arrival_time = message.arrival_time_ms().or_else(|| message.id.parse().ok())?;
+    let arrival_time = arrival_time(message)?;
     let properties = (!message.properties.is_empty()).then(|| Value::Object(message.properties.clone()).to_string());
     Some(Message {
         conversation_id: conversation.to_owned(),
@@ -620,23 +697,16 @@ fn has_unreadable_reactions(message: &chat::Message) -> bool {
     !matches!(message.reactions(), Field::Absent) && reaction_set(message).is_none()
 }
 
+/// A message's arrival time: its `originalarrivaltime`, or else its id, which is that time.
+fn arrival_time(message: &chat::Message) -> Option<i64> {
+    message.arrival_time_ms().or_else(|| message.id.parse().ok())
+}
+
+/// The oldest arrival time among a page's messages.
+fn oldest_arrival(page: &MessagePage) -> Option<i64> {
+    page.messages.iter().filter_map(arrival_time).min()
+}
+
 fn known_i64(field: &Field<u64>) -> Option<i64> {
     field.as_known().and_then(|value| i64::try_from(*value).ok())
-}
-
-/// A number as the service writes it: a JSON number, or a string of digits.
-fn number(value: &Value) -> Option<u64> {
-    match value {
-        Value::Number(number) => number.as_u64(),
-        Value::String(text) if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) => text.parse().ok(),
-        _ => None,
-    }
-}
-
-/// Milliseconds since the Unix epoch.
-fn now_ms() -> i64 {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX)
 }

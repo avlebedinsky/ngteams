@@ -179,6 +179,13 @@ impl Conversation {
         self.thread_properties.get(name).and_then(Value::as_str)
     }
 
+    /// The roster's version (`threadProperties.rosterVersion`): a number or a string of digits is known, anything else
+    /// is kept as it came.
+    #[must_use]
+    pub fn roster_version(&self) -> Field<u64> {
+        number_field(self.thread_properties.get("rosterVersion"))
+    }
+
     /// The last message, if the list gave one of a message's shape.
     #[must_use]
     pub fn last_message(&self) -> Option<Message> {

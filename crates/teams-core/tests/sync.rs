@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_core::{CatchUp, CatchUpError, Command, Gaps, MAX_PAGES, Outbox, enqueue, outbox::ConversationSync};
+use teams_core::{
+    CLOCK_SKEW_MS, CatchUp, CatchUpError, Command, Gaps, MAX_PAGES, Outbox, enqueue, outbox::ConversationSync,
+};
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C,
@@ -591,6 +593,48 @@ async fn a_reconnect_triggers_a_catch_up() {
     assert!(gaps.is_due());
 }
 
+#[tokio::test]
+async fn a_catch_up_that_leaves_a_conversation_unsynced_keeps_one_due() {
+    let mock = ChatServiceMock::start().await.unwrap();
+    let mut a = Account::of(&mock, LAB_A);
+    let mut gaps = Gaps::new();
+    gaps.connected();
+    a.catch_up.catch_up_if_due(&mut a.store, &mut gaps).await.unwrap();
+    assert!(!gaps.is_due());
+
+    // the channel drops, b writes, the channel is back; the chat's sync link is one the service doesn't take
+    gaps.disconnected();
+    let id = Writer::of(&mock, LAB_B).post(AB_CHAT, "missed").await;
+    gaps.connected();
+    let mut state = a.store.sync_state(AB_CHAT).unwrap().unwrap();
+    let good = state.sync_link.replace(format!(
+        "{CHAT_BASE}/v1/users/ME/conversations/{}/messages?syncState=not-the-mocks",
+        encoded(AB_CHAT)
+    ));
+    a.store.set_sync_state(&state).unwrap();
+    let report = a
+        .catch_up
+        .catch_up_if_due(&mut a.store, &mut gaps)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.failed.len(), 1);
+    assert!(gaps.is_due(), "a conversation left unsynced keeps one due");
+
+    // with the link back, the next one runs, brings the message and clears it
+    state.sync_link = good;
+    a.store.set_sync_state(&state).unwrap();
+    let report = a
+        .catch_up
+        .catch_up_if_due(&mut a.store, &mut gaps)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(a.message(AB_CHAT, &id).content, "<p>missed</p>");
+    assert!(!gaps.is_due());
+}
+
 // --- the outbox's check ---
 
 #[tokio::test]
@@ -807,8 +851,41 @@ async fn an_unreadable_version_never_replaces_a_stored_one() {
     assert_eq!(a.message(CHAT, "1001"), stored);
 }
 
+/// The `syncState` of every message read the plain service got, in order.
+async fn tokens_read(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(name, _)| name == "syncState")
+                .map(|(_, value)| value.into_owned())
+        })
+        .collect()
+}
+
+/// Stores entries as Trouter deliveries of them would.
+fn deliver_entries(account: &mut Account, entries: &[Value]) {
+    for entry in entries {
+        let message: chat::Message = serde_json::from_value(entry.clone()).unwrap();
+        let received = account
+            .catch_up
+            .receive_message(&mut account.store, CHAT, &message)
+            .unwrap();
+        assert_eq!(received.unwrap().applied, Applied::Inserted);
+    }
+}
+
+fn stored_ids(account: &Account) -> Vec<String> {
+    account.messages(CHAT).into_iter().map(|message| message.id).collect()
+}
+
 #[tokio::test]
-async fn a_sync_answer_with_a_backward_link_is_read_back_to_what_the_store_had() {
+async fn a_sync_answers_backward_link_is_followed_to_its_end() {
     let known = entry(1001, json!("1001"));
     let server = scripted(vec![
         ("", page(vec![known.clone()], Some("s1"), None)),
@@ -825,6 +902,7 @@ async fn a_sync_answer_with_a_backward_link_is_read_back_to_what_the_store_had()
             "b1",
             page(vec![entry(1003, json!("1003")), known.clone()], Some("s2"), Some("b2")),
         ),
+        // a page that changes nothing doesn't end the walk: the one behind it has a message the store never had
         ("b2", page(vec![known.clone()], Some("s2"), Some("b3"))),
         ("b3", page(vec![entry(1002, json!("1002"))], Some("s2"), None)),
     ])
@@ -832,24 +910,86 @@ async fn a_sync_answer_with_a_backward_link_is_read_back_to_what_the_store_had()
     let mut a = plain_account(&server);
     a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
     let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
-    assert_eq!((synced.inserted, synced.unchanged, synced.pages), (3, 2, 3));
-    let tokens: Vec<String> = server
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .filter_map(|request| {
-            request
-                .url
-                .query_pairs()
-                .find(|(name, _)| name == "syncState")
-                .map(|(_, value)| value.into_owned())
-        })
-        .collect();
-    assert_eq!(tokens, ["s1", "b1", "b2"], "b2 brought nothing new, so b3 isn't read");
+    assert_eq!((synced.inserted, synced.unchanged, synced.pages), (4, 2, 4));
+    assert_eq!(tokens_read(&server).await, ["s1", "b1", "b2", "b3"]);
+    assert_eq!(stored_ids(&a), ["1005", "1004", "1003", "1002", "1001"]);
     let state = a.store.sync_state(CHAT).unwrap().unwrap();
     assert_eq!(state.sync_link, Some(link("s2")));
     assert!(state.history_complete && state.backward_link.is_none());
+}
+
+#[tokio::test]
+async fn a_sync_answer_whose_newest_page_came_as_deliveries_still_reads_what_is_behind_it() {
+    // the socket dropped, 1002 and 1003 were missed; 1004 and 1005 came as deliveries before the catch-up ran
+    let newest = vec![entry(1005, json!("1005")), entry(1004, json!("1004"))];
+    let server = scripted(vec![
+        ("", page(vec![entry(1001, json!("1001"))], Some("s1"), None)),
+        ("s1", page(newest.clone(), Some("s2"), Some("b1"))),
+        (
+            "b1",
+            page(
+                vec![entry(1003, json!("1003")), entry(1002, json!("1002"))],
+                Some("s2"),
+                None,
+            ),
+        ),
+    ])
+    .await;
+    let mut a = plain_account(&server);
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    deliver_entries(&mut a, &newest);
+    let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert_eq!((synced.inserted, synced.unchanged), (2, 2));
+    assert_eq!(stored_ids(&a), ["1005", "1004", "1003", "1002", "1001"]);
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert_eq!(state.sync_link, Some(link("s2")));
+    assert!(state.history_complete && state.backward_link.is_none());
+}
+
+#[tokio::test]
+async fn a_middle_page_that_changes_nothing_does_not_end_a_sync_answers_walk() {
+    let delivered = vec![entry(1005, json!("1005")), entry(1004, json!("1004"))];
+    let server = scripted(vec![
+        ("", page(vec![entry(1001, json!("1001"))], Some("s1"), None)),
+        ("s1", page(vec![entry(1006, json!("1006"))], Some("s2"), Some("b1"))),
+        ("b1", page(delivered.clone(), Some("s2"), Some("b2"))),
+        ("b2", page(vec![entry(1003, json!("1003"))], Some("s2"), None)),
+    ])
+    .await;
+    let mut a = plain_account(&server);
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    deliver_entries(&mut a, &delivered);
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert_eq!(stored_ids(&a), ["1006", "1005", "1004", "1003", "1001"]);
+}
+
+#[tokio::test]
+async fn a_sync_whose_older_page_failed_reads_it_on_the_retry() {
+    let server = scripted(vec![
+        ("", page(vec![entry(1001, json!("1001"))], Some("s1"), None)),
+        ("s1", page(vec![entry(1005, json!("1005"))], Some("s2"), Some("b1"))),
+        ("b1", page(vec![entry(1004, json!("1004"))], Some("s2"), None)),
+    ])
+    .await;
+    // the first read of b1 fails
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::query_param("syncState", "b1"))
+        .respond_with(ResponseTemplate::new(404))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let mut a = plain_account(&server);
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert!(a.catch_up.sync_messages(&mut a.store, CHAT).await.is_err());
+    // the first page was stored, the sync link stayed: the retry's first page changes nothing, b1 is read all the same
+    assert_eq!(stored_ids(&a), ["1005", "1001"]);
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert_eq!(state.sync_link, Some(link("s1")));
+    let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert_eq!((synced.inserted, synced.unchanged), (1, 1));
+    assert_eq!(stored_ids(&a), ["1005", "1004", "1001"]);
+    assert_eq!(a.store.sync_state(CHAT).unwrap().unwrap().sync_link, Some(link("s2")));
 }
 
 #[tokio::test]
@@ -882,4 +1022,115 @@ async fn a_backward_walk_past_the_page_cap_leaves_the_rest_as_older_history() {
     // the rest comes with the older history
     let older = a.catch_up.load_older(&mut a.store, CHAT).await.unwrap().unwrap();
     assert_eq!(older.inserted, 1);
+}
+
+// --- the outbox's check, on plain wiremock ---
+
+/// When the check's row was made, in the tests' own made-up time (later than every other time here).
+const MADE: i64 = 1_800_000_000_000;
+
+/// The id of a message that arrived `offset` ms after the row was made: its id is its arrival time.
+fn at(offset: i64) -> u64 {
+    u64::try_from(MADE + offset).unwrap()
+}
+
+/// An entry without an `originalarrivaltime`, so its id (`at(…)`) is the time it arrived.
+fn entry_at(id: u64) -> Value {
+    let mut entry = entry(id, json!(id.to_string()));
+    entry.as_object_mut().unwrap().remove("originalarrivaltime");
+    entry
+}
+
+#[tokio::test]
+async fn the_check_of_a_conversation_never_synced_pages_back_past_the_rows_time() {
+    let server = scripted(vec![
+        // the newest page: one message after the row, one a little before it by the service's clock (within the skew)
+        (
+            "",
+            page(vec![entry_at(at(2000)), entry_at(at(-1000))], Some("s1"), Some("c1")),
+        ),
+        // the message looked for, its arrival before the row's `created_at` by a service clock behind ours
+        ("c1", page(vec![entry_at(at(-2000))], Some("s1"), Some("c2"))),
+        // older than the row by more than the skew: the check stops here
+        (
+            "c2",
+            page(vec![entry_at(at(-CLOCK_SKEW_MS - 1))], Some("s1"), Some("c3")),
+        ),
+    ])
+    .await;
+    let mut a = plain_account(&server);
+    a.catch_up
+        .sync_conversation_since(&mut a.store, CHAT, MADE)
+        .await
+        .unwrap();
+    let expected: Vec<String> = [2000, -1000, -2000, -CLOCK_SKEW_MS - 1]
+        .map(|offset| at(offset).to_string())
+        .into();
+    assert_eq!(stored_ids(&a), expected);
+    assert_eq!(tokens_read(&server).await, ["c1", "c2"], "c3 isn't read");
+    // the history read is kept: older pages go on from c3
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert_eq!(state.backward_link, Some(link("c3")));
+
+    // a plain sync of the same conversation reads only the newest page
+    let server = scripted(vec![("", page(vec![entry_at(at(2000))], Some("s1"), Some("c1")))]).await;
+    let mut a = plain_account(&server);
+    a.catch_up.sync_conversation(&mut a.store, CHAT).await.unwrap();
+    assert!(tokens_read(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_check_that_cannot_page_back_far_enough_fails() {
+    let tokens: Vec<String> = (0..=MAX_PAGES).map(|n| format!("c{n}")).collect();
+    let mut pages = vec![("", page(vec![entry_at(at(1000))], Some("s1"), Some(&tokens[0])))];
+    for (n, token) in tokens.iter().enumerate() {
+        let older = tokens.get(n + 1).map_or("end", String::as_str);
+        let id = at(-i64::try_from(n).unwrap());
+        pages.push((token, page(vec![entry_at(id)], Some("s1"), Some(older))));
+    }
+    let server = scripted(pages).await;
+    let mut a = plain_account(&server);
+    let error = a
+        .catch_up
+        .sync_conversation_since(&mut a.store, CHAT, MADE)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.downcast_ref::<CatchUpError>(), Some(CatchUpError::CheckFellShort)),
+        "{error:?}"
+    );
+    assert_eq!(tokens_read(&server).await.len(), MAX_PAGES);
+}
+
+#[tokio::test]
+async fn a_check_whose_sync_answer_was_cut_at_the_page_cap_pages_back_from_the_link_it_kept() {
+    let tokens: Vec<String> = (0..=MAX_PAGES).map(|n| format!("w{n}")).collect();
+    let mut pages = vec![
+        ("", page(vec![], Some("s1"), None)),
+        ("s1", page(vec![entry_at(at(1000))], Some("s2"), Some(&tokens[0]))),
+    ];
+    let looked_for = at(999 - i64::try_from(MAX_PAGES).unwrap());
+    for (n, token) in tokens.iter().enumerate() {
+        let older = tokens.get(n + 1).map_or("end", String::as_str);
+        let id = at(999 - i64::try_from(n).unwrap());
+        let entries = if n == MAX_PAGES {
+            // the message looked for, behind the cap, then one older than the row
+            vec![entry_at(id), entry_at(at(-CLOCK_SKEW_MS - 1))]
+        } else {
+            vec![entry_at(id)]
+        };
+        pages.push((token, page(entries, Some("s2"), Some(older))));
+    }
+    let server = scripted(pages).await;
+    let mut a = plain_account(&server);
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    a.catch_up
+        .sync_conversation_since(&mut a.store, CHAT, MADE)
+        .await
+        .unwrap();
+    assert!(a.store.message(CHAT, &looked_for.to_string()).unwrap().is_some());
+    assert_eq!(
+        a.store.sync_state(CHAT).unwrap().unwrap().backward_link,
+        Some(link("end"))
+    );
 }

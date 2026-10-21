@@ -20,4 +20,4 @@ pub use outbox::{
     CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, Outbox, OutboxError, Received,
     SentDue, SyncError, Unsynced, enqueue, new_client_message_id,
 };
-pub use sync::{CatchUp, CatchUpError, CatchUpReport, ConversationFailed, Gaps, MAX_PAGES, Synced};
+pub use sync::{CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, ConversationFailed, Gaps, MAX_PAGES, Synced};

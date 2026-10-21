@@ -128,6 +128,23 @@ fn a_conversation_entry_reads_its_horizon_and_last_message() -> TestResult {
 }
 
 #[test]
+fn a_conversations_roster_version_is_absent_known_or_kept_as_it_came() -> TestResult {
+    let roster = |properties: Value| -> TestResult<Field<u64>> {
+        let listed: Conversation = serde_json::from_value(json!({"id": ABC_CHAT, "threadProperties": properties}))?;
+        Ok(listed.roster_version())
+    };
+    assert_eq!(roster(json!({}))?, Field::Absent);
+    assert_eq!(
+        roster(json!({"rosterVersion": "1760000000000"}))?,
+        Field::Known(1_760_000_000_000)
+    );
+    assert_eq!(roster(json!({"rosterVersion": 7}))?, Field::Known(7));
+    assert_eq!(roster(json!({"rosterVersion": "r1"}))?, Field::Unknown(json!("r1")));
+    assert_eq!(roster(json!({"rosterVersion": null}))?, Field::Unknown(Value::Null));
+    Ok(())
+}
+
+#[test]
 fn a_conversation_kind_this_build_does_not_name_is_kept_and_read_only() {
     let kind = ConversationKind::of("19:meeting_abc@thread.v2", Some("chat"));
     assert_eq!(kind, ConversationKind::Unknown("chat".to_owned()));
