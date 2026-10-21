@@ -404,25 +404,45 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
 - Create: `crates/ui-sandbox/{Cargo.toml,src/lib.rs}`, `crates/ui-sandbox/tests/sandbox.rs`
 - Modify: `spikes/gpui-video/{Cargo.toml,src/sandbox.rs,tests/*}` (onto the crate), `Cargo.toml` (member)
 
-- [ ] move the spike's sandbox into `ui-sandbox` (`[lints] workspace = true`): headless weston with `--fake-seat`, a
+- [x] move the spike's sandbox into `ui-sandbox` (`[lints] workspace = true`): headless weston with `--fake-seat`, a
       nested niri, its own `WAYLAND_DISPLAY` and `NIRI_SOCKET`, screenshots through `niri msg`; `spikes/gpui-video`'s
       tests pass on it unchanged
-- [ ] tests first: a private D-Bus session bus (`dbus-daemon --session` on a socket in the sandbox dir) with a fake
+- [x] tests first: a private D-Bus session bus (`dbus-daemon --session` on a socket in the sandbox dir) with a fake
       notification server and a StatusNotifierItem watcher that record what they get; the user's bus is never reached
       (the test plants a canary on the inherited address and checks it stays silent)
-- [ ] tests first: virtual keyboard and pointer into the nested niri (`zwp_virtual_keyboard_manager_v1`,
+- [x] tests first: virtual keyboard and pointer into the nested niri (`zwp_virtual_keyboard_manager_v1`,
       `zwlr_virtual_pointer_manager_v1`), checked on a test window; a no-op URI opener on the sandbox's `PATH` that
       records what it was asked to open; a GPUI window's `open_url` in the sandbox reaches it (the private bus has no
       portal, so GPUI falls back to `xdg-open`), and nothing reaches the user's desktop
-- [ ] GPUI's start-up portal and settings calls on the private bus fail quietly (no hang, no fallback to another bus):
+- [x] GPUI's start-up portal and settings calls on the private bus fail quietly (no hang, no fallback to another bus):
       a test window opens and draws with the bus holding only the fakes
-- [ ] nothing inherits the user's `WAYLAND_DISPLAY`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`, `NIRI_SOCKET` or
+- [x] nothing inherits the user's `WAYLAND_DISPLAY`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`, `NIRI_SOCKET` or
       `XDG_RUNTIME_DIR` content (test); without weston 15 or niri the sandbox tests say so and skip, and fail under
       `GPUI_SMOKE_REQUIRE=1`
-- [ ] tests first: the sandbox's spawn passes through only the file descriptors its caller names (the credential
+- [x] tests first: the sandbox's spawn passes through only the file descriptors its caller names (the credential
       broker's socket, the view trace) and closes every other one it inherits. So the lab's credentials reach a
       sandboxed process only on the broker's socket (Technical Details), never by the user's bus
-- [ ] `cargo test -p ui-sandbox -p gpui-video` and the gate pass
+- [x] `cargo test -p ui-sandbox -p gpui-video` and the gate pass
+- What was built, where it differs from the lines above:
+  - The bus is `dbus-daemon --config-file` with a config of our own, not `--session`: the stock session config
+    activates services from the desktop's service dirs (a portal, a notification daemon), which would start them on
+    the private bus. Ours lists none, so an unowned name fails at once (`ServiceUnknown`). Its socket is
+    `<niri-run>/bus`, the client's `$XDG_RUNTIME_DIR/bus`, so a client that falls back from a missing
+    `DBUS_SESSION_BUS_ADDRESS` lands on it too. The fakes run in the test process, each on a `zbus` connection to that
+    address only (`zbus` 5.19 in the async-io flavour GPUI's ashpd already takes).
+  - GPUI's `open_url` runs the launchers first (`xdg-open`, then `gio open`, `gnome-open`, `kde-open`) and asks the
+    OpenURI portal only when all fail; the sandbox's opener answers all four names, exits 0 and records each call.
+  - The canary test runs everything together (the probe window draws, gets typed text, Ctrl+K, Enter and a click,
+    its `open_url` reaches the opener, it holds a connection to the private bus) in a child test process whose
+    inherited `DBUS_SESSION_BUS_ADDRESS`, `WAYLAND_DISPLAY`, `NIRI_SOCKET` and `XDG_RUNTIME_DIR` name listening
+    canaries and `DISPLAY` an X display; the child checks every client's and helper's environment, the parent that no
+    canary was connected to. GPUI also subscribes to logind's sleep signals on the system bus (read-only, not the
+    desktop session's); the sandbox leaves that as it is.
+  - The sandbox's opt-in variable is now `UI_SANDBOX_DIR` (`ui_sandbox::window_allowed`, which the spike binary and
+    the sandbox's own probe window, `ui-sandbox-probe`, check before GPUI connects); without `dbus-daemon` the
+    sandbox tests skip too.
+  - The spawn passes the named descriptors under their own numbers: before `exec` the child marks every other one
+    from 3 up close-on-exec (`close_range` with `CLOSE_RANGE_CLOEXEC`) and clears the flag on the named ones.
 
 ### Task 4: The credential broker
 **Files:**

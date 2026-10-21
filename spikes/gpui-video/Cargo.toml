@@ -13,9 +13,13 @@ gpui-pre-platform.workspace = true
 # `png`: the sandbox reads the compositor's screenshots back
 image = { workspace = true, features = ["png"] }
 log.workspace = true
-# the sandbox (src/sandbox.rs) keeps the compositors' runtime dirs in a temp dir
-tempfile.workspace = true
 thiserror.workspace = true
+# the private compositor, bus and opener the tests and the benchmark run in (src/sandbox.rs), and the check that the
+# binary opens a window only there
+ui-sandbox.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

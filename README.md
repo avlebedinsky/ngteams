@@ -33,6 +33,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and checks each fixture's `_synthetic` marker |
+| `crates/ui-sandbox` | tests and lab runs only: the UI sandbox every GUI process runs in, never the desktop's: a headless weston with a niri nested in it (screenshots and window control through `niri msg`), a private D-Bus session bus with no service activation and a fake notification server and tray watcher that record what they get, a virtual keyboard and pointer in the nested niri, a no-op URI opener first on `PATH`, a spawn that passes only the descriptors its caller names; `ui-sandbox-probe`, the window its own tests drive |
 | `spikes/gpui-video` | GPUI on niri (smoke window in a private weston + nested niri), then a 3×3 grid of 720p video (M0 Tasks 15–16) |
 | `spikes/media-loop` | two `str0m` peers on loopback carrying an Opus tone, checked with Goertzel (M0 Task 17) |
 | `spikes/echo-call` | the native echo call: a TURN client (RFC 8656), `str0m` through the relay, the test call's signaling from the capture, the call through the fence (M0 Task 19; the start sends nothing yet, see `docs/spikes/echo-call.md`) |
@@ -275,7 +276,7 @@ fence_ws --test fence_targets --test calling --test post_reads --test expected_d
 |---|---|
 | `PROTO_LAB_CHROME=<binary>` | the Chrome the browser tests use; by default the pinned install in the lab's `chrome/` dir (`proto-lab chrome install`) |
 | `PROTO_LAB_REQUIRE_CHROME=1` | without a Chrome the browser tests fail instead of skipping |
-| `GPUI_SMOKE_REQUIRE=1` | without weston ≥ 15.0 (for `--fake-seat`) and niri on `PATH` the GPUI smoke tests fail instead of skipping |
+| `GPUI_SMOKE_REQUIRE=1` | without weston ≥ 15.0 (for `--fake-seat`), niri and `dbus-daemon` on `PATH` the UI sandbox's and the GPUI smoke tests fail instead of skipping |
 | `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests: `crates/proto-lab/tests/auth_live.rs` (a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory) and `crates/teams-headless/tests/chat_live.rs` (M1's acceptance: it only spawns the normally built `teams-headless` and reads its output and `fence.log`); without the feature they aren't built, without the variable they skip |
 | `TEAMS_HEADLESS_BIN=<binary>` | the normally built `teams-headless` that `chat_live` spawns (required: a test build refuses to run) |
 | `TEAMS_HEADLESS_LOG=debug` | `teams-headless` logs our own crates' debug lines on stderr, never a payload or a token |
@@ -292,10 +293,13 @@ The browser tests run headless Chrome for Testing on throwaway profiles, never t
 under `data_dir` when `lab.toml` sets one, else `~/.local/share/teams-lab/chrome/`; no lab config is needed for this,
 but an invalid one is refused.
 
-The GPUI smoke tests (`spikes/gpui-video/tests/smoke.rs`) start their own headless weston with a niri nested in it and
-never touch the desktop session. They run the window once on every GPU, chosen with `ZED_DEVICE_ID`. The `gpui-video`
-binary itself refuses to open a window unless `WAYLAND_DISPLAY` is an absolute socket path inside the dir
-`GPUI_VIDEO_SANDBOX` names, which only the sandbox sets. The video grid benchmark (`spikes/gpui-video/tests/bench.rs`)
+Every GUI test runs in the UI sandbox (`crates/ui-sandbox`): its own headless weston with a niri nested in it, its own
+D-Bus session bus, never the desktop session's compositor, bus or URI opener (`crates/ui-sandbox/tests/sandbox.rs`
+checks that with canaries planted on the inherited addresses). Without weston 15, niri or `dbus-daemon` the sandbox
+tests say so and pass; `GPUI_SMOKE_REQUIRE=1` makes them fail instead. The GPUI smoke tests
+(`spikes/gpui-video/tests/smoke.rs`) run the window once on every GPU, chosen with `ZED_DEVICE_ID`. A sandboxed GUI
+binary (`gpui-video`, `ui-sandbox-probe`) refuses to open a window unless `WAYLAND_DISPLAY` is an absolute socket path
+inside the dir `UI_SANDBOX_DIR` names, which only the sandbox sets. The video grid benchmark (`spikes/gpui-video/tests/bench.rs`)
 runs in the same sandbox; its measurement is ignored by default and run by hand with a release build:
 `cargo test --release -p gpui-video --test bench -- --ignored --nocapture`. Results and the decision are in
 `docs/spikes/gpui-video.md`.

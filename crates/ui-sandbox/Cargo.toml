@@ -1,0 +1,29 @@
+[package]
+name = "ui-sandbox"
+description = "The UI sandbox for tests and lab runs: a nested niri on a headless weston, a private bus, virtual input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# the probe window (src/bin/ui-sandbox-probe.rs) the sandbox's own tests drive
+gpui-pre.workspace = true
+gpui-pre-platform.workspace = true
+# `png`: screenshots are read back
+image = { workspace = true, features = ["png"] }
+libc.workspace = true
+log.workspace = true
+# the sandbox keeps the compositors' runtime dirs and its bus in a temp dir
+tempfile.workspace = true
+wayland-client.workspace = true
+wayland-protocols-misc.workspace = true
+wayland-protocols-wlr.workspace = true
+xkbcommon.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+rustix.workspace = true
+
+[lints]
+workspace = true

@@ -182,7 +182,7 @@ fn refuses_to_run_without_a_wayland_display() {
 }
 
 /// A compositor outside an opted-in sandbox (the desktop session's) is refused before the binary connects to it:
-/// without `GPUI_VIDEO_SANDBOX`, with it naming another dir, and with a bare socket name in `XDG_RUNTIME_DIR`.
+/// without `UI_SANDBOX_DIR`, with it naming another dir, and with a bare socket name in `XDG_RUNTIME_DIR`.
 #[test]
 fn refuses_a_compositor_outside_the_sandbox() {
     let dir = TempDir::new().unwrap();

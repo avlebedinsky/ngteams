@@ -13,6 +13,7 @@ members = [
     "crates/teams-proto",
     "crates/teams-store",
     "crates/teams-trouter",
+    "crates/ui-sandbox",
     "spikes/echo-call",
     "spikes/gpui-video",
     "spikes/media-loop",
@@ -38,6 +39,8 @@ teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }
 teams-store = { path = "crates/teams-store" }
 teams-trouter = { path = "crates/teams-trouter" }
+# tests and lab runs only: the private compositor, bus, input and URI opener every GUI process runs in
+ui-sandbox = { path = "crates/ui-sandbox" }
 media-loop = { path = "spikes/media-loop" }
 # The video source hands frames to GPUI's foreground executor: the version GPUI already links.
 async-channel = "2.5.0"
@@ -63,6 +66,9 @@ image = { version = "0.25.10", default-features = false }
 hmac = "0.13.0"
 # a Retry-After given as an HTTP date
 httpdate = "1.0.3"
+# the UI sandbox's spawn marks every inherited descriptor but the named ones close-on-exec (`close_range`, which rustix
+# doesn't wrap): the version the workspace already links
+libc = "0.2.191"
 log = "0.4.34"
 # the STUN long-term credential key: MD5(username:realm:password), RFC 8489 9.2.2
 md-5 = "0.11.0"
@@ -106,7 +112,17 @@ toml = "1.1.8"
 toml_edit = "0.25.17"
 trybuild = "1.0.122"
 url = "2.5.8"
+# The UI sandbox's virtual keyboard and pointer: a Wayland client of the nested niri, on the versions GPUI already
+# links (wayland-client, the wlr protocols) and the misc protocols built for them (`zwp_virtual_keyboard_v1`).
+wayland-client = "0.31.15"
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 wiremock = "0.6.5"
+# the virtual keyboard's keymap and its text-to-key table: the version GPUI already links, without its features
+xkbcommon = { version = "0.8.0", default-features = false }
+# D-Bus for the UI sandbox's fake notification server and tray watcher: the version and the async-io flavour GPUI's
+# ashpd already takes (a `tokio` flavour breaks every workspace build with GPUI in it, as for oo7)
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 zeroize = "1.9.1"
 zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
