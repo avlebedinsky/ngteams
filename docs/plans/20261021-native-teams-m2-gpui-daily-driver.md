@@ -814,19 +814,40 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
   `crates/teams-core/src/*`, a store migration (names and pictures cached), `crates/teams-ui/src/*`,
   `docs/protocol/endpoints.md`
 
-- [ ] a read-only probe first (`proto-lab probe profile <alias>`): Graph `GET /v1.0/users/<id>` and
+- [x] a read-only probe first (`proto-lab probe profile <alias>`): Graph `GET /v1.0/users/<id>` and
       `/users/<id>/photo/$value` for the lab accounts with our own Graph token; statuses, key names and sizes only;
       written up in `graph.md`, which records that Graph is our own probed reach, not the web client's (the web
       client's pictures come from the middle tier's `profilepicturev2` with a `cookiev2` cookie, `endpoints.md`),
       so the probe's answer is the reviewed shape
-- [ ] tests first (wiremock, synthetic fixtures): if Graph answers, `Service::Graph` (that host exactly, `GET` only,
+- [x] tests first (wiremock, synthetic fixtures): if Graph answers, `Service::Graph` (that host exactly, `GET` only,
       the Graph audience from the `Session`, its path check) for names and photos; the profile lookup (`PostRead`,
       Task 11) for names Graph doesn't give; then a message's `imdisplayname` and the account names in `lab.toml`;
       pictures as initials when there is no photo
-- [ ] names and pictures cached in the store, refreshed by age, a lookup never repeated while one is under way; the
+- [x] names and pictures cached in the store, refreshed by age, a lookup never repeated while one is under way; the
       chat list and the chat view use them (the mention picker in Task 13); the bytes of a photo reach the view only
       from the engine
-- [ ] `cargo test -p teams-proto -p teams-core -p teams-store -p teams-ui -p fixture-guard` and the gate pass
+- [x] `cargo test -p teams-proto -p teams-core -p teams-store -p teams-ui -p fixture-guard` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - The probe (`crates/proto-lab/src/commands/profile_probe.rs`) read each lab account's user record whole and in the
+    native `$select=id,displayName` form, its largest picture (`photo/$value`) and its 96×96 one
+    (`photos/96x96/$value`); it prints statuses, header names, content types, sizes and key names with their JSON
+    types, and a Graph error's plain code. Two live runs (as a, then as b; GETs only, under the live lock): every
+    user read 200, a's pictures 200 `image/jpeg` (about 230 KB whole, about 7 KB at 96×96), b's and c's 404
+    `ImageNotFound`; the Graph token carries `User.ReadBasic.All`. `graph.md` has the shapes.
+  - The native client reads `users/<oid>?$select=id,displayName` (the name shown and nothing else of the record) and
+    `users/<oid>/photos/96x96/$value` (the avatar's size, not the largest `photo/$value` the line above names), both
+    probed; `Service::Graph` refuses every other Graph endpoint and any request to Graph that isn't a read
+    (`GraphUser`, `GraphPicture` in `teams-proto`'s `read.rs`; pictures kept as JPEG or PNG up to 256 KB).
+  - `teams-core`'s `profiles.rs`: `EngineRequests::person(mri)` answers from the store at once and starts a lookup
+    in the background (at most 4 at a time, on the engine's runtime) when the stored profile is missing or older than
+    a day; a part that failed on the way keeps the last one and the person waits 5 minutes; a change stored is told as
+    `Event::Profile`. The name: Graph, else the profile lookup (only with the fence's permit, and only once the lab
+    engine has the middle tier's base from the GTM `middleTier`), else the newest message's `imdisplayname`, else
+    `Parts::known_names` (the lab accounts' UPN local parts from `lab.toml`). Store migration `0007_profiles`.
+  - `teams-ui`: `Core::display_name` became `Core::person`; the chat list shows a 1:1 chat's partner's picture, the
+    chat view an avatar beside every other sender's name, a profile name over the name a message carried; rows and
+    names are asked again on `Event::Profile` (`people.rs`). The Graph reads ran natively only on wiremock: the app's
+    first live run is Task 25's.
 
 ### Task 13: Compose and the writes from the UI
 **Files:**

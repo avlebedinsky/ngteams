@@ -17,6 +17,7 @@ use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
 use proto_lab::commands::export;
 use proto_lab::commands::login::{self, LoginOptions};
 use proto_lab::commands::probe;
+use proto_lab::commands::profile_probe;
 use proto_lab::commands::status::{self, AccountStatus};
 use proto_lab::commands::thread_probe;
 use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_service_mri};
@@ -155,6 +156,13 @@ enum ProbeCommand {
         #[arg(long)]
         save: Option<String>,
     },
+    /// Whether Microsoft Graph gives the lab accounts' names and pictures to the account's own Graph token: refreshes
+    /// it from the stored refresh token and reads each lab account's user record (whole, and as the native client
+    /// selects it) and its picture. Prints statuses, key names, types and sizes only. GETs only.
+    Profile {
+        /// The lab account whose token reads: a, b or c.
+        alias: Alias,
+    },
 }
 
 #[derive(Subcommand)]
@@ -213,6 +221,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Probe {
             command: ProbeCommand::Thread { alias, save },
         } => run_probe_thread(alias, save.as_deref()).await,
+        Command::Probe {
+            command: ProbeCommand::Profile { alias },
+        } => run_probe_profile(alias).await,
         Command::Auth {
             alias,
             timeout,
@@ -387,6 +398,17 @@ async fn run_probe_thread(alias: Alias, save: Option<&str>) -> Result<(), Box<dy
         exported.events,
         exported.path.display()
     );
+    Ok(())
+}
+
+async fn run_probe_profile(alias: Alias) -> Result<(), Box<dyn std::error::Error>> {
+    let config = LabConfig::load(&LabLocations::from_env()?)?;
+    let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
+    let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
+    let report = profile_probe::probe_profile(&store, &tokens, &config, alias, &probe::Origin::ChatService).await?;
+    for line in report.lines(std::time::SystemTime::now()) {
+        println!("{line}");
+    }
     Ok(())
 }
 

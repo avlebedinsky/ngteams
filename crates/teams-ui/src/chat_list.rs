@@ -5,12 +5,14 @@
 //!   newest messages, unread count and people's names) when it opens and again each time the models say a chat
 //!   changed ([`crate::Chats::revision`]): a delivery, a catch-up, a read horizon, an outbox row. A row is built again
 //!   only when its chat changed since it was built, or when a message that carried a name came, in any chat, from
-//!   someone the row is named by ([`crate::Chats::named_at`]); every row again after a catch-up.
+//!   someone the row is named by, or their profile changed ([`crate::Chats::named_at`]); every row again after a
+//!   catch-up.
 //! - **Which chats**: 1:1, group and meeting chats. A team's channels belong to the Teams rail (Task 16) and the
 //!   account's own streams (`48:notes`, `48:notifications`, …) aren't chats: neither is listed.
-//! - **Names** (until Task 12 reads profiles): a 1:1 chat by the other member's newest `imdisplayname` in the store,
-//!   else their MRI; a group or meeting chat by its topic, else its other members' names (or MRIs). The avatar shows
-//!   the initials of a name the store gave.
+//! - **Names** (M2 Task 12): a 1:1 chat by the other member's name as the engine has it ([`Core::person`]: their
+//!   profile's, else their newest message's, else one the binary knew), else their MRI; a group or meeting chat by its
+//!   topic, else its other members' names (or MRIs). The avatar shows a 1:1 chat's other member's picture, else the
+//!   initials of a name, else nothing.
 //! - **Unread** is the store's count after the account's read horizon (`unread_count`).
 //!
 //! A row clicked is told as [`ChatListEvent::Opened`]; the shell shows it. The switcher tells the shell itself
@@ -23,17 +25,18 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Datelike as _, Local, TimeZone};
 use gpui::{
-    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
+    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, Image, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
     WeakEntity, Window, div, px, rgb, uniform_list,
 };
+use gpui_component::Size;
 use gpui_component::avatar::Avatar;
-use gpui_component::{Sizable as _, Size};
 use teams_proto::chat::parse_html;
 use teams_store::{Conversation, ConversationKind, Member, Message};
 
 use crate::bridge::Core;
 use crate::models::Models;
+use crate::people::{self, Shown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
@@ -98,8 +101,10 @@ pub struct ChatRow {
     pub kind: RowKind,
     /// What the row is called (see the module docs).
     pub name: SharedString,
-    /// Whether `name` came from the store's names or the chat's topic, not from MRIs.
+    /// Whether `name` came from people's names or the chat's topic, not from MRIs.
     pub named: bool,
+    /// A 1:1 chat's other member's picture, from the engine.
+    pub picture: Option<Arc<Image>>,
     /// The last message's first line.
     pub preview: SharedString,
     /// Milliseconds.
@@ -198,10 +203,11 @@ where
     at.format(format).to_string()
 }
 
-/// What a chat is called and whether that is a name.
+/// What a chat is called, whether that is a name, and its picture.
 struct Naming {
     name: SharedString,
     named: bool,
+    picture: Option<Arc<Image>>,
     /// The members whose names the name read (none for a topic).
     people: Vec<String>,
 }
@@ -219,6 +225,7 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
         return Naming {
             name: topic.to_owned().into(),
             named: true,
+            picture: None,
             people: Vec::new(),
         };
     }
@@ -227,19 +234,29 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
         return Naming {
             name: "Chat".into(),
             named: false,
+            picture: None,
             people: Vec::new(),
         };
     }
     let mut shown = Vec::new();
     let mut all_named = true;
+    let mut pictures = Vec::new();
     for mri in others.iter().take(NAMED_MEMBERS) {
-        if let Ok(Some(name)) = core.display_name(mri.clone()).await {
-            shown.push(name);
+        let person = core.person(mri.clone()).await.ok().map(Shown::of);
+        pictures.push(person.as_ref().and_then(|person| person.picture.clone()));
+        if let Some(name) = person.and_then(|person| person.name) {
+            shown.push(name.to_string());
         } else {
             shown.push(mri.clone());
             all_named = false;
         }
     }
+    // a 1:1 chat shows the other member's picture; a group none of its own
+    let picture = if conversation.kind == ConversationKind::OneToOne && others.len() == 1 {
+        pictures.pop().flatten()
+    } else {
+        None
+    };
     let mut name = shown.join(", ");
     if others.len() > NAMED_MEMBERS {
         name = format!("{name} +{}", others.len() - NAMED_MEMBERS);
@@ -247,6 +264,7 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
     Naming {
         name: name.into(),
         named: all_named,
+        picture,
         people: others.into_iter().take(NAMED_MEMBERS).collect(),
     }
 }
@@ -266,11 +284,17 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         .map(|page| page.messages)
         .unwrap_or_default();
     let unread = core.unread_count(id.clone()).await.unwrap_or(0);
-    let Naming { name, named, people } = name_of(core, conversation, &members).await;
+    let Naming {
+        name,
+        named,
+        picture,
+        people,
+    } = name_of(core, conversation, &members).await;
     let row = ChatRow {
         kind: RowKind::of(&conversation.kind),
         name,
         named,
+        picture,
         preview: preview(&page, core.me()),
         last_activity: conversation.last_activity,
         unread,
@@ -525,14 +549,9 @@ impl ChatList {
     }
 }
 
-/// The row's avatar: the initials of a name the store gave, else none.
+/// The row's avatar: its picture, else the initials of its name (not of an MRI), else none.
 fn avatar(row: &ChatRow) -> Avatar {
-    let avatar = Avatar::new().with_size(Size::Small);
-    if row.named {
-        avatar.name(row.name.clone())
-    } else {
-        avatar
-    }
+    people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small)
 }
 
 /// The row's name and time over its preview and unread count.

@@ -5,6 +5,7 @@
 //! - [`messages`]: messages by id and version (an edit or a soft delete is a newer version), reactions per user, pages
 //!   of a conversation, the unread count;
 //! - [`state`]: read horizons and where each conversation's sync stands;
+//! - [`profiles`]: people's names and pictures as the account last read them (M2 Task 12);
 //! - [`outbox`]: writes waiting to go out, keyed by `clientmessageid`; a run sends only its own rows, and adopts only
 //!   rows of runs that have ended (each open run holds a lock of its own, `runs`); one engine per account holds the
 //!   engine lock ([`Store::engine_lock`]);
@@ -20,6 +21,7 @@ pub mod conversations;
 mod file;
 pub mod messages;
 pub mod outbox;
+pub mod profiles;
 mod runs;
 pub mod schema;
 pub mod state;
@@ -33,6 +35,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 pub use conversations::{Conversation, ConversationKind, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
+pub use profiles::{NameSource, PictureState, Profile, StoredPicture};
 pub use schema::SCHEMA_VERSION;
 pub use state::{ReadHorizon, SyncState};
 

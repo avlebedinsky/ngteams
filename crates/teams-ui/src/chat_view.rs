@@ -16,7 +16,11 @@
 //!   rows added above it (an older page) or below it never move it.
 //! - **Rows**: a day separator before a new day; a "New messages" divider before the first message from someone else
 //!   after the account's read horizon as it stood when the chat opened ([`Core::read_horizon`]), as the store counts
-//!   unread; a sender's messages within 5 minutes of each other grouped under one name and time. A message shows its
+//!   unread; a sender's messages within 5 minutes of each other grouped under one name and time, someone else's with
+//!   their avatar (M2 Task 12: their picture from the engine, else their initials). The name is their profile's
+//!   ([`Core::person`]: Graph's, else the middle tier's profile lookup's), else the one their message carried, else
+//!   their newest message's or one the binary knew, else their MRI; a name or a picture read later shows once the
+//!   engine tells it (`Event::Profile`). A message shows its
 //!   rich text through our own renderer ([`crate::rich_text`], parsed and laid out once per message id and version),
 //!   "Edited" once edited, "This message was deleted" once deleted, its reactions with their counts (the account's own
 //!   marked), and a thread's event as a line of its own. A message type this build doesn't show is a placeholder
@@ -48,6 +52,7 @@ use teams_store::{Message, PageCursor, Reaction};
 
 use crate::bridge::Core;
 use crate::models::Models;
+use crate::people::{Face, Shown};
 use crate::rich_text::{self, Mentions, Rendered};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -237,6 +242,8 @@ pub struct MessageItem {
     pub version: i64,
     pub sender: Option<String>,
     pub sender_name: SharedString,
+    /// The sender's avatar beside `sender_name`: their picture from the engine, else the initials of their name.
+    pub face: Face,
     pub own: bool,
     /// The first of its group: its name and time are shown.
     pub header: bool,
@@ -462,8 +469,10 @@ pub struct ChatView {
     history: History,
     /// The account's read horizon when the chat opened.
     horizon: Option<i64>,
-    /// People's names from the store, by MRI (`None`: asked, none stored).
-    names: HashMap<String, Option<String>>,
+    /// People as the engine has them, by MRI (`None`: asked, no answer yet or none).
+    people: HashMap<String, Option<Shown>>,
+    /// The models' revision the people were last asked at: someone renamed since is asked again.
+    people_seen: u64,
     /// Rendered rich text per message id, with the version it was rendered from.
     rendered: HashMap<String, (i64, Arc<Rendered>)>,
     /// A thread event's parsed content per message id, with the version it was parsed from.
@@ -520,9 +529,11 @@ impl ChatView {
                 this.kick(cx);
             }
             this.typing_changed(cx);
+            this.renamed(cx);
             cx.notify();
         });
         let seen = models.chats.read(cx).changed_at(&conversation);
+        let people_seen = models.chats.read(cx).revision();
         let mut view = Self {
             core,
             models,
@@ -533,7 +544,8 @@ impl ChatView {
             next: None,
             history: History::More,
             horizon: None,
-            names: HashMap::new(),
+            people: HashMap::new(),
+            people_seen,
             rendered: HashMap::new(),
             activities: HashMap::new(),
             layouts: 0,
@@ -828,15 +840,13 @@ impl ChatView {
         self.activities.retain(|id, _| held.contains(id.as_str()));
     }
 
-    /// Asks the store for the names of the people the rows name and the store's messages didn't (senders without a
-    /// name, events' members, who is typing).
+    /// Asks the engine for the people the rows name: the senders (their profile's name and their picture), events'
+    /// members and who is typing.
     fn want_names(&mut self, cx: &mut Context<Self>) {
         let mut wanted: Vec<String> = Vec::new();
         let messages = std::mem::take(&mut self.messages);
         for message in &messages {
-            if message.sender_name.as_deref().is_none_or(|name| name.trim().is_empty())
-                && let Some(sender) = &message.sender
-            {
+            if let Some(sender) = &message.sender {
                 wanted.push(sender.clone());
             }
             if message.message_type == MessageType::AddMember.as_str()
@@ -862,8 +872,8 @@ impl ChatView {
         let me = self.core.me().to_owned();
         let mut asked = Vec::new();
         for mri in wanted {
-            if mri != me && !self.names.contains_key(&mri) {
-                self.names.insert(mri.clone(), None);
+            if mri != me && !self.people.contains_key(&mri) {
+                self.people.insert(mri.clone(), None);
                 asked.push(mri);
             }
         }
@@ -874,21 +884,51 @@ impl ChatView {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let mut found = Vec::new();
             for mri in asked {
-                if let Ok(Some(name)) = core.display_name(mri.clone()).await {
-                    found.push((mri, name));
+                if let Ok(person) = core.person(mri.clone()).await {
+                    found.push((mri, Shown::of(person)));
                 }
             }
             if found.is_empty() {
                 return;
             }
-            let _ = this.update(cx, |view, cx| {
-                for (mri, name) in found {
-                    view.names.insert(mri, Some(name));
-                }
-                view.rebuild(cx);
-            });
+            let _ = this.update(cx, |view, cx| view.answered(found, cx));
         })
         .detach();
+    }
+
+    /// The engine answered for these people: the rows are built again when anyone changed.
+    fn answered(&mut self, found: Vec<(String, Shown)>, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for (mri, shown) in found {
+            // someone the view dropped meanwhile isn't added back; a later ask's answer replaces this one
+            let Some(entry) = self.people.get_mut(&mri) else {
+                continue;
+            };
+            if entry.as_ref() != Some(&shown) {
+                *entry = Some(shown);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild(cx);
+        }
+    }
+
+    /// Someone the view asked about may have a new name or picture: they are asked again.
+    fn renamed(&mut self, cx: &mut Context<Self>) {
+        let chats = self.models.chats.read(cx);
+        let since = self.people_seen;
+        let renamed: Vec<String> = self
+            .people
+            .keys()
+            .filter(|mri| chats.named_at(mri) > since)
+            .cloned()
+            .collect();
+        self.people_seen = chats.revision();
+        for mri in &renamed {
+            self.people.remove(mri);
+        }
+        self.ask_names(renamed, cx);
     }
 
     /// Someone started or stopped typing.
@@ -911,12 +951,47 @@ impl ChatView {
         self.ask_names(typing, cx);
     }
 
-    /// A person's name: the store's, else "You" for the account, else their MRI.
+    /// A person's name: "You" for the account, else the engine's, else their MRI.
     fn name_of(&self, mri: &str) -> String {
         if mri == self.core.me() {
             return "You".to_owned();
         }
-        self.names.get(mri).cloned().flatten().unwrap_or_else(|| mri.to_owned())
+        self.shown(mri)
+            .and_then(|shown| shown.name.as_ref())
+            .map_or_else(|| mri.to_owned(), ToString::to_string)
+    }
+
+    /// A person as the engine last answered, if it has.
+    fn shown(&self, mri: &str) -> Option<&Shown> {
+        self.people.get(mri).and_then(Option::as_ref)
+    }
+
+    /// A message's sender's name and whether it is a name (not an MRI): their profile's, else the message's own,
+    /// else the engine's other names, else their MRI.
+    fn sender_of(&self, message: &Message) -> (String, bool) {
+        let Some(sender) = message.sender.as_deref() else {
+            return ("Unknown".to_owned(), false);
+        };
+        let shown = self.shown(sender);
+        let carried = message
+            .sender_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let name = match (
+            shown
+                .filter(|shown| shown.profiled())
+                .and_then(|shown| shown.name.as_ref()),
+            carried,
+        ) {
+            (Some(profiled), _) => Some(profiled.to_string()),
+            (None, Some(carried)) => Some(carried.to_owned()),
+            (None, None) => shown.and_then(|shown| shown.name.as_ref()).map(ToString::to_string),
+        };
+        match name {
+            Some(name) => (name, true),
+            None => (sender.to_owned(), false),
+        }
     }
 
     /// A text message's rich text, parsed and laid out once per id and version: the cache is asked before anything
@@ -994,12 +1069,12 @@ impl ChatView {
         }
         let me = self.core.me().to_owned();
         let body = self.body(message);
-        let sender_name = message
-            .sender_name
-            .clone()
-            .filter(|name| !name.trim().is_empty())
-            .or_else(|| message.sender.as_deref().map(|sender| self.name_of(sender)))
-            .unwrap_or_else(|| "Unknown".to_owned());
+        let (sender_name, named) = self.sender_of(message);
+        let picture = message
+            .sender
+            .as_deref()
+            .and_then(|sender| self.shown(sender))
+            .and_then(|shown| shown.picture.clone());
         let reactions = self
             .reactions
             .get(&message.id)
@@ -1011,6 +1086,7 @@ impl ChatView {
             version: message.version,
             own: message.sender.as_deref() == Some(me.as_str()),
             sender: message.sender.clone(),
+            face: Face { named, picture },
             sender_name: sender_name.into(),
             header: true,
             arrival_time: message.arrival_time,
@@ -1465,11 +1541,20 @@ fn header_line(item: &MessageItem, palette: Palette) -> AnyElement {
             .font_weight(gpui::FontWeight::BOLD)
             .child(item.sender_name.clone())
     });
+    let avatar = (!item.own).then(|| {
+        div()
+            .debug_selector({
+                let id = item.id.clone();
+                move || format!("avatar-{id}")
+            })
+            .child(item.face.avatar(&item.sender_name, Size::XSmall))
+    });
     div()
         .flex()
         .gap_2()
-        .items_baseline()
+        .items_center()
         .text_sm()
+        .children(avatar)
         .children(name)
         .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(time))
         .into_any_element()

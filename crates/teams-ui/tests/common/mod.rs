@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
-use teams_core::{Action, EngineError, Event, Reply, Transient, TransientSent};
+use teams_core::{Action, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
 use teams_store::{Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon};
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
@@ -43,8 +43,10 @@ pub struct FakeCore {
     pub messages: Mutex<HashMap<String, Vec<Message>>>,
     pub members: Mutex<HashMap<String, Vec<Member>>>,
     pub unread: Mutex<HashMap<String, u64>>,
-    /// Display names by MRI.
+    /// Display names by MRI, as their messages carried them.
     pub names: Mutex<HashMap<String, String>>,
+    /// People as their profiles have them, by MRI: answered before `names`.
+    pub people: Mutex<HashMap<String, Person>>,
     /// Reactions by message id.
     pub reactions: Mutex<HashMap<String, Vec<Reaction>>>,
     /// The account's read horizons by conversation.
@@ -73,6 +75,7 @@ impl Default for FakeCore {
             members: Mutex::default(),
             unread: Mutex::default(),
             names: Mutex::default(),
+            people: Mutex::default(),
             reactions: Mutex::default(),
             horizons: Mutex::default(),
             older: Mutex::default(),
@@ -211,8 +214,19 @@ impl Core for FakeCore {
         })
     }
 
-    fn display_name(&self, mri: String) -> Reply<Option<String>> {
-        self.answer("display_name", || locked(&self.names).get(&mri).cloned())
+    fn person(&self, mri: String) -> Reply<Person> {
+        self.answer("person", || {
+            if let Some(person) = locked(&self.people).get(&mri) {
+                return person.clone();
+            }
+            let name = locked(&self.names).get(&mri).cloned();
+            Person {
+                from: name.as_ref().map(|_| NameFrom::Message),
+                name,
+                picture: None,
+                mri,
+            }
+        })
     }
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {

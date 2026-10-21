@@ -2,7 +2,8 @@
 //! `teams-fence` can issue.
 //!
 //! A request comes in one of four classes, and a [`Transport`] takes nothing else:
-//! - a [`Read`]: always sent as a `GET`, with no body;
+//! - a [`Read`]: always sent as a `GET`, with no body (the chat service's, and Microsoft Graph's two reads of a
+//!   person's name and picture, [`GraphUser`] and [`GraphPicture`]);
 //! - an [`OwnState`] request: the reviewed list of requests that touch only the account's own state, sealed (only
 //!   this crate adds to it: the messaging stack's [`EndpointRegistration`]) and logged to `fence.log` before it is
 //!   sent;
@@ -46,8 +47,9 @@ pub use frame::{
     MessageLossAck, OwnFrame, Ping, Sent,
 };
 pub use http::{
-    BuildError, CONNECT_TIMEOUT, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport, IC3_AUDIENCE,
-    MAX_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
+    BuildError, CONNECT_TIMEOUT, Credentials, DEFAULT_RETRY_WAIT, Failure, GRAPH_AUDIENCE, GRAPH_HOST, HttpError,
+    HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, REQUEST_TIMEOUT, Refusal,
+    TROUTER_HOST,
 };
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
@@ -58,7 +60,10 @@ pub use own::{
 #[cfg(feature = "test-support")]
 pub use post_read::ProbePostRead;
 pub use post_read::{AnswerError, AuthorizedPostRead, PostRead, PostReadMismatch, ShortProfile, ShortProfileLookup};
-pub use read::Read;
+pub use read::{
+    GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT, GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture,
+    PictureFormat, Read, object_id,
+};
 pub use write::{
     AddToCall, Author, Authorized, ConversationUrl, CreateChat, DeleteMessage, EditMessage, Mutating, Original,
     ReadReceipt, RemoveReaction, SendMessage, SetReaction, StartCall, TEST_CALL_SCENARIO, TargetMismatch, Typing, Wire,

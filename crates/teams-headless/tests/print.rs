@@ -111,3 +111,12 @@ fn an_event_as_text_prints_no_raw_control() {
         "{line}"
     );
 }
+
+#[test]
+fn a_profile_event_names_whose_profile_changed_and_never_their_name() {
+    let mri = "8:orgid:synthetic-person";
+    let value = event_json(&Event::Profile { mri: mri.to_owned() }, 1, &LabNames::default());
+    assert_eq!(value["event"], "profile");
+    assert_eq!(value["who"], mri);
+    assert_eq!(value.as_object().map(serde_json::Map::len), Some(3), "{value}");
+}

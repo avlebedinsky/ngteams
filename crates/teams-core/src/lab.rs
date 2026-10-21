@@ -4,7 +4,8 @@
 //! credential broker's socket for the sandboxed app), the chat base from the region record `proto-lab auth` saved
 //! ([`LabPaths::region_file`], read by [`Region::load`]), the 1:1 chats' and the lab group chat's members read live
 //! ([`LiveMembershipSource::for_fence`], its credential the chat transport's), the store at [`LabPaths::store_file`],
-//! and the push channel ([`Trouter`]) when asked for.
+//! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's), the lab
+//! accounts' names as lab.toml has them ([`known_names`]), and the push channel ([`Trouter`]) when asked for.
 //!
 //! Nothing here reads or prints a token, and nothing is sent while the engine is built: the session asks its store for
 //! a token only when a request needs one.
@@ -88,11 +89,12 @@ pub fn start<S: SecretStore + 'static>(
     let transport = Arc::new(HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?);
     let membership = LiveMembershipSource::for_fence(&fence)?;
     membership.set_credential_source(transport.clone());
-    let client = Arc::new(Client::new(HttpTransport::new(
-        Arc::clone(&session),
-        Arc::clone(&fence),
-        &base,
-    )?));
+    let mut reads = HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?;
+    // the profile lookup's base; without one the lookup is refused and names come from Graph and the messages
+    if let Some(middle_tier) = session.service_base(MIDDLE_TIER_GTM) {
+        reads = reads.with_middle_tier(&middle_tier)?;
+    }
+    let client = Arc::new(Client::new(reads));
     let push = if push {
         Some(Push::new(Trouter::new(
             Arc::clone(&transport),
@@ -110,8 +112,22 @@ pub fn start<S: SecretStore + 'static>(
         outbox,
         push,
         options: EngineOptions::default(),
+        known_names: known_names(config),
     })?;
     Ok(LabEngine { handle, session })
+}
+
+/// The GTM the middle tier's base comes from (the profile lookup's).
+pub const MIDDLE_TIER_GTM: &str = "middleTier";
+
+/// The lab accounts' names as lab.toml has them ([`display_name`]), by MRI: the last a person's name comes from.
+#[must_use]
+pub fn known_names(config: &LabConfig) -> Vec<(String, String)> {
+    config
+        .accounts()
+        .iter()
+        .filter_map(|account| Some((account.mri.clone()?, display_name(&account.upn).to_owned())))
+        .collect()
 }
 
 /// The name a post carries (`imdisplayname`): the UPN's local part. lab.toml keeps no display name.

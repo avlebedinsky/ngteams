@@ -22,6 +22,12 @@ pub enum Service {
     /// `beta/users/`. It takes the account's token for `https://api.spaces.skype.com`. The reads by `POST` of the sealed
     /// `PostRead` list go here (the profile lookups).
     MiddleTier,
+    /// Microsoft Graph, `https://graph.microsoft.com/v1.0/`, with the account's token for `https://graph.microsoft.com`
+    /// (M2 Task 12). Reads only (`GET`), and only the two shapes `proto-lab probe profile` read live: a user's name
+    /// (`users/<object id>?$select=id,displayName`, [`crate::GraphUser`]) and their 96×96 picture
+    /// (`users/<object id>/photos/96x96/$value`, [`crate::GraphPicture`]); the transport refuses any other endpoint
+    /// on it, and any request on it that isn't a read.
+    Graph,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

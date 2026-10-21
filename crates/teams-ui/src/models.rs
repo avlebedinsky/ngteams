@@ -79,8 +79,9 @@ pub struct Chats {
     revision: u64,
     /// Per conversation: the revision of its last change.
     changed: HashMap<String, u64>,
-    /// Per sender, by MRI: the revision of the last message told from them that carried a display name (which may be
-    /// a name the store didn't have, or a new one).
+    /// Per person, by MRI: the revision of the last message told from them that carried a display name (which may be
+    /// a name the store didn't have, or a new one), or of their profile's last change (`Event::Profile`: a name or a
+    /// picture read in the background).
     named: HashMap<String, u64>,
     /// Per conversation: who is typing now, each with the stamp of their last signal (a timeout clears only the
     /// signal it was started for).
@@ -104,8 +105,8 @@ impl Chats {
         self.changed.get(conversation).copied().unwrap_or(0)
     }
 
-    /// The revision of the last message told from `mri` that carried a display name, in any conversation; 0 while
-    /// none was told.
+    /// The revision of the last message told from `mri` that carried a display name, in any conversation, or of their
+    /// profile's last change; 0 while none was told.
     #[must_use]
     pub fn named_at(&self, mri: &str) -> u64 {
         self.named.get(mri).copied().unwrap_or(0)
@@ -129,6 +130,12 @@ impl Chats {
     fn change(&mut self, conversation: &str) {
         self.revision += 1;
         self.changed.insert(conversation.to_owned(), self.revision);
+    }
+
+    /// Someone's name or picture may have changed: every view that shows them asks again.
+    fn renamed(&mut self, mri: &str) {
+        self.revision += 1;
+        self.named.insert(mri.to_owned(), self.revision);
     }
 
     /// Someone started typing: the stamp of this signal, and whether they weren't shown typing before.
@@ -215,6 +222,10 @@ impl Models {
                 typing,
             } => self.typing(&conversation, from.as_deref(), typing, cx),
             Event::Outbox(entry) => self.outbox(entry, cx),
+            Event::Profile { mri } => self.chats.update(cx, |chats, cx| {
+                chats.renamed(&mri);
+                cx.notify();
+            }),
             // how the push channel's registration went, and a waiting transient's send: nothing a view shows yet
             Event::Registration(_) | Event::Transient(..) => {}
         }

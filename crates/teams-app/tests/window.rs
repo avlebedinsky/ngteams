@@ -496,6 +496,7 @@ impl MockLab {
             outbox: Outbox::new(transport, fence, Arc::new(membership), author),
             push: Some(Push::new(trouter_client)),
             options: EngineOptions::default(),
+            known_names: Vec::new(),
         })?;
         let lab = Self {
             _runtime: runtime,

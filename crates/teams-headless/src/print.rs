@@ -259,6 +259,8 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
             "conversation": transient.conversation(),
             "outcome": transient_outcome(sent),
         }),
+        // whose profile changed, never their name
+        Event::Profile { mri } => json!({"event": "profile", "who": names.show(mri)}),
         Event::Failed { during, error } => json!({"event": "failed", "during": during, "error": error.to_string()}),
     }
 }

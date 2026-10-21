@@ -436,6 +436,12 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         &self.me
     }
 
+    /// The fence every attempt asks: the engine asks it too, for its reads by `POST` (the profile lookup).
+    #[must_use]
+    pub fn fence(&self) -> &Arc<Fence> {
+        &self.fence
+    }
+
     /// The rows a read changed since the last call, oldest first, each as the outbox last left it: a row that became
     /// sent (or had its message id filled in) by [`Outbox::match_arrival`], whichever read brought the message (a sync
     /// page, a delivery, the check before another row's attempt), and a pending row a read met an entry it couldn't

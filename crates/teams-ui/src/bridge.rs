@@ -19,7 +19,7 @@ use futures_util::FutureExt as _;
 use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
-use teams_core::{Action, EngineHandle, EngineRequests, Event, Reply, Transient, TransientSent};
+use teams_core::{Action, EngineHandle, EngineRequests, Event, Person, Reply, Transient, TransientSent};
 use teams_store::{Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon};
 use tokio::sync::oneshot;
 
@@ -52,8 +52,9 @@ pub trait Core: Send + Sync + 'static {
     fn members(&self, conversation: String) -> Reply<Vec<Member>>;
     /// How many stored messages of a conversation the account hasn't read.
     fn unread_count(&self, conversation: String) -> Reply<u64>;
-    /// The name `mri`'s newest stored message carried, in any conversation.
-    fn display_name(&self, mri: String) -> Reply<Option<String>>;
+    /// Someone's name and picture as the engine has them; a lookup starts in the background when its stored ones
+    /// are missing or old, and its change comes as `Event::Profile`.
+    fn person(&self, mri: String) -> Reply<Person>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -115,8 +116,8 @@ impl Core for EngineRequests {
         EngineRequests::unread_count(self, conversation)
     }
 
-    fn display_name(&self, mri: String) -> Reply<Option<String>> {
-        EngineRequests::display_name(self, mri)
+    fn person(&self, mri: String) -> Reply<Person> {
+        EngineRequests::person(self, mri)
     }
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
@@ -208,7 +209,7 @@ impl Core for StoppedCore {
         stopped()
     }
 
-    fn display_name(&self, _: String) -> Reply<Option<String>> {
+    fn person(&self, _: String) -> Reply<Person> {
         stopped()
     }
 

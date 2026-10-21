@@ -36,6 +36,9 @@
 //!   an outbox row, a conversation's rows that aren't sent and the rows earlier runs left, all read from the store on
 //!   the engine's thread, which owns it; older history from the service ([`EngineRequests::load_older`]). A row of an earlier run (or a failed or
 //!   denied one) goes out again only by the explicit [`EngineRequests::resend`].
+//! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
+//!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
+//!   profile lookup under the fence's permit); each change stored is told as [`Event::Profile`].
 //! - **Transient writes** ([`EngineRequests::transient`]: typing) go out through the outbox too, but as no row
 //!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
 //!   once and briefly ([`crate::MAX_TRANSIENT_WAIT`]), and a message post to its conversation drops it (told as
@@ -81,6 +84,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
+use crate::profiles::{Person, Profiles};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
 
 /// How the engine paces itself.
@@ -134,6 +138,9 @@ pub struct Parts<C, T> {
     pub outbox: Outbox<T>,
     pub push: Option<Push>,
     pub options: EngineOptions,
+    /// Names the binary knows already, by MRI (a lab binary: the lab accounts' from `lab.toml`): the last a person's
+    /// name comes from, after their profile and their messages ([`crate::profiles`]).
+    pub known_names: Vec<(String, String)>,
 }
 
 /// What the user asks the engine to write. Every one goes out through the outbox, under the fence.
@@ -260,6 +267,9 @@ pub enum Event {
     /// A transient that waited out its `Retry-After`, as its send from the tick went; or one that waited and was
     /// dropped because a message post to its conversation went first.
     Transient(Transient, TransientSent),
+    /// Someone's stored name or picture changed (a lookup in the background stored it): a view that shows them asks
+    /// for them again ([`EngineRequests::person`]).
+    Profile { mri: String },
     /// Something the engine did on its own failed: what, and why.
     Failed { during: &'static str, error: EngineError },
 }
@@ -341,6 +351,7 @@ enum Request {
     Transient(Transient, Responder<TransientSent>),
     Sync(Responder<CatchUpReport>),
     LoadOlder(String, Responder<Option<Synced>>),
+    Person(String, Responder<Person>),
     Query(Query),
     Shutdown,
 }
@@ -482,6 +493,14 @@ impl EngineRequests {
     pub fn display_name(&self, mri: impl Into<String>) -> Reply<Option<String>> {
         let mri = mri.into();
         self.query(|reply| Query::DisplayName(mri, reply))
+    }
+
+    /// Someone as the views show them: their name (their profile's, else their newest message's, else one the binary
+    /// knew) and their picture, from the store; when their stored profile is missing or old, a lookup starts in the
+    /// background and its change comes as [`Event::Profile`] ([`crate::profiles`]).
+    pub fn person(&self, mri: impl Into<String>) -> Reply<Person> {
+        let mri = mri.into();
+        self.ask(|reply| Request::Person(mri, reply))
     }
 
     /// The account's own stored read horizon in a conversation.
@@ -646,6 +665,7 @@ struct Core<C, T> {
     store: Store,
     outbox: Arc<Outbox<T>>,
     catch_up: CatchUp<C, T>,
+    profiles: Profiles<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -666,11 +686,13 @@ where
     fn new(parts: Parts<C, T>, events: mpsc::UnboundedSender<Event>) -> Self {
         let outbox = Arc::new(parts.outbox);
         let me = outbox.me().mri().clone();
+        let profiles = Profiles::new(Arc::clone(&parts.client), Arc::clone(outbox.fence()), parts.known_names);
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
         Self {
             store: parts.store,
             outbox,
             catch_up,
+            profiles,
             events,
             options: parts.options,
             push: parts.push,
@@ -696,6 +718,11 @@ where
                     None => push = None,
                 },
                 _ = tick.tick() => self.on_tick().await,
+                looked = self.profiles.next(), if self.profiles.busy() => {
+                    if let Some(looked) = looked {
+                        self.on_looked(looked);
+                    }
+                }
             }
             // whatever a read settled on its way (a sync after a write, a new conversation's sync, …)
             self.arrived(&[]);
@@ -802,8 +829,21 @@ where
                 self.arrived(&[]);
                 let _ = reply.send(older.map_err(EngineError::from));
             }
+            Request::Person(mri, reply) => {
+                let person = self.profiles.person(&self.store, &mri);
+                let _ = reply.send(person.map_err(EngineError::from));
+            }
             Request::Query(query) => self.answer(query),
             Request::Shutdown => {}
+        }
+    }
+
+    /// A lookup finished: what it found stored, and told when it changed the store.
+    fn on_looked(&mut self, looked: crate::profiles::Looked) {
+        match self.profiles.store(&mut self.store, looked) {
+            Ok(Some(profile)) => self.emit(Event::Profile { mri: profile.mri }),
+            Ok(None) => {}
+            Err(error) => self.failed("storing a profile", error),
         }
     }
 

@@ -36,6 +36,8 @@ tokio = { workspace = true, features = ["time"] }
 url.workspace = true
 
 [dev-dependencies]
+# a picture's bytes in the Graph fixture
+base64.workspace = true
 # the tests mint permits from a fence over a test roster and a fake membership source; the trybuild cases here see it
 # too, so the cases that need it off live in crates/fence-seal
 teams-fence = { workspace = true, features = ["test-support"] }

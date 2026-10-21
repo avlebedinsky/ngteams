@@ -416,6 +416,7 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
         outbox,
         push,
         options,
+        known_names: Vec::new(),
     })?;
     Ok(Native {
         handle,

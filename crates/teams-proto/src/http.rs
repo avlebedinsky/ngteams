@@ -12,7 +12,9 @@
 //!   `chatServiceAfd`), the registrar on an AFD host (`https://<AFD host>/registrar/…`), and Trouter's HTTP side
 //!   (`https://go.trouter.teams.microsoft.com/`), and, once the transport was given the account's middle-tier base
 //!   ([`HttpTransport::with_middle_tier`], the GTM `middleTier`: `https://<AFD host>/api/mt/part/<partition>`), that
-//!   base's `beta/users/…` endpoints. An endpoint with an empty, `.` or `..` segment is refused, and so is
+//!   base's `beta/users/…` endpoints; and Microsoft Graph's two reads (`https://graph.microsoft.com/v1.0/users/
+//!   <object id>?$select=id,displayName` and `…/users/<object id>/photos/96x96/$value`, `GET` only, M2 Task 12). An
+//!   endpoint with an empty, `.` or `..` segment is refused, and so is
 //!   any URL whose decoded path isn't exactly the base's plus the endpoint's segments. Entra and authz aren't on it
 //!   (they stay in `teams-auth`'s own clients, the reviewed exception), and neither is AMS.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
@@ -27,7 +29,8 @@
 //!   side none (its probe carried none); the middle tier the account's `api.spaces.skype.com` token with the values
 //!   every captured profile lookup carried (`x-ms-migration: True`, `x-ms-test-user: False`, `x-ms-client-type:
 //!   cdlworker`, `x-ms-client-request-type: 0`, an empty `x-ms-object-id`) and its body as
-//!   `application/json;charset=UTF-8`.
+//!   `application/json;charset=UTF-8`; Graph the account's `https://graph.microsoft.com` token and nothing else (the
+//!   probe's form).
 //! - **Retries** (the transport's part of the plan's retry table), for reads and own-state requests: a 401 makes the
 //!   session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's maximum,
 //!   [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is the
@@ -66,7 +69,7 @@ use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Service};
 use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead};
-use crate::read::Read;
+use crate::read::{GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT, Read, is_guid};
 use crate::write::{Authorized, Mutating};
 
 /// The Entra audience of the token the chat service and the registrar take.
@@ -74,6 +77,12 @@ pub const IC3_AUDIENCE: &str = "https://ic3.teams.office.com";
 
 /// The Entra audience of the token the middle tier takes.
 pub const MIDDLE_TIER_AUDIENCE: &str = SPACES_RESOURCE;
+
+/// The Entra audience of the token Microsoft Graph takes.
+pub const GRAPH_AUDIENCE: &str = "https://graph.microsoft.com";
+
+/// Microsoft Graph's host.
+pub const GRAPH_HOST: &str = "graph.microsoft.com";
 
 /// Trouter's HTTP host.
 pub const TROUTER_HOST: &str = "go.trouter.teams.microsoft.com";
@@ -163,6 +172,12 @@ pub enum Refusal {
     /// A middle-tier endpoint that isn't under `beta/users/`.
     #[error("a middle-tier endpoint that isn't under `beta/users/`")]
     MiddleTierPath,
+    /// A Graph endpoint that isn't one of the two probed reads ([`Service::Graph`]).
+    #[error("a Graph endpoint that isn't one of the probed reads")]
+    GraphPath,
+    /// A request to Graph that isn't a read: Graph is reached by `GET` only.
+    #[error("a request to Graph that isn't a read")]
+    GraphReadOnly,
     /// The URL built isn't on the host allowlist, or its path isn't exactly the base's and the endpoint's.
     #[error("the URL isn't on the transport's allowlist")]
     NotAllowed,
@@ -321,6 +336,13 @@ impl<C: Credentials> HttpTransport<C> {
         self.chat_base.as_str()
     }
 
+    /// Whether the transport was given the account's middle-tier base ([`Self::with_middle_tier`]): without one, every
+    /// middle-tier request is refused.
+    #[must_use]
+    pub fn has_middle_tier(&self) -> bool {
+        self.middle_tier.is_some()
+    }
+
     /// The URL of `endpoint` on `service`, checked against the allowlist.
     fn url_for(&self, service: Service, endpoint: &Endpoint) -> Result<Url, HttpError> {
         let refused = |refusal| HttpError::Refused(refusal);
@@ -343,6 +365,10 @@ impl<C: Credentials> HttpTransport<C> {
             }
             Service::MiddleTier if !is_middle_tier_endpoint(endpoint) => return Err(refused(Refusal::MiddleTierPath)),
             Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier))?,
+            Service::Graph if !is_graph_endpoint(endpoint) => return Err(refused(Refusal::GraphPath)),
+            Service::Graph => {
+                Url::parse(&format!("https://{GRAPH_HOST}/v1.0")).map_err(|_| refused(Refusal::NotAllowed))?
+            }
         };
         url.path_segments_mut()
             .map_err(|()| refused(Refusal::NotAllowed))?
@@ -481,6 +507,9 @@ impl<C: Credentials> HttpTransport<C> {
         let shape = read.shape();
         let wire = read.wire();
         let service = shape.service();
+        if service == Service::Graph {
+            return Err(HttpError::Refused(Refusal::GraphReadOnly));
+        }
         let url = self.url_for(service, wire.endpoint())?;
         let mut headers = plain_headers(service, true);
         headers.extend(wire.headers().iter().cloned());
@@ -545,6 +574,9 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let endpoint = request.endpoint();
         let body = request.body();
         async move {
+            if service == Service::Graph {
+                return Err(HttpError::Refused(Refusal::GraphReadOnly));
+            }
             let url = self.url_for(service, &endpoint)?;
             let outgoing = Outgoing {
                 method: method.to_reqwest(),
@@ -614,6 +646,7 @@ fn audience(service: Service) -> Option<&'static str> {
     match service {
         Service::ChatService | Service::Registrar => Some(IC3_AUDIENCE),
         Service::MiddleTier => Some(MIDDLE_TIER_AUDIENCE),
+        Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Trouter => None,
     }
 }
@@ -623,7 +656,7 @@ fn audience(service: Service) -> Option<&'static str> {
 fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
     let content_type = match service {
         Service::MiddleTier => "application/json;charset=UTF-8",
-        Service::ChatService | Service::Registrar | Service::Trouter => "application/json",
+        Service::ChatService | Service::Registrar | Service::Trouter | Service::Graph => "application/json",
     };
     let mut headers = vec![(ACCEPT.as_str().to_owned(), "application/json".to_owned())];
     if body {
@@ -649,7 +682,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
             ("x-ms-object-id", ""),
             ("x-ms-test-user", "False"),
         ],
-        Service::Trouter => &[],
+        Service::Trouter | Service::Graph => &[],
     }
 }
 
@@ -677,7 +710,45 @@ fn allowed(service: Service, url: &Url, endpoint: &Endpoint, middle_tier: Option
                 url.host_str() == Some(TROUTER_HOST) && decoded_path(url).is_some_and(|path| path == segments)
             }
             Service::MiddleTier => middle_tier.is_some_and(|base| on_middle_tier(base, url, endpoint)),
+            Service::Graph => {
+                url.host_str() == Some(GRAPH_HOST)
+                    && is_graph_endpoint(endpoint)
+                    && decoded_path(url).is_some_and(|path| {
+                        path.split_first()
+                            .is_some_and(|(first, rest)| first == "v1.0" && rest == segments)
+                    })
+                    && query_is(url, endpoint.query())
+            }
         }
+}
+
+/// Whether `url`'s query is exactly `query`, pair by pair in order.
+fn query_is(url: &Url, query: &[(String, String)]) -> bool {
+    url.query_pairs()
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .eq(query.iter().cloned())
+}
+
+/// One of Graph's two probed reads ([`Service::Graph`]): `users/<object id>` with the query `$select=id,displayName`
+/// exactly, or `users/<object id>/photos/96x96/$value` with none.
+fn is_graph_endpoint(endpoint: &Endpoint) -> bool {
+    let query = endpoint.query();
+    match endpoint.segments() {
+        [users, id] => {
+            users == "users"
+                && is_guid(id)
+                && matches!(query, [(name, value)] if name == "$select" && value == GRAPH_USER_SELECT)
+        }
+        [users, id, photos, size, value] => {
+            users == "users"
+                && is_guid(id)
+                && photos == "photos"
+                && size == GRAPH_PICTURE_SIZE
+                && value == "$value"
+                && query.is_empty()
+        }
+        _ => false,
+    }
 }
 
 /// Whether `url` is `endpoint` (under `beta/users/`) on the middle-tier `base`, and nothing else: its host and its

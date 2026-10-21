@@ -11,6 +11,9 @@
 #![cfg(test)]
 
 mod common;
+// names and pictures in the chat list and the chat view (M2 Task 12)
+#[path = "chat_view/people.rs"]
+mod people;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -264,6 +267,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         version: 1,
         sender: Some(sender.to_owned()),
         sender_name: "Someone".into(),
+        face: teams_ui::people::Face::default(),
         own: sender == LAB_A,
         header: true,
         arrival_time: at,
