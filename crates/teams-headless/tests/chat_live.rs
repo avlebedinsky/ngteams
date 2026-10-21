@@ -15,8 +15,9 @@
 //!   `docs/backlog/group-chat-member-read-completeness.md`); once the fence lets a group write out, this part changes
 //!   to "each message reaches both others".
 //! - Catch-up: b's watch stops (its socket closes), a sends [`GAP_MESSAGES`] more, b watches again, and b's store then
-//!   has every message of the run exactly once; then b reads the chat up to the run's last message (a read receipt),
-//!   so b's web client opens the chat at its newest message.
+//!   has every message of the run exactly once (each catch-up must sync every conversation); then b reads the chat up
+//!   to the run's last message: a read receipt, which moves b's stored read horizon (the consumption horizon) but not
+//!   b's web client's "last read" mark (`ab_chat::wait_for_newest` deals with that).
 //! - `fence.log` over the run: whole lines; allows only on the a–b chat (message, edit, reaction, read receipt); one
 //!   deny, the group write; only reviewed own-state requests and own Trouter frames; nothing else (no breach, no delivery response).
 //!
@@ -200,15 +201,18 @@ impl Watch {
             path: live.out.join(format!("{name}.out")),
             name: name.to_owned(),
         };
-        watch.until(READY_LIMIT, "registered and caught up", |events| {
+        let failed = watch.until(READY_LIMIT, "registered and caught up", |events| {
             let registered = events
                 .iter()
                 .any(|event| event["event"] == "registration" && event["registered"] == true);
             let caught_up = events
                 .iter()
-                .any(|event| event["event"] == "caught_up" && event["cause"] == "connected");
-            (registered && caught_up).then_some(())
+                .find(|event| event["event"] == "caught_up" && event["cause"] == "connected");
+            caught_up.filter(|_| registered).map(|event| event["failed"].clone())
         });
+        // A conversation the catch-up couldn't sync fails the run: the service's replay of recent events could
+        // still fill b's store and hide it.
+        assert_eq!(failed, 0, "{name}: its catch-up failed on some conversations");
         watch
     }
 
@@ -396,7 +400,8 @@ fn edited_text(message: &Sent) -> String {
     format!("{} edited", message.text)
 }
 
-/// a edits its first message and reacts to it; b receives both (their times from the command's start).
+/// a edits its first message and reacts to it; b receives both (their times from the write's start, after the
+/// command's catch-up).
 fn edit_and_react(live: &Live, watch: &mut Watch, first: &Sent) -> Value {
     let text = edited_text(first);
     let edit = live.run("a-edit", &["a", "edit", "b", &first.id, &text]);
@@ -485,9 +490,9 @@ fn every_message_once(live: &Live, texts: &[String]) {
     }
 }
 
-/// b reads the a–b chat up to `last` (a read receipt): the run leaves b's chat read, so b's web client opens it at its
-/// newest message (`proto-lab run ab-chat` looks for its message there), not at a "last read" mark dozens of messages
-/// up.
+/// b reads the a–b chat up to `last`: the live check of the read-receipt write, which moves b's stored read horizon
+/// (the consumption horizon). It doesn't move b's web client's "last read" mark, so that client still opens the chat
+/// there (`proto-lab run ab-chat` clicks "Jump to newest", `ab_chat::wait_for_newest`).
 fn b_reads_up_to(live: &Live, last: &Sent) {
     let read = live.run("b-read", &["b", "read", "a", &last.id]);
     assert!(

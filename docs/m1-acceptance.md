@@ -11,7 +11,7 @@ output was checked for JWTs, bearer headers and skypetokens. Load average 3–20
 | # | criterion | verdict |
 |---|---|---|
 | 1 | native a → b, N = 50, send → receive p95 under 2 s | **met** (run 6: p50 1107 ms, p95 1370 ms, max 1499 ms); four runs before failed on two Trouter bugs, both fixed (below) |
-| 2 | an edit and a reaction reach b | **met** (1115 ms and 1168 ms from the command's start) |
+| 2 | an edit and a reaction reach b | **met** (1115 ms and 1168 ms from the write's start, after the command's catch-up) |
 | 2b | a 3-person group chat of a, b and c | **being fixed** (the user's decision of 2026-10-21: M1 doesn't exit on 1:1 chats only; the group parts rerun after the fence change). Today the fence denies a group write, as it must; nothing was sent |
 | 3 | catch-up: b's socket closed, a sends, b reconnects with every message exactly once | **met** |
 | 4 | `fence.log`: allows only on the lab chats, no deny of a mapped write, own-state and frames only from the reviewed lists, no delivery response, lines whole | **met** (one deny: the group write of 2b) |
@@ -56,8 +56,9 @@ same profile (p95 1305–1390).
 
 ## 2. Edit and reaction: met; the group chat: being fixed
 
-- Edit: b's watch showed the `edit` change with the new text 1115 ms after a's `edit` started; the reaction 1168 ms
-  after a's `react` started (run 5: 1073 and 938).
+- Edit: b's watch showed the `edit` change with the new text 1115 ms after the write's start in a's `edit` (after the
+  command's catch-up, as for the send start in §1); the reaction 1168 ms after the write's start in a's `react` (run
+  5: 1073 and 938).
 - **Group chat: being fixed.** Task 8 found no evidence that a group chat's member read is complete, so the fence
   keeps group chats `Partial(Unsupported)` (`docs/backlog/group-chat-member-read-completeness.md`). The user decided
   on 2026-10-21 that M1 doesn't exit on 1:1 chats only: group chats get fixed as separate work after this task, the
