@@ -8,7 +8,8 @@ served then. [What the captures showed](#what-the-captures-showed) lists what th
 the sections above it are already corrected. M1 Task 7's `proto-lab run ab-chat-full` (the same day) exercised the
 edit, the delete, the reactions and a quoted reply, and corrected the edit row ([chat.md](chat.md) has the shapes); on
 2026-10-21, with the mention picker's profile lookups let through ([Reads by POST](#reads-by-post)), a mention.
-M1 Task 8 (2026-10-20) added a group chat: [A group chat's reads](#a-group-chats-reads).
+M1 Task 8 (2026-10-20) added a group chat: [A group chat's reads](#a-group-chats-reads); since the user's decision of
+2026-10-21 the fence admits that one chat: [The lab's group chat](#the-labs-group-chat).
 
 The code: the mapping is `Classifier::mapped` (`crates/proto-lab/src/classify.rs`), the member read is
 `LiveMembershipSource` (`crates/teams-fence/src/membership.rs`). Both are tested against synthetic fixtures in the
@@ -78,9 +79,10 @@ no member count. `GET v1/threads/<id>/consumptionhorizons` gives the members' re
 chat, `GET v1/users/ME/conversations/<id>`, answers 404 until the chat exists, and the client takes a 404 to mean the
 chat is one the user isn't in.
 
-The fence's live read (`LiveMembershipSource`) makes exactly one request, `GET v1/threads/<id>?view=msnp24Equivalent`
-with the token the page used (bearer or skypetoken), from Rust with its own HTTPS client (no proxy, no redirects), on
-the host and region of a chat service request the armed lab page itself sent. Live, with the bearer token, it read the
+The fence's live read of a 1:1 chat (`LiveMembershipSource`) makes exactly one request,
+`GET v1/threads/<id>?view=msnp24Equivalent` with the token the page used (bearer or skypetoken), from Rust with its own
+HTTPS client (no proxy, no redirects), on the host and region of a chat service request the armed lab page itself
+sent. Live, with the bearer token, it read the
 a–b chat as complete (the message and typing posts to it were allowed after the read). It accepts the answer as
 complete only when:
 
@@ -90,14 +92,15 @@ complete only when:
 - any member count (`memberCount`, `membercount`, `membersCount`, top level or under `properties`) equals the
   number of listed members;
 - `id` is exactly the requested thread, and every member has a string `id`;
-- **and, since only 1:1 chats are supported,** the members are exactly the two `8:orgid:<oid>` the chat's id names.
+- **and, for a 1:1 chat,** the members are exactly the two `8:orgid:<oid>` the chat's id names.
 
 That last check is what makes the answer evidence of the *full* membership rather than a view filtered by the
 caller's permissions: a 1:1 chat's membership is fixed by its id, and the read only confirms the thread exists with
-exactly those members. Group and meeting chats, channels, teams and calls are `Partial(Unsupported)` and so denied,
-answered without a read (`LiveMembershipSource::reads_in_full` tells a caller up front): the bundle shows paging
-(`thread_members`) and a separate filtered view (`filtered_thread`), and for group chats a live read didn't settle it
-either (below). Pagination and truncation are always `Partial`.
+exactly those members. Meeting chats, channels, teams and calls are `Partial(Unsupported)` and so denied, answered
+without a read (`LiveMembershipSource::reads_in_full` tells a caller up front): the bundle shows paging
+(`thread_members`) and a separate filtered view (`filtered_thread`). Group chats are the same, with one exception the
+user accepted for the lab's own chat: [The lab's group chat](#the-labs-group-chat). Pagination and truncation are
+always `Partial`.
 
 ### A group chat's reads
 
@@ -128,8 +131,55 @@ same distinct members, `totalMemberCount` equal to that list, equal `eTag`s, `th
 It shows the two endpoints agree, not that what they agree on is the whole membership: both exposing, and the count
 counting, one caller-visible subset fits the same answers, and a 3-member roster that every viewer sees alike can't
 tell the two apart. Nor was any paging form seen, and the `eTag`s' meaning across the endpoints is unknown (the list's
-`rosterVersion` is 0). What would settle it, and the open decision for the user (whether M1 exits on 1:1 chats), are in
-`docs/backlog/group-chat-member-read-completeness.md`.
+`rosterVersion` is 0). What would settle it is in `docs/backlog/group-chat-member-read-completeness.md`.
+
+### The lab's group chat
+
+**The user's decision (2026-10-21):** "No, we need to fix group chats. Loosen the fence if needed." The evidence above
+didn't change, so the fence doesn't claim a group chat's reads are complete in general. It accepts, for one chat only,
+that two fresh reads agreeing on exactly the lab's accounts show every participant. Designed with Codex (transcript
+`~/.local/state/plan-exec-revmux/20261020-native-teams-m1-headless-chat-core/discussions/group-chats-fence/`).
+
+`LiveMembershipSource` built with the lab's policy (`LiveMembershipSource::for_fence(&fence)`: a, b and c's MRIs
+from the `lab.toml` the fence's roster came from, three distinct ones, case folded, and the lab's `chats.toml`) reads a
+`19:<id>@thread.v2` chat as complete only when all of this holds on that check, the whole of it within one 10 s
+deadline (the record, the credential, a renewal, both reads and their bodies):
+
+1. `chats.toml` records exactly that id as `abc`. Any other group chat is `Partial(UnrecordedGroupChat)`, an
+   unreadable or invalid file `Partial(ChatsUnreadable)`; neither is read. A natively created group chat isn't
+   recorded, so it is denied too. Without the policy (`LiveMembershipSource::new`, a lab without three MRIs) every
+   group chat is `Partial(Unsupported)`.
+2. Both reads answer 2xx with one credential: `GET v1/threads/<id>?view=msnp24Equivalent`, then
+   `GET v1/threads/<id>/members?view=msnp24Equivalent&pageSize=100`, the thread read with the token alone (as the
+   1:1 read), the member list with `X-MS-Migration: True` and `BehaviorOverride: redirectAs404` too (the form
+   `proto-lab probe thread` read it in live). A 401 on either asks the credential source once for a renewed token,
+   and both are read again with it.
+3. No key that looks like paging (`next…`, `…continuation…`, `skiptoken`, `syncState`) at any depth of either body:
+   else `Paginated`.
+4. The thread read passes the 1:1 read's structural checks (its `id`, members with string ids, any member count equal
+   to them) and is a `Thread` of `threadType` `chat` with a non-empty `eTag`, an integer `rosterVersion` and a
+   `creator`.
+5. The member list has `isDeleted` `false`, a non-empty `eTag`, `rosterVersion` exactly `0` (the one relationship seen,
+   not known to mean anything) and `totalMemberCount` an integer equal to the members it lists, as any other member
+   count must be (else `Truncated`).
+6. Every member entry in both says `hidden` `false`, and neither lists anyone twice, case folded.
+7. Both list the same members with the same `eTag` (else `Inconsistent`).
+8. Those members are exactly a, b and c, and the chat's `creator` is a (else `UnexpectedRoster`).
+
+Any other shape is malformed. The fence then judges current and added participants against the roster as for every
+chat: a mention of an outsider is denied, a mention of an approved service passes as it does in the a–b chat. A member
+change that adds anyone passes or fails on its own; after it the chat is no longer exactly a, b and c, and every later
+write is denied. `reads_in_full` says yes only while the chat is the recorded one; it is eligibility, and every read
+checks everything again.
+
+**What stays at risk, which the user accepted.** For this one recorded lab chat, the fence assumes that the two
+matching fresh reads show every participant. That stays unproven: both endpoints and their count could leave out a
+participant the service doesn't show to members, and equal `eTag`s don't show otherwise. The chat allows member
+changes (`AddMember`), so having created it with a, b and c only doesn't keep it that way: an account of the lab
+signed in outside the fence, or a tenant admin, could add someone, and the next read would deny only what such a
+read shows. The members can also change between the read and the write. So a write the fence allows could, in those
+cases, be seen outside the lab. The recorded id limits where this assumption is made; it is not evidence of
+completeness.
 
 ## Writes
 
@@ -311,7 +361,8 @@ token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
   every write on it, a message's and an edit's mentioned MRIs added, a new chat `New` with its members. Its live
   member read takes the client's own credential from the native transport on every read (`CredentialSource`: the
   account's `ic3` token as its session has it now, and the region's chat base, as `ChatCredential::bearer`); with no
-  token the read is `Partial(NoCredential)` and the write denied. Group chats stay denied as above.
+  token the read is `Partial(NoCredential)` and the write denied. Its source is `LiveMembershipSource::for_fence`, so
+  it writes to the lab's recorded group chat under the rule above, and to no other group chat.
 - `ab-chat` opens the chat by b's MRI (`l/chat/0/0?users=<mri>`): by UPN the client first resolves the user with the
   middle tier's `fetchShortProfile` by address (`isMailAddress=true`), a `POST` the fence denies, and never opens the
   chat; by the chat's id a page that
@@ -324,9 +375,10 @@ token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
   it, even when the run fails after that: the chat exists by then, and a run without its id would create another one.
   The marker begins with `ab-chat`'s probe marker, so `ab-chat` and
   `abc-chat` force-deny the first message, as expected, when the web client sends it again; any other scenario on a's
-  profile sees the fence deny it as a write to a group chat (`Partial(Unsupported)`), unexpected there. Once the id is recorded, a run would
-  message the chat (a's probe, then a real message that b and c must show), but it refuses to start while
-  `LiveMembershipSource::reads_in_full` says no for a group chat: a denied message would be resent on every later load.
+  profile sees the fence deny it, as a write to a group chat the lab hadn't recorded then, or as the probe it is.
+  Once the id is recorded, a run messages the chat (a's probe, then a real message that b and c must show). It
+  refuses to start, before any browser opens, while the lab's source (`for_fence`) says no in `reads_in_full` (not
+  the recorded chat, or no three MRIs): a denied message would be resent on every later load.
 - `ab-chat`'s live enforcement test forces a deny (`ForcedDeny`) on every write carrying the probe marker, from before
   the page loads to the end of the run (so an earlier run's unsent probe, sent again on load, is denied too). This
   run's probe carries a run-unique nonce and has a labelled forced deny of its own ahead of the marker's, so the
@@ -351,8 +403,9 @@ captures stay outside the repository and no fixture was exported from them.
       (`threads?threadIds=`), whose thread object has `id`, both members in `members` and no paging or count field.
 - [x] A group chat's read and `thread_members` (M1 Task 8, [A group chat's reads](#a-group-chats-reads)): the thread
       read and the member list agree and the list carries `totalMemberCount`; no paging form was seen and the filtered
-      view is refused to members. Not enough to call the read complete (decided with Codex): group chats stay
-      `Partial(Unsupported)` (`docs/backlog/group-chat-member-read-completeness.md`).
+      view is refused to members. Not enough to call the read complete (decided with Codex), so group chats stayed
+      `Partial(Unsupported)`; since 2026-10-21 the lab's recorded chat is admitted by the user's decision
+      ([The lab's group chat](#the-labs-group-chat)), not by new evidence.
 - [x] Writes as sent: chat create, message (`RichText/Html`), typing (`Control/Typing`) and read receipt
       (`consumptionhorizon`) match the table and the mapping (see [Writes](#writes)).
 - [x] Edit, delete, reaction (added and taken back) and quoted reply, exercised by `ab-chat-full` (2026-10-20, M1

@@ -14,6 +14,13 @@ These hold for every agent and every change, with no exceptions.
   messages, edits, deletes, reactions, typing, read receipts, calls and answering a call, invites, meetings, member
   changes, chat creation, channel posts, bot replies. It is allowed only when every participant of its target, fetched
   fresh, is a lab account or an approved service participant. Anything unknown, partial or paginated is denied.
+- **One group chat counts as read in full: the lab's own.** The user set this on 2026-10-21. It is the a–b–c chat
+  `chats.toml` records as `abc`, looked up when the fence decides. Its thread read and its member list, both read
+  fresh within one 10 s budget, must list exactly a, b and c (`lab.toml`'s MRIs), the same in both, made by a, with
+  `totalMemberCount` 3, equal `eTag`s, no paging key anywhere, and the rest of the shape the service gave live
+  (`docs/protocol/fence-targets.md`). This is an accepted assumption, not evidence: a member the service hides from
+  both reads would still get the write. Every other group chat, a natively created one included, stays partial and
+  is never read. Never widen it to another chat, another roster or another shape without new evidence.
 - **A denied request may be allowed only if nothing it does or names leaves the lab.** The user set this on
   2026-10-21. Nobody outside the 3 lab accounts can notice it: it changes nothing (a read sent by `POST`), or only
   lab-account state no one outside the lab can see (its session, its tokens, its own settings). Presence, a status
@@ -87,8 +94,10 @@ What the code does and why. A change that undoes one of these needs a new reason
 ### The sealed fence API (`crates/teams-fence`, `crates/fence-seal`)
 
 - A lab binary's fence is `Fence::open_lab()` (roster from `lab.toml`, the lab's `fence.log`); its membership source is
-  `FailClosed` (every fetched scope `Partial(NoSource)`) or `LiveMembershipSource` (1:1 chats only, complete only when
-  the members are exactly the two the chat id names). `MembershipSource` and `Mutating` are sealed: a new source lives
+  `FailClosed` (every fetched scope `Partial(NoSource)`) or `LiveMembershipSource::for_fence(&fence)` (1:1 chats,
+  complete only when the members are exactly the two the chat id names; and the lab's recorded group chat under the
+  rule above, from the same `lab.toml` snapshot as the fence's roster; `LiveMembershipSource::new` admits no group
+  chat). `MembershipSource` and `Mutating` are sealed: a new source lives
   in `teams-fence`, a new write type in `teams-proto`, and `fence-seal`'s trybuild cases prove nothing else can mint a
   permit. A binary built with `test-support` (`cargo test`, `--all-targets`, `--all-features` unify it in) refuses to
   run, so live runs use `cargo build -p <crate>`.

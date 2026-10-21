@@ -535,6 +535,18 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
       --all-targets -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p teams-fence -p fence-seal -p proto-lab -p
       fixture-guard`, all pinned to 4 cores)
 
+📝 2026-10-21, after the user's decision ("No, we need to fix group chats. Loosen the fence if needed."; side work on
+branch `m1-group-chats`): the evidence above stands, and the fence now admits one group chat by an accepted assumption
+instead: the chat `chats.toml` records as `abc`, when its thread read and member list, read fresh within one 10 s
+deadline, agree on exactly a, b and c, made by a, with `totalMemberCount` 3, equal `eTag`s, no paging key anywhere and
+the rest of the live shape (`LiveMembershipSource::for_fence`, `teams_fence::parse_group`; `fence-targets.md`, "The
+lab's group chat", with the residual risk the user accepted). Every other group chat, a natively created one
+included, stays denied without a read. Designed with Codex (transcript
+`~/.local/state/plan-exec-revmux/20261020-native-teams-m1-headless-chat-core/discussions/group-chats-fence/`).
+`abc-chat`'s messaging run now starts when the lab's source reads the recorded chat in full; its live run, and
+`teams-headless` a→abc with b and c watching, are left to a follow-up (no live runs in that step). What stays owed is in
+`docs/backlog/group-chat-member-read-completeness.md`.
+
 ### Task 9: `teams-mock`: the chat service from synthetic fixtures
 **Files:**
 - Create: `crates/teams-mock/{Cargo.toml,src/lib.rs,src/chatsvc.rs}`, `crates/teams-mock/tests/mock.rs`
