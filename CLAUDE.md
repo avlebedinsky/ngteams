@@ -48,17 +48,25 @@ These hold for every agent and every change, with no exceptions.
   every host and target, the WebSocket guard, the service worker neutralized. Until the write-target mapping exists
   (M0 Task 11) the fence runs fail-closed: every mutating request is denied except the seeded own-state list.
 - **The native client sends only what its sealed policy allows** (M1 Tasks 5, 15), as the browser fence does for the
-  browser. A request is a read (`GET`, no body), an entry of `teams-proto`'s sealed `OwnState` list, or a sealed
-  `Mutating` write sent only as `Authorized<_>` with a `WritePermit` from `Fence::check` for its exact target. A
-  Trouter frame is an entry of the sealed `OwnFrame` list, sent only through `FrameSink`. Each own-state request and
-  each frame is logged to `fence.log` before it is sent, and one that can't be logged isn't sent; a write is logged by
-  `Fence::check`. Nothing else can go out: no raw request or frame, no answer to a delivery, no retry the transport
-  didn't decide (the HTTP client's own retries are off). The transport reaches only its fixed host allowlist,
-  `https` only, no proxy, no redirects. Both lists grow only by a reviewed entry in its exact captured shape, under the
-  allowance rules above; sign-in and token renewal stay in `teams-auth`'s own clients and touch only the account's own
-  credentials. A mock origin (HTTP or socket) exists only under a `test-support` feature, which a lab binary refuses to
-  run with. No write ever comes from a `cargo test` process: a live test spawns a normally built lab binary (built
-  with `--target-dir target/lab`) and reads its output and `fence.log`.
+  browser. A request is a read (`GET`, no body), an entry of `teams-proto`'s sealed `OwnState` list, an entry of its
+  sealed `PostRead` list (the next rule), or a sealed `Mutating` write sent only as `Authorized<_>` with a
+  `WritePermit` from `Fence::check` for its exact target. A Trouter frame is an entry of the sealed `OwnFrame` list,
+  sent only through `FrameSink`. Each own-state request and each frame is logged to `fence.log` before it is sent, and
+  one that can't be logged isn't sent; a write is logged by `Fence::check`. Nothing else can go out: no raw request or
+  frame, no answer to a delivery, no retry the transport didn't decide (the HTTP client's own retries are off). The
+  transport reaches only its fixed host allowlist, `https` only, no proxy, no redirects. The own-state and frame lists
+  grow only by a reviewed entry in its exact captured shape, under the allowance rules above; sign-in and token
+  renewal stay in `teams-auth`'s own clients and touch only the account's own credentials. A mock origin (HTTP or
+  socket) exists only under a `test-support` feature, which a lab binary refuses to run with. No write ever comes from
+  a `cargo test` process: a live test spawns a normally built lab binary (built with `--target-dir target/lab`) and
+  reads its output and `fence.log`.
+- **The native client's fourth list, `teams-proto`'s sealed `PostRead`, is for requests that change nothing.** The
+  user set this on 2026-10-21. Each entry is added only after a review in its exact captured shape (the host, the
+  method, the path, every query parameter and its value, the headers that change what it does, the body schema).
+  Every MRI it names is checked when the fence decides (`Fence::lab_accounts_only` in a lab build), and any other id
+  makes it `Unknown`. Its captured answer holds only the accounts asked for. It is logged to `fence.log` before it is
+  sent, and not sent if it can't be logged. It hands no token to a third party, and it is never a search or a
+  suggestion list.
 - **Captures and tokens never enter the repo, not even sanitized.** Captures live under
   `~/.local/share/teams-lab/captures/`. `proto-lab export` only writes a sanitized local reference copy under
   `~/.local/share/teams-lab/reference/` (it refuses any destination inside a git work tree). Committed fixtures are
