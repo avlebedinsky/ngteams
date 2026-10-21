@@ -372,6 +372,15 @@ pub fn probe_rules(probe: Option<&str>) -> Result<Vec<ForcedDeny>, regex::Error>
 /// When the compose box isn't there, the page refuses the input, or the box still holds `text` after the last try.
 pub async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), ScenarioError> {
     driver.type_into(&format!("{who} types"), COMPOSE, text).await?;
+    press_until_sent(driver, who, text).await
+}
+
+/// Sends what the compose box holds with Enter, and waits until it no longer holds `text` (a part of what it holds):
+/// [`send`]'s presses, for a message typed in parts (`chat-shapes`' lines).
+///
+/// # Errors
+/// As [`send`].
+pub(crate) async fn press_until_sent(driver: &mut Driver, who: &str, text: &str) -> Result<(), ScenarioError> {
     let sent = format!(
         "!(document.querySelector({})?.innerText ?? '').includes({})",
         js_string(COMPOSE_CSS),

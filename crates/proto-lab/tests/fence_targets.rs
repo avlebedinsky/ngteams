@@ -125,46 +125,85 @@ fn the_mapped_classifier_maps_each_chat_write_to_its_target() -> TestResult {
 
 /// The writes of the capture-shaped fixtures (`docs/protocol/chat.md`): each fixture's requests, by where they sit in
 /// it, with the write they must map to on the lab chat.
-const SHAPED: [(&str, &str, WriteKind); 6] = [
+const SHAPED: &[(&str, &str, WriteKind)] = &[
     ("edit.json", "/request", WriteKind::Edit),
     ("delete.json", "/request", WriteKind::Delete),
     ("reply.json", "/request", WriteKind::Message),
     ("mention.json", "/request", WriteKind::Message),
     ("reaction.json", "/add/request", WriteKind::Reaction),
     ("reaction.json", "/remove/request", WriteKind::Reaction),
+    // chat-shapes (M2 Task 10): every quick reaction set and taken back, a message of lines with a link
+    ("reactions.json", "/set/0", WriteKind::Reaction),
+    ("reactions.json", "/set/1", WriteKind::Reaction),
+    ("reactions.json", "/set/2", WriteKind::Reaction),
+    ("reactions.json", "/set/3", WriteKind::Reaction),
+    ("reactions.json", "/taken_back/0", WriteKind::Reaction),
+    ("reactions.json", "/taken_back/1", WriteKind::Reaction),
+    ("reactions.json", "/taken_back/2", WriteKind::Reaction),
+    ("reactions.json", "/taken_back/3", WriteKind::Reaction),
+    ("lines.json", "/request", WriteKind::Message),
 ];
+
+/// The made-up id `<group>` stands for in the fixtures: the lab's group chat is `19:<group>@thread.v2`.
+const GROUP: &str = "0123456789abcdef0123456789abcdef";
+
+/// The request at `at` in the chat service fixture `name`, as the classifier takes it: method, URL and body.
+fn shaped_request(name: &str, at: &str) -> TestResult<(String, String, Option<Vec<u8>>, Value)> {
+    let path = format!("{}/../../tests/fixtures/chatsvc/{name}", env!("CARGO_MANIFEST_DIR"));
+    let text = fill(&std::fs::read_to_string(path)?).replace("<group>", GROUP);
+    let fixture: Value = serde_json::from_str(&text)?;
+    let request = fixture.pointer(at).ok_or("no request")?;
+    let mut url = format!(
+        "https://teams.microsoft.com{}",
+        request["path"].as_str().ok_or("no path")?
+    );
+    if let Some(query) = request["query"].as_str() {
+        url = format!("{url}?{query}");
+    }
+    let body = match &request["body"] {
+        Value::Null => None,
+        body => Some(serde_json::to_vec(body)?),
+    };
+    let method = request["method"].as_str().ok_or("no method")?.to_owned();
+    Ok((method, url, body, request["body"].clone()))
+}
 
 #[test]
 fn the_capture_shaped_fixtures_map_to_their_writes_on_the_lab_chat() -> TestResult {
     let classifier = Classifier::mapped();
     for (name, at, kind) in SHAPED {
-        let path = format!("{}/../../tests/fixtures/chatsvc/{name}", env!("CARGO_MANIFEST_DIR"));
-        let fixture: Value = serde_json::from_str(&fill(&std::fs::read_to_string(path)?))?;
-        let request = fixture.pointer(at).ok_or("no request")?;
-        let mut url = format!(
-            "https://teams.microsoft.com{}",
-            request["path"].as_str().ok_or("no path")?
-        );
-        if let Some(query) = request["query"].as_str() {
-            url = format!("{url}?{query}");
-        }
-        let body = match &request["body"] {
-            Value::Null => None,
-            body => Some(serde_json::to_vec(body)?),
-        };
-        let method = request["method"].as_str().ok_or("no method")?;
+        let (method, url, body, json_body) = shaped_request(name, at)?;
         // only the mention fixture mentions anyone: the chat's other member
-        let mentioned = request["body"]["properties"]["mentions"]
+        let mentioned = json_body["properties"]["mentions"]
             .as_str()
             .is_some_and(|mentions| mentions != "[]");
         let target =
-            Target::new(kind, Scope::Conversation { id: one_to_one() }).with_added(mentioned.then(|| lab_mri(GUID_B)));
+            Target::new(*kind, Scope::Conversation { id: one_to_one() }).with_added(mentioned.then(|| lab_mri(GUID_B)));
         assert_eq!(
-            classifier.classify(method, &url, body.as_deref()),
+            classifier.classify(&method, &url, body.as_deref()),
             Classification::Write(target),
             "{name} {at}"
         );
     }
+    Ok(())
+}
+
+/// A mention of b in the lab's group chat (`chat-shapes`, M2 Task 10) is a message to the group chat that adds b: the
+/// fence judges b as it judges the chat's members.
+#[test]
+fn a_mention_in_the_group_chat_maps_to_a_message_there_adding_the_mentioned() -> TestResult {
+    let (method, url, body, _) = shaped_request("mention-group.json", "/request")?;
+    let target = Target::new(
+        WriteKind::Message,
+        Scope::Conversation {
+            id: format!("19:{GROUP}@thread.v2"),
+        },
+    )
+    .with_added([lab_mri(GUID_B)]);
+    assert_eq!(
+        Classifier::mapped().classify(&method, &url, body.as_deref()),
+        Classification::Write(target)
+    );
     Ok(())
 }
 
