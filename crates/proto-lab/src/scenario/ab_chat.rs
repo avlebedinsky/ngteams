@@ -182,7 +182,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let mut report = ScenarioReport::new(ScenarioName::AbChat);
     let nonce = nonce();
     // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
-    if let Err(error) = deny_probes(&a, &probe_text(&nonce)) {
+    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
         report.failures.push(error.to_string());
     }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
@@ -294,27 +294,43 @@ pub async fn not_received(drive_b: &mut Driver, probe: &str) -> Result<(), Scena
     Ok(())
 }
 
-/// Forces a deny ([`ForcedDeny`]) on every `POST` or `PUT` of `session` whose body holds [`PROBE_MARKER`], whatever
-/// its URL: this run's probe (a client that put the first message into the chat's creation is stopped too), and any
-/// earlier run's probe the client still holds as unsent and sends again once it loads. This run's `probe` gets its
-/// rule first, labelled [`THIS_RUN_PROBE`]: a deny names the first rule that matched it, so only this run's probe is
-/// denied under that label, and any other probe under [`EARLIER_RUN_PROBE`].
+/// Forces a deny on every `POST` or `PUT` of `session` whose body holds [`PROBE_MARKER`], whatever its URL
+/// ([`probe_rules`] of `probe`), from now to the end of the run.
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-pub(crate) fn deny_probes(session: &LabSession, probe: &str) -> Result<(), ScenarioError> {
-    let any_url = |method| ForcedDeny::new(method, ".").map_err(|error| setup(error.to_string()));
-    for method in ["POST", "PUT"] {
-        session.force_deny(any_url(method)?.with_body_containing(probe).labelled(THIS_RUN_PROBE));
-    }
-    for method in ["POST", "PUT"] {
-        session.force_deny(
-            any_url(method)?
-                .with_body_containing(PROBE_MARKER)
-                .labelled(EARLIER_RUN_PROBE),
-        );
+pub(crate) fn deny_probes(session: &LabSession, probe: Option<&str>) -> Result<(), ScenarioError> {
+    for rule in probe_rules(probe).map_err(|error| setup(error.to_string()))? {
+        session.force_deny(rule);
     }
     Ok(())
+}
+
+/// The forced denies ([`ForcedDeny`]) of every `POST` or `PUT` whose body holds [`PROBE_MARKER`], whatever its URL:
+/// this run's `probe`, if the run has one (a client that put the first message into the chat's creation is stopped
+/// too), and any earlier run's probe the client still holds as unsent and sends again once it loads, `abc-chat`'s
+/// first message among them ([`super::abc_chat::FIRST_MESSAGE_MARKER`] begins with the marker). This run's `probe`
+/// gets its rules first, labelled [`THIS_RUN_PROBE`]: a deny names the first rule that matched it, so only this run's
+/// probe is denied under that label, and any other probe under [`EARLIER_RUN_PROBE`].
+///
+/// # Errors
+/// Never: the patterns are fixed.
+pub fn probe_rules(probe: Option<&str>) -> Result<Vec<ForcedDeny>, regex::Error> {
+    let markers = probe
+        .map(|probe| (probe, THIS_RUN_PROBE))
+        .into_iter()
+        .chain([(PROBE_MARKER, EARLIER_RUN_PROBE)]);
+    let mut rules = Vec::new();
+    for (marker, label) in markers {
+        for method in ["POST", "PUT"] {
+            rules.push(
+                ForcedDeny::new(method, ".")?
+                    .with_body_containing(marker)
+                    .labelled(label),
+            );
+        }
+    }
+    Ok(rules)
 }
 
 /// Types `text` into the compose box ([`COMPOSE`]) and sends it with Enter, and waits until the compose box no longer

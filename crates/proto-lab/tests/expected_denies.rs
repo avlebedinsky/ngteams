@@ -329,8 +329,10 @@ fn only_ab_chats_own_probes_are_expected_among_forced_denies() -> TestResult {
         )
     };
     assert!(!policy.expects(&labelled));
-    // echo-call forces nothing: no probe of ab-chat's is expected there
+    // echo-call has no probe of its own: only an earlier run's, sent again on load, is expected there
     assert!(!echo_call::policy().expects(&forced(Some(ab_chat::THIS_RUN_PROBE))));
+    assert!(echo_call::policy().expects(&forced(Some(ab_chat::EARLIER_RUN_PROBE))));
+    assert!(!echo_call::policy().expects(&forced(None)));
     Ok(())
 }
 

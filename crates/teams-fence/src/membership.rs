@@ -69,6 +69,15 @@ const REFUSED: PartialReason = PartialReason::FetchFailed(FetchFailure::Status(4
 /// The page size the group chat's member list is read with, as `proto-lab probe thread` read it live.
 const MEMBERS_PAGE_SIZE: &str = "100";
 
+/// Which of a thread's reads a request makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadRead {
+    /// The thread itself (`v1/threads/<id>`), with its members.
+    Thread,
+    /// The thread's member list (`v1/threads/<id>/members`).
+    Members,
+}
+
 /// The lab's group chat policy (see the module docs): the MRIs of a, b and c, and where the lab records its a–b–c
 /// chat. From one `lab.toml`, the one the fence's roster comes from ([`Fence`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -485,19 +494,18 @@ impl LiveMembershipSource {
         }
     }
 
-    /// The URL of a thread's read (`members` false) or of its member list (`members` true): `origin` (the base's, or
-    /// the mock's), the base's path to `v1` (`prefix`), then `threads/<id>` (and `members`), the id one encoded
-    /// segment, and the fixed query.
-    fn thread_url(origin: &str, prefix: Vec<&str>, id: &str, members: bool) -> Option<Url> {
+    /// The URL of a thread's `read`: `origin` (the base's, or the mock's), the base's path to `v1` (`prefix`), then
+    /// `threads/<id>` (and `members` for [`ThreadRead::Members`]), the id one encoded segment, and the fixed query.
+    fn thread_url(origin: &str, prefix: Vec<&str>, id: &str, read: ThreadRead) -> Option<Url> {
         let mut url = Url::parse(origin).ok()?;
         {
             let mut segments = url.path_segments_mut().ok()?;
             segments.clear().extend(prefix).extend(["v1", "threads", id]);
-            if members {
+            if read == ThreadRead::Members {
                 segments.push("members");
             }
         }
-        if members {
+        if read == ThreadRead::Members {
             url.query_pairs_mut()
                 .append_pair("view", "msnp24Equivalent")
                 .append_pair("pageSize", MEMBERS_PAGE_SIZE);
@@ -512,9 +520,9 @@ impl LiveMembershipSource {
         let Some(credential) = Self::credential(&current).await else {
             return Membership::Partial(PartialReason::NoCredential);
         };
-        let body = match self.read_thread(id, &credential, false).await {
+        let body = match self.read_thread(id, &credential, ThreadRead::Thread).await {
             Err(REFUSED) => match Self::renewed(&current, &credential).await {
-                Some(renewed) => self.read_thread(id, &renewed, false).await,
+                Some(renewed) => self.read_thread(id, &renewed, ThreadRead::Thread).await,
                 None => Err(REFUSED),
             },
             read => read,
@@ -579,24 +587,24 @@ impl LiveMembershipSource {
     /// A group chat's thread read, then its member list, both with `credential`; a refusal of either is [`REFUSED`],
     /// so that both are read again with a renewed credential.
     async fn read_pair(&self, id: &str, credential: &ChatCredential) -> Result<(Vec<u8>, Vec<u8>), PartialReason> {
-        let thread = self.read_thread(id, credential, false).await?;
-        let members = self.read_thread(id, credential, true).await?;
+        let thread = self.read_thread(id, credential, ThreadRead::Thread).await?;
+        let members = self.read_thread(id, credential, ThreadRead::Members).await?;
         Ok((thread, members))
     }
 
-    /// The thread `id`'s read, or its member list (`members`), with `credential`.
+    /// The thread `id`'s `read`, with `credential`.
     async fn read_thread(
         &self,
         id: &str,
         credential: &ChatCredential,
-        members: bool,
+        read: ThreadRead,
     ) -> Result<Vec<u8>, PartialReason> {
         let (origin, prefix) = credential.base.origin_and_prefix();
         #[cfg(feature = "test-support")]
         let origin = self.mock_origin.clone().unwrap_or(origin);
-        let url = Self::thread_url(&origin, prefix, id, members)
-            .ok_or(PartialReason::FetchFailed(FetchFailure::Malformed))?;
-        self.fetch(url, credential, members).await
+        let url =
+            Self::thread_url(&origin, prefix, id, read).ok_or(PartialReason::FetchFailed(FetchFailure::Malformed))?;
+        self.fetch(url, credential, read).await
     }
 
     /// The renewed credential `current`'s source gives after the service refused `rejected`; `None` when `current` is
@@ -610,16 +618,16 @@ impl LiveMembershipSource {
 
     /// One GET with the credential's token, its body read up to [`MAX_BODY`]; the client's timeout covers the whole
     /// read. The thread read goes with the token alone, the form the fence's read was answered in live; the member
-    /// list (`members`) with the web client's `X-MS-Migration: True` and `BehaviorOverride: redirectAs404` beside it,
+    /// list ([`ThreadRead::Members`]) with the web client's `X-MS-Migration: True` and `BehaviorOverride: redirectAs404` beside it,
     /// the only form it was read in live (`proto-lab probe thread`, M1 Task 8).
-    async fn fetch(&self, url: Url, credential: &ChatCredential, members: bool) -> Result<Vec<u8>, PartialReason> {
+    async fn fetch(&self, url: Url, credential: &ChatCredential, read: ThreadRead) -> Result<Vec<u8>, PartialReason> {
         let (name, value) = credential.header();
         let mut request = self
             .client
             .get(url)
             .header(name, value.as_str())
             .header("Accept", "application/json");
-        if members {
+        if read == ThreadRead::Members {
             request = request
                 .header("X-MS-Migration", "True")
                 .header("BehaviorOverride", "redirectAs404");

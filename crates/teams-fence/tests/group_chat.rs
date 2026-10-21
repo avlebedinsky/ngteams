@@ -799,3 +799,32 @@ async fn every_condition_holds_over_the_wire_too() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn the_source_of_a_lab_fence_admits_only_that_lab_s_recorded_chat() -> TestResult {
+    // the source every lab session reads with (`for_fence`), not the test-only `with_lab`
+    let lab = Lab::new(Some(&group_id(GROUP)))?;
+    let fence = Fence::open(&lab.config)?;
+    let source = LiveMembershipSource::for_fence(&fence)?;
+    assert!(source.reads_in_full(&group_chat()));
+    let other = Scope::Conversation {
+        id: group_id(OTHER_GROUP),
+    };
+    assert!(!source.reads_in_full(&other));
+    // a lab without c's MRI admits no group chat, recorded or not
+    let without_c = Lab::with_mris(
+        [
+            Some(mri(GUID_A).as_str().to_owned()),
+            Some(mri(GUID_B).as_str().to_owned()),
+            None,
+        ],
+        Some(&group_id(GROUP)),
+    )?;
+    let source = LiveMembershipSource::for_fence(&Fence::open(&without_c.config)?)?;
+    assert!(!source.reads_in_full(&group_chat()));
+    // nor does a lab that recorded no chat yet
+    let unrecorded = Lab::new(None)?;
+    let source = LiveMembershipSource::for_fence(&Fence::open(&unrecorded.config)?)?;
+    assert!(!source.reads_in_full(&group_chat()));
+    Ok(())
+}

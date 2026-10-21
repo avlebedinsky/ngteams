@@ -168,7 +168,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let mut report = ScenarioReport::new(ScenarioName::AbChatFull);
     let nonce = nonce();
     // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
-    if let Err(error) = deny_probes(&a, &probe_text(&nonce)) {
+    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
         report.failures.push(error.to_string());
     }
     let mri = |alias| config.account(alias).mri.clone().unwrap_or_default();

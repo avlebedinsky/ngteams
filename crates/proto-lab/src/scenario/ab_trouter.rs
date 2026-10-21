@@ -289,7 +289,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
     };
     let mut report = ScenarioReport::new(name);
     let nonce = nonce();
-    if let Err(error) = deny_probes(&a, &probe_text(&nonce)) {
+    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
         report.failures.push(error.to_string());
     }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();

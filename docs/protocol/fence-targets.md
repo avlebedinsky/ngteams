@@ -373,9 +373,12 @@ token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
   earlier creation run's first message, sent again on load, is denied under another, so it can't stand in for this
   run's), and records the chat's id (from that denied post's URL) in the lab's `chats.toml` as soon as the deny names
   it, even when the run fails after that: the chat exists by then, and a run without its id would create another one.
-  The marker begins with `ab-chat`'s probe marker, so `ab-chat` and
-  `abc-chat` force-deny the first message, as expected, when the web client sends it again; any other scenario on a's
-  profile sees the fence deny it, as a write to a group chat the lab hadn't recorded then, or as the probe it is.
+  The marker begins with `ab-chat`'s probe marker, so every scenario that opens a's profile with members read live
+  force-denies the first message when the web client sends it again, and expects that deny: `abc-chat` under its
+  earlier-first-message label, `ab-chat`, `ab-chat-full`, `ab-image`, `ab-trouter`, `ab-trouter-quiet` and
+  `echo-call` under the earlier-run-probe label, all from before a's page loads (`echo-call`, which has no probe of
+  its own, installs only that rule). `load` reads no members, so its fence denies the resend as every write
+  (`Partial(NoSource)`).
   Once the id is recorded, a run messages the chat (a's probe, then a real message that b and c must show). It
   refuses to start, before any browser opens, while the lab's source (`for_fence`) says no in `reads_in_full` (not
   the recorded chat, or no three MRIs): a denied message would be resent on every later load.
