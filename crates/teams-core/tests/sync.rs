@@ -33,7 +33,7 @@ use teams_proto::chat;
 use teams_proto::{
     Authorized, Client, Credentials, Failure, HttpError, HttpTransport, Mutating, OwnState, Read, Response, Transport,
 };
-use teams_store::{Applied, Conversation, ConversationKind, Member, Message, OutboxState, Store};
+use teams_store::{Applied, Conversation, ConversationKind, Member, Message, OutboxEntry, OutboxState, Store};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const CHAT_BASE: &str = teams_mock::CHAT_BASE;
@@ -1304,6 +1304,184 @@ async fn a_second_cut_sync_answer_waits_for_the_first_gap_to_be_read() {
     assert!(a.catch_up.load_older(&mut a.store, CHAT).await.unwrap().is_some());
     assert!(a.store.sync_state(CHAT).unwrap().unwrap().history_complete);
     assert_eq!(stored_ids(&a).len(), 3 + gap.len() + next.len());
+}
+
+// --- our own message that comes back but isn't stored, and entries a check can't read ---
+
+/// An account of a's on a plain service that takes every message post, its outbox reading `clock`, the plain chat
+/// stored.
+async fn posting_account(clock: &Arc<AtomicI64>) -> (MockServer, Account) {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"OriginalArrivalTime": 1_800_000_000_001_u64})))
+        .mount(&server)
+        .await;
+    let mut a = Account::with_outbox_clock(&server.uri(), LAB_A, "placeholder-token", {
+        let clock = Arc::clone(clock);
+        Arc::new(move || clock.load(Ordering::SeqCst))
+    });
+    a.store.upsert_conversation(&plain_chat()).unwrap();
+    (server, a)
+}
+
+/// Our own message for `row`, as a read gives it back `offset` ms after the row was made (its id that time).
+fn own_entry(row: &OutboxEntry, offset: i64) -> Value {
+    let mut entry = entry_at(u64::try_from(row.created_at + offset).unwrap());
+    entry["clientmessageid"] = json!(row.client_message_id);
+    entry["from"] = json!(format!("{CHAT_BASE}/v1/users/ME/contacts/{LAB_A}"));
+    entry
+}
+
+/// Sends `row` with its first post's answer lost while the service can't be read, so its check fails and the row
+/// waits its backoff (one post, the row pending).
+async fn lose_the_answer_and_the_check(a: &mut Account, row: &OutboxEntry) {
+    a.fault(Fault::LoseAnswer);
+    let error = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap_err();
+    assert!(matches!(error, OutboxError::Sync { .. }), "{error:?}");
+}
+
+#[tokio::test]
+async fn our_message_whose_version_cannot_be_read_still_settles_its_row() {
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let (server, mut a) = posting_account(&clock).await;
+    let row = enqueue(&mut a.store, &send(CHAT, "unversioned")).unwrap();
+    let mut ours = own_entry(&row, 1000);
+    ours["version"] = Value::Null;
+    let id = ours["id"].as_str().unwrap().to_owned();
+    mount_pages(&server, vec![("", page(vec![ours], Some("s1"), None))]).await;
+
+    a.fault(Fault::LoseAnswer);
+    let sent = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap();
+    assert_eq!(sent.state, OutboxState::Sent);
+    assert_eq!(sent.message_id.as_deref(), Some(id.as_str()));
+    assert_eq!(post_count(&server).await, 1, "posted once");
+    assert!(a.store.message(CHAT, &id).unwrap().is_none(), "matched, not stored");
+}
+
+#[tokio::test]
+async fn our_message_whose_arrival_time_cannot_be_read_still_settles_its_row() {
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let (server, mut a) = posting_account(&clock).await;
+    let row = enqueue(&mut a.store, &send(CHAT, "timeless")).unwrap();
+    // no `originalarrivaltime`, and an id that isn't a time either
+    let mut ours = own_entry(&row, 1000);
+    ours["id"] = json!("not-a-time");
+    mount_pages(&server, vec![("", page(vec![ours], Some("s1"), None))]).await;
+
+    a.fault(Fault::LoseAnswer);
+    let sent = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap();
+    assert_eq!(sent.state, OutboxState::Sent);
+    assert_eq!(sent.message_id.as_deref(), Some("not-a-time"));
+    assert_eq!(post_count(&server).await, 1, "posted once");
+    assert!(
+        a.store.message(CHAT, "not-a-time").unwrap().is_none(),
+        "matched, not stored"
+    );
+}
+
+#[tokio::test]
+async fn our_unversioned_message_seen_by_a_catch_up_is_not_sent_again_by_a_later_check() {
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let (server, mut a) = posting_account(&clock).await;
+    let row = enqueue(&mut a.store, &send(CHAT, "seen first by a catch-up")).unwrap();
+    lose_the_answer_and_the_check(&mut a, &row).await;
+
+    let mut ours = own_entry(&row, 1000);
+    ours["version"] = json!("v2");
+    mount_pages(
+        &server,
+        vec![
+            ("", page(vec![ours], Some("s1"), None)),
+            // what the later check reads: nothing new
+            ("s1", page(vec![], Some("s2"), None)),
+        ],
+    )
+    .await;
+    let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert_eq!((synced.inserted, synced.skipped), (0, 1), "{synced:?}");
+
+    clock.fetch_add(3_600_000, Ordering::SeqCst);
+    let sent = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap();
+    assert_eq!(sent.state, OutboxState::Sent);
+    assert_eq!(post_count(&server).await, 1, "posted once");
+}
+
+#[tokio::test]
+async fn an_unstored_message_from_someone_else_or_another_conversation_matches_nothing() {
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let (server, mut a) = posting_account(&clock).await;
+    let row = enqueue(&mut a.store, &send(CHAT, "not theirs")).unwrap();
+    lose_the_answer_and_the_check(&mut a, &row).await;
+
+    let mut theirs = own_entry(&row, 1000);
+    theirs["version"] = Value::Null;
+    theirs["from"] = json!(format!("{CHAT_BASE}/v1/users/ME/contacts/{LAB_B}"));
+    let mut elsewhere = own_entry(&row, 2000);
+    elsewhere["version"] = Value::Null;
+    elsewhere["conversationid"] = json!("19:another@thread.v2");
+    let entries = vec![elsewhere, theirs];
+    mount_pages(
+        &server,
+        vec![
+            ("", page(entries.clone(), Some("s1"), None)),
+            ("s1", page(entries, Some("s2"), None)),
+        ],
+    )
+    .await;
+    // an ordinary catch-up, then the check's own sync
+    let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert_eq!(synced.skipped, 2, "{synced:?}");
+    a.catch_up
+        .sync_conversation_since(&mut a.store, CHAT, row.created_at)
+        .await
+        .unwrap();
+
+    let after = a.store.outbox_entry(row.id).unwrap().unwrap();
+    assert_eq!((after.state, after.message_id), (OutboxState::Pending, None));
+    assert_eq!(post_count(&server).await, 1);
+}
+
+#[tokio::test]
+async fn an_entry_a_check_cannot_read_that_carries_the_rows_id_fails_the_check() {
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let (server, mut a) = posting_account(&clock).await;
+    let row = enqueue(&mut a.store, &send(CHAT, "unreadable")).unwrap();
+    // not a message's shape (`properties` must be an object), but it names the row's clientmessageid
+    let mut raw = own_entry(&row, 1000);
+    raw["properties"] = json!("unreadable");
+    mount_pages(
+        &server,
+        vec![
+            ("", page(vec![], Some("s1"), None)),
+            ("s1", page(vec![raw], Some("s2"), None)),
+        ],
+    )
+    .await;
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+
+    a.fault(Fault::LoseAnswer);
+    let error = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap_err();
+    let OutboxError::Sync { source, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert!(
+        matches!(
+            source.downcast_ref::<CatchUpError>(),
+            Some(CatchUpError::CheckFellShort)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(post_count(&server).await, 1, "not sent again");
+    let after = a.store.outbox_entry(row.id).unwrap().unwrap();
+    assert_eq!((after.state, after.failed_checks), (OutboxState::Pending, 1));
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert_eq!(state.sync_link, Some(link("s1")), "the cursor stays before that page");
+
+    // an ordinary catch-up isn't held up by it
+    let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert_eq!(synced.skipped, 1);
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert_eq!(state.sync_link, Some(link("s2")));
 }
 
 /// How many message posts the plain service got.
