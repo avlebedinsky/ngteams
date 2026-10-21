@@ -24,7 +24,8 @@
 //!   body is a `400`, a missing credential a `401`.
 //!
 //! Test hooks: every socket's record ([`TrouterMock::sockets`]: the account, the endpoint, the query, every frame the
-//! client sent), dropping an account's sockets, a service disconnect with a reason, an incoming call's delivery.
+//! client sent), dropping an account's sockets, a service disconnect with a reason, an incoming call's delivery,
+//! sockets closed before their `trouter.connected`, a late `1::`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -110,6 +111,10 @@ struct Sockets {
     next_delivery: u64,
     no_pongs: bool,
     auth_timeout: Option<Duration>,
+    /// How many of the next authenticated sockets are closed without a `trouter.connected`.
+    withheld: usize,
+    /// How long the next socket waits before its `1::`.
+    hello_delay: Option<Duration>,
 }
 
 struct Shared {
@@ -255,6 +260,17 @@ impl TrouterMock {
         self.shared.sockets().auth_timeout = Some(timeout);
     }
 
+    /// Closes each of the next `count` sockets right after its `user.authenticate` (recorded and checked as usual),
+    /// without a `trouter.connected`: a regional host that takes the socket and never says connected.
+    pub fn withhold_connected(&self, count: usize) {
+        self.shared.sockets().withheld = count;
+    }
+
+    /// Makes the next socket wait `delay` after its handshake before the mock's `1::`.
+    pub fn delay_hello_once(&self, delay: Duration) {
+        self.shared.sockets().hello_delay = Some(delay);
+    }
+
     /// Drops `account`'s open sockets without a word (the network failing).
     pub fn drop_sockets(&self, account: &str) {
         self.command(account, &Command::Drop);
@@ -300,15 +316,18 @@ async fn serve(stream: TcpStream, shared: Arc<Shared>) {
     let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(stream, QueryOf(&mut query)).await else {
         return;
     };
-    let index = {
+    let (index, hello_delay) = {
         let mut sockets = shared.sockets();
         sockets.records.push(SocketRecord {
             query,
             open: true,
             ..SocketRecord::default()
         });
-        sockets.records.len() - 1
+        (sockets.records.len() - 1, sockets.hello_delay.take())
     };
+    if let Some(delay) = hello_delay {
+        tokio::time::sleep(delay).await;
+    }
     if socket.send(Message::text("1::")).await.is_ok()
         && let Some(account) = authenticate(&mut socket, &shared, index).await
     {
@@ -368,6 +387,16 @@ async fn authenticate(socket: &mut Socket, shared: &Shared, index: usize) -> Opt
         record.account = Some(account.clone());
         record.endpoint = Some(endpoint.clone());
         record.reconnect = reconnect;
+    }
+    let withheld = {
+        let mut sockets = shared.sockets();
+        let withheld = sockets.withheld > 0;
+        sockets.withheld = sockets.withheld.saturating_sub(1);
+        withheld
+    };
+    if withheld {
+        let _ = socket.close(None).await;
+        return None;
     }
     let seen_before = send_connected(socket, shared, &account, &endpoint).await?;
     if seen_before {
@@ -570,22 +599,29 @@ async fn deliver_queued(socket: &mut Socket, shared: &Shared, account: &str, end
         }
         deliverable
     };
-    for event in events {
-        let typing = event.kind == EventKind::Typing;
-        let (id, body) = {
-            let mut sockets = shared.sockets();
-            sockets.next_delivery += 1;
-            let id = 1_000_000 + sockets.next_delivery;
-            let body = event_message(&event, id);
-            if !typing {
-                sockets.stored.entry(account.to_owned()).or_default().push(Stored {
-                    id,
-                    frame_body: body.clone(),
-                    headers: live_headers(shared, id, false),
-                });
-            }
-            (id, body)
-        };
+    // every event is numbered and stored before the first send, so a socket that fails halfway loses none: the
+    // unsent ones come with the next connect's replay
+    let numbered: Vec<(u64, Value, bool)> = {
+        let mut sockets = shared.sockets();
+        events
+            .iter()
+            .map(|event| {
+                let typing = event.kind == EventKind::Typing;
+                sockets.next_delivery += 1;
+                let id = 1_000_000 + sockets.next_delivery;
+                let body = event_message(event, id);
+                if !typing {
+                    sockets.stored.entry(account.to_owned()).or_default().push(Stored {
+                        id,
+                        frame_body: body.clone(),
+                        headers: live_headers(shared, id, false),
+                    });
+                }
+                (id, body, typing)
+            })
+            .collect()
+    };
+    for (id, body, typing) in numbered {
         send_delivery(socket, endpoint, id, live_headers(shared, id, typing), &body).await?;
     }
     Some(())

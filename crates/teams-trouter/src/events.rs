@@ -2,8 +2,9 @@
 //! `tests/fixtures/trouter/deliveries.json`): a delivery's body is an `EventMessage` naming its `resourceType` and
 //! carrying the `resource`, a message or a conversation as the chat service's reads give them (`teams_proto::chat`).
 //!
-//! - `NewMessage`: a message ([`ChatEvent::Message`]), or typing when its `messagetype` is `Control/Typing`
-//!   ([`ChatEvent::Typing`]): a signal, not a message.
+//! - `NewMessage`: a message ([`ChatEvent::Message`]), or a signal when its `messagetype` is a `Control/…` one:
+//!   typing for `Control/Typing` ([`ChatEvent::Typing`]), its end for `Control/ClearTyping`
+//!   ([`ChatEvent::TypingStopped`]), any other control [`ChatEvent::Unknown`]. A control is never a message.
 //! - `MessageUpdate`: the whole message again with a new `version` ([`ChatEvent::MessageUpdate`]), told apart as the
 //!   captures showed: a delete's `deletetime` is its `version`, an edit's `edittime` is its `version`, a reaction
 //!   change carries `emotions` (the whole set) and neither.
@@ -41,6 +42,8 @@ pub enum ChatEvent {
     },
     /// Someone typing in `conversation` (their MRI, when the message names one).
     Typing { conversation: String, from: Option<String> },
+    /// Someone stopped typing in `conversation` (`Control/ClearTyping`).
+    TypingStopped { conversation: String, from: Option<String> },
     /// A message changed: the whole message as it is now.
     MessageUpdate {
         conversation: String,
@@ -123,16 +126,16 @@ fn message_in(resource: &Value) -> Option<(String, Message)> {
 
 fn new_message(resource: &Value) -> Option<ChatEvent> {
     let (conversation, message) = message_in(resource)?;
-    Some(if message.message_type == MessageType::Typing {
-        ChatEvent::Typing {
-            conversation,
-            from: message.sender().map(str::to_owned),
-        }
-    } else {
-        ChatEvent::Message {
+    let from = message.sender().map(str::to_owned);
+    Some(match &message.message_type {
+        MessageType::Typing => ChatEvent::Typing { conversation, from },
+        MessageType::ClearTyping => ChatEvent::TypingStopped { conversation, from },
+        // a control no capture showed: a signal all the same, never a message
+        control if control.is_control() => unknown("NewMessage"),
+        _ => ChatEvent::Message {
             conversation,
             message: Box::new(message),
-        }
+        },
     })
 }
 

@@ -3,7 +3,8 @@
 //!
 //! - **Connect** to `wss://go.trouter.teams.microsoft.com/v4/c` (the connect URL's query as the web client's), and
 //!   after a `trouter.connected` straight to its `reconnectUrl` with its `connectparams`, until those are within an
-//!   hour of their expiry or three connects in a row have failed.
+//!   hour of their expiry, three connects in a row have failed (any connect that ended before its `trouter.connected`
+//!   but for a renewal) or the service disconnected twice for a `dup` within 10 s.
 //! - **Authenticate** in the first frame, at once after the service's `1::` ([`Authenticate`]: the session's `ic3`
 //!   token and the cached reconnect parameters). The socket is never authenticated again.
 //! - **Keep-alive**: a [`Ping`] every [`Options::ping_interval`] once connected; a pong missing for
@@ -11,7 +12,8 @@
 //! - **Reconnect** after the socket closes, the service disconnects or a pong is missing: at once for a renewal, a
 //!   missing pong, an `unauthorized` disconnect (with a new token) or a `dup` (but never twice within 10 s), else
 //!   after a backoff of `base · 2^n` (± [`Options::backoff_jitter_percent`], capped at [`Options::backoff_cap`]),
-//!   whose count starts again once a connection stayed up [`Options::stable_after`]. A `skypetoken-deprecated`
+//!   whose count starts again once a connection stayed up [`Options::stable_after`]. The token service's
+//!   `Retry-After` is only a floor: the wait is the longer of it and the backoff. A `skypetoken-deprecated`
 //!   disconnect stops the client.
 //! - **Token renewal**: the socket is reconnected with a new token before the old one runs out
 //!   ([`Options::renew_lead`] before its expiry, checked against the clock every [`Options::renew_check`], so a jump
@@ -305,6 +307,7 @@ where
             need: Need::Current,
             last_endpoint: None,
             last_immediate: None,
+            last_dup: None,
         };
         TrouterHandle {
             events: received,
@@ -328,8 +331,8 @@ impl TrouterHandle {
         self.events.recv().await
     }
 
-    /// Stops the client (it sends its disconnect, `0::`, on an open socket) and waits for it to end. Events not yet
-    /// taken are dropped.
+    /// Stops the client (it sends its disconnect, `0::`, on an authenticated socket; a stop while a token is fetched
+    /// or a socket opened takes effect at once) and waits for it to end. Events not yet taken are dropped.
     pub async fn stop(mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -383,6 +386,8 @@ struct Run<T, K> {
     last_endpoint: Option<String>,
     /// When the last reconnect without a wait began.
     last_immediate: Option<Instant>,
+    /// When the service last disconnected for a `dup`.
+    last_dup: Option<Instant>,
 }
 
 impl<T, K> Run<T, K> {
@@ -420,7 +425,8 @@ where
                     continue;
                 }
                 Wait::None | Wait::Backoff => self.backoff(),
-                Wait::For(delay) => delay,
+                // the service's wait is a floor: a `Retry-After: 0` (or a past date) still waits the backoff
+                Wait::For(delay) => delay.max(self.backoff()),
             };
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
@@ -445,9 +451,15 @@ where
         wait.saturating_mul(100 - jitter + spread) / 100
     }
 
-    /// One connection, from asking for its token to its end.
+    /// One connection, from asking for its token to its end. A stop while the token is fetched or the socket opened
+    /// ends it at once (nothing was sent).
     async fn connection(&mut self) -> End {
-        let token = match self.token().await {
+        let fetched = tokio::select! {
+            biased;
+            _ = &mut self.stop => return End::Stop(Stop::Requested),
+            fetched = fetch_token(&*self.trouter.credentials, &self.need) => fetched,
+        };
+        let token = match self.token(fetched) {
             Ok(token) => token,
             Err(end) => return end,
         };
@@ -461,7 +473,12 @@ where
         let con_num = format!("{}_{}", millis(self.trouter.clock.now()), self.connects);
         let url = base.connect_url(&self.trouter.epid, &guid().unwrap_or_default(), &con_num);
         let options = self.trouter.options;
-        let socket = match self.trouter.opener.open(&url, options.connect_timeout).await {
+        let opened = tokio::select! {
+            biased;
+            _ = &mut self.stop => return End::Stop(Stop::Requested),
+            opened = self.trouter.opener.open(&url, options.connect_timeout) => opened,
+        };
+        let socket = match opened {
             Ok(socket) => socket,
             Err(error) => {
                 self.connect_failed();
@@ -471,16 +488,18 @@ where
         let (writer, read) = socket::split(socket);
         let sink = FrameSink::new(writer, Arc::clone(&self.trouter.fence), url.as_str());
         let mut link = Link::new(sink, read, token, params, &options, self.trouter.clock.now());
-        link.serve(self).await
+        let end = link.serve(self).await;
+        // a connect that ended before its `trouter.connected` failed, whatever ended it (the socket closed, the
+        // service disconnected, `1::` or `trouter.connected` never came), unless a renewal ended it
+        let failed = matches!(&end, End::Again(down, _) if !matches!(down, Down::Renewal));
+        if failed && link.endpoint.is_none() {
+            self.connect_failed();
+        }
+        end
     }
 
-    /// The token for the next connect, as [`Need`] says; on success the need is back to the current one.
-    async fn token(&mut self) -> Result<AccessToken, End> {
-        let credentials = &self.trouter.credentials;
-        let result = match &self.need {
-            Need::Current => credentials.ic3().await,
-            Need::Replace(old) => credentials.ic3_after(old).await,
-        };
+    /// The token for the next connect from what [`fetch_token`] got; on success the need is back to the current one.
+    fn token(&mut self, result: Result<AccessToken, TokenError>) -> Result<AccessToken, End> {
         match result {
             Ok(token) => {
                 self.need = Need::Current;
@@ -511,6 +530,7 @@ where
         self.cache.as_ref().map(|cached| cached.params.clone())
     }
 
+    /// A connect that failed: three in a row drop the cached regional host.
     fn connect_failed(&mut self) {
         self.failures += 1;
         if self.failures >= 3 {
@@ -532,6 +552,14 @@ where
             endpoint: connected.id.clone(),
             new_endpoint,
         });
+    }
+}
+
+/// The token for the next connect, as `need` says.
+async fn fetch_token<K: TrouterCredentials>(credentials: &K, need: &Need) -> Result<AccessToken, TokenError> {
+    match need {
+        Need::Current => credentials.ic3().await,
+        Need::Replace(old) => credentials.ic3_after(old).await,
     }
 }
 
@@ -816,7 +844,15 @@ impl Link {
                 run.need = Need::Replace(self.token.token.clone());
                 End::Again(Down::ServiceDisconnect(reason), Wait::None)
             }
-            Some("dup") => End::Again(Down::ServiceDisconnect(reason), Wait::None),
+            Some("dup") => {
+                // a second `dup` within the spacing: the cached regional host is given up, as the web client does
+                let now = Instant::now();
+                if run.last_dup.is_some_and(|last| now - last < IMMEDIATE_SPACING) {
+                    run.cache = None;
+                }
+                run.last_dup = Some(now);
+                End::Again(Down::ServiceDisconnect(reason), Wait::None)
+            }
             Some("skypetoken-deprecated") => End::Stop(Stop::Deprecated),
             _ => End::Again(Down::ServiceDisconnect(reason), Wait::Backoff),
         }
@@ -874,7 +910,12 @@ impl Link {
         Some(self.reconnect_for_renewal().await)
     }
 
+    /// Reconnects for a new token: the disconnect (`0::`) only on an authenticated socket, so `user.authenticate`
+    /// stays a socket's first frame.
     async fn reconnect_for_renewal(&mut self) -> End {
+        if !self.authenticated {
+            return End::Again(Down::Renewal, Wait::None);
+        }
         match self.send(&Disconnect::new()).await {
             Err(End::Stop(stop)) => End::Stop(stop),
             _ => End::Again(Down::Renewal, Wait::None),

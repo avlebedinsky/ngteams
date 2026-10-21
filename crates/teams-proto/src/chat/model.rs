@@ -497,6 +497,8 @@ pub enum MessageType {
     AddMember,
     /// `Control/Typing`: typing (seen sent, never in a read).
     Typing,
+    /// `Control/ClearTyping`: typing stopped (seen sent by the web client, never in a read).
+    ClearTyping,
     /// Any other, as it came (empty when there was none).
     Unknown(String),
 }
@@ -509,8 +511,15 @@ impl MessageType {
             Self::RichTextHtml => "RichText/Html",
             Self::AddMember => "ThreadActivity/AddMember",
             Self::Typing => "Control/Typing",
+            Self::ClearTyping => "Control/ClearTyping",
             Self::Unknown(text) => text,
         }
+    }
+
+    /// A `Control/…` type: a signal (typing, its end, any other control), never a message to keep or show.
+    #[must_use]
+    pub fn is_control(&self) -> bool {
+        self.as_str().starts_with("Control/")
     }
 }
 
@@ -527,6 +536,7 @@ impl From<String> for MessageType {
             "RichText/Html" => Self::RichTextHtml,
             "ThreadActivity/AddMember" => Self::AddMember,
             "Control/Typing" => Self::Typing,
+            "Control/ClearTyping" => Self::ClearTyping,
             _ => Self::Unknown(text),
         }
     }

@@ -1,15 +1,16 @@
 //! The push channel against `teams-mock`'s Trouter and chat service, reached through the `test-support` mock origins:
 //! connect, authenticate as the first frame, register the messaging endpoint, keep-alives, deliveries that are never
 //! answered (an incoming call's included), a dropped socket and the regional reconnect with its replay, the service's
-//! disconnects, token renewal (a fake clock, the real session over a mock Entra), the stop, and that every frame the
-//! socket sent is a reviewed own frame logged to `fence.log` before it went out.
+//! disconnects, a regional host given up, token renewal (a fake clock, the real session over a mock Entra, before the
+//! service's `1::`), a throttled token service, the stop (also while a socket opens), no token in any log record, and
+//! that every frame the socket sent is a reviewed own frame logged to `fence.log` before it went out.
 //!
 //! Every id and token here is the mocks' made-up one.
 
 use std::future::{self, Future};
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -113,6 +114,10 @@ struct FakeTokens {
     queued: Mutex<Vec<String>>,
     replaced: AtomicUsize,
     renewals: broadcast::Sender<Renewal>,
+    /// Every `ic3` the client asked for.
+    asked: AtomicUsize,
+    /// Each ask is answered as the token service's throttling with `Retry-After: 0`.
+    throttled: AtomicBool,
 }
 
 #[cfg(test)]
@@ -125,6 +130,8 @@ impl FakeTokens {
             queued: Mutex::default(),
             replaced: AtomicUsize::new(0),
             renewals: broadcast::channel(16).0,
+            asked: AtomicUsize::new(0),
+            throttled: AtomicBool::new(false),
         })
     }
 
@@ -147,6 +154,17 @@ impl FakeTokens {
         self.current.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
+    /// Another part of the client renewed the token: `token` now, expiring at `expires_at`, and announced.
+    fn renew(&self, token: &str, expires_at: SystemTime) {
+        let mut renewed = Self::token(token, self.clock.now());
+        renewed.expires_at = expires_at;
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = renewed;
+        let _ = self.renewals.send(Renewal::AccessToken {
+            resource: IC3_AUDIENCE.to_owned(),
+            expires_at,
+        });
+    }
+
     fn replace(&self, old: &Secret) -> Result<AccessToken, TokenError> {
         let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
         if current.token.expose() == old.expose() {
@@ -166,6 +184,13 @@ impl FakeTokens {
 #[cfg(test)]
 impl TrouterCredentials for FakeTokens {
     fn ic3(&self) -> impl Future<Output = Result<AccessToken, TokenError>> + Send {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        if self.throttled.load(Ordering::SeqCst) {
+            return future::ready(Err(TokenError::Throttled {
+                retry_after: Some(Duration::ZERO),
+                error: None,
+            }));
+        }
         future::ready(Ok(self.current()))
     }
 
@@ -708,6 +733,12 @@ async fn a_service_that_keeps_disconnecting_at_once_is_met_with_a_backoff() {
         second.elapsed() >= Duration::from_millis(700),
         "a second reconnect within 10 s waits"
     );
+    // the second `dup` within 10 s gave up the regional host: the next connect starts over, without parameters
+    let sockets = lab.trouter.sockets();
+    assert_eq!(
+        sockets.iter().map(|socket| socket.reconnect).collect::<Vec<_>>(),
+        [false, true, false]
+    );
     push.stop().await;
     sent_only_logged_own_frames(&lab).await;
 }
@@ -1024,4 +1055,138 @@ async fn a_failed_registration_is_tried_again_and_a_good_one_renewed_before_its_
         assert!(path.ends_with(&format!("/v4/f/{endpoint}/")), "{path}");
     }
     push.stop().await;
+    sent_only_logged_own_frames(&lab).await;
+}
+
+#[tokio::test]
+async fn a_regional_host_that_never_says_connected_is_given_up_after_three_connects_in_a_row() {
+    let lab = Lab::start().await;
+    let mut push = lab.client().spawn();
+    let first = connected(&mut push).await;
+    // the regional host takes each socket and its authentication, and closes it without a `trouter.connected`
+    lab.trouter.withhold_connected(3);
+    lab.trouter.drop_sockets(LAB_B);
+    for _ in 0..4 {
+        assert!(matches!(down(&mut push).await, Down::Closed));
+    }
+    let (again, new_endpoint) = next(&mut push, |event| match event {
+        PushEvent::Connected { endpoint, new_endpoint } => Some((endpoint, new_endpoint)),
+        _ => None,
+    })
+    .await;
+    assert!(new_endpoint && again != first, "started over at the global host");
+    let sockets = lab.trouter.sockets();
+    assert_eq!(
+        sockets.iter().map(|socket| socket.reconnect).collect::<Vec<_>>(),
+        [false, true, true, true, false],
+        "three failed reconnects with the parameters, then none"
+    );
+    push.stop().await;
+    sent_only_logged_own_frames(&lab).await;
+}
+
+#[tokio::test]
+async fn a_throttled_token_answer_with_no_wait_still_waits_a_backoff() {
+    let lab = Lab::start().await;
+    lab.tokens.throttled.store(true, Ordering::SeqCst);
+    let mut push = lab.client().spawn();
+    assert!(matches!(down(&mut push).await, Down::Credentials(_)));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // backoffs of 50, 100, 200, 200 ms: about five asks in 600 ms, not one per timer tick
+    let asked = lab.tokens.asked.load(Ordering::SeqCst);
+    assert!((2..=8).contains(&asked), "{asked} asks");
+    push.stop().await;
+    assert!(lab.log.frames().is_empty());
+}
+
+#[tokio::test]
+async fn a_renewal_before_the_services_hello_sends_nothing_on_that_socket() {
+    let lab = Lab::start().await;
+    lab.trouter.delay_hello_once(Duration::from_secs(1));
+    let mut push = lab.client().spawn();
+    sockets_until(&lab.trouter, |sockets| sockets.len() == 1).await;
+    let renewed = "mock-ic3-token-renewed-b-3";
+    lab.mock.set_token(LAB_B, renewed);
+    // later than the held one, so the renewal is told even by its expiry
+    lab.tokens.renew(renewed, lab.clock.now() + Duration::from_secs(7_100));
+    assert!(matches!(down(&mut push).await, Down::Renewal));
+    connected(&mut push).await;
+    push.stop().await;
+    sent_only_logged_own_frames(&lab).await;
+    // not even a disconnect went out before the first socket's authentication
+    let sockets = lab.trouter.sockets();
+    assert!(sockets[0].frames.is_empty(), "{:?}", sockets[0].frames);
+    assert_eq!(lab.log.frames()[0]["own"], "trouter_authenticate");
+    assert_eq!(authorization(&sockets[1]), format!("Bearer {renewed}"));
+}
+
+#[tokio::test]
+async fn a_stop_while_the_socket_opens_ends_the_client_at_once() {
+    let lab = Lab::start().await;
+    // a port that takes the TCP connection and never answers the WebSocket handshake
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("ws://{}", silent.local_addr().unwrap());
+    let fence = fence(lab.log.clone());
+    let transport = HttpTransport::with_mock_origin(
+        Arc::clone(&lab.tokens),
+        Arc::clone(&fence),
+        CHAT_BASE,
+        &lab.mock.origin(),
+    )
+    .unwrap();
+    let push = Trouter::with_mock_origin(Arc::new(transport), Arc::clone(&lab.tokens), fence, &origin)
+        .unwrap()
+        .with_options(Options {
+            connect_timeout: Duration::from_secs(60),
+            ..options()
+        })
+        .spawn();
+    let (opening, _) = tokio::time::timeout(WAIT, silent.accept()).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), push.stop())
+        .await
+        .expect("the stop waited for the socket to open");
+    drop(opening);
+    assert!(lab.log.frames().is_empty());
+}
+
+/// Every log record of the process, as its target and its text.
+struct Captured(Mutex<Vec<String>>);
+
+#[cfg(test)]
+impl log::Log for Captured {
+    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        let line = format!("{} {}", record.target(), record.args());
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).push(line);
+    }
+
+    fn flush(&self) {}
+}
+
+static CAPTURED: Captured = Captured(Mutex::new(Vec::new()));
+
+#[tokio::test]
+async fn no_log_record_carries_the_token_even_with_a_logger_at_trace() {
+    // tungstenite traces each frame it sends, the authentication's bearer token included: the cap compiles that out
+    assert!(log::STATIC_MAX_LEVEL <= log::LevelFilter::Debug);
+    log::set_logger(&CAPTURED).unwrap();
+    log::set_max_level(log::LevelFilter::Trace);
+    let lab = Lab::start().await;
+    let mut push = lab.client().spawn();
+    connected(&mut push).await;
+    registered(&mut push).await;
+    lab.post("<p>logged?</p>", "1000000000000000301").await;
+    chat_event(&mut push).await;
+    push.stop().await;
+    sent_only_logged_own_frames(&lab).await;
+    let token = lab.mock.token(LAB_B).unwrap();
+    let records = CAPTURED.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert!(!records.is_empty(), "the logger was live");
+    for record in &records {
+        let target = record.split_once(' ').map_or("", |(target, _)| target);
+        assert!(!record.contains(&token), "a record of {target} carries the token");
+    }
 }

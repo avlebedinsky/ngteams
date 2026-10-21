@@ -63,7 +63,8 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
 
 - **Connect**: `wss://go.trouter.teams.microsoft.com/v4/c`, then the `reconnectUrl` a `trouter.connected` handed over
   (a `<name>-t` host under `.trouter.teams.microsoft.com`, port 443 dropped as the web client's connect URL dropped
-  it) with its `connectparams`, until those are within an hour of `se` or three connects in a row failed. The query is
+  it) with its `connectparams`, until those are within an hour of `se`, three connects in a row failed (any that
+  ended before its `trouter.connected`, but for a renewal) or two `dup` disconnects came within 10 s. The query is
   the messaging stack's as captured: `tc` (`{"cv":…,"ua":"TeamsCDL","hr":"","v":"1415/<build>"}`, braces and quotes
   percent-encoded, `:`, `,` and `/` left), `timeout=40`, `epid` (one GUID per client run), `cor_id` (a GUID per
   connect), `con_num` (`<ms>_<n>`); the handshake carries the web client's `Origin: https://teams.microsoft.com` and
@@ -72,7 +73,7 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
   build.
 - **Frames**: `user.authenticate` at once after `1::` (never before it: a stop before then sends nothing at all),
   pings every 40 s and a reconnect when a pong is 5 s late, the message-loss acknowledgement once the owner has caught
-  up, and `0::` on a stop or a renewal. Each goes through `teams_proto::FrameSink` and is logged to `fence.log`
+  up, and `0::` on a stop or a renewal (once authenticated). Each goes through `teams_proto::FrameSink` and is logged to `fence.log`
   first; the socket's write half goes only to the sink. No `user.activity`, no answer to any delivery, an incoming
   call's (a `callNotification`, whatever its path) included.
 - **Registration**: the messaging stack's, as `teams_proto::EndpointRegistration` (an own-state request, logged
@@ -81,10 +82,12 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
   registrar `X-MS-Migration: True` and `X-Ms-Test-User: False` with the token.
 - **Reconnect**: at once for a renewal, a missing pong, an `unauthorized` disconnect (with a new token) or a `dup`,
   but never twice within 10 s; otherwise after a backoff of `1 s · 2^n` ±20 %, capped at 300 s, whose count starts
-  again after a connection stayed up a minute. `skypetoken-deprecated` stops the client.
+  again after a connection stayed up a minute; a throttled token service's `Retry-After` is a floor on that wait,
+  never a shortcut past it. `skypetoken-deprecated` stops the client.
 - **Renewal**: an open socket is never authenticated again, so the client reconnects with a new token 5 minutes
   (the session's refresh margin) before the held one expires, checking the expiry against the wall clock every 30 s,
-  and at once when the session announces a newer `ic3` token.
+  and at once when the session announces a newer `ic3` token. A renewal before
+  the service's `1::` sends nothing on that socket.
 
 ## Connect and the regional move
 
@@ -214,7 +217,8 @@ account's endpoints get its own
 events.
 
 The native client turns these into typed events (Task 16, `teams_trouter::events`): a `NewMessage` whose
-`messagetype` is `Control/Typing` is a signal (typing), not a message; a message's own `clientmessageid` matches it
+`messagetype` is `Control/Typing` is a signal (typing), not a message, and so is every other `Control/…` one
+(`Control/ClearTyping`, which the web client sends, is typing's end; one no capture showed is `Unknown`); a message's own `clientmessageid` matches it
 to our outbox row (Task 13). A `MessageUpdate` carries the whole message, so what changed is told from it the way
 every one in the captures of runs 12 and 13 (below; both accounts' sockets) could be told (read locally, the times
 compared, none printed): an

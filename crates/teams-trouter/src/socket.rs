@@ -6,6 +6,14 @@
 //!
 //! What the WebSocket layer itself sends on the socket (the masked handshake request, a pong to a WebSocket ping, the
 //! reply to a close) carries no data of ours and reaches no one: those are the protocol's own control frames.
+//!
+//! **No frame reaches a log.** tungstenite logs every frame it sends and reads at `trace` level, its payload
+//! included (`Sending frame: …`, `writing frame …`, `Received message …`), and `user.authenticate` carries the bearer
+//! token. This crate takes `log` with `max_level_debug` and `release_max_level_debug` (`Cargo.toml`), so those
+//! `trace!` calls compile to nothing in any build with this crate in it, whatever logger a binary installs. Its
+//! `debug!` lines (the handshake, a close, a send error's kind) carry no payload. rustls logs only the handshake's
+//! metadata, and hyper and h2 log through `tracing` without its `log` feature (h2's frame `Debug` leaves the header
+//! fields out on purpose).
 
 use std::future::Future;
 use std::io;
@@ -15,7 +23,7 @@ use std::time::Duration;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt as _, StreamExt as _};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use teams_proto::{CLIENT_BUILD, FrameText, FrameWriter, TROUTER_DOMAIN};
+use teams_proto::{CLIENT_BUILD, FrameText, FrameWriter, TROUTER_DOMAIN, TROUTER_HOST};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -27,9 +35,6 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use url::Url;
-
-/// The global Trouter host, where a first connect goes.
-pub const GO_HOST: &str = "go.trouter.teams.microsoft.com";
 
 /// The connect path on every Trouter host.
 pub const CONNECT_PATH: &str = "/v4/c";
@@ -79,7 +84,9 @@ pub(crate) struct ConnectBase(Url);
 impl ConnectBase {
     /// `wss://go.trouter.teams.microsoft.com/v4/c` (a fixed URL: `None` never comes).
     pub(crate) fn global() -> Option<Self> {
-        Url::parse(&format!("wss://{GO_HOST}{CONNECT_PATH}")).ok().map(Self)
+        Url::parse(&format!("wss://{TROUTER_HOST}{CONNECT_PATH}"))
+            .ok()
+            .map(Self)
     }
 
     /// A `reconnectUrl` as `trouter.connected` handed it over, if it is on the allowlist ([`allowed`]); its port `443`
@@ -116,13 +123,13 @@ impl ConnectBase {
     }
 }
 
-/// Whether `url` is a connect URL the client may open: `wss`, the global host or a regional `<name>-t` one under
-/// [`TROUTER_DOMAIN`], no port but `443`, the path [`CONNECT_PATH`], no user info or fragment.
+/// Whether `url` is a connect URL the client may open: `wss`, the global host ([`TROUTER_HOST`]) or a regional
+/// `<name>-t` one under [`TROUTER_DOMAIN`], no port but `443`, the path [`CONNECT_PATH`], no user info or fragment.
 #[must_use]
 pub fn allowed(url: &Url) -> bool {
     let mut base = url.clone();
     base.set_query(None);
-    let host_ok = url.host_str() == Some(GO_HOST) || ConnectBase::regional(base.as_str()).is_some();
+    let host_ok = url.host_str() == Some(TROUTER_HOST) || ConnectBase::regional(base.as_str()).is_some();
     host_ok
         && url.scheme() == "wss"
         && url.port().is_none_or(|port| port == 443)

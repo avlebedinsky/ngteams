@@ -276,6 +276,37 @@ fn a_stored_replay_is_told_from_a_live_delivery_and_an_unknown_kind_is_kept_by_i
 }
 
 #[test]
+fn a_control_message_is_a_signal_never_a_message() {
+    // the captured typing delivery, with another messagetype
+    let fixture = filled(DELIVERIES);
+    let Incoming::Delivery(raw) = decode(fixture["deliveries"][0]["frame"].as_str().unwrap()).unwrap() else {
+        panic!("a delivery");
+    };
+    let body = |kind: &str| {
+        let mut body: Value = serde_json::from_str(&raw.body).unwrap();
+        body["resource"]["messagetype"] = Value::from(kind);
+        ChatEvent::from_body(&body.to_string())
+    };
+    assert_eq!(
+        body("Control/ClearTyping"),
+        ChatEvent::TypingStopped {
+            conversation: chat(),
+            from: Some(format!("8:orgid:{LAB_A}"))
+        }
+    );
+    // a control no capture showed isn't a message either
+    assert_eq!(
+        body("Control/LiveState"),
+        ChatEvent::Unknown {
+            resource_type: "NewMessage".to_owned()
+        }
+    );
+    assert!(matches!(body("RichText/Html"), ChatEvent::Message { .. }));
+    assert!(MessageType::from("Control/ClearTyping".to_owned()).is_control());
+    assert!(!MessageType::RichTextHtml.is_control());
+}
+
+#[test]
 fn a_socket_connects_only_to_the_global_or_a_regional_trouter_host() {
     for url in [
         "wss://go.trouter.teams.microsoft.com/v4/c?tc=%7B%7D&timeout=40",
