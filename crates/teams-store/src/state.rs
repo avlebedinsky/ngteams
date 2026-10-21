@@ -29,7 +29,13 @@ pub struct SyncState {
     pub sync_link: Option<String>,
     /// The link to the next older page of history not yet stored.
     pub backward_link: Option<String>,
-    /// The whole history is stored: there is no older page.
+    /// The oldest arrival time (milliseconds) on the page `backward_link` came with: every message newer than that is
+    /// stored, apart from a gap's. None when no time on those pages could be read.
+    pub backward_oldest: Option<i64>,
+    /// The rest of a sync answer that was cut short (its own `backwardLink`): what changed since the sync before it,
+    /// not yet stored. Read before older history, and never in its place.
+    pub gap_link: Option<String>,
+    /// The whole history is stored: there is no older page and no gap.
     pub history_complete: bool,
     /// When this state was written, in milliseconds.
     pub updated: i64,
@@ -109,14 +115,18 @@ impl Store {
         let tx = self.conn.transaction()?;
         Self::require_conversation(&tx, &state.conversation_id)?;
         tx.execute(
-            "INSERT INTO conversation_sync (conversation_id, sync_link, backward_link, history_complete, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO conversation_sync (conversation_id, sync_link, backward_link, backward_oldest, gap_link,
+                 history_complete, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT DO UPDATE SET sync_link = excluded.sync_link, backward_link = excluded.backward_link,
+                 backward_oldest = excluded.backward_oldest, gap_link = excluded.gap_link,
                  history_complete = excluded.history_complete, updated = excluded.updated",
             params![
                 state.conversation_id,
                 state.sync_link,
                 state.backward_link,
+                state.backward_oldest,
+                state.gap_link,
                 state.history_complete,
                 state.updated
             ],
@@ -134,16 +144,18 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT sync_link, backward_link, history_complete, updated FROM conversation_sync
-                 WHERE conversation_id = ?1",
+                "SELECT sync_link, backward_link, backward_oldest, gap_link, history_complete, updated
+                 FROM conversation_sync WHERE conversation_id = ?1",
                 [conversation_id],
                 |row| {
                     Ok(SyncState {
                         conversation_id: conversation_id.to_owned(),
                         sync_link: row.get(0)?,
                         backward_link: row.get(1)?,
-                        history_complete: row.get(2)?,
-                        updated: row.get(3)?,
+                        backward_oldest: row.get(2)?,
+                        gap_link: row.get(3)?,
+                        history_complete: row.get(4)?,
+                        updated: row.get(5)?,
                     })
                 },
             )

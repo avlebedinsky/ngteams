@@ -11,9 +11,11 @@
 //!   sync link, which brings what changed since. A sync answer that has a `backwardLink` of its own (never captured) is
 //!   followed to its end, so a gap longer than a page is read through whatever its pages hold: a page that changes
 //!   nothing (its messages came as deliveries, or by an earlier attempt that failed further back) doesn't stop it.
-//!   Past [`MAX_PAGES`] the link left is kept as the conversation's `backwardLink` ([`CatchUp::load_older`] reads on
-//!   from it), so the sync link moves on only past what is stored or kept to be read. A conversation the store
-//!   doesn't know yet is first read as a thread.
+//!   Past [`MAX_PAGES`] the link left is kept as the conversation's gap ([`SyncState::gap_link`]), apart from its
+//!   older history's `backwardLink`, so the sync link moves on only past what is stored or kept to be read. The next
+//!   sync reads on from a kept gap first, and so does [`CatchUp::load_older`] before older history; a sync answer cut
+//!   again while a gap is still unread leaves the sync link where it was ([`CatchUpError::GapPending`]). A
+//!   conversation the store doesn't know yet is first read as a thread.
 //! - **One path for what comes in** ([`CatchUp::receive_message`]): a message as read (a sync page, or the resource of
 //!   a Trouter delivery) becomes a store row and goes through [`Outbox::receive`], which stores it by its id and
 //!   version and matches our own to its outbox row by `clientmessageid`. So a delivery and a sync that bring the same
@@ -26,10 +28,12 @@
 //!   channel is connected first and the catch-up runs after, so nothing falls between the two: what arrives after the
 //!   connect comes as a delivery, what came before by the catch-up, and what comes both ways is stored once.
 //! - **The outbox's check** ([`ConversationSync`]): before a new attempt whose earlier one may have arrived, the outbox
-//!   syncs the conversation through [`CatchUp::sync_messages`] and looks for the row's `clientmessageid`. When that
-//!   read stopped with older pages left (a first read is one page, a long sync answer [`MAX_PAGES`]), it pages back
-//!   until a page reaches a message older than the row (less [`CLOCK_SKEW_MS`]), and fails after [`MAX_PAGES`] more,
-//!   so the row waits rather than going out twice.
+//!   syncs the conversation through [`CatchUp::sync_messages`] and looks for the row's `clientmessageid`. Whether
+//!   that is enough is told by the stored sync state, not by what this one sync read: older pages may be left by it
+//!   or by any read before it (a first read is one page, a sync answer is cut at [`MAX_PAGES`], an earlier check fell
+//!   short). So the check reads any kept gap to its end and older history until its pages reached a message older
+//!   than the row (less [`CLOCK_SKEW_MS`]; [`SyncState::backward_oldest`]), and fails after [`MAX_PAGES`] more, so
+//!   the row waits rather than going out twice.
 //!
 //! Every read is a `GET` through the native transport (`teams_proto::chat::ChatReads`), and every link is the
 //! service's own, followed only on the same chat base. Nothing here writes to the service.
@@ -68,27 +72,45 @@ pub enum CatchUpError {
     /// The conversation list ran past [`MAX_PAGES`] pages: its sync link wasn't moved on.
     #[error("the conversation list ran past {MAX_PAGES} pages, so its sync link wasn't moved on")]
     TooManyPages,
-    /// The outbox's check paged back [`MAX_PAGES`] pages without reaching a message older than its row: whether the
-    /// row's message arrived can't be told.
+    /// The outbox's check paged back [`MAX_PAGES`] pages without reaching a message older than its row (or the end
+    /// of a gap): whether the row's message arrived can't be told.
     #[error("the outbox's check read {MAX_PAGES} older pages without reaching its row's time")]
     CheckFellShort,
+    /// A sync answer ran past [`MAX_PAGES`] while the rest of an earlier one was still unread: its sync link wasn't
+    /// moved on (the pages it read are stored). The next sync reads on from the earlier one first.
+    #[error("a sync answer ran past {MAX_PAGES} pages while an earlier one's rest was still unread")]
+    GapPending,
 }
 
-/// Where a read of a conversation's messages stopped (for the outbox's check).
-#[derive(Clone, Copy, Debug)]
-enum Reach {
-    /// Everything it was to read is stored: a sync answer read to its end, or a first page with nothing older.
-    Whole,
-    /// Older pages are left behind the kept `backwardLink`; the oldest arrival time its last page had (none when that
-    /// page had no message whose time could be read).
-    Older(Option<i64>),
+/// Which of a conversation's kept links an older page is read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chain {
+    /// The rest of a sync answer cut at [`MAX_PAGES`] ([`SyncState::gap_link`]).
+    Gap,
+    /// Older history ([`SyncState::backward_link`]).
+    History,
 }
 
-/// A sync answer's `backwardLink` the walk didn't follow, past [`MAX_PAGES`].
-struct Left {
-    link: String,
-    /// The oldest arrival time the last page read had.
-    oldest: Option<i64>,
+impl Chain {
+    /// The chain the next older page comes from: a gap before older history.
+    fn next(state: &SyncState) -> Self {
+        if state.gap_link.is_some() {
+            Self::Gap
+        } else {
+            Self::History
+        }
+    }
+
+    /// The chain the outbox's check still has to read for a message that arrived no earlier than `stop`, decided by
+    /// what is stored, not by the read just made: any gap (a sync answer's order is not relied on), then older
+    /// history until its pages reached a message older than `stop`. `None`: everything since `stop` is stored.
+    fn unread_since(state: &SyncState, stop: i64) -> Option<Self> {
+        if state.gap_link.is_some() {
+            return Some(Self::Gap);
+        }
+        let reached = state.backward_oldest.is_some_and(|oldest| oldest < stop);
+        (state.backward_link.is_some() && !reached).then_some(Self::History)
+    }
 }
 
 /// What a sync did with the messages it read.
@@ -318,13 +340,9 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// # Errors
     ///
     /// [`CatchUpError::Read`] when a read fails, [`CatchUpError::Store`] or [`CatchUpError::Outbox`] when the store
-    /// does; the sync state then stays as it was.
+    /// does; the sync state then stays as it was (a kept gap may have been read on). [`CatchUpError::GapPending`]
+    /// when the answer is cut at [`MAX_PAGES`] while an earlier gap is still unread: the sync link stays.
     pub async fn sync_messages(&self, store: &mut Store, conversation: &str) -> Result<Synced, CatchUpError> {
-        Ok(self.sync_reach(store, conversation).await?.0)
-    }
-
-    /// [`CatchUp::sync_messages`], with where it stopped.
-    async fn sync_reach(&self, store: &mut Store, conversation: &str) -> Result<(Synced, Reach), CatchUpError> {
         if store.conversation(conversation)?.is_none() {
             self.add_conversation(store, conversation).await?;
         }
@@ -333,80 +351,126 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         let Some((kept, link)) = kept.and_then(|state| state.sync_link.clone().map(|link| (state, link))) else {
             return self.first_read(store, &reads, conversation).await;
         };
+        let mut synced = Synced::default();
+        let kept = self.read_gap(store, kept, &mut synced).await?;
         let page = reads.messages_from(conversation, &link).await?;
-        let mut synced = self.apply_page(store, conversation, &page)?;
+        synced.add(self.apply_page(store, conversation, &page)?);
         let left = self
-            .follow_back(store, &reads, conversation, &page, &mut synced)
+            .follow_back(store, conversation, page.backward_link(), MAX_PAGES - 1, &mut synced)
             .await?;
-        let reach = left.as_ref().map_or(Reach::Whole, |left| Reach::Older(left.oldest));
+        if left.is_some() && kept.gap_link.is_some() {
+            // one gap link at a time: the earlier one's progress is kept, this answer is read again next time
+            return Err(CatchUpError::GapPending);
+        }
+        let gap_link = left.or_else(|| kept.gap_link.clone());
         let state = SyncState {
-            conversation_id: conversation.to_owned(),
             sync_link: page.sync_state().map(str::to_owned).or(Some(link)),
-            history_complete: kept.history_complete && left.is_none(),
-            // the gap's unread part comes first: `load_older` reads on from it
-            backward_link: left.map(|left| left.link).or(kept.backward_link),
+            history_complete: kept.backward_link.is_none() && gap_link.is_none(),
+            gap_link,
             updated: (self.clock)(),
+            ..kept
         };
         store.set_sync_state(&state)?;
-        Ok((synced, reach))
+        Ok(synced)
     }
 
-    /// Reads the next older page of a conversation's history, from the `backwardLink` its sync kept; `None` when there
-    /// is none to read (the whole history is stored, or the conversation was never synced).
+    /// Reads on from the rest of an earlier sync answer, if one is kept, for up to [`MAX_PAGES`] pages; returns the
+    /// sync state with the gap as far as it is now read (stored).
+    async fn read_gap(
+        &self,
+        store: &mut Store,
+        kept: SyncState,
+        synced: &mut Synced,
+    ) -> Result<SyncState, CatchUpError> {
+        if kept.gap_link.is_none() {
+            return Ok(kept);
+        }
+        let conversation = kept.conversation_id.clone();
+        let gap_link = self
+            .follow_back(store, &conversation, kept.gap_link.as_deref(), MAX_PAGES, synced)
+            .await?;
+        let state = SyncState {
+            history_complete: kept.backward_link.is_none() && gap_link.is_none(),
+            gap_link,
+            updated: (self.clock)(),
+            ..kept
+        };
+        store.set_sync_state(&state)?;
+        Ok(state)
+    }
+
+    /// Reads the next older page of a conversation from the links its sync kept, the rest of a cut sync answer before
+    /// older history; `None` when there is none to read (the whole history is stored, or the conversation was never
+    /// synced).
     ///
     /// # Errors
     ///
     /// As [`CatchUp::sync_messages`].
     pub async fn load_older(&self, store: &mut Store, conversation: &str) -> Result<Option<Synced>, CatchUpError> {
-        Ok(self.older_page(store, conversation).await?.map(|(synced, _)| synced))
-    }
-
-    /// [`CatchUp::load_older`], with where it stopped.
-    async fn older_page(&self, store: &mut Store, conversation: &str) -> Result<Option<(Synced, Reach)>, CatchUpError> {
         let Some(kept) = store.sync_state(conversation)? else {
             return Ok(None);
         };
-        let Some(link) = kept.backward_link.clone() else {
-            return Ok(None);
-        };
-        let page = ChatReads::new(&self.client).messages_from(conversation, &link).await?;
-        let synced = self.apply_page(store, conversation, &page)?;
-        let older = page.backward_link().map(str::to_owned);
-        let reach = if older.is_some() {
-            Reach::Older(oldest_arrival(&page))
-        } else {
-            Reach::Whole
-        };
-        let state = SyncState {
-            history_complete: older.is_none(),
-            backward_link: older,
-            updated: (self.clock)(),
-            ..kept
-        };
-        store.set_sync_state(&state)?;
-        Ok(Some((synced, reach)))
+        let chain = Chain::next(&kept);
+        self.older_page(store, kept, chain).await
     }
 
-    /// The outbox's check (see the module docs): syncs `conversation`, then, when that stopped with older pages left,
-    /// pages back until a page reaches a message older than `since` less [`CLOCK_SKEW_MS`].
+    /// Reads the next page of one of a conversation's kept chains; `None` when that chain has no link.
+    async fn older_page(
+        &self,
+        store: &mut Store,
+        kept: SyncState,
+        chain: Chain,
+    ) -> Result<Option<Synced>, CatchUpError> {
+        let link = match chain {
+            Chain::Gap => kept.gap_link.as_deref(),
+            Chain::History => kept.backward_link.as_deref(),
+        };
+        let Some(link) = link else {
+            return Ok(None);
+        };
+        let conversation = kept.conversation_id.as_str();
+        let page = ChatReads::new(&self.client).messages_from(conversation, link).await?;
+        let synced = self.apply_page(store, conversation, &page)?;
+        let older = page.backward_link().map(str::to_owned);
+        let state = match chain {
+            Chain::Gap => SyncState {
+                history_complete: kept.backward_link.is_none() && older.is_none(),
+                gap_link: older,
+                updated: (self.clock)(),
+                ..kept
+            },
+            Chain::History => SyncState {
+                history_complete: kept.gap_link.is_none() && older.is_none(),
+                // a page without a time it can read is older than the one before it all the same
+                backward_oldest: oldest_arrival(&page).or(kept.backward_oldest),
+                backward_link: older,
+                updated: (self.clock)(),
+                ..kept
+            },
+        };
+        store.set_sync_state(&state)?;
+        Ok(Some(synced))
+    }
+
+    /// The outbox's check (see the module docs): syncs `conversation`, then reads older pages until the stored state
+    /// says everything since `since` less [`CLOCK_SKEW_MS`] is stored ([`Chain::unread_since`]), whatever this sync
+    /// itself read: a gap or a history read an earlier sync, check or start left unread is read here.
     async fn sync_since(&self, store: &mut Store, conversation: &str, since: i64) -> Result<(), CatchUpError> {
         let stop = since.saturating_sub(CLOCK_SKEW_MS);
-        let (_, mut reach) = self.sync_reach(store, conversation).await?;
+        self.sync_messages(store, conversation).await?;
         let mut pages = 0;
-        while let Reach::Older(oldest) = reach {
-            if oldest.is_some_and(|oldest| oldest < stop) {
+        loop {
+            // a sync that succeeded kept a state: none can't be told complete
+            let state = store.sync_state(conversation)?.ok_or(CatchUpError::CheckFellShort)?;
+            let Some(chain) = Chain::unread_since(&state, stop) else {
                 return Ok(());
-            }
+            };
             if pages == MAX_PAGES {
                 return Err(CatchUpError::CheckFellShort);
             }
-            reach = self
-                .older_page(store, conversation)
-                .await?
-                .map_or(Reach::Whole, |(_, reach)| reach);
+            self.older_page(store, state, chain).await?;
             pages += 1;
         }
-        Ok(())
     }
 
     /// Stores a message that came in (a sync page's entry, or a Trouter delivery's resource) in `conversation`,
@@ -436,45 +500,45 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         store: &mut Store,
         reads: &ChatReads<'_, C>,
         conversation: &str,
-    ) -> Result<(Synced, Reach), CatchUpError> {
+    ) -> Result<Synced, CatchUpError> {
+        let kept_gap = store.sync_state(conversation)?.and_then(|state| state.gap_link);
         let page = reads.messages(conversation, self.page_size).await?;
         let synced = self.apply_page(store, conversation, &page)?;
+        let backward_link = page.backward_link().map(str::to_owned);
         let state = SyncState {
             conversation_id: conversation.to_owned(),
             sync_link: page.sync_state().map(str::to_owned),
-            backward_link: page.backward_link().map(str::to_owned),
-            history_complete: page.backward_link().is_none(),
+            history_complete: backward_link.is_none() && kept_gap.is_none(),
+            backward_link,
+            backward_oldest: oldest_arrival(&page),
+            gap_link: kept_gap,
             updated: (self.clock)(),
         };
         store.set_sync_state(&state)?;
-        let reach = if page.backward_link().is_some() {
-            Reach::Older(oldest_arrival(&page))
-        } else {
-            Reach::Whole
-        };
-        Ok((synced, reach))
+        Ok(synced)
     }
 
-    /// Follows a sync answer's `backwardLink`s from its first page to their end, whatever each page brings (a page
-    /// that changes nothing may still have older messages behind it the store never had); returns the link left
-    /// unfollowed at [`MAX_PAGES`], if any.
+    /// Follows a chain of `backwardLink`s from `from` to its end, for up to `budget` pages, whatever each page brings
+    /// (a page that changes nothing may still have older messages behind it the store never had); returns the link
+    /// left unfollowed, if any.
     async fn follow_back(
         &self,
         store: &mut Store,
-        reads: &ChatReads<'_, C>,
         conversation: &str,
-        first: &MessagePage,
+        from: Option<&str>,
+        budget: usize,
         synced: &mut Synced,
-    ) -> Result<Option<Left>, CatchUpError> {
-        let mut link = first.backward_link().map(str::to_owned);
-        let mut oldest = oldest_arrival(first);
+    ) -> Result<Option<String>, CatchUpError> {
+        let reads = ChatReads::new(&self.client);
+        let mut link = from.map(str::to_owned);
+        let mut read = 0;
         while let Some(next) = link {
-            if synced.pages >= MAX_PAGES {
-                return Ok(Some(Left { link: next, oldest }));
+            if read == budget {
+                return Ok(Some(next));
             }
             let page = reads.messages_from(conversation, &next).await?;
             synced.add(self.apply_page(store, conversation, &page)?);
-            oldest = oldest_arrival(&page);
+            read += 1;
             link = page.backward_link().map(str::to_owned);
         }
         Ok(None)

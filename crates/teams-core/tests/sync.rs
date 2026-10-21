@@ -21,7 +21,8 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
-    CLOCK_SKEW_MS, CatchUp, CatchUpError, Command, Gaps, MAX_PAGES, Outbox, enqueue, outbox::ConversationSync,
+    CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, Gaps, MAX_PAGES, Outbox, OutboxError, enqueue,
+    outbox::ConversationSync,
 };
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_mock::{
@@ -145,6 +146,11 @@ struct Account {
 
 impl Account {
     fn on(origin: &str, me: &str, token: &str) -> Self {
+        Self::with_outbox_clock(origin, me, token, Arc::new(now_ms))
+    }
+
+    /// An account whose outbox reads `clock` (a backoff passed without waiting for it).
+    fn with_outbox_clock(origin: &str, me: &str, token: &str, clock: Clock) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("store").join("lab.sqlite")).unwrap();
         let faults = Arc::new(Mutex::new(VecDeque::new()));
@@ -152,7 +158,7 @@ impl Account {
             inner: transport(origin, token),
             faults: Arc::clone(&faults),
         };
-        let outbox = Arc::new(outbox(flaky, me));
+        let outbox = Arc::new(outbox(flaky, me).with_clock(clock));
         let client = Arc::new(Client::new(transport(origin, token)));
         let clock = Arc::new(AtomicI64::new(START));
         let catch_up = CatchUp::new(client, Arc::clone(&outbox), Mri::new(me))
@@ -726,6 +732,12 @@ const CHAT: &str = "19:00000000000000000000000000000def@thread.v2";
 /// A plain service whose message reads answer by their `syncState`: none for the first read, else the token.
 async fn scripted(pages: Vec<(&str, Value)>) -> MockServer {
     let server = MockServer::start().await;
+    mount_pages(&server, pages).await;
+    server
+}
+
+/// Answers the plain service's message reads by their `syncState`, as [`scripted`] does.
+async fn mount_pages(server: &MockServer, pages: Vec<(&str, Value)>) {
     let pages: Vec<(String, Value)> = pages
         .into_iter()
         .map(|(token, page)| (token.to_owned(), page))
@@ -743,9 +755,8 @@ async fn scripted(pages: Vec<(&str, Value)>) -> MockServer {
                 |(_, page)| ResponseTemplate::new(200).set_body_json(page),
             )
         })
-        .mount(&server)
+        .mount(server)
         .await;
-    server
 }
 
 fn link(token: &str) -> String {
@@ -783,15 +794,27 @@ fn page(messages: Vec<Value>, sync: Option<&str>, backward: Option<&str>) -> Val
 
 fn plain_account(server: &MockServer) -> Account {
     let mut account = Account::on(&server.uri(), LAB_A, "placeholder-token");
-    let chat = Conversation {
+    account.store.upsert_conversation(&plain_chat()).unwrap();
+    account
+}
+
+/// The plain service's one chat, as the store keeps it.
+fn plain_chat() -> Conversation {
+    Conversation {
         id: CHAT.to_owned(),
         kind: ConversationKind::Group,
         topic: None,
         version: 1,
         last_activity: None,
-    };
-    account.store.upsert_conversation(&chat).unwrap();
-    account
+    }
+}
+
+/// Milliseconds since the Unix epoch, as the outbox's own clock reads them.
+fn now_ms() -> i64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    i64::try_from(since.as_millis()).unwrap()
 }
 
 #[tokio::test]
@@ -993,7 +1016,7 @@ async fn a_sync_whose_older_page_failed_reads_it_on_the_retry() {
 }
 
 #[tokio::test]
-async fn a_backward_walk_past_the_page_cap_leaves_the_rest_as_older_history() {
+async fn a_backward_walk_past_the_page_cap_keeps_the_rest_as_a_gap() {
     let tokens: Vec<String> = (0..=MAX_PAGES).map(|n| format!("w{n}")).collect();
     let mut pages = vec![
         ("", page(vec![], Some("s1"), None)),
@@ -1017,9 +1040,10 @@ async fn a_backward_walk_past_the_page_cap_leaves_the_rest_as_older_history() {
     assert_eq!(synced.pages, MAX_PAGES);
     let state = a.store.sync_state(CHAT).unwrap().unwrap();
     assert_eq!(state.sync_link, Some(link("s2")));
-    assert_eq!(state.backward_link, Some(link(&tokens[MAX_PAGES - 1])));
+    assert_eq!(state.gap_link, Some(link(&tokens[MAX_PAGES - 1])));
+    assert_eq!(state.backward_link, None, "the first read had no older history");
     assert!(!state.history_complete);
-    // the rest comes with the older history
+    // the rest comes first when older pages are read
     let older = a.catch_up.load_older(&mut a.store, CHAT).await.unwrap().unwrap();
     assert_eq!(older.inserted, 1);
 }
@@ -1111,7 +1135,8 @@ async fn a_check_whose_sync_answer_was_cut_at_the_page_cap_pages_back_from_the_l
     ];
     let looked_for = at(999 - i64::try_from(MAX_PAGES).unwrap());
     for (n, token) in tokens.iter().enumerate() {
-        let older = tokens.get(n + 1).map_or("end", String::as_str);
+        // the answer ends at its last page: a gap is read to its end, whatever times its pages have
+        let older = tokens.get(n + 1).map(String::as_str);
         let id = at(999 - i64::try_from(n).unwrap());
         let entries = if n == MAX_PAGES {
             // the message looked for, behind the cap, then one older than the row
@@ -1119,7 +1144,7 @@ async fn a_check_whose_sync_answer_was_cut_at_the_page_cap_pages_back_from_the_l
         } else {
             vec![entry_at(id)]
         };
-        pages.push((token, page(entries, Some("s2"), Some(older))));
+        pages.push((token, page(entries, Some("s2"), older)));
     }
     let server = scripted(pages).await;
     let mut a = plain_account(&server);
@@ -1129,8 +1154,165 @@ async fn a_check_whose_sync_answer_was_cut_at_the_page_cap_pages_back_from_the_l
         .await
         .unwrap();
     assert!(a.store.message(CHAT, &looked_for.to_string()).unwrap().is_some());
-    assert_eq!(
-        a.store.sync_state(CHAT).unwrap().unwrap().backward_link,
-        Some(link("end"))
-    );
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert_eq!((state.gap_link, state.backward_link), (None, None));
+    assert!(state.history_complete);
+}
+
+#[tokio::test]
+async fn a_check_reads_on_from_the_history_a_first_read_left_unread() {
+    let server = scripted(vec![
+        // the start's first read: one page, newer than the row; the row's message behind its backward link
+        ("", page(vec![entry_at(at(3000))], Some("s1"), Some("h1"))),
+        (
+            "h1",
+            page(
+                vec![entry_at(at(1000)), entry_at(at(-CLOCK_SKEW_MS - 1))],
+                Some("s1"),
+                None,
+            ),
+        ),
+        // nothing changed since: this sync alone reads everything it was given
+        ("s1", page(vec![], Some("s2"), None)),
+    ])
+    .await;
+    let mut a = plain_account(&server);
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    a.catch_up
+        .sync_conversation_since(&mut a.store, CHAT, MADE)
+        .await
+        .unwrap();
+    assert_eq!(tokens_read(&server).await, ["s1", "h1"]);
+    assert!(a.store.message(CHAT, &at(1000).to_string()).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_check_after_one_that_fell_short_does_not_send_the_row_again() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"OriginalArrivalTime": 1_800_000_000_001_u64})))
+        .mount(&server)
+        .await;
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let mut a = Account::with_outbox_clock(&server.uri(), LAB_A, "placeholder-token", {
+        let clock = Arc::clone(&clock);
+        Arc::new(move || clock.load(Ordering::SeqCst))
+    });
+    a.store.upsert_conversation(&plain_chat()).unwrap();
+    let row = enqueue(&mut a.store, &send(CHAT, "behind fifty pages")).unwrap();
+    let made = row.created_at;
+    let arrived = |offset: i64| entry_at(u64::try_from(made + offset).unwrap());
+    let mut ours = arrived(1000);
+    ours["clientmessageid"] = json!(row.client_message_id);
+    ours["from"] = json!(format!("{CHAT_BASE}/v1/users/ME/contacts/{LAB_A}"));
+    let tokens: Vec<String> = (0..=MAX_PAGES).map(|n| format!("c{n}")).collect();
+    let mut pages = vec![
+        ("", page(vec![arrived(60_000)], Some("s1"), Some(&tokens[0]))),
+        ("s1", page(vec![], Some("s2"), None)),
+    ];
+    for (n, token) in tokens.iter().enumerate() {
+        let entries = if n == MAX_PAGES {
+            vec![ours.clone(), arrived(-CLOCK_SKEW_MS - 1)]
+        } else {
+            vec![arrived(50_000 - i64::try_from(n).unwrap())]
+        };
+        pages.push((token, page(entries, Some("s1"), tokens.get(n + 1).map(String::as_str))));
+    }
+    mount_pages(&server, pages).await;
+
+    // the post reaches the service, its answer is lost; the check reads MAX_PAGES older pages, all newer than the row
+    a.fault(Fault::LoseAnswer);
+    let error = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap_err();
+    assert!(matches!(error, OutboxError::Sync { .. }), "{error:?}");
+    // after the backoff, the next check's sync brings nothing new: the history the first one left is read on
+    clock.fetch_add(3_600_000, Ordering::SeqCst);
+    let sent = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap();
+    assert_eq!(sent.state, OutboxState::Sent);
+    assert_eq!(post_count(&server).await, 1, "posted once");
+}
+
+#[tokio::test]
+async fn a_sync_cut_at_the_page_cap_keeps_the_older_history_apart() {
+    let tokens: Vec<String> = (0..MAX_PAGES).map(|n| format!("w{n}")).collect();
+    let mut pages = vec![
+        ("", page(vec![entry(3000, json!("3000"))], Some("s1"), Some("h1"))),
+        ("h1", page(vec![entry(2000, json!("2000"))], Some("s1"), None)),
+        (
+            "s1",
+            page(vec![entry(5000, json!("5000"))], Some("s2"), Some(&tokens[0])),
+        ),
+    ];
+    for (n, token) in tokens.iter().enumerate() {
+        let id = 4000 + u64::try_from(n).unwrap();
+        pages.push((
+            token,
+            page(
+                vec![entry(id, json!(id.to_string()))],
+                Some("s2"),
+                tokens.get(n + 1).map(String::as_str),
+            ),
+        ));
+    }
+    let server = scripted(pages).await;
+    let mut a = plain_account(&server);
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    // the gap's rest is read first, and reading it to its end doesn't end the older history
+    let gap = a.catch_up.load_older(&mut a.store, CHAT).await.unwrap().unwrap();
+    assert_eq!(gap.inserted, 1);
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert!(!state.history_complete);
+    assert_eq!(state.backward_link, Some(link("h1")));
+    let history = a.catch_up.load_older(&mut a.store, CHAT).await.unwrap().unwrap();
+    assert_eq!(history.inserted, 1);
+    assert!(a.store.message(CHAT, "2000").unwrap().is_some());
+    assert!(a.store.sync_state(CHAT).unwrap().unwrap().history_complete);
+    assert!(a.catch_up.load_older(&mut a.store, CHAT).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_second_cut_sync_answer_waits_for_the_first_gap_to_be_read() {
+    let gap: Vec<String> = (0..2 * MAX_PAGES + 10).map(|n| format!("w{n}")).collect();
+    let next: Vec<String> = (0..MAX_PAGES).map(|n| format!("x{n}")).collect();
+    let mut pages = vec![
+        ("", page(vec![entry(1001, json!("1001"))], Some("s1"), None)),
+        ("s1", page(vec![entry(5000, json!("5000"))], Some("s2"), Some(&gap[0]))),
+        ("s2", page(vec![entry(6000, json!("6000"))], Some("s3"), Some(&next[0]))),
+    ];
+    for (chain, first) in [(&gap, 10_000), (&next, 20_000)] {
+        for (n, token) in chain.iter().enumerate() {
+            let id = first + u64::try_from(n).unwrap();
+            let older = chain.get(n + 1).map(String::as_str);
+            pages.push((token, page(vec![entry(id, json!(id.to_string()))], Some("s3"), older)));
+        }
+    }
+    let server = scripted(pages).await;
+    let mut a = plain_account(&server);
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    // the first gap is read on, but not to its end: the second answer, cut too, isn't moved past
+    let error = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap_err();
+    assert!(matches!(error, CatchUpError::GapPending), "{error:?}");
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert_eq!(state.sync_link, Some(link("s2")));
+    assert_eq!(state.gap_link, Some(link(&gap[2 * MAX_PAGES - 1])));
+    // the next sync reads the first gap to its end, then keeps the second's rest
+    a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    let state = a.store.sync_state(CHAT).unwrap().unwrap();
+    assert_eq!(state.sync_link, Some(link("s3")));
+    assert_eq!(state.gap_link, Some(link(&next[MAX_PAGES - 1])));
+    assert!(a.catch_up.load_older(&mut a.store, CHAT).await.unwrap().is_some());
+    assert!(a.store.sync_state(CHAT).unwrap().unwrap().history_complete);
+    assert_eq!(stored_ids(&a).len(), 3 + gap.len() + next.len());
+}
+
+/// How many message posts the plain service got.
+async fn post_count(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.method.as_str() == "POST")
+        .count()
 }
