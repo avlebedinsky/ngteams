@@ -1,0 +1,36 @@
+[package]
+name = "teams-headless"
+description = "The headless lab binary: one lab account's native client (teams-core) from the command line, its fence from Fence::open_lab, its tokens from the Secret Service, its store under the lab's data dir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+# `watch --json`: one JSON object per event; the region record `proto-lab auth` saved
+serde_json.workspace = true
+# the account's tokens: its refresh token and skypetoken in the Secret Service (`teams-lab`), renewed by its session
+teams-auth.workspace = true
+teams-core.workspace = true
+# `Fence::open_lab`, the lab's config and paths, the live member read
+teams-fence.workspace = true
+teams-proto.workspace = true
+teams-store.workspace = true
+teams-trouter.workspace = true
+thiserror.workspace = true
+# the command's own runtime: its replies and events awaited, SIGINT and SIGTERM, the wait for a write to settle
+tokio = { workspace = true, features = ["macros", "rt", "signal", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+# the CLI tests run the commands against the mock chat service and its Trouter, through the test-support mock
+# origins; never a normal dependency, and the binary refuses to run when a test build unified it in
+teams-fence = { workspace = true, features = ["test-support"] }
+teams-mock.workspace = true
+teams-proto = { workspace = true, features = ["test-support"] }
+teams-trouter = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[lints]
+workspace = true

@@ -48,6 +48,11 @@
 //! denied), because a half-written record would run into the next one. When an existing file doesn't end with a
 //! newline, [`FenceLog::open`] terminates that last line first: it stays as one line that isn't JSON (a record whose
 //! write failed, reported as failed when it happened), and the entries after it parse on their own.
+//!
+//! Several processes append to the lab's one `fence.log` at once (each lab account runs a binary of its own). Each
+//! append is made under an exclusive advisory lock on the file (`flock`), as is the check for a half-written last line
+//! when the log is opened; each append checks for one too, since another process's append may have failed halfway
+//! after this log was opened. Within a process, appends are serialized by the log's own lock as well.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -250,9 +255,45 @@ pub struct FenceLog {
 }
 
 struct Sink {
-    writer: Box<dyn Write + Send>,
+    writer: Writer,
     /// An append failed, possibly halfway through a record; nothing more is written.
     broken: bool,
+}
+
+/// Where the entries go.
+enum Writer {
+    /// A log file other processes may append to too: every append under the file's advisory lock.
+    File(File),
+    /// Any other writer (tests only: [`FenceLog::from_writer`]).
+    #[cfg(feature = "test-support")]
+    Other(Box<dyn Write + Send>),
+}
+
+impl Writer {
+    /// Writes `line` whole and flushes it; a file under its lock, after ending a half line another writer left.
+    fn append(&mut self, line: &[u8]) -> io::Result<()> {
+        match self {
+            Self::File(file) => locked(file, |file| {
+                terminate_last_line(file)?;
+                file.write_all(line)?;
+                file.flush()
+            }),
+            #[cfg(feature = "test-support")]
+            Self::Other(writer) => {
+                writer.write_all(line)?;
+                writer.flush()
+            }
+        }
+    }
+}
+
+/// Runs `step` holding the file's exclusive advisory lock (`flock`), waiting for any other holder; the lock is let go
+/// afterwards whatever `step` gave.
+fn locked(file: &mut File, step: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+    file.lock()?;
+    let done = step(file);
+    let unlocked = file.unlock();
+    done.and(unlocked)
 }
 
 impl fmt::Debug for FenceLog {
@@ -263,11 +304,11 @@ impl fmt::Debug for FenceLog {
 
 impl FenceLog {
     /// Opens `path` for appending, creating it readable by the owner only (0600). When the file's last line has no
-    /// newline (an append that failed halfway), the line is terminated first, so the next entry starts a line of its
-    /// own.
+    /// newline (an append that failed halfway), the line is terminated first, under the file's lock, so the next entry
+    /// starts a line of its own.
     ///
     /// # Errors
-    /// When the file can't be opened, created, read or terminated.
+    /// When the file can't be opened, created, locked, read or terminated.
     pub fn open(path: &Path) -> io::Result<Self> {
         let mut file = OpenOptions::new()
             .create(true)
@@ -275,23 +316,20 @@ impl FenceLog {
             .append(true)
             .mode(0o600)
             .open(path)?;
-        terminate_last_line(&mut file)?;
-        Ok(Self::with_writer(file))
+        locked(&mut file, terminate_last_line)?;
+        Ok(Self::with_writer(Writer::File(file)))
     }
 
     /// Logs into any writer. Tests only (`test-support`): a lab binary's log is the lab's `fence.log`.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn from_writer(writer: impl Write + Send + 'static) -> Self {
-        Self::with_writer(writer)
+        Self::with_writer(Writer::Other(Box::new(writer)))
     }
 
-    fn with_writer(writer: impl Write + Send + 'static) -> Self {
+    fn with_writer(writer: Writer) -> Self {
         Self {
-            sink: Mutex::new(Sink {
-                writer: Box::new(writer),
-                broken: false,
-            }),
+            sink: Mutex::new(Sink { writer, broken: false }),
         }
     }
 
@@ -402,7 +440,7 @@ impl FenceLog {
         if sink.broken {
             return Err(io::Error::other("an earlier fence.log append failed"));
         }
-        let appended = sink.writer.write_all(&line).and_then(|()| sink.writer.flush());
+        let appended = sink.writer.append(&line);
         if appended.is_err() {
             sink.broken = true;
         }

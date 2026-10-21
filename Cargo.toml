@@ -8,6 +8,7 @@ members = [
     "crates/teams-auth",
     "crates/teams-core",
     "crates/teams-fence",
+    "crates/teams-headless",
     "crates/teams-mock",
     "crates/teams-proto",
     "crates/teams-store",

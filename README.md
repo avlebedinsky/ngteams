@@ -21,6 +21,7 @@ GPUI, an audio call). The plan is `docs/plans/completed/20261019-native-teams-m0
 | `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`) |
 | `crates/teams-proto` | Teams internal API requests and the native HTTP transport: reads (`GET`), a sealed own-state list (empty so far, logged to `fence.log`), and mutating requests (`SendMessage`, `StartCall`, `AddToCall`) that need a `WritePermit` for their exact target; a fixed host allowlist, `https` only, no proxy, no redirects |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service built from the synthetic fixtures in `tests/fixtures/chatsvc/`, serving the conversation list, message pages, thread reads and the chat writes, queuing an event for the other members of each write; clients reach it through the `test-support` mock origins |
+| `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and checks each fixture's `_synthetic` marker |
 | `spikes/gpui-video` | GPUI on niri (smoke window in a private weston + nested niri), then a 3×3 grid of 720p video (M0 Tasks 15–16) |
@@ -49,7 +50,8 @@ outside the repo:
 | `…/captures/<scenario>/<ts>/events.jsonl` | recorded runs (format in `crates/proto-lab/src/capture.rs`) |
 | `…/reference/<name>` | sanitized reference copies made by `export`, read locally to write synthetic fixtures |
 | `…/bundles/<version>/` | the unpacked web bundle and its `index.jsonl` |
-| `…/fence.log` | JSONL: every fence decision of every run (allows, denies, breaches, with reasons; no tokens, no participants' MRIs, scope ids verbatim), and every target the browser fence couldn't arm (its type, failed step, close and containment) |
+| `…/fence.log` | JSONL: every fence decision of every run (allows, denies, breaches, with reasons; no tokens, no participants' MRIs, scope ids verbatim), and every target the browser fence couldn't arm (its type, failed step, close and containment). Every lab process appends to it at once, each line under an advisory lock on the file |
+| `…/store/<alias>.sqlite` | the account's native store (`teams-headless`): conversations, messages, reactions, the outbox (`0600`) |
 | `…/auth/<alias>.json` | the account's region, partition, region GTMs and skypetoken expiry from `auth` (`0600`) |
 | `…/status-<alias>.json` | `login`'s steps, and why it stopped |
 | `…/media/tone-440.wav` | the fake microphone's tone for `echo-call` |
@@ -58,7 +60,7 @@ outside the repo:
 
 ## Building
 
-`cargo build -p proto-lab` (and `-p echo-call`) builds a normal lab binary. The tests enable `teams-fence`'s
+`cargo build -p proto-lab` (and `-p teams-headless`, `-p echo-call`) builds a normal lab binary. The tests enable `teams-fence`'s
 `test-support` feature through dev-dependencies, and cargo unifies it into everything built together with them
 (`cargo test`, `--all-targets`, `--all-features`), the binaries included. Such a binary refuses to run; rebuild with
 `cargo build -p <crate>`.
@@ -137,6 +139,31 @@ bot's `28:<guid>`.
 The spike binary `echo-call` (`cargo build -p echo-call`; `--caller a` by default) runs the native call flow as far as
 it goes: the fence allows the test call, the skypetoken is read, and the start isn't sent
 (`CallError::FollowUpsUnfenced`).
+
+## `teams-headless`
+
+One lab account's native client, no browser: the M1 core with its push channel (Trouter), its catch-up sync and its
+outbox. Its fence is `Fence::open_lab`'s, so every write goes out under a fresh `Fence::check` of its target's members
+and is logged to the lab's `fence.log`; its tokens are the ones `proto-lab auth` stored in the Secret Service, and its
+chat base is the region `auth` saved. It prints no token. One process per account at a time; a, b and c may each run
+their own at once.
+
+```sh
+teams-headless a sync                     # catch up: the conversation list and changed conversations, into the store
+teams-headless a list [--limit 20]        # the stored conversations (the store only; nothing goes out)
+teams-headless a show b [--limit 20]      # the a–b chat's newest stored messages, with reactions (the store only)
+teams-headless a send b 'hello'           # a post; prints start_ms, original_arrival_time, message_id and state
+teams-headless a edit b <message> 'text'  # one of a's messages, edited
+teams-headless a delete b <message>       # one of a's messages, deleted
+teams-headless a react b <message> like [--remove]
+teams-headless b watch [--json]           # every event of the push channel with its receive time, until SIGINT/SIGTERM
+```
+
+A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat
+recorded in `chats.toml`), or a conversation id. Each write first catches up (its summary on stderr), then waits up to
+`--wait` seconds (120) for a write that has to wait out a `Retry-After`; it exits non-zero unless the write went
+through. `watch` answers no delivery and no call; it exits 0 on SIGINT or SIGTERM, non-zero when the push channel
+stopped on its own.
 
 ## Captures and fixtures
 

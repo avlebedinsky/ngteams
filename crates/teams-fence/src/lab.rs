@@ -166,6 +166,13 @@ impl LabPaths {
         self.data_dir.join("auth").join(format!("{}.json", alias.as_str()))
     }
 
+    /// A lab account's native store (`teams-store`: its chats, messages and outbox), `<data_dir>/store/<alias>.sqlite`:
+    /// lab data, never in the repo.
+    #[must_use]
+    pub fn store_file(&self, alias: Alias) -> PathBuf {
+        self.data_dir.join("store").join(format!("{}.sqlite", alias.as_str()))
+    }
+
     /// The lab's own chats whose ids no account's MRIs give (the a–b–c group chat), `<data_dir>/chats.toml`
     /// ([`LabChats`]): lab data, never in the repo.
     #[must_use]
