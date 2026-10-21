@@ -204,8 +204,9 @@ impl Shell {
         self.rail = RailItem::Chats;
         self.main = Main::Chat(id);
         self.close_switcher(window, cx);
-        // the chat opened takes what is typed next
+        // the chat opened takes what is typed next, and is shown (read receipts may go)
         if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.set_shown(true, cx));
             let compose = chat.read(cx).compose().clone();
             compose.update(cx, |compose, cx| compose.focus(window, cx));
         }
@@ -222,11 +223,15 @@ impl Shell {
         }
     }
 
-    /// Shows the settings in the conversation pane.
+    /// Shows the settings in the conversation pane; the chat they hide is kept (its draft stays), but isn't shown, so
+    /// no read receipt goes for it.
     pub fn show_settings(&mut self, cx: &mut Context<Self>) {
         if self.main != Main::Settings {
             self.trace.record(&TraceLine::new("settings", "opened"));
             self.main = Main::Settings;
+            if let Some(chat) = &self.chat {
+                chat.update(cx, |chat, cx| chat.set_shown(false, cx));
+            }
             cx.notify();
         }
     }

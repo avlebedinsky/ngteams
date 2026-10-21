@@ -277,7 +277,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         message_type: "RichText/Html".to_owned(),
         edited: false,
         reactions: Vec::new(),
-        outbox: None,
+        outbox: Vec::new(),
     }
 }
 

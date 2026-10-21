@@ -1,9 +1,12 @@
 //! Compose and the writes from the UI on two accounts' engines on the mock (`teams-mock`, reached through the
 //! `test-support` mock origins), in process (M2 Task 13): account a's chat view of the a–b chat over its engine (the
 //! bridge, the models, GPUI's test context), account b's engine headless. Each write a makes through the view (a post
-//! with lines and a link, typing, a mention picked after `@`, a reply, an edit by Up, a reaction, a delete confirmed,
-//! a read receipt) reaches b over its push channel and leaves its decision in a's own `fence.log`; a mention of
-//! someone outside the lab is denied by a's fence, shown as denied, and never reaches the service.
+//! with lines and a link, sent key for key as the capture's link inserted with its text, typing, a mention picked
+//! after `@`, a reply, an edit by Up, a reaction, a delete confirmed, a read receipt) reaches b over its push channel
+//! and leaves its decision in a's own `fence.log`; a mention of someone outside the lab is denied by a's fence, shown
+//! as denied, and never reaches the service. And nothing goes out that a didn't ask for: no read receipt for the chat
+//! while it isn't shown, no edit a newer one made out of date sent again, no delete of a message other than the one
+//! selected.
 //!
 //! Every write goes out through a's engine, its outbox and its fence (a fence over the lab roster, the 1:1 chat's
 //! members read live from the mock); the view builds no request. Every id and token is the mock's made-up one.
@@ -27,11 +30,11 @@ use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OUTSIDER, TrouterMock};
 use teams_proto::chat::MessageText;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
-use teams_store::{Message, OutboxState, Store};
+use teams_store::{Message, OutboxKind, OutboxState, Store};
 use teams_trouter::{Options, RegistrationReport, Trouter, TrouterCredentials};
 use teams_ui::chat_view::{ChatView, MessageAction, READ_DEBOUNCE};
 use teams_ui::compose::Compose;
-use teams_ui::sending::RowState;
+use teams_ui::sending::{Again, RowState};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::{Bridge, Core, Link, Models, ShellParts, ViewTrace};
 use tokio::sync::broadcast;
@@ -138,14 +141,38 @@ impl Lab {
 
     /// The bodies of the message posts the mock got.
     fn posted(&self) -> Vec<String> {
+        self.bodies("POST", "/messages")
+    }
+
+    /// The bodies of the requests of `method` the mock got whose path ends with `end`, in order.
+    fn bodies(&self, method: &str, end: &str) -> Vec<String> {
         let requests = self.runtime.block_on(self.mock.received_requests());
         requests
             .iter()
-            .filter(|request| request.method.as_str() == "POST" && request.url.path().ends_with("/messages"))
+            .filter(|request| request.method.as_str() == method && request.url.path().ends_with(end))
             .map(|request| String::from_utf8_lossy(&request.body).into_owned())
             .collect()
     }
 }
+
+/// `lines.json` (synthetic-from-capture), its placeholders filled with the mock's made-up ids.
+fn lines_fixture() -> Value {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/chatsvc/lines.json");
+    let oid = |mri: &str| mri.trim_start_matches("8:orgid:").to_owned();
+    let text = std::fs::read_to_string(path)
+        .unwrap()
+        .replace("<region>", "amer")
+        .replace("<guid:a>", &oid(LAB_A))
+        .replace("<guid:b>", &oid(LAB_B));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// What `lines.json`'s message was typed as, line by line.
+const LINES_TYPED: [&str; 3] = [
+    "a made-up first line",
+    "a second line",
+    "a link https://example.com/made-up/path on the third line",
+];
 
 /// `me`'s engine on the mock, its fence over the lab roster writing to the second value, its store in the third.
 fn engine(lab: &Lab, me: &str) -> (EngineHandle, SharedLog, tempfile::TempDir) {
@@ -369,14 +396,14 @@ impl Walk {
         self.a_log.verdicts(kind, AB_CHAT)
     }
 
-    /// b's message comes in and is read: a's receipt goes once its wait is over, through a's fence. Its id.
-    fn b_s_message_is_read(&mut self) -> String {
+    /// b posts `text`, and a's view holds it. Its id.
+    fn b_posts(&mut self, text: &str) -> String {
         let row = self
             .b
             .handle
             .write(Action::Send {
                 conversation: AB_CHAT.to_owned(),
-                text: MessageText::plain("hi a, read me").unwrap(),
+                text: MessageText::plain(text).unwrap(),
             })
             .blocking_wait()
             .unwrap();
@@ -385,6 +412,12 @@ impl Walk {
         settle(self.cx, |cx| {
             newest_from(&view, cx, LAB_B).as_deref() == Some(theirs.as_str())
         });
+        theirs
+    }
+
+    /// b's message comes in and is read: a's receipt goes once its wait is over, through a's fence. Its id.
+    fn b_s_message_is_read(&mut self) -> String {
+        let theirs = self.b_posts("hi a, read me");
         assert!(self.verdicts("read_receipt").is_empty(), "not before its wait is over");
         self.cx.executor().advance_clock(READ_DEBOUNCE);
         let log = self.a_log.clone();
@@ -392,12 +425,15 @@ impl Walk {
         theirs
     }
 
-    /// A post with a line break and a link, typing before it. The post as b stored it.
+    /// `lines.json`'s three lines, the last with a link, typing before them. The post as b stored it.
     fn a_post_with_lines_and_a_link(&mut self) -> Message {
         focus_compose(&self.view, self.cx);
-        self.cx.simulate_input("hello b");
-        self.cx.simulate_keystrokes("shift-enter");
-        self.cx.simulate_input("see https://example.test/x");
+        for (index, line) in LINES_TYPED.iter().enumerate() {
+            if index > 0 {
+                self.cx.simulate_keystrokes("shift-enter");
+            }
+            self.cx.simulate_input(line);
+        }
         let typing = self.b.event(self.cx, |event| match event {
             Event::Typing {
                 conversation,
@@ -410,8 +446,20 @@ impl Walk {
         self.cx.simulate_keystrokes("enter");
         let (change, posted) = self.b.message(self.cx);
         assert_eq!(change, MessageChange::New);
-        let link = "<p>hello b</p><p>see <a href=\"https://example.test/x\">";
-        assert!(posted.content.contains(link), "{}", posted.content);
+        let fixture = lines_fixture();
+        assert_eq!(posted.content, fixture["unlinked_content"].as_str().unwrap());
+        // as a sent it: the capture's link inserted with its text, key for key (plain text, `links` "[]"), the values
+        // that differ per post (its times, its id, the account's name) aside
+        let posts = self.lab.posted();
+        let sent = posts.iter().find(|body| body.contains(LINES_TYPED[0])).unwrap();
+        let sent: Value = serde_json::from_str(sent).unwrap();
+        let mut expected = fixture["request"]["body"].clone();
+        expected["content"] = fixture["unlinked_content"].clone();
+        expected["properties"]["links"] = Value::from("[]");
+        for own in ["composetime", "originalarrivaltime", "clientmessageid", "imdisplayname"] {
+            expected[own] = sent[own].clone();
+        }
+        assert_eq!(sent, expected);
         assert_eq!(self.verdicts("typing"), ["allow"]);
         assert_eq!(self.verdicts("message"), ["allow"]);
         posted
@@ -532,6 +580,122 @@ impl Walk {
         assert!(denied);
     }
 
+    /// The chat hidden (the shell shows the settings): b's message comes in and nothing is asked of a's engine, so no
+    /// receipt reaches the mock; shown again, the receipt goes.
+    fn no_receipt_for_the_chat_while_it_isn_t_shown(&mut self) {
+        let view = self.view.clone();
+        let horizons = self.lab.bodies("PUT", "/properties").len();
+        let receipts = self.cx.update(|_, cx| view.read(cx).receipts());
+        self.cx
+            .update(|_, cx| view.update(cx, |view, cx| view.set_shown(false, cx)));
+        self.b_posts("hi a, while you look elsewhere");
+        for _ in 0..3 {
+            self.cx.executor().advance_clock(READ_DEBOUNCE);
+            settle(self.cx, |_| true);
+        }
+        assert_eq!(
+            self.cx.update(|_, cx| view.read(cx).receipts()),
+            receipts,
+            "none asked for"
+        );
+        assert_eq!(self.verdicts("read_receipt"), ["allow"]);
+        assert_eq!(
+            self.lab.bodies("PUT", "/properties").len(),
+            horizons,
+            "none reached the service"
+        );
+
+        self.cx
+            .update(|_, cx| view.update(cx, |view, cx| view.set_shown(true, cx)));
+        self.cx.executor().advance_clock(READ_DEBOUNCE);
+        let log = self.a_log.clone();
+        settle(self.cx, |_| log.verdicts("read_receipt", AB_CHAT) == ["allow", "allow"]);
+    }
+
+    /// A delete asked on a's newest message, then the selection moved up: Enter deletes nothing.
+    fn a_delete_asked_on_one_message_never_deletes_another(&mut self) {
+        let mine = newest_from(&self.view, self.cx, LAB_A).unwrap();
+        act(&self.view, self.cx, MessageAction::Delete, &mine);
+        self.cx.simulate_keystrokes("up");
+        self.cx.simulate_keystrokes("enter");
+        settle(self.cx, |_| true);
+        let view = self.view.clone();
+        assert_eq!(
+            self.cx.update(|_, cx| view.read(cx).deleting().map(str::to_owned)),
+            None
+        );
+        assert!(self.verdicts("delete").is_empty(), "no delete asked for");
+        assert!(self.lab.bodies("DELETE", "").is_empty(), "none reached the service");
+        self.cx.simulate_keystrokes("escape");
+    }
+
+    /// An edit of a's newest message the service refuses, then a newer one that goes: the refused one is out of date,
+    /// never offered or sent again; a later write on the message (which would go after anything sent again before it)
+    /// finds only the two edits sent.
+    fn an_edit_out_of_date_is_never_sent_again(&mut self) {
+        let mine = newest_from(&self.view, self.cx, LAB_A).unwrap();
+        let edit_path = format!("/messages/{mine}");
+        self.lab
+            .runtime
+            .block_on(self.lab.mock.refuse_next("PUT", &edit_path, 400));
+        act(&self.view, self.cx, MessageAction::Edit, &mine);
+        self.cx.simulate_input(" (one)");
+        self.cx.simulate_keystrokes("enter");
+        let models = self.models.clone();
+        let failed = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                models
+                    .chats
+                    .read(cx)
+                    .outbox_rows(AB_CHAT)
+                    .find(|row| row.kind == OutboxKind::Edit && row.state == OutboxState::Failed)
+                    .map(|row| row.id)
+            })
+        };
+        settle(self.cx, |cx| failed(cx).is_some());
+        let stale = failed(self.cx).unwrap();
+        let view = self.view.clone();
+        settle(self.cx, |cx| {
+            notes_on(&view, cx, &mine).contains(&(stale, Again::AfterWarning))
+        });
+
+        act(&self.view, self.cx, MessageAction::Edit, &mine);
+        self.cx.simulate_input(" (two)");
+        self.cx.simulate_keystrokes("enter");
+        let (change, edited) = self.b.message(self.cx);
+        assert_eq!((change, edited.id.as_str()), (MessageChange::Edit, mine.as_str()));
+        assert!(
+            edited.content.contains(" (two)") && !edited.content.contains(" (one)"),
+            "{}",
+            edited.content
+        );
+        let newer_sent = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                models
+                    .chats
+                    .read(cx)
+                    .outbox_rows(AB_CHAT)
+                    .any(|row| row.kind == OutboxKind::Edit && row.id > stale && row.state == OutboxState::Sent)
+            })
+        };
+        settle(self.cx, newer_sent);
+        assert_eq!(notes_on(&view, self.cx, &mine), [], "the refused edit is out of date");
+        let again: &'static str = Box::leak(format!("send-again-{stale}").into_boxed_str());
+        assert!(self.cx.debug_bounds(again).is_none());
+        self.cx
+            .update(|_, cx| view.update(cx, |view, cx| view.send_again(stale, cx)));
+
+        act(&self.view, self.cx, MessageAction::React, &mine);
+        self.cx.simulate_keystrokes("1");
+        self.b_told(&mine, |change| {
+            matches!(change, MessageChange::Reaction | MessageChange::Other)
+        });
+        let edits = self.lab.bodies("PUT", &edit_path);
+        assert_eq!(edits.len(), 2, "the refused edit and the newer one, nothing again");
+        assert!(edits[0].contains(" (one)") && edits[1].contains(" (two)"));
+        assert_eq!(self.verdicts("edit"), ["allow", "allow"]);
+    }
+
     /// a's bridge shut down (a's engine joined), then b's engine.
     fn stop(self) {
         let bridge = self.bridge.clone();
@@ -540,6 +704,27 @@ impl Walk {
         settle(self.cx, |cx| cx.update(|_, cx| !bridge.read(cx).running()));
         self.b.handle.shutdown();
     }
+}
+
+/// The notes on message `id` in a's view: each row and whether "send again" is offered.
+fn notes_on(view: &Entity<ChatView>, cx: &mut VisualTestContext, id: &str) -> Vec<(i64, Again)> {
+    cx.update(|_, cx| {
+        view.read(cx)
+            .message_items()
+            .find(|item| item.id == id)
+            .map(|item| item.outbox.iter().map(|note| (note.row, note.again)).collect())
+            .unwrap_or_default()
+    })
+}
+
+#[test]
+fn nothing_goes_out_from_a_s_view_that_a_didn_t_ask_for() {
+    let mut walk = Walk::start();
+    walk.b_s_message_is_read();
+    walk.no_receipt_for_the_chat_while_it_isn_t_shown();
+    walk.a_delete_asked_on_one_message_never_deletes_another();
+    walk.an_edit_out_of_date_is_never_sent_again();
+    walk.stop();
 }
 
 #[test]

@@ -351,6 +351,17 @@ fn no_message_html_reaches_a_markdown_or_html_view() {
     assert!(chat_view.contains("rich_text::render("));
 }
 
+/// What builds a request for a new chat: the engine's action or the outbox's command, named or brought in by name
+/// (`use …::Action::CreateChat`, a glob of either's variants, or the variant's fields after its bare name). A row's
+/// kind (`OutboxKind::CreateChat`, shown by the view as it stands) builds nothing.
+const CREATES_A_CHAT: [&str; 5] = [
+    "Action::CreateChat",
+    "Command::CreateChat",
+    "Action::*",
+    "Command::*",
+    "CreateChat {",
+];
+
 /// Creating a chat is never offered (M2 Task 13): a group chat the native client creates is denied its writes
 /// (CLAUDE.md: it isn't recorded in `chats.toml`), and starting a 1:1 chat needs the people search, whose results list
 /// other tenant users. No app crate's source asks the engine for one.
@@ -360,7 +371,9 @@ fn no_view_offers_creating_a_chat() {
     for package in APP_CRATES {
         for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
             read += 1;
-            assert!(!text.contains("CreateChat"), "{} names CreateChat", path.display());
+            for builds in CREATES_A_CHAT {
+                assert!(!text.contains(builds), "{} names {builds}", path.display());
+            }
         }
     }
     assert!(read >= 13, "the app crates' sources were read ({read} files)");

@@ -31,15 +31,20 @@
 //!   focus): reply and react, and for the account's own message edit and delete. Each is told as
 //!   [`ChatViewEvent::Action`] and carried out (M2 Task 13): a reply and an edit go to the [`Compose`] box under the
 //!   messages; react opens the quick reactions M2 Task 10 captured ([`QUICK_REACTIONS`], keys 1–4), and a reaction
-//!   chip clicked sets or takes back the account's own; delete asks first (Enter or the button confirms, Escape
-//!   cancels). Every write goes out through the engine ([`Core::write`]), never from the view.
+//!   chip of one of them clicked sets or takes back the account's own (a chip of any other key only shows); react and
+//!   delete select the message they act on, and moving the selection closes them; delete asks first (Enter or the
+//!   button confirms, Escape cancels). Every write goes out through the engine ([`Core::write`]), never from the view.
 //! - **The account's writes as they go out** ([`crate::sending`]): a message post shows at once as a pending message of
-//!   its own (the engine tells its row as it is made), with its state, until its message is in the store; an edit, a
-//!   delete or a reaction shows its state on the message it acts on. "Send again" on a failed row or an earlier
-//!   session's is the engine's explicit [`Core::resend`], after a warning when its message may have arrived.
-//! - **Read receipts**: with the "send read receipts" setting on, while the window is active and the list is at the
-//!   newest message, the account's read horizon moves to the newest message from someone else that is after it,
-//!   [`READ_DEBOUNCE`] after the view settles, one at a time.
+//!   its own (the engine tells its row as it is made, and the rows are built again then, before any store read),
+//!   with its state, until its message is held or found in the store ([`Core::message`], by the id the row was sent
+//!   with: a message older than the pages held); an edit, a delete or a reaction shows its state on the message it
+//!   acts on, unless a newer write on the same thing makes it out of date ([`sending::superseded`]). "Send again" on
+//!   a failed row or an earlier session's is the engine's explicit [`Core::resend`], after a warning when its message
+//!   may have arrived, or when it changes a message (a later change may have gone out since).
+//! - **Read receipts**: with the "send read receipts" setting on, while the chat is shown ([`ChatView::set_shown`]:
+//!   the shell hides it behind the settings), the window is active and the list is at the newest message, the
+//!   account's read horizon moves to the newest message from someone else that is after it, [`READ_DEBOUNCE`] after
+//!   the view settles, one at a time.
 //!
 //! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds; `typing
 //! shown`/`cleared`; `outbox shown`: the rows shown and their states), never text or a name.
@@ -59,7 +64,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError};
 use teams_proto::chat::{MessageType, RichText, ThreadActivity, parse_html, thread_activity};
-use teams_store::{Message, OutboxEntry, OutboxKind, PageCursor, Reaction};
+use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction};
 
 use crate::bridge::Core;
 use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
@@ -118,6 +123,9 @@ pub const READ_DEBOUNCE: Duration = Duration::from_millis(800);
 pub const CONFIRM_DELETE: &str = "Delete this message?";
 /// What "send again" warns of on a row whose message may have arrived.
 pub const MAY_HAVE_ARRIVED: &str = "This message may have arrived already. Send it again anyway?";
+/// What "send again" warns of on an edit, a delete or a reaction: sent again, it would undo a later change.
+pub const MAY_BE_OUT_OF_DATE: &str =
+    "A later change to this message may have gone out since. Send this one again anyway?";
 
 /// Marks the view's key bindings as installed.
 struct Bound;
@@ -287,8 +295,9 @@ pub struct MessageItem {
     pub message_type: String,
     pub edited: bool,
     pub reactions: Vec<ReactionCount>,
-    /// The account's latest write on it that isn't sent (an edit, a delete, a reaction), as it stands.
-    pub outbox: Option<Note>,
+    /// The account's writes on it that aren't sent (an edit, a delete, a reaction) and that no newer write on the same
+    /// thing made out of date, as they stand, the oldest first.
+    pub outbox: Vec<Note>,
 }
 
 /// A message post of the account's whose message isn't in the store yet: its row as it stands, and its text.
@@ -562,6 +571,10 @@ pub struct ChatView {
     unsettled: Vec<OutboxEntry>,
     /// The rows earlier sessions left, by id.
     earlier: HashSet<i64>,
+    /// This session's message posts told sent whose message was found in the store, by row id: never shown pending.
+    stored_posts: HashSet<i64>,
+    /// Whether the chat is shown (not hidden behind the settings): read receipts go only while it is.
+    shown: Visibility,
     /// Rendered text of the pending message posts, per row id.
     pending_rendered: HashMap<i64, Arc<Rendered>>,
     /// The newest message the account has read up to (its arrival time): the store's horizon, or the last receipt.
@@ -638,6 +651,8 @@ impl ChatView {
             resending: None,
             unsettled: Vec::new(),
             earlier: HashSet::new(),
+            stored_posts: HashSet::new(),
+            shown: Visibility::Shown,
             pending_rendered: HashMap::new(),
             read_upto: None,
             receipt: None,
@@ -679,6 +694,9 @@ impl ChatView {
             if at > this.seen {
                 this.seen = at;
                 this.window_due = true;
+                // a row just queued shows at once: the rows are built again from the models before the store is read
+                // (the engine answers that read only once the send it is busy with is over)
+                this.rebuild(cx);
                 this.kick(cx);
             }
             this.typing_changed(cx);
@@ -731,6 +749,27 @@ impl ChatView {
     #[must_use]
     pub fn receipts(&self) -> u64 {
         self.receipts
+    }
+
+    /// Whether the chat is shown.
+    #[must_use]
+    pub fn is_shown(&self) -> bool {
+        self.shown == Visibility::Shown
+    }
+
+    /// The chat is shown, or hidden (the shell shows the settings over it): hidden, no read receipt goes, and one
+    /// waiting is dropped; shown again, one may be due.
+    pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.is_shown() == shown {
+            return;
+        }
+        self.shown = if shown { Visibility::Shown } else { Visibility::Hidden };
+        if shown {
+            self.want_receipt(cx);
+        } else {
+            self.receipt = None;
+        }
+        cx.notify();
     }
 
     #[must_use]
@@ -856,6 +895,14 @@ impl ChatView {
     /// Selects a message (the keyboard's actions apply to it).
     pub fn select(&mut self, message: Option<String>, cx: &mut Context<Self>) {
         if self.selected != message {
+            // what waits on another message (its quick reactions, its delete's confirmation) closes: a key acts only on
+            // the message selected
+            if self.reacting.is_some() && self.reacting != message {
+                self.reacting = None;
+            }
+            if self.deleting.is_some() && self.deleting != message {
+                self.deleting = None;
+            }
             self.selected = message;
             cx.notify();
         }
@@ -875,14 +922,21 @@ impl ChatView {
             action,
             message: message.to_owned(),
         });
+        // another action closes what waited for an answer
+        self.reacting = None;
+        self.deleting = None;
         match action {
             MessageAction::Reply => self.reply_to(message, window, cx),
             MessageAction::Edit => self.edit(message, window, cx),
             MessageAction::React => {
+                // the message the keys 1–4 act on is the one selected
+                self.select(Some(message.to_owned()), cx);
                 self.reacting = Some(message.to_owned());
                 self.focus.focus(window, cx);
             }
             MessageAction::Delete => {
+                // the message Enter deletes is the one selected
+                self.select(Some(message.to_owned()), cx);
                 self.deleting = Some(message.to_owned());
                 self.focus.focus(window, cx);
             }
@@ -928,9 +982,13 @@ impl ChatView {
         }
     }
 
-    /// Sets the account's reaction `key` on `message`, or takes it back when it is set.
+    /// Sets the account's reaction `key` on `message`, or takes it back when it is set: only a key of
+    /// [`QUICK_REACTIONS`], the keys the capture showed sent; any other is shown, never sent.
     pub fn toggle_reaction(&mut self, message: &str, key: &str, cx: &mut Context<Self>) {
         self.reacting = None;
+        if !QUICK_REACTIONS.contains(&key) {
+            return;
+        }
         let Some(item) = self.message_items().find(|item| item.id == message) else {
             return;
         };
@@ -995,7 +1053,7 @@ impl ChatView {
     fn note_of_row(&self, row: i64) -> Option<&Note> {
         self.items.iter().find_map(|item| match item {
             Item::Pending(pending) if pending.note.row == row => Some(&pending.note),
-            Item::Message(message) => message.outbox.as_ref().filter(|note| note.row == row),
+            Item::Message(message) => message.outbox.iter().find(|note| note.row == row),
             _ => None,
         })
     }
@@ -1050,6 +1108,11 @@ impl ChatView {
             .map(|message| (message.arrival_time, message.id.clone()));
         let next = self.next.clone();
         let first = self.loads == 0;
+        let find = if load == Load::Window {
+            self.posts_to_find(cx)
+        } else {
+            Vec::new()
+        };
         let held: HashMap<String, i64> = self
             .reactions
             .iter()
@@ -1057,7 +1120,7 @@ impl ChatView {
             .collect();
         self.loading = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let read = match load {
-                Load::Window => window(&*core, &conversation, oldest, first, &held).await,
+                Load::Window => window(&*core, &conversation, oldest, first, &held, &find).await,
                 Load::Older => older(&*core, &conversation, oldest, next, &held).await,
             };
             let _ = this.update(cx, |view, cx| view.loaded(load, read, cx));
@@ -1091,6 +1154,7 @@ impl ChatView {
             self.unsettled = outbox.unsettled;
             self.earlier = outbox.earlier;
             self.read_upto = self.read_upto.max(outbox.read_upto);
+            self.stored_posts.extend(outbox.stored);
         }
         if let Some(history) = read.history {
             self.history = history;
@@ -1370,7 +1434,7 @@ impl ChatView {
 
     /// A message's row, before it is arranged, with the note `notes` has for it; `None` for a control message (a
     /// signal, never shown).
-    fn item(&mut self, message: &Message, notes: &HashMap<String, Note>) -> Option<MessageItem> {
+    fn item(&mut self, message: &Message, notes: &HashMap<String, Vec<Note>>) -> Option<MessageItem> {
         if MessageType::from(message.message_type.clone()).is_control() {
             return None;
         }
@@ -1401,56 +1465,91 @@ impl ChatView {
             edited: message.edit_time.is_some() && !matches!(body, Body::Deleted),
             body,
             reactions,
-            outbox: notes.get(&message.id).cloned(),
+            outbox: notes.get(&message.id).cloned().unwrap_or_default(),
         })
     }
 
-    /// The notes shown on messages: per message id, the account's newest edit, delete or reaction on it that isn't
-    /// sent.
-    fn message_notes(&self, now_ms: i64) -> HashMap<String, Note> {
-        let mut notes = HashMap::new();
-        // the store's rows come the oldest first: the newest on a message is the one kept
-        for row in self.unsettled.iter().filter(|row| sending::shown_on_message(row.kind)) {
-            let target = sending::command_of(row).and_then(|command| command.message_id().map(str::to_owned));
-            if let Some(target) = target {
-                notes.insert(target, Note::of(row, self.earlier.contains(&row.id), now_ms));
-            }
-        }
-        notes
-    }
-
-    /// The message posts on their way: this session's as last told and the store's that aren't sent (a row told sent
-    /// stays sent), each until its message is held.
-    fn pending(&mut self, cx: &App, now_ms: i64) -> Vec<PendingItem> {
+    /// The conversation's outbox rows the view knows, by id: this session's as last told and the store's that aren't
+    /// sent (a row told sent stays sent).
+    fn known_rows(&self, cx: &App) -> BTreeMap<i64, OutboxEntry> {
         let mut rows: BTreeMap<i64, OutboxEntry> = self
             .models
             .chats
             .read(cx)
             .outbox_rows(&self.conversation)
-            .filter(|row| row.kind == OutboxKind::Send)
             .map(|row| (row.id, row.clone()))
             .collect();
-        for row in self.unsettled.iter().filter(|row| row.kind == OutboxKind::Send) {
-            let told_sent = rows
-                .get(&row.id)
-                .is_some_and(|told| told.state == teams_store::OutboxState::Sent);
+        for row in &self.unsettled {
+            let told_sent = rows.get(&row.id).is_some_and(|told| told.state == OutboxState::Sent);
             if !told_sent {
                 rows.insert(row.id, row.clone());
             }
         }
+        rows
+    }
+
+    /// The notes shown on messages: per message id, the account's edits, deletes and reactions on it that aren't sent
+    /// and that no newer write on the same thing made out of date, the oldest first.
+    fn message_notes(&self, rows: &BTreeMap<i64, OutboxEntry>, now_ms: i64) -> HashMap<String, Vec<Note>> {
+        let superseded = sending::superseded(rows.values());
+        let mut notes: HashMap<String, Vec<Note>> = HashMap::new();
+        let shown = rows.values().filter(|row| {
+            sending::shown_on_message(row.kind) && row.state != OutboxState::Sent && !superseded.contains(&row.id)
+        });
+        for row in shown {
+            let target = sending::command_of(row).and_then(|command| command.message_id().map(str::to_owned));
+            if let Some(target) = target {
+                notes
+                    .entry(target)
+                    .or_default()
+                    .push(Note::of(row, self.earlier.contains(&row.id), now_ms));
+            }
+        }
+        notes
+    }
+
+    /// This session's message posts told sent whose message the view doesn't hold and that weren't found in the store
+    /// yet: their row ids and the message ids they were sent as, for the window load to look up.
+    fn posts_to_find(&self, cx: &App) -> Vec<(i64, String)> {
         let held: HashSet<&str> = self
             .messages
             .iter()
             .filter_map(|message| message.client_message_id.as_deref())
             .collect();
-        let shown: Vec<OutboxEntry> = rows
-            .into_values()
-            .filter(|row| !held.contains(row.client_message_id.as_str()))
+        self.models
+            .chats
+            .read(cx)
+            .outbox_rows(&self.conversation)
+            .filter(|row| {
+                row.kind == OutboxKind::Send
+                    && row.state == OutboxState::Sent
+                    && !self.stored_posts.contains(&row.id)
+                    && !held.contains(row.client_message_id.as_str())
+            })
+            .filter_map(|row| Some((row.id, row.message_id.clone()?)))
+            .collect()
+    }
+
+    /// The message posts on their way: the rows known ([`Self::known_rows`]), each until its message is held or was
+    /// found in the store (a message older than the pages held).
+    fn pending(&mut self, rows: &BTreeMap<i64, OutboxEntry>, now_ms: i64) -> Vec<PendingItem> {
+        let held: HashSet<&str> = self
+            .messages
+            .iter()
+            .filter_map(|message| message.client_message_id.as_deref())
+            .collect();
+        let shown: Vec<&OutboxEntry> = rows
+            .values()
+            .filter(|row| {
+                row.kind == OutboxKind::Send
+                    && !held.contains(row.client_message_id.as_str())
+                    && !self.stored_posts.contains(&row.id)
+            })
             .collect();
         self.pending_rendered
             .retain(|id, _| shown.iter().any(|row| row.id == *id));
         shown
-            .iter()
+            .into_iter()
             .map(|row| PendingItem {
                 note: Note::of(row, self.earlier.contains(&row.id), now_ms),
                 created_at: row.created_at,
@@ -1475,7 +1574,8 @@ impl ChatView {
     /// Builds the rows again and tells the list which changed.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let now_ms = Utc::now().timestamp_millis();
-        let notes = self.message_notes(now_ms);
+        let known = self.known_rows(cx);
+        let notes = self.message_notes(&known, now_ms);
         let messages = std::mem::take(&mut self.messages);
         let rows: Vec<MessageItem> = messages
             .iter()
@@ -1483,7 +1583,7 @@ impl ChatView {
             .collect();
         self.messages = messages;
         let mut items = arrange(rows, self.history, self.horizon, &Local);
-        items.extend(self.pending(cx, now_ms).into_iter().map(Item::Pending));
+        items.extend(self.pending(&known, now_ms).into_iter().map(Item::Pending));
         let anchor = Anchor::of(&self.list, &self.items);
         splice(&self.list, &self.items, &items);
         if let Some(anchor) = anchor {
@@ -1495,9 +1595,29 @@ impl ChatView {
         {
             self.selected = None;
         }
+        self.close_gone();
         self.trace_items();
         self.trace_outbox();
         cx.notify();
+    }
+
+    /// Closes what waits on a message that no longer offers it (gone from the rows, or deleted meanwhile): its quick
+    /// reactions, its delete's confirmation.
+    fn close_gone(&mut self) {
+        let offers = |view: &Self, id: &str, action: MessageAction| {
+            view.message_items()
+                .any(|item| item.id == id && item.actions().contains(&action))
+        };
+        if let Some(id) = self.reacting.clone()
+            && !offers(self, &id, MessageAction::React)
+        {
+            self.reacting = None;
+        }
+        if let Some(id) = self.deleting.clone()
+            && !offers(self, &id, MessageAction::Delete)
+        {
+            self.deleting = None;
+        }
     }
 
     /// Traces the outbox rows shown and their states, when they changed (`outbox shown`: the rows' ids as
@@ -1506,10 +1626,10 @@ impl ChatView {
         let shown: Vec<(String, &'static str)> = self
             .items
             .iter()
-            .filter_map(|item| match item {
-                Item::Pending(pending) => Some(&pending.note),
-                Item::Message(message) => message.outbox.as_ref(),
-                _ => None,
+            .flat_map(|item| match item {
+                Item::Pending(pending) => std::slice::from_ref(&pending.note),
+                Item::Message(message) => message.outbox.as_slice(),
+                _ => &[],
             })
             .map(|note| (note.row.to_string(), note.state.name()))
             .collect();
@@ -1529,10 +1649,11 @@ impl ChatView {
     }
 
     /// The newest message a read receipt would move the account's horizon to now, with its arrival time, if one is
-    /// due: the setting on, the window active, the list at the newest message, and someone else's message after the
-    /// horizon that the store counts unread (and that carries the `clientmessageid` a receipt names).
+    /// due: the setting on, the chat shown, the window active, the list at the newest message, and someone else's
+    /// message after the horizon that the store counts unread (and that carries the `clientmessageid` a receipt names).
     fn receipt_target(&self, cx: &App) -> Option<(String, i64)> {
-        let wanted = self.active == Activation::Active
+        let wanted = self.shown == Visibility::Shown
+            && self.active == Activation::Active
             && self.list.is_following_tail()
             && self.settings.read(cx).settings().send_read_receipts;
         if !wanted {
@@ -1685,7 +1806,12 @@ impl ChatView {
             row.children(item.header.then(|| header_line(item, palette)))
                 .child(bubble(item, highlighted, palette))
                 .children(footer_line(item, palette, cx))
-                .children(item.outbox.as_ref().map(|note| note_line(note, palette, cx)))
+                .children(
+                    item.outbox
+                        .iter()
+                        .map(|note| note_line(note, palette, cx))
+                        .collect::<Vec<_>>(),
+                )
                 .children(picker)
         };
         row.children(actions).into_any_element()
@@ -1708,8 +1834,9 @@ impl ChatView {
             }
         } else {
             let row = self.resending?;
+            let post = self.note_of_row(row).is_none_or(|note| note.kind == OutboxKind::Send);
             Ask {
-                question: MAY_HAVE_ARRIVED,
+                question: if post { MAY_HAVE_ARRIVED } else { MAY_BE_OUT_OF_DATE },
                 yes: "resend-anyway",
                 label: "Send again",
                 on_yes: Box::new(move |this, cx| this.send_again(row, cx)),
@@ -1753,6 +1880,14 @@ struct Ask {
     yes: &'static str,
     label: &'static str,
     on_yes: OnYes,
+}
+
+/// Whether the chat is shown in its window: read receipts go out only while it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Visibility {
+    Shown,
+    /// Behind the settings.
+    Hidden,
 }
 
 /// Whether the window is the one the user is using: read receipts go out only while it is.
@@ -1907,6 +2042,8 @@ struct OutboxRead {
     earlier: HashSet<i64>,
     /// The arrival time of the last message the account has read.
     read_upto: Option<i64>,
+    /// The message posts looked up whose message the store has, by row id.
+    stored: Vec<i64>,
 }
 
 /// The conversation's rows that aren't sent, the rows earlier sessions left, and the account's read horizon now; what
@@ -1928,19 +2065,34 @@ async fn outbox_read(core: &dyn Core, conversation: &str) -> OutboxRead {
         unsettled,
         earlier,
         read_upto,
+        stored: Vec::new(),
     }
 }
 
-/// The window load: the newest messages down to `oldest`, the account's writes and read horizon now, and on the first
-/// load that horizon for the "New messages" divider.
+/// The posts of `find` (row ids, the message ids they were sent as) whose message the store has.
+async fn stored_posts(core: &dyn Core, conversation: &str, find: &[(i64, String)]) -> Vec<i64> {
+    let mut stored = Vec::new();
+    for (row, message_id) in find {
+        let found = core.message(conversation.to_owned(), message_id.clone()).await;
+        if matches!(found, Ok(Some(_))) {
+            stored.push(*row);
+        }
+    }
+    stored
+}
+
+/// The window load: the newest messages down to `oldest`, the account's writes and read horizon now, which of the
+/// posts of `find` the store has, and on the first load that horizon for the "New messages" divider.
 async fn window(
     core: &dyn Core,
     conversation: &str,
     oldest: Option<(i64, String)>,
     first: bool,
     held: &HashMap<String, i64>,
+    find: &[(i64, String)],
 ) -> Result<Read, EngineError> {
-    let outbox = outbox_read(core, conversation).await;
+    let mut outbox = outbox_read(core, conversation).await;
+    outbox.stored = stored_posts(core, conversation, find).await;
     let horizon = if first {
         Horizon::Read(outbox.read_upto)
     } else {
@@ -1987,7 +2139,7 @@ async fn older(
         }
         let Some((arrival_time, id)) = oldest else {
             // nothing was held: the newest page now
-            return window(core, conversation, None, false, held).await;
+            return window(core, conversation, None, false, held, &[]).await;
         };
         PageCursor { arrival_time, id }
     };
@@ -2275,8 +2427,13 @@ fn footer_line(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>)
             .rounded_md()
             .border_1()
             .text_xs()
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&message, &toggled, cx)))
             .child(format!("{} {}", reaction_label(&reaction.key), reaction.count));
+        // a chip of a quick reaction sets or takes back the account's own; any other key only shows
+        let chip = if QUICK_REACTIONS.contains(&reaction.key.as_str()) {
+            chip.on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&message, &toggled, cx)))
+        } else {
+            chip
+        };
         if reaction.mine {
             chip.border_color(rgb(palette.brand)).bg(rgb(palette.selected))
         } else {

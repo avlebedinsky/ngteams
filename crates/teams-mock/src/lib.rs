@@ -65,8 +65,8 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
-use wiremock::matchers::any;
-use wiremock::{Mock, MockServer, Request};
+use wiremock::matchers::{any, method};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 pub use fixtures::FixtureError;
 pub use trouter::{REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
@@ -157,6 +157,15 @@ pub enum EventKind {
 pub struct ChatServiceMock {
     server: MockServer,
     state: Arc<Mutex<world::State>>,
+}
+
+/// Matches a request whose path (still percent-encoded) ends with the string held.
+struct PathEnds(String);
+
+impl Match for PathEnds {
+    fn matches(&self, request: &Request) -> bool {
+        request.url.path().ends_with(&self.0)
+    }
 }
 
 impl std::fmt::Debug for ChatServiceMock {
@@ -261,6 +270,19 @@ impl ChatServiceMock {
         change(&mut copy);
         conversation.messages.push(copy);
         true
+    }
+
+    /// Answers the next request of `http_method` whose path ends with `path_end` with `status` and no body, before the
+    /// world sees it: a test's stand-in for a write the service refuses (the world doesn't change and nobody is told).
+    /// Every later request is answered as before.
+    pub async fn refuse_next(&self, http_method: &str, path_end: &str, status: u16) {
+        Mock::given(method(http_method))
+            .and(PathEnds(path_end.to_owned()))
+            .respond_with(ResponseTemplate::new(status))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
     }
 
     /// Every request the mock got, in order (to check what a client sent, and how often).

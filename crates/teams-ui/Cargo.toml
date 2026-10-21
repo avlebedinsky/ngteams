@@ -31,8 +31,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 # the settings file
 toml.workspace = true
-# a link typed in compose, checked as `teams-proto` checks the links it sends
-url.workspace = true
 
 [dev-dependencies]
 # the views on GPUI's test context (`TestAppContext`): a fake core and a fake event source, no window system

@@ -2,12 +2,14 @@
 //! write goes out through the engine ([`Core::write`]), its outbox and the fence; the box builds no request.
 //!
 //! - **Text** ([`message_text`]): each line a paragraph (Shift-Enter breaks the line, and the web client sent each
-//!   line as a paragraph of its own: `docs/protocol/chat.md`, "Lines and links"), blank lines at either end dropped; an
-//!   `http`, `https` or `mailto` URL typed as a word becomes a link; a mention is an atomic token of the kit's text
-//!   area naming its MRI, completed after `@` from the chat's members ([`Core::members`], their names from
-//!   [`Core::person`]) and only from them: a mention is never read from typed text, only by the MRI the picker put in
-//!   its token. `teams-proto`'s [`MessageText`] renders the HTML, the mentions and the reply's quote from that one
-//!   value.
+//!   line as a paragraph of its own: `docs/protocol/chat.md`, "Lines and links"), blank lines at either end dropped; a
+//!   URL typed stays text, as the capture's link inserted with its text went out (plain text, `properties.links`
+//!   `"[]"`: `lines.json`'s `unlinked_content`), never an anchor (the web client's anchor carries a `HyperLink` entry
+//!   in `links`, which isn't built here); a mention is an atomic token of the kit's text area naming its MRI,
+//!   completed after `@` from the chat's members ([`Core::members`], their names from [`Core::person`]) and only from
+//!   them: a mention is never read from typed text, only by the MRI the picker put in its token. `teams-proto`'s
+//!   [`MessageText`] renders the HTML, the mentions and the reply's quote from that one value. A send the engine
+//!   refuses before it makes a row gives the box its draft back.
 //! - **Keys**: Enter sends (the kit's text area hands a plain Enter on, and the box takes it as the send, or the
 //!   platform would type it as a line break: M2 Task 7), Shift-Enter breaks the line; with the mention picker open, Up
 //!   and Down move in it, Enter or Tab chooses, Escape closes it; Escape cancels a reply or an edit; Up in an empty box
@@ -17,8 +19,9 @@
 //!   loaded back into the box ([`load`]), its mentions as tokens again by their MRI, its quote kept as it was; Enter
 //!   sends the edit.
 //! - **Typing** ([`Core::transient`], never a stored row): sent while the box has the focus and holds text, at most once
-//!   per [`TYPING_EVERY`] (the web client's throttle, M2 Task 10), never while editing, and only with the "send typing"
-//!   setting on. Nothing is sent when typing stops: the web client never sent `Control/ClearTyping`.
+//!   per [`TYPING_EVERY`] per chat (the web client's throttle, M2 Task 10; kept for the app, so a chat opened again
+//!   doesn't start it over), never while editing, and only with the "send typing" setting on. Nothing is sent when
+//!   typing stops: the web client never sent `Control/ClearTyping`.
 //!
 //! What the box does is traced (`compose sent`, `replying`, `editing`, `cancelled`), never its text.
 
@@ -29,9 +32,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, Window, div, px, rgb,
+    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Focusable as _, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{
@@ -43,7 +46,6 @@ use teams_core::{Action, Transient};
 use teams_fence::Mri;
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
 use teams_store::Message;
-use url::Url;
 
 use crate::bridge::Core;
 use crate::settings::SettingsModel;
@@ -63,8 +65,6 @@ pub const MENTION_QUERY_MAX: usize = 40;
 pub const PREVIEW_MAX: usize = 300;
 /// The most rows the box grows to.
 pub const MAX_ROWS: usize = 8;
-/// The schemes a typed word becomes a link with: those `teams-proto` sends as a link.
-const LINK_SCHEMES: [&str; 3] = ["https://", "http://", "mailto:"];
 
 /// A mention in the typed text: where its name stands (bytes) and whom it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,51 +85,6 @@ fn push_text(nodes: &mut Vec<Node>, text: &str) {
     if !text.is_empty() {
         nodes.push(text_node(text));
     }
-}
-
-/// The words of `text` with where each starts (bytes): runs of anything but whitespace.
-fn words(text: &str) -> Vec<(usize, &str)> {
-    let mut words = Vec::new();
-    let mut start = None;
-    for (at, character) in text.char_indices() {
-        match (character.is_whitespace(), start) {
-            (true, Some(from)) => {
-                words.push((from, &text[from..at]));
-                start = None;
-            }
-            (false, None) => start = Some(at),
-            _ => {}
-        }
-    }
-    if let Some(from) = start {
-        words.push((from, &text[from..]));
-    }
-    words
-}
-
-/// The link a typed word is: an `http`, `https` or `mailto` URL, without the punctuation that may follow it in a
-/// sentence; `None` for any other word.
-fn link_in(word: &str) -> Option<&str> {
-    let scheme = LINK_SCHEMES.iter().find(|scheme| word.starts_with(**scheme))?;
-    let link = word.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"', '>']);
-    (link.len() > scheme.len() && Url::parse(link).is_ok()).then_some(link)
-}
-
-/// A piece of a line without mentions: its text, each link in it a link.
-fn linked(segment: &str) -> Vec<Node> {
-    let mut nodes = Vec::new();
-    let mut plain = 0;
-    for (start, word) in words(segment) {
-        let Some(link) = link_in(word) else { continue };
-        push_text(&mut nodes, &segment[plain..start]);
-        nodes.push(Node::Link {
-            href: link.to_owned(),
-            children: vec![text_node(link)],
-        });
-        plain = start + link.len();
-    }
-    push_text(&mut nodes, &segment[plain..]);
-    nodes
 }
 
 /// Each line's range in `text` (bytes), its `\n` left out.
@@ -158,8 +113,8 @@ fn blank(text: &str, line: &Range<usize>, mentions: &[DraftMention]) -> bool {
 }
 
 /// The text typed as the rich text a message is written from, with the MRI each mention names by its `item_id`
-/// (`0`, `1`, … in order): each line a paragraph, blank lines at either end dropped, mentions at their ranges, links
-/// in the rest. No paragraph when nothing but whitespace was typed.
+/// (`0`, `1`, … in order): each line a paragraph, blank lines at either end dropped, mentions at their ranges, the
+/// rest text (a URL too: see the module docs). No paragraph when nothing but whitespace was typed.
 #[must_use]
 pub fn draft_nodes(text: &str, mentions: &[DraftMention]) -> (Vec<Node>, Vec<(String, Mri)>) {
     let all = lines(text);
@@ -176,7 +131,7 @@ pub fn draft_nodes(text: &str, mentions: &[DraftMention]) -> (Vec<Node>, Vec<(St
     (paragraphs, table)
 }
 
-/// One line's nodes: its mentions at their ranges (each added to `table`), links in the rest.
+/// One line's nodes: its mentions at their ranges (each added to `table`), text in the rest.
 fn line_nodes(text: &str, line: &Range<usize>, mentions: &[DraftMention], table: &mut Vec<(String, Mri)>) -> Vec<Node> {
     let mut nodes = Vec::new();
     let mut at = line.start;
@@ -184,7 +139,7 @@ fn line_nodes(text: &str, line: &Range<usize>, mentions: &[DraftMention], table:
         if mention.range.start < at {
             continue;
         }
-        nodes.extend(linked(&text[at..mention.range.start]));
+        push_text(&mut nodes, &text[at..mention.range.start]);
         let item_id = table.len().to_string();
         nodes.push(Node::Mention {
             item_id: item_id.clone(),
@@ -193,7 +148,7 @@ fn line_nodes(text: &str, line: &Range<usize>, mentions: &[DraftMention], table:
         table.push((item_id, Mri::new(mention.mri.clone())));
         at = mention.range.end;
     }
-    nodes.extend(linked(&text[at..line.end]));
+    push_text(&mut nodes, &text[at..line.end]);
     nodes
 }
 
@@ -454,6 +409,13 @@ impl TypingThrottle {
     }
 }
 
+/// The typing throttles of the app's chats, by conversation: a global, so a chat view built again (another chat opened
+/// and this one again) doesn't start its chat's throttle over.
+#[derive(Default)]
+struct TypingSent(HashMap<String, TypingThrottle>);
+
+impl Global for TypingSent {}
+
 /// What the box is writing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -483,6 +445,12 @@ pub enum ComposeEvent {
     EditLast,
 }
 
+/// What a send took from the box: given back when the engine refuses the write.
+struct Draft {
+    content: InputContent,
+    mode: Mode,
+}
+
 /// What a compose box is made of.
 #[derive(Clone)]
 pub struct ComposeParts {
@@ -503,7 +471,6 @@ pub struct Compose {
     /// The chat's members the picker offers, once read.
     candidates: Option<Vec<Candidate>>,
     reading: Option<Task<()>>,
-    typing: TypingThrottle,
     /// What the last send couldn't do, shown over the box.
     problem: Option<SharedString>,
     _input_events: Subscription,
@@ -560,7 +527,6 @@ impl Compose {
             picker: None,
             candidates: None,
             reading: None,
-            typing: TypingThrottle::default(),
             problem: None,
             _input_events: input_events,
         }
@@ -716,7 +682,9 @@ impl Compose {
         (input.value().to_string(), mentions)
     }
 
-    /// Sends what the box holds (see the module docs); the box is emptied once the write is asked for.
+    /// Sends what the box holds (see the module docs); the box is emptied once the write is asked for, and given its
+    /// draft back (its text, its mentions, the reply or the edit) when the engine refuses it before it makes a row,
+    /// unless something was typed in it since.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (text, mentions) = self.draft(cx);
         let quotes = match &self.mode {
@@ -754,6 +722,10 @@ impl Compose {
                 "message",
             ),
         };
+        let draft = Draft {
+            content: self.input.read(cx).content(),
+            mode: self.mode.clone(),
+        };
         let reply = self.core.write(action);
         self.trace.record(
             &TraceLine::new("compose", "sent")
@@ -761,12 +733,33 @@ impl Compose {
                 .kind(kind),
         );
         self.clear(window, cx);
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = reply.await {
-                let _ = this.update(cx, |this, cx| this.show_problem(format!("Not sent: {error}"), cx));
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.give_back(draft, window, cx);
+                    this.show_problem(format!("Not sent: {error}"), cx);
+                });
             }
         })
         .detach();
+    }
+
+    /// Puts a refused send's draft back in the box, unless the box holds something new or writes something else now.
+    fn give_back(&mut self, draft: Draft, window: &mut Window, cx: &mut Context<Self>) {
+        let empty = {
+            let input = self.input.read(cx);
+            input.value().is_empty() && input.tokens().is_empty()
+        };
+        if !empty || self.mode != Mode::New {
+            return;
+        }
+        let end = draft.content.text().len();
+        self.input.update(cx, |input, cx| {
+            input.set_value(draft.content, window, cx);
+            input.set_selected_range(end..end, cx);
+        });
+        self.mode = draft.mode;
+        cx.notify();
     }
 
     /// Empties the box and ends a reply or an edit.
@@ -784,7 +777,17 @@ impl Compose {
             && !matches!(self.mode, Mode::Edit { .. })
             && self.focused(window, cx)
             && self.holds_text(cx);
-        if wanted && self.typing.take(cx.background_executor().now()) {
+        if !wanted {
+            return;
+        }
+        let now = cx.background_executor().now();
+        let may = cx
+            .default_global::<TypingSent>()
+            .0
+            .entry(self.conversation.clone())
+            .or_default()
+            .take(now);
+        if may {
             // nothing of it is kept: how it went is the engine's (a dropped typing is never sent again)
             drop(self.core.transient(Transient::Typing {
                 conversation: self.conversation.clone(),
@@ -799,7 +802,15 @@ impl Compose {
 
     // --- the mention picker ---
 
-    /// Opens, moves or closes the picker after the text or the cursor changed.
+    /// Reads the picker again from the text and the cursor as they stand, before a key it would take: moving the
+    /// cursor changes no text, so nothing else tells the picker (an `@` the cursor left closes it).
+    fn revalidate_picker(&mut self, cx: &mut Context<Self>) {
+        if self.picker.is_some() {
+            self.refresh_picker(cx);
+        }
+    }
+
+    /// Opens, moves or closes the picker after the text changed, or before a key it would take.
     fn refresh_picker(&mut self, cx: &mut Context<Self>) {
         let (text, cursor, tokens) = {
             let input = self.input.read(cx);
@@ -871,6 +882,7 @@ impl Compose {
 
     /// Puts the picker's `index`th match in place of the `@` and the query typed.
     pub fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.revalidate_picker(cx);
         let Some(picker) = self.picker.clone() else { return };
         let Some(candidate) = picker.matches.get(index) else {
             return;
@@ -886,6 +898,7 @@ impl Compose {
     // --- keys ---
 
     fn capture_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.revalidate_picker(cx);
         if self.picker.is_some() {
             self.step_picker(-1, cx);
             cx.stop_propagation();
@@ -896,6 +909,7 @@ impl Compose {
     }
 
     fn capture_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.revalidate_picker(cx);
         if self.picker.is_some() {
             self.step_picker(1, cx);
             cx.stop_propagation();
@@ -903,6 +917,7 @@ impl Compose {
     }
 
     fn capture_enter(&mut self, enter: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+        self.revalidate_picker(cx);
         if self.offering() && !enter.shift {
             self.choose_selected(window, cx);
             cx.stop_propagation();
@@ -910,6 +925,7 @@ impl Compose {
     }
 
     fn capture_tab(&mut self, _: &IndentInline, window: &mut Window, cx: &mut Context<Self>) {
+        self.revalidate_picker(cx);
         if self.offering() {
             self.choose_selected(window, cx);
             cx.stop_propagation();
@@ -924,6 +940,7 @@ impl Compose {
     }
 
     fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        self.revalidate_picker(cx);
         if self.picker.is_some() {
             self.close_picker(cx);
         } else if self.mode == Mode::New {

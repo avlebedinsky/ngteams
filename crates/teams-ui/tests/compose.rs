@@ -1,10 +1,14 @@
 //! Compose and the writes from the UI (M2 Task 13) on GPUI's test context, over the fake engine (`common`), which
-//! records every write and transient it is asked for: the typed text as a message's text (lines as paragraphs, links,
-//! mentions by MRI only), Enter and Shift-Enter, the mention picker over the chat's members, a reply with its quote,
-//! an edit (Up in an empty box edits the last), a delete confirmed first, the quick reactions, typing (its throttle,
-//! the focus, the setting, never while editing), read receipts (the window active, the list at the newest, the
-//! setting, one per burst), and the outbox rows shown with their states and "send again". The same writes on two
-//! accounts' engines on the mock are `tests/compose_mock.rs`. Every id, name and text is made up.
+//! records every write and transient it is asked for: the typed text as a message's text (lines as paragraphs, a URL
+//! as text, as the capture's link inserted with its text; mentions by MRI only), Enter and Shift-Enter, a refused
+//! send's draft given back, the mention picker over the chat's members (closed once the cursor leaves its `@`), a
+//! reply with its quote, an edit (Up in an empty box edits the last), a delete confirmed first (on the message
+//! selected), the quick reactions (a chip of any other key only shows), typing (its throttle, kept across a chat view
+//! built again, the focus, the setting, never while editing), read receipts (the chat shown, the window active, the
+//! list at the newest, the setting, one per burst), and the outbox rows shown with their states and "send again" (a
+//! queued post at once, a sent one until its message is held or stored, a write a newer one made out of date never).
+//! The same writes on two accounts' engines on the mock are `tests/compose_mock.rs`. Every id, name and text is made
+//! up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -25,13 +29,14 @@ use teams_fence::Mri;
 use teams_proto::chat::{ComposeError, MessageText, Node, RichText};
 use teams_store::{Applied, Member, Message, OutboxEntry, OutboxState, Reaction, ReadHorizon};
 use teams_ui::ViewTrace;
-use teams_ui::chat_view::{ChatView, MessageAction, QUICK_REACTIONS, READ_DEBOUNCE};
+use teams_ui::chat_view::{ChatView, MessageAction, PAGE, QUICK_REACTIONS, READ_DEBOUNCE};
 use teams_ui::compose::{
     Candidate, CantEdit, Compose, DraftMention, Mode, PREVIEW_MAX, Quoted, TYPING_EVERY, TypingThrottle, load,
     matching, mention_query, message_text,
 };
 use teams_ui::sending::{Again, RowState};
 use teams_ui::settings::Settings;
+use teams_ui::shell::Shell;
 
 const AB: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
 /// Someone outside the lab (made up).
@@ -66,22 +71,33 @@ fn each_line_is_a_paragraph_and_blank_lines_at_either_end_are_dropped() {
     );
 }
 
+/// `lines.json` (synthetic-from-capture): the chat-shapes capture's message of three lines, the last holding a link.
+fn lines_fixture() -> serde_json::Value {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/chatsvc/lines.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// What `lines.json`'s message was typed as.
+const LINES_TYPED: &str =
+    "a made-up first line\na second line\na link https://example.com/made-up/path on the third line";
+
 #[test]
-fn a_typed_url_becomes_a_link_without_the_punctuation_after_it() {
+fn a_typed_url_stays_text_as_the_capture_s_link_inserted_with_its_text() {
+    // the captured form with `links` "[]": the anchor form needs a `HyperLink` entry this box doesn't build
+    let fixture = lines_fixture();
     assert_eq!(
-        html("see https://example.test/a?b=1. ok", &[], &[]),
-        "<p>see <a href=\"https://example.test/a?b=1\">https://example.test/a?b=1</a>. ok</p>"
+        html(LINES_TYPED, &[], &[]),
+        fixture["unlinked_content"].as_str().unwrap()
     );
-    assert_eq!(
-        html("(http://example.test) mailto:lab@example.test", &[], &[]),
-        "<p>(http://example.test) <a href=\"mailto:lab@example.test\">mailto:lab@example.test</a></p>",
-        "a link starts a word"
-    );
-    assert_eq!(
-        html("https:// and ftp://example.test and javascript:alert(1)", &[], &[]),
-        "<p>https:// and ftp://example.test and javascript:alert(1)</p>",
-        "only an http, https or mailto URL with something after its scheme"
-    );
+    for typed in [
+        "see https://example.test/a?b=1. ok",
+        "(http://example.test) mailto:lab@example.test",
+        "https:// and javascript:alert(1)",
+    ] {
+        let built = html(typed, &[], &[]);
+        assert!(!built.contains("<a"), "no anchor: {built}");
+        assert_eq!(built, format!("<p>{typed}</p>"));
+    }
 }
 
 #[test]
@@ -407,10 +423,7 @@ fn enter_sends_and_shift_enter_breaks_the_line() {
         panic!("a post: {sent:?}")
     };
     assert_eq!(conversation, AB);
-    assert_eq!(
-        text.html(),
-        "<p>one</p><p>two <a href=\"https://example.test/a\">https://example.test/a</a>.</p>"
-    );
+    assert_eq!(text.html(), "<p>one</p><p>two https://example.test/a.</p>");
     assert_eq!(typed(&view, cx), "", "the box is emptied once the write is asked for");
     assert_eq!(trace_changes(&written, "compose"), ["sent"]);
     assert!(!written.text().contains("example.test"), "no text reaches the trace");
@@ -911,15 +924,9 @@ fn each_post_on_its_way_shows_its_state_and_a_failed_or_earlier_one_offers_send_
             (6, RowState::EarlierSession, Again::Yes),
         ]
     );
-    let note = cx.update(|_, cx| {
-        view.read(cx)
-            .message_items()
-            .find(|item| item.id == theirs.id)
-            .and_then(|item| item.outbox.clone())
-    });
     assert_eq!(
-        note.map(|note| (note.row, note.state)),
-        Some((7, RowState::Failed)),
+        notes_on(&view, cx, &theirs.id),
+        [(7, RowState::Failed, Again::AfterWarning)],
         "an edit on its message"
     );
     assert!(cx.debug_bounds("pending-3").is_some() && cx.debug_bounds("send-again-3").is_none());
@@ -988,4 +995,303 @@ fn a_post_shows_at_once_as_it_is_queued_then_sent_until_its_message_is_held() {
     assert!(pending(&view, cx).is_empty(), "the message itself shows now");
     let shown = cx.update(|_, cx| view.read(cx).message_items().any(|item| item.id == mine.id));
     assert!(shown);
+}
+
+/// The notes on message `id`: each row, its state, whether "send again" is offered.
+fn notes_on(view: &Entity<ChatView>, cx: &mut VisualTestContext, id: &str) -> Vec<(i64, RowState, Again)> {
+    cx.update(|_, cx| {
+        view.read(cx)
+            .message_items()
+            .find(|item| item.id == id)
+            .map(|item| {
+                item.outbox
+                    .iter()
+                    .map(|note| (note.row, note.state, note.again))
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn no_receipts() -> Settings {
+    Settings {
+        send_read_receipts: false,
+        ..Settings::default()
+    }
+}
+
+#[test]
+fn a_send_the_engine_refuses_gives_the_box_its_draft_back() {
+    let theirs = message(NOON, LAB_B, "<p>question?</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    act(&view, cx, MessageAction::Reply, &theirs.id);
+    type_text(cx, "hi @");
+    keys(cx, "enter");
+    type_text(cx, "keep me");
+    // the engine refuses before it makes a row (here: stopped)
+    *rig.core.stopped.lock().unwrap() = true;
+    keys(cx, "enter");
+    assert_eq!(actions(&rig).len(), 1, "asked for once");
+    assert_eq!(typed(&view, cx), "hi Lab Bee keep me", "the text is back");
+    assert!(matches!(mode(&view, cx), Mode::Reply(_)), "and the reply");
+    let compose = compose(&view, cx);
+    let (tokens, problem) = cx.update(|_, cx| {
+        let compose = compose.read(cx);
+        (compose.input().read(cx).tokens().len(), compose.problem().cloned())
+    });
+    assert_eq!(tokens, 1, "the mention, still a token");
+    assert!(problem.is_some_and(|problem| problem.starts_with("Not sent")));
+}
+
+#[test]
+fn a_chip_of_a_key_the_capture_never_showed_sent_only_shows() {
+    let theirs = message(NOON, LAB_B, "<p>nice</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    rig.core.reactions.lock().unwrap().insert(
+        theirs.id.clone(),
+        vec![
+            Reaction {
+                key: "sad".to_owned(),
+                user: LAB_B.to_owned(),
+                time: NOON,
+            },
+            Reaction {
+                key: "yes-tone2".to_owned(),
+                user: LAB_A.to_owned(),
+                time: NOON + 1,
+            },
+        ],
+    );
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    click(cx, "reaction-sad");
+    click(cx, "reaction-yes-tone2");
+    cx.update(|_, cx| view.update(cx, |view, cx| view.toggle_reaction(&theirs.id, "yes-tone2", cx)));
+    assert!(actions(&rig).is_empty(), "neither set nor taken back");
+}
+
+#[test]
+fn typing_s_throttle_holds_for_a_chat_whose_view_is_built_again() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hi</p>")]);
+    let (_view, cx, _) = chat_window(&rig, no_receipts());
+    type_text(cx, "h");
+    assert_eq!(typing_sent(&rig), 1);
+    // the chat opened again (another chat opened between): a new view of it, within the throttle
+    let (_again, again, _) = chat_window(&rig, no_receipts());
+    type_text(again, "i");
+    assert_eq!(typing_sent(&rig), 0, "the chat's throttle holds");
+    again.executor().advance_clock(TYPING_EVERY);
+    type_text(again, "!");
+    assert_eq!(typing_sent(&rig), 1);
+}
+
+#[test]
+fn a_queued_post_shows_while_the_engine_is_busy_with_its_send() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hi</p>")]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    // the engine's loop sends, so it answers no store read meanwhile
+    *rig.core.hold_unsettled.lock().unwrap() = true;
+    rig.send(Event::Queued(row(9, &post("on its way"), OutboxState::Pending)));
+    draw(cx);
+    assert_eq!(pending(&view, cx), [(9, RowState::Sending, Again::No)]);
+    assert!(cx.debug_bounds("pending-9").is_some());
+}
+
+#[test]
+fn the_mention_picker_closes_once_the_cursor_leaves_its_at() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hi a</p>")]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    let compose = compose(&view, cx);
+    type_text(cx, "hi @");
+    assert!(cx.update(|_, cx| compose.read(cx).picker().is_some()));
+    keys(cx, "home");
+    keys(cx, "enter");
+    let sent = actions(&rig);
+    assert_eq!(sent.len(), 1, "Enter sent, it chose nobody: {sent:?}");
+    let text = text_of(&sent[0]);
+    assert_eq!(text.html(), "<p>hi @</p>");
+    assert!(text.participants().is_empty());
+}
+
+#[test]
+fn a_chat_hidden_behind_the_settings_sends_no_read_receipt() {
+    let read = message(NOON, LAB_B, "<p>read already</p>");
+    let rig = rig_with(vec![read.clone()]);
+    rig.core.horizons.lock().unwrap().insert(
+        AB.to_owned(),
+        ReadHorizon {
+            conversation_id: AB.to_owned(),
+            user: LAB_A.to_owned(),
+            last_read_arrival: read.arrival_time,
+            updated: NOON,
+            raw: None,
+        },
+    );
+    let settings = Settings {
+        selected_chat: Some(AB.to_owned()),
+        ..Settings::default()
+    };
+    let parts = parts::parts(&rig, settings, Arc::new(ViewTrace::off()));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    debounced(cx);
+    assert!(receipts(&rig).is_empty(), "nothing unread");
+
+    // b's message comes in, then the settings hide the chat before the receipt's wait is over
+    let first = message(NOON + MINUTE, LAB_B, "<p>one</p>");
+    rig.send(deliver(&rig, &first));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    draw(cx);
+    debounced(cx);
+    // and another while it is hidden
+    let second = message(NOON + 2 * MINUTE, LAB_B, "<p>two</p>");
+    rig.send(deliver(&rig, &second));
+    debounced(cx);
+    debounced(cx);
+    assert!(receipts(&rig).is_empty(), "no receipt for a chat not shown");
+
+    // shown again, it goes, for the newest
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+    draw(cx);
+    debounced(cx);
+    assert_eq!(receipts(&rig), std::slice::from_ref(&second.id));
+}
+
+#[test]
+fn a_sent_post_whose_message_is_older_than_the_pages_held_isn_t_shown_pending() {
+    let mut mine = message(NOON, LAB_A, "<p>mine</p>");
+    let mut sent = row(9, &post("mine"), OutboxState::Sent);
+    sent.message_id = Some(mine.id.clone());
+    mine.client_message_id = Some(sent.client_message_id.clone());
+    let mut messages = vec![mine.clone()];
+    let later = i64::try_from(4 * PAGE).unwrap();
+    messages.extend((1..=later).map(|n| message(NOON + n * MINUTE, LAB_B, "<p>later</p>")));
+    let rig = rig_with(messages);
+    // told sent this session, its message since followed by more than the pages a view holds
+    rig.send(Event::Outbox(sent));
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    let held = cx.update(|_, cx| view.read(cx).message_items().any(|item| item.id == mine.id));
+    assert!(!held, "the view holds only the newest pages");
+    assert!(pending(&view, cx).is_empty(), "its message is in the store");
+    assert!(cx.debug_bounds("pending-9").is_none());
+}
+
+/// An edit of `message` to `text` (made up).
+fn edit_of(message: &Message, text: &str) -> Command {
+    Command::Edit {
+        conversation: AB.to_owned(),
+        message_id: message.id.clone(),
+        text: MessageText::plain(text).unwrap(),
+        original: teams_core::Sent {
+            client_message_id: "1".to_owned(),
+            compose_time_ms: NOON,
+            arrival_time_ms: NOON,
+        },
+    }
+}
+
+fn reaction_on(message: &Message, key: &str, on: bool) -> Command {
+    Command::React {
+        conversation: AB.to_owned(),
+        message_id: message.id.clone(),
+        key: key.to_owned(),
+        on,
+    }
+}
+
+#[test]
+fn a_write_a_newer_one_on_the_same_thing_made_out_of_date_isn_t_offered_again() {
+    let mine = message(NOON, LAB_A, "<p>mine</p>");
+    let theirs = message(NOON + MINUTE, LAB_B, "<p>theirs</p>");
+    let rig = rig_with(vec![mine.clone(), theirs.clone()]);
+    // edit 1 failed, edit 2 sent; heart set failed, then taken back; like set failed, nothing newer on it
+    *rig.core.unsettled.lock().unwrap() = vec![
+        row(1, &edit_of(&mine, "one"), OutboxState::Failed),
+        row(3, &reaction_on(&theirs, "heart", true), OutboxState::Failed),
+        row(5, &reaction_on(&theirs, "like", true), OutboxState::Failed),
+    ];
+    rig.send(Event::Outbox(row(2, &edit_of(&mine, "two"), OutboxState::Sent)));
+    rig.send(Event::Outbox(row(
+        4,
+        &reaction_on(&theirs, "heart", false),
+        OutboxState::Sent,
+    )));
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+
+    assert!(notes_on(&view, cx, &mine.id).is_empty(), "edit 1 is out of date");
+    assert_eq!(
+        notes_on(&view, cx, &theirs.id),
+        [(5, RowState::Failed, Again::AfterWarning)],
+        "the heart set before its take-back is out of date; the like isn't"
+    );
+    assert!(cx.debug_bounds("send-again-1").is_none() && cx.debug_bounds("send-again-3").is_none());
+    for stale in [1, 3] {
+        cx.update(|_, cx| view.update(cx, |view, cx| view.send_again(stale, cx)));
+        draw(cx);
+    }
+    assert!(rig.core.resent.lock().unwrap().is_empty(), "never sent again");
+
+    // the one still current warns first (a later change may have gone out in a session the view doesn't know)
+    click(cx, "send-again-5");
+    assert_eq!(cx.update(|_, cx| view.read(cx).resending()), Some(5));
+    assert!(rig.core.resent.lock().unwrap().is_empty());
+    assert!(cx.debug_bounds("confirmation").is_some());
+    click(cx, "resend-anyway");
+    assert_eq!(*rig.core.resent.lock().unwrap(), [5]);
+}
+
+#[test]
+fn moving_the_selection_closes_the_delete_s_confirmation_and_the_quick_reactions() {
+    let older = message(NOON, LAB_A, "<p>older</p>");
+    let newer = message(NOON + MINUTE, LAB_A, "<p>newer</p>");
+    let rig = rig_with(vec![older.clone(), newer.clone()]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    let state = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            (
+                view.selected().map(str::to_owned),
+                view.deleting().map(str::to_owned),
+                view.reacting().map(str::to_owned),
+            )
+        })
+    };
+
+    act(&view, cx, MessageAction::Delete, &newer.id);
+    assert_eq!(
+        state(cx),
+        (Some(newer.id.clone()), Some(newer.id.clone()), None),
+        "asked on the message selected"
+    );
+    keys(cx, "up");
+    assert_eq!(
+        state(cx),
+        (Some(older.id.clone()), None, None),
+        "the selection moved: the question closed"
+    );
+    assert!(cx.debug_bounds("confirmation").is_none());
+    keys(cx, "enter");
+    assert!(actions(&rig).is_empty(), "Enter deletes nothing");
+
+    act(&view, cx, MessageAction::React, &newer.id);
+    keys(cx, "up");
+    keys(cx, "1");
+    assert!(
+        actions(&rig).is_empty(),
+        "the quick reactions closed with the selection"
+    );
+
+    // asked on the message now selected, Enter deletes that one
+    act(&view, cx, MessageAction::Delete, &older.id);
+    keys(cx, "enter");
+    assert_eq!(
+        actions(&rig),
+        [Action::Delete {
+            conversation: AB.to_owned(),
+            message_id: older.id.clone(),
+        }]
+    );
 }

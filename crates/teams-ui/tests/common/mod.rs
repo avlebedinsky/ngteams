@@ -76,6 +76,10 @@ pub struct FakeCore {
     pub resent: Mutex<Vec<i64>>,
     /// The outbox rows that aren't sent, of any conversation, the oldest first.
     pub unsettled: Mutex<Vec<OutboxEntry>>,
+    /// While set, `outbox_unsettled` isn't answered (as the engine's loop doesn't while it sends): its answers are kept
+    /// in `held_unsettled`, never sent.
+    pub hold_unsettled: Mutex<bool>,
+    pub held_unsettled: Mutex<Vec<Answer<Vec<OutboxEntry>>>>,
     /// The rows earlier runs left.
     pub earlier: Mutex<Vec<OutboxEntry>>,
 }
@@ -104,6 +108,8 @@ impl Default for FakeCore {
             transients: Mutex::default(),
             resent: Mutex::default(),
             unsettled: Mutex::default(),
+            hold_unsettled: Mutex::new(false),
+            held_unsettled: Mutex::default(),
             earlier: Mutex::default(),
         }
     }
@@ -273,8 +279,12 @@ impl Core for FakeCore {
         })
     }
 
-    fn message(&self, _conversation: String, _id: String) -> Reply<Option<Message>> {
-        self.ask("message")
+    fn message(&self, conversation: String, id: String) -> Reply<Option<Message>> {
+        self.answer("message", || {
+            locked(&self.messages)
+                .get(&conversation)
+                .and_then(|messages| messages.iter().find(|message| message.id == id).cloned())
+        })
     }
 
     fn reactions(&self, _conversation: String, id: String) -> Reply<Vec<Reaction>> {
@@ -331,6 +341,12 @@ impl Core for FakeCore {
     }
 
     fn outbox_unsettled(&self, conversation: String) -> Reply<Vec<OutboxEntry>> {
+        if !*locked(&self.stopped) && *locked(&self.hold_unsettled) {
+            locked(&self.asked).push("outbox_unsettled");
+            let (answer, reply) = Reply::later();
+            locked(&self.held_unsettled).push(answer);
+            return reply;
+        }
         self.answer("outbox_unsettled", || {
             locked(&self.unsettled)
                 .iter()
