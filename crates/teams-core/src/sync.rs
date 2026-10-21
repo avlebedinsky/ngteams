@@ -231,6 +231,12 @@ impl Gaps {
         self.due = true;
     }
 
+    /// Something the push channel would have brought was missed while it stayed up (the service reported a message
+    /// loss), or the owner asks for a catch-up: one is due.
+    pub fn missed(&mut self) {
+        self.due = true;
+    }
+
     /// Whether a catch-up is due.
     #[must_use]
     pub fn is_due(&self) -> bool {
@@ -684,8 +690,8 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     }
 
     /// A conversation the store doesn't know, read as a thread: kept at version 0 (the list's version replaces it),
-    /// with its members.
-    async fn add_conversation(&self, store: &mut Store, id: &str) -> Result<(), CatchUpError> {
+    /// with its members. The engine adds one this way when a delivery names it, before it stores the delivery.
+    pub(crate) async fn add_conversation(&self, store: &mut Store, id: &str) -> Result<(), CatchUpError> {
         let thread = ChatReads::new(&self.client).thread(id).await?;
         let row = Conversation {
             id: id.to_owned(),
@@ -703,23 +709,38 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
 
     /// The account's own read horizon from the list, when both its parts can be read.
     fn store_horizon(&self, store: &mut Store, listed: &chat::Conversation) -> Result<(), CatchUpError> {
-        let Some(horizon) = listed.consumption_horizon() else {
-            return Ok(());
-        };
+        if let Some(horizon) = listed.consumption_horizon() {
+            self.receive_horizon(store, &listed.id, &horizon)?;
+        }
+        Ok(())
+    }
+
+    /// Stores the account's own read horizon in `conversation` (from the conversation list, or a Trouter delivery),
+    /// by the time it was set; `None` when its message or its time can't be read.
+    ///
+    /// # Errors
+    ///
+    /// [`CatchUpError::Store`] when the store fails, an unknown conversation included.
+    pub fn receive_horizon(
+        &self,
+        store: &mut Store,
+        conversation: &str,
+        horizon: &chat::ConsumptionHorizon,
+    ) -> Result<Option<Applied>, CatchUpError> {
         let (Some(last_read), Some(updated)) = (horizon.last_read_arrival, horizon.updated) else {
-            return Ok(());
+            return Ok(None);
         };
         let (Ok(last_read_arrival), Ok(updated)) = (i64::try_from(last_read), i64::try_from(updated)) else {
-            return Ok(());
+            return Ok(None);
         };
-        store.set_read_horizon(&ReadHorizon {
-            conversation_id: listed.id.clone(),
+        let applied = store.set_read_horizon(&ReadHorizon {
+            conversation_id: conversation.to_owned(),
             user: self.me.as_str().to_owned(),
             last_read_arrival,
             updated,
-            raw: Some(horizon.raw),
+            raw: Some(horizon.raw.clone()),
         })?;
-        Ok(())
+        Ok(Some(applied))
     }
 
     /// A chat's members, read as a thread when the list's `rosterVersion` is newer than the stored one, or there is

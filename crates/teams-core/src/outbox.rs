@@ -25,9 +25,11 @@
 //!   budget over. An adopted row that had an attempt (in any run) begins with the sync check above, so a message an
 //!   earlier attempt got through isn't sent twice.
 //!
-//! The commands are a message post for now; the other chat writes have their sealed requests in `teams-proto` (M1 Task
-//! 12) and become commands with the engine (M1 Task 18). The sync the timeout check relies on is the [`ConversationSync`] seam, which M1 Task 17's
-//! catch-up sync fills.
+//! The commands are the chat writes of `teams-proto` (M1 Task 12): a message post, an edit, a soft delete, a reaction
+//! and taking it back, a read receipt and a new chat; the engine (M1 Task 18) builds them from what the user asks
+//! for. Only a message post can be looked for by its `clientmessageid`, so only its row is checked and tried again
+//! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice. The sync
+//! the check relies on is the [`ConversationSync`] seam, which M1 Task 17's catch-up sync fills.
 
 use std::error::Error;
 use std::future::Future;
@@ -37,9 +39,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teams_auth::token::TokenError;
-use teams_fence::{Denied, Fence, MembershipSource};
+use teams_fence::{Denied, Fence, MembershipSource, Mri};
 use teams_proto::chat::MessageText;
-use teams_proto::{Author, Authorized, DEFAULT_RETRY_WAIT, HttpError, Mutating, Response, SendMessage, Transport};
+use teams_proto::{
+    Author, Authorized, CreateChat, DEFAULT_RETRY_WAIT, DeleteMessage, EditMessage, HttpError, Mutating, Original,
+    ReadReceipt, RemoveReaction, Response, SendMessage, SetReaction, Transport,
+};
 use teams_store::{
     Applied, AttemptOutcome, CheckFailed, Message, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState, Reaction,
     Store, StoreError,
@@ -59,13 +64,49 @@ pub const CHECK_RETRY_WAIT: Duration = Duration::from_secs(30);
 /// How many fresh `clientmessageid`s a command is tried with when one is taken already.
 const CLIENT_MESSAGE_ID_TRIES: usize = 3;
 
-/// What the user asked for, as the outbox stores it (the row's payload, JSON).
+/// What the user asked for, as the outbox stores it (the row's payload, JSON). Each attempt builds its sealed request
+/// from it, with the row's `created_at` as the time the request carries (a post's compose time, an edit's time, a
+/// reaction's or a read receipt's), so every attempt sends the same request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     /// Posts a message to an existing chat: its text, from which the request builds its HTML, its mentions and its
     /// target.
     Send { conversation: String, text: MessageText },
+    /// Edits one of the account's messages: its new text, and what the edit sends again of the message as it was
+    /// sent.
+    Edit {
+        conversation: String,
+        message_id: String,
+        text: MessageText,
+        original: Sent,
+    },
+    /// Soft-deletes one of the account's messages.
+    Delete { conversation: String, message_id: String },
+    /// Sets (`on`) or takes back the account's reaction `key` on a message.
+    React {
+        conversation: String,
+        message_id: String,
+        key: String,
+        on: bool,
+    },
+    /// Moves the account's read horizon to a message (sent with `client_message_id`).
+    ReadReceipt {
+        conversation: String,
+        message_id: String,
+        client_message_id: String,
+    },
+    /// Creates a chat of the account and `others` (MRIs): their 1:1 chat for one, a new group chat for two or more.
+    CreateChat { others: Vec<String> },
+}
+
+/// What an edit sends again of the message it changes, as the store had it when the edit was asked for: its
+/// `clientmessageid` and its times, in milliseconds since the Unix epoch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sent {
+    pub client_message_id: String,
+    pub compose_time_ms: i64,
+    pub arrival_time_ms: i64,
 }
 
 impl Command {
@@ -74,6 +115,12 @@ impl Command {
     pub fn kind(&self) -> OutboxKind {
         match self {
             Self::Send { .. } => OutboxKind::Send,
+            Self::Edit { .. } => OutboxKind::Edit,
+            Self::Delete { .. } => OutboxKind::Delete,
+            Self::React { on: true, .. } => OutboxKind::AddReaction,
+            Self::React { on: false, .. } => OutboxKind::RemoveReaction,
+            Self::ReadReceipt { .. } => OutboxKind::ReadReceipt,
+            Self::CreateChat { .. } => OutboxKind::CreateChat,
         }
     }
 
@@ -81,8 +128,36 @@ impl Command {
     #[must_use]
     pub fn conversation(&self) -> Option<&str> {
         match self {
-            Self::Send { conversation, .. } => Some(conversation),
+            Self::Send { conversation, .. }
+            | Self::Edit { conversation, .. }
+            | Self::Delete { conversation, .. }
+            | Self::React { conversation, .. }
+            | Self::ReadReceipt { conversation, .. } => Some(conversation),
+            Self::CreateChat { .. } => None,
         }
+    }
+
+    /// The existing message it acts on: an edit's, a delete's, a reaction's, a read receipt's.
+    #[must_use]
+    pub fn message_id(&self) -> Option<&str> {
+        match self {
+            Self::Edit { message_id, .. }
+            | Self::Delete { message_id, .. }
+            | Self::React { message_id, .. }
+            | Self::ReadReceipt { message_id, .. } => Some(message_id),
+            Self::Send { .. } | Self::CreateChat { .. } => None,
+        }
+    }
+}
+
+/// The request a new chat of `me` and `others` is: their 1:1 chat for one other, a group chat for more; `None` when
+/// `others` don't make a chat (none, `me` among them, one given twice).
+#[must_use]
+pub fn create_chat(me: &Mri, others: &[String]) -> Option<CreateChat> {
+    match others {
+        [] => None,
+        [other] => CreateChat::one_to_one(me.clone(), Mri::new(other)),
+        _ => CreateChat::group(me.clone(), others.iter().map(Mri::new)),
     }
 }
 
@@ -255,6 +330,12 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
         self
+    }
+
+    /// The account the outbox writes as.
+    #[must_use]
+    pub fn me(&self) -> &Author {
+        &self.me
     }
 
     /// Sends every row of this run that is due, oldest first, as [`Outbox::send`] does; returns the rows as they
@@ -442,14 +523,64 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
 
     /// One attempt: the row's request, a fresh permit for its target, and the transport.
     async fn attempt(&self, row: &OutboxEntry) -> Tried {
-        match serde_json::from_str::<Command>(&row.payload) {
-            Ok(Command::Send { conversation, text }) => {
-                let request = SendMessage::new(conversation, self.me.clone(), text)
-                    .composed_at(row.created_at)
+        let command = match serde_json::from_str::<Command>(&row.payload) {
+            Ok(command) => command,
+            Err(error) => return Tried::NotSent(format!("the stored command can't be read: {error}")),
+        };
+        let at = row.created_at;
+        let me = self.me.clone();
+        match command {
+            Command::Send { conversation, text } => {
+                let request = SendMessage::new(conversation, me, text)
+                    .composed_at(at)
                     .with_client_message_id(&row.client_message_id);
                 self.deliver(request).await
             }
-            Err(error) => Tried::NotSent(format!("the stored command can't be read: {error}")),
+            Command::Edit {
+                conversation,
+                message_id,
+                text,
+                original,
+            } => {
+                let original = Original {
+                    client_message_id: original.client_message_id,
+                    compose_time_ms: original.compose_time_ms,
+                    arrival_time_ms: original.arrival_time_ms,
+                };
+                let request = EditMessage::new(conversation, message_id, me, text, original).edited_at(at);
+                self.deliver(request).await
+            }
+            Command::Delete {
+                conversation,
+                message_id,
+            } => self.deliver(DeleteMessage::new(conversation, message_id)).await,
+            Command::React {
+                conversation,
+                message_id,
+                key,
+                on: true,
+            } => {
+                self.deliver(SetReaction::new(conversation, message_id, key).at(at))
+                    .await
+            }
+            Command::React {
+                conversation,
+                message_id,
+                key,
+                on: false,
+            } => self.deliver(RemoveReaction::new(conversation, message_id, key)).await,
+            Command::ReadReceipt {
+                conversation,
+                message_id,
+                client_message_id,
+            } => {
+                let request = ReadReceipt::new(conversation, message_id, client_message_id).at(at);
+                self.deliver(request).await
+            }
+            Command::CreateChat { others } => match create_chat(me.mri(), &others) {
+                Some(request) => self.deliver(request).await,
+                None => Tried::NotSent("the chat's members don't make a chat".to_owned()),
+            },
         }
     }
 
@@ -489,7 +620,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         match status {
             200..=299 => (
                 AttemptOutcome::Sent {
-                    message_id: message_id(answer),
+                    message_id: answered_id(row, answer),
                 },
                 false,
             ),
@@ -571,8 +702,22 @@ fn from_transport(error: HttpError) -> Tried {
     }
 }
 
-/// The new message's id from a post's answer: the last segment of its `Location`, or else its `OriginalArrivalTime`
-/// (a message's id is its arrival time).
+/// The id a row that went through is kept with: a post's new message, a new chat's thread (from the answer), the
+/// message an edit, a delete or a reaction acted on; none for a read receipt.
+fn answered_id(row: &OutboxEntry, answer: &Response) -> Option<String> {
+    match row.kind {
+        OutboxKind::Send | OutboxKind::CreateChat => message_id(answer),
+        OutboxKind::ReadReceipt => None,
+        OutboxKind::Edit | OutboxKind::Delete | OutboxKind::AddReaction | OutboxKind::RemoveReaction => {
+            let command = serde_json::from_str::<Command>(&row.payload).ok()?;
+            command.message_id().map(str::to_owned)
+        }
+    }
+}
+
+/// The new message's id from a post's answer: the last segment of its `Location`, or else its `OriginalArrivalTime` (a
+/// message's id is its arrival time). A new chat's answer gives its thread id the same way (`Location`
+/// `…/v1/threads/<id>`).
 fn message_id(answer: &Response) -> Option<String> {
     let located = answer
         .location()

@@ -1,6 +1,6 @@
 [package]
 name = "teams-core"
-description = "The native client's core: commands go out through the outbox and the fence, and a catch-up sync keeps the store up to date (the engine comes in M1 Task 18)"
+description = "The native client's core: an engine on its own runtime, reached through channels; commands go out through the outbox and the fence, push deliveries and a catch-up sync keep the store up to date"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,7 +17,11 @@ teams-auth.workspace = true
 teams-fence.workspace = true
 teams-proto.workspace = true
 teams-store.workspace = true
+# the push channel the engine runs and takes its deliveries from
+teams-trouter.workspace = true
 thiserror.workspace = true
+# the engine's own runtime (current-thread, on a thread of its own) and its channels
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 # the sync tests write as the other lab accounts straight to the mock chat service
@@ -28,6 +32,8 @@ teams-fence = { workspace = true, features = ["test-support"] }
 teams-mock.workspace = true
 # the transport reaches wiremock through its mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
+# the engine tests' push channel reaches the Trouter mock through its mock origin
+teams-trouter = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 # a post's ISO compose time read back, to compare with the row's
 time.workspace = true

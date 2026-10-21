@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
-    CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, Outbox, OutboxError,
-    SyncError, enqueue, new_client_message_id,
+    CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, Outbox, OutboxError, Sent,
+    SyncError, create_chat, enqueue, new_client_message_id,
 };
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_proto::chat::{MessageText, Node, RichText};
@@ -450,6 +450,144 @@ fn client_message_ids_are_random_19_digit_numbers() {
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), ids.len());
+}
+
+/// Every chat write but a post, as a command on [`CHAT`]'s message 1001 (a new chat with the peer for the last).
+fn other_writes() -> Vec<(Command, OutboxKind)> {
+    let on_message = |key: &str| (CHAT.to_owned(), "1001".to_owned(), key.to_owned());
+    let (conversation, message_id, key) = on_message("like");
+    vec![
+        (
+            Command::Edit {
+                conversation: conversation.clone(),
+                message_id: message_id.clone(),
+                text: MessageText::plain("hello again").unwrap(),
+                original: Sent {
+                    client_message_id: "1111111111111111111".to_owned(),
+                    compose_time_ms: START - 2_000,
+                    arrival_time_ms: START - 1_000,
+                },
+            },
+            OutboxKind::Edit,
+        ),
+        (
+            Command::Delete {
+                conversation: conversation.clone(),
+                message_id: message_id.clone(),
+            },
+            OutboxKind::Delete,
+        ),
+        (
+            Command::React {
+                conversation: conversation.clone(),
+                message_id: message_id.clone(),
+                key: key.clone(),
+                on: true,
+            },
+            OutboxKind::AddReaction,
+        ),
+        (
+            Command::React {
+                conversation: conversation.clone(),
+                message_id: message_id.clone(),
+                key,
+                on: false,
+            },
+            OutboxKind::RemoveReaction,
+        ),
+        (
+            Command::ReadReceipt {
+                conversation,
+                message_id,
+                client_message_id: "1111111111111111111".to_owned(),
+            },
+            OutboxKind::ReadReceipt,
+        ),
+        (
+            Command::CreateChat {
+                others: vec![PEER.to_owned()],
+            },
+            OutboxKind::CreateChat,
+        ),
+    ]
+}
+
+#[test]
+fn every_chat_write_becomes_a_row_of_its_kind() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let setup = runtime.block_on(setup());
+    let mut store = setup.open_store();
+
+    for (command, kind) in other_writes() {
+        let row = enqueue(&mut store, &command).unwrap();
+        assert_eq!(row.kind, kind, "{command:?}");
+        let conversation = (kind != OutboxKind::CreateChat).then_some(CHAT);
+        assert_eq!(row.conversation_id.as_deref(), conversation, "{command:?}");
+        assert_eq!(serde_json::from_str::<Command>(&row.payload).unwrap(), command);
+    }
+}
+
+#[test]
+fn a_new_chat_is_one_to_one_for_one_other_and_a_group_for_more() {
+    let me = Mri::new(ME);
+    let one = create_chat(&me, &[PEER.to_owned()]).unwrap();
+    assert_eq!(one.members(), [Mri::new(ME), Mri::new(PEER)]);
+    let group = create_chat(&me, &[PEER.to_owned(), OUTSIDER.to_owned()]).unwrap();
+    assert_eq!(group.members().len(), 3);
+    for others in [vec![], vec![ME.to_owned()], vec![PEER.to_owned(), PEER.to_owned()]] {
+        assert!(create_chat(&me, &others).is_none(), "{others:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_edit_sends_the_message_again_as_it_was_sent_and_keeps_its_id() {
+    let setup = setup().await;
+    Mock::given(method("PUT"))
+        .and(path(format!("{MESSAGES}/1001")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"OriginalArrivalTime": START + 5})))
+        .mount(&setup.server)
+        .await;
+    let mut store = setup.open_store();
+    let (edit, _) = other_writes().remove(0);
+    let row = enqueue(&mut store, &edit).unwrap();
+
+    let sent = send(&setup, &mut store, &row).await;
+
+    assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+    assert_eq!(sent.message_id.as_deref(), Some("1001"), "the edited message's own id");
+    let requests = setup.server.received_requests().await.unwrap();
+    let body: Value = requests.last().unwrap().body_json().unwrap();
+    assert_eq!(body["clientmessageid"], "1111111111111111111");
+    assert!(body["content"].as_str().unwrap().contains("hello again"));
+    assert_eq!(
+        body["properties"]["edittime"],
+        json!(row.created_at),
+        "edited when it was asked for"
+    );
+    assert_eq!(setup.log.verdicts(), ["allow"]);
+}
+
+#[tokio::test]
+async fn a_write_other_than_a_post_whose_outcome_is_unknown_is_failed_not_tried_again() {
+    let setup = setup().await;
+    let mut store = setup.open_store();
+    for (command, _) in other_writes() {
+        setup.fault(Fault::DropRequest);
+        let row = enqueue(&mut store, &command).unwrap();
+
+        let ended = send(&setup, &mut store, &row).await;
+
+        assert_eq!(ended.state, OutboxState::Failed, "{command:?}: {ended:?}");
+        assert_eq!(ended.attempts, 1, "{command:?}");
+        assert!(
+            ended.last_error.as_deref().unwrap().contains("isn't sent again"),
+            "{ended:?}"
+        );
+    }
+    assert!(setup.sync.calls().is_empty(), "only a post can be looked for");
 }
 
 // --- each attempt asks the fence ---

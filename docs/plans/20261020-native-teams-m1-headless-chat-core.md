@@ -878,12 +878,41 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 **Files:**
 - Create: `crates/teams-core/src/engine.rs`, `crates/teams-core/tests/engine.rs`
 - Modify: `crates/teams-core/src/lib.rs`
+  (➕ `crates/teams-core/{Cargo.toml,src/outbox.rs,src/sync.rs,tests/outbox.rs}`: the outbox's `Command` gains every
+  chat write, `Gaps::missed`, `CatchUp::receive_horizon`; `docs/protocol/endpoints.md`: the native column of the
+  chat writes)
 
-- [ ] the engine: commands (send, edit, delete, react, read, create chat) → outbox → fence → transport; events → store;
+- [x] the engine: commands (send, edit, delete, react, read, create chat) → outbox → fence → transport; events → store;
       tokio on its own runtime, reachable through channels (the shape M2's GPUI bridge needs)
-- [ ] tests first, two native clients on the mock: a sends, b receives through its Trouter socket; edit and reaction
+      (`teams_core::engine::start(Parts { store, client, outbox, push, options })` → `EngineHandle`: a current-thread
+      tokio runtime on a thread of its own; `write(Action)` (`Send`, `Edit`, `Delete`, `React`, `Unreact`, `Read`,
+      `CreateChat`), `sync`, `load_older` and store queries (`conversations`, `messages`, `message`, `reactions`,
+      `members`) each answer a `Reply` (a future on any executor, or `blocking_wait`); `next_event`/`try_next_event`/
+      `blocking_next_event` give `Event`s; `shutdown` stops the push channel and joins. An action is checked against
+      the store (edit/delete only of the account's own standing message, a reaction not on a deleted one, a read
+      receipt up to a stored message with its `clientmessageid`), then `enqueue` → `Outbox::send` (a fresh
+      `Fence::check` per attempt); the outbox's `Command` now holds every chat write, its time the row's `created_at`;
+      only a post is looked for after an unknown outcome, any other such row fails. A write that went through syncs
+      its conversation (a new chat's thread). A 1 s tick sends due rows (`send_due`) and retries a failed catch-up
+      after 30 s. The push channel (`Push::new(trouter)`, started on the engine's runtime): `Connected` →
+      `Gaps::connected` and a catch-up when due; `Disconnected`/`Stopped` → `Gaps::disconnected`; a message-loss report
+      about the chats → `Gaps::missed`, a catch-up, acknowledged once one runs clean; deliveries → `receive_message`
+      (an unknown conversation added by a thread read first, synced after), the own read horizon →
+      `receive_horizon`, typing only an event, nothing answered. `Event::CaughtUp` names its `Cause`)
+- [x] tests first, two native clients on the mock: a sends, b receives through its Trouter socket; edit and reaction
       arrive; a group of three
-- [ ] `cargo test -p teams-core` and the gate pass
+      (`tests/engine.rs`, 9 tests, each account its own engine, fence and `fence.log`, 1:1 members read live from the
+      mock: a → b over b's socket, only reviewed own frames logged and sent, none answering a delivery, b's socket
+      closed on shutdown; edit, reaction, its take-back and delete arrive on b; a read receipt; a group of three under
+      a test-only member source that reads every group chat as a, b and c (Task 8 left group chats
+      `Partial(Unsupported)`), and the same write denied under the live read; a new group chat created and brought to
+      b and c by its first message; a dropped socket caught up on the reconnect before any delivery, each message
+      stored once; a write throttled once sent from the tick; an engine without a push channel syncing on demand and
+      refusing an edit/delete of a's message, a reaction on a deleted one and a read of an unknown one, nothing sent.
+      Mutation-checked: without `Gaps::disconnected` on a drop, or without storing deliveries, the tests fail.
+      `tests/outbox.rs` +4: every write's row kind, a new chat's members, an edit's wire form and kept id, an unknown
+      outcome of a write other than a post failed)
+- [x] `cargo test -p teams-core` and the gate pass
 
 ### Task 19: The `teams-headless` lab binary
 **Files:**
