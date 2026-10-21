@@ -52,6 +52,7 @@ fn message_post_of(text: &str) -> PausedRequest {
         request_id: "interception-1".to_owned(),
         method: "POST".to_owned(),
         url: format!("{BASE}/users/ME/conversations/{GROUP_ENCODED}/messages"),
+        headers: Vec::new(),
         body: Some(format!(r#"{{"content":"<p>{text}</p>","messagetype":"RichText/Html"}}"#).into_bytes()),
         network_id: Some("network-1".to_owned()),
     }
