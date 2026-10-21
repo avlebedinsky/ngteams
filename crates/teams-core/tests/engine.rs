@@ -3,8 +3,9 @@
 //! and b receives through its push channel, never answering a delivery; an edit, a reaction (and taking it back) and
 //! a delete arrive; a read receipt; a group of three, under a stand-in for the group member read (the fence's live
 //! read denies group chats, which is checked too); a new chat; the catch-up after a dropped socket, each message stored
-//! once; a write throttled once that goes out from the engine's tick; and an engine without a push channel that syncs
-//! on demand and refuses what the store says can't be done.
+//! once; a write throttled once that goes out from the engine's tick; a write whose check can't sync, answered as the
+//! row that waits; a delivery whose conversation can't be read, caught up from the tick; and an engine without a push
+//! channel that syncs on demand and refuses what the store says can't be done.
 //!
 //! Every write goes through each account's own fence over the lab roster, the 1:1 chats' members read live from the
 //! mock. Every id and token here is the mock's made-up one, never a real one.
@@ -15,7 +16,7 @@
 use std::fmt::Write as _;
 use std::future::{self, Future};
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -118,13 +119,44 @@ impl MembershipSource for GroupsOfTheLab {
     }
 }
 
-/// The HTTP transport, whose first write is answered 429 with a short `Retry-After` before it reaches the service.
-struct ThrottledOnce {
-    inner: Arc<HttpTransport<Tokens>>,
-    throttled: AtomicBool,
+/// The reads' token, which fails while `failing` is set: every read of the engine's client (the catch-up's, the
+/// outbox's check, a thread read) fails before it goes out, as an unreachable service would fail it.
+struct Reads {
+    tokens: Arc<Tokens>,
+    failing: Arc<AtomicBool>,
 }
 
-impl Transport for ThrottledOnce {
+impl Reads {
+    fn token(&self) -> Result<Secret, TokenError> {
+        if self.failing.load(Ordering::SeqCst) {
+            return Err(TokenError::UnexpectedResponse { status: 503 });
+        }
+        Ok(Secret::new(self.tokens.token.clone()))
+    }
+}
+
+impl Credentials for Reads {
+    fn bearer(&self, _audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        future::ready(self.token())
+    }
+
+    fn bearer_rejected(
+        &self,
+        _audience: &str,
+        _rejected: &Secret,
+    ) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        future::ready(self.token())
+    }
+}
+
+/// The outbox's HTTP transport, whose next write can be answered before it reaches the service with the status
+/// `next` holds (0: none): a 429 with a short `Retry-After`, any other with no body.
+struct Interposed {
+    inner: Arc<HttpTransport<Tokens>>,
+    next: Arc<AtomicU16>,
+}
+
+impl Transport for Interposed {
     type Error = HttpError;
 
     fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
@@ -136,10 +168,11 @@ impl Transport for ThrottledOnce {
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
-        if !self.throttled.swap(true, Ordering::SeqCst) {
-            return Ok(Response::new(429, Vec::new()).with_retry_after(Duration::from_millis(300)));
+        match self.next.swap(0, Ordering::SeqCst) {
+            0 => self.inner.deliver(write).await,
+            429 => Ok(Response::new(429, Vec::new()).with_retry_after(Duration::from_millis(300))),
+            status => Ok(Response::new(status, Vec::new())),
         }
-        self.inner.deliver(write).await
     }
 }
 
@@ -226,7 +259,7 @@ struct How {
     /// Group chats read as a, b and c ([`GroupsOfTheLab`]); otherwise the fence's live read alone.
     groups: bool,
     push: bool,
-    /// The first write is throttled ([`ThrottledOnce`]).
+    /// The first write is throttled ([`Interposed`]).
     throttle_first_write: bool,
     /// The push channel's reconnect wait.
     backoff: Duration,
@@ -243,12 +276,19 @@ impl Default for How {
     }
 }
 
-/// A lab account's native client: its engine, its `fence.log`, and every event it took so far.
+/// A lab account's native client: its engine, its `fence.log`, every event it took so far, and the switches of its
+/// fakes.
 struct Native {
     handle: EngineHandle,
     log: SharedLog,
     me: &'static str,
     seen: String,
+    /// The engine's reads fail while it is set ([`Reads`]).
+    reads_fail: Arc<AtomicBool>,
+    /// The status the next write is answered with before it reaches the service ([`Interposed`]).
+    next_write: Arc<AtomicU16>,
+    /// An [`Event::Failed`] is taken like any other event instead of failing the test.
+    failures_expected: bool,
     _dir: tempfile::TempDir,
 }
 
@@ -284,7 +324,14 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
         Arc::new(live)
     };
     let author = Author::new(Mri::new(me), "Lab account");
-    let client = Arc::new(Client::new(http()));
+    let reads_fail = Arc::new(AtomicBool::new(false));
+    let reads = Arc::new(Reads {
+        tokens: Arc::clone(&tokens),
+        failing: Arc::clone(&reads_fail),
+    });
+    let client = Arc::new(Client::new(
+        HttpTransport::with_mock_origin(reads, Arc::clone(&fence), CHAT_BASE, &origin).unwrap(),
+    ));
     let push = how.push.then(|| {
         let trouter = Trouter::with_mock_origin(
             Arc::clone(&transport),
@@ -302,34 +349,27 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
         tick: Duration::from_millis(50),
         catch_up_retry: Duration::from_millis(500),
     };
-    let handle = if how.throttle_first_write {
-        let throttled = ThrottledOnce {
-            inner: transport,
-            throttled: AtomicBool::new(false),
-        };
-        let outbox = Outbox::new(Arc::new(throttled), fence, membership, author);
-        engine::start(Parts {
-            store,
-            client,
-            outbox,
-            push,
-            options,
-        })
-    } else {
-        let outbox = Outbox::new(transport, fence, membership, author);
-        engine::start(Parts {
-            store,
-            client,
-            outbox,
-            push,
-            options,
-        })
+    let next_write = Arc::new(AtomicU16::new(if how.throttle_first_write { 429 } else { 0 }));
+    let interposed = Interposed {
+        inner: transport,
+        next: Arc::clone(&next_write),
     };
+    let outbox = Outbox::new(Arc::new(interposed), fence, membership, author);
+    let handle = engine::start(Parts {
+        store,
+        client,
+        outbox,
+        push,
+        options,
+    });
     Native {
         handle: handle.unwrap(),
         log,
         me,
         seen: String::new(),
+        reads_fail,
+        next_write,
+        failures_expected: false,
         _dir: dir,
     }
 }
@@ -344,7 +384,9 @@ impl Native {
             };
             let event = event.expect("the engine stopped");
             let _ = writeln!(self.seen, "{event:?}");
-            if let Event::Failed { during, error } = &event {
+            if let Event::Failed { during, error } = &event
+                && !self.failures_expected
+            {
                 panic!("{}: failed {during}: {error}", self.me);
             }
             if let Some(picked) = pick(&event) {
@@ -919,5 +961,85 @@ async fn without_a_push_channel_the_engine_syncs_on_demand_and_refuses_what_the_
             .contains("sent without a push channel")
     );
     b.handle.load_older(AB_CHAT).await.unwrap();
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn a_write_whose_check_cant_sync_is_answered_as_the_row_that_waits() {
+    let lab = Lab::start().await;
+    let mut a = native(
+        &lab,
+        LAB_A,
+        How {
+            push: false,
+            ..How::default()
+        },
+    );
+    a.handle.sync().await.unwrap();
+
+    // the post's answer is a 500, so whether it arrived is unknown, and the chat can't be read to look for it
+    a.next_write.store(500, Ordering::SeqCst);
+    a.reads_fail.store(true, Ordering::SeqCst);
+    let row = a.handle.write(send(AB_CHAT, "did it arrive?")).await;
+
+    // the reply is the row as it waits for its next check, not an error a caller would send the message again on
+    let row = row.unwrap();
+    assert_eq!(row.state, OutboxState::Pending, "{row:?}");
+    assert_eq!((row.attempts, row.failed_checks), (1, 1), "{row:?}");
+    assert!(row.not_before.is_some(), "{row:?}");
+    let told = a
+        .event(|event| match event {
+            Event::Outbox(entry) => Some(entry.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(told, row);
+    assert_eq!(lab.posts_to(AB_CHAT).await, 0);
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn a_delivery_whose_conversation_cant_be_read_is_caught_up_from_the_tick() {
+    let lab = Lab::start().await;
+    let how = How {
+        groups: true,
+        ..How::default()
+    };
+    let mut a = native(&lab, LAB_A, how);
+    let mut b = native(&lab, LAB_B, how);
+    a.ready().await;
+    b.ready().await;
+
+    // b can't read the new chat its first message names, so the delivery doesn't reach b's store
+    b.reads_fail.store(true, Ordering::SeqCst);
+    b.failures_expected = true;
+    let chat = id_of(
+        &a.write(Action::CreateChat {
+            others: vec![Mri::new(LAB_B), Mri::new(LAB_C)],
+        })
+        .await,
+    );
+    let first = id_of(&a.send(&chat, "the first message, missed by b").await);
+    b.event(|event| match event {
+        Event::Failed { during, .. } => (*during == "adding a delivery's conversation").then_some(()),
+        Event::Message { id, .. } if *id == first => panic!("the message reached b's store"),
+        _ => None,
+    })
+    .await;
+    assert!(b.handle.message(chat.as_str(), first.as_str()).await.unwrap().is_none());
+
+    // once b can read again, the tick's catch-up brings the chat and its message while the socket stays up
+    b.reads_fail.store(false, Ordering::SeqCst);
+    b.event(|event| match event {
+        Event::CaughtUp {
+            cause: Cause::Retry,
+            report,
+        } => report.failed.is_empty().then_some(()),
+        Event::Disconnected(_) => panic!("b's socket dropped"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(b.copies(&chat, &first).await, 1);
+    a.shutdown();
     b.shutdown();
 }

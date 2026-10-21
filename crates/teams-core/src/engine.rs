@@ -6,9 +6,11 @@
 //!   create a chat) is checked against the store first: an edit or a delete only of the account's own message that
 //!   isn't deleted, a reaction only on a message that isn't, a read receipt only up to a stored message. It becomes an
 //!   outbox row ([`enqueue`]) and is sent at once ([`Outbox::send`]): every attempt under a fresh `Fence::check`,
-//!   then the transport. The reply is the row as that send left it. A row that waits (a `Retry-After`) goes out from
-//!   the engine's tick ([`Outbox::send_due`]); every row that settles comes as [`Event::Outbox`] too. Once a write
-//!   went through, its conversation is synced, so the account's own change is in the store (a new chat with it).
+//!   then the transport. The reply is the row as that send left it, an error only when no row was made (or it can't
+//!   be read back): a row that waits (a `Retry-After`, a check that couldn't sync, an older row on its
+//!   [`Lane`](crate::Lane)) is in the reply as it waits, and goes out from the engine's tick ([`Outbox::send_due`]);
+//!   every row that settles comes as [`Event::Outbox`] too. Once a write went through, its conversation is synced, so
+//!   the account's own change is in the store (a new chat with it).
 //! - **Events → store**: each delivery of the push channel ([`teams_trouter`]) goes through the catch-up's
 //!   [`CatchUp::receive_message`], the path a sync takes, so a message that comes both ways is stored once, at its
 //!   newest version; the account's own read horizon through [`CatchUp::receive_horizon`]. A delivery naming a
@@ -17,7 +19,9 @@
 //! - **Catch-up** ([`Gaps`]): after every connect of the push channel when one is due (on start, and after every
 //!   disconnect), after a message-loss report about the chats (acknowledged once a catch-up ran with nothing failed),
 //!   and on [`EngineHandle::sync`]. One that failed is tried again from the tick, [`EngineOptions::catch_up_retry`]
-//!   later, while the channel is up.
+//!   later, while the channel is up; so is a delivery that didn't reach the store (its conversation couldn't be
+//!   added or synced, the store failed), and a sync after a write that failed: what they would have stored is missed
+//!   until a catch-up brings it.
 //! - **Queries**: the conversation list, a page of a conversation's messages, one message, its reactions, a chat's
 //!   members, all read from the store on the engine's thread, which owns it; older history from the service
 //!   ([`EngineHandle::load_older`]).
@@ -60,7 +64,8 @@ use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
 pub struct EngineOptions {
     /// How often the outbox's waiting rows are looked at, and a failed catch-up's time to try again: 1 s.
     pub tick: Duration,
-    /// How long after a catch-up that failed (or left a conversation unsynced) the next is tried: 30 s.
+    /// How long after a catch-up that failed (or left a conversation unsynced), or a delivery that didn't reach the
+    /// store, the next catch-up is tried: 30 s.
     pub catch_up_retry: Duration,
 }
 
@@ -166,7 +171,8 @@ pub enum Cause {
     Connected,
     /// The service reported pushes about the chats that the endpoint missed.
     MessageLoss,
-    /// The last one failed (or left a conversation unsynced), and its wait is over.
+    /// The last one failed (or left a conversation unsynced), or a delivery didn't reach the store, and its wait is
+    /// over.
     Retry,
 }
 
@@ -442,7 +448,7 @@ struct Core<C, T> {
     gaps: Gaps,
     /// The push channel is connected.
     up: bool,
-    /// When a catch-up that failed is tried again.
+    /// When a catch-up is tried again after one that failed, or after something a delivery brought was missed.
     retry_at: Option<Instant>,
     /// Message-loss reports waiting for a catch-up that runs clean.
     losses: Vec<MessageLoss>,
@@ -505,6 +511,21 @@ where
         });
     }
 
+    /// Something that should be in the store isn't (a delivery that couldn't be stored, a sync that failed): it is
+    /// told to the owner, and a catch-up is due ([`Core::catch_up_later`]).
+    fn missed(&mut self, during: &'static str, error: impl Into<EngineError>) {
+        self.failed(during, error);
+        self.catch_up_later();
+    }
+
+    /// A catch-up is due, tried from the tick within [`EngineOptions::catch_up_retry`] (sooner when a retry was due
+    /// already) while the channel is up.
+    fn catch_up_later(&mut self) {
+        self.gaps.missed();
+        self.retry_at
+            .get_or_insert_with(|| Instant::now() + self.options.catch_up_retry);
+    }
+
     async fn on_request(&mut self, request: Request) {
         match request {
             Request::Write(action, reply) => {
@@ -560,8 +581,25 @@ where
     async fn write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
         let command = self.command(action)?;
         let row = enqueue(&mut self.store, &command)?;
-        let row = self.outbox.send(&mut self.store, &self.catch_up, row.id).await?;
+        let row = match self.outbox.send(&mut self.store, &self.catch_up, row.id).await {
+            Ok(row) => row,
+            Err(error) => self.row_after(row.id, error)?,
+        };
         self.settled(&row).await;
+        Ok(row)
+    }
+
+    /// A row whose send ended in an error, as it now stands: it exists, and one left pending goes out from the tick,
+    /// so the reply is the row (an owner told the write failed would ask for it again, and it would go out twice). A
+    /// check that couldn't sync is the row's own `last_error`; any other error is told as [`Event::Failed`]. The
+    /// error itself when the row can't be read back.
+    fn row_after(&self, id: i64, error: OutboxError) -> Result<OutboxEntry, EngineError> {
+        let Ok(Some(row)) = self.store.outbox_entry(id) else {
+            return Err(error.into());
+        };
+        if !matches!(error, OutboxError::Sync { .. }) {
+            self.failed("sending a write", error);
+        }
         Ok(row)
     }
 
@@ -688,7 +726,7 @@ where
         if let Some(conversation) = conversation
             && let Err(error) = self.catch_up.sync_messages(&mut self.store, &conversation).await
         {
-            self.failed("the sync after a write", error);
+            self.missed("the sync after a write", error);
         }
     }
 
@@ -804,11 +842,11 @@ where
     }
 
     /// A message delivered (new, or changed): stored as a sync would store it, its conversation added first when the
-    /// store doesn't know it, and synced after.
+    /// store doesn't know it, and synced after. One that doesn't reach the store is missed ([`Core::missed`]).
     async fn on_message(&mut self, conversation: String, change: MessageChange, message: &chat::Message, replay: bool) {
         let added = match self.add_if_unknown(&conversation).await {
             Ok(added) => added,
-            Err(error) => return self.failed("adding a delivery's conversation", error),
+            Err(error) => return self.missed("adding a delivery's conversation", error),
         };
         match self.catch_up.receive_message(&mut self.store, &conversation, message) {
             Ok(Some(received)) => {
@@ -833,10 +871,10 @@ where
             }
             // a control signal, or a message this build can't read: nothing stored
             Ok(None) => {}
-            Err(error) => self.failed("storing a delivered message", error),
+            Err(error) => self.missed("storing a delivered message", error),
         }
         if added && let Err(error) = self.catch_up.sync_messages(&mut self.store, &conversation).await {
-            self.failed("syncing a delivery's new conversation", error);
+            self.missed("syncing a delivery's new conversation", error);
         }
     }
 
@@ -851,29 +889,29 @@ where
 
     fn on_horizon(&mut self, conversation: String, horizon: &chat::ConsumptionHorizon) {
         match self.store.conversation(&conversation) {
-            // a conversation the store doesn't know yet brings its horizon with its catch-up
-            Ok(None) => return,
+            // a conversation the store doesn't know yet brings its horizon with its catch-up, made due here
+            Ok(None) => return self.catch_up_later(),
             Ok(Some(_)) => {}
-            Err(error) => return self.failed("storing a read horizon", error),
+            Err(error) => return self.missed("storing a read horizon", error),
         }
         match self.catch_up.receive_horizon(&mut self.store, &conversation, horizon) {
             Ok(Some(_)) => self.emit(Event::ReadHorizon { conversation }),
             Ok(None) => {}
-            Err(error) => self.failed("storing a read horizon", error),
+            Err(error) => self.missed("storing a read horizon", error),
         }
     }
 
-    /// A conversation changed: one the store doesn't know is added and synced; the rest comes with the next
-    /// catch-up.
+    /// A conversation changed: one the store doesn't know is added and synced (missed when it can't be, [`Core::missed`]);
+    /// the rest comes with the next catch-up.
     async fn on_conversation(&mut self, conversation: String) {
         match self.add_if_unknown(&conversation).await {
             Ok(true) => {
                 if let Err(error) = self.catch_up.sync_messages(&mut self.store, &conversation).await {
-                    self.failed("syncing a new conversation", error);
+                    self.missed("syncing a new conversation", error);
                 }
             }
             Ok(false) => {}
-            Err(error) => return self.failed("adding a changed conversation", error),
+            Err(error) => return self.missed("adding a changed conversation", error),
         }
         self.emit(Event::ConversationChanged { conversation });
     }

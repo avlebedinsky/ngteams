@@ -16,6 +16,11 @@
 //!   nothing: the row waits [`CHECK_RETRY_WAIT`], doubled for each check of its that failed before. A row is given up
 //!   (failed) after [`MAX_ATTEMPTS`] attempts or [`MAX_FAILED_CHECKS`] checks that couldn't sync, both counted since
 //!   it was made or last resent.
+//! - **Writes on one thing go out in the order they were asked for** ([`Lane`]): a row waits, sending nothing, while
+//!   an older pending row of this run acts on the same message (an edit, a delete, a reaction or taking it back) or,
+//!   for a read receipt, on the same conversation's read horizon; so a take-back sent while its reaction waits out a
+//!   `Retry-After` can't be undone by the reaction going out after it, nor a newer edit by an older one. Rows on
+//!   anything else go out meanwhile; a message post and a new chat wait for nothing.
 //! - **Our own message coming back** ([`Outbox::receive`], for a Trouter delivery and a sync alike) is stored once
 //!   (by its id and version) and matched by its `clientmessageid` to its row, which becomes sent with the message's
 //!   id; it may come back before the post's answer does, and the answer then changes nothing.
@@ -100,6 +105,17 @@ pub enum Command {
     CreateChat { others: Vec<String> },
 }
 
+/// What commands go out in the order they were asked for on: a later one of this run waits while an earlier one on
+/// the same lane is pending, since sent out of order the earlier would undo the later (a reaction coming back after
+/// its take-back, an older edit over a newer one, the read horizon moving back).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane<'a> {
+    /// A message's edits, its delete, and the account's reactions on it.
+    Message { conversation: &'a str, message_id: &'a str },
+    /// The account's read horizon in a conversation.
+    ReadHorizon { conversation: &'a str },
+}
+
 /// What an edit sends again of the message it changes, as the store had it when the edit was asked for: its
 /// `clientmessageid` and its times, in milliseconds since the Unix epoch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +150,33 @@ impl Command {
             | Self::React { conversation, .. }
             | Self::ReadReceipt { conversation, .. } => Some(conversation),
             Self::CreateChat { .. } => None,
+        }
+    }
+
+    /// What it has to go out in order on with the other commands of this run ([`Lane`]); none for a message post and
+    /// a new chat.
+    #[must_use]
+    pub fn lane(&self) -> Option<Lane<'_>> {
+        match self {
+            Self::Edit {
+                conversation,
+                message_id,
+                ..
+            }
+            | Self::Delete {
+                conversation,
+                message_id,
+            }
+            | Self::React {
+                conversation,
+                message_id,
+                ..
+            } => Some(Lane::Message {
+                conversation,
+                message_id,
+            }),
+            Self::ReadReceipt { conversation, .. } => Some(Lane::ReadHorizon { conversation }),
+            Self::Send { .. } | Self::CreateChat { .. } => None,
         }
     }
 
@@ -340,7 +383,8 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
 
     /// Sends every row of this run that is due, oldest first, as [`Outbox::send`] does; returns the rows as they
     /// end up. A row whose check can't sync doesn't hold up the rows after it: it is listed in
-    /// [`SentDue::unsynced`] and waits (see the module docs).
+    /// [`SentDue::unsynced`] and waits (see the module docs). A row that waits behind an older one on its lane
+    /// ([`Lane`]) is left out: nothing happened to it.
     ///
     /// # Errors
     ///
@@ -352,6 +396,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             unsynced: Vec::new(),
         };
         for row in due {
+            if waits_behind(store, &row)? {
+                continue;
+            }
             match self.send(store, sync, row.id).await {
                 Ok(row) => done.rows.push(row),
                 Err(OutboxError::Sync { id, source }) => {
@@ -365,8 +412,8 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// Sends one row of this run, if it is pending and due: attempts until it is sent, denied or failed, or waits
-    /// for a `Retry-After` (see the module docs). A row of this run that isn't due, and a row of any run that isn't
-    /// pending, comes back as it is.
+    /// for a `Retry-After` (see the module docs). A row of this run that isn't due, or waits behind an older pending
+    /// row on its lane ([`Lane`]), and a row of any run that isn't pending, comes back as it is.
     ///
     /// # Errors
     ///
@@ -385,7 +432,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             if row.state == OutboxState::Pending && row.run_id != store.run_id() {
                 return Err(OutboxError::OtherRun { id, run_id: row.run_id });
             }
-            if !self.is_due(&row) {
+            if !self.is_due(&row) || waits_behind(store, &row)? {
                 return Ok(row);
             }
             if row.attempts > 0
@@ -682,6 +729,23 @@ fn findable(row: &OutboxEntry) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// Whether an older pending row of this run is on `row`'s lane ([`Lane`]), so `row` waits for it to settle. A row
+/// whose command can't be read is on no lane (its attempt fails it).
+fn waits_behind(store: &Store, row: &OutboxEntry) -> Result<bool, OutboxError> {
+    let Ok(command) = serde_json::from_str::<Command>(&row.payload) else {
+        return Ok(false);
+    };
+    let Some(lane) = command.lane() else {
+        return Ok(false);
+    };
+    // every pending row of this run, whenever it is due, oldest first
+    let pending = store.outbox_due(i64::MAX)?;
+    Ok(pending
+        .iter()
+        .take_while(|older| older.id < row.id)
+        .any(|older| serde_json::from_str::<Command>(&older.payload).is_ok_and(|command| command.lane() == Some(lane))))
 }
 
 fn entry(store: &Store, id: i64) -> Result<OutboxEntry, OutboxError> {

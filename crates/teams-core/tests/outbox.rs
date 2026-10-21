@@ -1078,6 +1078,176 @@ async fn a_row_whose_check_keeps_failing_waits_longer_each_time_and_is_given_up(
     assert!(store.outbox_due(i64::MAX).unwrap().is_empty());
 }
 
+// --- writes on one thing go out in order ---
+
+fn react(message_id: &str, on: bool) -> Command {
+    Command::React {
+        conversation: CHAT.to_owned(),
+        message_id: message_id.to_owned(),
+        key: "like".to_owned(),
+        on,
+    }
+}
+
+fn edit(text: &str) -> Command {
+    Command::Edit {
+        conversation: CHAT.to_owned(),
+        message_id: "1001".to_owned(),
+        text: MessageText::plain(text).unwrap(),
+        original: Sent {
+            client_message_id: "1111111111111111111".to_owned(),
+            compose_time_ms: START - 2_000,
+            arrival_time_ms: START - 1_000,
+        },
+    }
+}
+
+fn read_up_to(message_id: &str) -> Command {
+    Command::ReadReceipt {
+        conversation: CHAT.to_owned(),
+        message_id: message_id.to_owned(),
+        client_message_id: "1111111111111111111".to_owned(),
+    }
+}
+
+/// `CHAT`'s properties (a read receipt's URL).
+const PROPERTIES: &str = "/api/chatsvc/amer/v1/users/ME/conversations/19:lab-chat@thread.v2/properties";
+
+/// A message's properties (a reaction's URL, `?name=emotions`).
+fn emotions(message_id: &str) -> String {
+    format!("{MESSAGES}/{message_id}/properties")
+}
+
+/// Answers `verb` on `at` with 429 (`Retry-After: 7`) once, and with 200 after that.
+async fn throttled_once(setup: &Setup, verb: &str, at: &str) {
+    Mock::given(method(verb))
+        .and(path(at))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "7"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&setup.server)
+        .await;
+    answered(setup, verb, at).await;
+}
+
+/// Answers `verb` on `at` with 200.
+async fn answered(setup: &Setup, verb: &str, at: &str) {
+    Mock::given(method(verb))
+        .and(path(at))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"OriginalArrivalTime": START + 5})))
+        .mount(&setup.server)
+        .await;
+}
+
+/// The requests the service received at `at`, in order: each one's method and body.
+async fn requests_at(setup: &Setup, at: &str) -> Vec<(String, Value)> {
+    setup
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| request.url.path() == at)
+        .map(|request| {
+            let body = request.body_json().unwrap_or(Value::Null);
+            (request.method.to_string(), body)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_take_back_waits_for_its_throttled_reaction_and_goes_out_after_it() {
+    let setup = setup().await;
+    let at = emotions("1001");
+    throttled_once(&setup, "PUT", &at).await;
+    answered(&setup, "DELETE", &at).await;
+    let mut store = setup.open_store();
+    let reaction = enqueue(&mut store, &react("1001", true)).unwrap();
+    let waiting = send(&setup, &mut store, &reaction).await;
+    assert_eq!(waiting.state, OutboxState::Pending, "{waiting:?}");
+
+    // taken back while the reaction waits out its Retry-After: it waits behind it, sending nothing
+    let take_back = enqueue(&mut store, &react("1001", false)).unwrap();
+    assert_eq!(send(&setup, &mut store, &take_back).await, take_back);
+    let done = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+    assert!(done.rows.is_empty(), "{done:?}");
+    let methods = |requests: Vec<(String, Value)>| requests.into_iter().map(|(verb, _)| verb).collect::<Vec<_>>();
+    assert_eq!(methods(requests_at(&setup, &at).await), ["PUT"]);
+
+    setup.advance(Duration::from_secs(7));
+    let done = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+
+    let settled: Vec<(i64, OutboxState)> = done.rows.iter().map(|row| (row.id, row.state)).collect();
+    assert_eq!(
+        settled,
+        [(reaction.id, OutboxState::Sent), (take_back.id, OutboxState::Sent)]
+    );
+    // the take-back went out last, so the reaction stays taken back
+    assert_eq!(methods(requests_at(&setup, &at).await), ["PUT", "PUT", "DELETE"]);
+}
+
+#[tokio::test]
+async fn a_later_edit_waits_for_an_earlier_throttled_one_so_the_later_text_stands() {
+    let setup = setup().await;
+    let at = format!("{MESSAGES}/1001");
+    throttled_once(&setup, "PUT", &at).await;
+    let mut store = setup.open_store();
+    let first = enqueue(&mut store, &edit("the first edit")).unwrap();
+    assert_eq!(send(&setup, &mut store, &first).await.state, OutboxState::Pending);
+    let second = enqueue(&mut store, &edit("the second edit")).unwrap();
+
+    let behind = send(&setup, &mut store, &second).await;
+
+    assert_eq!((behind.state, behind.attempts), (OutboxState::Pending, 0), "{behind:?}");
+    setup.advance(Duration::from_secs(7));
+    let done = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+    let settled: Vec<(i64, OutboxState)> = done.rows.iter().map(|row| (row.id, row.state)).collect();
+    assert_eq!(settled, [(first.id, OutboxState::Sent), (second.id, OutboxState::Sent)]);
+    let texts: Vec<bool> = requests_at(&setup, &at)
+        .await
+        .iter()
+        .map(|(_, body)| body["content"].as_str().unwrap().contains("the second edit"))
+        .collect();
+    assert_eq!(texts, [false, false, true], "the second edit went out last");
+}
+
+#[tokio::test]
+async fn a_later_read_receipt_waits_for_an_earlier_throttled_one() {
+    let setup = setup().await;
+    throttled_once(&setup, "PUT", PROPERTIES).await;
+    let mut store = setup.open_store();
+    let earlier = enqueue(&mut store, &read_up_to("1001")).unwrap();
+    assert_eq!(send(&setup, &mut store, &earlier).await.state, OutboxState::Pending);
+    let later = enqueue(&mut store, &read_up_to("1002")).unwrap();
+
+    assert_eq!(send(&setup, &mut store, &later).await, later);
+    assert_eq!(requests_at(&setup, PROPERTIES).await.len(), 1);
+
+    setup.advance(Duration::from_secs(7));
+    let done = setup.outbox.send_due(&mut store, &setup.sync).await.unwrap();
+    let settled: Vec<i64> = done.rows.iter().map(|row| row.id).collect();
+    assert_eq!(settled, [earlier.id, later.id]);
+    assert_eq!(requests_at(&setup, PROPERTIES).await.len(), 3);
+}
+
+#[tokio::test]
+async fn writes_on_anything_else_dont_wait_for_a_throttled_reaction() {
+    let setup = setup().await;
+    throttled_once(&setup, "PUT", &emotions("1001")).await;
+    answered(&setup, "PUT", &emotions("1002")).await;
+    answered(&setup, "PUT", PROPERTIES).await;
+    setup.created().await;
+    let mut store = setup.open_store();
+    let reaction = enqueue(&mut store, &react("1001", true)).unwrap();
+    assert_eq!(send(&setup, &mut store, &reaction).await.state, OutboxState::Pending);
+
+    for command in [react("1002", true), read_up_to("1001"), hello()] {
+        let row = enqueue(&mut store, &command).unwrap();
+        let sent = send(&setup, &mut store, &row).await;
+        assert_eq!(sent.state, OutboxState::Sent, "{command:?}: {sent:?}");
+    }
+}
+
 // --- our own message coming back ---
 
 #[tokio::test]
