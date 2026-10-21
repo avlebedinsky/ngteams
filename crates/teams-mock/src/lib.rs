@@ -232,6 +232,13 @@ impl ChatServiceMock {
         world.changed();
     }
 
+    /// `from` posts `html` (a rich-text message) to `chat`, as one of its clients would: stored as a read gives it back
+    /// and queued for the chat's other members, as any post. Its id, or `None` when `from` may not write there.
+    #[must_use = "None says the post was refused"]
+    pub fn post_as(&self, from: &str, chat: &str, html: &str) -> Option<String> {
+        writes::post_text(&mut self.lock(), from, chat, html)
+    }
+
     /// Changes the message of `conversation` that carries `client_message_id` as `change` says, as every later read
     /// gives it (a test's stand-in for an entry a client can't read); its `version` is whatever `change` leaves, so a
     /// sync link already past it doesn't bring it again. `false` when there is no such message.

@@ -108,6 +108,8 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
         engine: lab.handle,
         trace,
         settings: SettingsFile::new(config.paths().ui_settings_file(alias)),
+        // the bus the app is given, read once: nothing else is ever connected to for notifications or the tray
+        bus: teams_ui::bus::address_from_env(),
     })
 }
 

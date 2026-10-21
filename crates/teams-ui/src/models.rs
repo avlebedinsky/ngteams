@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-use gpui::{App, AppContext as _, AsyncApp, Entity, SharedString};
+use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, SharedString};
 use teams_core::{Event, MessageChange, Source};
-use teams_store::{Message, OutboxEntry};
+use teams_store::{Applied, Message, OutboxEntry};
 
 /// How long someone is shown typing after their last typing signal, unless they stop (`typing: false`) or a message
 /// of theirs is delivered first. M2 Task 10's capture (`docs/protocol/chat.md`, "The shapes the UI needs
@@ -174,11 +174,33 @@ impl Chats {
     }
 }
 
+/// What the [`Feed`] tells as it comes: for what acts on single events (the desktop's notifications), not for what a
+/// view shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FeedEvent {
+    /// A message newly stored (a delivery the store didn't have, or one a read of the service brought), with what
+    /// brought it. An edit, a delete, a reaction or a newer version of a stored message isn't one.
+    Arrived {
+        conversation: String,
+        message: Box<Message>,
+        source: Source,
+    },
+    /// The account's own read horizon in a conversation moved.
+    Read { conversation: String },
+}
+
+/// The engine's events that single things act on, told one by one ([`FeedEvent`]); it holds nothing.
+#[derive(Debug, Default)]
+pub struct Feed;
+
+impl EventEmitter<FeedEvent> for Feed {}
+
 /// The models, shared by every view (cheap to clone: entity handles).
 #[derive(Clone, Debug)]
 pub struct Models {
     pub status: Entity<Status>,
     pub chats: Entity<Chats>,
+    pub feed: Entity<Feed>,
 }
 
 impl Models {
@@ -187,11 +209,14 @@ impl Models {
         Self {
             status: cx.new(|_| Status::default()),
             chats: cx.new(|_| Chats::default()),
+            feed: cx.new(|_| Feed),
         }
     }
 
-    /// Applies one of the engine's events; the models it changed notify their observers.
+    /// Applies one of the engine's events; the models it changed notify their observers, and the [`Feed`] tells what
+    /// came.
     pub fn apply(&self, event: Event, cx: &mut App) {
+        self.feed(&event, cx);
         match event {
             Event::Connected { .. } => self.set_link(Link::Connected, cx),
             Event::Disconnected(_) => self.set_link(Link::Down, cx),
@@ -237,6 +262,29 @@ impl Models {
             // how the push channel's registration went, and a waiting transient's send: nothing a view shows yet
             Event::Registration(_) | Event::Transient(..) => {}
         }
+    }
+
+    /// Tells a message newly stored, or a read horizon that moved, on the [`Feed`].
+    fn feed(&self, event: &Event, cx: &mut App) {
+        let told = match event {
+            Event::Message {
+                conversation,
+                message: Some(message),
+                change: MessageChange::New,
+                applied: Applied::Inserted,
+                source,
+                ..
+            } => FeedEvent::Arrived {
+                conversation: conversation.clone(),
+                message: message.clone(),
+                source: *source,
+            },
+            Event::ReadHorizon { conversation } => FeedEvent::Read {
+                conversation: conversation.clone(),
+            },
+            _ => return,
+        };
+        self.feed.update(cx, |_, cx| cx.emit(told));
     }
 
     /// The engine stopped (its events ended, or it was shut down).

@@ -1,9 +1,11 @@
 //! The app on GPUI: the bridge over the account's engine, the main window, the sign-out, the quit.
 //!
 //! [`launch`] runs inside GPUI's `run`: it hands the engine to a [`Bridge`], opens the main window over the bridge's
-//! models with the view trace, watches the session for a sign-out ([`watch_sign_out`]) and, once the last window
-//! closes, shuts the engine down (off the foreground, joining its thread) and quits. A window that can't be opened
-//! shuts the engine down too, and the caller quits once that shutdown has ended ([`LaunchFailed`]).
+//! models with the view trace on the [`Desktop`] (which holds the window, the notifications and the tray item, and
+//! puts the last two on the bus the app is given), watches the session for a sign-out ([`watch_sign_out`]) and, once
+//! the desktop asks to quit (the tray's "Quit", or the window closed with no tray item to stay in), shuts the engine
+//! down (off the foreground, joining its thread) and quits. A window that can't be opened shuts the engine down too,
+//! and the caller quits once that shutdown has ended ([`LaunchFailed`]).
 //!
 //! The engine is held as an [`AppEngine`]: its shutdown waits [`SHUTDOWN_GRACE`] for the engine's thread, then shuts
 //! the broker's socket down, so an exchange waiting on the broker (the Secret Service asking the user to unlock it,
@@ -15,14 +17,21 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, AppContext as _, AsyncApp, Entity, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui::{App, AppContext as _, AsyncApp, Entity, Global, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
 use teams_auth::session::SignedOut;
 use teams_core::EngineError;
 use teams_core::lab::LabError;
 use teams_core::{EngineHandle, Event};
 use teams_fence::lab::Alias;
-use teams_ui::window::{self, KitRoot, LAB_APP_ID};
-use teams_ui::{Bridge, Core, EventSource, Models, SettingsFile, SettingsModel, ShellParts, ViewTrace};
+use teams_ui::bus::BusError;
+use teams_ui::window::{KitRoot, LAB_APP_ID};
+use teams_ui::{
+    Bridge, Core, Desktop, DesktopEvent, DesktopParts, EventSource, Models, SettingsFile, SettingsModel, ShellParts,
+    ViewTrace,
+};
 use tokio::sync::watch;
 
 /// What the app starts with.
@@ -38,6 +47,25 @@ pub struct Launch {
     pub trace: ViewTrace,
     /// The account's settings file (`LabPaths::ui_settings_file`).
     pub settings: SettingsFile,
+    /// The session bus the app is given ([`teams_ui::bus::address_from_env`]), for its notifications and tray item.
+    pub bus: Result<String, BusError>,
+}
+
+/// The desktop and the bridge, held by the app for its whole life: nothing else holds the desktop once its window is
+/// closed, and dropping the bridge would stop the engine.
+struct Held {
+    _desktop: Entity<Desktop>,
+    _bridge: Entity<Bridge>,
+}
+
+impl Global for Held {}
+
+/// What [`launch`] started: the main window, the bridge holding the engine, and the desktop holding the window, the
+/// notifications and the tray item.
+pub struct Launched {
+    pub window: WindowHandle<KitRoot>,
+    pub bridge: Entity<Bridge>,
+    pub desktop: Entity<Desktop>,
 }
 
 /// What a lab account signed out is told to do.
@@ -97,7 +125,7 @@ pub struct LaunchFailed {
 ///
 /// # Errors
 /// The window can't be opened: the bridge is shut down then, and [`LaunchFailed::stopped`] ends once it is.
-pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<KitRoot>, Entity<Bridge>), LaunchFailed> {
+pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     let Launch {
         alias,
         engine,
@@ -105,9 +133,11 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<KitRoot>, En
         signed_out,
         trace,
         settings,
+        bus,
     } = launch;
     // GPUI would quit on its own as the last window closes (`QuitMode::Default` on Linux), before the engine is shut
-    // down: the app quits itself once it is (`quit_when_closed`)
+    // down, and closing the window keeps the app in the tray: the app quits itself when the desktop asks
+    // (`quit_when_asked`), once the engine is shut down
     cx.set_quit_mode(QuitMode::Explicit);
     let models = Models::new(cx);
     let core: Arc<dyn Core> = Arc::new(engine.requests());
@@ -127,7 +157,18 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<KitRoot>, En
         settings: cx.new(|_| settings),
         trace: Arc::new(trace),
     };
-    let window = match window::open(cx, LAB_APP_ID, title(alias), parts) {
+    let desktop = cx.new(|cx| {
+        Desktop::new(
+            DesktopParts {
+                app_id: LAB_APP_ID,
+                app_name: title(alias),
+                title: title(alias),
+                shell: parts,
+            },
+            cx,
+        )
+    });
+    let window = match desktop.update(cx, Desktop::open_window) {
         Ok(window) => window,
         Err(error) => {
             return Err(LaunchFailed {
@@ -136,8 +177,24 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<KitRoot>, En
             });
         }
     };
-    quit_when_closed(bridge.clone(), cx);
-    Ok((window, bridge))
+    // held for the app's life: the desktop outlives its window (the app stays in the tray), and the bridge with it
+    cx.set_global(Held {
+        _desktop: desktop.clone(),
+        _bridge: bridge.clone(),
+    });
+    quit_when_asked(&desktop, bridge.clone(), cx);
+    let connecting = desktop.update(cx, |desktop, cx| desktop.connect(bus, cx));
+    cx.spawn(async move |_: &mut AsyncApp| {
+        for problem in connecting.await {
+            eprintln!("teams-app: {problem}");
+        }
+    })
+    .detach();
+    Ok(Launched {
+        window,
+        bridge,
+        desktop,
+    })
 }
 
 /// Once `signed_out` says the session is signed out, shows it with `hint` and shuts the engine down, so nothing more
@@ -159,12 +216,16 @@ pub fn watch_sign_out(
     .detach();
 }
 
-/// Once the last window closes: the engine shut down, then the app quits.
-fn quit_when_closed(bridge: Entity<Bridge>, cx: &mut App) {
-    cx.on_window_closed(move |cx, _| {
-        if cx.windows().is_empty() {
-            let stopped = bridge.update(cx, Bridge::shutdown);
-            quit_after(stopped, cx);
+/// Once the desktop asks to quit (the tray's "Quit", or the window closed with no tray item): the engine shut down,
+/// then the app quits. The first ask does it; a later one (the window closing as the app quits) changes nothing.
+fn quit_when_asked(desktop: &Entity<Desktop>, bridge: Entity<Bridge>, cx: &mut App) {
+    let quitting = Rc::new(Cell::new(false));
+    cx.subscribe(desktop, move |_, event, cx| match event {
+        DesktopEvent::Quit => {
+            if !quitting.replace(true) {
+                let stopped = bridge.update(cx, Bridge::shutdown);
+                quit_after(stopped, cx);
+            }
         }
     })
     .detach();

@@ -31,6 +31,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 # the settings file
 toml.workspace = true
+# the notifications and the tray item, on the bus the app is given (async-io, as GPUI's own)
+zbus.workspace = true
 
 [dev-dependencies]
 # the views on GPUI's test context (`TestAppContext`): a fake core and a fake event source, no window system
@@ -52,13 +54,17 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
 # the compositor, private bus and virtual keyboard the kit window test runs in
 ui-sandbox.workspace = true
-# the kit window test's fake settings portal on the sandbox's bus (the colour scheme the theme follows)
-zbus.workspace = true
 
 [[test]]
 # the kit's text area and the theme in the UI sandbox: its own `main` (GPUI runs on the main thread), which runs
 # itself again inside the sandbox
 name = "kit_window"
+harness = false
+
+[[test]]
+# what GPUI's own system notifications do on the sandbox's bus: its own `main`, which runs itself again inside the
+# sandbox
+name = "gpui_notification"
 harness = false
 
 [lints]

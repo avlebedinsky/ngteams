@@ -11,9 +11,12 @@
 //!   notifications stream), screenshots the window (the rail, the list and the conversation pane drawn; the shot is
 //!   kept under `target/ui-shots/`), drives the chat switcher with the sandbox's virtual keyboard (Ctrl+K opens it,
 //!   Escape closes it, Ctrl+K and Enter open the chat at its top), checks the chat view shows that chat's messages
-//!   from the store (the a–b chat's with their kinds: its event, a deleted and an edited message), screenshots it
-//!   again, closes the window through niri, and checks that the app quit and its engine's thread was joined (the
-//!   account's engine lock is free).
+//!   from the store (the a–b chat's with their kinds: its event, a deleted and an edited message), and screenshots it
+//!   again. Then c posts on the mock to another of a's chats: the app's notification reaches the sandbox's fake
+//!   notification server (from the connection its tray item is on), and activating it opens that chat. The tray item
+//!   is registered with the fake watcher under the app's name; the window closed through niri leaves the app running,
+//!   a click on the item opens the window again, and once it is closed again the menu's "Quit" quits the app, whose
+//!   engine's thread was joined (the account's engine lock is free).
 //! - `http`: a window with an `img()` of an `https` URL on a loopback listener the child holds. GPUI's HTTP client is
 //!   the null one: the image loads nothing, a request through `cx.http_client()` is refused, and the listener never
 //!   sees a connection.
@@ -51,10 +54,13 @@ use teams_mock::{
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
+use teams_ui::tray::{ITEM_PATH, MENU_PATH, MENU_QUIT};
 use teams_ui::view::BACKGROUND;
 use tokio::sync::broadcast;
 use ui_sandbox::input::{Modifier, VirtualInput, keys};
-use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
+use ui_sandbox::{
+    LineError, NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip, wait_until,
+};
 
 /// Which mode the child runs in.
 const CHILD_ENV: &str = "TEAMS_APP_WINDOW_TEST";
@@ -66,6 +72,12 @@ const STARTUP: Duration = Duration::from_secs(90);
 const WAIT: Duration = Duration::from_secs(30);
 /// Frames the window presents before the child says `ready`.
 const READY_FRAMES: usize = 3;
+/// The file in the sandbox dir the parent writes a chat's id to, for c to post there.
+const POST_TRIGGER: &str = "post-as-c";
+/// What c posts.
+const C_SAYS: &str = "hello from c";
+/// How long the app is watched staying up after its window closed.
+const STAYS: Duration = Duration::from_secs(2);
 
 fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
@@ -226,7 +238,9 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
         .line_where(STARTUP, |line| line == "ready")
         .map_err(|error| running.fail(&format!("no ready line: {error:?}")))?;
     trace.wait_for("window", "opened")?;
-    trace.wait_for("status", "connected")?;
+    trace
+        .wait_for("status", "connected")
+        .map_err(|error| running.fail(&error))?;
     let listed = the_chat_list_shows_a_s_chats(&mut trace).map_err(|error| running.fail(&error))?;
 
     let windows = sandbox.niri_msg(&["windows"])?;
@@ -253,7 +267,9 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
     let png = sandbox.screenshot("teams-app-chat.png", true)?;
     fs::copy(&png, shots_dir()?.join("teams-app-chat.png"))?;
 
-    sandbox.niri_msg(&["action", "close-window"])?;
+    a_message_notifies_and_opens_its_chat(sandbox, &mut trace, &running, &chat)
+        .map_err(|error| running.fail(&error))?;
+    the_tray_keeps_the_app_and_quits_it(sandbox, &mut trace, &running).map_err(|error| running.fail(&error))?;
     running
         .line_where(WAIT, |line| line == "engine-released")
         .map_err(|error| running.fail(&format!("the engine wasn't released: {error:?}")))?;
@@ -365,6 +381,103 @@ fn the_switcher_opens_a_chat(sandbox: &Sandbox, trace: &mut TraceReader, listed:
     Ok(chat)
 }
 
+/// c posts to a chat of a's that isn't the one shown: the app's notification reaches the sandbox's fake server (from
+/// the app's own connection to the bus it was given, with the body's action), and activating it opens that chat.
+fn a_message_notifies_and_opens_its_chat(
+    sandbox: &Sandbox,
+    trace: &mut TraceReader,
+    running: &Running,
+    shown: &str,
+) -> SandboxResult {
+    let target = if shown == AC_CHAT { ABC_CHAT } else { AC_CHAT };
+    let staged = sandbox.path("post-as-c.staged");
+    fs::write(&staged, target)?;
+    fs::rename(&staged, sandbox.path(POST_TRIGGER))?;
+    running
+        .line_where(WAIT, |line| line.starts_with("posted "))
+        .map_err(|error| format!("c didn't post: {error:?}"))?;
+    trace.wait_where("notification shown for c's message", |line| {
+        line["view"] == "notification" && line["change"] == "shown" && line["conversation"] == target
+    })?;
+    let notifications = sandbox.bus().notifications();
+    let notification = notifications
+        .iter()
+        .find(|notification| notification.body == C_SAYS)
+        .ok_or_else(|| format!("no notification of c's message: {notifications:?}"))?;
+    if notification.app_name != app::title(Alias::A).as_ref()
+        || notification.actions != ["default", "Open"]
+        || notification.summary.is_empty()
+    {
+        return Err(format!("the notification: {notification:?}").into());
+    }
+    // the app's one connection: the tray item is on it too
+    if !sandbox
+        .bus()
+        .tray_items()
+        .iter()
+        .any(|item| item.sender == notification.sender)
+    {
+        return Err(format!("the notification came from another connection: {notification:?}").into());
+    }
+    sandbox.bus().invoke_action(notification.id, "default")?;
+    trace.wait_where("notification opened", |line| {
+        line["view"] == "notification" && line["change"] == "opened" && line["conversation"] == target
+    })?;
+    trace.wait_where("its chat opened", |line| {
+        line["view"] == "chat" && line["change"] == "opened" && line["conversation"] == target
+    })?;
+    Ok(())
+}
+
+/// The tray item: registered under the app's name, its title the app's; closing the window keeps the app, a click on
+/// the item opens the window again, and the menu's "Quit" quits.
+fn the_tray_keeps_the_app_and_quits_it(sandbox: &Sandbox, trace: &mut TraceReader, running: &Running) -> SandboxResult {
+    let name = format!("org.kde.StatusNotifierItem-{}-1", running.pid());
+    let items = sandbox.bus().tray_items();
+    if !items.iter().any(|item| item.service == name) {
+        return Err(format!("no tray item {name}: {items:?}").into());
+    }
+    trace.wait_where("the tray's unread total", |line| {
+        line["view"] == "tray" && line["change"] == "unread"
+    })?;
+    let host = sandbox.bus().connect()?;
+    let item = zbus::blocking::Proxy::new(&host, name.as_str(), ITEM_PATH, "org.kde.StatusNotifierItem")?;
+    let title: String = item.get_property("Title")?;
+    if !title.starts_with(app::title(Alias::A).as_ref()) {
+        return Err(format!("the item's title: {title}").into());
+    }
+
+    sandbox.niri_msg(&["action", "close-window"])?;
+    trace.next_where("window closed", |line| {
+        line["view"] == "window" && line["change"] == "closed"
+    })?;
+    match running.line_where(STAYS, |line| line == "engine-released") {
+        Err(LineError::Timeout) => {}
+        other => return Err(format!("the app didn't stay in the tray: {other:?}").into()),
+    }
+    item.call_method("Activate", &(0_i32, 0_i32))?;
+    trace.next_where("tray open", |line| line["view"] == "tray" && line["change"] == "open")?;
+    trace.next_where("window opened again", |line| {
+        line["view"] == "window" && line["change"] == "opened"
+    })?;
+    wait_until(WAIT, || {
+        sandbox
+            .niri_msg(&["windows"])
+            .ok()
+            .filter(|windows| windows.contains(teams_ui::window::LAB_APP_ID))
+    })
+    .ok_or("the window didn't come back")?;
+    sandbox.niri_msg(&["action", "close-window"])?;
+    trace.next_where("window closed again", |line| {
+        line["view"] == "window" && line["change"] == "closed"
+    })?;
+
+    let menu = zbus::blocking::Proxy::new(&host, name.as_str(), MENU_PATH, "com.canonical.dbusmenu")?;
+    menu.call_method("Event", &(MENU_QUIT, "clicked", zbus::zvariant::Value::from(""), 0_u32))?;
+    trace.next_where("tray quit", |line| line["view"] == "tray" && line["change"] == "quit")?;
+    Ok(())
+}
+
 fn gpui_s_http_client_is_the_null_one(sandbox: &Sandbox) -> SandboxResult {
     let child = sandbox.spawn(&std::env::current_exe()?, &[], &[(CHILD_ENV, "http")])?;
     let running = Running::new(child)?;
@@ -448,7 +561,7 @@ impl Tokens {
 /// a test log; its push channel on the Trouter mock.
 struct MockLab {
     _runtime: tokio::runtime::Runtime,
-    _mock: ChatServiceMock,
+    mock: Arc<ChatServiceMock>,
     _trouter: TrouterMock,
     dir: tempfile::TempDir,
 }
@@ -500,7 +613,7 @@ impl MockLab {
         })?;
         let lab = Self {
             _runtime: runtime,
-            _mock: mock,
+            mock: Arc::new(mock),
             _trouter: trouter,
             dir,
         };
@@ -527,6 +640,7 @@ fn child_window() -> SandboxResult {
     let settings = teams_ui::SettingsFile::new(lab.dir.path().join("ui").join("a.toml"));
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
+    let mock = Arc::clone(&lab.mock);
     gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
         let launched = app::launch(
             cx,
@@ -537,11 +651,14 @@ fn child_window() -> SandboxResult {
                 signed_out: None,
                 trace,
                 settings,
+                // the sandbox's private bus, with its fake notification server and tray watcher
+                bus: teams_ui::bus::address_from_env(),
             },
         );
         match launched {
-            Ok((window, _)) => {
-                let _ = window.update(cx, |_, window, _| {
+            Ok(launched) => {
+                post_when_asked(mock, cx);
+                let _ = launched.window.update(cx, |_, window, _| {
                     after_frames(window, READY_FRAMES, |window, _| {
                         say(&format!("rem-size {}", window.rem_size().as_f32()));
                         say("ready");
@@ -561,6 +678,31 @@ fn child_window() -> SandboxResult {
         say("engine-released");
     }
     Ok(())
+}
+
+/// Once the parent writes a chat's id to [`POST_TRIGGER`] in the sandbox dir, c posts [`C_SAYS`] there on the mock,
+/// which delivers it to a's push channel as any post of c's.
+fn post_when_asked(mock: Arc<ChatServiceMock>, cx: &mut App) {
+    let Some(dir) = std::env::var_os(ui_sandbox::SANDBOX_ENV) else {
+        say("no sandbox dir");
+        return;
+    };
+    let trigger = PathBuf::from(dir).join(POST_TRIGGER);
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            let Ok(chat) = fs::read_to_string(&trigger) else {
+                continue;
+            };
+            let _ = fs::remove_file(&trigger);
+            match mock.post_as(LAB_C, chat.trim(), &format!("<p>{C_SAYS}</p>")) {
+                Some(id) => say(&format!("posted {id}")),
+                None => say("post refused"),
+            }
+            return;
+        }
+    })
+    .detach();
 }
 
 /// A window with one image whose source is an `https` URL.

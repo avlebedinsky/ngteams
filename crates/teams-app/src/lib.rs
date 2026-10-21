@@ -8,14 +8,16 @@
 //! refuses a `test-support` build and a window anywhere but the UI sandbox ([`guard`]), reports another engine on the
 //! account and exits, writes the view trace to `--trace-fd` ([`trace`]) and prints no token. When the account's
 //! session can't renew its tokens, the window shows it signed out (run `proto-lab auth <alias>`) and the engine is
-//! stopped, so nothing more is sent.
+//! stopped, so nothing more is sent. Its notifications and its tray item go to the session bus it is given (its
+//! `DBUS_SESSION_BUS_ADDRESS`, the sandbox's private bus) and nowhere else; closing the window keeps the app in the
+//! tray, whose "Quit" quits it (`teams_ui::desktop`).
 //!
 //! The app runs in the UI sandbox, whose session bus is the sandbox's own, so it can't reach the Secret Service where
 //! the lab's tokens are. `teams-app secrets --lab <alias> --fd <n>` ([`secrets`]) runs outside the sandbox, with the
 //! user's bus, and serves that account's own `teams-lab` items, nothing else, on descriptor `n`, one end of a socket
 //! pair; the app gets the other end.
 //!
-//! [`cli`] is the command line. M2 Tasks 4 and 6 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+//! [`cli`] is the command line. M2 Tasks 4, 6 and 14 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod app;
 pub mod cli;

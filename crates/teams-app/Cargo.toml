@@ -45,6 +45,8 @@ teams-proto = { workspace = true, features = ["test-support"] }
 teams-store.workspace = true
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+# the window test's tray host on the sandbox's private bus: the item's title, a click, the menu's "Quit"
+zbus.workspace = true
 
 [[test]]
 # the app's window in the UI sandbox, on the mock: its own `main` (GPUI runs on the main thread), which runs itself

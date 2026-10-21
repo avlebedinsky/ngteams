@@ -356,6 +356,23 @@ impl PrivateBus {
         records(&self.records).closed.clone()
     }
 
+    /// The user activating notification `id` with `action` (`default` for its body): the fake server's
+    /// `ActionInvoked` signal, sent to every connection on the bus as notification servers send it.
+    ///
+    /// # Errors
+    /// The signal can't be sent.
+    pub fn invoke_action(&self, id: u32, action: &str) -> SandboxResult {
+        let server = self.connections.first().ok_or("no connection to the bus")?;
+        server.emit_signal(
+            None::<BusName<'_>>,
+            NOTIFICATIONS_PATH,
+            NOTIFICATIONS_NAME,
+            "ActionInvoked",
+            &(id, action),
+        )?;
+        Ok(())
+    }
+
     /// The items registered with the fake watcher, in order.
     #[must_use]
     pub fn tray_items(&self) -> Vec<TrayItem> {

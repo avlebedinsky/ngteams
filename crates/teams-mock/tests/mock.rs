@@ -790,6 +790,40 @@ async fn a_read_receipt_sets_only_the_readers_own_horizon() -> TestResult {
 }
 
 #[tokio::test]
+async fn a_post_made_for_a_test_reads_back_and_reaches_the_others_as_a_client_s_does() -> TestResult {
+    let lab = Lab::start().await?;
+    let id = lab
+        .mock
+        .post_as(LAB_C, ABC_CHAT, "<p>from c</p>")
+        .ok_or("c may write in the group chat")?;
+    let posted = lab.post(LAB_A, ABC_CHAT, &text_message("<p>from a</p>", "7")).await?;
+    let read = lab.messages(LAB_B, ABC_CHAT).await?;
+    let made = read
+        .iter()
+        .find(|message| message["id"] == id.as_str())
+        .ok_or("the post reads back")?;
+    let sent = read
+        .iter()
+        .find(|message| message["id"] == posted)
+        .ok_or("a client's post reads back")?;
+    assert_eq!(keys(made), keys(sent));
+    assert_eq!(made["content"], "<p>from c</p>");
+    assert_eq!(made["messagetype"], "RichText/Html");
+    for member in [LAB_A, LAB_B] {
+        let events = lab.mock.take_events(member);
+        let from_c: Vec<&ChatEvent> = events.iter().filter(|event| event.from == LAB_C).collect();
+        assert_eq!(from_c.len(), 1, "{member}");
+        assert_eq!(from_c[0].kind, EventKind::Message);
+        assert_eq!(from_c[0].resource["id"], id.as_str());
+    }
+    assert!(lab.mock.take_events(LAB_C).iter().all(|event| event.from != LAB_C));
+    // nobody posts where they aren't a member, nor to a read-only channel
+    assert_eq!(lab.mock.post_as(LAB_C, AB_CHAT, "<p>no</p>"), None);
+    assert_eq!(lab.mock.post_as(LAB_A, CHANNEL, "<p>no</p>"), None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn typing_and_group_messages_reach_every_other_member() -> TestResult {
     let lab = Lab::start().await?;
     let typing = json!({"content": "", "messagetype": "Control/Typing", "contenttype": "Application/Message"});

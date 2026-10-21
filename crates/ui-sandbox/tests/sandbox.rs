@@ -232,6 +232,24 @@ fn check_watcher(bus: &PrivateBus, client: &zbus::blocking::Connection) -> Sandb
     Ok(())
 }
 
+/// The user activating a notification: the fake server's `ActionInvoked` reaches a client listening for it.
+fn check_action_invoked(bus: &PrivateBus, client: &zbus::blocking::Connection) -> SandboxResult {
+    let server = zbus::blocking::Proxy::new(client, NOTIFICATIONS_NAME, NOTIFICATIONS_PATH, NOTIFICATIONS_NAME)?;
+    // the match rule is in place once the iterator is made, before the signal goes
+    let mut invoked = server.receive_signal("ActionInvoked")?;
+    let (sender, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let body = invoked
+            .next()
+            .and_then(|signal| signal.body().deserialize::<(u32, String)>().ok());
+        let _ = sender.send(body);
+    });
+    bus.invoke_action(7, "default")?;
+    let got = received.recv_timeout(Duration::from_secs(10))?;
+    assert_eq!(got, Some((7, "default".to_owned())));
+    Ok(())
+}
+
 /// Nothing is activated: a portal call fails at once, as GPUI's start-up calls do.
 fn check_no_activation(client: &zbus::blocking::Connection) -> SandboxResult {
     let start = Instant::now();
@@ -264,6 +282,7 @@ fn the_private_bus_records_what_its_fakes_get() {
     let client = bus.connect().unwrap();
     check_notifications(&bus, &client).unwrap();
     check_watcher(&bus, &client).unwrap();
+    check_action_invoked(&bus, &client).unwrap();
     check_no_activation(&client).unwrap();
     assert!(bus.client_pids().unwrap().contains(&std::process::id()));
 }

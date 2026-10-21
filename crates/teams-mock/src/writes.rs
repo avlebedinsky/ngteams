@@ -44,7 +44,7 @@ pub(crate) fn post(state: &mut State, call: &Call<'_>, chat: &str) -> ResponseTe
         return status(400);
     }
     let arrival = state.tick();
-    let Some(message) = new_message(state, call, chat, &body, arrival) else {
+    let Some(message) = new_message(state, &call.caller, chat, &body, arrival) else {
         return status(400);
     };
     if let Some(conversation) = state.conversation_mut(chat) {
@@ -54,6 +54,30 @@ pub(crate) fn post(state: &mut State, call: &Call<'_>, chat: &str) -> ResponseTe
     state.queue(chat, &call.caller, EventKind::Message, &message);
     let location = format!("{REGIONAL_HOST}/v1/users/ME/conversations/{chat}/messages/{arrival}");
     posted(state, arrival, Some(location))
+}
+
+/// `from`'s rich-text post of `html` to `chat`, as [`post`] stores and queues a client's: its id, or `None` when `from`
+/// may not write there.
+pub(crate) fn post_text(state: &mut State, from: &str, chat: &str, html: &str) -> Option<String> {
+    writable(state, chat, from).ok()?;
+    let arrival = state.tick();
+    let display = state.account(from)?.display_name.clone();
+    // a client's post as `text_message` in the mock's tests sends it: a client message id of its own, the sender's name
+    let body = json!({
+        "messagetype": "RichText/Html",
+        "contenttype": "Text",
+        "content": html,
+        "clientmessageid": (9_000_000_000_000_000_000_u64 + arrival).to_string(),
+        "imdisplayname": display,
+        "amsreferences": [],
+        "properties": {"mentions": "[]", "files": "[]", "formatVariant": "TEAMS"},
+    });
+    let message = new_message(state, from, chat, body.as_object()?, arrival)?;
+    let conversation = state.conversation_mut(chat)?;
+    conversation.messages.push(message.clone());
+    conversation.version = arrival;
+    state.queue(chat, from, EventKind::Message, &message);
+    Some(arrival.to_string())
 }
 
 /// `PUT …/messages/<id>`: the whole message again (`edit.json`). The sender's own standing message takes the new
@@ -324,9 +348,9 @@ fn posted(state: &State, arrival: u64, location: Option<String>) -> ResponseTemp
 
 /// A posted message as a read gives it back (`reply.json`'s `read_back`, `messages.json`): the service's id, version,
 /// sequence and times, the sender from the token, the sent keys and properties carried through.
-fn new_message(state: &State, call: &Call<'_>, chat: &str, body: &Map<String, Value>, arrival: u64) -> Option<Value> {
+fn new_message(state: &State, caller: &str, chat: &str, body: &Map<String, Value>, arrival: u64) -> Option<Value> {
     let conversation = state.conversation(chat)?;
-    let display = state.account(&call.caller)?.display_name.clone();
+    let display = state.account(caller)?.display_name.clone();
     let properties = sent_properties(body.get("properties"))?;
     let mut message = json!({
         "sequenceId": conversation.next_sequence(),
@@ -338,7 +362,7 @@ fn new_message(state: &State, call: &Call<'_>, chat: &str, body: &Map<String, Va
         "version": arrival.to_string(),
         "messagetype": body.get("messagetype")?,
         "content": stored_content(body.get("content")?.as_str()?),
-        "from": contact(&call.caller),
+        "from": contact(caller),
         "composetime": iso_time(arrival, 7),
         "originalarrivaltime": iso_time(arrival, 7),
         "properties": properties,

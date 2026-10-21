@@ -351,6 +351,45 @@ fn no_message_html_reaches_a_markdown_or_html_view() {
     assert!(chat_view.contains("rich_text::render("));
 }
 
+/// What reaches a bus other than the one the app is given: `zbus`'s session-bus constructors (an address from the
+/// environment, else `$XDG_RUNTIME_DIR/bus`), GPUI's own system notifications (which use them, a connection each),
+/// and the blocking API's (its own constructors alike).
+const OTHER_BUSES: [&str; 6] = [
+    "Connection::session(",
+    "Builder::session(",
+    "Address::session(",
+    "zbus::blocking",
+    "show_system_notification",
+    "on_system_notification_response",
+];
+
+/// The notifications and the tray item reach only the bus the app is given (M2 Task 14): no app crate's source calls
+/// another way onto a bus, the one connection is made by `bus::connect` from the address alone, and the address is
+/// read only by `bus::address_from_env`.
+#[test]
+fn the_desktop_is_reached_only_on_the_bus_given() {
+    let mut read = 0;
+    for package in APP_CRATES {
+        for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
+            read += 1;
+            for other in OTHER_BUSES {
+                assert!(!text.contains(other), "{} names {other}", path.display());
+            }
+            let connects = text.matches("connection::Builder::").count();
+            let reads_env = text.contains("bus::ADDRESS_ENV") || text.contains("var_os(ADDRESS_ENV)");
+            if path.ends_with("teams-ui/src/bus.rs") {
+                assert_eq!(connects, 1, "bus.rs builds one connection");
+                assert!(text.contains("zbus::connection::Builder::address(address)"));
+                assert!(reads_env);
+            } else {
+                assert_eq!(connects, 0, "{} builds a bus connection of its own", path.display());
+                assert!(!reads_env, "{} reads the bus address itself", path.display());
+            }
+        }
+    }
+    assert!(read >= 15, "the app crates' sources were read ({read} files)");
+}
+
 /// What builds a request for a new chat: the engine's action or the outbox's command, named or brought in by name
 /// (`use …::Action::CreateChat`, a glob of either's variants, or the variant's fields after its bare name). A row's
 /// kind (`OutboxKind::CreateChat`, shown by the view as it stands) builds nothing.

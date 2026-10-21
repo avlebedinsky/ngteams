@@ -140,8 +140,9 @@ pub fn others(conversation: &Conversation, members: &[Member], me: &str) -> Vec<
     others
 }
 
-/// A message the list previews: text, deleted or not.
-fn is_text(message: &Message) -> bool {
+/// A message the list previews (and the store counts unread): text, deleted or not.
+#[must_use]
+pub fn is_text(message: &Message) -> bool {
     message.message_type == "Text" || message.message_type.starts_with("RichText")
 }
 
@@ -156,6 +157,26 @@ fn first_line(text: &str) -> String {
     cut
 }
 
+/// A text message's first line with something in it, at most [`PREVIEW_CHARS`] characters: read from its sanitized
+/// rich text, or as it came for a `Text` message; [`DELETED`] for a deleted one.
+#[must_use]
+pub fn message_line(message: &Message) -> String {
+    if message.delete_time.is_some() {
+        DELETED.to_owned()
+    } else if message.message_type == "Text" {
+        // plain text: its `<` and `&` are the text's own
+        first_line(&message.content)
+    } else {
+        first_line(&parse_html(&message.content).plain_text())
+    }
+}
+
+/// What a chat is called, as its row in the list names it (see the module docs).
+pub async fn chat_name(core: &dyn Core, conversation: &Conversation) -> SharedString {
+    let members = core.members(conversation.id.clone()).await.unwrap_or_default();
+    name_of(core, conversation, &members).await.name
+}
+
 /// The preview line of a chat from its newest messages (newest first): the newest text message's first line, read
 /// from its sanitized rich text, or as it came for a `Text` message ("You: " before the account's own); empty when
 /// there is none.
@@ -164,14 +185,7 @@ pub fn preview(page: &[Message], me: &str) -> SharedString {
     let Some(message) = page.iter().find(|message| is_text(message)) else {
         return SharedString::default();
     };
-    let text = if message.delete_time.is_some() {
-        DELETED.to_owned()
-    } else if message.message_type == "Text" {
-        // plain text: its `<` and `&` are the text's own
-        first_line(&message.content)
-    } else {
-        first_line(&parse_html(&message.content).plain_text())
-    };
+    let text = message_line(message);
     if message.sender.as_deref() == Some(me) {
         format!("You: {text}").into()
     } else {

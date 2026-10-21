@@ -22,6 +22,10 @@
 //!   [`settings_view`] changes them.
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
 //!   caller hands in, read by the live test.
+//! - [`desktop`]: the app on the desktop: the main window (opened again from the tray or a notification), the
+//!   [`notify`] notifications of messages that come (as the "notifications" setting says; a chat shown in a focused
+//!   window never notifies; activating one opens its chat) and the [`tray`] item (the unread total, open, quit;
+//!   closing the window keeps the app in the tray), both on the bus the app is given ([`bus`]) and nowhere else.
 //! - [`view`]: the window's root view; [`window`] opens it inside the kit's root, which applies the theme to the
 //!   window (its font size as the rem size, its font family and colours) and hosts the kit's dialogs and tooltips.
 //! - [`theme`]: the UI kit's (`gpui-component`) theme in Teams-like colours and compact sizes, light and dark
@@ -31,13 +35,16 @@
 //! one (nothing here hands GPUI another), so an image URL loads nothing. Pictures reach a view only as bytes from
 //! the engine ([`people`]).
 //!
-//! M2 Tasks 6–9 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+//! M2 Tasks 6–14 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod bridge;
+pub mod bus;
 pub mod chat_list;
 pub mod chat_view;
 pub mod compose;
+pub mod desktop;
 pub mod models;
+pub mod notify;
 pub mod people;
 pub mod rich_text;
 pub mod sending;
@@ -47,6 +54,7 @@ pub mod shell;
 pub mod switcher;
 pub mod theme;
 pub mod trace;
+pub mod tray;
 pub mod view;
 pub mod window;
 
@@ -54,10 +62,13 @@ pub use bridge::{Bridge, Core, EventSource, StoppedCore};
 pub use chat_list::{ChatList, ChatListEvent, ChatRow};
 pub use chat_view::{ChatView, ChatViewEvent, MessageAction};
 pub use compose::{Compose, ComposeEvent, ComposeParts};
-pub use models::{Account, Chats, Engine, Link, Models, Status};
+pub use desktop::{Desktop, DesktopEvent, DesktopParts};
+pub use models::{Account, Chats, Engine, Feed, FeedEvent, Link, Models, Status};
+pub use notify::{Notice, NoticeKind, NotificationServer, Notifier, NotifierEvent};
 pub use people::Shown;
 pub use settings::{Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};
 pub use switcher::Switcher;
 pub use trace::{TraceId, TraceLine, ViewTrace};
+pub use tray::{Tray, TrayEvent, TrayIcon};
 pub use view::Root;

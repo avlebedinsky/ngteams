@@ -912,17 +912,58 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 - Modify: `Cargo.toml` (`zbus` in `[workspace.dependencies]`, async-io flavour, version looked up live and matching
   the one GPUI links)
 
-- [ ] first: does GPUI's `show_system_notification` reach `org.freedesktop.Notifications` on the bus the app is given
+- [x] first: does GPUI's `show_system_notification` reach `org.freedesktop.Notifications` on the bus the app is given
       (the sandbox's fake server sees it, with its actions)? If so it is the notification path; if not, our own over
       `zbus`
-- [ ] tests first, on the sandbox's private bus: a notification for a message from someone else in a chat that isn't
+- [x] tests first, on the sandbox's private bus: a notification for a message from someone else in a chat that isn't
       shown and focused (a mention marked as such), as the "notifications" setting says; none for the account's own,
       for a replayed delivery (`replay`) or for one the store already had (`applied` unchanged); a message brought by
       a catch-up notifies only if it arrived after the push channel last went down and is unread, and more than
       three in one chat collapse into one notification; activating it opens the chat
-- [ ] the tray (StatusNotifierItem): the unread total, open, quit; closing the window keeps the app in the tray
-- [ ] the bus address is the one the app is given, and a test checks the app never falls back to another
-- [ ] `cargo test -p teams-ui` and the gate pass
+- [x] the tray (StatusNotifierItem): the unread total, open, quit; closing the window keeps the app in the tray
+- [x] the bus address is the one the app is given, and a test checks the app never falls back to another
+- [x] `cargo test -p teams-ui` and the gate pass
+- Done (2026-10-22), where it differs from the lines above:
+  - GPUI's own path reaches the sandbox's fake server with its actions (`default`, then its own `gpui-action-<n>`
+    keys) and hands the body's activation back with its tag (`crates/teams-ui/tests/gpui_notification.rs`), but it
+    is not the path: its tag replaces nothing on Linux (`replaces_id` always 0) and nothing can close one
+    (`dismiss_system_notification` does nothing), so more than three of one chat can't collapse into one; and each
+    notification opens a connection of its own through `zbus`'s session-bus constructor (the environment's address,
+    else `$XDG_RUNTIME_DIR/bus`) on a thread that waits until the server closes it. The app sends its own over
+    `zbus` (`notify::BusNotifications`). The test keeps GPUI's behaviour on record.
+  - `zbus` was already in `[workspace.dependencies]` at 5.19.0, async-io, the version GPUI links (Task 3); it is
+    now a normal dependency of `teams-ui`. crates.io's newest is 6.0.0 (looked up 2026-10-22), which would put a
+    second `zbus` in the tree, so it stays.
+  - The decisions are on GPUI's test context against the fake engine and a fake notification server
+    (`tests/notify.rs`, `tests/desktop.rs`); the D-Bus side on the sandbox's real private bus (`tests/desktop_bus.rs`:
+    the server, the tray item, the bus given being the only one) and the whole app in the sandbox on `teams-mock`
+    (`teams-app/tests/window.rs`). New modules: `bus.rs` (the address and the one connection), `desktop.rs` (the
+    window, the notifier and the tray held together), besides `notify.rs` and `tray.rs`; the models gained a `Feed`
+    entity (each message newly stored, with its source, and each read horizon moved).
+  - Which messages: a delivery notifies with no time or read check (it is new by definition; the mock's arrival
+    times are older than its fixtures', so a horizon check would drop a live one); a catch-up's only after the push
+    channel last went down (before it first connects: since the app started) and after the account's read horizon.
+    In a team's channel only a mention notifies; the account's own streams (`48:`) and non-text messages never do.
+    A mention reads "<name> mentioned you" (in "<chat>" for a group).
+  - Collapsing: messages are gathered for 250 ms before they are shown, so a catch-up's come together; a chat keeps
+    up to three single notifications, and the fourth closes them and shows one "N new messages" (", one or more
+    mentioning you" when one did) that later ones replace by id. A chat's notifications close and its count starts
+    again once it is read (its horizon moved and nothing in it is unread), opened from one, or shown in a focused
+    window when the next message comes.
+  - The tray item is `org.kde.StatusNotifierItem` with a `com.canonical.dbusmenu` menu ("Open Teams", "Quit") under
+    `org.kde.StatusNotifierItem-<pid>-1`, registered with the watcher; its title and tooltip carry the unread total
+    of the listed chats, its status `NeedsAttention` while it isn't 0, its icon named from the theme. Closing the
+    window keeps the app only when the item is up (a watcher took it); without one, closing quits as before.
+  - The app holds its desktop and bridge in a GPUI global for its whole life: nothing else holds the desktop once its
+    window is closed, and dropping the bridge stops the engine (the window test found it).
+  - The bus the app is given is its `DBUS_SESSION_BUS_ADDRESS`, read once (`bus::address_from_env`); one that is a
+    list is refused, and without one there are no notifications and no tray. `reach.rs` refuses `zbus`'s session-bus
+    constructors, its blocking API and GPUI's system notifications in the app crates, and any connection built
+    outside `bus.rs`.
+  - The view trace gained `notification shown` (the chat and the kind: message, mention, collapsed), `notification
+    opened`, `notifications closed`, `tray unread` (the total), `tray open`/`quit` and `window closed`.
+  - `teams-mock` gained `ChatServiceMock::post_as` (another account's post, stored and delivered as a client's), and
+    the sandbox's bus `PrivateBus::invoke_action` (the fake server's `ActionInvoked`).
 
 ### Task 15: Local search
 **Files:**

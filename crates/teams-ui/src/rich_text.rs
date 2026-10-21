@@ -148,6 +148,12 @@ impl Mentions {
         Self { mine }
     }
 
+    /// Whether one of them names the account.
+    #[must_use]
+    pub fn names_me(&self) -> bool {
+        !self.mine.is_empty()
+    }
+
     fn whom(&self, item_id: &str) -> Mentioned {
         if self.mine.contains(item_id) {
             Mentioned::Me

@@ -29,7 +29,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-store` | the account's SQLite store (`rusqlite`, bundled, WAL, `0600`): conversations, members, messages by version (edits, soft deletes), reactions per user, read horizons, sync state, the outbox; migrations; each open is a run, and a row of another open run is never taken over |
 | `crates/teams-trouter` | the native push channel: socket.io 0.9 over WSS to the Trouter hosts only, `user.authenticate` first, keep-alives, the registrar registration of the messaging stack, reconnects with backoff and on token renewal, deliveries turned into typed chat events and never answered (an incoming call included) |
 | `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out); a lab account's engine assembled as every lab binary builds it (`lab`) |
-| `crates/teams-ui` | the GPUI views and models over the engine: the bridge (it owns the engine, drains its events into the models on GPUI's foreground, shuts it down off it; views reach it only through `Core`), the models, the root view and window, the shell (rail, chat list, conversation pane), the chat view (a conversation's messages from the store, a page at a time), our own rich text renderer (`teams-proto`'s `RichText` drawn with GPUI's text elements, links opened only through `open_url`), the chat switcher (Ctrl+K), the settings and their file, the view trace (ids, kinds and times, never text), the theme (the UI kit's, Teams-like and compact, light and dark following the window); no HTTP or socket client, GPUI's HTTP client the null one |
+| `crates/teams-ui` | the GPUI views and models over the engine: the bridge (it owns the engine, drains its events into the models on GPUI's foreground, shuts it down off it; views reach it only through `Core`), the models, the root view and window, the shell (rail, chat list, conversation pane), the chat view (a conversation's messages from the store, a page at a time), our own rich text renderer (`teams-proto`'s `RichText` drawn with GPUI's text elements, links opened only through `open_url`), the chat switcher (Ctrl+K), the settings and their file, the desktop (the window, the notifications of messages that come and the tray item with the unread total, both over `zbus` on the session bus the app is given and nowhere else; closing the window keeps the app in the tray), the view trace (ids, kinds and times, never text), the theme (the UI kit's, Teams-like and compact, light and dark following the window); no HTTP or socket client, GPUI's HTTP client the null one |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; clients reach it through the `test-support` mock origins |
 | `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
@@ -284,10 +284,19 @@ Enter opens, Escape closes). The settings (the selected chat,
 typing, read receipts, notifications, the idle time, the manual status) live in `<data_dir>/ui/<alias>.toml` (`0600`,
 its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is
 printed and shown in the settings view.
+Messages from others notify on the desktop as the "notifications" setting says (all, mentions only, off; a mention is
+marked; in a team's channel only a mention), never for the chat shown in a focused window, the account's own, a
+replayed delivery or older history; a catch-up's only when it arrived after the push channel last went down and is
+unread; more than three of one chat collapse into one. Activating one opens its chat. The tray item shows the unread
+total ("Open Teams", "Quit"); closing the window keeps the app in the tray when there is one, and quits it when there
+isn't. Both go only to the session bus the app is given (its `DBUS_SESSION_BUS_ADDRESS`, the sandbox's private bus),
+never `$XDG_RUNTIME_DIR/bus` or another, and are left out without one.
 `crates/teams-app/tests/window.rs` runs the window in the sandbox on `teams-mock` (the chat list filled by the
 catch-up, the switcher driven by the virtual keyboard, the chat it opens shown in the chat view with that chat's
-messages from the store) and keeps its two screenshots under `target/ui-shots/`: `teams-app-window.png` (the window
-as the catch-up filled it) and `teams-app-chat.png` (the chat opened).
+messages from the store; a message of c's notifying on the sandbox's fake server and its activation opening its chat;
+the tray item keeping the app when the window closes, opening it again and quitting it) and keeps its two screenshots
+under `target/ui-shots/`: `teams-app-window.png` (the window as the catch-up filled it) and `teams-app-chat.png` (the
+chat opened).
 
 ## `teams-app secrets`
 
