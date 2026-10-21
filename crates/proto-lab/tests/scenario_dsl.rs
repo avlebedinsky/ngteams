@@ -149,7 +149,7 @@ where
     };
     // a test acts on the page at once: once it has loaded, its elements and their handlers are there
     let url = format!("{}/page", run.server.uri());
-    page::navigate(run.armed.cdp(), &page, &url, Duration::from_secs(15)).await?;
+    page::navigate(run.armed.cdp(), &run.page, &url, Duration::from_secs(15)).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(60), body(&mut run)).await;
     run.armed.close(Duration::from_secs(10)).await?;
     outcome.map_err(|_| "the run took over 60 s")?

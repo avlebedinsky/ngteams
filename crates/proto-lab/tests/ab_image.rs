@@ -58,6 +58,7 @@ fn request(method: &str, url: &str) -> PausedRequest {
         request_id: "1".to_owned(),
         method: method.to_owned(),
         url: url.to_owned(),
+        headers: Vec::new(),
         body: Some(br#"{"type":"pish/image","permissions":{"19:x@unq.gbl.spaces":["read"]}}"#.to_vec()),
         network_id: None,
     }
