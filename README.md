@@ -6,29 +6,39 @@ closed SlimCore media stack. So this one is written against Teams' internal APIs
 reference. Everything is learned and tested in a lab of three dedicated accounts, behind a write fence that lets
 nothing reach anyone else in the tenant.
 
-Status: **M0 is done**: the protocol lab with the write fence, and the three risk spikes (native sign-in, video in
-GPUI, an audio call). The plan is `docs/plans/completed/20261019-native-teams-m0-lab-and-spikes.md`, the outcome
-`docs/m0-acceptance.md`. **Next: M1**, the headless chat core
-(`docs/plans/20261020-native-teams-m1-headless-chat-core.md`). Hard rules for contributors and agents are in
-[CLAUDE.md](CLAUDE.md).
+Status:
+
+- **M0 is done**: the protocol lab with the write fence, and the three risk spikes (native sign-in, video in GPUI, an
+  audio call). Plan `docs/plans/completed/20261019-native-teams-m0-lab-and-spikes.md`, outcome `docs/m0-acceptance.md`.
+- **M1 is done**: the headless chat core. Our own Rust code signs a lab account in, syncs its chats into a local
+  store, sends, edits, deletes and reacts under the fence, and receives over Teams' push channel (Trouter): native
+  a → b in p95 1.4 s, edits, reactions, the lab's a–b–c group chat and a catch-up after a disconnect, all checked live.
+  Plan `docs/plans/completed/20261020-native-teams-m1-headless-chat-core.md`, outcome `docs/m1-acceptance.md`.
+- **Next: M2**, the GPUI daily driver (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+
+Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
 ## Layout
 
 | path | contents |
 |---|---|
-| `crates/teams-fence` | the write fence: a write is allowed only when every participant of its target, read fresh, is a lab account or an approved service; the lab config (`lab.toml`), `fence.log`, the membership sources (`FailClosed`, `LiveMembershipSource`) |
-| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit` or send a request outside the native request policy, and a lab binary has its membership sources |
-| `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`) |
-| `crates/teams-proto` | Teams internal API requests and the native HTTP transport: reads (`GET`), a sealed own-state list (empty so far, logged to `fence.log`), and mutating requests (`SendMessage`, `StartCall`, `AddToCall`) that need a `WritePermit` for their exact target; a fixed host allowlist, `https` only, no proxy, no redirects |
-| `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service built from the synthetic fixtures in `tests/fixtures/chatsvc/`, serving the conversation list, message pages, thread reads and the chat writes, queuing an event for the other members of each write; clients reach it through the `test-support` mock origins |
-| `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir |
-| `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, captures and the sanitizer, bundle import and search, scenarios |
+| `crates/teams-fence` | the write fence: a write is allowed only when every participant of its target, read fresh, is a lab account or an approved service; the lab config (`lab.toml`, `chats.toml`), `fence.log` (appends locked across processes), the membership sources (`FailClosed`; `LiveMembershipSource`: 1:1 chats, and the lab's recorded group chat when both member reads agree on exactly a, b and c), the native client's credential for them (`CredentialSource`) |
+| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, send a request outside the native request policy, send a Trouter frame that isn't a reviewed own frame, or reach a mock origin; a lab binary has its membership sources |
+| `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`); the `Session`: an access token per audience refreshed before it expires, the skypetoken renewed after its Entra token, throttling shared by waiting callers, renewal notifications |
+| `crates/teams-proto` | Teams' internal API and the native HTTP transport. Three request classes only: reads (`GET`), a sealed own-state list logged to `fence.log` before it is sent (one entry: the messaging stack's endpoint registration), and sealed writes sent only as `Authorized<_>` with a `WritePermit` for their exact target (`SendMessage`, `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`, `ReadReceipt`, `Typing`, `CreateChat`; `StartCall`/`AddToCall` have no route yet). The chat model (`chat`: conversations, messages, versions, reactions, mentions, quotes, a sanitized rich-text tree, paging and sync links) and `MessageText`, which builds a message's markup and its mentioned MRIs from one value. The Trouter frame policy: a `FrameSink` that sends only the reviewed `OwnFrame`s, each logged first. A fixed host allowlist, `https` only, no proxy, no redirects, no hidden retries |
+| `crates/teams-store` | the account's SQLite store (`rusqlite`, bundled, WAL, `0600`): conversations, members, messages by version (edits, soft deletes), reactions per user, read horizons, sync state, the outbox; migrations; each open is a run, and a row of another open run is never taken over |
+| `crates/teams-trouter` | the native push channel: socket.io 0.9 over WSS to the Trouter hosts only, `user.authenticate` first, keep-alives, the registrar registration of the messaging stack, reconnects with backoff and on token renewal, deliveries turned into typed chat events and never answered (an incoming call included) |
+| `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out) |
+| `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; clients reach it through the `test-support` mock origins |
+| `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
+| `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and checks each fixture's `_synthetic` marker |
 | `spikes/gpui-video` | GPUI on niri (smoke window in a private weston + nested niri), then a 3×3 grid of 720p video (M0 Tasks 15–16) |
 | `spikes/media-loop` | two `str0m` peers on loopback carrying an Opus tone, checked with Goertzel (M0 Task 17) |
 | `spikes/echo-call` | the native echo call: a TURN client (RFC 8656), `str0m` through the relay, the test call's signaling from the capture, the call through the fence (M0 Task 19; the start sends nothing yet, see `docs/spikes/echo-call.md`) |
-| `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike |
-| `docs/protocol/` | protocol notes in our own words: `auth.md`, `fence-targets.md` (chat service reads and writes), `calling-echo.md` |
+| `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike: `chatsvc/` (the chat service), `trouter/` (the push channel), `mt/` (profile lookups) |
+| `docs/protocol/` | protocol notes in our own words: `auth.md`, `chat.md` (the chat service's reads and writes as captured), `fence-targets.md` (how the fence maps them, member reads, reads by `POST`), `trouter.md`, `calling-echo.md`, and `endpoints.md`, one row for every endpoint seen or used and how the browser fence and the native client treat it |
+| `docs/m0-acceptance.md`, `docs/m1-acceptance.md` | each milestone's acceptance check: numbers, the fence's picture, every live run |
 | `docs/spikes/` | spike write-ups: `ca-probe.md`, `auth.md`, `gpui-video.md` (+ raw runs), `echo-call.md` |
 | `docs/backlog/` | deferred work, one file per item |
 | `docs/plans/` | milestone plans; finished ones in `docs/plans/completed/` |
@@ -51,7 +61,10 @@ outside the repo:
 | `…/reference/<name>` | sanitized reference copies made by `export`, read locally to write synthetic fixtures |
 | `…/bundles/<version>/` | the unpacked web bundle and its `index.jsonl` |
 | `…/fence.log` | JSONL: every fence decision of every run (allows, denies, breaches, with reasons; no tokens, no participants' MRIs, scope ids verbatim), and every target the browser fence couldn't arm (its type, failed step, close and containment). Every lab process appends to it at once, each line under an advisory lock on the file |
-| `…/store/<alias>.sqlite` | the account's native store (`teams-headless`): conversations, messages, reactions, the outbox (`0600`) |
+| `…/chats.toml` | the lab's group chat: the id of the a–b–c chat `abc-chat` created, recorded once as `abc` (`0600`); the only group chat the fence reads |
+| `…/store/<alias>.sqlite` | the account's native store (`teams-headless`): conversations, messages, reactions, the outbox (`0600`, its dir `0700`); `<alias>.sqlite-runs/` holds a lock per open run |
+| `…/headless/<time>…/` | the native live runs' outputs (`teams-headless` and `chat_live`'s `summary.json`) |
+| `…/live.lock` | the live lock: every live run (a lab browser or a native client against the tenant) holds it with `flock` |
 | `…/auth/<alias>.json` | the account's region, partition, region GTMs and skypetoken expiry from `auth` (`0600`) |
 | `…/status-<alias>.json` | `login`'s steps, and why it stopped |
 | `…/media/tone-440.wav` | the fake microphone's tone for `echo-call` |
@@ -63,7 +76,8 @@ outside the repo:
 `cargo build -p proto-lab` (and `-p teams-headless`, `-p echo-call`) builds a normal lab binary. The tests enable `teams-fence`'s
 `test-support` feature through dev-dependencies, and cargo unifies it into everything built together with them
 (`cargo test`, `--all-targets`, `--all-features`), the binaries included. Such a binary refuses to run; rebuild with
-`cargo build -p <crate>`.
+`cargo build -p <crate>`. A live run's binary is built into a target dir of its own (`cargo build -p teams-headless -p
+proto-lab --target-dir target/lab`), so a later `cargo test` can't rebuild it with `test-support` in.
 
 ## `proto-lab`
 
@@ -79,7 +93,9 @@ proto-lab chrome path                     # print its browser binary
 proto-lab login a [--timeout 300]         # sign account a (b, c alike) in to the web client; record its MRI
 proto-lab status [a b c] [--timeout 120]  # ok / login needed / refused, per account; exits non-zero unless all ok
 proto-lab auth a [--audiences] [--no-skypetoken] [--timeout 120]   # native sign-in, tokens, skypetoken
-proto-lab run load|ab-chat|echo-call --headless [--timeout 180]    # a scenario under the armed fence
+proto-lab probe chat a [--with b] [--save <name>]                  # read-only: does the chat service take our ic3 token
+proto-lab probe thread a [--save <name>]                           # read-only: the group chat's member reads
+proto-lab run <scenario> --headless [--timeout 180]                # a scenario under the armed fence (list below)
 proto-lab export <capture> <name> [--strict]                       # a capture -> a local reference copy
 proto-lab bundles import <msix>           # unpack the web bundle from the Teams MSIX and index it
 proto-lab bundles search <regex> [--kind url|host|route|method] [--version <v>]
@@ -102,22 +118,47 @@ token is stored only once the ID token names the account. Then a refresh and the
 also asks for a token for each other Teams audience, `--no-skypetoken` stops after Entra. It prints only each token's
 `aud`, `exp`, scopes and tenant, plus the skypetoken's expiry and region (`docs/spikes/auth.md`).
 
+**`probe`** makes read-only `GET`s with the account's own tokens and prints statuses, header names, key names, counts
+and token claims only, never a token or a body. `probe chat` refreshes the account's `ic3` token and reads one page of
+the conversation list in each header form, then the 1:1 chat's thread the way the fence reads it (M1 Task 3). `probe
+thread` reads the group chat `chats.toml` records: the thread, the batch read, the member list in one page and paged,
+the filtered view, the account's own view, then the fence's read (M1 Task 8). `--save <name>` writes the answers as a
+sanitized reference copy through `export`'s checks, never inside a git work tree.
+
 **`run`** exits non-zero when the scenario's goal isn't reached, the fence was breached, or the fence denied something
 the scenario doesn't expect. Runs are recorded under `captures/<scenario>/<ts>/`. Without `--headless` the browsers
 are visible. A target the fence can't arm in time (a step unanswered for 10 s under load) is never resumed: it is
 closed, or, when its close isn't confirmed, the browser is killed. That is a warning, not a breach (the target was held
 and never ran), but a killed browser fails the run; a target whose resume was sent, one that wasn't held, or one that
-could be neither closed nor killed is a breach. Each such target is in `fence.log` and the capture.
+could be neither closed nor killed is a breach. Each such target is in `fence.log` and the capture. Every page call
+and navigation is bounded (a `beforeunload` dialog holding a navigation is accepted after 5 s), and SIGINT or SIGTERM
+stops the run, kills its browsers and lets the fence's decisions still running land in `fence.log` (exit 130 or 143).
+
+A writing scenario first proves enforcement live: a probe post to its chat is force-denied, must fail in the page and
+must never show on the other accounts. It maps the chat service's writes (`Classifier::mapped`), reads the target's
+members live (`LiveMembershipSource`, with the `ic3` bearer token the page itself sent), and lets the mention picker's
+profile lookups out only when every MRI they name is a lab account (the read-by-`POST` list,
+`crates/proto-lab/src/post_read.rs`). It expects only its probes' forced denies and the web client's requests and
+frames on the reviewed expected-deny list (`crates/proto-lab/src/scenario/expected.rs`: telemetry, lookups beyond the
+lab, presence, the account's own settings, marking its own feed items read, bot invokes, Trouter and AugLoop frames, …), each with the
+reason the scenario doesn't need it. The list only judges the run: everything on it stays denied. A deny on the
+scenario's own chat other than the probes, one for a partial or refused membership, or a class off the list fails
+the run.
 
 - `load`: account a loads the web client, fail-closed; every deny is expected.
-- `ab-chat`: a and b; a opens the a–b 1:1 chat by b's MRI and sends a message, and b must show it. First, a live
-  enforcement test: a probe post to the chat is force-denied, must fail in a's page and must never show on b. It maps
-  the chat service's writes (`Classifier::mapped`) and reads the target's members live (`LiveMembershipSource`, with
-  the `ic3` bearer token the page itself sent). It expects only its two probes' forced denies and the web client's
-  requests and frames on the reviewed expected-deny list (`crates/proto-lab/src/scenario/expected.rs`: telemetry,
-  middle-tier lookups by `POST`, presence, the account's own chat properties, Trouter and AugLoop frames, …), each
-  with the reason the scenario doesn't need it. The list only judges the run: everything on it stays denied. A deny on
-  the a–b chat other than the probes, one for a partial or refused membership, or a class off the list fails the run.
+- `ab-chat`: a and b; a opens the a–b 1:1 chat by b's MRI and sends a message, and b must show it (clicking "Jump to
+  newest" or "New messages" when the native runs left it unread).
+- `ab-chat-full`: the a–b chat beyond a message, as captured for `docs/protocol/chat.md`: a sends, edits, reacts and
+  takes it back, mentions b (the picker's suggestion checked to be b), replies with a quote, reacts to the reply and
+  deletes; b reads and reacts.
+- `ab-image`: a pastes a made-up image into the a–b chat with every write to the media service force-denied, to
+  capture what sending an image sends (sending stays deferred: `docs/backlog/ams-image-sending.md`).
+- `abc-chat`: with no group chat recorded, a creates the a–b–c chat (its first message force-denied) and records it
+  in `chats.toml`, once; after that a messages it and b and c must show it, under the group-chat rule in
+  [CLAUDE.md](CLAUDE.md).
+- `ab-trouter`, `ab-trouter-quiet`: b's push channel while a sends, edits and reacts, under the messaging classifier
+  (the Trouter session frames and the messaging stack's registration only), observed for 16 minutes; the quiet one
+  holds back every `user.activity` (`docs/protocol/trouter.md`).
 - `echo-call`: account a places the web client's test call to the echo service, with a fake microphone playing a
   440 Hz tone. The calling classifiers allow the account's reviewed own-state (its settings and policy reads, the
   Trouter session, the endpoint registration) and the call start in exactly its captured shape, a new call of a and
@@ -125,6 +166,10 @@ could be neither closed nor killed is a breach. Each such target is in `fence.lo
   still denied (no authoritative call-membership read: `docs/backlog/fence-call-follow-ups.md`), so the echo never
   joins and the run exits 1: it is judged by the same expected-deny list, and the call's follow-ups are needed, so
   they are not on it. An incoming call is never answered.
+
+Live runs go one at a time under the live lock, with an outer bound, from a normal build:
+`flock ~/.local/share/teams-lab/live.lock timeout --signal=INT --kill-after=60 900 target/lab/debug/proto-lab run
+ab-chat --headless`. `pgrep -af chrome` shows no lab profile afterwards.
 
 **`export`** sanitizes a capture (its dir or `events.jsonl`, or `<scenario>/<ts>` under the captures dir) into
 `reference/<name>` (`.jsonl` added without an extension; a `.json` name gets one JSON array), file `0600`, dirs `0700`.
@@ -221,20 +266,27 @@ scripts/lint-report.sh
 cargo test --workspace
 ```
 
-`cargo test --workspace` is offline. The fence suite alone: `cargo test -p teams-fence -p teams-proto -p fence-seal`
-plus `cargo test -p proto-lab --test fence_http --test fence_ws --test fence_targets --test calling`.
+`cargo test --workspace` is offline: the native client is tested against `teams-mock` (two or three native clients
+talking through it), the browser fence against local pages in Chrome. The fence suite alone: `cargo test -p
+teams-fence -p teams-proto -p fence-seal -p teams-trouter` plus `cargo test -p proto-lab --test fence_http --test
+fence_ws --test fence_targets --test calling --test post_reads --test expected_denies`.
 
 | variable / flag | effect |
 |---|---|
 | `PROTO_LAB_CHROME=<binary>` | the Chrome the browser tests use; by default the pinned install in the lab's `chrome/` dir (`proto-lab chrome install`) |
 | `PROTO_LAB_REQUIRE_CHROME=1` | without a Chrome the browser tests fail instead of skipping |
 | `GPUI_SMOKE_REQUIRE=1` | without weston ≥ 15.0 (for `--fake-seat`) and niri on `PATH` the GPUI smoke tests fail instead of skipping |
-| `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests (`crates/proto-lab/tests/auth_live.rs`: a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory); without the feature they aren't built, without the variable they skip |
+| `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests: `crates/proto-lab/tests/auth_live.rs` (a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory) and `crates/teams-headless/tests/chat_live.rs` (M1's acceptance: it only spawns the normally built `teams-headless` and reads its output and `fence.log`); without the feature they aren't built, without the variable they skip |
+| `TEAMS_HEADLESS_BIN=<binary>` | the normally built `teams-headless` that `chat_live` spawns (required: a test build refuses to run) |
+| `TEAMS_HEADLESS_LOG=debug` | `teams-headless` logs our own crates' debug lines on stderr, never a payload or a token |
 | `ECHO_CALL_TURN_SERVER`, `ECHO_CALL_TURN_USER`, `ECHO_CALL_TURN_PASSWORD` | also run `spikes/echo-call/tests/relay.rs`'s echo through a real TURN server (coturn on loopback) |
 | `GPUI_BENCH_GPU`, `GPUI_BENCH_SECONDS`, `GPUI_BENCH_UPLOAD`, `GPUI_BENCH_OUT` | the video grid benchmark (below) |
 
-The machine's own gate run: `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 cargo test --workspace`. The live test:
-`PROTO_LAB_LIVE=1 cargo test -p proto-lab --features live --test auth_live`.
+The machine's own gate run: `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 cargo test --workspace`. The live tests
+run one at a time under the live lock: `flock ~/.local/share/teams-lab/live.lock env PROTO_LAB_LIVE=1 cargo test -p
+proto-lab --features live --test auth_live`, and `chat_live` as in [`teams-headless`](#teams-headless). No write ever
+comes from a `cargo test` process: a live test that needs one spawns a normally built lab binary, which writes under
+its own fence.
 
 The browser tests run headless Chrome for Testing on throwaway profiles, never the lab's. The lab's `chrome/` dir is
 under `data_dir` when `lab.toml` sets one, else `~/.local/share/teams-lab/chrome/`; no lab config is needed for this,

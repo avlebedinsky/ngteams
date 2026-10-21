@@ -1093,12 +1093,27 @@ included, stays denied without a read. Designed with Codex (transcript
       After the group runs: the gate again, 1081 passed, 0 failed, load 9–23; fixture-guard after the doc edits)
 
 ### Task 22: [Final] Update documentation
-- [ ] README.md: the M1 crates, `teams-headless`, the new scenarios and `probe`, tests
-- [ ] CLAUDE.md: a hard rule for the native client (what the browser-fence rule says for the browser: the request
+- [x] README.md: the M1 crates, `teams-headless`, the new scenarios and `probe`, tests
+      (status, layout rows for `teams-store`, `teams-trouter`, `teams-core` and the grown `teams-proto`, `teams-mock`,
+      `teams-fence`, `teams-auth`; the lab's `chats.toml`, store runs, `headless/` outputs and the live lock; `probe
+      chat`/`probe thread`; every scenario; how live runs and live tests run; the fence suite)
+- [x] CLAUDE.md: a hard rule for the native client (what the browser-fence rule says for the browser: the request
       and frame policy, no write from a `cargo test` process, mock origins only under `test-support`); patterns
       discovered during M1 (the outbox rule, the retry table, Trouter deliveries and presence)
-- [ ] write the M2 plan (GPUI daily driver), informed by M1
-- [ ] move this plan to `docs/plans/completed/`
+      (the rule "The native client sends only what its sealed policy allows"; the user's rules of 2026-10-21 kept as
+      they were. "Patterns learned in M0 and M1": arming containment by kill (Task 2), the credential source, native
+      group chats denied, the read-by-`POST` list, a new section on the native client (outbox, retry table, unseen
+      forms, deliveries and presence, a field's whole captured range: signed delivery ids, base64url endpoint ids, the
+      log cap, the store, the engine), the expected-deny list and classifiers per scenario, the live lock and bounded
+      navigation; the stale links to the two backlog items Tasks 1 and 2 deleted replaced)
+- [x] write the M2 plan (GPUI daily driver), informed by M1
+      (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`: what M1 built, found and still owes; bots and
+      message extensions with Adaptive Cards in the long tail, image sending, native group-chat enrolment)
+- ➕ [x] `docs/protocol/endpoints.md` checked against what merged since it was written (Tasks 17, 19, 21 and the group
+      chat): the native reads of the catch-up, the native live evidence, signed delivery ids and base64url endpoint ids,
+      typing stopped as received; `trouter.md`'s open question on our token over Trouter answered by Task 19
+- [x] move this plan to `docs/plans/completed/` (not moved here: the plan-execution harness moves it once every phase
+      has finished)
 
 ## Validation commands
 

@@ -119,9 +119,9 @@ name>","se":"<ms>","st":"<ms>"}}]}`
   24 hours); the registrar takes the same token. The calling stack's socket sends only `Authorization` and
   `X-MS-Migration`.
 - `connectparams` is what an earlier `trouter.connected` handed over, sent back as it came; a first connect has none.
-- Whether the service takes **our** non-CAE `ic3` token on Trouter is not tested yet (it does on the chat service,
-  `auth.md` question 8). Task 16 built the native client against the mock only: no lab binary runs it yet (a live run
-  never comes from a `cargo test` process), so the first live socket is Task 19's `teams-headless watch`.
+- The service takes **our** non-CAE `ic3` token on Trouter, as on the chat service (`auth.md` question 8): Task 16
+  built the native client against the mock, and its first live socket, M1 Task 19's `teams-headless watch`
+  (2026-10-21), authenticated, registered and got the delivery; so did every socket of Task 21's acceptance runs.
 
 ## `trouter.connected`: the endpoint
 
@@ -343,8 +343,10 @@ place.
 
 ## Open
 
-- Whether the service takes our own non-CAE `ic3` token on Trouter and the registrar, and the native connect's
-  query, `Origin` and registration as built (Task 16 tested them on the mock only; the first live run is Task 19's).
+- ~~Whether the service takes our own non-CAE `ic3` token on Trouter and the registrar, and the native connect's
+  query, `Origin` and registration as built.~~ **Answered (live, M1 Task 19, 2026-10-21): yes**, all of them as built;
+  right after each connect the service sent three message-loss reports, each acknowledged after a catch-up that found
+  nothing.
 - What the service does when a token expires on an open socket.
 - The v3 registrar (`registrarUrl`) the service hands over; the web client doesn't use it.
 - Accepted delivery answers might reduce the reconnect replay; not tested under the current policy (every answer is
