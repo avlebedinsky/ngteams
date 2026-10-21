@@ -10,14 +10,17 @@
 //! ([`Classifier::with_test_call_callee`]). With no echo MRI in `lab.toml` the call start is unknown and denied.
 //!
 //! The steps:
-//! 1. a opens the web client and must load;
+//! 1. before the page loads, a's fence force-denies every write carrying `ab-chat`'s probe marker
+//!    ([`forced_rules`]): the web client keeps a send that failed and sends it again on every later load, an earlier
+//!    `ab-chat` run's probe or `abc-chat`'s first message among them, and the members' live read (on here for the call)
+//!    would let the resend out to b, or b and c. a opens the web client and must load;
 //! 2. a opens the Calls app, which starts the client's calling stack (the client defers it until then), then Settings →
 //!    Devices from the account menu, in the same document ([`stand_up_calling`]);
 //! 3. a clicks "Make a test call" ([`TEST_CALL_BUTTON`]); the call screen must show its hang-up button ([`HANG_UP`])
 //!    within [`CALL_START`], and the fence must have allowed the call start ([`call_starts`]);
 //! 4. the run stays in the call for [`IN_CALL`], hangs up (if the call is still up) and records [`AFTER_HANG_UP`] more;
 //! 5. after the run, the capture's WebRTC statistics must show audio sent and received ([`AudioSummary`]), and no deny
-//!    but the reviewed expected-deny list's ([`policy`]).
+//!    but the reviewed expected-deny list's and step 1's ([`policy`]).
 //!
 //! Live on 2026-10-20 steps 1–4 pass; step 5 doesn't: the call's later requests (the echo service's `add` to the
 //! conversation, the call's acknowledgements, `leave`) land on the call, whose members the fence can't read yet, so they
@@ -41,10 +44,11 @@ use crate::browser::Media;
 use crate::capture::EVENTS_FILE;
 use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
+use crate::fence_http::ForcedDeny;
 use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
-use super::ab_chat::{load, save_screenshot};
+use super::ab_chat::{EARLIER_RUN_PROBE, load, probe_rules, save_screenshot};
 use super::dsl::{Driver, Selector, StepError};
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
@@ -102,11 +106,26 @@ pub const TONE_RATE: u32 = 48_000;
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
 
-/// The denies a run of this scenario expects: the reviewed list alone ([`super::expected`]). The run forces no deny,
-/// and every deny on the call (its follow-ups, the echo service's `add`, `leave`) stays unexpected: the call needs them.
+/// The forced denies a run of this scenario expects ([`forced_rules`]): it has no probe of its own, so only an earlier
+/// run's probe, `abc-chat`'s first message among them.
+pub const EXPECTED_FORCED: [&str; 1] = [EARLIER_RUN_PROBE];
+
+/// The rules a run forces on a's fence before its page loads: `ab-chat`'s rules for an earlier run's probe
+/// ([`probe_rules`] without a probe of this run's), which deny `abc-chat`'s first message too, labelled
+/// [`EARLIER_RUN_PROBE`].
+///
+/// # Errors
+/// Never: the patterns are fixed.
+pub fn forced_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
+    probe_rules(None)
+}
+
+/// The denies a run of this scenario expects: the reviewed list ([`super::expected`]) and the forced denies of
+/// [`EXPECTED_FORCED`]. Every deny on the call (its follow-ups, the echo service's `add`, `leave`) stays unexpected:
+/// the call needs them.
 #[must_use]
 pub fn policy() -> DenyPolicy {
-    DenyPolicy::Reviewed(Review::new())
+    DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
 }
 
 /// A mono 16-bit PCM WAV file of a sine tone at `frequency` Hz, `seconds` long at `rate` samples per second, at half
@@ -298,6 +317,11 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         user_agent: Some(USER_AGENT.to_owned()),
     };
     let mut session = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    // before the page loads: the client sends an earlier run's unsent probe again as soon as it can
+    match forced_rules() {
+        Ok(rules) => rules.into_iter().for_each(|rule| session.force_deny(rule)),
+        Err(error) => report.failures.push(format!("can't force the probe denies: {error}")),
+    }
     if let Err(error) = call(&mut session, options, &mut report).await {
         report.failures.push(error.to_string());
         if let Some(note) = save_screenshot(ACCOUNT, &session).await {

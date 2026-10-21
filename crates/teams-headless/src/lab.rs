@@ -117,7 +117,7 @@ impl Lab {
         ));
         let base = session.service_base(CHAT_BASE_GTM).ok_or(LabError::NoChatBase)?;
         let transport = Arc::new(HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?);
-        let membership = LiveMembershipSource::new()?;
+        let membership = LiveMembershipSource::for_fence(&fence)?;
         membership.set_credential_source(transport.clone());
         let client = Arc::new(Client::new(HttpTransport::new(
             Arc::clone(&session),

@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::lab::{ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
+use crate::membership::LabGroup;
 use crate::target::{Mri, Scope, Target};
 
 /// Who may take part in a write: the lab accounts and the approved service participants, by exact MRI. A lab account
@@ -95,6 +96,14 @@ pub enum PartialReason {
     NoCredential,
     /// The source can't read this kind of scope in full (yet).
     Unsupported,
+    /// A group chat other than the one the lab recorded as its a–b–c chat (`chats.toml`'s `abc`): never read.
+    UnrecordedGroupChat,
+    /// The lab's `chats.toml` can't be read or is invalid, so no group chat counts as recorded.
+    ChatsUnreadable,
+    /// The reads of one scope disagree (a group chat's thread read and member list: their members or `eTag`s).
+    Inconsistent,
+    /// The lab's group chat reads, consistently, as another roster than exactly a, b and c made by a.
+    UnexpectedRoster,
 }
 
 impl fmt::Display for PartialReason {
@@ -107,6 +116,10 @@ impl fmt::Display for PartialReason {
             Self::NoSource => f.write_str("no membership source (the fence runs fail-closed)"),
             Self::NoCredential => f.write_str("the membership source has no credential yet"),
             Self::Unsupported => f.write_str("the membership source can't read this scope in full"),
+            Self::UnrecordedGroupChat => f.write_str("a group chat the lab didn't record as its own"),
+            Self::ChatsUnreadable => f.write_str("the lab's chats.toml can't be read"),
+            Self::Inconsistent => f.write_str("the membership reads disagree"),
+            Self::UnexpectedRoster => f.write_str("the lab's group chat isn't exactly a, b and c made by a"),
         }
     }
 }
@@ -252,6 +265,10 @@ pub enum OpenError {
 pub struct Fence {
     roster: Roster,
     log: FenceLog,
+    /// The lab's group chat policy, from the same `lab.toml` as the roster: what
+    /// [`LiveMembershipSource::for_fence`](crate::LiveMembershipSource::for_fence) gives its source. `None` for a
+    /// fence of no lab (`Fence::new`), or a lab whose a, b and c aren't three known, distinct MRIs.
+    group: Option<LabGroup>,
 }
 
 impl Fence {
@@ -280,6 +297,7 @@ impl Fence {
         Ok(Self {
             roster: Roster::from_lab(config),
             log,
+            group: LabGroup::from_config(config),
         })
     }
 
@@ -287,7 +305,16 @@ impl Fence {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn new(roster: Roster, log: FenceLog) -> Self {
-        Self { roster, log }
+        Self {
+            roster,
+            log,
+            group: None,
+        }
+    }
+
+    /// The lab's group chat policy this fence was opened with, if any.
+    pub(crate) fn lab_group(&self) -> Option<&LabGroup> {
+        self.group.as_ref()
     }
 
     /// The log every decision goes to; the browser fence records its own request decisions there too.

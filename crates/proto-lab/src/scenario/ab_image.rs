@@ -277,7 +277,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let mut report = ScenarioReport::new(ScenarioName::AbImage);
     let nonce = nonce();
     // before a's page loads: the client sends an earlier run's unsent probe, or image, again as soon as it can
-    for denied in [deny_probes(&a, &probe_text(&nonce)), deny_media_writes(&a)] {
+    for denied in [deny_probes(&a, Some(&probe_text(&nonce))), deny_media_writes(&a)] {
         if let Err(error) = denied {
             report.failures.push(error.to_string());
         }

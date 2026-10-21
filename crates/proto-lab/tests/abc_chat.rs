@@ -1,20 +1,28 @@
 //! The `abc-chat` scenario's offline parts: its deep links, how it finds the group chat a first message went to, its
 //! forced-deny labels and how it judges denies. Every id here is made up.
 
+use std::fmt::Write as _;
+
+use clap::ValueEnum as _;
 use proto_lab::config::LabPaths;
-use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
-use proto_lab::scenario::ab_chat::{EARLIER_RUN_PROBE, ForcedPost, PROBE_MARKER, THIS_RUN_PROBE, probe_text};
+use proto_lab::fence_http::{Denial, DenyCause, ForcedDeny, PausedRequest};
+use proto_lab::scenario::ab_chat::{
+    self, EARLIER_RUN_PROBE, ForcedPost, PROBE_MARKER, THIS_RUN_PROBE, one_to_one_id, probe_rules, probe_text,
+};
 use proto_lab::scenario::abc_chat::{
     ANY_GROUP_CHAT, EXPECTED_FORCED, FIRST_MESSAGE, THIS_RUN_FIRST_MESSAGE, chat_link_by_id, first_message_text,
     forced_denies, group_chat_of_message_post, messaging_blocked, new_chat_link, policy, record_creation,
 };
-use proto_lab::scenario::{ScenarioError, ScenarioName, ScenarioReport};
+use proto_lab::scenario::{DenyPolicy, ScenarioError, ScenarioName, ScenarioReport};
+use proto_lab::scenario::{ab_image, ab_trouter, echo_call};
 use regex::Regex;
-use teams_fence::lab::LabChats;
+use teams_fence::LiveMembershipSource;
+use teams_fence::lab::{LabChats, LabConfig, record_abc_chat};
 
 const GROUP: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
 const GROUP_ENCODED: &str = "19%3A0123456789abcdef0123456789abcdef%40thread.v2";
 const BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer/v1";
+const MRI_A: &str = "8:orgid:0000000a-0000-4000-8000-00000000000a";
 const MRI_B: &str = "8:orgid:0000000b-0000-4000-8000-00000000000b";
 const MRI_C: &str = "8:orgid:0000000c-0000-4000-8000-00000000000c";
 
@@ -176,12 +184,47 @@ fn the_group_chat_comes_only_from_a_message_post_to_a_group_chat() {
     }
 }
 
+/// A `lab.toml` in `dir` whose a, b and c have made-up MRIs (`c` none when `with_c` is false).
+fn lab_config(dir: &std::path::Path, with_c: bool) -> Result<LabConfig, teams_fence::lab::ConfigError> {
+    let accounts = [("a", Some(MRI_A)), ("b", Some(MRI_B)), ("c", with_c.then_some(MRI_C))]
+        .into_iter()
+        .fold(String::new(), |mut out, (alias, mri)| {
+            let mri = mri.map(|mri| format!("mri = \"{mri}\"\n")).unwrap_or_default();
+            let _ = write!(
+                out,
+                "\n[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.com\"\n{mri}"
+            );
+            out
+        });
+    let text = format!("data_dir = {:?}\n{accounts}", dir.display().to_string());
+    LabConfig::parse(&text, dir)
+}
+
 #[test]
-fn the_messaging_run_doesn_t_start_while_the_fence_can_t_read_a_group_chat_in_full() {
+fn the_messaging_run_starts_only_when_the_lab_s_source_reads_the_recorded_chat_in_full() {
     // a message the fence denies stays unsent in a's client and is sent again on every later load
-    let blocked = messaging_blocked(GROUP).unwrap_or_default();
-    assert!(blocked.contains("Partial(Unsupported)"), "{blocked}");
+    let dir = tempfile::tempdir().unwrap();
+    let config = lab_config(dir.path(), true).unwrap();
+    let source = || {
+        LiveMembershipSource::with_mock_origin("http://127.0.0.1:9")
+            .unwrap()
+            .with_lab(&config)
+    };
+    let blocked = messaging_blocked(&source(), GROUP).unwrap_or_default();
+    assert!(blocked.contains("chats.toml records"), "{blocked}");
     assert!(blocked.contains("nothing was opened"), "{blocked}");
+
+    record_abc_chat(config.paths(), GROUP).unwrap();
+    assert_eq!(messaging_blocked(&source(), GROUP), None);
+    // not with a source that doesn't know the lab, nor for another chat, nor in a lab without c's MRI
+    let bare = LiveMembershipSource::with_mock_origin("http://127.0.0.1:9").unwrap();
+    assert!(messaging_blocked(&bare, GROUP).is_some());
+    assert!(messaging_blocked(&source(), "19:fedcba9876543210fedcba9876543210@thread.v2").is_some());
+    let without_c = lab_config(dir.path(), false).unwrap();
+    let source = LiveMembershipSource::with_mock_origin("http://127.0.0.1:9")
+        .unwrap()
+        .with_lab(&without_c);
+    assert!(messaging_blocked(&source, GROUP).is_some());
 }
 
 #[test]
@@ -208,5 +251,57 @@ fn only_the_scenario_s_forced_denies_and_the_list_are_expected_and_nothing_on_th
     let creation = proto_lab::scenario::abc_chat::policy(None)?;
     assert!(creation.expects(&forced(FIRST_MESSAGE)));
     assert!(!creation.expects(&forced("some other rule")));
+    Ok(())
+}
+
+/// The rules `name` forces on a's fence before its page loads in a run with `nonce`, and the policy it judges a's denies
+/// by; `None` for `load`, which reads no members (`FailClosed`: every write to a chat is denied, and every deny is
+/// expected there).
+fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<ForcedDeny>, DenyPolicy)>, regex::Error> {
+    let probe = probe_text(nonce);
+    let ab = one_to_one_id(MRI_A, MRI_B);
+    let ab = ab.as_deref();
+    Ok(Some(match name {
+        ScenarioName::Load => return Ok(None),
+        ScenarioName::AbChat | ScenarioName::AbChatFull => (probe_rules(Some(&probe))?, ab_chat::policy(ab)?),
+        ScenarioName::AbTrouter | ScenarioName::AbTrouterQuiet => {
+            (probe_rules(Some(&probe))?, ab_trouter::trouter_policy(ab)?)
+        }
+        ScenarioName::AbImage => (
+            [probe_rules(Some(&probe))?, ab_image::media_rules()?].concat(),
+            ab_image::policy(ab)?,
+        ),
+        ScenarioName::AbcChat => (forced_denies(nonce), policy(Some(GROUP))?),
+        ScenarioName::EchoCall => (echo_call::forced_rules()?, echo_call::policy()),
+    }))
+}
+
+#[test]
+fn every_scenario_that_reads_members_live_force_denies_the_first_message_sent_again() -> Result<(), regex::Error> {
+    // a creation run's first message stays unsent in a's client, which sends it again on every later load of a's
+    // profile; once the chat is recorded, the live read would let it out to b and c
+    let resent = message_post_of(&first_message_text("nonce-1"));
+    for &name in ScenarioName::value_variants() {
+        let Some((rules, policy)) = forced_and_policy(name, "nonce-2")? else {
+            continue;
+        };
+        // the first rule that matches names the deny
+        let label = rules
+            .iter()
+            .find(|rule| rule.matches(&resent))
+            .and_then(ForcedDeny::label);
+        let Some(label) = label else {
+            panic!("{name} doesn't force-deny the first message sent again");
+        };
+        assert!(
+            ![THIS_RUN_PROBE, THIS_RUN_FIRST_MESSAGE].contains(&label),
+            "{name}: {label}"
+        );
+        let denial = Denial {
+            label: Some(label.to_owned()),
+            ..Denial::new("POST", &resent.url, DenyCause::Forced)
+        };
+        assert!(policy.expects(&denial), "{name} doesn't expect {label:?}");
+    }
     Ok(())
 }

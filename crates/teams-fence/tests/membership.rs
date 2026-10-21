@@ -2,8 +2,8 @@
 //! `with_mock_origin`), and every way an answer falls short of a complete member list.
 //!
 //! The thread answer is the synthetic fixture `tests/fixtures/chatsvc/thread-one-to-one.json` (sanitized form), with
-//! made-up GUIDs filled in for its placeholders; a group chat's answers are `tests/fixtures/chatsvc/thread-group*.json`.
-//! No real MRI or token appears here.
+//! made-up GUIDs filled in for its placeholders. The lab's group chat has tests of its own (`tests/group_chat.rs`). No
+//! real MRI or token appears here.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -553,19 +553,7 @@ async fn the_fence_allows_a_lab_only_one_to_one_chat_and_denies_one_with_an_outs
     Ok(())
 }
 
-const GUID_C: &str = "00000000-0000-4000-8000-00000000000c";
 const GROUP: &str = "0123456789abcdef0123456789abcdef";
-const GROUP_FIXTURES: [(&str, &str); 3] = [
-    ("", include_str!("../../../tests/fixtures/chatsvc/thread-group.json")),
-    (
-        "/members",
-        include_str!("../../../tests/fixtures/chatsvc/thread-group-members.json"),
-    ),
-    (
-        "/filtered",
-        include_str!("../../../tests/fixtures/chatsvc/thread-group-filtered.json"),
-    ),
-];
 
 fn group_chat() -> Scope {
     Scope::Conversation {
@@ -573,58 +561,11 @@ fn group_chat() -> Scope {
     }
 }
 
-/// Serves the group chat fixtures' answers, as the chat service gave them live (M1 Task 8): the thread read and the
-/// member list agree on a, b and c and the list counts them (`totalMemberCount`); the filtered view is refused.
-async fn serve_group(server: &MockServer) -> TestResult {
-    for (suffix, fixture) in GROUP_FIXTURES {
-        let filled = fill(fixture)
-            .replace("<guid:c>", GUID_C)
-            .replace("<guid:tenant>", GUID_X)
-            .replace("<group>", GROUP);
-        let fixture: Value = serde_json::from_str(&filled)?;
-        let status = u16::try_from(fixture["response"]["status"].as_u64().ok_or("no status")?)?;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/api/chatsvc/emea/v1/threads/19:{GROUP}@thread.v2{suffix}"
-            )))
-            .respond_with(ResponseTemplate::new(status).set_body_json(&fixture["response"]["body"]))
-            .mount(server)
-            .await;
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_group_chat_stays_unsupported_even_when_its_reads_look_complete() -> TestResult {
-    // the answers agree and count their members, but nothing shows that neither is a page or a caller's view of the
-    // chat (docs/backlog/group-chat-member-read-completeness.md): unsupported, and never read
-    let server = MockServer::start().await;
-    serve_group(&server).await?;
-    let source = source(&server)?;
-    assert_eq!(
-        source.members(&group_chat()).await,
-        Membership::Partial(PartialReason::Unsupported)
-    );
-    assert!(server.received_requests().await.unwrap_or_default().is_empty());
-
-    // and so the fence denies a message to a chat of lab accounts only
-    let lab = Fence::new(
-        Roster::new(vec![mri(GUID_A), mri(GUID_B), mri(GUID_C)], []),
-        FenceLog::from_writer(std::io::sink()),
-    );
-    let denied = lab
-        .check(Target::new(WriteKind::Message, group_chat()), &source)
-        .await
-        .err()
-        .ok_or("a group chat message was allowed")?;
-    assert_eq!(*denied.reason(), DenyReason::Partial(PartialReason::Unsupported));
-    assert!(server.received_requests().await.unwrap_or_default().is_empty());
-    Ok(())
-}
-
 #[test]
-fn only_a_one_to_one_chat_can_be_read_in_full() {
-    assert!(LiveMembershipSource::reads_in_full(&chat()));
+fn without_the_lab_only_a_one_to_one_chat_can_be_read_in_full() -> TestResult {
+    // a source that doesn't know the lab admits no group chat (the lab's own one: tests/group_chat.rs)
+    let source = LiveMembershipSource::new()?;
+    assert!(source.reads_in_full(&chat()));
     for scope in [
         group_chat(),
         Scope::Conversation {
@@ -644,8 +585,9 @@ fn only_a_one_to_one_chat_can_be_read_in_full() {
             id: "call-1".to_owned(),
         },
     ] {
-        assert!(!LiveMembershipSource::reads_in_full(&scope), "{scope}");
+        assert!(!source.reads_in_full(&scope), "{scope}");
     }
+    Ok(())
 }
 
 #[test]

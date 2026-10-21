@@ -23,12 +23,12 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Parts, Push};
 use teams_core::{EngineError, Outbox};
-use teams_fence::lab::Alias;
+use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster, one_to_one_id};
 use teams_headless::chat::{ChatError, LabNames, resolve};
 use teams_headless::commands::{self, CommandError, WatchEnd};
 use teams_headless::lab::display_name;
-use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock};
+use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Authorized, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState, Read, Response, Transport,
@@ -246,16 +246,22 @@ struct Lab {
     mock: ChatServiceMock,
     trouter: TrouterMock,
     dir: tempfile::TempDir,
+    /// The lab's `lab.toml` (a, b and c with the mock's MRIs), whose `chats.toml` records the mock's a–b–c chat.
+    config: LabConfig,
 }
 
 impl Lab {
     async fn start() -> Self {
         let mock = ChatServiceMock::start().await.unwrap();
         let trouter = mock.start_trouter().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = LabConfig::parse(&lab_toml(dir.path()), dir.path()).unwrap();
+        record_abc_chat(config.paths(), ABC_CHAT).unwrap();
         Self {
             mock,
             trouter,
-            dir: tempfile::tempdir().unwrap(),
+            dir,
+            config,
         }
     }
 
@@ -286,7 +292,10 @@ impl Lab {
         let http =
             || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
         let transport = Arc::new(http());
-        let membership = LiveMembershipSource::with_mock_origin(&origin).unwrap();
+        // the lab's group chat policy, as `LiveMembershipSource::for_fence` gives the lab binary's source
+        let membership = LiveMembershipSource::with_mock_origin(&origin)
+            .unwrap()
+            .with_lab(&self.config);
         membership.set_credential_source(transport.clone());
         let push = push.then(|| {
             let trouter = Trouter::with_mock_origin(
@@ -539,6 +548,40 @@ async fn b_s_read_moves_its_read_horizon_up_to_a_s_message() {
     assert_eq!(horizons, 1, "b's read receipt reached the service once");
     a.shutdown();
     b.shutdown();
+}
+
+#[tokio::test]
+async fn a_s_send_to_the_lab_s_group_chat_reaches_b_s_and_c_s_watch() {
+    let lab = Lab::start().await;
+    let (watch_b, stop_b, task_b) = watching(lab.engine(LAB_B, true), true);
+    let (watch_c, stop_c, task_c) = watching(lab.engine(LAB_C, true), true);
+    ready(&watch_b).await;
+    ready(&watch_c).await;
+    let mut a = lab.engine(LAB_A, false);
+
+    let to_group = Action::Send {
+        conversation: ABC_CHAT.to_owned(),
+        text: MessageText::plain("hello b and c, from teams-headless").unwrap(),
+    };
+    let (state, sent) = write(&mut a, to_group).await;
+    assert_eq!(state, OutboxState::Sent, "{sent:?}");
+    let id = field(&sent, "message_id").to_owned();
+    for watch in [&watch_b, &watch_c] {
+        let received = watch
+            .json_line(|line| line["event"] == "message" && line["id"] == id.as_str())
+            .await;
+        assert_eq!(received["conversation"], ABC_CHAT);
+        assert_eq!(received["sender"], "a");
+        assert_eq!(received["text"], "hello b and c, from teams-headless");
+    }
+
+    for (stop, task) in [(stop_b, task_b), (stop_c, task_c)] {
+        let _ = stop.send(());
+        let (handle, end) = task.await.unwrap();
+        assert_eq!(end, WatchEnd::Stopped);
+        handle.shutdown();
+    }
+    a.shutdown();
 }
 
 /// a's store as `list` and `show` print it: the a–b chat, and in it a's message `id`, edited, with a's like.

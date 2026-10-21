@@ -11,7 +11,8 @@
 //!   denied on the chat the scenario writes to is ever expected.
 //!
 //! The one exception to both is a forced deny ([`DenyCause::Forced`]) whose rule's label the scenario names
-//! ([`Review::expecting_forced`]): the enforcement probes of `ab-chat`, `ab-chat-full` and `ab-image`, and
+//! ([`Review::expecting_forced`]): the enforcement probes of `ab-chat`, `ab-chat-full`, `ab-image`, `ab-trouter` and
+//! `abc-chat`, an earlier run's probe sent again on load (in `echo-call` too), `abc-chat`'s first messages, and
 //! `ab-image`'s media writes. Any other forced deny is unexpected.
 //!
 //! A scenario may also name classes of its own besides the list ([`Review::expecting_requests`]), expected under the
