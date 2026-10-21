@@ -19,15 +19,18 @@
     the lab, so channel writes stay unmapped and denied, unless the user approves a team of the 3 lab accounts only
     (Decisions for the user).
   - **Presence is read, not set.** Setting presence is a write the whole tenant sees; the native client sets none
-    until the user decides otherwise (Decisions for the user). Reading the lab accounts' presence is a read by `POST`,
-    allowed only under the allowance rules.
+    until the user decides otherwise (Decisions for the user). Reading the lab accounts' presence is a read by `POST`:
+    the browser fence may allow it under the allowance rules, but the native client can't send it unless the user
+    widens its hard rule (Decisions for the user).
   - **Images and files: sending is decided from a capture first,** as M1 Task 20 did for images
     (`docs/backlog/ams-image-sending.md`). No image or file has ever been received in the lab, so viewing them needs
     sending first.
 - **Every write goes through the fence**, and the native client sends only what its sealed policy allows (CLAUDE.md's
   hard rules). The UI gets no request path of its own: the app has no HTTP or socket client, only `teams-core`'s
-  engine. A new request class (Graph reads, a native read by `POST`, an own-state entry) is added only as those rules
-  allow, with its row in `docs/protocol/endpoints.md`.
+  engine. A new request class is added only as those rules allow, with its row in `docs/protocol/endpoints.md`: a
+  Graph or CSA read is a `GET`, an own-state entry is reviewed in its captured shape. A native read by `POST`
+  (profiles, presence) fits none of the rule's three lists, so M2 sends none unless the user widens that rule
+  (Decisions for the user); until then the tasks that would use one take their interim path.
 - **The personal build is the user's.** Agents never build or run it and never receive the user's tokens. M2 ends with
   its design written down and the user's decision on it; nothing that loosens the fence for it is written before.
 - Out of scope: calls (M3: `docs/backlog/fence-call-follow-ups.md`), meetings (M4; a meeting link opens in the
@@ -119,7 +122,8 @@
 - **no window, bus or handler of the user's desktop**: every GUI test, offline or live, runs in the UI sandbox (a
   nested niri on a headless weston, a private D-Bus session bus, a no-op URI opener); a client is pointed at the
   sandbox's socket or bus explicitly, and a test checks the client honours it. The lab app refuses to open a window
-  outside the sandbox.
+  outside the sandbox. The lab's tokens stay in the Secret Service on the user's bus, which the sandboxed app never
+  reaches: it gets them only through the credential broker (Task 4), a process outside the sandbox.
 - **test-only reach stays behind `test-support`**, as in M1; the lab app refuses to run when built with it.
 - **captures and screenshots of the live lab stay outside the repo**: captures under the lab's `captures/`, live
   screenshots under `<data_dir>/screenshots/` (they show lab and tenant data). Fixtures are synthetic-from-capture and
@@ -165,13 +169,15 @@ ui-sandbox (tests only: weston + nested niri, private D-Bus, virtual input, scre
 ```
 
 - **`teams-ui`**: GPUI views and their models over an engine seam: the chat list, the chat view, compose, search,
-  teams and channels, the calendar, settings. A background task awaits the engine's events and updates the models
-  on GPUI's foreground; queries are `Reply` futures. No view builds a request.
-- **`teams-app`**: the lab binary, `teams-app --lab <alias>`: `Fence::open_lab`, the account's `Session` from the
-  Secret Service, `LiveMembershipSource::for_fence` with the transport as its `CredentialSource`, the store at
-  `LabPaths::store_file`, Trouter. It refuses a `test-support` build, refuses to open a window outside the UI
-  sandbox, and prints no token. Notifications and the tray go to the session bus it is given. Its lab build writes a
-  view trace (ids and kinds of what each view shows, never message text) for the live test.
+  teams and channels, the calendar, settings. The bridge owns the engine handle; one background task drains its
+  events and updates every window's models on GPUI's foreground; queries are `Reply` futures. No view builds a
+  request.
+- **`teams-app`**: the lab binary, `teams-app --lab <alias> --secrets-fd <n>`: `Fence::open_lab`, the account's
+  `Session` over the credential broker's socket, `LiveMembershipSource::for_fence` with the transport as its
+  `CredentialSource`, the store at `LabPaths::store_file`, Trouter. It refuses a `test-support` build, refuses to
+  open a window outside the UI sandbox, and prints no token. Notifications and the tray go to the session bus it is
+  given. Its lab build writes a view trace (ids and kinds of what each view shows, never message text) for the live
+  test. `teams-app secrets --lab <alias>` is its credential broker, started outside the sandbox (Task 4).
 - **`teams-signin`**: the sign-in window, a separate process (GTK's main loop apart from GPUI's): Microsoft's page in
   a WebKitGTK webview behind a request guard; it hands the redirect's code to its parent, and `teams-auth` does the
   rest (PKCE, exchange, the ID token's account check).
@@ -181,17 +187,34 @@ ui-sandbox (tests only: weston + nested niri, private D-Bus, virtual input, scre
   mock first.
 
 ## Technical Details
-- **The bridge**: the engine stays on its own thread and runtime. `teams-ui` holds an `Arc<EngineHandle>` behind a
-  trait (`Core`) so views are tested on a fake; one background task per window awaits `next_event` and applies each
-  event to the models through GPUI's async context; a view asks for data with a query `Reply`. A message the account
-  sends shows at once from its outbox row (`Event::Outbox`), then as the message once it is sent.
+- **The bridge**: the engine stays on its own thread and runtime. `EngineHandle` has one event receiver,
+  `next_event` (and `try_next_event`, `blocking_next_event`) takes `&mut self`, and `shutdown(self)` consumes it, so
+  it can't sit behind an `Arc`: `teams-ui`'s bridge owns it. Its request side (writes and queries, each answering a
+  `Reply`) is split off as a cloneable handle (`teams-core` grows that split, which M1 doesn't have: the request
+  sender cloned, the receiver and the thread kept by the owner) and shared by every window behind a trait (`Core`), so views
+  are tested on a fake. One background task drains `next_event` and fans each event out to every open window's models
+  through GPUI's async context; a view asks for data with a query `Reply`. Shutdown ends the drain task and calls
+  `shutdown` on the owned handle off GPUI's foreground (it blocks until the engine's thread is joined). A message the
+  account sends shows at once from its outbox row (`Event::Outbox`), then as the message once it is sent.
+- **Credentials: the broker.** `teams-headless` reaches the lab's tokens through `KeyringSecretStore`, which is `oo7`
+  on the session bus named by `DBUS_SESSION_BUS_ADDRESS` (oo7 0.6 takes no other connection), and `Session` reads and
+  writes the store for the whole run (a renewal stores the new tokens). The sandboxed app's session bus is the
+  sandbox's, so it can't use that store. Instead `teams-app secrets --lab <alias>` runs outside the sandbox with the
+  user's bus, holds the one `KeyringSecretStore`, and serves `get`, `put` and `delete` of that account's own
+  `teams-lab` items, nothing else, on one end of a socket pair. The app (`--secrets-fd <n>`) gets the other end and
+  uses it through a `SecretStore` of its own (`BrokerSecretStore`). The broker opens no window, starts no desktop
+  client, and exits when the socket closes. Neither side logs a value, only the key's account and audience. The app
+  has no fallback: without `--secrets-fd` it doesn't start, and it never opens `KeyringSecretStore` or a bus from its
+  environment for secrets. So the desktop-bus rule holds: the sandboxed process reaches only the sandbox's bus, and
+  the user's bus is reached only by the broker, for the lab's own items.
 - **Reads the UI needs, by request class**: the store first (everything shown comes from it); new service reads are
   `GET`s added to the transport's allowlist host by host (Graph `https://graph.microsoft.com/v1.0/` with a Graph
   token from the `Session`, CSA's team reads with its `chatsvcagg` token), each probed read-only first
-  (`proto-lab probe …`, statuses, key names and sizes only). A read by `POST` (profiles, presence) becomes, if needed,
-  a sealed native class in `teams-proto` (`PostRead`): its exact captured shape, every MRI checked against the roster
-  by `teams-fence` when it is sent (`Fence::lab_accounts_only`), logged to `fence.log` first; decided with Codex,
-  with a `fence-seal` case.
+  (`proto-lab probe …`, statuses, key names and sizes only). A read by `POST` (profiles, presence) is none of the
+  hard rule's three lists (a `GET` read, an `OwnState` entry, an `Authorized<Mutating>` write), so the native client
+  sends none. A sealed native class for it (`PostRead`) is written only if the user widens that rule (Decisions for
+  the user). Until then Tasks 8 and 13 take their interim paths: names from what the reads already give, presence
+  not shown.
 - **Writes the UI adds**: typing (`teams_proto::Typing`, already sealed and mapped; a new `Action::Typing`, sent no
   more often than the capture shows); nothing else new. Reactions offer only the keys a capture showed.
 - **Outbox states in the UI**: sending, sent, waiting (`Retry-After`), denied by the fence, failed. "Send again" on a
@@ -256,20 +279,33 @@ ui-sandbox (tests only: weston + nested niri, private D-Bus, virtual input, scre
       open
 - [ ] nothing inherits the user's `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`, `NIRI_SOCKET` or `XDG_RUNTIME_DIR`
       content (test); without weston 15 or niri the sandbox tests say so and skip, and fail under `GPUI_SMOKE_REQUIRE=1`
+- [ ] tests first: the sandbox's spawn passes through only the file descriptors its caller names (the credential
+      broker's socket, the view trace) and closes every other one it inherits. So the lab's credentials reach a
+      sandboxed process only on the broker's socket (Technical Details), never by the user's bus
 - [ ] `cargo test -p ui-sandbox -p gpui-video` and the gate pass
 
 ### Task 4: `teams-app` and `teams-ui`: the lab binary and the engine bridge
 **Files:**
 - Create: `crates/teams-ui/{Cargo.toml,src/lib.rs,src/bridge.rs,src/models.rs}`, `crates/teams-app/{Cargo.toml,
-  src/main.rs}`, tests in both
-- Modify: `Cargo.toml` (members, workspace deps), `crates/teams-core/src/engine.rs` (only if a query is missing)
+  src/main.rs,src/secrets.rs}`, tests in both
+- Modify: `Cargo.toml` (members, workspace deps), `crates/teams-core/src/engine.rs` (the request side split off, tests
+  first; a query only if one is missing), `crates/teams-auth/src/secrets.rs` (if the broker's `SecretStore` lives there)
 
-- [ ] tests first: `teams-app --lab <alias>` builds its parts as `teams-headless` does (`Fence::open_lab`, `Session`
-      from the Secret Service, the region, `LiveMembershipSource::for_fence` with the transport's credential, the
-      store at `LabPaths::store_file`, Trouter); refuses a `test-support` build; refuses to open a window unless its
-      Wayland socket is inside the directory `TEAMS_APP_SANDBOX` names (as the GPUI spike does); prints no token
-- [ ] tests first: the bridge: a `Core` trait over `EngineHandle`; one background task applies events to the models on
-      GPUI's foreground; a query answers through its `Reply`; shutdown stops the engine and joins it
+- [ ] tests first: the credential broker (Technical Details): `teams-app secrets --lab <alias>` serves `get`, `put`
+      and `delete` of that account's own `teams-lab` keys on a socket pair and refuses any other account or
+      application; the app's `BrokerSecretStore` over it passes `Session`'s renewal tests (a renewal's new tokens
+      stored through it); no value in either side's output or `Debug`; the broker opens no window and no desktop
+      client and exits when the socket closes; offline tests serve a `MemorySecretStore`
+- [ ] tests first: `teams-app --lab <alias> --secrets-fd <n>` builds its parts as `teams-headless` does
+      (`Fence::open_lab`, `Session` over the broker's socket, the region, `LiveMembershipSource::for_fence` with the
+      transport's credential, the store at `LabPaths::store_file`, Trouter); refuses to start without
+      `--secrets-fd` and never opens `KeyringSecretStore` itself; refuses a `test-support` build; refuses to open a
+      window unless its Wayland socket is inside the directory `TEAMS_APP_SANDBOX` names (as the GPUI spike does);
+      prints no token
+- [ ] tests first: the bridge owns the `EngineHandle`; one background task drains `next_event` and fans each event out
+      to every window's models on GPUI's foreground (two windows on a fake core both get it); the windows share only
+      the request side, behind the `Core` trait; a query answers through its `Reply`; shutdown ends the drain task and
+      consumes the owned handle with `shutdown`, off the foreground, joining the engine's thread
 - [ ] a manifest test: `teams-ui` and `teams-app` depend on no HTTP or WebSocket client (`reqwest`, `tungstenite`,
       `hyper`, …): every request goes through `teams-core`
 - [ ] the lab build's view trace: one JSON line per view change (view, conversation and message ids, kinds, times;
@@ -328,8 +364,10 @@ ui-sandbox (tests only: weston + nested niri, private D-Bus, virtual input, scre
 - [ ] if Graph answers: tests first (wiremock, synthetic fixtures): `Service::Graph` on the transport's allowlist
       (that host exactly, `GET` only, the Graph audience from the `Session`); names and pictures cached in the store,
       refreshed by age; the chat list, the chat view and the mention picker use them
-- [ ] if it doesn't: the middle tier's profile lookups as a native read by `POST` (`PostRead`, Technical Details),
-      decided with Codex, tests and a `fence-seal` case first
+- [ ] if it doesn't: names come from what the reads already give (a message's `imdisplayname`, the account names in
+      `lab.toml`), pictures as initials, cached the same way. The middle tier's profile lookups (a native read by
+      `POST`) wait for the user's decision on `PostRead` (Decisions for the user). Only if the user widens the rule:
+      the `PostRead` entry for them, decided with Codex, tests and a `fence-seal` case first
 - [ ] `cargo test -p teams-proto -p teams-core -p teams-ui -p fixture-guard` and the gate pass
 
 ### Task 9: Compose and the writes from the UI
@@ -394,9 +432,10 @@ ui-sandbox (tests only: weston + nested niri, private D-Bus, virtual input, scre
       captured shape and only when every MRI it names is a lab account
 - [ ] live: capture its request and answer (an `ab-chat` run); allowed only if the answer names nobody but the
       accounts asked for; answer `auth.md` question 4 (the presence token's audience)
-- [ ] if allowed: the native `PostRead` entry for it (Technical Details), polled at a bounded interval for the lab
-      accounts in view; decided with Codex, tests and a `fence-seal` case first. If not: presence isn't shown in the
-      lab
+- [ ] natively, presence isn't shown in the lab (a "not available" state in the views, tested) until the user decides
+      on `PostRead` (Decisions for the user); this task's browser capture is the evidence for that decision. Only if
+      the user widens the rule and the capture allowed it: the native `PostRead` entry for it, polled at a bounded
+      interval for the lab accounts in view, decided with Codex, tests and a `fence-seal` case first
 - [ ] the account's own presence is not set and shown as not reported (Decisions for the user)
 - [ ] `cargo test -p proto-lab -p teams-proto -p teams-ui -p fence-seal` and the gate pass
 
@@ -465,9 +504,14 @@ ui-sandbox (tests only: weston + nested niri, private D-Bus, virtual input, scre
 - Create: `crates/teams-app/tests/ui_live.rs` (`required-features = ["live"]`), `docs/m2-acceptance.md`
 
 - [ ] the live test is an orchestrator only: it starts the UI sandbox, spawns the app built by `cargo build -p
-      teams-app --target-dir target/lab` (path from `TEAMS_APP_BIN`) for a, b and c, one process each, drives them
+      teams-app --target-dir target/lab` (path from `TEAMS_APP_BIN`) for a, b and c, one app process each, drives them
       with the sandbox's input, reads their view traces and `fence.log`; it opens no fence, holds no token and sends
       nothing itself
+- [ ] credentials: for each account the orchestrator starts that binary's broker (`teams-app secrets --lab <alias>`)
+      outside the sandbox, with the user's session bus, and hands the socket's other end to the app it spawns in the
+      sandbox (`--secrets-fd`). It never reads or writes the socket itself, and the app's environment carries only the
+      sandbox's bus. Every broker has exited when the run ends (checked); no token in the orchestrator's, the
+      brokers' or the apps' output
 - [ ] (`PROTO_LAB_LIVE=1`): a types and sends N = 20 messages to b; each is shown in b's chat view; **send → shown
       p95 under 2 s** (p50/p95/max reported); an edit and a reaction shown; a message to the group chat shown by b
       and c; b's notification raised on the sandbox's bus for a chat it isn't viewing; b's app closed, a sends, b's
@@ -480,7 +524,8 @@ ui-sandbox (tests only: weston + nested niri, private D-Bus, virtual input, scre
 
 ### Task 19: [Final] Update documentation
 - [ ] README.md: the M2 crates, `teams-app`, the UI sandbox, the live UI test
-- [ ] CLAUDE.md: the patterns M2 settled (the UI sandbox, the bridge, the view trace, any new request class)
+- [ ] CLAUDE.md: the patterns M2 settled (the UI sandbox, the bridge, the credential broker, the view trace, any new
+      request class the user approved)
 - [ ] `docs/protocol/endpoints.md` checked against every endpoint M2 touched
 - [ ] write the M3 plan (calls), informed by M2
 - [ ] move this plan to `docs/plans/completed/`
@@ -496,9 +541,9 @@ cargo test -p fixture-guard
 cargo build -p proto-lab -p teams-headless -p teams-app --target-dir target/lab
 target/lab/debug/proto-lab run ab-chat --headless
 target/lab/debug/proto-lab run abc-chat --headless
-TEAMS_APP_BIN=target/lab/debug/teams-app PROTO_LAB_LIVE=1 \
+TEAMS_APP_BIN=$PWD/target/lab/debug/teams-app PROTO_LAB_LIVE=1 \
   cargo test -p teams-app --features live --test ui_live
-TEAMS_HEADLESS_BIN=target/lab/debug/teams-headless PROTO_LAB_LIVE=1 \
+TEAMS_HEADLESS_BIN=$PWD/target/lab/debug/teams-headless PROTO_LAB_LIVE=1 \
   cargo test -p teams-headless --features live --test chat_live
 ```
 
@@ -537,6 +582,21 @@ Every live command above runs under `flock ~/.local/share/teams-lab/live.lock` w
 - **The personal build** (Task 17): what its fence is, how it is told apart from a lab binary, and when the user
   switches to it. Agents never build or run it.
 - **The account's own presence**: whether the native client may set it (a write the whole tenant sees), and how.
+- **A native read by `POST` (`PostRead`)** (Tasks 8, 13): CLAUDE.md's hard rule "The native client sends only what
+  its sealed policy allows" lets out three things only: a read (`GET`, no body), an entry of the sealed `OwnState`
+  list, and an `Authorized<Mutating>` write. Nothing else can go out. A `POST` that reads other lab accounts' data
+  (the middle tier's profile lookups, UPS's `getpresence`) is none of these, so the native client can't send it,
+  though the browser fence may allow it under the 2026-10-21 allowance rules. What would change: the rule would gain
+  a fourth sealed list, `teams-proto`'s `PostRead`, under the same 2026-10-21 rules applied natively. Each entry
+  would be added only after a review, in its exact captured shape (host, method, path, every query parameter, the
+  headers that change what it does, the body schema). Every MRI it names would be checked against the lab roster when
+  the fence decides (`Fence::lab_accounts_only`), and any other id would make it `Unknown`. Its captured answer could
+  hold only the accounts asked for. It would be logged to `fence.log` before it is sent, and not sent if it can't be
+  logged. It would carry no token to a third party, and a `fence-seal` case would prove nothing else mints one. Why:
+  Graph may not give names and pictures (Task 8), and presence has no `GET` (Task 13). Until the user decides, the
+  native client sends no `POST` read: names come from what reads already give, pictures are initials, and presence
+  isn't shown. CLAUDE.md isn't changed by this plan; if the user widens the rule, the rule's text changes first, then
+  Tasks 8 and 13 build on it.
 - **A lab-only team**: whether to create a team of a, b and c only (a group the tenant's directory shows), so that
   channel writes can be mapped and tested.
 - **Native group-chat enrolment**: whether the group-chat rule may admit chats the native client creates, and on what
