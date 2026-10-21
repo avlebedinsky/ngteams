@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
-use proto_lab::cdp::{CdpError, RemoteError};
+use proto_lab::cdp::{CdpError, RemoteError, SessionId};
 use proto_lab::classify::{Classifier, OwnKind, OwnRule};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
@@ -69,6 +69,8 @@ document.getElementById('box').addEventListener('keydown', (event) => {
 struct Run {
     armed: ArmedBrowser,
     driver: Driver,
+    /// The tab's session.
+    page: SessionId,
     server: MockServer,
     _dir: tempfile::TempDir,
 }
@@ -133,10 +135,11 @@ where
     };
     let armed = ArmedBrowser::arm(browser, http, ws, &options).await?;
     let page = armed.open_page(Duration::from_secs(15)).await?.session;
-    let driver = Driver::new(armed.cdp().clone(), page, armed.watch());
+    let driver = Driver::new(armed.cdp().clone(), page.clone(), armed.watch());
     let mut run = Run {
         armed,
         driver,
+        page,
         server,
         _dir: dir,
     };
@@ -444,6 +447,10 @@ fn only_an_evaluation_refused_because_its_page_navigated_counts_as_navigated_awa
 #[tokio::test]
 async fn keys_are_pressed_with_their_modifiers() -> TestResult {
     with_page(async |run| {
+        // the navigation is answered before the page is parsed: typing at once raced it
+        run.driver
+            .wait_for("the box", Selector::Tid("box"), Duration::from_secs(10))
+            .await?;
         run.driver.type_into("type", Selector::Tid("box"), "hello").await?;
         run.driver.press("select all", Key::SELECT_ALL).await?;
         run.driver
@@ -1001,6 +1008,196 @@ async fn the_enforcement_test_fails_when_bs_copy_of_the_chat_has_the_probe() -> 
                 .is_err_and(|error| error.to_string().contains("b received the probe")),
             "{received:?}"
         );
+        Ok(())
+    })
+    .await
+}
+
+/// A compose box that, like the web client's editor, takes an image file handed to it (by a paste, or by a drop when
+/// `#mode` says `drop`) and shows it as an `img`, saying on the page the file's name, type and size.
+const IMAGE_PAGE: &str = r#"<!doctype html><html><body>
+<div id="out"></div>
+<div id="mode">paste</div>
+<div contenteditable="true" role="textbox" id="compose"></div>
+<script>
+const compose = document.getElementById('compose');
+function take(files, how) {
+  if (document.getElementById('mode').textContent !== how) return;
+  const file = files[0];
+  document.getElementById('out').textContent = how + ' ' + file.name + ' ' + file.type + ' ' + file.size;
+  const img = document.createElement('img');
+  img.src = URL.createObjectURL(file);
+  compose.append(img);
+}
+compose.addEventListener('paste', (event) => { event.preventDefault(); take(event.clipboardData.files, 'paste'); });
+compose.addEventListener('dragover', (event) => event.preventDefault());
+compose.addEventListener('drop', (event) => { event.preventDefault(); take(event.dataTransfer.files, 'drop'); });
+</script></body></html>"#;
+
+#[tokio::test]
+async fn ab_image_hands_the_compose_box_its_test_image_by_paste_or_drop() -> TestResult {
+    use proto_lab::scenario::ab_image::{compose_has_image, image_event, test_png};
+    with_html(IMAGE_PAGE, async |run| {
+        let drive = &mut run.driver;
+        let png = test_png(0x40);
+        let has_image = compose_has_image();
+        let short = Duration::from_secs(5);
+        // the page takes pastes: a drop does nothing there
+        drive
+            .wait_until_true(
+                "drop",
+                &image_event(&png, "lab-image-n1.png", "drop"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        let none = drive
+            .wait_until_true("no image", &has_image, "an image", Duration::from_millis(500))
+            .await;
+        assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
+        drive
+            .wait_until_true(
+                "paste",
+                &image_event(&png, "lab-image-n1.png", "paste"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        drive
+            .wait_until_true("image", &has_image, "an image", Duration::from_secs(5))
+            .await?;
+        let said = format!("paste lab-image-n1.png image/png {}", png.len());
+        drive.wait_for_text("pasted", &said, Duration::from_secs(5)).await?;
+        // a page that takes drops
+        drive
+            .wait_until_true(
+                "switch",
+                "(() => { document.getElementById('mode').textContent = 'drop'; return true; })()",
+                "switched",
+                short,
+            )
+            .await?;
+        drive
+            .wait_until_true(
+                "drop",
+                &image_event(&png, "lab-image-n2.png", "drop"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        let said = format!("drop lab-image-n2.png image/png {}", png.len());
+        drive.wait_for_text("dropped", &said, Duration::from_secs(5)).await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A page that asks before it is left, as the web client does while a message is still being sent: once a key has
+/// been pressed in it (a dialog before leaving needs the user to have done something on the page).
+const LEAVING_PAGE: &str = r#"<!doctype html><html><body>
+<div contenteditable="true" role="textbox" id="box"></div>
+<script>
+window.addEventListener('beforeunload', (event) => { event.preventDefault(); event.returnValue = ''; });
+</script></body></html>"#;
+
+#[tokio::test]
+async fn a_navigation_held_by_a_dialog_before_leaving_is_bounded_and_leaves_the_page() -> TestResult {
+    with_html(LEAVING_PAGE, async |run| {
+        run.driver
+            .wait_for("the box", Selector::Css("#box"), Duration::from_secs(10))
+            .await?;
+        run.driver.type_into("type", Selector::Css("#box"), "unsent").await?;
+        run.driver.press("a key", Key::ENTER).await?;
+        // what hung a live run: Page.navigate unanswered while the page's dialog shows to nobody
+        let cdp = run.armed.cdp().clone();
+        let held = tokio::time::timeout(
+            Duration::from_secs(3),
+            cdp.call(
+                Some(&run.page),
+                "Page.navigate",
+                serde_json::json!({"url": "about:blank"}),
+            ),
+        )
+        .await;
+        assert!(held.is_err(), "the dialog didn't hold the navigation: {held:?}");
+        // the bounded navigation accepts the dialog, and the page is left
+        dsl::navigate_tab(&cdp, &run.page, "about:blank", Duration::from_secs(20)).await?;
+        run.driver
+            .wait_until_true(
+                "the page was left",
+                "location.href === 'about:blank'",
+                "about:blank",
+                Duration::from_secs(10),
+            )
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_navigation_the_page_holds_past_its_timeout_fails_in_time() -> TestResult {
+    with_html(LEAVING_PAGE, async |run| {
+        run.driver
+            .wait_for("the box", Selector::Css("#box"), Duration::from_secs(10))
+            .await?;
+        run.driver.type_into("type", Selector::Css("#box"), "unsent").await?;
+        run.driver.press("a key", Key::ENTER).await?;
+        let cdp = run.armed.cdp().clone();
+        // the first navigation is held by the dialog and given up at once, before the dialog wait
+        let started = tokio::time::Instant::now();
+        let outcome = dsl::navigate_tab(&cdp, &run.page, "about:blank", Duration::from_millis(500)).await;
+        assert!(matches!(outcome, Err(dsl::NavigateError::Timeout(_))), "{outcome:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        // and a driver's navigation is bounded by its call timeout, failing the step by name
+        run.driver.set_call_timeout(Duration::from_millis(500));
+        let error = match run.driver.navigate("leave", "about:blank").await {
+            Ok(()) => return Ok(()), // the earlier accept may have left the page already
+            Err(error) => error,
+        };
+        assert!(matches!(error, StepError::Timeout { .. }), "{error}");
+        assert!(
+            error.to_string().contains("leave") && error.to_string().contains("Page.navigate"),
+            "{error}"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A chat with an avatar (an image from a URL) on the other account's message and two images of a's not yet uploaded
+/// (local previews).
+const IMAGES_CHAT_PAGE: &str = r#"<!doctype html><html><body>
+<div data-tid="chat-pane-message" id="older"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div>
+<div data-tid="chat-pane-message" id="newer"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div>
+<div data-tid="chat-pane-message" id="avatar"><img src="/avatar.png"><p>hello</p></div>
+<div data-tid="chat-pane-message" id="text"><p>no image</p></div>
+</body></html>"#;
+
+#[tokio::test]
+async fn ab_image_marks_the_newest_message_showing_a_local_image() -> TestResult {
+    use proto_lab::scenario::ab_image::MARK_IMAGE_MESSAGE;
+    with_html(IMAGES_CHAT_PAGE, async |run| {
+        let drive = &mut run.driver;
+        drive
+            .wait_until_true("mark", MARK_IMAGE_MESSAGE, "a message with an image", Duration::from_secs(5))
+            .await?;
+        drive
+            .wait_for("marked", Selector::Css("#newer[data-lab-mark]"), Duration::from_secs(1))
+            .await?;
+        // once the marked ones are gone, the avatar alone isn't taken for one
+        drive
+            .wait_until_true(
+                "remove",
+                "(() => { document.getElementById('newer').remove(); document.getElementById('older').remove(); return true; })()",
+                "removed",
+                Duration::from_secs(5),
+            )
+            .await?;
+        let none = drive
+            .wait_until_true("mark again", MARK_IMAGE_MESSAGE, "a message with an image", Duration::from_millis(500))
+            .await;
+        assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
         Ok(())
     })
     .await

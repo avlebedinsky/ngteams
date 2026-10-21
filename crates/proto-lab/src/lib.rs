@@ -16,3 +16,4 @@ pub mod fence_ws;
 pub mod sanitize;
 pub mod scenario;
 pub mod session;
+pub mod stop;

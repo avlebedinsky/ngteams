@@ -155,13 +155,19 @@ fn marking_an_own_feed_item_read_is_expected_and_nothing_like_it() -> TestResult
     let policies = [ab_chat_policy()?, echo_call::policy()];
     let feed = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Anotifications/messages";
     let isread = format!("{feed}/1760000000000/properties");
+    // and the mentions feed's, seen from b in ab-image (2026-10-21)
+    let mentions = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Amentions/messages";
+    let mention_read = format!("{mentions}/1760000000000/properties");
     for policy in &policies {
         assert!(policy.expects(&denial("PUT", &isread, DenyCause::Unclassified)));
+        assert!(policy.expects(&denial("PUT", &mention_read, DenyCause::Unclassified)));
     }
     assert_unlisted(&[
         ("POST", &isread),
         ("PUT", &format!("{feed}/1760000000000")),
         ("POST", feed),
+        ("POST", &mention_read),
+        ("PUT", &format!("{mentions}/1760000000000")),
         (
             "PUT",
             "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Acalllogs/messages/1/properties",

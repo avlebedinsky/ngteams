@@ -190,9 +190,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(cli)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
+    // a signal drops the command, and with it every lab browser it owns, before the process exits
+    match runtime.block_on(proto_lab::stop::until_stopped(run(cli))) {
+        Ok(Ok(())) => ExitCode::SUCCESS,
+        Err(stopped) => {
+            eprintln!("proto-lab: {stopped}");
+            ExitCode::from(130)
+        }
+        Ok(Err(error)) => {
             eprintln!("proto-lab: {error}");
             ExitCode::FAILURE
         }
