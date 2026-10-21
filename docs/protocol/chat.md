@@ -161,11 +161,11 @@ text is a typed rich-text value with the MRI of each mention, from which `conten
 write's target are all built; raw HTML can't be sent. Times go out as the web client writes them
 (`2026-01-01T00:00:00.000Z`), an edit's `version` and `properties.edittime` being one instant.
 
-**The mention form was built from the bundle before the capture.** It is built in one place only, `mention_span`
-and `mention_entry` in `crates/teams-proto/src/chat/compose.rs`, so the captured form ([above](#mentions-mention))
-replaces those two functions alone. Still owed from M1 Task 12: bring them (and the read of a mention) to the
-captured form, the `<readonly>` wrapper as sent and `mention.json` as rewritten from the capture; until then a mention
-the native client sends differs from the web client's.
+**A mention is sent in the captured form** ([above](#mentions-mention)): the span inside the `<readonly>` element,
+built in one place only, `mention_span` and `mention_entry` in `crates/teams-proto/src/chat/compose.rs` (written from
+the bundle in Task 12, brought to the capture when the capture reached the M1 branch), and a no-break space written
+`&nbsp;` as the web client writes the one after a mention. Its tests compare the post with `mention.json` and read the
+mention back from both the post and the chat's copy.
 
 ## Read horizons
 

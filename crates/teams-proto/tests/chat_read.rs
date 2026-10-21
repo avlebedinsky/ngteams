@@ -276,26 +276,30 @@ fn edits_deletes_and_reactions_read_back_as_their_fixtures_recorded() -> TestRes
 }
 
 #[test]
-fn a_mention_reads_in_the_bundles_form_from_content_and_properties() -> TestResult {
-    let sent = message(&fixture("mention.json")?["request"]["body"])?;
-    let mentions = sent.mentions().known().ok_or("mentions as a JSON string")?;
-    assert_eq!(mentions.len(), 1);
-    assert_eq!(mentions[0].item_id, "0");
-    assert_eq!(mentions[0].mri.as_deref(), Some(LAB_B));
-    assert_eq!(mentions[0].kind, MentionKind::Person);
-    assert_eq!(mentions[0].display_name.as_deref(), Some("Lab B"));
-    assert_eq!(mentions[0].extra["@type"], "http://schema.skype.com/Mention");
-    let rich = sent.rich_text().ok_or("no rich text")?;
-    assert_eq!(
-        rich.nodes,
-        [Node::Paragraph(vec![
-            Node::Mention {
-                item_id: "0".to_owned(),
-                text: "Lab B".to_owned()
-            },
-            text(" a made-up mention"),
-        ])]
-    );
+fn a_mention_reads_in_the_captured_form_from_content_and_properties_as_sent_and_read_back() -> TestResult {
+    let fixture = fixture("mention.json")?;
+    // as sent the span is inside a `readonly` element; read back it is bare and the entry's itemid a number
+    for form in [&fixture["request"]["body"], &fixture["read_back"]] {
+        let read = message(form)?;
+        let mentions = read.mentions().known().ok_or("mentions as a JSON string")?;
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].item_id, "0");
+        assert_eq!(mentions[0].mri.as_deref(), Some(LAB_B));
+        assert_eq!(mentions[0].kind, MentionKind::Person);
+        assert_eq!(mentions[0].display_name.as_deref(), Some("Lab B"));
+        assert_eq!(mentions[0].extra["@type"], "http://schema.skype.com/Mention");
+        let rich = read.rich_text().ok_or("no rich text")?;
+        assert_eq!(
+            rich.nodes,
+            [Node::Paragraph(vec![
+                Node::Mention {
+                    item_id: "0".to_owned(),
+                    text: "Lab B".to_owned()
+                },
+                text("\u{a0}a made-up mention"),
+            ])]
+        );
+    }
     Ok(())
 }
 

@@ -10,9 +10,10 @@
 //! - a reply's quote as the captured reply (`reply.json`): the `blockquote` of itemtype Reply naming the quoted message,
 //!   its sender and its time, with a `preview` paragraph of the quote's text, plus a `qtdMsgs` entry; a quote that
 //!   names no message as a plain `blockquote`;
-//! - a mention in the web bundle's form ([`mention_span`], [`mention_entry`]): **not captured yet**
-//!   (`docs/backlog/mention-not-captured-under-the-fence.md`); those two functions are the only place it is built, so
-//!   a captured form replaces them alone;
+//! - a mention as the web client sent it (`mention.json`, captured in `ab-chat-full` on 2026-10-21): the span of
+//!   itemtype Mention inside a `readonly` element, and its `properties.mentions` entry ([`mention_span`],
+//!   [`mention_entry`], the only place it is built); a no-break space (U+00A0) as `&nbsp;`, as the web client writes
+//!   the one after a mention;
 //! - an image is refused: sending one is an attachment (M1 Task 20 decides), not a message's text.
 //!
 //! Every mentioned MRI is a participant of the message ([`MessageText::participants`]), so the fence judges them
@@ -207,16 +208,17 @@ impl From<MessageText> for Stored {
     }
 }
 
-/// A mention's span in `content`, in the web bundle's form (not captured; see the module docs): the name shown, marked
-/// with the mention's index in the message.
+/// A mention's span in `content`, as captured (`mention.json`): the name shown, marked with the mention's index in the
+/// message, inside the `readonly` element the web client's editor wraps it in.
 fn mention_span(index: usize, name: &str) -> String {
     format!(
-        "<span itemtype=\"{MENTION_ITEMTYPE}\" itemscope itemid=\"{index}\">{}</span>",
+        "<readonly class=\"skipProofing\" itemtype=\"{MENTION_ITEMTYPE}\" spellcheck=\"false\"><span \
+         itemtype=\"{MENTION_ITEMTYPE}\" itemscope itemid=\"{index}\">{}</span></readonly>",
         escape(name)
     )
 }
 
-/// A mention's entry in `properties.mentions`, in the web bundle's form (not captured; see the module docs).
+/// A mention's entry in `properties.mentions`, as captured (`mention.json`): `itemid` a string as sent.
 fn mention_entry(index: usize, mri: &Mri, name: &str) -> Value {
     json!({
         "@type": MENTION_ITEMTYPE,
@@ -396,7 +398,8 @@ fn is_link(href: &str) -> bool {
     Url::parse(href).is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "mailto"))
 }
 
-/// `text` with `&`, `<`, `>` and `"` escaped, for an element's text or a quoted attribute.
+/// `text` with `&`, `<`, `>` and `"` escaped, for an element's text or a quoted attribute, and a no-break space as
+/// `&nbsp;` (the web client's form of the space after a mention).
 fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
@@ -405,6 +408,7 @@ fn escape(text: &str) -> String {
             '<' => escaped.push_str("&lt;"),
             '>' => escaped.push_str("&gt;"),
             '"' => escaped.push_str("&quot;"),
+            '\u{a0}' => escaped.push_str("&nbsp;"),
             other => escaped.push(other),
         }
     }

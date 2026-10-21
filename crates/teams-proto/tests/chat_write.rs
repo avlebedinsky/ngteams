@@ -105,7 +105,8 @@ fn plain(words: &str) -> MessageText {
     MessageText::plain(words).unwrap()
 }
 
-/// "Lab B a made-up mention", mentioning b: `mention.json`'s text.
+/// "Lab B\u{a0}a made-up mention", mentioning b: `mention.json`'s text (a no-break space after the mention, as the web
+/// client wrote it).
 fn mentioning_b() -> MessageText {
     mentioning(LAB_B, "Lab B")
 }
@@ -114,7 +115,7 @@ fn mentioning(who: &str, name: &str) -> MessageText {
     MessageText::new(
         rich(vec![Node::Paragraph(vec![
             mention("m", name),
-            run(" a made-up mention"),
+            run("\u{a0}a made-up mention"),
         ])]),
         [("m".to_owned(), mri(who))],
     )
@@ -348,7 +349,8 @@ fn a_mention_is_in_the_content_and_the_target_from_one_value() {
     let text = mentioning_b();
     assert_eq!(
         text.html(),
-        "<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Lab B</span> a made-up \
+        "<p><readonly class=\"skipProofing\" itemtype=\"http://schema.skype.com/Mention\" spellcheck=\"false\"><span \
+         itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Lab B</span></readonly>&nbsp;a made-up \
          mention</p>"
     );
     assert_eq!(text.participants(), &BTreeSet::from([mri(LAB_B)]));

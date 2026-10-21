@@ -4,7 +4,8 @@
 //!
 //! - **Kept**: text, `br`; `p`, `div`, `li`, `h1`–`h6` and `pre` as paragraphs; `b`/`strong`, `i`/`em`, `u`/`ins`,
 //!   `s`/`strike`/`del`, `code` as marks; a mention (`<span itemtype="http://schema.skype.com/Mention" itemid="<n>">`,
-//!   bundle-derived, not captured); a quote (`<blockquote>`; a reply's, `itemtype="http://schema.skype.com/Reply"`,
+//!   as captured: inside a `readonly` element as sent, which is unknown markup and so gives its text, bare as read
+//!   back); a quote (`<blockquote>`; a reply's, `itemtype="http://schema.skype.com/Reply"`,
 //!   with the quoted message's id, its sender's MRI and name and its time, as `docs/protocol/chat.md` shows it); a link
 //!   with an `http`, `https` or `mailto` `href`; an image with an `https` `src`.
 //! - **Unknown markup is kept as text**: an element this model doesn't name, a link of another scheme or an image of

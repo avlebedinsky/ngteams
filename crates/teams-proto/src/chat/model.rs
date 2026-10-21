@@ -444,9 +444,8 @@ impl Message {
         }
     }
 
-    /// `properties.mentions`, read as a JSON string or as a list (the bundle's reader takes both). **Not captured**: the
-    /// form is the web bundle's (`docs/protocol/chat.md`), so an entry of another form makes it all
-    /// [`Field::Unknown`].
+    /// `properties.mentions`, read as a JSON string (as captured, sent and read back: `docs/protocol/chat.md`) or as a
+    /// list (the bundle's reader takes both; not seen). An entry of another form makes it all [`Field::Unknown`].
     #[must_use]
     pub fn mentions(&self) -> Field<Vec<Mention>> {
         json_list(self.properties.get("mentions"))
@@ -570,8 +569,9 @@ pub struct ReactionUser {
     pub extra: Map<String, Value>,
 }
 
-/// One entry of `properties.mentions`, in the web bundle's form (not captured). Its `item_id` is the `itemid` of the
-/// mention's span in the content ([`crate::chat::Node::Mention`]).
+/// One entry of `properties.mentions`, as captured (`mention.json`: `itemid` a string as sent, a number as read back;
+/// `mentionType` `person`). Its `item_id` is the `itemid` of the mention's span in the content
+/// ([`crate::chat::Node::Mention`]).
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Mention {
     #[serde(rename = "itemid", deserialize_with = "string_or_number")]
