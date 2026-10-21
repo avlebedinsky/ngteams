@@ -1,6 +1,7 @@
 //! The mock chat service against its fixtures: reads replay `tests/fixtures/chatsvc/`, writes read back as the
 //! fixtures recorded and queue an event for every other member, the headers M1 Task 3 found are required, and the
-//! native transport and the fence's membership read reach it through their `test-support` mock origins.
+//! native transport and the fence's membership read reach it through their `test-support` mock origins. Its Trouter
+//! (`tests/fixtures/trouter/`): the session's frames, the registrar, and deliveries only to a registered endpoint.
 //!
 //! Every id and token here is the mock's made-up one, never a real one.
 
@@ -26,6 +27,7 @@ use teams_proto::{Client, Credentials, Endpoint, HttpTransport, Read, SendMessag
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/chatsvc");
+const TROUTER_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/trouter");
 
 fn oid(mri: &str) -> &str {
     mri.trim_start_matches("8:orgid:")
@@ -1231,22 +1233,248 @@ fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
             }
             for include in source.split("include_str!(\"").skip(1) {
                 assert!(
-                    include.starts_with("../../../tests/fixtures/chatsvc/"),
+                    include.starts_with("../../../tests/fixtures/chatsvc/")
+                        || include.starts_with("../../../tests/fixtures/trouter/"),
                     "{}: {include:.60}",
                     path.display()
                 );
             }
         }
     }
-    for entry in std::fs::read_dir(FIXTURES)? {
-        let path = entry?.path();
-        let text = std::fs::read_to_string(&path)?;
-        let fixture: Value = serde_json::from_str(&text)?;
-        assert!(
-            fixture.get("_synthetic").is_some(),
-            "{} isn't marked synthetic",
-            path.display()
-        );
+    for dir in [FIXTURES, TROUTER_FIXTURES] {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            let text = std::fs::read_to_string(&path)?;
+            let fixture: Value = serde_json::from_str(&text)?;
+            assert!(
+                fixture.get("_synthetic").is_some(),
+                "{} isn't marked synthetic",
+                path.display()
+            );
+        }
     }
+    Ok(())
+}
+
+type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// The next text frame from the mock's Trouter (at most 5 s away).
+async fn read_frame(socket: &mut Socket) -> TestResult<String> {
+    use futures_util::StreamExt as _;
+    loop {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await?
+            .ok_or("the socket closed")??;
+        if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+            return Ok(text.as_str().to_owned());
+        }
+    }
+}
+
+async fn write_frame(socket: &mut Socket, text: &str) -> TestResult {
+    use futures_util::SinkExt as _;
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::text(text.to_owned()))
+        .await?;
+    Ok(())
+}
+
+/// `user.authenticate` as the messaging stack sends it, with `token`.
+fn authenticate_frame(token: &str) -> String {
+    let event = json!({"name": "user.authenticate", "args": [{"headers": {
+        "X-Ms-Test-User": "False", "Authorization": format!("Bearer {token}"), "X-MS-Migration": "True"}}]});
+    format!("5:::{event}")
+}
+
+/// A socket to the mock's Trouter, authenticated with `token`; its `trouter.connected` argument.
+async fn connect_as(trouter: &teams_mock::TrouterMock, token: &str) -> TestResult<(Socket, Value)> {
+    let url = format!(
+        "{}/v4/c?tc=%7B%7D&timeout=40&epid=00000000-0000-4000-8000-0000000000e1",
+        trouter.origin()
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await?;
+    assert_eq!(read_frame(&mut socket).await?, "1::");
+    write_frame(&mut socket, &authenticate_frame(token)).await?;
+    let connected = read_frame(&mut socket).await?;
+    let event: Value = serde_json::from_str(connected.strip_prefix("5:1::").ok_or("not trouter.connected")?)?;
+    assert_eq!(event["name"], "trouter.connected");
+    Ok((socket, event["args"][0].clone()))
+}
+
+/// A registration of `push_url` for `app`, in `registration.json`'s shape.
+fn registration_body(app: &str, push_url: &str) -> Value {
+    json!({
+        "clientDescription": {"appId": app, "aesKey": "", "languageId": "en-US", "platform": "chrome",
+            "templateKey": format!("{app}_2.6"), "platformUIVersion": "1/1"},
+        "registrationId": "00000000-0000-4000-8000-0000000000e1",
+        "nodeId": "",
+        "transports": {"TROUTER": [{"context": "", "path": push_url, "ttl": 3600}]},
+    })
+}
+
+/// A fixture of `tests/fixtures/trouter/`, as it is.
+fn trouter_fixture(name: &str) -> TestResult<Value> {
+    Ok(serde_json::from_str(&std::fs::read_to_string(
+        Path::new(TROUTER_FIXTURES).join(name),
+    )?)?)
+}
+
+/// The JSON of a recorded frame, after its packet prefix.
+fn recorded_frame(frames: &Value, name: &str, prefix: &str) -> TestResult<Value> {
+    let frame = frames
+        .as_array()
+        .and_then(|frames| frames.iter().find(|frame| frame["name"] == name))
+        .and_then(|frame| frame["frame"].as_str())
+        .ok_or_else(|| format!("no frame {name:?}"))?;
+    Ok(serde_json::from_str(
+        frame.strip_prefix(prefix).ok_or("another packet")?,
+    )?)
+}
+
+impl Lab {
+    async fn register(&self, token: Option<&str>, body: &Value) -> TestResult<u16> {
+        let url = format!("{}/registrar/prod/V2/registrations", self.mock.origin());
+        let bearer = token.map(|token| format!("Bearer {token}"));
+        let mut headers = vec![("X-MS-Migration", "True"), ("X-Ms-Test-User", "False")];
+        if let Some(bearer) = &bearer {
+            headers.push(("Authorization", bearer.as_str()));
+        }
+        Ok(self.send_raw(Method::POST, &url, &headers, Some(body)).await?.status)
+    }
+}
+
+#[tokio::test]
+async fn the_mocks_trouter_connects_authenticates_and_answers_pings_as_the_session_fixture() -> TestResult {
+    let lab = Lab::start().await?;
+    let trouter = lab.mock.start_trouter()?;
+    let token = lab.mock.token(LAB_B).ok_or("no b")?;
+    let (mut socket, connected) = connect_as(&trouter, &token).await?;
+
+    let session = trouter_fixture("session.json")?;
+    let recorded = recorded_frame(&session["frames"], "the endpoint and its push URLs", "5:1::")?;
+    assert_eq!(keys(&connected), keys(&recorded["args"][0]));
+    let endpoint = connected["id"].as_str().ok_or("no id")?.to_owned();
+    assert_eq!(
+        connected["surl"],
+        format!(
+            "https://{}-f.trouter.teams.microsoft.com:3443/v4/f/{endpoint}/",
+            teams_mock::REGIONAL_NAME
+        )
+    );
+    assert_eq!(connected["connectparams"]["sr"], endpoint.as_str());
+
+    write_frame(&mut socket, r#"5:1+::{"name":"ping"}"#).await?;
+    assert_eq!(read_frame(&mut socket).await?, r#"6:::1+["pong"]"#);
+    let record = &trouter.sockets()[0];
+    assert_eq!(record.account.as_deref(), Some(LAB_B));
+    assert_eq!(record.endpoint.as_deref(), Some(endpoint.as_str()));
+    assert!(record.query.contains("epid=00000000-0000-4000-8000-0000000000e1"));
+    assert_eq!(
+        record.frames,
+        [authenticate_frame(&token), r#"5:1+::{"name":"ping"}"#.to_owned()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_socket_that_is_late_to_authenticate_or_brings_a_strange_token_is_closed_with_the_reason() -> TestResult {
+    let lab = Lab::start().await?;
+    let trouter = lab.mock.start_trouter()?;
+    trouter.set_auth_timeout(std::time::Duration::from_millis(100));
+    let url = format!("{}/v4/c?timeout=40", trouter.origin());
+    let (mut late, _) = tokio_tungstenite::connect_async(&url).await?;
+    assert_eq!(read_frame(&mut late).await?, "1::");
+    assert_eq!(read_frame(&mut late).await?, r#"0:::{"reason":"timeout"}"#);
+
+    let (mut strange, _) = tokio_tungstenite::connect_async(&url).await?;
+    assert_eq!(read_frame(&mut strange).await?, "1::");
+    write_frame(&mut strange, &authenticate_frame("not-a-token-of-the-mocks")).await?;
+    assert_eq!(read_frame(&mut strange).await?, r#"0:::{"reason":"unauthorized"}"#);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_registrar_takes_only_the_messaging_registration_with_the_accounts_token() -> TestResult {
+    let lab = Lab::start().await?;
+    let trouter = lab.mock.start_trouter()?;
+    let token = lab.mock.token(LAB_B).ok_or("no b")?;
+    let push = "https://mock-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/MockEndpoint000009/";
+    let messaging = registration_body("TeamsCDLWebWorker", push);
+    assert_eq!(lab.register(None, &messaging).await?, 401);
+    assert_eq!(
+        lab.register(Some(&token), &registration_body("SkypeSpacesWeb", push))
+            .await?,
+        400
+    );
+    assert_eq!(lab.register(Some(&token), &json!({"registrationId": "x"})).await?, 400);
+    assert!(trouter.registrations().is_empty());
+    assert_eq!(lab.register(Some(&token), &messaging).await?, 202);
+    let registrations = trouter.registrations();
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(
+        (registrations[0].account.as_str(), registrations[0].path.as_str()),
+        (LAB_B, push)
+    );
+    assert_eq!(registrations[0].ttl, 3600);
+    let url = format!("{}/registrar/prod/V2/registrations", lab.mock.origin());
+    let bearer = format!("Bearer {token}");
+    let read = lab
+        .send_raw(Method::GET, &url, &[("Authorization", bearer.as_str())], None)
+        .await?;
+    assert_eq!(read.status, 404);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deliveries_wait_for_the_registration_and_come_in_the_deliveries_fixture_shape() -> TestResult {
+    let lab = Lab::start().await?;
+    let trouter = lab.mock.start_trouter()?;
+    let token = lab.mock.token(LAB_B).ok_or("no b")?;
+    let (mut socket, connected) = connect_as(&trouter, &token).await?;
+    let id = lab
+        .post(LAB_A, AB_CHAT, &text_message("<p>pushed</p>", "4444444444444444444"))
+        .await?;
+    // nothing is delivered before a registration names the endpoint
+    write_frame(&mut socket, r#"5:1+::{"name":"ping"}"#).await?;
+    assert_eq!(read_frame(&mut socket).await?, r#"6:::1+["pong"]"#);
+
+    let push = connected["surl"].as_str().ok_or("no surl")?;
+    let registration = registration_body("TeamsCDLWebWorker", push);
+    assert_eq!(lab.register(Some(&token), &registration).await?, 202);
+    let frame = read_frame(&mut socket).await?;
+    let delivery: Value = serde_json::from_str(frame.strip_prefix("3:::").ok_or("not a delivery")?)?;
+    let recorded = recorded_frame(
+        &trouter_fixture("deliveries.json")?["deliveries"],
+        "a's new message",
+        "3:::",
+    )?;
+    assert_eq!(keys(&delivery), keys(&recorded));
+    let mut got_headers = keys(&delivery["headers"]);
+    let mut recorded_headers = keys(&recorded["headers"]);
+    got_headers.sort();
+    recorded_headers.sort();
+    assert_eq!(got_headers, recorded_headers);
+    let endpoint = connected["id"].as_str().ok_or("no id")?;
+    assert_eq!(delivery["url"], format!("/v4/f/{endpoint}/messaging"));
+    let body: Value = serde_json::from_str(delivery["body"].as_str().ok_or("no body")?)?;
+    assert_eq!(
+        (body["type"].as_str(), body["resourceType"].as_str()),
+        (Some("EventMessage"), Some("NewMessage"))
+    );
+    assert_eq!(body["resource"]["id"].as_str(), Some(id.as_str()));
+    assert_eq!(body["resource"]["to"], AB_CHAT);
+    assert_eq!(body["resource"]["content"], "<p>pushed</p>");
+
+    // a read receipt has no captured delivery to another member: it stays queued
+    let horizon = format!(
+        "users/ME/conversations/{}/properties?name=consumptionhorizon",
+        segment(AB_CHAT)
+    );
+    let receipt = json!({"consumptionhorizon": format!("{id};{id};4444444444444444444")});
+    let answer = lab.send(LAB_A, Method::PUT, &horizon, Some(&receipt)).await?;
+    assert_eq!(answer.status, 200);
+    write_frame(&mut socket, r#"5:2+::{"name":"ping"}"#).await?;
+    assert_eq!(read_frame(&mut socket).await?, r#"6:::2+["pong"]"#);
+    assert_eq!(kinds(&lab.mock.take_events(LAB_B)), [EventKind::ReadReceipt]);
     Ok(())
 }

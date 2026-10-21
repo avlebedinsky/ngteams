@@ -4,7 +4,8 @@
 //! A request comes in one of three classes, and a [`Transport`] takes nothing else:
 //! - a [`Read`]: always sent as a `GET`, with no body;
 //! - an [`OwnState`] request: the reviewed list of requests that touch only the account's own state, sealed (only
-//!   this crate adds to it; it starts empty) and logged to `fence.log` before it is sent;
+//!   this crate adds to it: the messaging stack's [`EndpointRegistration`]) and logged to `fence.log` before it is
+//!   sent;
 //! - a write: a request others could notice implements [`Mutating`] and names its one target. [`Client::write`] takes
 //!   the request together with a [`WritePermit`](teams_fence::WritePermit), so a mutating call without a permit doesn't
 //!   compile, and a permit can't be made outside `teams-fence`. At runtime [`Authorized::new`] checks that the permit
@@ -39,9 +40,12 @@ pub use http::{
     BuildError, CONNECT_TIMEOUT, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport, IC3_AUDIENCE,
     MAX_BODY, MAX_RETRY_WAIT, REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
 };
-pub use own::OwnState;
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
+pub use own::{
+    CLIENT_BUILD, EndpointRegistration, MESSAGING_APP_ID, MESSAGING_TEMPLATE, OwnState, REGISTRATION_TTL,
+    TROUTER_DOMAIN,
+};
 pub use read::Read;
 pub use write::{
     AddToCall, Authorized, ConversationUrl, Mutating, SendMessage, StartCall, TEST_CALL_SCENARIO, TargetMismatch, Wire,

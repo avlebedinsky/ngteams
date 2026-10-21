@@ -1,6 +1,6 @@
 # Trouter: the push channel for messaging
 
-Status: 2026-10-20, M1 Task 14. Written from live runs of `proto-lab run ab-trouter --headless` (accounts a and b,
+Status: 2026-10-20, M1 Task 14; the native client's part (below) 2026-10-21, M1 Task 16. Written from live runs of `proto-lab run ab-trouter --headless` (accounts a and b,
 Chrome for Testing 155 headless, the fence armed with the **messaging set**, below), from M0's `echo-call` runs
 (`calling-echo.md`), and from the web bundle `26260.1717.5229.7049` (read locally, notes in our own words). The
 captures stay outside the repository; the fixtures in `tests/fixtures/trouter/` are synthetic, shaped like them
@@ -56,6 +56,36 @@ the shapes above:
 The sink numbers the acknowledged events itself (`<n>`, from 1 per socket). No `user.activity` and no answer to a
 delivery: neither has a type, so neither can be sent.
 
+## The native client (M1 Task 16)
+
+`crates/teams-trouter` is the native push channel, tested against `teams-mock`'s Trouter (`TrouterMock`, which
+answers as the fixtures here do and delivers the chat mock's queued events once a registration names the endpoint):
+
+- **Connect**: `wss://go.trouter.teams.microsoft.com/v4/c`, then the `reconnectUrl` a `trouter.connected` handed over
+  (a `<name>-t` host under `.trouter.teams.microsoft.com`, port 443 dropped as the web client's connect URL dropped
+  it) with its `connectparams`, until those are within an hour of `se` or three connects in a row failed. The query is
+  the messaging stack's as captured: `tc` (`{"cv":…,"ua":"TeamsCDL","hr":"","v":"1415/<build>"}`, braces and quotes
+  percent-encoded, `:`, `,` and `/` left), `timeout=40`, `epid` (one GUID per client run), `cor_id` (a GUID per
+  connect), `con_num` (`<ms>_<n>`); the handshake carries the web client's `Origin: https://teams.microsoft.com` and
+  no credential. TLS is checked by the system's verifier, as the HTTP transport's. The host allowlist and the TLS
+  are lifted only by the `test-support` mock origin (`ws` on loopback), which a `fence-seal` case keeps out of a normal
+  build.
+- **Frames**: `user.authenticate` at once after `1::` (never before it: a stop before then sends nothing at all),
+  pings every 40 s and a reconnect when a pong is 5 s late, the message-loss acknowledgement once the owner has caught
+  up, and `0::` on a stop or a renewal. Each goes through `teams_proto::FrameSink` and is logged to `fence.log`
+  first; the socket's write half goes only to the sink. No `user.activity`, no answer to any delivery, an incoming
+  call's (a `callNotification`, whatever its path) included.
+- **Registration**: the messaging stack's, as `teams_proto::EndpointRegistration` (an own-state request, logged
+  first): the body above with `templateKey` `TeamsCDLWebWorker_2.6` and `platformUIVersion` the `tc`'s `v`, on every
+  `trouter.connected`, again 30 s before its hour ends, after a failure again 123 s later. The transport sends the
+  registrar `X-MS-Migration: True` and `X-Ms-Test-User: False` with the token.
+- **Reconnect**: at once for a renewal, a missing pong, an `unauthorized` disconnect (with a new token) or a `dup`,
+  but never twice within 10 s; otherwise after a backoff of `1 s · 2^n` ±20 %, capped at 300 s, whose count starts
+  again after a connection stayed up a minute. `skypetoken-deprecated` stops the client.
+- **Renewal**: an open socket is never authenticated again, so the client reconnects with a new token 5 minutes
+  (the session's refresh margin) before the held one expires, checking the expiry against the wall clock every 30 s,
+  and at once when the session announces a newer `ic3` token.
+
 ## Connect and the regional move
 
 - The client opens `wss://go.trouter.teams.microsoft.com/v4/c?tc=<json>&timeout=40&epid=<endpoint guid>&ccid=…&
@@ -85,7 +115,8 @@ name>","se":"<ms>","st":"<ms>"}}]}`
   `X-MS-Migration`.
 - `connectparams` is what an earlier `trouter.connected` handed over, sent back as it came; a first connect has none.
 - Whether the service takes **our** non-CAE `ic3` token on Trouter is not tested yet (it does on the chat service,
-  `auth.md` question 8): that is Task 16's first live step.
+  `auth.md` question 8). Task 16 built the native client against the mock only: no lab binary runs it yet (a live run
+  never comes from a `cargo test` process), so the first live socket is Task 19's `teams-headless watch`.
 
 ## `trouter.connected`: the endpoint
 
@@ -168,6 +199,7 @@ Chat events reach the **messaging stack's** socket as socket.io messages:
 | a reaction removed | `MessageUpdate` | `emotions` with the key kept and its `users` empty |
 | a delete | `MessageUpdate` | the same message id, a new `version`, empty `content`, `properties` only `deletetime`, `importance`, `subject` |
 | a reply with a quote | `NewMessage` | `content` starting with the quote's `<blockquote itemscope itemtype="http://schema.skype.com/Reply" …>`, `properties.qtdMsgs` and `hasValidMsgReferences` |
+| b reading the chat (to b's own endpoints) | `ConversationUpdate` | the chat, its `propertiesUpdated` `["consumptionhorizon"]` and `properties.consumptionhorizon` the new horizon (`<arrival id>;<ms>;<clientmessageid>`, `chat.md`) |
 
 The reaction row was captured live in run 13 (below): a liked its edited message from the message's hover bar
 (`message-actions-like`, the control `ab-chat-full` uses), its `PUT …/properties?name=emotions` was answered `200`
@@ -181,8 +213,17 @@ same a–b chat), seen again at run 13's connects. A reaction by b to a's messag
 account's endpoints get its own
 events.
 
-The native client turns these into typed events (Task 16): a `NewMessage` whose `messagetype` is `Control/…` is a
-signal (typing), not a message; a message's own `clientmessageid` matches it to our outbox row (Task 13).
+The native client turns these into typed events (Task 16, `teams_trouter::events`): a `NewMessage` whose
+`messagetype` is `Control/Typing` is a signal (typing), not a message; a message's own `clientmessageid` matches it
+to our outbox row (Task 13). A `MessageUpdate` carries the whole message, so what changed is told from it the way
+every one in the captures of runs 12 and 13 (below; both accounts' sockets) could be told (read locally, the times
+compared, none printed): an
+edit's `edittime` equals its new `version` (6 of 6), a delete's `deletetime` does (3 of 3), and a reaction change
+carries `emotions` with neither (14 of 14: an edited message keeps its old `edittime`). A `ConversationUpdate` whose
+`propertiesUpdated` names `consumptionhorizon` is the account's own read horizon (4 of 4, the last row above, in
+`deliveries.json` as the eighth delivery); any other one is the chat's update. Any other `resourceType` is kept as
+`Unknown` by its name. No delivery of another member's read receipt and none of a new chat were seen, so the mock
+doesn't deliver those (`teams_mock::TrouterMock`).
 
 ## Answering deliveries
 
@@ -293,7 +334,8 @@ place.
 
 ## Open
 
-- Whether the service takes our own non-CAE `ic3` token on Trouter and the registrar (Task 16).
+- Whether the service takes our own non-CAE `ic3` token on Trouter and the registrar, and the native connect's
+  query, `Origin` and registration as built (Task 16 tested them on the mock only; the first live run is Task 19's).
 - What the service does when a token expires on an open socket.
 - The v3 registrar (`registrarUrl`) the service hands over; the web client doesn't use it.
 - Accepted delivery answers might reduce the reconnect replay; not tested under the current policy (every answer is

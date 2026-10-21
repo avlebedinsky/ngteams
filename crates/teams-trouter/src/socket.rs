@@ -1,0 +1,288 @@
+//! The socket: where it connects (a fixed host allowlist), how (WSS, the system's certificate verifier), and its two
+//! halves. The write half is wrapped in [`SocketWriter`], the [`FrameWriter`] that only `teams_proto`'s
+//! [`FrameSink`](teams_proto::FrameSink) can feed (it takes nothing but the sink's [`FrameText`]), and it is handed to
+//! the sink at once; nothing else in this crate holds it, so the socket has no other way to send a frame. The read
+//! half only reads.
+//!
+//! What the WebSocket layer itself sends on the socket (the masked handshake request, a pong to a WebSocket ping, the
+//! reply to a close) carries no data of ours and reaches no one: those are the protocol's own control frames.
+
+use std::future::Future;
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt as _, StreamExt as _};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use teams_proto::{CLIENT_BUILD, FrameText, FrameWriter, TROUTER_DOMAIN};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, crypto};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::{self, Message};
+use url::Url;
+
+/// The global Trouter host, where a first connect goes.
+pub const GO_HOST: &str = "go.trouter.teams.microsoft.com";
+
+/// The connect path on every Trouter host.
+pub const CONNECT_PATH: &str = "/v4/c";
+
+/// The ping interval the connect names (`timeout`), in seconds, as the web client's.
+pub const PING_SECONDS: u64 = 40;
+
+/// The largest frame the client reads, and the largest message.
+pub const MAX_INCOMING: usize = 4 * 1024 * 1024;
+
+/// The most the write half buffers before a write fails: frames are small (an authentication is the largest).
+const MAX_WRITE_BUFFER: usize = 256 * 1024;
+
+/// The client the connect names in `tc`: the messaging stack (`TeamsCDL`), the web client's versions.
+const CLIENT_VERSION: &str = "2026.36.01.1";
+
+/// The `Origin` the web client's handshake carried.
+const ORIGIN: &str = "https://teams.microsoft.com";
+
+/// What the web client percent-encoded in `tc`: quotes and braces (and what a query can't carry); `:`, `,` and `/`
+/// stayed as they were.
+const TC_ENCODED: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'{')
+    .add(b'}')
+    .add(b'%')
+    .add(b'#')
+    .add(b'&')
+    .add(b'+')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`');
+
+/// A stream the socket runs over: TLS to the service, or (tests only) plain TCP to a loopback mock.
+pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+pub(crate) type Stream = WebSocketStream<Box<dyn Io>>;
+
+/// Where a socket connects: the global host, or a regional one a `trouter.connected` named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConnectBase(Url);
+
+impl ConnectBase {
+    /// `wss://go.trouter.teams.microsoft.com/v4/c` (a fixed URL: `None` never comes).
+    pub(crate) fn global() -> Option<Self> {
+        Url::parse(&format!("wss://{GO_HOST}{CONNECT_PATH}")).ok().map(Self)
+    }
+
+    /// A `reconnectUrl` as `trouter.connected` handed it over, if it is on the allowlist ([`allowed`]); its port `443`
+    /// is dropped, as the web client's connect URL dropped it.
+    pub(crate) fn regional(reconnect_url: &str) -> Option<Self> {
+        let url = Url::parse(reconnect_url).ok()?;
+        let regional = url
+            .host_str()
+            .and_then(|host| host.strip_suffix(TROUTER_DOMAIN))
+            .and_then(|name| name.strip_suffix("-t"))
+            .is_some_and(|name| {
+                !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            });
+        let plain = url.scheme() == "wss"
+            && url.port().is_none_or(|port| port == 443)
+            && url.path() == CONNECT_PATH
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.username().is_empty()
+            && url.password().is_none();
+        (regional && plain).then_some(Self(url))
+    }
+
+    /// The connect URL: the base and the web client's query (`tc`, `timeout`, `epid`, `cor_id`, `con_num`).
+    pub(crate) fn connect_url(&self, epid: &str, cor_id: &str, con_num: &str) -> Url {
+        let tc = format!(r#"{{"cv":"{CLIENT_VERSION}","ua":"TeamsCDL","hr":"","v":"{CLIENT_BUILD}"}}"#);
+        let query = format!(
+            "tc={}&timeout={PING_SECONDS}&epid={epid}&cor_id={cor_id}&con_num={con_num}",
+            utf8_percent_encode(&tc, TC_ENCODED)
+        );
+        let mut url = self.0.clone();
+        url.set_query(Some(&query));
+        url
+    }
+}
+
+/// Whether `url` is a connect URL the client may open: `wss`, the global host or a regional `<name>-t` one under
+/// [`TROUTER_DOMAIN`], no port but `443`, the path [`CONNECT_PATH`], no user info or fragment.
+#[must_use]
+pub fn allowed(url: &Url) -> bool {
+    let mut base = url.clone();
+    base.set_query(None);
+    let host_ok = url.host_str() == Some(GO_HOST) || ConnectBase::regional(base.as_str()).is_some();
+    host_ok
+        && url.scheme() == "wss"
+        && url.port().is_none_or(|port| port == 443)
+        && url.path() == CONNECT_PATH
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+/// Why a socket couldn't be opened. Nothing in it carries a token (the handshake carries none) or a body.
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectError {
+    #[error("the connect URL isn't on the allowlist")]
+    NotAllowed,
+    #[error("connecting timed out")]
+    Timeout,
+    #[error("the network failed: {0:?}")]
+    Network(io::ErrorKind),
+    #[error("the TLS handshake failed")]
+    Tls,
+    #[error("the WebSocket handshake was refused (HTTP {0:?})")]
+    Refused(Option<u16>),
+}
+
+/// The TLS client config: the system's certificate verifier on `aws-lc-rs`, as the HTTP transport's (reqwest's).
+///
+/// # Errors
+/// When the system verifier can't be set up.
+pub(crate) fn tls_config() -> Result<Arc<ClientConfig>, tokio_rustls::rustls::Error> {
+    let provider = Arc::new(crypto::aws_lc_rs::default_provider());
+    let verifier = rustls_platform_verifier::Verifier::new(Arc::clone(&provider))?;
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+/// How a socket is opened: TLS to the URL's host, or (`test-support` only) plain TCP to a loopback mock.
+#[derive(Clone)]
+pub(crate) struct Opener {
+    tls: Arc<ClientConfig>,
+    #[cfg(feature = "test-support")]
+    mock_origin: Option<Url>,
+}
+
+impl Opener {
+    pub(crate) fn new(tls: Arc<ClientConfig>) -> Self {
+        Self {
+            tls,
+            #[cfg(feature = "test-support")]
+            mock_origin: None,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn with_mock_origin(mut self, origin: Url) -> Self {
+        self.mock_origin = Some(origin);
+        self
+    }
+
+    /// Opens the socket at `url` (checked against the allowlist first) within `limit`: TCP, TLS, the WebSocket
+    /// handshake with the web client's `Origin`.
+    pub(crate) async fn open(&self, url: &Url, limit: Duration) -> Result<Stream, ConnectError> {
+        if !allowed(url) {
+            return Err(ConnectError::NotAllowed);
+        }
+        tokio::time::timeout(limit, self.open_checked(url))
+            .await
+            .map_err(|_| ConnectError::Timeout)?
+    }
+
+    async fn open_checked(&self, url: &Url) -> Result<Stream, ConnectError> {
+        #[cfg(feature = "test-support")]
+        if let Some(origin) = &self.mock_origin {
+            let mut mocked = origin.clone();
+            mocked.set_path(url.path());
+            mocked.set_query(url.query());
+            let address = (origin.host_str().unwrap_or_default(), origin.port().unwrap_or_default());
+            let tcp = TcpStream::connect(address).await.map_err(|error| network(&error))?;
+            return handshake(mocked, Box::new(tcp)).await;
+        }
+        let host = url.host_str().ok_or(ConnectError::NotAllowed)?.to_owned();
+        let tcp = TcpStream::connect((host.as_str(), 443))
+            .await
+            .map_err(|error| network(&error))?;
+        let name = ServerName::try_from(host).map_err(|_| ConnectError::NotAllowed)?;
+        let tls = TlsConnector::from(Arc::clone(&self.tls))
+            .connect(name, tcp)
+            .await
+            .map_err(|_| ConnectError::Tls)?;
+        handshake(url.clone(), Box::new(tls)).await
+    }
+}
+
+fn network(error: &io::Error) -> ConnectError {
+    ConnectError::Network(error.kind())
+}
+
+async fn handshake(url: Url, stream: Box<dyn Io>) -> Result<Stream, ConnectError> {
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .map_err(|_| ConnectError::NotAllowed)?;
+    request.headers_mut().insert("origin", HeaderValue::from_static(ORIGIN));
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_INCOMING))
+        .max_frame_size(Some(MAX_INCOMING))
+        .max_write_buffer_size(MAX_WRITE_BUFFER);
+    let (socket, _response) = tokio_tungstenite::client_async_with_config(request, stream, Some(config))
+        .await
+        .map_err(|error| match error {
+            tungstenite::Error::Http(response) => ConnectError::Refused(Some(response.status().as_u16())),
+            tungstenite::Error::Io(error) => network(&error),
+            _ => ConnectError::Refused(None),
+        })?;
+    Ok(socket)
+}
+
+/// Splits an open socket: the write half as the [`FrameWriter`] for the sink, the read half to read from.
+pub(crate) fn split(socket: Stream) -> (SocketWriter, SplitStream<Stream>) {
+    let (write, read) = socket.split();
+    (SocketWriter(write), read)
+}
+
+/// The socket's write half, as the frame sink uses it: it sends the sink's [`FrameText`] as one text frame, and
+/// nothing else.
+pub(crate) struct SocketWriter(SplitSink<Stream, Message>);
+
+/// Why the socket couldn't send a frame. Never the frame: tungstenite's `WriteBufferFull` hands the unsent frame
+/// back, and it is dropped here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum WriteFailed {
+    #[error("the socket is closed")]
+    Closed,
+    #[error("the socket's write buffer is full")]
+    BufferFull,
+    #[error("the network failed: {0:?}")]
+    Network(io::ErrorKind),
+    #[error("the WebSocket layer failed")]
+    Protocol,
+}
+
+impl From<tungstenite::Error> for WriteFailed {
+    fn from(error: tungstenite::Error) -> Self {
+        match error {
+            tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => Self::Closed,
+            tungstenite::Error::WriteBufferFull(_) => Self::BufferFull,
+            tungstenite::Error::Io(error) => Self::Network(error.kind()),
+            _ => Self::Protocol,
+        }
+    }
+}
+
+impl FrameWriter for SocketWriter {
+    type Error = WriteFailed;
+
+    fn write(&mut self, text: FrameText) -> impl Future<Output = Result<(), WriteFailed>> + Send {
+        let message = Message::text(text.into_string());
+        async move { self.0.send(message).await.map_err(WriteFailed::from) }
+    }
+}

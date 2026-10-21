@@ -11,6 +11,7 @@ members = [
     "crates/teams-mock",
     "crates/teams-proto",
     "crates/teams-store",
+    "crates/teams-trouter",
     "spikes/echo-call",
     "spikes/gpui-video",
     "spikes/media-loop",
@@ -35,6 +36,7 @@ teams-fence = { path = "crates/teams-fence" }
 teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }
 teams-store = { path = "crates/teams-store" }
+teams-trouter = { path = "crates/teams-trouter" }
 media-loop = { path = "spikes/media-loop" }
 # The video source hands frames to GPUI's foreground executor: the version GPUI already links.
 async-channel = "2.5.0"
@@ -77,6 +79,8 @@ rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 # the local store: SQLite built from source (`bundled`), so every machine runs the same version
+# the Trouter socket checks the server certificate as reqwest does (the system verifier)
+rustls-platform-verifier = "0.7.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustix = { version = "1.1.5", features = ["process"] }
 # the chat service's message HTML, read into a small typed model (teams-proto's `chat::html`): html5ever's

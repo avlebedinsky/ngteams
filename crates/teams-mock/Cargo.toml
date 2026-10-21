@@ -7,9 +7,14 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# the Trouter mock's socket halves
+futures-util.workspace = true
 # decodes the conversation and message ids the clients percent-encode as one path segment
 percent-encoding.workspace = true
 serde_json.workspace = true
+# the Trouter mock: its own loopback server on a thread of its own, and the wake-up when an event is queued
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+tokio-tungstenite.workspace = true
 # the local HTTP server: one catch-all responder over the mock's state, with the requests it got recorded
 wiremock.workspace = true
 
