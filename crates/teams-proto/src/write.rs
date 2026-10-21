@@ -1,10 +1,17 @@
 //! Mutating requests ([`Mutating`]) and the pairing of one with the permit issued for its target ([`Authorized`]).
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use teams_fence::{Mri, Scope, Target, WriteKind, WritePermit};
 use url::Url;
 
 use crate::endpoint::{Endpoint, Method};
+
+mod chat;
+
+pub use chat::{
+    Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage, SetReaction,
+    Typing,
+};
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
 /// [`Authorized`], next to a [`WritePermit`] issued for exactly that target.
@@ -19,7 +26,7 @@ pub trait Mutating: sealed::Sealed {
 }
 
 mod sealed {
-    use super::{Endpoint, Method, Wire, json};
+    use super::Wire;
 
     /// The seal on [`Mutating`](super::Mutating): a public trait no other crate can name, implemented for this crate's
     /// requests only. It also carries the request's wire form, built from the same fields as its target.
@@ -27,28 +34,6 @@ mod sealed {
         /// What the transport sends for this request on the chat service; `None` for a request the native transport
         /// has no route for.
         fn wire(&self) -> Option<Wire>;
-    }
-
-    /// `POST v1/users/ME/conversations/<conversation>/messages`, the message as the web client posts it
-    /// (`docs/protocol/fence-targets.md`): for now the HTML `content` with `messagetype` `RichText/Html` and
-    /// `contenttype` `Text`, and the `clientmessageid` when the request has one (the outbox's, M1 Task 13). M1 Task 12
-    /// completes the body (`imdisplayname`, `properties`).
-    impl Sealed for super::SendMessage {
-        fn wire(&self) -> Option<Wire> {
-            let mut body = json!({
-                "content": self.content,
-                "messagetype": "RichText/Html",
-                "contenttype": "Text",
-            });
-            if let (Some(id), Some(fields)) = (&self.client_message_id, body.as_object_mut()) {
-                fields.insert("clientmessageid".to_owned(), id.as_str().into());
-            }
-            Some(Wire {
-                method: Method::Post,
-                endpoint: Endpoint::new(["v1", "users", "ME", "conversations", &self.conversation, "messages"]),
-                body: Some(body),
-            })
-        }
     }
 
     /// Calls go to the call controller and the conversation service, not the chat service: the native transport has no
@@ -154,61 +139,6 @@ impl TargetMismatch {
     #[must_use]
     pub fn requested(&self) -> &Target {
         &self.requested
-    }
-}
-
-/// Posts a message to an existing chat.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SendMessage {
-    conversation: String,
-    content: String,
-    client_message_id: Option<String>,
-}
-
-impl SendMessage {
-    #[must_use]
-    pub fn new(conversation: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            conversation: conversation.into(),
-            content: content.into(),
-            client_message_id: None,
-        }
-    }
-
-    /// The same message posted with `clientmessageid` `id`: the id the outbox gives a command and keeps across its
-    /// attempts, by which the message is recognised when it comes back. It isn't part of the target.
-    #[must_use]
-    pub fn with_client_message_id(mut self, id: impl Into<String>) -> Self {
-        self.client_message_id = Some(id.into());
-        self
-    }
-
-    /// The `clientmessageid` it is posted with, if any.
-    #[must_use]
-    pub fn client_message_id(&self) -> Option<&str> {
-        self.client_message_id.as_deref()
-    }
-
-    /// The conversation id the message goes to.
-    #[must_use]
-    pub fn conversation(&self) -> &str {
-        &self.conversation
-    }
-
-    #[must_use]
-    pub fn content(&self) -> &str {
-        &self.content
-    }
-}
-
-impl Mutating for SendMessage {
-    fn target(&self) -> Target {
-        Target::new(
-            WriteKind::Message,
-            Scope::Conversation {
-                id: self.conversation.clone(),
-            },
-        )
     }
 }
 

@@ -1,5 +1,7 @@
 error[E0451]: fields `request` and `permit` of struct `Authorized` are private
  --> tests/ui/authorized_literal.rs:6:18
   |
-6 |     Authorized { request: SendMessage::new("19:other-chat@thread.v2", "hello"), permit }
-  |                  ^^^^^^^ private field                                          ^^^^^^ private field
+6 |     Authorized { request, permit }
+  |                  ^^^^^^^  ^^^^^^ private field
+  |                  |
+  |                  private field

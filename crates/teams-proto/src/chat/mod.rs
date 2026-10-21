@@ -6,15 +6,19 @@
 //! - the model ([`Conversation`], [`Message`], [`Thread`], …): unknown fields kept, unknown kinds kept as their text,
 //!   never a parse failure for what this build doesn't know;
 //! - [`RichText`]: a message's HTML as a small typed model (text runs, mentions, quotes, links, images), with unknown
-//!   markup kept as text and nothing active surviving.
+//!   markup kept as text and nothing active surviving;
+//! - [`MessageText`]: what a message is written from (M1 Task 12), a [`RichText`] and the MRI each of its mentions
+//!   names, from which a post's or an edit's `content`, `properties.mentions` and target are all built.
 //!
 //! Received attachments are parsed, never fetched: `amsreferences` and `properties.files` are kept as they come (no
 //! capture showed one), and an image's `src` is kept on [`Image`].
 
+mod compose;
 mod html;
 mod model;
 mod read;
 
+pub use compose::{ComposeError, MessageText};
 pub use html::{
     Image, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText, ThreadActivity,
     parse as parse_html, thread_activity,

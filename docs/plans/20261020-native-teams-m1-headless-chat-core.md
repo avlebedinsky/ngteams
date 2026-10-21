@@ -592,18 +592,41 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
   `crates/teams-fence/src/membership.rs`
 - Create: `crates/teams-proto/tests/chat_write.rs`
 
-- [ ] tests first: `SendMessage` (with mentions), `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`,
+- [x] tests first: `SendMessage` (with mentions), `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`,
       `ReadReceipt`, `Typing`, `CreateChat` as sealed `Mutating` types with their wire forms; each target exactly as
       `fence-targets.md` (as corrected by Tasks 7–8); a permit for chat X can't send to chat Y
-- [ ] a message's `content` and `properties.mentions` are both built from one typed rich-text value (Task 10's model);
+      (`teams-proto/src/write/chat.rs`, re-exported from `write.rs`; an `Author` (MRI, `imdisplayname`) and the
+      times are fields of the request, so its wire form is built from its own fields; `CreateChat::one_to_one` and
+      `::group` (three or more members); typing stopped isn't there, not captured. Written in one pass with the tests)
+- [x] a message's `content` and `properties.mentions` are both built from one typed rich-text value (Task 10's model);
       raw HTML can't be passed, so a mention can't be in the markup without being in the target; every mentioned MRI
       is an added participant
-- [ ] the fence's live read gets the native client's own credential (`ChatCredential::bearer` from our `ic3` token and
+      (`chat::MessageText`: a `RichText` and the MRI of each mention by its `item_id`, rendered once into `content`,
+      `properties.mentions` (renumbered `0`, `1`, … as they appear) and a reply quote's `qtdMsgs`; refused: a mention
+      naming nobody, an MRI no mention shows, a mention twice, anyone but an `8:orgid:` account, images (Task 20),
+      links but `http`/`https`/`mailto`, an incomplete reply quote, truncated or too deep or too long text. A quote
+      adds nobody, as the mapping. The mention form is the bundle's, built only in `mention_span`/`mention_entry`
+      (`chat/compose.rs`), to be replaced by a capture (`docs/backlog/mention-not-captured-under-the-fence.md`).
+      `fence-seal`'s `proto_raw_html` shows raw HTML doesn't compile. The outbox's `Command::Send` now holds a
+      `MessageText` and `Outbox::new` an `Author`; `RichText` and its nodes gained serde for the stored command)
+- [x] the fence's live read gets the native client's own credential (`ChatCredential::bearer` from our `ic3` token and
       the region's chat base, the form Task 3 established); without it every write is `Partial(NoCredential)`
-- [ ] bodies match the captured shapes (Task 7) key for key; tests compare with the synthetic fixtures
-- [ ] tests on `teams-mock`: each write allowed for a lab chat and sent once; a chat with an outsider (a mock member
+      (`teams_fence::CredentialSource`, asked on every read through `LiveMembershipSource::set_credential_source`;
+      `HttpTransport` implements it from its session's current `ic3` token and its chat base, so a renewed token is
+      used at once; no token is no credential)
+- [x] bodies match the captured shapes (Task 7) key for key; tests compare with the synthetic fixtures
+      (equal, not only key for key, to `mention.json`, `reply.json`, `delete.json`, `reaction.json` and the
+      `writes.json` message, read receipt, typing and new-chat cases; to `edit.json` but for its made-up `version` and
+      `edittime`, which aren't one instant there)
+- [x] tests on `teams-mock`: each write allowed for a lab chat and sent once; a chat with an outsider (a mock member
       outside the roster) denied, nothing sent, `fence.log` entry written
-- [ ] `cargo test -p teams-proto -p teams-fence -p fence-seal` and the gate pass
+      (also: a mention of the outsider in the a–b chat and a chat create with them denied; a group chat write denied
+      `Partial(Unsupported)` while a new a–b–c group may be created; no credential, or a source without a token,
+      `Partial(NoCredential)` with no request at all)
+- [x] `cargo test -p teams-proto -p teams-fence -p fence-seal` and the gate pass (parallel run: crate-scoped gate;
+      workspace gate after merge: `cargo fmt --all --check`, `cargo clippy -p teams-proto -p teams-fence -p teams-core
+      -p teams-mock -p fence-seal --all-targets -- -D warnings`, `scripts/lint-report.sh`, `cargo test` on those
+      crates and `fixture-guard`; `proto-lab`'s clippy too, as it builds on the changed API)
 
 ### Task 13: Outbox with `clientmessageid` dedupe
 **Files:**

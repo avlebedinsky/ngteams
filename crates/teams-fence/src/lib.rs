@@ -12,8 +12,9 @@
 //! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed, so its sources are
 //! the ones this crate defines: [`FailClosed`], which denies every write whose scope has to be fetched, and
 //! [`LiveMembershipSource`], which reads a scope's members from Teams' chat service itself, the caller supplying only
-//! the lab account's credential. The `test-support` feature lifts both for tests (`Fence::new` over any `Roster::new`, `FenceLog::from_writer`, any type as a
-//! membership source); only dev-dependencies enable it, and a lab binary refuses to run when a build turned it on
+//! the lab account's credential (or, for a native client, a [`CredentialSource`] asked for it on every read). The
+//! `test-support` feature lifts both for tests (`Fence::new` over any `Roster::new`, `FenceLog::from_writer`, any type
+//! as a membership source); only dev-dependencies enable it, and a lab binary refuses to run when a build turned it on
 //! ([`test_support_enabled`]).
 
 mod decision;
@@ -28,8 +29,8 @@ pub use decision::{
 };
 pub use log::{ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, FenceLog, RequestOutcome, RequestRecord};
 pub use membership::{
-    AFD_HOSTS, ChatCredential, FETCH_TIMEOUT, LiveMembershipSource, LiveSourceError, MAX_BODY, REGIONAL_SUFFIX,
-    chat_service_path, is_group_chat_id, one_to_one_pair, parse_thread,
+    AFD_HOSTS, ChatCredential, CredentialFuture, CredentialSource, FETCH_TIMEOUT, LiveMembershipSource,
+    LiveSourceError, MAX_BODY, REGIONAL_SUFFIX, chat_service_path, is_group_chat_id, one_to_one_pair, parse_thread,
 };
 pub use target::{Mri, Scope, Target, WriteKind};
 

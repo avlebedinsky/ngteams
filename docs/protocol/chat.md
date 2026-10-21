@@ -121,6 +121,22 @@ The fence's mapping takes the `mri` of each entry as an added participant of the
 mention of anyone outside the lab is denied like adding them to the chat; any other form of `mentions`, or the key in
 another case, is unknown.
 
+## The native client's writes (M1 Task 12)
+
+`teams_proto` sends each chat write in the form above, key for key (its tests compare the bodies with `mention.json`,
+`reply.json`, `edit.json`, `delete.json`, `reaction.json` and the `writes.json` cases): a post with every key the web
+client sent (`id` `-1`, `version` `"0"`, the `conversationLink` `blah/<chat>` it sends, the empty JSON-string lists,
+`onbehalfof` and `policyViolation` null, `crossPostChannels` `[]`), the edit as the whole message again, the soft
+delete, the reaction and its take-back, the read horizon, typing (`Control/Typing` only: typing stopped wasn't
+captured) and a new chat (`fixedRoster` and `uniquerosterthread` for a 1:1 chat, neither for a group). A message's
+text is a typed rich-text value with the MRI of each mention, from which `content`, `properties.mentions` and the
+write's target are all built; raw HTML can't be sent. Times go out as the web client writes them
+(`2026-01-01T00:00:00.000Z`), an edit's `version` and `properties.edittime` being one instant.
+
+**The mention form is still the bundle's.** It is built in one place only, `mention_span` and `mention_entry` in
+`crates/teams-proto/src/chat/compose.rs`, so a captured form replaces those two functions alone; until a capture
+shows it (`docs/backlog/mention-not-captured-under-the-fence.md`), a mention the native client sends is unverified.
+
 ## Read horizons
 
 - The account's own horizon is the conversation property `consumptionhorizon`, `<arrival id>;<ms>;<clientmessageid>`:

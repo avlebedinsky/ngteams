@@ -24,6 +24,8 @@ What is still owed, and how it can be closed:
 - Task 12's mention body must match a capture, and none exists. Either its own native client sends a mention to the
   lab chat (the fence allows a message whose mentioned MRIs are lab accounts) and the answer and b's read of it are
   checked, or a reviewed profile-read allowance lets the web client's picker offer b and `ab-chat-full` mentions b.
+- M1 Task 12 built the native client's mention from the bundle form, in `mention_span` and `mention_entry`
+  (`crates/teams-proto/src/chat/compose.rs`) alone; a capture replaces those two functions and `mention.json`.
 - Either way the capture must show the content's mention span, `properties.mentions` (string or list, its keys), and
   how b's read gives it back; then `mention.json` is rewritten from that capture and `chat.md` updated.
 - A scenario that picks from the picker must check the suggestion is b before it presses Enter (the old step picked

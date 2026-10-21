@@ -25,6 +25,8 @@ teams-fence = { workspace = true, features = ["test-support"] }
 # the transport reaches wiremock through its mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+# a post's ISO compose time read back, to compare with the row's
+time.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 wiremock.workspace = true
 
