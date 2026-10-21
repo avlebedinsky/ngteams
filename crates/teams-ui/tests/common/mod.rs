@@ -55,6 +55,9 @@ pub struct FakeCore {
     /// Conversations never synced: `history_complete` answers `None` for them; for any other, whether `older` has
     /// no page left.
     pub unsynced: Mutex<HashSet<String>>,
+    /// Per conversation, a catch-up that lands just before `history_complete` answers (between it and a `load_older`
+    /// that found nothing): its messages go into `messages` and the conversation is synced, once.
+    pub catch_up_before_history_complete: Mutex<HashMap<String, Vec<Message>>>,
     /// The `limit` of each `messages` read, in order.
     pub limits: Mutex<Vec<usize>>,
 }
@@ -74,6 +77,7 @@ impl Default for FakeCore {
             horizons: Mutex::default(),
             older: Mutex::default(),
             unsynced: Mutex::default(),
+            catch_up_before_history_complete: Mutex::default(),
             limits: Mutex::default(),
         }
     }
@@ -217,6 +221,13 @@ impl Core for FakeCore {
 
     fn history_complete(&self, conversation: String) -> Reply<Option<bool>> {
         self.answer("history_complete", || {
+            if let Some(caught_up) = locked(&self.catch_up_before_history_complete).remove(&conversation) {
+                locked(&self.messages)
+                    .entry(conversation.clone())
+                    .or_default()
+                    .extend(caught_up);
+                locked(&self.unsynced).remove(&conversation);
+            }
             if locked(&self.unsynced).contains(&conversation) {
                 return None;
             }

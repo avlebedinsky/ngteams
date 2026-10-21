@@ -704,6 +704,44 @@ fn a_chat_never_synced_isn_t_its_beginning_and_loads_older_once_it_is_synced() {
 }
 
 #[test]
+fn a_catch_up_between_the_older_load_and_the_history_read_leaves_the_stored_pages_reachable() {
+    let all = many(PAGE * 2 + 20);
+    let rig = rig_with(Vec::new());
+    rig.core.unsynced.lock().unwrap().insert(AB.to_owned());
+    // the view holds nothing, so its top asks for older: the service has nothing yet, and before the history is read
+    // a catch-up stores the whole chat and marks its history complete
+    rig.core
+        .catch_up_before_history_complete
+        .lock()
+        .unwrap()
+        .insert(AB.to_owned(), all.clone());
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    let history = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).history());
+    let held = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).held());
+    assert_eq!(held(cx), 0);
+    assert!(rig.core.catch_up_before_history_complete.lock().unwrap().is_empty());
+
+    // the catch-up's change brings the window: the newest page, with the store's older pages behind it
+    rig.send(Event::ConversationChanged {
+        conversation: AB.to_owned(),
+    });
+    draw(cx);
+    assert!(held(cx) >= PAGE);
+    assert_eq!(history(cx), History::More, "the store still has older pages");
+
+    for _ in 0..10 {
+        if history(cx) == History::Complete {
+            break;
+        }
+        scroll_up(cx, 100_000.0);
+        draw(cx);
+    }
+    let expected: Vec<String> = (1..=all.len()).map(|n| n.to_string()).collect();
+    assert_eq!(ids(&view, cx), expected);
+    assert_eq!(history(cx), History::Complete);
+}
+
+#[test]
 fn older_loads_that_bring_nothing_stall_until_asked_again() {
     let fruitless = usize::try_from(MAX_FRUITLESS).unwrap();
     let rig = rig_with(many(10));

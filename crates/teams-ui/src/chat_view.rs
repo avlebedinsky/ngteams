@@ -805,6 +805,10 @@ impl ChatView {
                 };
                 if kept.is_empty() {
                     self.next = loaded.next;
+                    if self.next.is_some() && self.history == History::Complete {
+                        // the store has an older page: a catch-up landed after an older load found nothing
+                        self.history = History::More;
+                    }
                 }
                 self.messages = kept.into_iter().chain(messages).collect();
             }
