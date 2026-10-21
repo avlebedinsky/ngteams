@@ -1,5 +1,5 @@
 //! The window's root view. For now an empty window with the account's status in it (connecting, connected, offline,
-//! signed out); the shell, the chat list and the chat view come in Tasks 8 and 9.
+//! signed out), in the theme's colours; the shell, the chat list and the chat view come in Tasks 8 and 9.
 
 use std::sync::Arc;
 
@@ -8,12 +8,12 @@ use gpui::{
 };
 
 use crate::models::{Account, Engine, Link, Models, Status};
+use crate::theme;
 use crate::trace::{TraceLine, ViewTrace};
 
-/// The window's background, 0xRRGGBB.
-pub const BACKGROUND: u32 = 0x00f5_f5f7;
-/// The status text's colour.
-const FOREGROUND: u32 = 0x0024_2424;
+/// The window's background in the light theme (the sandbox has no settings portal, so its windows stay light),
+/// 0xRRGGBB.
+pub const BACKGROUND: u32 = theme::LIGHT_PALETTE.background;
 
 /// What the status line shows, by name: the trace's `change` for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +69,8 @@ pub struct Root {
     trace: Arc<ViewTrace>,
     shown: Shown,
     _observing: Subscription,
+    /// The theme following the window's appearance, while the window is open ([`Root::following`]).
+    appearance: Option<Subscription>,
 }
 
 impl Root {
@@ -89,7 +91,21 @@ impl Root {
             trace,
             shown,
             _observing: observing,
+            appearance: None,
         }
+    }
+
+    /// Keeps `appearance` (the theme following the window, [`theme::follow`]) for as long as the view lives.
+    #[must_use]
+    pub fn following(mut self, appearance: Subscription) -> Self {
+        self.appearance = Some(appearance);
+        self
+    }
+
+    /// Whether the theme follows this view's window ([`crate::window::open`] makes it so).
+    #[must_use]
+    pub fn follows_appearance(&self) -> bool {
+        self.appearance.is_some()
     }
 
     /// What the status line shows now.
@@ -107,14 +123,15 @@ impl Root {
 impl Render for Root {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let text = status_text(self.models.status.read(cx));
+        let colors = theme::current(cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .justify_center()
             .items_center()
-            .bg(rgb(BACKGROUND))
-            .text_color(rgb(FOREGROUND))
+            .bg(rgb(colors.background))
+            .text_color(rgb(colors.foreground))
             .child(text)
     }
 }

@@ -10,6 +10,8 @@ publish.workspace = true
 # the bridge's drain: the engine's next event or the stop, whichever comes first
 futures-util.workspace = true
 gpui-pre.workspace = true
+# the UI kit: compose's text area and the theme now; the list, the command palette and the avatar in later tasks
+gpui-component.workspace = true
 # the view trace: one JSON object per line
 serde_json.workspace = true
 # the engine: its request side (behind `Core`), its events and its shutdown
@@ -22,8 +24,22 @@ tokio = { workspace = true, features = ["sync"] }
 [dev-dependencies]
 # the views on GPUI's test context (`TestAppContext`): a fake core and a fake event source, no window system
 gpui-pre = { workspace = true, features = ["test-support"] }
+# the kit's widgets on GPUI's test context
+gpui-component = { workspace = true, features = ["test-support"] }
+# the kit's text area on the real platform, in the UI sandbox: GPUI's Linux platform, Wayland only
+gpui-pre-platform.workspace = true
 # the push channel's events the fake engine hands the bridge
 teams-trouter.workspace = true
+# the compositor, private bus and virtual keyboard the kit window test runs in
+ui-sandbox.workspace = true
+# the kit window test's fake settings portal on the sandbox's bus (the colour scheme the theme follows)
+zbus.workspace = true
+
+[[test]]
+# the kit's text area and the theme in the UI sandbox: its own `main` (GPUI runs on the main thread), which runs
+# itself again inside the sandbox
+name = "kit_window"
+harness = false
 
 [lints]
 workspace = true

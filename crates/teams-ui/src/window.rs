@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use crate::models::Models;
+use crate::theme;
 use crate::trace::ViewTrace;
 use crate::view::Root;
 
@@ -16,7 +17,8 @@ pub const LAB_APP_ID: &str = "ms-teams-lab";
 /// The window's size when it opens.
 const DEFAULT_SIZE: (f32, f32) = (1100.0, 720.0);
 
-/// Opens the main window, titled `title`, with app id `app_id`, its root view over `models`.
+/// Opens the main window, titled `title`, with app id `app_id`, its root view over `models`; sets the UI kit up
+/// first (once per app) and keeps the theme following the window's appearance.
 ///
 /// # Errors
 /// The platform can't open a window.
@@ -37,5 +39,9 @@ pub fn open(
         app_id: Some(app_id.to_owned()),
         ..WindowOptions::default()
     };
-    cx.open_window(options, |_, cx| cx.new(|cx| Root::new(models, trace, cx)))
+    theme::init(cx);
+    cx.open_window(options, |window, cx| {
+        let following = theme::follow(window, cx);
+        cx.new(|cx| Root::new(models, trace, cx).following(following))
+    })
 }

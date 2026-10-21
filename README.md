@@ -29,7 +29,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-store` | the account's SQLite store (`rusqlite`, bundled, WAL, `0600`): conversations, members, messages by version (edits, soft deletes), reactions per user, read horizons, sync state, the outbox; migrations; each open is a run, and a row of another open run is never taken over |
 | `crates/teams-trouter` | the native push channel: socket.io 0.9 over WSS to the Trouter hosts only, `user.authenticate` first, keep-alives, the registrar registration of the messaging stack, reconnects with backoff and on token renewal, deliveries turned into typed chat events and never answered (an incoming call included) |
 | `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out); a lab account's engine assembled as every lab binary builds it (`lab`) |
-| `crates/teams-ui` | the GPUI views and models over the engine: the bridge (it owns the engine, drains its events into the models on GPUI's foreground, shuts it down off it; views reach it only through `Core`), the models, the root view and window, the view trace (ids, kinds and times, never text); no HTTP or socket client, GPUI's HTTP client the null one |
+| `crates/teams-ui` | the GPUI views and models over the engine: the bridge (it owns the engine, drains its events into the models on GPUI's foreground, shuts it down off it; views reach it only through `Core`), the models, the root view and window, the view trace (ids, kinds and times, never text), the theme (the UI kit's, Teams-like and compact, light and dark following the window); no HTTP or socket client, GPUI's HTTP client the null one |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; clients reach it through the `test-support` mock origins |
 | `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
@@ -48,6 +48,30 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `build/patches/`, `vendor/`, `scripts/vendor-gpui.sh` | GPUI (`gpui-pre` 0.3.9) vendored with agterm-rs's external-surfaces patches, used through `[patch.crates-io]`; `scripts/vendor-gpui.sh --check` verifies it |
 | `scripts/lint-report.sh` | refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s |
 | `tools/` | interim Node tools: `ca-probe` (the Conditional Access probe), `lab-login` (the first sign-in of the profiles) |
+
+## Third-party UI code
+
+The views are built on [`gpui-component`](https://crates.io/crates/gpui-component) 0.8 (Longbridge's GPUI Kit,
+Apache-2.0), the UI kit for `gpui-pre` 0.3.9; it resolves to the vendored, patched GPUI above. Its audit (M2 Task 7,
+in the plan) found:
+
+- It takes `gpui-pre` with its default features (`x11`, `font-kit`, `windows-manifest`), so the workspace's GPUI has
+  them on. In `gpui-pre` 0.3.9 `x11` only lets GPUI name an X11 display it could use and `font-kit` switches nothing;
+  the X11 client is `gpui-pre-linux`'s, which stays Wayland-only (`crates/teams-ui/tests/reach.rs` checks it), and
+  `teams-app` refuses a set `DISPLAY` all the same. `windows-manifest` acts on Windows builds only.
+- Its tree for the host holds no HTTP or WebSocket client (`gpui-pre-reqwest` is for wasm only) and only licences an
+  Apache-2.0/MIT project can take: MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0, 0BSD, CC0, and MPL-2.0 for
+  `option-ext`, which a build-time macro of the kit's assets uses (`reach.rs` checks both).
+- It starts no thread or process of its own and touches no file in our use: its theme directory watcher
+  (`ThemeRegistry::watch_dir`, `notify`) is never called. It reads the reduced-motion setting from the settings portal
+  on the bus the app is given (the sandbox's private bus, which has none). Its `tracing` and `log` lines go nowhere:
+  the app crates install no logger and no subscriber (`reach.rs` checks the sources).
+- We don't use its Markdown/HTML text view: message text is rendered from `teams-proto`'s `RichText` only.
+
+The kit's `Textarea` (the compose box) is tested on GPUI's test context (`crates/teams-ui/tests/kit.rs`: typing,
+selection, the clipboard with plain text only, undo, soft wrap, IME composition, Enter and Shift-Enter) and on the
+real platform in the UI sandbox (`crates/teams-ui/tests/kit_window.rs`, which also switches the theme live through a
+fake settings portal on the sandbox's bus).
 
 ## The lab
 
@@ -335,7 +359,7 @@ D-Bus session bus, never the desktop session's compositor, bus or URI opener (`c
 checks that with canaries planted on the inherited addresses). Without weston 15, niri or `dbus-daemon` the sandbox
 tests say so and pass; `GPUI_SMOKE_REQUIRE=1` makes them fail instead. The GPUI smoke tests
 (`spikes/gpui-video/tests/smoke.rs`) run the window once on every GPU, chosen with `ZED_DEVICE_ID`. A sandboxed GUI
-binary (`gpui-video`, `ui-sandbox-probe`, `teams-app`) refuses to open a window unless `WAYLAND_DISPLAY` is an absolute socket path
+binary (`gpui-video`, `ui-sandbox-probe`, `teams-app`, the kit window test's child) refuses to open a window unless `WAYLAND_DISPLAY` is an absolute socket path
 inside the dir `UI_SANDBOX_DIR` names, which only the sandbox sets. The video grid benchmark (`spikes/gpui-video/tests/bench.rs`)
 runs in the same sandbox; its measurement is ignored by default and run by hand with a release build:
 `cargo test --release -p gpui-video --test bench -- --ignored --nocapture`. Results and the decision are in

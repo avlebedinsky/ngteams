@@ -588,21 +588,72 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
 - Modify: `Cargo.toml` (`gpui-component` in `[workspace.dependencies]`, version looked up live),
   `crates/teams-ui/{Cargo.toml,src/theme.rs}`, tests, `README.md` (third-party UI kit and its license)
 
-- [ ] add `gpui-component`; it resolves to the vendored patched `gpui-pre` (one `gpui-pre` in `Cargo.lock`) and the
+- [x] add `gpui-component`; it resolves to the vendored patched `gpui-pre` (one `gpui-pre` in `Cargo.lock`) and the
       workspace builds with GPUI's async-io `zbus`/`ashpd` unchanged
-- [ ] audit (written into this task): the kit turns on `gpui-pre`'s default features (`x11`, `font-kit`,
+- [x] audit (written into this task): the kit turns on `gpui-pre`'s default features (`x11`, `font-kit`,
       `windows-manifest`) for the whole workspace; record it and decide it is acceptable (Task 6's `DISPLAY` refusal
       covers the lab app); `cargo tree` of `teams-ui` for the host target shows no HTTP or WebSocket client through
       the kit (`gpui-pre-reqwest` is wasm-only; the manifest test extended to the kit's tree); the kit starts no file
       watcher (`watch_dir` never called), thread or process in our use; its `tracing`/`log` lines carry no text we
       hand it at the levels the app keeps; its licence and its dependencies' are Apache-2.0/MIT-compatible
-- [ ] tests first: the kit's `Textarea` in the sandbox: typing, selection, copy, cut, paste (plain text only), undo,
+- [x] tests first: the kit's `Textarea` in the sandbox: typing, selection, copy, cut, paste (plain text only), undo,
       soft wrap, IME composition (through GPUI's input handler in the test context), Enter and Shift-Enter told apart
-- [ ] the theme: Teams-like and compact, light and dark following the window's appearance, switching live (test on
+- [x] the theme: Teams-like and compact, light and dark following the window's appearance, switching live (test on
       the test context)
-- [ ] ⚠️ if the audit fails: fall back to our own widgets on gpui-pre's examples (`input.rs`, `view_example/`,
-      `list_example.rs`), add them as ➕ tasks here, and update Technical Details
-- [ ] `cargo test -p teams-ui` and the gate pass
+- [x] ⚠️ if the audit fails: fall back to our own widgets on gpui-pre's examples (`input.rs`, `view_example/`,
+      `list_example.rs`), add them as ➕ tasks here, and update Technical Details (not needed: the audit passed)
+- [x] `cargo test -p teams-ui` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - The kit is `gpui-component` **0.8.0** (the latest on crates.io when added, 2026-10-19; still `gpui-pre =0.3.9`),
+    not the 0.7.3 Context names, taken with no features of its own (`default-features = false`; its defaults are
+    none anyway). One `gpui-pre` in `Cargo.lock`, the vendored path crate (a test checks it); `ashpd` and `zbus` stay
+    on async-io (the kit's own `ashpd` asks for `async-io` and `settings`). `Cargo.lock` also lists `gpui-fast` (an
+    optional GPUI variant of the kit's base crate): no build compiles it (`cargo tree --workspace --all-features
+    --target all -i gpui-fast` is empty).
+  - The audit passed:
+    - Default features: the kit takes `gpui-pre` with its defaults, so the workspace's GPUI has `x11`, `font-kit` and
+      `windows-manifest` on. In the vendored 0.3.9 `x11` only lets `GraphicalEnvironment::guess_compositor` name X11
+      and keeps a few scene `cfg`s; `font-kit` is an empty feature nothing reads; `windows-manifest` runs only in a
+      Windows build script. The X11 client lives in `gpui-pre-linux`, whose features stay `wayland` only (nobody
+      turns its `x11` on), and the app starts `gpui_platform::linux(WindowingModes::WAYLAND)`; Task 6's `DISPLAY`
+      refusal stays as a second guard. Accepted.
+    - Reach: the kit's whole host tree (`cargo metadata --filter-platform`, normal and build dependencies, proc
+      macros included) holds no HTTP or WebSocket client (`gpui-pre-reqwest` is under `cfg(target_family =
+      "wasm")` in `gpui-kit-assets`). `crates/teams-ui/tests/reach.rs` checks it.
+    - Threads, processes, files: the kit's sources spawn no thread or process (its `smol` use is channels only, its
+      speech/microphone code is behind the `speech` feature, off). Its only file watcher is
+      `ThemeRegistry::watch_dir` (`notify`/`inotify`), never called (a source test refuses `watch_dir(` in the app
+      crates). Its assets crate (`rust-embed`) is reached only through an `AssetSource` the app doesn't install. On
+      Linux its base crate reads the reduced-motion setting from the settings portal on the bus the app is given,
+      as GPUI reads the colour scheme there: read only, and the sandbox's bus has no portal.
+    - Logs: its `tracing`/`log` lines (warnings about theme files, Markdown/HTML nodes we never hand it, a failed
+      clipboard read) go nowhere: `tracing` is built with `log`, but the app installs no `log` logger and no
+      `tracing` subscriber (the source test refuses `set_logger`, `set_boxed_logger`, `set_global_default`,
+      `tracing_subscriber` in the app crates), and `log` stays capped at `debug` at compile time.
+    - Licences: the kit and its crates are Apache-2.0; its tree is MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib,
+      Unicode-3.0, 0BSD, CC0-1.0, Unlicense, BSL-1.0, and MPL-2.0 for `option-ext` only (through `dirs` in
+      `rust-embed`'s build-time macro; MPL's copyleft stops at its own unmodified files). `reach.rs` checks every
+      package's SPDX expression against that list.
+  - The theme (`crates/teams-ui/src/theme.rs`): our two `ThemeConfig`s ("Teams Light", "Teams Dark") built in code
+    from two palettes (Teams' brand purple, its greys), 14 px text, radius 4/6, no shadows; anything not named keeps
+    the kit's default for the mode. `theme::init` (once per app: `gpui_component::init`, then ours, light first),
+    `theme::follow(window)` (applies the window's appearance and again on each change), `theme::apply`,
+    `theme::current` (the palette now). `window::open` sets the kit up and keeps the root view following its window;
+    the root view draws in the theme's colours (`view::BACKGROUND` is the light palette's background).
+  - GPUI's test context can't change a window's appearance (`TestWindow` is crate-private), so the live switch is
+    tested twice: on the test context through `theme::apply` (every window redraws in the new colours, state kept),
+    and on the real platform in the sandbox, where a fake settings portal on the sandbox's bus
+    (`org.freedesktop.portal.Settings`, the one GPUI asks) signals the colour scheme's change and the window's theme
+    follows to dark and back (`crates/teams-ui/tests/kit_window.rs`).
+  - The text area is tested on both: `crates/teams-ui/tests/kit.rs` on the test context (typing through GPUI's
+    platform input handler, selection, copy/cut/paste on the test platform's clipboard, a paste of an image pasting
+    nothing and of text beside an image the text only, undo and redo, soft wrap, IME composition marked then
+    committed and given up through `EntityInputHandler`, Enter and Shift-Enter) and `kit_window.rs` in the sandbox
+    (the virtual keyboard and the nested compositor's own clipboard). Two things the compose box (Task 13) must
+    keep: with `submit_on_enter`, the kit's text area hands a plain Enter on (`Enter` action propagated, then
+    `InputEvent::PressEnter { shift: false }`), and the platform types it as a line break unless an ancestor handles
+    the `Enter` action, so the compose box takes Enter as the send with `on_action`; redo is `ctrl-y` on Linux (the
+    kit binds no `ctrl-shift-z`).
 
 ### Task 8: The shell, settings and the chat list
 **Files:**

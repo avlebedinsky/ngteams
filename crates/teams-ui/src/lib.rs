@@ -11,15 +11,18 @@
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
 //!   caller hands in, read by the live test.
 //! - [`view`]: the window's root view; [`window`] opens it.
+//! - [`theme`]: the UI kit's (`gpui-component`) theme in Teams-like colours and compact sizes, light and dark
+//!   following the window's appearance.
 //!
 //! No view builds a request: the UI has no HTTP or socket client of its own, and GPUI's HTTP client stays the null
 //! one (nothing here hands GPUI another), so an image URL loads nothing. Pictures will reach a view only as bytes
 //! from the engine.
 //!
-//! M2 Task 6 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+//! M2 Tasks 6 and 7 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod bridge;
 pub mod models;
+pub mod theme;
 pub mod trace;
 pub mod view;
 pub mod window;

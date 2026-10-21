@@ -64,6 +64,10 @@ getrandom = "0.4.3"
 # are. Wayland only: without `x11`, GPUI's Linux platform has no X11 backend to fall back to.
 gpui-pre = { version = "=0.3.9", default-features = false, features = ["wayland"] }
 gpui-pre-platform = { version = "=0.3.9", default-features = false, features = ["wayland"] }
+# The UI kit (Apache-2.0; M2 Task 7's audit): built for `gpui-pre =0.3.9`, so it resolves to the vendored patched
+# copy above. It takes `gpui-pre` with its default features, so the workspace's GPUI gains `x11`, `font-kit` and
+# `windows-manifest` (the lab app refuses a set `DISPLAY`); none of the kit's own optional features.
+gpui-component = { version = "0.8.0", default-features = false }
 # GPUI's `RenderImage` frames are `image` buffers: the version GPUI already links.
 image = { version = "0.25.10", default-features = false }
 # STUN MESSAGE-INTEGRITY (HMAC-SHA1 over a long-term key) for the echo call's TURN client
