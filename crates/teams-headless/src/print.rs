@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use teams_core::{Cause, Event, MessageChange};
+use teams_core::{Cause, Event, MessageChange, Source, Transient, TransientSent};
 use teams_proto::chat;
 use teams_store::{Applied, Conversation, Member, Message, OutboxEntry, OutboxState, Reaction};
 use teams_trouter::RegistrationReport;
@@ -230,24 +230,7 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         Event::CatchUpFailed { cause: why, error } => {
             json!({"event": "catch_up_failed", "cause": cause(*why), "error": error.to_string()})
         }
-        Event::Message {
-            conversation,
-            id,
-            change: what,
-            applied: how,
-            message,
-            replay,
-        } => {
-            let value = json!({
-                "event": "message",
-                "conversation": conversation,
-                "id": id,
-                "change": change(*what),
-                "applied": applied(*how),
-                "replay": replay,
-            });
-            with_message(value, message.as_deref(), names)
-        }
+        Event::Message { .. } => message_fields(event, names),
         Event::Typing {
             conversation,
             from,
@@ -270,7 +253,52 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
             "message_id": row.message_id,
             "error": row.last_error,
         }),
+        Event::Transient(transient, sent) => json!({
+            "event": "transient",
+            "kind": match transient { Transient::Typing { .. } => "typing" },
+            "conversation": transient.conversation(),
+            "outcome": transient_outcome(sent),
+        }),
         Event::Failed { during, error } => json!({"event": "failed", "during": during, "error": error.to_string()}),
+    }
+}
+
+/// A message event's fields (see [`event_fields`]).
+fn message_fields(event: &Event, names: &LabNames) -> Value {
+    let Event::Message {
+        conversation,
+        id,
+        change: what,
+        applied: how,
+        message,
+        source,
+    } = event
+    else {
+        return Value::Null;
+    };
+    let value = json!({
+        "event": "message",
+        "conversation": conversation,
+        "id": id,
+        "change": change(*what),
+        "applied": applied(*how),
+        "replay": *source == Source::Replay,
+        "source": match source {
+            Source::Delivery => "delivery",
+            Source::Replay => "replay",
+            Source::CatchUp => "catch_up",
+            Source::History => "history",
+        },
+    });
+    with_message(value, message.as_deref(), names)
+}
+
+fn transient_outcome(sent: &TransientSent) -> Value {
+    match sent {
+        TransientSent::Sent => json!("sent"),
+        TransientSent::Waiting { not_before } => json!({"waiting": not_before}),
+        TransientSent::Denied { reason } => json!({"denied": reason}),
+        TransientSent::Dropped { reason } => json!({"dropped": reason}),
     }
 }
 

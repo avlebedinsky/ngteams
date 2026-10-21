@@ -3,7 +3,7 @@
 //! same value; neither prints one raw.
 
 use serde_json::Value;
-use teams_core::{Event, MessageChange};
+use teams_core::{Event, MessageChange, Source};
 use teams_headless::chat::LabNames;
 use teams_headless::print::{
     conversation_line, event_json, event_line, is_terminal_control, json_line, message_line, visible,
@@ -83,7 +83,7 @@ fn hostile_event() -> Event {
         change: MessageChange::New,
         applied: Applied::Inserted,
         message: Some(Box::new(message(HOSTILE))),
-        replay: false,
+        source: Source::Delivery,
     }
 }
 

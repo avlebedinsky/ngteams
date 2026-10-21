@@ -15,6 +15,9 @@
 //! journal mode can't change inside a transaction. The lock is held only while the open checks the file's modes and
 //! SQLite opens it and switches it to WAL, each step bounded (SQLite's own waits by the busy timeout); everything
 //! after, the migrations included, waits on SQLite's write lock instead.
+//!
+//! It holds the engine lock too, `engine.lock` (never swept either): an engine's owner holds it, taken without waiting,
+//! for as long as the engine runs ([`Store::engine_lock`](crate::Store::engine_lock)).
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
@@ -27,6 +30,8 @@ const FILE_MODE: u32 = 0o600;
 const SUFFIX: &str = ".lock";
 /// The open lock's file name: no run id, so [`sweep`] leaves it.
 const OPEN_LOCK: &str = "open.lock";
+/// The engine lock's file name: no run id either, so [`sweep`] leaves it.
+const ENGINE_LOCK: &str = "engine.lock";
 
 /// The directory of a store's run locks, next to it: `<store>-runs`.
 pub(crate) fn dir(store: &Path) -> PathBuf {
@@ -79,6 +84,23 @@ pub(crate) fn hold(dir: &Path, run_id: i64) -> Result<File, StoreError> {
     // only a check holds it, and only for a moment: no open run has this id
     file.lock().map_err(failed(&path))?;
     Ok(file)
+}
+
+/// Takes the engine's lock (see [`crate::EngineLock`]) without waiting: the file is held until it is dropped; `None`
+/// when another open file holds it (an engine on the account, in this process or another). The file is never removed,
+/// by this or by [`sweep`] (its name is no run's), so no one can take a lock on a file another holder no longer sees.
+pub(crate) fn try_hold_engine(dir: &Path) -> Result<Option<(File, PathBuf)>, StoreError> {
+    let (file, path) = lock_file_in(dir, ENGINE_LOCK)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some((file, path))),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(failed(&path)(error)),
+    }
+}
+
+/// The engine lock's path in the directory.
+pub(crate) fn engine_lock_path(dir: &Path) -> PathBuf {
+    dir.join(ENGINE_LOCK)
 }
 
 /// Whether the run's store is still open somewhere. No lock file means the run has ended (its file was removed by a

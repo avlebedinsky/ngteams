@@ -489,20 +489,42 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
 - Modify: `crates/teams-core/src/{engine.rs,outbox.rs,sync.rs}`, `crates/teams-store/src/*` (if a query is missing),
   `crates/teams-core/tests/*`
 
-- [ ] tests first: the request side split off `EngineHandle` as a cloneable handle (writes and queries, each a
+- [x] tests first: the request side split off `EngineHandle` as a cloneable handle (writes and queries, each a
       `Reply`); the owner keeps the event receiver, the thread and `shutdown`
-- [ ] tests first: the exclusive per-account engine lock (Technical Details): a second engine on the same store, in
+- [x] tests first: the exclusive per-account engine lock (Technical Details): a second engine on the same store, in
       this process or another, is refused with a clear error, never waits and never breaks the lock; the lock goes
       with the engine's shutdown
-- [ ] tests first: the queries the UI needs: `unread_count`, `read_horizon`, a conversation's outbox rows, the
+- [x] tests first: the queries the UI needs: `unread_count`, `read_horizon`, a conversation's outbox rows, the
       earlier runs' rows; the `resend` request (the explicit `Store::resend`, only for a row of a run that has ended)
-- [ ] tests first: a catch-up reports what it changed: `ConversationChanged` for each conversation it synced with a
+- [x] tests first: a catch-up reports what it changed: `ConversationChanged` for each conversation it synced with a
       change, and `Event::Message` for each message it newly stored, marked as brought by a catch-up (so Task 14 can
       tell it from a delivery); a replay or an unchanged row gives none
-- [ ] tests first: the outbox's transient kind (Technical Details): a fresh `Fence::check` and `fence.log` line per
+- [x] tests first: the outbox's transient kind (Technical Details): a fresh `Fence::check` and `fence.log` line per
       send; no stored row; an unknown outcome dropped, never checked for or retried; latest wins while one waits;
       nothing of it survives a restart or appears among the earlier runs' rows
-- [ ] `cargo test -p teams-core -p teams-store` and the gate pass
+- [x] `cargo test -p teams-core -p teams-store` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - The request side is `EngineRequests` (`Clone`, `Send`): `EngineHandle` keeps the events, the thread and
+    `shutdown`, hands out clones (`requests()`) and derefs to its own, so existing callers are unchanged. Dropping the
+    owner now sends the engine its stop itself, since a clone left elsewhere keeps the channel open.
+  - The lock is `Store::engine_lock` (`flock` try-lock on `<store>-runs/engine.lock`, never swept); `engine::start`
+    takes it before anything else and answers `EngineError::AlreadyRunning { lock }`; the engine's thread drops it
+    after its runtime and store. The other-process case is a store test (a child process of the test binary holds it).
+  - The queries: `unread_count`, `read_horizon` (the account's own), `outbox_unsettled` (a conversation's rows that
+    aren't sent, of any run: a new store query on a partial index, migration `0005`), `left_by_earlier_runs`;
+    `resend(id)` is `Store::resend` with its own rules (a row of a run whose store is open, this run's waiting or
+    in-flight row included, and a sent row are refused), then sent at once as a write is: a row that had an attempt
+    is looked for first. It also takes a failed or denied row of this run, since Task 13 offers "send again" on one.
+  - What reads changed is kept by the catch-up (`CatchUp::take_changes`: `Changes` of `StoredMessage`s and
+    conversations) for every read alike, so the engine tells it after each one: `Event::Message` replaces its
+    `replay: bool` with `source: Source` (`Delivery`, `Replay`, `CatchUp` for a catch-up, the sync after a write or a
+    delivery's new conversation, the outbox's check; `History` for `load_older`). A read's newer version is
+    `MessageChange::Other` (a read doesn't say what changed). `teams-headless` prints `source` beside `replay`.
+  - The transient kind is `outbox::Transient` (`Typing { conversation }`), sent by `EngineRequests::transient`
+    (refused for a conversation the store doesn't know), not an `Action` variant: `write` answers with a stored row,
+    which a transient never has. A 401 gets one more attempt at once, a 429/503 (or a throttled token service) waits
+    in memory and goes out from the tick (`Event::Transient` tells how), a denial, any other answer and an unknown
+    outcome drop it. `endpoints.md`'s typing row says so.
 
 ### Task 6: `teams-ui` and `teams-app`: the bridge and the lab binary
 **Files:**

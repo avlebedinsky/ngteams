@@ -29,9 +29,9 @@ use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{
-    self, Action, Cause, EngineError, EngineHandle, EngineOptions, Event, MessageChange, Parts, Push,
+    self, Action, Cause, EngineError, EngineHandle, EngineOptions, Event, MessageChange, Parts, Push, Source,
 };
-use teams_core::{Clock, MAX_FAILED_CHECKS, Outbox};
+use teams_core::{Clock, MAX_FAILED_CHECKS, Outbox, Transient, TransientSent};
 use teams_fence::lab::{LabConfig, record_abc_chat};
 use teams_fence::{
     Fence, FenceLog, LiveMembershipSource, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope,
@@ -44,7 +44,7 @@ use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Authorized, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState, Read, Response, Transport,
 };
-use teams_store::{Applied, Message, OutboxEntry, OutboxKind, OutboxState, Store};
+use teams_store::{Applied, Message, OutboxEntry, OutboxKind, OutboxState, Store, StoreError};
 use teams_trouter::{Options, RegistrationReport, Trouter, TrouterCredentials};
 use tokio::sync::broadcast;
 
@@ -317,7 +317,8 @@ struct Native {
     ahead: Arc<AtomicI64>,
     /// An [`Event::Failed`] is taken like any other event instead of failing the test.
     failures_expected: bool,
-    _dir: tempfile::TempDir,
+    /// Where its store is, kept while it runs; another engine on the account opens the store there ([`try_native_in`]).
+    _dir: Arc<tempfile::TempDir>,
 }
 
 fn trouter_options(backoff: Duration) -> Options {
@@ -333,8 +334,14 @@ fn trouter_options(backoff: Duration) -> Options {
     }
 }
 
-/// `me`'s native client against the lab's mocks, set up as `how` says.
+/// `me`'s native client against the lab's mocks, set up as `how` says, on a store of its own.
 fn native(lab: &Lab, me: &'static str, how: How) -> Native {
+    try_native_in(lab, me, how, Arc::new(tempfile::tempdir().unwrap())).unwrap()
+}
+
+/// `me`'s native client as [`native`] makes it, on the store in `dir` (another engine's, perhaps), with a `fence.log`
+/// of its own; the engine's refusal when it can't start.
+fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempDir>) -> Result<Native, EngineError> {
     let tokens = Tokens::of(&lab.mock, me);
     let log = SharedLog::default();
     let fence = Arc::new(Fence::new(
@@ -344,7 +351,6 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
     let origin = lab.mock.origin();
     let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
     let transport = Arc::new(http());
-    let dir = tempfile::tempdir().unwrap();
     let live = LiveMembershipSource::with_mock_origin(&origin).unwrap();
     let live = match how.groups {
         Groups::Lab { recorded } => {
@@ -402,9 +408,9 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
         outbox,
         push,
         options,
-    });
-    Native {
-        handle: handle.unwrap(),
+    })?;
+    Ok(Native {
+        handle,
         log,
         me,
         seen: String::new(),
@@ -414,7 +420,7 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
         ahead,
         failures_expected: false,
         _dir: dir,
-    }
+    })
 }
 
 impl Native {
@@ -533,6 +539,17 @@ impl Native {
             }
         }
         rows
+    }
+
+    /// Every event waiting now, taken; a request answered first makes sure the engine is done with what came before.
+    async fn drain(&mut self) -> Vec<Event> {
+        self.handle.conversations(1).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = self.handle.try_next_event() {
+            let _ = writeln!(self.seen, "{event:?}");
+            events.push(event);
+        }
+        events
     }
 
     async fn stored(&self, conversation: &str, id: &str) -> Message {
@@ -942,16 +959,26 @@ async fn a_dropped_socket_is_caught_up_after_the_reconnect_each_message_stored_o
     // message-loss report's catch-up, the deliveries the service kept for b, and the replays of earlier ones
     b.event(|event| matches!(event, Event::Connected { .. }).then_some(()))
         .await;
+    // what the catch-up stored is told as it is stored, marked as brought by it, before it ends
+    let mut told_caught_up = 0;
     let mut caught_up = b
         .event(|event| match event {
             Event::CaughtUp { cause, report } => {
                 assert_eq!(*cause, Cause::Connected, "{report:?}");
                 Some(report.messages.inserted)
             }
-            Event::Message { id, .. } if missed.contains(id) => panic!("a delivery came before the catch-up"),
+            Event::Message {
+                id, source, applied, ..
+            } if missed.contains(id) => {
+                assert_eq!(*source, Source::CatchUp, "a delivery came before the catch-up");
+                assert_eq!(*applied, Applied::Inserted);
+                told_caught_up += 1;
+                None
+            }
             _ => None,
         })
         .await;
+    assert_eq!(told_caught_up, caught_up, "each message the catch-up stored is told");
     let mut delivered = 0;
     let mut seen: Vec<String> = Vec::new();
     while seen.len() < missed.len() {
@@ -961,7 +988,10 @@ async fn a_dropped_socket_is_caught_up_after_the_reconnect_each_message_stored_o
                 caught_up += report.messages.inserted;
                 Some(())
             }
-            Event::Message { id, applied, .. } if missed.contains(id) => {
+            // one a later catch-up stored is counted by its report
+            Event::Message {
+                id, applied, source, ..
+            } if missed.contains(id) && *source != Source::CatchUp => {
                 if !seen.contains(id) {
                     seen.push(id.clone());
                 }
@@ -1420,4 +1450,486 @@ async fn a_delivery_whose_conversation_cant_be_read_is_caught_up_from_the_tick()
     assert_eq!(b.copies(&chat, &first).await, 1);
     a.shutdown();
     b.shutdown();
+}
+
+// --- the request side, the account's lock, the queries the UI reads ---
+
+/// A native client without a push channel.
+const QUIET: How = How {
+    groups: Groups::Unknown,
+    push: false,
+    throttle_first_write: false,
+    backoff: Duration::from_millis(50),
+};
+
+#[tokio::test]
+async fn the_request_side_is_shared_from_any_thread_and_answers_stopped_once_the_engine_is_shut_down() {
+    let lab = Lab::start().await;
+    let mut b = native(&lab, LAB_B, QUIET);
+    let requests = b.handle.requests();
+
+    // from a thread that runs no executor, blocking; from a task, awaiting
+    let from_thread = {
+        let requests = requests.clone();
+        std::thread::spawn(move || requests.sync().blocking_wait())
+            .join()
+            .unwrap()
+            .unwrap()
+    };
+    assert!(
+        from_thread.failed.is_empty() && from_thread.conversations > 0,
+        "{from_thread:?}"
+    );
+    let from_task = tokio::spawn({
+        let requests = requests.clone();
+        async move { requests.conversations(100).await }
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(from_task.iter().any(|conversation| conversation.id == AB_CHAT));
+
+    // a write made through a shared handle is told on the owner's events
+    let read = Action::Read {
+        conversation: AB_CHAT.to_owned(),
+        message_id: A_EDITED.to_owned(),
+    };
+    let row = requests.write(read).await.unwrap();
+    let told = b
+        .event(|event| match event {
+            Event::Outbox(entry) if entry.id == row.id => Some(entry.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(told, row);
+
+    b.shutdown();
+    assert!(matches!(requests.conversations(1).await, Err(EngineError::Stopped)));
+}
+
+/// An engine for `me` on the store in `dir`, once the one before it has let go of the account's lock (its thread ends
+/// after its handle is dropped, which isn't waited for).
+async fn native_once_free(lab: &Lab, me: &'static str, dir: &Arc<tempfile::TempDir>) -> Native {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        match try_native_in(lab, me, QUIET, Arc::clone(dir)) {
+            Ok(native) => return native,
+            Err(EngineError::AlreadyRunning { .. }) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("the engine didn't start: {error}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn dropping_the_owner_stops_the_engine_whatever_request_handles_are_left() {
+    let lab = Lab::start().await;
+    let dir = Arc::new(tempfile::tempdir().unwrap());
+    let b = try_native_in(&lab, LAB_B, QUIET, Arc::clone(&dir)).unwrap_or_else(|error| panic!("{error}"));
+    let requests = b.handle.requests();
+    drop(b);
+    assert!(matches!(requests.conversations(1).await, Err(EngineError::Stopped)));
+    // and the account's lock went with its thread
+    native_once_free(&lab, LAB_B, &dir).await.shutdown();
+}
+
+#[tokio::test]
+async fn a_second_engine_on_the_account_is_refused_at_once_and_starts_once_the_first_is_shut_down() {
+    let lab = Lab::start().await;
+    let dir = Arc::new(tempfile::tempdir().unwrap());
+    let mut first =
+        try_native_in(&lab, LAB_A, How::default(), Arc::clone(&dir)).unwrap_or_else(|error| panic!("{error}"));
+    first.ready().await;
+
+    let started = std::time::Instant::now();
+    let Err(error) = try_native_in(&lab, LAB_A, How::default(), Arc::clone(&dir)) else {
+        panic!("a second engine started on the account");
+    };
+    assert!(started.elapsed() < Duration::from_secs(2), "a refusal never waits");
+    assert!(
+        matches!(&error, EngineError::AlreadyRunning { lock } if lock.ends_with("lab.sqlite-runs/engine.lock")),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("another engine runs on this account"),
+        "{error}"
+    );
+    // the refused one never started its push channel; the first one runs on
+    let sockets = lab
+        .trouter
+        .sockets()
+        .into_iter()
+        .filter(|socket| socket.account.as_deref() == Some(LAB_A))
+        .count();
+    assert_eq!(sockets, 1);
+    assert!(!first.handle.conversations(1).await.unwrap().is_empty());
+
+    first.shutdown();
+    let second = try_native_in(&lab, LAB_A, QUIET, Arc::clone(&dir)).unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        !second.handle.conversations(1).await.unwrap().is_empty(),
+        "the same store"
+    );
+    second.shutdown();
+}
+
+#[tokio::test]
+async fn the_unread_count_and_the_read_horizon_follow_the_store() {
+    let lab = Lab::start().await;
+    let a = native(&lab, LAB_A, QUIET);
+    let b = native(&lab, LAB_B, QUIET);
+    b.handle.sync().await.unwrap();
+    let before = b.handle.unread_count(AB_CHAT).await.unwrap();
+
+    let id = id_of(&a.send(AB_CHAT, "count me").await);
+    b.handle.sync().await.unwrap();
+    assert_eq!(b.handle.unread_count(AB_CHAT).await.unwrap(), before + 1);
+
+    let read = b
+        .write(Action::Read {
+            conversation: AB_CHAT.to_owned(),
+            message_id: id.clone(),
+        })
+        .await;
+    assert_eq!(read.state, OutboxState::Sent, "{read:?}");
+    b.handle.sync().await.unwrap();
+    let horizon = b.handle.read_horizon(AB_CHAT).await.unwrap().unwrap();
+    assert_eq!(horizon.user, LAB_B);
+    assert_eq!(horizon.last_read_arrival, b.stored(AB_CHAT, &id).await.arrival_time);
+    // what is unread now is what arrived after it (the fixture's messages carry later arrival times than the mock's
+    // new ones), from a, standing
+    let page = b.handle.messages(AB_CHAT, None, 100).await.unwrap();
+    let after = page
+        .messages
+        .iter()
+        .filter(|message| {
+            message.arrival_time > horizon.last_read_arrival
+                && message.sender.as_deref() == Some(LAB_A)
+                && message.delete_time.is_none()
+        })
+        .count();
+    assert_eq!(
+        b.handle.unread_count(AB_CHAT).await.unwrap(),
+        u64::try_from(after).unwrap()
+    );
+    assert!(b.handle.read_horizon("19:unknown@thread.v2").await.unwrap().is_none());
+    a.shutdown();
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn a_row_an_earlier_run_left_goes_out_only_by_an_explicit_resend_which_looks_for_it_first() {
+    let lab = Lab::start().await;
+    let dir = Arc::new(tempfile::tempdir().unwrap());
+    let mut first = try_native_in(&lab, LAB_A, QUIET, Arc::clone(&dir)).unwrap_or_else(|error| panic!("{error}"));
+    let row = first.send_unanswered(AB_CHAT, "its answer was lost").await;
+    assert_eq!(
+        first.handle.outbox_unsettled(AB_CHAT).await.unwrap(),
+        std::slice::from_ref(&row)
+    );
+    assert!(
+        first.handle.left_by_earlier_runs().await.unwrap().is_empty(),
+        "its own run's"
+    );
+    first.shutdown();
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+
+    let mut second = native_once_free(&lab, LAB_A, &dir).await;
+    let left = second.handle.left_by_earlier_runs().await.unwrap();
+    assert_eq!(left.iter().map(|left| left.id).collect::<Vec<_>>(), [row.id]);
+    assert_eq!(second.handle.outbox_unsettled(AB_CHAT).await.unwrap().len(), 1);
+    // it doesn't go out on its own, however many ticks pass
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+
+    // the explicit resend: the row's earlier attempt arrived, which its check finds, so nothing goes out again
+    let resent = second.handle.resend(row.id).await.unwrap();
+    assert_eq!(resent.state, OutboxState::Sent, "{resent:?}");
+    assert_eq!(resent.client_message_id, row.client_message_id);
+    assert_ne!(resent.run_id, row.run_id, "adopted into this run");
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+    assert!(second.handle.outbox_unsettled(AB_CHAT).await.unwrap().is_empty());
+    assert!(second.handle.left_by_earlier_runs().await.unwrap().is_empty());
+    let told = second
+        .event(|event| match event {
+            Event::Outbox(entry) if entry.id == row.id => Some(entry.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(told.state, OutboxState::Sent);
+    // a sent row isn't sent again
+    let refused = second.handle.resend(row.id).await;
+    assert!(
+        matches!(refused, Err(EngineError::Store(StoreError::OutboxNotSendable { .. }))),
+        "{refused:?}"
+    );
+
+    // a denied row is the conversation's to show until it is resent
+    let denied = second.write(send(ABC_CHAT, "never sent")).await;
+    assert_eq!(denied.state, OutboxState::Denied);
+    assert_eq!(second.handle.outbox_unsettled(ABC_CHAT).await.unwrap(), [denied]);
+    second.shutdown();
+}
+
+#[tokio::test]
+async fn a_catch_up_tells_what_it_stored_and_changed_once_marked_as_its_own() {
+    let lab = Lab::start().await;
+    let a = native(&lab, LAB_A, QUIET);
+    let mut b = native(&lab, LAB_B, QUIET);
+
+    let report = b.handle.sync().await.unwrap();
+    let told = b.drain().await;
+    let messages: Vec<_> = told
+        .iter()
+        .filter_map(|event| match event {
+            Event::Message {
+                change,
+                applied,
+                message,
+                source,
+                ..
+            } => Some((*change, *applied, message.is_some(), *source)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages.len(), report.messages.changed(), "{messages:?}");
+    assert!(
+        messages
+            .iter()
+            .all(|told| *told == (MessageChange::New, Applied::Inserted, true, Source::CatchUp)),
+        "{messages:?}"
+    );
+    let changed = conversations_changed(&told);
+    assert!(changed.contains(&AB_CHAT.to_owned()), "{changed:?}");
+    let mut once = changed.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!(once.len(), changed.len(), "each conversation once: {changed:?}");
+
+    // nothing changed: nothing told
+    b.handle.sync().await.unwrap();
+    let told = b.drain().await;
+    assert!(
+        told.iter()
+            .all(|event| !matches!(event, Event::Message { .. } | Event::ConversationChanged { .. })),
+        "{told:?}"
+    );
+
+    // a's new message: told once, as new, with the conversation it changed
+    let id = id_of(&a.send(AB_CHAT, "brought by a catch-up").await);
+    b.handle.sync().await.unwrap();
+    let told = b.drain().await;
+    let messages: Vec<_> = told
+        .iter()
+        .filter_map(|event| match event {
+            Event::Message {
+                id,
+                change,
+                applied,
+                message,
+                source,
+                ..
+            } => Some((
+                id.clone(),
+                *change,
+                *applied,
+                *source,
+                message.as_ref()?.content.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    let (got, change, applied, source, content) = &messages[0];
+    assert_eq!(
+        (got, *change, *applied, *source),
+        (&id, MessageChange::New, Applied::Inserted, Source::CatchUp)
+    );
+    assert!(content.contains("brought by a catch-up"), "{content}");
+    assert_eq!(conversations_changed(&told), [AB_CHAT]);
+    a.shutdown();
+    b.shutdown();
+}
+
+/// The conversations `events` told changed, in order.
+fn conversations_changed(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::ConversationChanged { conversation } => Some(conversation.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_message_a_delivery_brought_is_not_told_again_by_a_catch_up() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    let mut b = native(&lab, LAB_B, How::default());
+    a.ready().await;
+    b.ready().await;
+    let id = id_of(&a.send(AB_CHAT, "delivered, then caught up").await);
+    let (applied, source) = b
+        .event(|event| match event {
+            Event::Message {
+                id: got,
+                applied,
+                source,
+                ..
+            } if *got == id => Some((*applied, *source)),
+            _ => None,
+        })
+        .await;
+    assert_eq!((applied, source), (Applied::Inserted, Source::Delivery));
+
+    b.handle.sync().await.unwrap();
+    let told = b.drain().await;
+    assert!(
+        !told
+            .iter()
+            .any(|event| matches!(event, Event::Message { id: got, .. } if *got == id)),
+        "{told:?}"
+    );
+    a.shutdown();
+    b.shutdown();
+}
+
+// --- transient writes ---
+
+fn typing(conversation: &str) -> Transient {
+    Transient::Typing {
+        conversation: conversation.to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn typing_reaches_b_under_a_fresh_decision_each_time_and_nothing_of_it_is_stored_or_survives_a_restart() {
+    let lab = Lab::start().await;
+    let dir = Arc::new(tempfile::tempdir().unwrap());
+    let mut a = try_native_in(&lab, LAB_A, How::default(), Arc::clone(&dir)).unwrap_or_else(|error| panic!("{error}"));
+    let mut b = native(&lab, LAB_B, How::default());
+    a.ready().await;
+    b.ready().await;
+
+    for _ in 0..2 {
+        assert_eq!(a.handle.transient(typing(AB_CHAT)).await.unwrap(), TransientSent::Sent);
+        let from = b
+            .event(|event| match event {
+                Event::Typing {
+                    conversation,
+                    from,
+                    typing: true,
+                } if conversation == AB_CHAT => Some(from.clone()),
+                _ => None,
+            })
+            .await;
+        assert_eq!(from.as_deref(), Some(LAB_A));
+    }
+    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow", "allow"]);
+    assert_eq!(lab.posts_to(AB_CHAT).await, 2);
+
+    // no row: none is the conversation's, none was ever made, and none is left for a later run
+    assert!(a.handle.outbox_unsettled(AB_CHAT).await.unwrap().is_empty());
+    assert!(a.handle.outbox_entry(1).await.unwrap().is_none());
+    a.shutdown();
+    let again = native_once_free(&lab, LAB_A, &dir).await;
+    assert!(again.handle.left_by_earlier_runs().await.unwrap().is_empty());
+    assert!(again.handle.outbox_entry(1).await.unwrap().is_none());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(lab.posts_to(AB_CHAT).await, 2, "nothing sent again after the restart");
+    again.shutdown();
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn typing_whose_outcome_is_unknown_is_dropped_and_never_sent_again() {
+    let lab = Lab::start().await;
+    let a = native(&lab, LAB_A, QUIET);
+    a.handle.sync().await.unwrap();
+
+    a.lose_answer.store(true, Ordering::SeqCst);
+    let sent = a.handle.transient(typing(AB_CHAT)).await.unwrap();
+    assert!(
+        matches!(&sent, TransientSent::Dropped { reason } if reason.contains("whether it arrived is unknown")),
+        "{sent:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1, "no check, no second attempt");
+    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow"]);
+
+    // a 401 gets one more attempt at once, as a row's does; any other refusal drops it
+    a.next_write.store(401, Ordering::SeqCst);
+    assert_eq!(a.handle.transient(typing(AB_CHAT)).await.unwrap(), TransientSent::Sent);
+    assert_eq!(lab.posts_to(AB_CHAT).await, 2);
+    a.next_write.store(400, Ordering::SeqCst);
+    let sent = a.handle.transient(typing(AB_CHAT)).await.unwrap();
+    assert_eq!(
+        sent,
+        TransientSent::Dropped {
+            reason: "HTTP 400".to_owned()
+        }
+    );
+    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow"; 4]);
+    assert!(a.handle.outbox_entry(1).await.unwrap().is_none());
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn throttled_typing_waits_and_only_the_latest_goes_out_from_the_tick() {
+    let lab = Lab::start().await;
+    let mut a = native(
+        &lab,
+        LAB_A,
+        How {
+            throttle_first_write: true,
+            ..QUIET
+        },
+    );
+    a.handle.sync().await.unwrap();
+
+    let first = a.handle.transient(typing(AB_CHAT)).await.unwrap();
+    let TransientSent::Waiting { not_before } = first else {
+        panic!("{first:?}");
+    };
+    // asked again while it waits: it takes the first one's place, and waits as long
+    let second = a.handle.transient(typing(AB_CHAT)).await.unwrap();
+    assert_eq!(second, TransientSent::Waiting { not_before });
+    let (transient, sent) = a
+        .event(|event| match event {
+            Event::Transient(transient, sent) => Some((transient.clone(), sent.clone())),
+            _ => None,
+        })
+        .await;
+    assert_eq!((transient, sent), (typing(AB_CHAT), TransientSent::Sent));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let told = a.drain().await;
+    assert!(
+        !told.iter().any(|event| matches!(event, Event::Transient(..))),
+        "one went out from the tick: {told:?}"
+    );
+    // the throttled attempt never reached the service; the replaced one never went out
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow", "allow"]);
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn typing_is_fenced_like_any_write_and_refused_where_the_store_knows_no_chat() {
+    let lab = Lab::start().await;
+    let a = native(&lab, LAB_A, QUIET);
+    a.handle.sync().await.unwrap();
+    let denied = a.handle.transient(typing(ABC_CHAT)).await.unwrap();
+    assert!(matches!(denied, TransientSent::Denied { .. }), "{denied:?}");
+    assert_eq!(a.log.verdicts("typing", ABC_CHAT), ["deny"]);
+    assert_eq!(lab.posts_to(ABC_CHAT).await, 0);
+
+    let refused = a.handle.transient(typing("19:unknown@thread.v2")).await;
+    assert!(
+        matches!(refused, Err(EngineError::Store(StoreError::UnknownConversation(_)))),
+        "{refused:?}"
+    );
+    assert_eq!(a.log.lines().len(), 1, "the refused one reached no fence");
+    a.shutdown();
 }

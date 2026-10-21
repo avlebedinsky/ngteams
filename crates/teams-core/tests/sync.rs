@@ -22,7 +22,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, Gaps, MAX_FAILED_CHECKS, MAX_PAGES, Outbox, OutboxError,
-    UnreadableSeen, enqueue, outbox::ConversationSync,
+    StoredMessage, UnreadableSeen, enqueue, outbox::ConversationSync,
 };
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_mock::{
@@ -545,6 +545,87 @@ async fn trouter_deliveries_and_the_sync_agree() {
     assert_eq!(b.deliver(&events), [Applied::Ignored]);
     assert_eq!(b.messages(AB_CHAT).len(), 7);
     assert_eq!(b.message(AB_CHAT, &second).content, "<p>again</p>");
+}
+
+fn stored(conversation: &str, id: &str, applied: Applied) -> StoredMessage {
+    StoredMessage {
+        conversation: conversation.to_owned(),
+        id: id.to_owned(),
+        applied,
+    }
+}
+
+#[tokio::test]
+async fn the_reads_tell_what_they_changed_once_and_never_what_the_store_had() {
+    let mock = ChatServiceMock::start().await.unwrap();
+    let mut b = Account::of(&mock, LAB_B);
+    let report = b.catch_up.catch_up(&mut b.store).await.unwrap();
+    let changes = b.catch_up.take_changes();
+    assert_eq!(changes.messages.len(), report.messages.changed(), "{changes:?}");
+    assert!(
+        changes
+            .messages
+            .iter()
+            .all(|message| message.applied == Applied::Inserted)
+    );
+    let mut conversations = changes.conversations.clone();
+    conversations.sort();
+    conversations.dedup();
+    assert_eq!(
+        conversations.len(),
+        changes.conversations.len(),
+        "each conversation once"
+    );
+    assert_eq!(
+        conversations.len(),
+        report.conversations,
+        "every one the first catch-up added"
+    );
+    assert!(b.catch_up.take_changes().is_empty(), "taken once");
+
+    // nothing changed: nothing to tell
+    b.catch_up.catch_up(&mut b.store).await.unwrap();
+    assert!(b.catch_up.take_changes().is_empty());
+
+    // a new message, then it edited: each change told, its conversation with it
+    let a = Writer::of(&mock, LAB_A);
+    let id = a.post(AB_CHAT, "told once").await;
+    b.catch_up.catch_up(&mut b.store).await.unwrap();
+    let changes = b.catch_up.take_changes();
+    assert_eq!(changes.messages, [stored(AB_CHAT, &id, Applied::Inserted)]);
+    assert_eq!(changes.conversations, [AB_CHAT]);
+    a.edit(AB_CHAT, &id, "told once, edited").await;
+    b.catch_up.catch_up(&mut b.store).await.unwrap();
+    assert_eq!(
+        b.catch_up.take_changes().messages,
+        [stored(AB_CHAT, &id, Applied::Updated)]
+    );
+
+    // delivered first: the delivery is its receiver's to tell, and the catch-up that meets it again tells nothing of it
+    drop(mock.take_events(LAB_B));
+    let delivered = a.post(AB_CHAT, "delivered first").await;
+    b.deliver(&mock.take_events(LAB_B));
+    assert!(b.catch_up.take_changes().is_empty(), "a delivery is no read's change");
+    b.catch_up.catch_up(&mut b.store).await.unwrap();
+    let changes = b.catch_up.take_changes();
+    assert!(
+        changes.messages.iter().all(|message| message.id != delivered),
+        "{changes:?}"
+    );
+}
+
+#[tokio::test]
+async fn older_history_tells_each_message_it_stored() {
+    let mock = ChatServiceMock::start().await.unwrap();
+    let mut b = Account::of(&mock, LAB_B);
+    b.catch_up = b.catch_up.with_page_size(2);
+    b.catch_up.sync_messages(&mut b.store, AB_CHAT).await.unwrap();
+    assert_eq!(b.catch_up.take_changes().messages.len(), 2);
+    let older = b.catch_up.load_older(&mut b.store, AB_CHAT).await.unwrap().unwrap();
+    let changes = b.catch_up.take_changes();
+    assert_eq!(changes.messages.len(), older.inserted);
+    assert!(older.inserted > 0);
+    assert_eq!(changes.conversations, [AB_CHAT]);
 }
 
 // --- when ---

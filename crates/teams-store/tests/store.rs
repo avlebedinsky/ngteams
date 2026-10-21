@@ -1459,3 +1459,146 @@ fn our_message_coming_back_marks_its_row_sent() {
         (OutboxState::Sent, Some("1000"))
     );
 }
+
+#[test]
+fn a_conversations_unsettled_rows_are_those_not_sent_of_any_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (left, denied) = {
+        let mut earlier = open(&dir).expect("open the store");
+        let left = earlier.enqueue(&send("1")).expect("left pending").id;
+        let denied = earlier.enqueue(&send("2")).expect("denied").id;
+        earlier.begin_attempt(denied).expect("begin");
+        let outcome = AttemptOutcome::Denied {
+            reason: "outsider".to_owned(),
+        };
+        earlier.finish_attempt(denied, &outcome).expect("denied");
+        (left, denied)
+    };
+    let mut store = open(&dir).expect("open the store again");
+    let sent = store.enqueue(&send("3")).expect("sent").id;
+    store.begin_attempt(sent).expect("begin");
+    store
+        .finish_attempt(sent, &AttemptOutcome::Sent { message_id: None })
+        .expect("sent");
+    let in_flight = store.enqueue(&send("4")).expect("in flight").id;
+    store.begin_attempt(in_flight).expect("begin");
+    let waiting = store.enqueue(&send("5")).expect("waiting").id;
+    let elsewhere = NewOutboxEntry {
+        conversation_id: Some(GROUP.to_owned()),
+        ..send("6")
+    };
+    store.enqueue(&elsewhere).expect("another conversation's");
+
+    let ids: Vec<i64> = store
+        .outbox_unsettled(CHAT)
+        .expect("unsettled")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(
+        ids,
+        [left, denied, in_flight, waiting],
+        "oldest first, the sent one left out"
+    );
+    assert_eq!(store.outbox_unsettled(GROUP).expect("unsettled").len(), 1);
+    assert!(store.outbox_unsettled(THIRD).expect("none").is_empty());
+}
+
+// --- the engine lock ---
+
+/// The variable naming the store whose engine lock [`the_engine_lock_holder`] takes, in a process of its own.
+const HOLD_ENGINE_LOCK: &str = "TEAMS_STORE_TEST_HOLD_ENGINE_LOCK";
+/// What the holder prints once it holds the lock.
+const HELD: &str = "the engine lock is held";
+
+/// Not a test of its own: run as a child process by [`the_engine_lock_is_refused_while_another_process_holds_it`]
+/// (with [`HOLD_ENGINE_LOCK`] set), it opens the store, takes its engine lock, says so and holds it until its stdin
+/// closes. Without the variable it does nothing.
+#[test]
+fn the_engine_lock_holder() {
+    let Some(path) = std::env::var_os(HOLD_ENGINE_LOCK) else {
+        return;
+    };
+    let store = Store::open(Path::new(&path)).expect("open the store");
+    let lock = store.engine_lock().expect("take the engine lock");
+    // on the line libtest began with the test's name
+    println!("{HELD}");
+    std::io::Write::flush(&mut std::io::stdout()).expect("flush");
+    let mut rest = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut rest).expect("wait for stdin to close");
+    drop(lock);
+}
+
+#[test]
+fn a_second_engine_lock_in_the_process_is_refused_at_once_and_free_once_dropped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = open(&dir).expect("open the store");
+    let lock = first.engine_lock().expect("the first engine lock");
+    let runs = PathBuf::from(format!("{}-runs", store_path(&dir).display()));
+    assert_eq!(lock.path(), runs.join("engine.lock"));
+    assert_eq!(mode(lock.path()).expect("mode"), 0o600);
+
+    // the same store, and another store on the same file: both refused, neither waits
+    let started = std::time::Instant::now();
+    let error = first.engine_lock().expect_err("the same store again");
+    assert!(
+        matches!(&error, StoreError::EngineRunning { path } if path == lock.path()),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("another engine runs on this account"),
+        "{error}"
+    );
+    let second = open(&dir).expect("open the store again");
+    assert!(matches!(second.engine_lock(), Err(StoreError::EngineRunning { .. })));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "a refusal never waits"
+    );
+
+    // an open after it sweeps the ended runs' locks, never the engine's
+    drop(second);
+    let third = open(&dir).expect("open a third time");
+    assert!(lock.path().exists());
+    assert!(third.engine_lock().is_err(), "still held");
+
+    drop(lock);
+    let again = third.engine_lock().expect("free once dropped");
+    drop(again);
+    drop(first);
+    third.engine_lock().expect("free with its store closed too");
+}
+
+#[test]
+fn the_engine_lock_is_refused_while_another_process_holds_it() {
+    use std::io::BufRead as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    let mut holder = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", "the_engine_lock_holder", "--nocapture", "--test-threads=1"])
+        .env(HOLD_ENGINE_LOCK, &path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the holder");
+    let stdout = holder.stdout.take().expect("its stdout");
+    let mut lines = std::io::BufReader::new(stdout).lines();
+    let held = lines.by_ref().map_while(Result::ok).any(|line| line.ends_with(HELD));
+    if !held {
+        drop(holder.stdin.take());
+        drop(holder.wait());
+    }
+    assert!(held, "the holder took the lock");
+
+    let store = Store::open(&path).expect("open the store");
+    let error = store.engine_lock().expect_err("another process holds it");
+    assert!(matches!(error, StoreError::EngineRunning { .. }), "{error}");
+
+    drop(holder.stdin.take());
+    // the rest of its output read, so its last lines never meet a closed pipe
+    lines.for_each(drop);
+    let status = holder.wait().expect("the holder ends");
+    assert!(status.success(), "{status}");
+    store.engine_lock().expect("free once its holder is gone");
+}

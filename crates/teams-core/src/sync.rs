@@ -43,12 +43,17 @@
 //!   than the row (less [`CLOCK_SKEW_MS`]; [`SyncState::backward_oldest`]), and fails after [`MAX_PAGES`] more, so
 //!   the row waits rather than going out twice.
 //!
+//! - **What the reads changed** ([`CatchUp::take_changes`]): every message a sync page stored new or newer, and every
+//!   conversation a read added or changed (its version, its read horizon, its roster, its messages), is kept until
+//!   the engine takes it after its read and tells its owner; a message the store had as new or newer is not, so a
+//!   delivery the catch-up meets again changes nothing and is told once.
+//!
 //! Every read is a `GET` through the native transport (`teams_proto::chat::ChatReads`), and every link is the
 //! service's own, followed only on the same chat base. Nothing here writes to the service.
 //!
 //! M1 Task 17 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
 use teams_fence::Mri;
@@ -186,6 +191,42 @@ pub struct ConversationFailed {
     pub error: CatchUpError,
 }
 
+/// What the reads of the service changed in the store since the last [`CatchUp::take_changes`]: every read alike (a
+/// catch-up, a conversation's sync, older history, the outbox's check), never a delivery's message, which its
+/// receiver tells of itself ([`CatchUp::receive_message`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// Messages a sync page stored new ([`Applied::Inserted`]) or newer ([`Applied::Updated`]), in the order stored;
+    /// one the store had as new or newer isn't here.
+    pub messages: Vec<StoredMessage>,
+    /// Conversations a read changed (added, a newer version, a moved read horizon, a newer roster, a message stored),
+    /// each once, in the order first changed.
+    pub conversations: Vec<String>,
+}
+
+impl Changes {
+    /// Nothing changed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty() && self.conversations.is_empty()
+    }
+
+    fn conversation(&mut self, conversation: &str) {
+        if !self.conversations.iter().any(|known| known == conversation) {
+            self.conversations.push(conversation.to_owned());
+        }
+    }
+}
+
+/// A message a sync page stored, as [`Changes`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredMessage {
+    pub conversation: String,
+    pub id: String,
+    /// [`Applied::Inserted`] or [`Applied::Updated`].
+    pub applied: Applied,
+}
+
 /// When a catch-up is due: before the first one, and whenever the push channel went down since the last one that ran
 /// to the end while it was up.
 #[derive(Debug)]
@@ -246,6 +287,8 @@ pub struct CatchUp<C, T> {
     me: Mri,
     page_size: u32,
     clock: Clock,
+    /// What the reads changed, until taken ([`CatchUp::take_changes`]).
+    changes: Mutex<Changes>,
 }
 
 impl<C, T> std::fmt::Debug for CatchUp<C, T> {
@@ -267,6 +310,24 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             me,
             page_size: MAX_PAGE_SIZE,
             clock: Arc::new(now_ms),
+            changes: Mutex::new(Changes::default()),
+        }
+    }
+
+    /// What the reads changed in the store since the last call ([`Changes`]): the engine takes it after every read it
+    /// makes and tells its owner. Kept until taken, whether or not the read ran to its end.
+    pub fn take_changes(&self) -> Changes {
+        std::mem::take(&mut *self.changes.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    fn changed(&self, record: impl FnOnce(&mut Changes)) {
+        record(&mut self.changes.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// A conversation changed by a read, when `applied` changed anything.
+    fn conversation_changed(&self, conversation: &str, applied: Applied) {
+        if applied != Applied::Ignored {
+            self.changed(|changes| changes.conversation(conversation));
         }
     }
 
@@ -590,6 +651,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             match self.receive_message(store, conversation, message)? {
                 Some(received) => {
                     synced.count(received.applied);
+                    self.message_stored(conversation, &message.id, received.applied);
                     if has_unreadable_reactions(message) {
                         synced.skipped += 1;
                     }
@@ -598,6 +660,21 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             }
         }
         Ok(synced)
+    }
+
+    /// A sync page's message as the store took it: kept for [`CatchUp::take_changes`] when it was new or newer.
+    fn message_stored(&self, conversation: &str, id: &str, applied: Applied) {
+        if applied == Applied::Ignored {
+            return;
+        }
+        self.changed(|changes| {
+            changes.messages.push(StoredMessage {
+                conversation: conversation.to_owned(),
+                id: id.to_owned(),
+                applied,
+            });
+            changes.conversation(conversation);
+        });
     }
 
     /// Every entry of a page it can't read at all that carries a `clientmessageid` is handed to the outbox
@@ -623,7 +700,8 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         let stored = store.conversation(&listed.id)?;
         let version = known_i64(&listed.version);
         if stored.is_none() {
-            store.upsert_conversation(&conversation_row(listed, 0))?;
+            let added = store.upsert_conversation(&conversation_row(listed, 0))?;
+            self.conversation_changed(&listed.id, added);
         }
         let changed = match (&stored, version) {
             (Some(stored), Some(version)) => version > stored.version,
@@ -636,7 +714,8 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         };
         // an unreadable version keeps the stored row: as new as itself, only a later last activity is taken
         let kept = stored.map_or(0, |stored| stored.version);
-        store.upsert_conversation(&conversation_row(listed, version.unwrap_or(kept)))?;
+        let applied = store.upsert_conversation(&conversation_row(listed, version.unwrap_or(kept)))?;
+        self.conversation_changed(&listed.id, applied);
         self.store_horizon(store, listed)?;
         self.refresh_members(store, listed).await?;
         Ok(synced)
@@ -653,18 +732,36 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             version: 0,
             last_activity: None,
         };
-        store.upsert_conversation(&row)?;
+        let added = store.upsert_conversation(&row)?;
+        self.conversation_changed(id, added);
         if !thread.kind().is_read_only() {
-            store_members(store, &thread)?;
+            self.store_members(store, &thread)?;
         }
         Ok(())
     }
 
     /// The account's own read horizon from the list, when both its parts can be read.
     fn store_horizon(&self, store: &mut Store, listed: &chat::Conversation) -> Result<(), CatchUpError> {
-        if let Some(horizon) = listed.consumption_horizon() {
-            self.receive_horizon(store, &listed.id, &horizon)?;
+        if let Some(horizon) = listed.consumption_horizon()
+            && let Some(applied) = self.receive_horizon(store, &listed.id, &horizon)?
+        {
+            self.conversation_changed(&listed.id, applied);
         }
+        Ok(())
+    }
+
+    /// A thread's members by its `rosterVersion`, when that can be read.
+    fn store_members(&self, store: &mut Store, thread: &chat::Thread) -> Result<(), CatchUpError> {
+        let Some(roster) = known_i64(&thread.roster_version) else {
+            return Ok(());
+        };
+        let members: Vec<Member> = thread
+            .members
+            .iter()
+            .map(|member| Member::new(&member.id, member.role.as_deref()))
+            .collect();
+        let applied = store.replace_members(&thread.id, roster, &members)?;
+        self.conversation_changed(&thread.id, applied);
         Ok(())
     }
 
@@ -710,7 +807,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         };
         if newer {
             let thread = ChatReads::new(&self.client).thread(&listed.id).await?;
-            store_members(store, &thread)?;
+            self.store_members(store, &thread)?;
         }
         Ok(())
     }
@@ -734,20 +831,6 @@ impl<C: Credentials, T: Transport<Error = HttpError> + Send> ConversationSync fo
             .await
             .map_err(SyncError::from)
     }
-}
-
-/// A thread's members by its `rosterVersion`, when that can be read.
-fn store_members(store: &mut Store, thread: &chat::Thread) -> Result<(), CatchUpError> {
-    let Some(roster) = known_i64(&thread.roster_version) else {
-        return Ok(());
-    };
-    let members: Vec<Member> = thread
-        .members
-        .iter()
-        .map(|member| Member::new(&member.id, member.role.as_deref()))
-        .collect();
-    store.replace_members(&thread.id, roster, &members)?;
-    Ok(())
 }
 
 /// A conversation of the list as the store keeps it, at `version`.

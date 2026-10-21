@@ -11,18 +11,25 @@
 //!
 //! - [`engine`]: one account's client on a tokio runtime and a thread of its own, reached through channels: actions
 //!   go out through the outbox, the push channel's deliveries and the catch-up come into the store, and a catch-up
-//!   runs after every reconnect.
+//!   runs after every reconnect. One engine per account (its lock); its request side is a cloneable handle of its own.
 //!
-//! M1 Tasks 13, 17 and 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
+//! M1 Tasks 13, 17 and 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`); M2 Task 5
+//! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod engine;
 pub mod outbox;
 pub mod sync;
 
-pub use engine::{Action, Cause, EngineError, EngineHandle, EngineOptions, Event, MessageChange, Parts, Push, Reply};
+pub use engine::{
+    Action, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, Parts, Push, Reply,
+    Source,
+};
 pub use outbox::{
     Arrival, CHECK_RETRY_WAIT, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS, MAX_FAILED_CHECKS,
-    Outbox, OutboxError, Received, Sent, SentDue, SyncError, UnreadableSeen, Unsynced, create_chat, enqueue,
-    new_client_message_id,
+    Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient, TransientSent, UnreadableSeen, Unsynced,
+    create_chat, enqueue, new_client_message_id,
 };
-pub use sync::{CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, ConversationFailed, Gaps, MAX_PAGES, Synced};
+pub use sync::{
+    CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, Gaps, MAX_PAGES, StoredMessage,
+    Synced,
+};

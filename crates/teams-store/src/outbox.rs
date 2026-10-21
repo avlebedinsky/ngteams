@@ -315,6 +315,21 @@ impl Store {
         )
     }
 
+    /// A conversation's rows that aren't sent, of any run, oldest first: waiting, in flight, denied or failed (what
+    /// its view shows of the outbox beside its messages). A sent row is the message once it comes back.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn outbox_unsettled(&self, conversation_id: &str) -> Result<Vec<OutboxEntry>, StoreError> {
+        // `'sent'` written out, not bound: SQLite takes the partial index only for a term that implies its own
+        entries(
+            &self.conn,
+            "conversation_id = ?1 AND state <> 'sent'",
+            [conversation_id],
+        )
+    }
+
     /// Rows a run that has ended left pending or in flight: never sent on their own, only through [`Store::resend`].
     /// Rows of another run whose store is still open aren't listed.
     ///

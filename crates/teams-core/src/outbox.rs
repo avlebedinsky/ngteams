@@ -40,11 +40,19 @@
 //!   budget over. An adopted row that had an attempt (in any run) begins with the sync check above, so a message an
 //!   earlier attempt got through isn't sent twice.
 //!
+//! - **Transient writes** ([`Transient`], [`Outbox::send_transient`]): typing goes out from here too, each send under a
+//!   fresh `Fence::check`, but never as a row: nothing of it is stored, checked for, retried after an unknown outcome or
+//!   sent by a later run; a throttled one waits in memory, and the newest of the same takes its place.
+//!
 //! The commands are the chat writes of `teams-proto` (M1 Task 12): a message post, an edit, a soft delete, a reaction
 //! and taking it back, a read receipt and a new chat; the engine (M1 Task 18) builds them from what the user asks
 //! for. Only a message post can be looked for by its `clientmessageid`, so only its row is checked and tried again
 //! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice. The sync
 //! the check relies on is the [`ConversationSync`] seam, which M1 Task 17's catch-up sync fills.
+
+mod transient;
+
+pub use transient::{Transient, TransientSent};
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -392,6 +400,9 @@ pub struct Outbox<T> {
     /// within the same budget fails the row, whatever came between (other answers, a check that couldn't sync, more
     /// [`Outbox::send`] calls); a resend starts a new budget, and with it a new allowance.
     refreshed: Mutex<BTreeMap<i64, u32>>,
+    /// The transients waiting for their `Retry-After`, one of each kind and target ([`Transient::replaces`]); kept
+    /// in memory only.
+    waiting: Mutex<Vec<transient::Waiting>>,
 }
 
 impl<T: Transport<Error = HttpError>> Outbox<T> {
@@ -407,6 +418,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             clock: Arc::new(now_ms),
             arrived: Mutex::new(Vec::new()),
             refreshed: Mutex::new(BTreeMap::new()),
+            waiting: Mutex::new(Vec::new()),
         }
     }
 
