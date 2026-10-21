@@ -9,6 +9,10 @@
 //!   as a row does; a 429 or 503 (or a throttled token service) waits its `Retry-After` in memory and goes out from
 //!   the engine's tick ([`Outbox::send_due_transients`]); a denial, any other answer and any outcome that isn't known
 //!   (a network error, a timeout, another 5xx) drop it.
+//! - **A transient waits once, and briefly**: it is worth sending only near the moment it was asked for, so one whose
+//!   `Retry-After` is longer than [`MAX_TRANSIENT_WAIT`], or that is throttled again after its wait, is dropped; and a
+//!   waiting one is dropped when what it announced has gone first ([`Outbox::drop_waiting`]: the engine calls it
+//!   before a message post to its conversation).
 //! - **Latest wins while one waits**: a transient asked for while one of the same ([`Transient::replaces`]) waits takes
 //!   its place, and waits as long; only the newest goes out.
 
@@ -18,6 +22,10 @@ use std::time::Duration;
 use teams_proto::{DEFAULT_RETRY_WAIT, HttpError, Response, Transport, Typing};
 
 use super::{Outbox, Tried};
+
+/// The longest `Retry-After` a transient waits out: a typing sent later than this would tell the chat of a moment long
+/// gone, so one throttled for longer is dropped.
+pub const MAX_TRANSIENT_WAIT: Duration = Duration::from_secs(5);
 
 /// A write the outbox sends without a row (see the module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,11 +58,12 @@ pub enum TransientSent {
     /// The service took it.
     Sent,
     /// Throttled, or another of the same waits: it goes out from the tick after `not_before` (milliseconds since the
-    /// Unix epoch), unless a newer one takes its place first.
+    /// Unix epoch), unless a newer one takes its place first or it is dropped ([`Outbox::drop_waiting`]).
     Waiting { not_before: i64 },
     /// The fence denied it: nothing went out.
     Denied { reason: String },
-    /// It didn't go out, or whether it arrived is unknown: dropped, never sent again.
+    /// It didn't go out (refused, throttled too long or again, or what it announced went first), or whether it
+    /// arrived is unknown: dropped, never sent again.
     Dropped { reason: String },
 }
 
@@ -71,11 +80,11 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         if let Some(not_before) = self.replace_waiting(&transient) {
             return TransientSent::Waiting { not_before };
         }
-        self.try_transient(transient).await
+        self.try_transient(transient, false).await
     }
 
     /// Sends every waiting transient whose `Retry-After` has passed, each as [`Outbox::send_transient`] would; returns
-    /// each with how it went (one throttled again waits again).
+    /// each with how it went (one throttled again is dropped: it has waited once).
     pub async fn send_due_transients(&self) -> Vec<(Transient, TransientSent)> {
         let now = (self.clock)();
         let due: Vec<Transient> = {
@@ -88,10 +97,27 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         };
         let mut sent = Vec::with_capacity(due.len());
         for transient in due {
-            let outcome = self.try_transient(transient.clone()).await;
+            let outcome = self.try_transient(transient.clone(), true).await;
             sent.push((transient, outcome));
         }
         sent
+    }
+
+    /// Drops every transient waiting in `conversation`, each returned with its drop: what it announced has gone first
+    /// (the engine calls this before a message post to the conversation, so no typing follows the message).
+    pub fn drop_waiting(&self, conversation: &str) -> Vec<(Transient, TransientSent)> {
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        let (dropped, kept): (Vec<Waiting>, Vec<Waiting>) = std::mem::take(&mut *waiting)
+            .into_iter()
+            .partition(|waiting| waiting.transient.conversation() == Some(conversation));
+        *waiting = kept;
+        dropped
+            .into_iter()
+            .map(|waiting| {
+                let reason = "a message to its conversation went first".to_owned();
+                (waiting.transient, TransientSent::Dropped { reason })
+            })
+            .collect()
     }
 
     /// Puts `transient` in the place of a waiting one of the same, if one waits; its time, when it did.
@@ -104,8 +130,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         Some(found.not_before)
     }
 
-    /// Attempts until it is sent, denied, dropped or throttled (one more attempt after a first 401).
-    async fn try_transient(&self, transient: Transient) -> TransientSent {
+    /// Attempts until it is sent, denied, dropped or throttled (one more attempt after a first 401); `waited`: it has
+    /// waited out a `Retry-After` already.
+    async fn try_transient(&self, transient: Transient, waited: bool) -> TransientSent {
         let mut refreshed = false;
         loop {
             let tried = match &transient {
@@ -113,14 +140,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             };
             match tried {
                 Tried::Answered(answer) if answer.status() == 401 && !refreshed => refreshed = true,
-                Tried::Answered(answer) => return self.answered(transient, &answer),
+                Tried::Answered(answer) => return self.answered(transient, &answer, waited),
                 Tried::Denied(denied) => {
                     return TransientSent::Denied {
                         reason: denied.to_string(),
                     };
                 }
                 Tried::NotSent(reason) => return TransientSent::Dropped { reason },
-                Tried::Throttled { wait, .. } => return self.wait_transient(transient, wait),
+                Tried::Throttled { wait, .. } => return self.wait_transient(transient, wait, waited),
                 Tried::Uncertain(error) => {
                     return TransientSent::Dropped {
                         reason: format!("{error}; whether it arrived is unknown, so it isn't sent again"),
@@ -130,11 +157,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    fn answered(&self, transient: Transient, answer: &Response) -> TransientSent {
+    fn answered(&self, transient: Transient, answer: &Response, waited: bool) -> TransientSent {
         let status = answer.status();
         match status {
             200..=299 => TransientSent::Sent,
-            429 | 503 => self.wait_transient(transient, answer.retry_after().unwrap_or(DEFAULT_RETRY_WAIT)),
+            429 | 503 => {
+                let wait = answer.retry_after().unwrap_or(DEFAULT_RETRY_WAIT);
+                self.wait_transient(transient, wait, waited)
+            }
             500..=599 => TransientSent::Dropped {
                 reason: format!("HTTP {status}; whether it arrived is unknown, so it isn't sent again"),
             },
@@ -145,8 +175,23 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// Keeps a throttled transient until `wait` has passed, in the place of any of the same that waits (a newer one
-    /// asked for meanwhile can't be: the engine sends one thing at a time).
-    fn wait_transient(&self, transient: Transient, wait: Duration) -> TransientSent {
+    /// asked for meanwhile can't be: the engine sends one thing at a time); drops it instead when it has `waited`
+    /// once already or `wait` is longer than [`MAX_TRANSIENT_WAIT`].
+    fn wait_transient(&self, transient: Transient, wait: Duration, waited: bool) -> TransientSent {
+        if waited {
+            return TransientSent::Dropped {
+                reason: "throttled again after waiting once".to_owned(),
+            };
+        }
+        if wait > MAX_TRANSIENT_WAIT {
+            return TransientSent::Dropped {
+                reason: format!(
+                    "throttled for {} ms, longer than the {} ms a transient is worth waiting",
+                    wait.as_millis(),
+                    MAX_TRANSIENT_WAIT.as_millis()
+                ),
+            };
+        }
         let not_before = (self.clock)().saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX));
         let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
         waiting.retain(|waiting| !transient.replaces(&waiting.transient));

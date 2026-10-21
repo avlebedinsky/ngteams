@@ -1916,6 +1916,43 @@ async fn throttled_typing_waits_and_only_the_latest_goes_out_from_the_tick() {
 }
 
 #[tokio::test]
+async fn a_message_post_drops_the_typing_waiting_in_its_conversation() {
+    let lab = Lab::start().await;
+    let mut a = native(
+        &lab,
+        LAB_A,
+        How {
+            throttle_first_write: true,
+            ..QUIET
+        },
+    );
+    a.handle.sync().await.unwrap();
+
+    let waiting = a.handle.transient(typing(AB_CHAT)).await.unwrap();
+    assert!(matches!(waiting, TransientSent::Waiting { .. }), "{waiting:?}");
+    let row = a.handle.write(send(AB_CHAT, "typed")).await.unwrap();
+    assert_eq!(row.state, OutboxState::Sent);
+    let (transient, sent) = a
+        .event(|event| match event {
+            Event::Transient(transient, sent) => Some((transient.clone(), sent.clone())),
+            _ => None,
+        })
+        .await;
+    assert_eq!(transient, typing(AB_CHAT));
+    assert!(matches!(sent, TransientSent::Dropped { .. }), "{sent:?}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let told = a.drain().await;
+    assert!(
+        !told.iter().any(|event| matches!(event, Event::Transient(..))),
+        "no typing after the message: {told:?}"
+    );
+    // the message alone reached the service: the throttled typing never did, and nothing followed
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow"]);
+    a.shutdown();
+}
+
+#[tokio::test]
 async fn typing_is_fenced_like_any_write_and_refused_where_the_store_knows_no_chat() {
     let lab = Lab::start().await;
     let a = native(&lab, LAB_A, QUIET);

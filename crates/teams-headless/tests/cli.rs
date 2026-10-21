@@ -439,6 +439,11 @@ async fn write(handle: &mut EngineHandle, action: Action) -> (OutboxState, Vec<(
     (state, fields(&String::from_utf8(out).unwrap()))
 }
 
+/// A message event the push channel delivered: a read's (a catch-up's) event for the same message doesn't count.
+fn delivered(line: &Value) -> bool {
+    line["event"] == "message" && line["source"] == "delivery"
+}
+
 #[tokio::test]
 async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
     let lab = Lab::start().await;
@@ -469,7 +474,7 @@ async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
     assert_eq!(field(&sent, "state"), "sent");
 
     let received = watch
-        .json_line(|line| line["event"] == "message" && line["id"] == id.as_str())
+        .json_line(|line| delivered(line) && line["id"] == id.as_str())
         .await;
     assert_eq!(received["conversation"], AB_CHAT);
     assert_eq!(received["change"], "new");
@@ -492,7 +497,7 @@ async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
         "{edited:?}"
     );
     let changed = watch
-        .json_line(|line| line["event"] == "message" && line["id"] == id.as_str() && line["change"] == "edit")
+        .json_line(|line| delivered(line) && line["id"] == id.as_str() && line["change"] == "edit")
         .await;
     assert_eq!(changed["text"], "hello b, edited");
 
@@ -504,7 +509,7 @@ async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
     let (state, reacted) = write(&mut a, react).await;
     assert_eq!(state, OutboxState::Sent, "{reacted:?}");
     watch
-        .json_line(|line| line["event"] == "message" && line["id"] == id.as_str() && line["change"] == "reaction")
+        .json_line(|line| delivered(line) && line["id"] == id.as_str() && line["change"] == "reaction")
         .await;
 
     let _ = stop.send(());
@@ -568,7 +573,7 @@ async fn a_s_send_to_the_lab_s_group_chat_reaches_b_s_and_c_s_watch() {
     let id = field(&sent, "message_id").to_owned();
     for watch in [&watch_b, &watch_c] {
         let received = watch
-            .json_line(|line| line["event"] == "message" && line["id"] == id.as_str())
+            .json_line(|line| delivered(line) && line["id"] == id.as_str())
             .await;
         assert_eq!(received["conversation"], ABC_CHAT);
         assert_eq!(received["sender"], "a");

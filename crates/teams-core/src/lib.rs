@@ -26,8 +26,8 @@ pub use engine::{
 };
 pub use outbox::{
     Arrival, CHECK_RETRY_WAIT, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS, MAX_FAILED_CHECKS,
-    Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient, TransientSent, UnreadableSeen, Unsynced,
-    create_chat, enqueue, new_client_message_id,
+    MAX_TRANSIENT_WAIT, Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient, TransientSent,
+    UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id,
 };
 pub use sync::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, Gaps, MAX_PAGES, StoredMessage,

@@ -37,7 +37,9 @@
 //!   it; older history from the service ([`EngineRequests::load_older`]). A row of an earlier run (or a failed or
 //!   denied one) goes out again only by the explicit [`EngineRequests::resend`].
 //! - **Transient writes** ([`EngineRequests::transient`]: typing) go out through the outbox too, but as no row
-//!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place.
+//!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
+//!   once and briefly ([`crate::MAX_TRANSIENT_WAIT`]), and a message post to its conversation drops it (told as
+//!   [`Event::Transient`] with its drop).
 //! - **Its handles**: [`EngineRequests`], the request side (writes and queries, each a [`Reply`]), is cloneable, for a
 //!   UI's views to share; [`EngineHandle`] owns the engine: its events, its thread and its shutdown.
 //! - **One engine per account** ([`teams_store::Store::engine_lock`]): [`start`] takes the account's engine lock
@@ -249,12 +251,13 @@ pub enum Event {
     /// The account's own read horizon in a conversation moved (stored).
     ReadHorizon { conversation: String },
     /// A conversation changed (its properties, its last message): a delivery said so, or a read of the service changed
-    /// it in the store (added it, or its version, read horizon, roster or messages).
+    /// it in the store (added it, or its version, last activity, read horizon, roster or messages).
     ConversationChanged { conversation: String },
     /// An outbox row as it settled: after its first send, a later retry, or our own message coming back (by a
     /// catch-up, a delivery or any other sync).
     Outbox(OutboxEntry),
-    /// A transient that waited out its `Retry-After`, as its send from the tick went.
+    /// A transient that waited out its `Retry-After`, as its send from the tick went; or one that waited and was
+    /// dropped because a message post to its conversation went first.
     Transient(Transient, TransientSent),
     /// Something the engine did on its own failed: what, and why.
     Failed { during: &'static str, error: EngineError },
@@ -375,10 +378,12 @@ impl EngineRequests {
     }
 
     /// Sends an outbox row again, by its id: the explicit resend ([`Store::resend`]) of a row an earlier run left
-    /// pending or in flight, or of one that was denied or failed; a row of a run whose store is still open (this
-    /// one's waiting or in flight included) is refused, and a sent one too. The row keeps its `clientmessageid`, its
-    /// budget starts over, and one that had an attempt is first looked for (its earlier attempt may have arrived).
-    /// The reply is the row as its send left it, as [`EngineRequests::write`]'s.
+    /// pending or in flight, or of one that was denied or failed, of whichever run; only a pending or sending row of a
+    /// run whose store is still open (this one included) is refused, and a sent one. The row keeps its
+    /// `clientmessageid` and its budget starts over. A message post that had an attempt is first looked for (its
+    /// earlier attempt may have arrived); any other kind (an edit, a delete, a reaction, a read receipt, a chat's
+    /// creation) can't be looked for, so it goes out again unchecked, and the resend is the caller's decision to risk
+    /// applying it twice. The reply is the row as its send left it, as [`EngineRequests::write`]'s.
     pub fn resend(&self, id: i64) -> Reply<OutboxEntry> {
         self.ask(|reply| Request::Resend(id, reply))
     }
@@ -794,6 +799,12 @@ where
 
     async fn write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
         let command = self.command(action)?;
+        if let Command::Send { conversation, .. } = &command {
+            // the message a waiting typing announced goes now: the typing must not follow it
+            for (transient, dropped) in self.outbox.drop_waiting(conversation) {
+                self.emit(Event::Transient(transient, dropped));
+            }
+        }
         let row = enqueue(&mut self.store, &command)?;
         self.send_row(row.id).await
     }

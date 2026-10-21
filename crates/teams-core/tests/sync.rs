@@ -963,6 +963,44 @@ async fn an_unreadable_version_never_replaces_a_stored_one() {
     assert_eq!(a.message(CHAT, "1001"), stored);
 }
 
+#[tokio::test]
+async fn a_later_last_activity_under_an_unreadable_version_is_told_as_a_change() {
+    let server = scripted(vec![
+        ("", page(Vec::new(), Some("s1"), None)),
+        ("s1", page(Vec::new(), Some("s1"), None)),
+    ])
+    .await;
+    // the list: the plain chat, its version unreadable, its last message later than anything stored
+    let listed = json!({
+        "id": CHAT,
+        "version": "not a number",
+        "lastMessage": entry(1001, json!("1001")),
+        "threadProperties": {"threadType": "chat"},
+    });
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/chatsvc/amer/v1/users/ME/conversations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"conversations": [listed]})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let mut a = plain_account(&server);
+    a.store
+        .replace_members(CHAT, 1, &[Member::new(LAB_A, None), Member::new(LAB_B, None)])
+        .unwrap();
+
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    let activity = a.store.conversation(CHAT).unwrap().unwrap().last_activity;
+    assert!(activity.is_some(), "the later last activity is taken");
+    let changes = a.catch_up.take_changes();
+    assert!(changes.messages.is_empty(), "{changes:?}");
+    assert_eq!(changes.conversations, [CHAT]);
+
+    // the same list again: the stored last activity is as late, nothing to tell
+    a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(a.catch_up.take_changes().is_empty());
+}
+
 /// `entry` as a control message of `messagetype` (typing and its end come with no content).
 fn control(mut entry: Value, messagetype: &str) -> Value {
     entry["messagetype"] = json!(messagetype);

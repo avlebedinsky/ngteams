@@ -290,12 +290,15 @@ fn send_to(live: &Live, name: &str, chat: &str, text: &str) -> Sent {
     }
 }
 
-/// When a watch received a message event of `change` for `id` in `chat` (the first one).
+/// When a watch received a message event of `change` for `id` in `chat` over the push channel (the first one): a
+/// read's event for the same message (a catch-up after a drop or a message-loss report) is no delivery, and a
+/// delivery it stood in for may have been lost.
 fn received(events: &[Value], chat: &str, id: &str, change: &str) -> Option<i64> {
     events
         .iter()
         .find(|event| {
             event["event"] == "message"
+                && event["source"] == "delivery"
                 && event["conversation"] == chat
                 && event["id"] == id
                 && event["change"] == change
@@ -426,6 +429,7 @@ fn edit_and_react(live: &Live, watch: &mut Watch, first: &Sent) -> Value {
     let edited = watch.until(ARRIVAL_LIMIT, "received the edit", |events| {
         events.iter().find_map(|event| {
             (event["event"] == "message"
+                && event["source"] == "delivery"
                 && event["id"] == first.id.as_str()
                 && event["change"] == "edit"
                 && event["text"] == text.as_str())

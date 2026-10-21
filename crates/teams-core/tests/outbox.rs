@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
-    CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, Outbox, OutboxError, Sent,
-    SyncError, create_chat, enqueue, new_client_message_id,
+    CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, MAX_TRANSIENT_WAIT, Outbox,
+    OutboxError, Sent, SyncError, Transient, TransientSent, create_chat, enqueue, new_client_message_id,
 };
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_proto::chat::{MessageText, Node, RichText};
@@ -1575,6 +1575,86 @@ async fn another_runs_pending_row_is_refused_even_while_it_waits_for_its_retry_a
         "{error:?}"
     );
     assert_eq!(setup.members.reads(), 0);
+}
+
+// --- transient writes wait once, and briefly ---
+
+fn typing() -> Transient {
+    Transient::Typing {
+        conversation: CHAT.to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn a_typing_throttled_for_longer_than_it_is_worth_is_dropped_at_once() {
+    let setup = setup().await;
+    setup.answer(201).await;
+    let longest = MAX_TRANSIENT_WAIT.as_secs();
+    setup.answer_once(429, Some(&(longest + 1).to_string())).await;
+
+    let sent = setup.outbox.send_transient(typing()).await;
+
+    assert!(
+        matches!(&sent, TransientSent::Dropped { reason } if reason.contains("longer than")),
+        "{sent:?}"
+    );
+    setup.advance(Duration::from_secs(longest + 2));
+    assert!(setup.outbox.send_due_transients().await.is_empty(), "nothing waits");
+    assert_eq!(setup.posted().await.len(), 1, "only the throttled attempt");
+}
+
+#[tokio::test]
+async fn a_typing_throttled_again_after_its_wait_is_dropped_not_kept_waiting() {
+    let setup = setup().await;
+    setup.answer(201).await;
+    setup.answer_once(429, Some("1")).await;
+    setup.answer_once(503, Some("1")).await;
+
+    let sent = setup.outbox.send_transient(typing()).await;
+    assert_eq!(
+        sent,
+        TransientSent::Waiting {
+            not_before: setup.now() + 1000
+        }
+    );
+    assert!(setup.outbox.send_due_transients().await.is_empty(), "not yet due");
+    setup.advance(Duration::from_secs(1));
+
+    let due = setup.outbox.send_due_transients().await;
+    assert_eq!(
+        due,
+        [(
+            typing(),
+            TransientSent::Dropped {
+                reason: "throttled again after waiting once".to_owned()
+            }
+        )]
+    );
+    setup.advance(Duration::from_secs(5));
+    assert!(setup.outbox.send_due_transients().await.is_empty(), "nothing waits");
+    assert_eq!(setup.posted().await.len(), 2);
+    assert_eq!(setup.log.verdicts(), ["allow", "allow"]);
+}
+
+#[tokio::test]
+async fn a_waiting_typing_is_dropped_when_its_conversation_is_named() {
+    let setup = setup().await;
+    setup.answer(201).await;
+    setup.answer_once(429, Some("1")).await;
+    assert!(matches!(
+        setup.outbox.send_transient(typing()).await,
+        TransientSent::Waiting { .. }
+    ));
+
+    assert!(setup.outbox.drop_waiting("19:another@thread.v2").is_empty());
+    let dropped = setup.outbox.drop_waiting(CHAT);
+    assert!(
+        matches!(dropped.as_slice(), [(transient, TransientSent::Dropped { .. })] if *transient == typing()),
+        "{dropped:?}"
+    );
+    setup.advance(Duration::from_secs(2));
+    assert!(setup.outbox.send_due_transients().await.is_empty());
+    assert_eq!(setup.posted().await.len(), 1, "only the throttled attempt");
 }
 
 // --- the engine's runtime ---

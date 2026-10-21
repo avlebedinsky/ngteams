@@ -42,7 +42,8 @@
 //!
 //! - **Transient writes** ([`Transient`], [`Outbox::send_transient`]): typing goes out from here too, each send under a
 //!   fresh `Fence::check`, but never as a row: nothing of it is stored, checked for, retried after an unknown outcome or
-//!   sent by a later run; a throttled one waits in memory, and the newest of the same takes its place.
+//!   sent by a later run; a throttled one waits in memory, once and briefly ([`MAX_TRANSIENT_WAIT`]), the newest of
+//!   the same takes its place, and a message post to its conversation drops it ([`Outbox::drop_waiting`]).
 //!
 //! The commands are the chat writes of `teams-proto` (M1 Task 12): a message post, an edit, a soft delete, a reaction
 //! and taking it back, a read receipt and a new chat; the engine (M1 Task 18) builds them from what the user asks
@@ -52,7 +53,7 @@
 
 mod transient;
 
-pub use transient::{Transient, TransientSent};
+pub use transient::{MAX_TRANSIENT_WAIT, Transient, TransientSent};
 
 use std::collections::BTreeMap;
 use std::error::Error;

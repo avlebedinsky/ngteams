@@ -713,9 +713,16 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             Synced::default()
         };
         // an unreadable version keeps the stored row: as new as itself, only a later last activity is taken
-        let kept = stored.map_or(0, |stored| stored.version);
-        let applied = store.upsert_conversation(&conversation_row(listed, version.unwrap_or(kept)))?;
+        let kept = stored.as_ref().map_or(0, |stored| stored.version);
+        let row = conversation_row(listed, version.unwrap_or(kept));
+        let applied = store.upsert_conversation(&row)?;
         self.conversation_changed(&listed.id, applied);
+        // the store takes a later last activity whatever the version (`Ignored` then), and that is a change too
+        if let Some(stored) = &stored
+            && advances(row.last_activity, stored.last_activity)
+        {
+            self.changed(|changes| changes.conversation(&listed.id));
+        }
         self.store_horizon(store, listed)?;
         self.refresh_members(store, listed).await?;
         Ok(synced)
@@ -843,6 +850,11 @@ fn conversation_row(listed: &chat::Conversation, version: i64) -> Conversation {
         version,
         last_activity: listed.last_message().and_then(|message| message.arrival_time_ms()),
     }
+}
+
+/// Whether a listed last activity moves the stored one on: the store keeps the later of the two.
+fn advances(listed: Option<i64>, stored: Option<i64>) -> bool {
+    listed.is_some_and(|listed| stored.is_none_or(|stored| listed > stored))
 }
 
 /// The store's kind for the model's: a kind it doesn't name is kept as text the store's own names can't be.
