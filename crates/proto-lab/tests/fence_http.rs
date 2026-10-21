@@ -254,6 +254,7 @@ fn log_entries(path: &Path) -> TestResult<Vec<Value>> {
 fn paused(method: &str, url: &str) -> PausedRequest {
     PausedRequest {
         request_id: "interception-job-1.0".to_owned(),
+        headers: Vec::new(),
         method: method.to_owned(),
         url: url.to_owned(),
         body: None,
@@ -364,6 +365,26 @@ fn a_paused_event_gives_the_request_and_its_inline_body() {
 
     let without_body = json!({"requestId": "r", "request": {"method": "GET", "url": CHAT}});
     assert_eq!(PausedRequest::from_params(&without_body).unwrap().body, None);
+
+    // every header's name, but the value only of those the read-by-POST list reads, and only when it is a string
+    let with_headers = json!({"requestId": "r", "request": {"method": "POST", "url": CHAT, "headers": {
+        "Authorization": "Bearer planted-token",
+        "Cookie": "planted-cookie",
+        "Content-Type": "application/json",
+        "Origin": 7,
+        "x-ms-migration": "True",
+    }}});
+    let mut headers = PausedRequest::from_params(&with_headers).unwrap().headers;
+    headers.sort();
+    let expected = [
+        ("Authorization", None),
+        ("Content-Type", Some("application/json")),
+        ("Cookie", None),
+        ("Origin", None),
+        ("x-ms-migration", Some("True")),
+    ]
+    .map(|(name, value)| (name.to_owned(), value.map(str::to_owned)));
+    assert_eq!(headers, expected);
 
     for (field, params) in [
         ("requestId", json!({"request": {"method": "POST", "url": CHAT}})),

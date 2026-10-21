@@ -7,20 +7,20 @@
 //! 2. a opens the chat with b, and the live enforcement test comes first: this run's probe must be denied by the fence
 //!    and fail in a's page (`ab_chat::enforce`).
 //! 3. a, each step a write on the a–b chat whose answer the step waits for ([`Writes`]): sends a message, edits it,
-//!    reacts to it and takes the reaction back, replies to the first message with a quote, reacts to the reply and
-//!    leaves the reaction there (so b's read of the chat shows a reaction with its user), and sends a last message and
-//!    deletes it ([`Texts`]).
+//!    reacts to it and takes the reaction back, mentions b ([`Steps::mention`]), replies to the first message with a
+//!    quote, reacts to the reply and leaves the reaction there (so b's read of the chat shows a reaction with its user),
+//!    and sends a last message and deletes it ([`Texts`]).
 //! 4. b opens the chat (it reads the chat's history: message pages and their sync state) and, once it shows a's first
 //!    message, the enforcement test's other half: b's copy of the chat must not have the probe
 //!    (`ab_chat::not_received`). b then shows a's edited message, goes to its compose box (whether the client then
-//!    sends a read receipt is noted, not required), and reacts to a's first message.
+//!    sends a read receipt is noted, not required), shows a's mention, and reacts to a's first message.
 //! 5. The run is judged as `ab-chat` is: a probe in b's copy fails it like any failed step.
 //!
-//! No mention: under the fence the web client's mention picker can't offer b. The chat partner shows as "Unknown User"
-//! because the profile lookups behind the picker are middle-tier `POST`s the fence denies, and the picker's only
-//! suggestion is a message extension (live, 2026-10-20). The mention's wire form is
-//! described from the web bundle in `docs/protocol/chat.md`, marked as not captured
-//! (`docs/backlog/mention-not-captured-under-the-fence.md`).
+//! The mention needs the web client's mention picker to offer b, which it can only once it can read b's profile: the
+//! middle tier's profile lookups are `POST`s, let through by the fence's read-by-`POST` list when they name only lab
+//! accounts (`crate::post_read`, the user's decision of 2026-10-21). Without them b shows as "Unknown User" and the
+//! picker offers nobody (live, 2026-10-20). The step picks b only once the picker's highlighted suggestion is b by its
+//! id, never whatever came first, and checks that the post's `properties.mentions` names b.
 //!
 //! A step that fails after the enforcement test (the web client's controls moved, a write denied) is reported, with a
 //! screenshot named after it in the capture dir and the page's visible `data-tid`s in the notes, and the run goes on
@@ -37,7 +37,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::browser::Media;
-use crate::classify::Classifier;
+use crate::classify::{Classifier, strict_json};
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::without_query;
 use crate::fence_ws::FrameClassifier;
@@ -74,6 +74,9 @@ pub const MARKED: Selector<'static> = Selector::Css("[data-lab-mark]");
 /// The quick reaction a and b use.
 const LIKE: &str = r#"[data-tid="message-actions-like"]"#;
 
+/// The mention picker the compose box opens on `@` (seen on 2026-10-20).
+const PICKER: &str = r#"[data-tid="AutocompletePopup-Mentions"]"#;
+
 /// What a's messages say; each holds the run's nonce, and none another's text but the edit its original.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Texts {
@@ -81,6 +84,8 @@ pub struct Texts {
     pub first: String,
     /// What a edits it to.
     pub edited: String,
+    /// What a's message mentioning b says after the mention.
+    pub mention: String,
     /// a's reply quoting the first message; a reacts to it and leaves the reaction.
     pub reply: String,
     /// The message a deletes.
@@ -93,6 +98,7 @@ impl Texts {
         Self {
             first: format!("lab full {nonce} first"),
             edited: format!("lab full {nonce} first, edited"),
+            mention: format!("lab full {nonce} mention"),
             reply: format!("lab full {nonce} reply"),
             doomed: format!("lab full {nonce} to be deleted"),
         }
@@ -235,6 +241,7 @@ impl Full {
             writes: &writes,
             texts: &self.texts,
             probe: &probe,
+            mri_b: &self.mri_b,
             report,
         };
         steps.a(a, &mut drive_a).await;
@@ -250,6 +257,8 @@ struct Steps<'a> {
     texts: &'a Texts,
     /// This run's probe, which b's copy of the chat must not have ([`not_received`]).
     probe: &'a str,
+    /// The account a mentions.
+    mri_b: &'a str,
     report: &'a mut ScenarioReport,
 }
 
@@ -264,6 +273,13 @@ impl Steps<'_> {
         self.settle(Alias::A, a, drive, "react", outcome).await;
         let outcome = react(drive, &self.writes.reaction, "a (taking it back)", &self.texts.first).await;
         self.settle(Alias::A, a, drive, "unreact", outcome).await;
+        self.a_then(a, drive).await;
+    }
+
+    /// a's steps after taking its reaction back: the mention, the reply and its reaction, the delete.
+    async fn a_then(&mut self, a: &LabSession, drive: &mut Driver) {
+        let outcome = self.mention(drive).await;
+        self.settle(Alias::A, a, drive, "mention", outcome).await;
         let outcome = self.reply(drive).await;
         self.settle(Alias::A, a, drive, "reply", outcome).await;
         let outcome = react(drive, &self.writes.reaction, "a (on the reply)", &self.texts.reply).await;
@@ -332,6 +348,81 @@ impl Steps<'_> {
         answered("a's edit", &seen)
     }
 
+    /// a mentions b: types `@` in the compose box and waits for the picker to offer b, then types the name the picker
+    /// shows for b and waits again, and presses Enter only once the picker's highlighted suggestion is b, by b's object
+    /// id in it ([`picker_offers`]); then it sends [`Texts::mention`] after the mention and checks that the post's
+    /// `properties.mentions` names b. What the picker showed goes into the notes when it never offers b; the compose
+    /// box is emptied then, at best: the picker's error is what the step fails with, a failed emptying only a note.
+    async fn mention(&mut self, drive: &mut Driver) -> Result<(), ScenarioError> {
+        drive.type_into("a starts a mention", COMPOSE, "@").await?;
+        let name = match self.pick_b(drive).await {
+            Ok(name) => name,
+            Err(error) => {
+                let shown = drive
+                    .evaluate("what the picker shows", &picker_state(self.mri_b))
+                    .await
+                    .unwrap_or(Value::Null);
+                self.report.notes.push(format!("a: mention: the picker showed {shown}"));
+                for _ in 0..2 {
+                    let _ = drive.press("a closes the picker", Key::ESCAPE).await;
+                }
+                if let Err(cleanup) = clear_compose(drive).await {
+                    self.report
+                        .notes
+                        .push(format!("a: mention: the compose box couldn't be emptied: {cleanup}"));
+                }
+                return Err(error);
+            }
+        };
+        drive.press_enter("a picks b").await?;
+        drive.skip_seen();
+        ab_chat::send(drive, "a (the mention)", &format!(" {}", self.texts.mention)).await?;
+        let post = self.writes.post.clone().with_body_containing(&self.texts.mention);
+        let seen = drive.wait_for_answer("a's mention is posted", &post, STEP).await?;
+        answered("a's mention", &seen)?;
+        if !mentions(seen.body.as_deref(), self.mri_b) {
+            return Err(setup(
+                "a's mention: the post's properties.mentions doesn't name b".to_owned(),
+            ));
+        }
+        self.report
+            .notes
+            .push(format!("a: mention: b offered as {name:?}, picked and mentioned"));
+        Ok(())
+    }
+
+    /// Waits for the picker's highlighted suggestion to be b, types the name it shows for b after the `@`, and waits
+    /// for that again; the name, once it is b.
+    async fn pick_b(&self, drive: &mut Driver) -> Result<String, ScenarioError> {
+        let offers_b = picker_offers(self.mri_b);
+        drive
+            .wait_until_true(
+                "a's picker offers b",
+                &offers_b,
+                "the picker's highlighted suggestion to be b",
+                STEP,
+            )
+            .await?;
+        let name = drive
+            .evaluate("the name the picker shows for b", &picker_name(self.mri_b))
+            .await?;
+        let name = name
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| setup("the picker shows no name for b".to_owned()))?
+            .to_owned();
+        drive.insert_text("a types b's name", &name).await?;
+        drive
+            .wait_until_true(
+                "a's picker offers b by name",
+                &offers_b,
+                "the picker's highlighted suggestion to be b",
+                STEP,
+            )
+            .await?;
+        Ok(name)
+    }
+
     /// a replies to its first message with a quote of it, from the message's actions.
     async fn reply(&self, drive: &mut Driver) -> Result<(), ScenarioError> {
         find_message(drive, "a finds its first message", &self.texts.first).await?;
@@ -375,6 +466,9 @@ impl Steps<'_> {
         drive
             .wait_for_text("b shows a's edited message", &self.texts.edited, DELIVERY)
             .await?;
+        drive
+            .wait_for_text("b shows a's mention", &self.texts.mention, DELIVERY)
+            .await?;
         drive.type_into("b goes to its compose box", COMPOSE, "").await?;
         match drive
             .wait_for_answer("b's read receipt", &self.writes.read_receipt, STEP)
@@ -401,6 +495,84 @@ const VISIBLE_TIDS: &str = r"(() => {
   const tids = [...document.querySelectorAll('[data-tid]')].filter(visible).map((e) => e.dataset.tid);
   return [...new Set(tids)].slice(0, 200).join(' ');
 })()";
+
+/// The page expression of the mention picker's visible suggestions (`[role="option"]` in [`PICKER`]).
+const PICKER_OPTIONS: &str = r#"[...document.querySelectorAll('[data-tid="AutocompletePopup-Mentions"] [role="option"]')]
+    .filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })"#;
+
+/// The page function of the name a suggestion shows: its first line of text, else its accessible name.
+const SHOWN_NAME: &str = r"((e) => (e.innerText ?? '').split(/\n/).map((l) => l.trim()).find((l) => l)
+    ?? (e.getAttribute('aria-label') ?? '').trim())";
+
+/// The object id an MRI names (`8:orgid:<id>`), in lower case, as a JavaScript string literal.
+fn object_id(mri: &str) -> String {
+    js_string(&mri.rsplit(':').next().unwrap_or(mri).to_ascii_lowercase())
+}
+
+/// The page expression of the picker's highlighted suggestion (the one Enter picks: `aria-selected`, else the first),
+/// when it is the account `mri`: its markup holds the account's object id. `undefined` when it isn't.
+fn picked_option(mri: &str) -> String {
+    r"(() => {
+  const options = OPTIONS;
+  const picked = options.find((e) => e.getAttribute('aria-selected') === 'true') ?? options[0];
+  return picked && picked.outerHTML.toLowerCase().includes(ID) ? picked : undefined;
+})()"
+        .replace("OPTIONS", PICKER_OPTIONS)
+        .replace("ID", &object_id(mri))
+}
+
+/// Whether the picker's highlighted suggestion is the account `mri` ([`picked_option`]).
+fn picker_offers(mri: &str) -> String {
+    format!("{} !== undefined", picked_option(mri))
+}
+
+/// The name the picker's highlighted suggestion shows ([`SHOWN_NAME`]), when it is the account `mri`; `null`
+/// otherwise.
+fn picker_name(mri: &str) -> String {
+    r"(() => { const e = PICKED; return e ? (NAME(e) || null) : null; })()"
+        .replace("PICKED", &picked_option(mri))
+        .replace("NAME", SHOWN_NAME)
+}
+
+/// What the picker shows, for a failed mention's notes: whether it is open, how many suggestions it has, which one is
+/// highlighted, which hold the object id of `mri`, and the name each one shows.
+fn picker_state(mri: &str) -> String {
+    r"(() => {
+  const options = OPTIONS;
+  return {
+    open: !!document.querySelector(POPUP),
+    count: options.length,
+    selected: options.findIndex((e) => e.getAttribute('aria-selected') === 'true'),
+    b: options.map((e, i) => (e.outerHTML.toLowerCase().includes(ID) ? i : -1)).filter((i) => i >= 0),
+    names: options.map((e) => NAME(e).slice(0, 60)),
+  };
+})()"
+        .replace("OPTIONS", PICKER_OPTIONS)
+        .replace("POPUP", &js_string(PICKER))
+        .replace("ID", &object_id(mri))
+        .replace("NAME", SHOWN_NAME)
+}
+
+/// Whether a message post's body (`body`, read strictly: the classifier's `strict_json`) has `properties.mentions`, a
+/// JSON string of a list (read strictly too), with an entry whose `mri` is `mri`.
+#[must_use]
+pub fn mentions(body: Option<&str>, mri: &str) -> bool {
+    let mentions = body
+        .and_then(|body| strict_json(body.as_bytes()))
+        .and_then(|body| body["properties"]["mentions"].as_str().map(str::to_owned))
+        .and_then(|mentions| strict_json(mentions.as_bytes()));
+    mentions
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|mentions| mentions.iter().any(|mention| mention["mri"] == mri))
+}
+
+/// Empties the compose box: everything selected, then deleted.
+async fn clear_compose(drive: &mut Driver) -> Result<(), StepError> {
+    drive.type_into("a goes back to the compose box", COMPOSE, "").await?;
+    drive.press("a selects the compose box's text", Key::SELECT_ALL).await?;
+    drive.press("a deletes it", Key::BACKSPACE).await
+}
 
 /// Types `text` into the compose box, sends it ([`ab_chat::send`]) and waits for its post (`post`, holding the text)
 /// to be answered.

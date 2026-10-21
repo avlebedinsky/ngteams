@@ -13,6 +13,7 @@ pub mod commands;
 pub mod config;
 pub mod fence_http;
 pub mod fence_ws;
+pub mod post_read;
 pub mod sanitize;
 pub mod scenario;
 pub mod session;

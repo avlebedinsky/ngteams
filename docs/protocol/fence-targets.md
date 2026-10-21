@@ -6,7 +6,8 @@ builders), plus [auth.md](auth.md). Then checked the same day against live traff
 license: `proto-lab run load` (account a) and `proto-lab run ab-chat` (a and b, the a–b 1:1 chat), the web client as
 served then. [What the captures showed](#what-the-captures-showed) lists what they confirmed and what they corrected;
 the sections above it are already corrected. M1 Task 7's `proto-lab run ab-chat-full` (the same day) exercised the
-edit, the delete, the reactions and a quoted reply, and corrected the edit row ([chat.md](chat.md) has the shapes).
+edit, the delete, the reactions and a quoted reply, and corrected the edit row ([chat.md](chat.md) has the shapes); on
+2026-10-21, with the mention picker's profile lookups let through ([Reads by POST](#reads-by-post)), a mention.
 M1 Task 8 (2026-10-20) added a group chat: [A group chat's reads](#a-group-chats-reads).
 
 The code: the mapping is `Classifier::mapped` (`crates/proto-lab/src/classify.rs`), the member read is
@@ -182,7 +183,10 @@ and how each change reads back, are in [chat.md](chat.md):
   taken back with `DELETE` on the same URL and `{"emotions": {"key": "like"}}`; both answer 200.
 - **Quoted reply**: an ordinary message post (`RichText/Html`) whose content quotes the message and whose
   `properties.qtdMsgs` names it. A 1:1 chat has no reply chain.
-- **Mention**: not seen (the fence leaves the mention picker nobody to offer; chat.md). Its form is the bundle's.
+- **Mention** (2026-10-21): an ordinary message post whose content holds the mention span and whose
+  `properties.mentions` is a JSON string of a list, one entry per mention with its `mri` (`8:orgid:<oid>`),
+  `mentionType` `person`, `displayName`, `itemid` and `@type`. The mapping added the mentioned lab account to the
+  message's target, and the fence allowed it after the live member read.
 
 Rules that keep the mapping fail-closed:
 
@@ -191,7 +195,7 @@ Rules that keep the mapping fail-closed:
   its body too, with a message `messagetype`.
 - Whoever a message or an edit mentions is an added participant of its target, so the fence judges them as it judges
   the chat's members, and a mention of an outsider is denied. The mentions are `properties.mentions`, a JSON string of
-  a list whose entries each name an `mri` (the bundle's form; the captures only had the empty `"[]"`). No
+  a list whose entries each name an `mri` (the form the mention of 2026-10-21 showed). No
   `properties` or no `mentions` is no mention; `properties` that aren't an object, `mentions` in any other form, and
   either key in another case (`Properties`, `Mentions`, which a service binding keys in any case may read) are
   `Unknown`.
@@ -227,7 +231,63 @@ Rules that keep the mapping fail-closed:
 - Calls (`Call`, `CallAnswer`), meetings, invites and channel posts aren't mapped here: calling goes through other
   services. A run that calls (`Classifier::calling`, Task 18) maps only a call's start, as a new call of its caller and
   callees; every write on an existing call and any answer stay unknown ([calling-echo.md](calling-echo.md)). The middle tier (`/api/mt/…`, `/api/apps/…`) and CSA (`chatsvcagg`) mutating requests aren't
-  mapped either; live they were all lookups sent as `POST` (below), denied as `Unknown`.
+  mapped either; live they were all lookups sent as `POST` (below), denied as `Unknown`, but for the two profile
+  lookups on the read-by-`POST` list when they name only lab accounts ([below](#reads-by-post)).
+
+## Reads by POST
+
+A class of its own, neither a write nor own-state: requests the web client sends as a `POST` although they only read,
+let through in their captured shape when nothing they name, and nothing their answer can name, is outside the a–b–c
+lab. The user decided on 2026-10-21 to let the mention picker's people lookups through on that rule; without them the
+chat partner shows as "Unknown User" and the picker offers nobody. The list is `crate::post_read::POST_READS`
+(`crates/proto-lab/src/post_read.rs`), on `Classifier::mapped` and so on `Classifier::calling` and
+`Classifier::messaging`; `seeded` and `sign_in` (`load`, `status`, `login`) don't have it. The classifier asks it only after the write mapping, so a write is judged
+only by `Fence::check`.
+
+| Entry (`fence.log` `post_read`) | Request | Body |
+|---|---|---|
+| `short_profile` | `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetchShortProfile?<the lookup query>` | a non-empty JSON list of MRIs |
+| `user_fetch` | `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetch?<the lookup query>` | a non-empty JSON list of MRIs |
+
+An entry matches only all of it:
+
+- `POST`, on `https://teams.microsoft.com` or `https://teams.cloud.microsoft` exactly (no port, no user info), the
+  partition a lowercase region, `-` and a number (`amer-03`), the path's last segment exactly;
+- the query every captured lookup sent, each pair once and nothing else, in any order: `isMailAddress=false`,
+  `enableGuest=true`, `skypeTeamsInfo=true`, `canBeSmtpAddress=false`, `includeIBBarredUsers=true`,
+  `includeDisabledAccounts=true` (the one lookup by address, `isMailAddress=true` with addresses in the body, isn't
+  on the list);
+- only the headers the fence saw on every lookup it paused (`Accept`, `Cookie`, `Origin`, `Referer`, `User-Agent`,
+  `authorization`, `content-type` and the client's `x-client-ui-language`, `x-ms-client-caller`,
+  `x-ms-client-request-type`, `x-ms-client-type`, `x-ms-client-version`, `x-ms-migration`, `x-ms-object-id`,
+  `x-ms-request-id`, `x-ms-session-id`, `x-ms-test-user`), none twice, `Content-Type` there, and the values that
+  could change what the request does or name someone checked:
+  - pinned, when there, to the one value all 5869 captured lookups carried: `Content-Type`
+    `application/json;charset=UTF-8`, `x-ms-object-id` empty (it would name an account by its object id; the
+    captures never filled it in, so a lookup naming anyone there is unknown rather than checked against the roster),
+    `x-ms-migration` `True`, `x-ms-test-user` `False`, `x-ms-client-request-type` `0`, `x-ms-client-type`
+    `cdlworker`;
+  - `Origin`, when there, the request's own origin;
+  - `x-ms-client-caller`, the client component that asked (dozens of names seen, `use-chat-hook`, `User.avatarUrl`),
+    only a short name of ASCII letters, digits, `-`, `:`, `.` and `_` with no run of 8 hex digits, so no object id;
+  - the rest free, as none names anyone but the signed-in account or changes what is read: `authorization` and
+    `Cookie` (the account's own middle-tier credentials, for the host the request goes to anyway), `Accept` and
+    `x-client-ui-language` (the answer's format and language), `Referer`, `User-Agent`, `x-ms-client-version` (the
+    page and the client), `x-ms-request-id`, `x-ms-session-id` (correlation ids);
+- a body read strictly (one JSON value, no two keys alike in any case) that is a non-empty list of strings;
+- and, decided by the fence at that moment, every string an exact MRI of a lab account in `lab.toml`'s roster
+  (`Fence::lab_accounts_only`; an approved service participant isn't a lab account).
+
+A lookup naming anyone else (a tenant member the client shows in its chat list, a bot, the echo service), or off the
+shape in any way, is `Unknown` and denied; the writing scenarios' expected-deny list still expects those. The answers
+seen live name exactly the requested accounts: `{"type": …, "value": [one profile per requested MRI]}`, each profile
+with its `mri`, `objectId`, `displayName`, `givenName`, `surname`, `email`, `userPrincipalName`, `userType`,
+`tenantName`, `isShortProfile`, and for `users/fetch` also `alias`, `mail`, `smtpAddresses`, `sipProxyAddress`,
+`phones`, `accountEnabled`, `skypeTeamsInfo`, `featureSettings` and such; no other account's id or address.
+
+Not on the list, and denied: Substrate's search (`POST substrate.office.com/search/api/v1/suggestions`), whose answers
+list other people of the tenant (never allowed under the user's rule of 2026-10-21), and bot invokes, whose body hands the account's Entra
+token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
 
 ## How a run uses it
 
@@ -235,9 +295,10 @@ Rules that keep the mapping fail-closed:
   `FailClosed`.
 - `ab-chat` uses `Classifier::mapped` with `LiveMembershipSource`. The browser fence hands the source the account's
   chat service token from the page's own chat service requests (`HttpFence::with_credentials`: `HttpFence::handle`
-  takes it from the raw `Fetch.requestPaused` event's headers before the event becomes a `PausedRequest`, which holds
-  no header). The event itself, headers included, has already been handed to the run's event watchers
-  (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b 1:1 chat passes only when the read
+  takes it from the raw `Fetch.requestPaused` event's headers). A `PausedRequest` keeps every header's name, and the
+  value only of those the read-by-`POST` list reads (`Content-Type`, `Origin` and the pinned `x-ms-*` ones), never a
+  token or a cookie; the write mapping reads none. The event itself, headers included, has already been handed
+  to the run's event watchers (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b 1:1 chat passes only when the read
   confirms its two members are lab accounts.
 - The native client (M1 Task 12) sends each chat write as a sealed request whose target is the table's: the chat for
   every write on it, a message's and an edit's mentioned MRIs added, a new chat `New` with its members. Its live
@@ -245,7 +306,8 @@ Rules that keep the mapping fail-closed:
   account's `ic3` token as its session has it now, and the region's chat base, as `ChatCredential::bearer`); with no
   token the read is `Partial(NoCredential)` and the write denied. Group chats stay denied as above.
 - `ab-chat` opens the chat by b's MRI (`l/chat/0/0?users=<mri>`): by UPN the client first resolves the user with the
-  middle tier's `fetchShortProfile`, a `POST` the fence denies, and never opens the chat; by the chat's id a page that
+  middle tier's `fetchShortProfile` by address (`isMailAddress=true`), a `POST` the fence denies, and never opens the
+  chat; by the chat's id a page that
   loaded before the chat existed says the user isn't in it.
 - `abc-chat` (M1 Task 8) creates the a–b–c group chat once, from account a: it opens the web client straight at the
   new-chat deep link for b and c (a deep link reloads the whole client), sends a first message carrying the marker
@@ -289,7 +351,8 @@ captures stay outside the repository and no fixture was exported from them.
 - [x] Edit, delete, reaction (added and taken back) and quoted reply, exercised by `ab-chat-full` (2026-10-20, M1
       Task 7): they match the table; each was mapped to the a–b chat and allowed after the live member read. The edit
       sends the whole message again, which the mapping now requires (with a message `messagetype`), and a message's or
-      an edit's mentioned MRIs are added participants. Member changes, reply chains and a mention weren't exercised.
+      an edit's mentioned MRIs are added participants. A mention, on 2026-10-21: as the bundle builds it, b added to
+      the target and allowed. Member changes and reply chains weren't exercised.
 - [x] The 1:1 id: the two object ids, lowercase and sorted (the bundle builds it that way; the live chat's id matches).
       Federated and guest chats weren't seen.
 - [x] Own state: the own properties above; no endpoint registration (the client uses the push channel `trouter` and the
@@ -298,14 +361,14 @@ captures stay outside the repository and no fixture was exported from them.
 - [x] Denied in every run, all `Unknown`, expected by `load` and, through the reviewed expected-deny list that keeps
       them denied (`crates/proto-lab/src/scenario/expected.rs`), by `ab-chat`, `ab-chat-full` and `echo-call`: telemetry
       (`*.events.data.microsoft.com`, `browser.pipe.aria.microsoft.com`, `admin.microsoft.com/api/instrument`), the
-      middle tier's lookups by `POST` (`users/fetchShortProfile` with a JSON array of MRIs, `users/fetch`,
-      `effectivePolicies`, `useraggregatesettings`, `fetchfeaturesettings`, `apps/aggregatedEntitlements`,
+      middle tier's lookups by `POST` (`users/fetchShortProfile` with a JSON array of MRIs and `users/fetch`, both
+      let through since 2026-10-21 when they name only lab accounts, [Reads by POST](#reads-by-post); `effectivePolicies`, `useraggregatesettings`, `fetchfeaturesettings`, `apps/aggregatedEntitlements`,
       `apps/eligibilities`, `apps/batchedDefinitions`, `me/files/availability`, `users/<oid>/cookiev2`,
       `mcps/initArtifactFolder`), CSA's `chatsAndChannelsByIds`, presence (`ups/<region>/v1/presence/getpresence`), the
       team push updates (`api/tps/…/pushupdates`), the async gateway's and media service's token exchanges, the editor
       service (`editor.svc.cloud.microsoft`), Substrate search suggestions, and every frame sent on the
-      `augloop.office.com` and `go.trouter.teams.microsoft.com` sockets. The chat works without them, though a chat
-      partner shows as "Unknown User" (no profile lookup). Two classes on the list were first seen in `ab-chat-full`'s
+      `augloop.office.com` and `go.trouter.teams.microsoft.com` sockets. The chat works without them; without the
+      profile lookups a chat partner showed as "Unknown User". Two classes on the list were first seen in `ab-chat-full`'s
       runs of 2026-10-20: the bot invokes an opening editor sends (`POST v1/agents/<bot>/invoke`,
       `composeExtension/fetchCommands`) and the own activity feed's item read (`PUT
       v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread`).

@@ -1,6 +1,6 @@
 # The chat service: conversations, messages and what happens to them
 
-Status: 2026-10-20, M1 Task 7. Written from what the lab saw, in our own words, plus the web bundle where nothing was
+Status: 2026-10-21, M1 Task 7. Written from what the lab saw, in our own words, plus the web bundle where nothing was
 captured (marked so). The chat service's base, credential, ids, member reads and the fence's mapping of writes are in
 [fence-targets.md](fence-targets.md); its token in [auth.md](auth.md).
 
@@ -14,6 +14,10 @@ Sources (all outside the repository, under the lab's data dir; fixtures are writ
   (`captures/ab-chat-full/20261020T205155Z` and `…205156Z`, read locally): a sent, edited, reacted and took the
   reaction back, replied with a quote, reacted to the reply, sent and deleted a message; b opened the chat (reading
   its history) and reacted.
+- **mention**: `proto-lab run ab-chat-full` of 2026-10-21, once the fence let the mention picker's profile lookups of
+  lab accounts through (fence-targets.md, "Reads by POST"): a mentioned b, picked from the picker (captures
+  `captures/ab-chat-full/20261020T223250Z` for a and `…223251Z` for b, reference copies
+  `reference/chat/ab-chat-full-mention-a.jsonl`, `…-b.jsonl`).
 - **bundle**: the web client `26260.1717.5229.7049`, for what no run showed.
 
 Every path below is relative to the chat service base (`…/api/chatsvc/<region>/`), and every id in a path is
@@ -64,7 +68,8 @@ Every message (`type` `Message`) has `id` (its arrival time in ms, as a string),
 `version` (ms, a string), `conversationid`, `conversationLink` (a URL), `messagetype`, `content`, `from` (a URL ending
 `…/contacts/<MRI>`: take the sender's MRI from its last segment), `composetime` and `originalarrivaltime` (ISO times
 with seven fraction digits). A user's message adds `clientmessageid` (the sender's, kept), `contenttype` `Text`,
-`imdisplayname` (the name the sender's client gave: "Unknown User" in the lab, since it couldn't resolve profiles),
+`imdisplayname` (the name the sender's client gave: "Unknown User" in the lab's runs of 2026-10-20, when the fence denied
+every profile lookup; the account's display name since the lookups of lab accounts pass),
 `fromDisplayNameInToken` (the name from the sender's token), `amsreferences` (`[]`) and `properties`:
 `mentions`, `cards`, `links` and `files` as JSON strings (`"[]"`), `formatVariant` `TEAMS`, `languageStamp`.
 
@@ -94,7 +99,7 @@ with seven fraction digits). A user's message adds `clientmessageid` (the sender
   quoted message: sent as a JSON string `[{"messageId": "<id>", "sender": "<MRI>", "time": <ms>}]`, read back as a list
   of objects (`messageId` a number, plus `message` null, `validationResult` `Valid`, `sharedRefId`, `replyChainId`) and
   `hasValidMsgReferences` true. A 1:1 chat has no reply chains: a quote is all a "reply" is.
-- **Mentions** (fixture `mention.json`): **not captured** (below).
+- **Mentions** (fixture `mention.json`): [below](#mentions-mention).
 - **Received attachments**: not seen; every message had `amsreferences` `[]` and `files` `"[]"`. Task 20 decides what
   to do about attachments; their shapes need a capture with one.
 
@@ -105,21 +110,44 @@ with seven fraction digits). A user's message adds `clientmessageid` (the sender
 `formatVariant`. It answers 201 with `{"OriginalArrivalTime": <ms>}`, and the new message's `id` is that time. Typing is
 the same post with `messagetype` `Control/Typing`, also answered with an arrival time.
 
-## Mentions (bundle only, not captured)
+## Mentions (mention)
 
-No mention could be made: under the fence the mention picker offered nobody but a message extension, since the profile
-lookups behind it are denied (`docs/backlog/mention-not-captured-under-the-fence.md`). What the bundle builds and reads:
+Typing `@` in the compose box opens the mention picker (`AutocompletePopup-Mentions`); in the 1:1 chat its highlighted
+suggestion was the chat's other member, by name, once the client could read that member's profile (the middle tier's
+`users/fetchShortProfile` and `users/fetch`; Substrate's search stayed denied and wasn't needed). Typing the name after
+`@` kept it highlighted, Enter put the mention in, and the post was an ordinary message post. Fixture:
+`tests/fixtures/chatsvc/mention.json`.
 
-- in `content`, the mentioned name in `<span itemtype="http://schema.skype.com/Mention" itemscope itemid="<n>">`, `<n>`
-  the mention's index in the message (the client's reader accepts `itemid` before or after `itemtype`);
-- `properties.mentions`, a JSON string of a list with one entry per mention: `{"@type":
-  "http://schema.skype.com/Mention", "itemid": "<n>", "mri": "<MRI>", "mentionType": "person", "displayName": "<name>"}`,
-  with `appId` for a bot. Other `mentionType`s the bundle names: `bot`, `everyone`, `tag`, `channel`, `team`,
-  `community`, `nearby`, `share-contact`. Reading, the client takes `mentions` as a string or a list.
+- **As sent**: `content` holds the mention as `<readonly class="skipProofing" itemtype="http://schema.skype.com/Mention"
+  spellcheck="false"><span itemtype="http://schema.skype.com/Mention" itemscope itemid="0">name</span></readonly>`
+  followed by `&nbsp;` and the text, all in one `<p>`; `itemid` is the mention's index in the message.
+  `properties.mentions` is a JSON string of a list with one entry per mention: `{"@type":
+  "http://schema.skype.com/Mention", "itemid": "0", "mri": "8:orgid:<oid>", "mentionType": "person", "displayName":
+  "<name>"}`, `itemid` a string. The rest of the post is as any message (above), answered 201.
+- **As read from the chat** (b's message page): the `<readonly>` wrapper is gone, the span is
+  `<span itemtype="http://schema.skype.com/Mention" itemscope="" itemid="0">name</span>`, and `properties.mentions` is
+  still a JSON string, its entries with the same keys but `itemid` a number (`0`).
+- **The mentioned account's own streams**: b's `48:mentions` stream (`GET v1/users/ME/conversations/48%3Amentions/
+  messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=200&startTime=1`) got an entry of its own: a message
+  with its own `id`, `from` b's own contact URL, `imdisplayname` empty, `clumpId` the chat's id, `secondaryReferenceId`
+  `T_<chat id>_M_<message id>`, the content without the `<p>` and with a plain space, `properties.mentions` without
+  `@type`, and `properties.activity` (`activityType` `mentions`, `activitySubtype` `mention`, the source chat, message
+  and sender, the target user, a text preview, `activityContext`), `views` (a JSON string naming the `ActivityFeed` view
+  on `48:notifications` and the `Mentions` view on `48:mentions`), `messageUpdatePolicyValue`, `issaved`,
+  `s2spartnername` `skypespaces`. The same activity reached b's `48:notifications` stream. b's client then marked the
+  `48:mentions` item read with `PUT …/48%3Amentions/messages/<id>/properties?name=isread` and `{"isread":"true"}`, as it
+  does for its activity feed (below); the fence denied it.
+- CSA's update read (`GET api/csa/<region>/api/v3/teams/users/me/updates`) carried the message too, in its own
+  camel-cased form (`messageType`, `imDisplayName`, `containerId`), with the span but no `properties`.
+
+The bundle names more `mentionType`s than `person` (`bot` with an `appId`, `everyone`, `tag`, `channel`, `team`,
+`community`, `nearby`, `share-contact`) and a reader that accepts `mentions` as a string or a list; none of those was
+seen.
 
 The fence's mapping takes the `mri` of each entry as an added participant of the message's (or edit's) target, so a
-mention of anyone outside the lab is denied like adding them to the chat; any other form of `mentions`, or the key in
-another case, is unknown.
+mention of anyone outside the lab is denied like adding them to the chat; any other form of `mentions`, an entry
+without a string `mri` (an `everyone` or `tag` mention among them), or the key in another case, is unknown. The
+captured form is the one it reads.
 
 ## The native client's writes (M1 Task 12)
 
@@ -133,9 +161,11 @@ text is a typed rich-text value with the MRI of each mention, from which `conten
 write's target are all built; raw HTML can't be sent. Times go out as the web client writes them
 (`2026-01-01T00:00:00.000Z`), an edit's `version` and `properties.edittime` being one instant.
 
-**The mention form is still the bundle's.** It is built in one place only, `mention_span` and `mention_entry` in
-`crates/teams-proto/src/chat/compose.rs`, so a captured form replaces those two functions alone; until a capture
-shows it (`docs/backlog/mention-not-captured-under-the-fence.md`), a mention the native client sends is unverified.
+**The mention form was built from the bundle before the capture.** It is built in one place only, `mention_span`
+and `mention_entry` in `crates/teams-proto/src/chat/compose.rs`, so the captured form ([above](#mentions-mention))
+replaces those two functions alone. Still owed from M1 Task 12: bring them (and the read of a mention) to the
+captured form, the `<readonly>` wrapper as sent and `mention.json` as rewritten from the capture; until then a mention
+the native client sends differs from the web client's.
 
 ## Read horizons
 
@@ -153,7 +183,7 @@ shows it (`docs/backlog/mention-not-captured-under-the-fence.md`), a mention the
 
 - Own properties the client puts and the fence denies (unknown, not on the own-state list): `messageDensity` (hundreds
   of retries a run), `favorites`, `locale`, `firstLoginInformation`, and `readReceiptsEnabled`, new in this run.
-- Whenever an editor opens (the compose box at the mention picker, an edit box), the client asks its message
+- Whenever an editor opens (the compose box, the mention picker, an edit box), the client asks its message
   extensions' bots for their commands: `POST v1/agents/28:<id>/invoke` with `name` `composeExtension/fetchCommands`, to
   two bots, denied as unknown (a bot invoke reaches the bot's own service). The reviewed expected-deny list
   (`crates/proto-lab/src/scenario/expected.rs`) now expects them, so a run isn't failed by them; they stay denied.

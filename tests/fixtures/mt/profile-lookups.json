@@ -1,0 +1,57 @@
+{
+  "_synthetic": "Made up, in the shape of the web client's middle-tier profile lookups that ab-chat-full's and ab-chat's captures of 2026-10-20 show (read locally, all denied then): a POST of a JSON list of MRIs, the query and the headers the client always sent as the fence paused them (their values made up but those the list checks, as captured: Content-Type's, Origin's (the request's own), x-ms-object-id's (always empty), x-ms-migration's, x-ms-test-user's, x-ms-client-request-type's and x-ms-client-type's), on either Teams origin, the partition a region and a number. These are the shapes the browser fence's read-by-POST list allows (crates/proto-lab/src/post_read.rs, docs/protocol/fence-targets.md), and only when every MRI is a lab account. <guid:a>, <guid:b>, <guid:c> are lab accounts' object ids; tests fill them in.",
+  "query": "isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false&includeIBBarredUsers=true&includeDisabledAccounts=true",
+  "headers": {
+    "Accept": "*/*",
+    "Cookie": "<the account's own cookies>",
+    "Origin": "<the request's own origin>",
+    "Referer": "https://teams.microsoft.com/v2/",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) made-up",
+    "authorization": "Bearer <the account's own middle-tier token>",
+    "content-type": "application/json;charset=UTF-8",
+    "x-client-ui-language": "en-us",
+    "x-ms-client-caller": "made-up-caller",
+    "x-ms-client-request-type": "0",
+    "x-ms-client-type": "cdlworker",
+    "x-ms-client-version": "1415/26260.1717.5229.7049",
+    "x-ms-migration": "True",
+    "x-ms-object-id": "",
+    "x-ms-request-id": "made-up-request-id",
+    "x-ms-session-id": "made-up-session-id",
+    "x-ms-test-user": "False"
+  },
+  "lookups": [
+    {
+      "name": "the short profile of the chat partner",
+      "kind": "short_profile",
+      "method": "POST",
+      "origin": "https://teams.microsoft.com",
+      "path": "/api/mt/part/amer-01/beta/users/fetchShortProfile",
+      "body": ["8:orgid:<guid:b>"]
+    },
+    {
+      "name": "the short profiles of a chat's members, on the cloud origin",
+      "kind": "short_profile",
+      "method": "POST",
+      "origin": "https://teams.cloud.microsoft",
+      "path": "/api/mt/part/amer-01/beta/users/fetchShortProfile",
+      "body": ["8:orgid:<guid:c>", "8:orgid:<guid:a>", "8:orgid:<guid:b>"]
+    },
+    {
+      "name": "the full profiles of both accounts",
+      "kind": "user_fetch",
+      "method": "POST",
+      "origin": "https://teams.microsoft.com",
+      "path": "/api/mt/part/amer-01/beta/users/fetch",
+      "body": ["8:orgid:<guid:a>", "8:orgid:<guid:b>"]
+    },
+    {
+      "name": "the full profile of one account, on the cloud origin",
+      "kind": "user_fetch",
+      "method": "POST",
+      "origin": "https://teams.cloud.microsoft",
+      "path": "/api/mt/part/amer-01/beta/users/fetch",
+      "body": ["8:orgid:<guid:a>"]
+    }
+  ]
+}

@@ -341,12 +341,7 @@ enum Settings {
 fn own_settings(path: &str) -> Option<Settings> {
     let rest = path.strip_prefix("/api/mt/part/")?;
     let (partition, rest) = rest.split_once('/')?;
-    let (region, number) = partition.split_once('-')?;
-    let partition = !region.is_empty()
-        && region.bytes().all(|byte| byte.is_ascii_lowercase())
-        && !number.is_empty()
-        && number.bytes().all(|byte| byte.is_ascii_digit());
-    if !partition {
+    if !crate::post_read::is_partition(partition) {
         return None;
     }
     match rest {

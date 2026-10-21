@@ -22,8 +22,9 @@
 //! The classes are the ones the M0 acceptance runs of `ab-chat` showed on 2026-10-20 (both accounts) and that its
 //! `load`, `ab-chat`, `ab-chat-full` and `echo-call` captures since repeat, plus two first seen in `ab-chat-full`'s
 //! runs of 2026-10-20: the bot invokes an opening editor sends and the own activity feed's item read
-//! (`48:notifications`, `isread`). Each entry says why the scenario doesn't need it. A class that isn't here keeps failing the run until it
-//! is reviewed: writes on conversations other than the scenario's (a tenant team's thread, say), the calling stack's
+//! (`48:notifications`, `isread`), and one first seen once it mentioned b (2026-10-21): the same read on the
+//! account's own mentions stream (`48:mentions`). Each entry says why the scenario doesn't need it. A class that isn't
+//! here keeps failing the run until it is reviewed: writes on conversations other than the scenario's (a tenant team's thread, say), the calling stack's
 //! own-state and every request on a call (`echo-call` needs those: `docs/backlog/fence-call-follow-ups.md`).
 
 use url::Url;
@@ -131,6 +132,10 @@ pub const TEAMS: Hosts = Hosts::Exact(&["teams.microsoft.com", "teams.cloud.micr
 const MIDDLE_TIER: &str = "a middle-tier lookup the client posts (profiles, settings, policies, entitlements): no \
                            state changes, and the scenario reads the chat from the chat service, not from these";
 const APPS: &str = "the client's app catalogue and entitlements: the scenario uses no app";
+const PROFILES_OUTSIDE: &str = "a profile lookup the read-by-POST list doesn't let through (`crate::post_read`): it \
+                                names someone who isn't a lab account (a tenant member the client shows, an approved \
+                                service) or isn't in the captured shape; the scenario needs only the lab accounts' \
+                                profiles, which pass";
 const TOKEN_EXCHANGE: &str = "a token exchange of the asynchronous media gateway or AMS (images, files): the scenario \
                               sends and reads plain text only";
 
@@ -184,6 +189,15 @@ pub const REQUESTS: &[ExpectedRequest] = &[
                  account's own feed shows, and the scenario reads nothing from the feed",
     },
     ExpectedRequest {
+        class: "own mention read",
+        hosts: TEAMS,
+        method: "PUT",
+        path: "/api/chatsvc/*/v1/users/ME/conversations/48%3Amentions/messages/*/properties",
+        reason: "the account marking an item of its own mentions stream read (`?name=isread`, `{\"isread\":\"true\"}`), \
+                 seen once a's mention reached b (ab-chat-full, 2026-10-21): it changes only what the account's own \
+                 mentions show, and the scenario reads the mention from the chat, not from that stream",
+    },
+    ExpectedRequest {
         class: "chat list by POST (CSA)",
         hosts: TEAMS,
         method: "POST",
@@ -192,18 +206,18 @@ pub const REQUESTS: &[ExpectedRequest] = &[
                  read is a GET",
     },
     ExpectedRequest {
-        class: "short profiles",
+        class: "short profiles beyond the lab",
         hosts: TEAMS,
         method: "POST",
         path: "/api/mt/part/*/beta/users/fetchShortProfile",
-        reason: MIDDLE_TIER,
+        reason: PROFILES_OUTSIDE,
     },
     ExpectedRequest {
-        class: "user fetch",
+        class: "user fetch beyond the lab",
         hosts: TEAMS,
         method: "POST",
         path: "/api/mt/part/*/beta/users/fetch",
-        reason: MIDDLE_TIER,
+        reason: PROFILES_OUTSIDE,
     },
     ExpectedRequest {
         class: "feature settings",
@@ -357,7 +371,9 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         hosts: Hosts::Exact(&["substrate.office.com"]),
         method: "POST",
         path: "/search/api/v1/suggestions",
-        reason: "search suggestions: the scenario searches nothing",
+        reason: "Substrate's search suggestions (files, people): its answers list other people of the tenant, so it \
+                 stays denied (the user's rule of 2026-10-21); the scenario searches nothing, and its mention picker \
+                 offers b from the chat's members",
     },
     ExpectedRequest {
         class: "editor service config",

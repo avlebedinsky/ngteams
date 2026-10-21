@@ -673,6 +673,23 @@ async fn reopening_terminates_a_half_written_last_line() {
     );
 }
 
+// --- reads that name people: the lab accounts alone ---
+
+#[test]
+fn only_a_list_of_lab_accounts_names_nobody_outside_the_lab() {
+    let fence = try_lab().unwrap().fence;
+    assert!(fence.lab_accounts_only(&mris(&[LAB_A])));
+    assert!(fence.lab_accounts_only(&mris(&[LAB_B, LAB_A, LAB_C])));
+    assert!(fence.lab_accounts_only(&mris(&[LAB_A, LAB_A])));
+    // nobody named, an approved service, an outsider, a bot, or an account's MRI in another case
+    assert!(!fence.lab_accounts_only(&[]));
+    assert!(!fence.lab_accounts_only(&mris(&[ECHO])));
+    assert!(!fence.lab_accounts_only(&mris(&[LAB_A, ECHO])));
+    assert!(!fence.lab_accounts_only(&mris(&[LAB_A, COWORKER])));
+    assert!(!fence.lab_accounts_only(&mris(&[OTHER_BOT])));
+    assert!(!fence.lab_accounts_only(&mris(&[&LAB_A.to_uppercase()])));
+}
+
 // --- browser requests decided without a membership check ---
 
 #[test]
@@ -694,6 +711,13 @@ fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() 
         method: "POST",
         url: "https://login.example.com/common/oauth2/v2.0/token?x=1",
         outcome: RequestOutcome::Own("entra_token"),
+    })
+    .unwrap();
+    log.record_request(&RequestRecord {
+        channel: Channel::Http,
+        method: "POST",
+        url: "https://teams.example.com/api/mt/part/amer-01/beta/users/fetchShortProfile?isMailAddress=false",
+        outcome: RequestOutcome::PostRead("short_profile"),
     })
     .unwrap();
     log.record_request(&RequestRecord {
@@ -720,6 +744,13 @@ fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() 
             "method": "POST",
             "url": "https://login.example.com/common/oauth2/v2.0/token",
             "own": "entra_token",
+        }),
+        serde_json::json!({
+            "verdict": "allow",
+            "channel": "http",
+            "method": "POST",
+            "url": "https://teams.example.com/api/mt/part/amer-01/beta/users/fetchShortProfile",
+            "post_read": "short_profile",
         }),
         serde_json::json!({
             "verdict": "breach",

@@ -6,8 +6,8 @@
 //!   receives it; before that, a forced deny on one a–b message checks live that a denied write never leaves the
 //!   browser.
 //! - [`ab_chat_full`] (accounts a and b, as `ab-chat`): the a–b chat beyond a plain message, recorded: a sends, edits,
-//!   reacts and takes the reaction back, replies with a quote and reacts to it, and deletes; b reads and reacts. No
-//!   mention: the fence leaves the web client's mention picker nobody to offer.
+//!   reacts and takes the reaction back, mentions b (picked from the mention picker only once it is b), replies with a
+//!   quote and reacts to it, and deletes; b reads (the mention among it) and reacts.
 //! - [`abc_chat`] (accounts a, b and c, writes mapped, members read live): the group chat of a, b and c, created once
 //!   (its id kept in the lab's `chats.toml`); messaging it (a sends, b and c receive, after a live enforcement test)
 //!   is refused before anything opens until the fence can read a group chat's members in full.

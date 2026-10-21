@@ -174,6 +174,27 @@ fn marking_an_own_feed_item_read_is_expected_and_nothing_like_it() -> TestResult
 }
 
 #[test]
+fn marking_an_own_mention_read_is_expected_and_nothing_like_it() -> TestResult {
+    // seen in ab-chat-full (2026-10-21): the same `isread` put on b's own mentions stream once a mentioned b
+    let policies = [ab_chat_policy()?, echo_call::policy()];
+    let mentions = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Amentions/messages";
+    let isread = format!("{mentions}/1760000000000/properties");
+    for policy in &policies {
+        assert!(policy.expects(&denial("PUT", &isread, DenyCause::Unclassified)));
+    }
+    assert_unlisted(&[
+        ("POST", &isread),
+        ("DELETE", &isread),
+        ("PUT", &format!("{mentions}/1760000000000")),
+        ("POST", mentions),
+        (
+            "PUT",
+            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Amentions/properties",
+        ),
+    ])
+}
+
+#[test]
 fn frames_are_expected_by_their_socket_host() -> TestResult {
     let policy = ab_chat_policy()?;
     for url in [
@@ -505,6 +526,7 @@ fn log_entries(path: &Path) -> TestResult<Vec<Value>> {
 fn paused(method: &str, url: &str, body: Option<&str>) -> PausedRequest {
     PausedRequest {
         request_id: "interception-job-1.0".to_owned(),
+        headers: Vec::new(),
         method: method.to_owned(),
         url: url.to_owned(),
         body: body.map(|body| body.as_bytes().to_vec()),

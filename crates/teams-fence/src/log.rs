@@ -95,6 +95,9 @@ pub enum Channel {
 pub enum RequestOutcome {
     /// An own-state request on the reviewed list (its kind's name), let through.
     Own(&'static str),
+    /// A read sent as a `POST`, on the browser fence's reviewed list (its kind's name), whose body names only lab
+    /// accounts ([`crate::Fence::lab_accounts_only`]): let through. Not own-state and not a write.
+    PostRead(&'static str),
     /// Nothing classifies it: denied.
     Unclassified,
     /// It left the browser without the fence's allow: seen only afterwards, by the audit of what was sent (a WebSocket
@@ -124,6 +127,8 @@ struct RequestEntry<'a> {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     own: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_read: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -314,23 +319,16 @@ impl FenceLog {
     /// # Errors
     /// When the entry can't be written, or an earlier append failed.
     pub fn record_request(&self, request: &RequestRecord<'_>) -> io::Result<()> {
-        let (verdict, own, reason, message) = match request.outcome {
-            RequestOutcome::Own(kind) => ("allow", Some(kind), None, None),
-            RequestOutcome::Unclassified => (
-                "deny",
-                None,
-                Some("unclassified"),
-                Some("no rule classifies this request"),
-            ),
+        let (verdict, reason, message) = match request.outcome {
+            RequestOutcome::Own(_) | RequestOutcome::PostRead(_) => ("allow", None, None),
+            RequestOutcome::Unclassified => ("deny", Some("unclassified"), Some("no rule classifies this request")),
             RequestOutcome::SentWithoutAllow => (
                 "breach",
-                None,
                 Some("sent_without_allow"),
                 Some("this left the browser without the fence's allow"),
             ),
             RequestOutcome::Forced => (
                 "deny",
-                None,
                 Some("forced"),
                 Some("denied on purpose by the run (an enforcement test)"),
             ),
@@ -341,7 +339,14 @@ impl FenceLog {
             channel: request.channel,
             method: request.method,
             url: redact_url(request.url),
-            own,
+            own: match request.outcome {
+                RequestOutcome::Own(kind) => Some(kind),
+                _ => None,
+            },
+            post_read: match request.outcome {
+                RequestOutcome::PostRead(kind) => Some(kind),
+                _ => None,
+            },
             reason,
             message,
         })

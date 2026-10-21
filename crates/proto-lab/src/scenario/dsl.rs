@@ -136,6 +136,14 @@ impl Key {
         text: None,
         modifiers: 0,
     };
+    /// Backspace: deletes the selection, or the character before the caret.
+    pub const BACKSPACE: Self = Self {
+        key: "Backspace",
+        code: "Backspace",
+        virtual_key: 8,
+        text: None,
+        modifiers: 0,
+    };
     /// Ctrl+A: selects everything in the focused editor.
     pub const SELECT_ALL: Self = Self {
         key: "a",
