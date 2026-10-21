@@ -43,27 +43,33 @@ pub async fn evaluate_until(cdp: &Cdp, session: &SessionId, expression: &str, ti
         .map_err(|_| format!("{expression} stayed null for {timeout:?}"))?
 }
 
-/// Navigates the page to `url` and waits up to `timeout` for the document that navigation started to be loaded
-/// (`readyState` `complete`: every script of the page's markup has run). A navigation the browser refuses
-/// (`errorText`) fails.
+/// Navigates the page to `url` and waits for the document that navigation started to be loaded (`readyState`
+/// `complete`: every script of the page's markup has run), all of it (the command too) within `timeout`. A navigation
+/// the browser refuses (`errorText`) fails.
 pub async fn navigate(cdp: &Cdp, session: &SessionId, url: &str, timeout: Duration) -> TestResult {
-    let navigated = cdp.call(Some(session), "Page.navigate", json!({ "url": url })).await?;
-    if let Some(error) = navigated.get("errorText") {
-        return Err(format!("navigating to {url}: {error}").into());
-    }
-    let loaded = async {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let committed = async {
+        let navigated = cdp.call(Some(session), "Page.navigate", json!({ "url": url })).await?;
+        if let Some(error) = navigated.get("errorText") {
+            return Err(format!("navigating to {url}: {error}").into());
+        }
         // the frame shows the new document once it has committed; one within the same document has no loader of its own
         if let Some(loader) = navigated["loaderId"].as_str() {
             while current_loader(cdp, session).await? != loader {
                 tokio::time::sleep(POLL).await;
             }
         }
-        evaluate_until(cdp, session, "document.readyState === 'complete' || null", timeout).await?;
         TestResult::Ok(())
     };
-    tokio::time::timeout(timeout, loaded)
+    tokio::time::timeout_at(deadline, committed)
         .await
-        .map_err(|_| format!("{url} didn't load within {timeout:?}"))?
+        .map_err(|_| format!("{url} didn't commit within {timeout:?}"))??;
+    // what is left of the same bound
+    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+    evaluate_until(cdp, session, "document.readyState === 'complete' || null", left)
+        .await
+        .map_err(|error| format!("loading {url}: {error}"))?;
+    Ok(())
 }
 
 /// The loader of the document the page's main frame shows now.

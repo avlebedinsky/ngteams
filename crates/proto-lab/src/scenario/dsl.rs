@@ -490,7 +490,9 @@ impl Driver {
     }
 
     /// Waits up to `timeout` for a request matching `pattern` that failed, sent since the driver began or since the
-    /// request the last request wait returned; requests that match but didn't fail are passed over.
+    /// request the last request wait returned; requests that match but didn't fail are passed over. One that got a
+    /// response didn't fail, even when a failure follows the response (as for [`Self::wait_for_failure`]): a request's
+    /// response comes in before its failure, so one seen failed without a response never got one.
     ///
     /// # Errors
     /// [`StepError::Timeout`] when none fails in time, [`StepError::Closed`] when the connection goes.
@@ -504,9 +506,9 @@ impl Driver {
         let waiting_for = format!("{pattern} that fails");
         loop {
             self.drain();
-            let found = self.requests[self.cursor..]
-                .iter()
-                .position(|request| request.failed.is_some() && pattern.matches_request(request));
+            let found = self.requests[self.cursor..].iter().position(|request| {
+                request.status.is_none() && request.failed.is_some() && pattern.matches_request(request)
+            });
             if let Some(offset) = found {
                 let index = self.cursor + offset;
                 self.cursor = index + 1;

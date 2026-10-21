@@ -475,6 +475,65 @@ async fn a_request_answered_and_then_aborted_got_a_response_and_didnt_fail() -> 
     Ok(())
 }
 
+/// A wait for a failed request passes over a matching one that got a response and then failed (`net::ERR_ABORTED`),
+/// and gives the one that failed without a response (the fence's `net::ERR_BLOCKED_BY_CLIENT`); with only the answered
+/// one it runs out.
+#[tokio::test]
+async fn a_failed_request_wait_passes_over_one_that_got_a_response_and_then_failed() -> TestResult {
+    let (events, watch) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = Driver::new(silent_cdp().await?, SessionId::new("S-page"), watch);
+    let posts = RequestPattern::new(Some("POST"), "/api/send$")?;
+    let request = json!({"method": "POST", "url": "http://127.0.0.1/api/send"});
+    events.send(network_event(
+        "Network.requestWillBeSent",
+        json!({"requestId": "1", "request": request}),
+    ))?;
+    events.send(network_event(
+        "Network.responseReceived",
+        json!({"requestId": "1", "response": {"status": 204}}),
+    ))?;
+    events.send(network_event(
+        "Network.loadingFailed",
+        json!({"requestId": "1", "errorText": "net::ERR_ABORTED"}),
+    ))?;
+    let error = driver
+        .wait_for_failed_request("only the answered one", &posts, Duration::from_millis(300))
+        .await
+        .err()
+        .ok_or("an answered request counted as failed")?;
+    assert!(matches!(error, StepError::Timeout { .. }), "{error}");
+
+    events.send(network_event(
+        "Network.requestWillBeSent",
+        json!({"requestId": "2", "request": request}),
+    ))?;
+    events.send(network_event(
+        "Network.loadingFailed",
+        json!({"requestId": "2", "errorText": "net::ERR_BLOCKED_BY_CLIENT"}),
+    ))?;
+    let failed = driver
+        .wait_for_failed_request("the blocked one", &posts, Duration::from_secs(1))
+        .await?;
+    assert_eq!(failed.request_id, "2");
+    assert_eq!(failed.failed.as_deref(), Some("net::ERR_BLOCKED_BY_CLIENT"));
+    Ok(())
+}
+
+/// A navigation the browser never answers runs out its bound: the `Page.navigate` command is inside it.
+#[tokio::test]
+async fn a_navigation_the_browser_never_answers_runs_out_its_bound() -> TestResult {
+    let cdp = silent_cdp().await?;
+    let session = SessionId::new("S-page");
+    let navigation = page::navigate(&cdp, &session, "http://127.0.0.1/page", Duration::from_millis(300));
+    let error = tokio::time::timeout(Duration::from_secs(10), navigation)
+        .await
+        .map_err(|_| "an unanswered navigation outlived its bound")?
+        .err()
+        .ok_or("an unanswered navigation succeeded")?;
+    assert!(error.to_string().contains("didn't commit within 300ms"), "{error}");
+    Ok(())
+}
+
 #[test]
 fn only_an_evaluation_refused_because_its_page_navigated_counts_as_navigated_away() {
     let remote = |message: &str| StepError::Cdp {
