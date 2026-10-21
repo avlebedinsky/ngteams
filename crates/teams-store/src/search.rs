@@ -7,13 +7,18 @@
 //!   nothing) are indexed by the core's backfill: [`Store::messages_to_index`] lists them a batch at a time in a fixed
 //!   order, [`Store::index_messages`] stores their text. What is indexed is kept in the store, so a backfill that
 //!   stopped goes on where it was at the next start.
-//! - **The query** ([`Store::search`]) is the user's input, never FTS5's syntax: each whitespace-separated term is
-//!   quoted as a string and matched as a prefix, all of them in a message ([`match_expression`]), so `"`, `*`, `-`,
-//!   `:`, `NEAR`, `AND`, `OR`, `NOT` and parentheses are looked for as the text they are, and never make the query
-//!   fail. Hits come the newest first, each with the text around its match ([`SearchHit::snippet`]).
+//! - **The query** ([`Store::search`]) is the user's input, never FTS5's syntax: each term (split at whitespace and
+//!   control characters) is quoted as a string and matched as a prefix, all of them in a message
+//!   ([`match_expression`]), so `"`, `*`, `-`, `:`, `NEAR`, `AND`, `OR`, `NOT` and parentheses are looked for as the
+//!   text they are, and never make the query fail (FTS5 reads a query only up to a NUL, so a control character never
+//!   reaches it). Hits come the newest first, each with the text around its match ([`SearchHit::snippet`]); a search
+//!   in some conversations only ([`Store::search_in`]) leaves the others out before it counts the hits.
 
 use std::fmt;
+use std::rc::Rc;
 
+use rusqlite::types::Value;
+use rusqlite::vtab::array::Array;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::messages::{MESSAGE_COLUMNS, message_from_row};
@@ -87,13 +92,14 @@ impl fmt::Debug for SearchHit {
     }
 }
 
-/// The FTS5 query for the user's `input`: each whitespace-separated term with a letter or a digit in it, quoted as an
-/// FTS5 string (its `"` doubled) and matched as a prefix, at most [`MAX_TERMS`] of them, all needed. `None` when no
-/// term has a letter or a digit: nothing can match it.
+/// The FTS5 query for the user's `input`: each term (split at whitespace and at control characters, which FTS5's
+/// query reader can't take: it stops at a NUL) with a letter or a digit in it, quoted as an FTS5 string (its `"`
+/// doubled) and matched as a prefix, at most [`MAX_TERMS`] of them, all needed. `None` when no term has a letter or a
+/// digit: nothing can match it.
 #[must_use]
 pub fn match_expression(input: &str) -> Option<String> {
     let terms: Vec<String> = input
-        .split_whitespace()
+        .split(|ch: char| ch.is_whitespace() || ch.is_control())
         .filter(|term| term.chars().any(char::is_alphanumeric))
         .take(MAX_TERMS)
         .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
@@ -185,22 +191,28 @@ impl Store {
     ///
     /// [`StoreError::Sqlite`] when the read fails.
     pub fn messages_to_index(&self, after: Option<&IndexCursor>, limit: usize) -> Result<Vec<Message>, StoreError> {
+        // two statements, so the cursor plans as a range of the primary key: an `?1 IS NULL OR` beside it would make
+        // every batch walk the table from its first row up to the cursor
+        let from = match after {
+            Some(_) => "WHERE (conversation_id, id) > (?2, ?3) AND",
+            None => "WHERE",
+        };
         let sql = format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages
-             WHERE (?1 IS NULL OR (conversation_id, id) > (?1, ?2))
-               AND NOT EXISTS (SELECT 1 FROM search_entries AS entry
+             {from} NOT EXISTS (SELECT 1 FROM search_entries AS entry
                    WHERE entry.conversation_id = messages.conversation_id AND entry.message_id = messages.id
                      AND entry.version >= messages.version)
-             ORDER BY conversation_id, id LIMIT ?3"
+             ORDER BY conversation_id, id LIMIT ?1"
         );
-        let (conversation, id) = after
-            .map(|cursor| (cursor.conversation_id.as_str(), cursor.message_id.as_str()))
-            .unzip();
-        let rows = self
-            .conn
-            .prepare_cached(&sql)?
-            .query_map(params![conversation, id, sql_limit(limit)], message_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        let rows = match after {
+            Some(cursor) => statement.query_map(
+                params![sql_limit(limit), cursor.conversation_id, cursor.message_id],
+                message_from_row,
+            )?,
+            None => statement.query_map([sql_limit(limit)], message_from_row)?,
+        }
+        .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
@@ -229,8 +241,28 @@ impl Store {
     ///
     /// [`StoreError::Sqlite`] when the read fails.
     pub fn search(&self, input: &str, limit: usize) -> Result<Vec<SearchHit>, StoreError> {
+        self.find(input, None, limit)
+    }
+
+    /// As [`Store::search`], in the conversations of `conversations` only: the others' messages are left out before
+    /// the hits are counted, so however many of them match, up to `limit` hits of these come back.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn search_in(&self, input: &str, conversations: &[String], limit: usize) -> Result<Vec<SearchHit>, StoreError> {
+        let within: Array = Rc::new(conversations.iter().cloned().map(Value::Text).collect());
+        self.find(input, Some(within), limit)
+    }
+
+    fn find(&self, input: &str, within: Option<Array>, limit: usize) -> Result<Vec<SearchHit>, StoreError> {
         let Some(expression) = match_expression(input) else {
             return Ok(Vec::new());
+        };
+        let only = if within.is_some() {
+            "AND entry.conversation_id IN rarray(?3)"
+        } else {
+            ""
         };
         let sql = format!(
             "SELECT entry.conversation_id, entry.message_id, message.arrival_time, message.sender,
@@ -240,23 +272,25 @@ impl Store {
              JOIN search_entries AS entry ON entry.id = message_search.rowid
              JOIN messages AS message
                ON message.conversation_id = entry.conversation_id AND message.id = entry.message_id
-             WHERE message_search MATCH ?1
+             WHERE message_search MATCH ?1 {only}
              ORDER BY message.arrival_time DESC, message.id DESC LIMIT ?2"
         );
-        let hits = self
-            .conn
-            .prepare_cached(&sql)?
-            .query_map(params![expression, sql_limit(limit)], |row| {
-                Ok(SearchHit {
-                    conversation_id: row.get(0)?,
-                    message_id: row.get(1)?,
-                    arrival_time: row.get(2)?,
-                    sender: row.get(3)?,
-                    sender_name: row.get(4)?,
-                    snippet: row.get(5)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let hit = |row: &rusqlite::Row<'_>| {
+            Ok(SearchHit {
+                conversation_id: row.get(0)?,
+                message_id: row.get(1)?,
+                arrival_time: row.get(2)?,
+                sender: row.get(3)?,
+                sender_name: row.get(4)?,
+                snippet: row.get(5)?,
+            })
+        };
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        let hits = match within {
+            Some(within) => statement.query_map(params![expression, sql_limit(limit), within], hit)?,
+            None => statement.query_map(params![expression, sql_limit(limit)], hit)?,
+        }
+        .collect::<Result<Vec<_>, _>>()?;
         Ok(hits)
     }
 }

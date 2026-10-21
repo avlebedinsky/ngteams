@@ -112,7 +112,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 # the Trouter socket checks the server certificate as reqwest does (the system verifier)
 rustls-platform-verifier = "0.7.1"
 # the local store: SQLite built from source (`bundled`), so every machine runs the same version
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["array", "bundled"] }
 rustix = { version = "1.1.5", features = ["process"] }
 # the chat service's message HTML, read into a small typed model (teams-proto's `chat::html`): html5ever's
 # browser-grade parse, as a tree to walk; without the CLI (`main`) and the parse-error list (`errors`)

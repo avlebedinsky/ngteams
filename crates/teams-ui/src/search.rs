@@ -36,8 +36,6 @@ use crate::trace::{TraceLine, ViewTrace};
 pub const MIN_QUERY: usize = 2;
 /// The most hits shown.
 pub const MAX_HITS: usize = 50;
-/// How many hits are asked of the store: those of chats the list doesn't show are left out of them.
-pub const ASKED: usize = 200;
 /// The search's width, px.
 pub const WIDTH: f32 = 640.0;
 /// Who the account's own messages are from.
@@ -95,12 +93,14 @@ pub fn split_snippet(snippet: &str) -> (String, Vec<Range<usize>>) {
 }
 
 /// The hits of `query` in the chats of `chats` (`(id, name)`, as the list shows them), at most [`MAX_HITS`], the
-/// newest first; none for a query too short or when the engine can't answer.
+/// newest first; none for a query too short or when the engine can't answer. The store looks in these chats only, so
+/// however many messages of the others match (a busy channel's), they never take the hits' places.
 pub async fn find(core: &dyn Core, query: String, chats: Vec<(String, SharedString)>) -> Vec<Hit> {
     if !searchable(&query) {
         return Vec::new();
     }
-    let Ok(found) = core.search(query, ASKED).await else {
+    let within: Vec<String> = chats.iter().map(|(id, _)| id.clone()).collect();
+    let Ok(found) = core.search(query, within, MAX_HITS).await else {
         return Vec::new();
     };
     let names: HashMap<String, SharedString> = chats.into_iter().collect();

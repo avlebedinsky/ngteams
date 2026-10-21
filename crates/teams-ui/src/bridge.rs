@@ -67,9 +67,10 @@ pub trait Core: Send + Sync + 'static {
     fn outbox_unsettled(&self, conversation: String) -> Reply<Vec<OutboxEntry>>;
     /// The rows runs that have ended left pending or in flight.
     fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>>;
-    /// Up to `limit` stored messages whose text holds every term of `query`, the newest first: the store's own
-    /// index, never the service's search.
-    fn search(&self, query: String, limit: usize) -> Reply<Vec<SearchHit>>;
+    /// Up to `limit` stored messages of the conversations of `within` whose text holds every term of `query`, the
+    /// newest first: the store's own index, never the service's search. The other conversations' messages are left
+    /// out before the hits are counted.
+    fn search(&self, query: String, within: Vec<String>, limit: usize) -> Reply<Vec<SearchHit>>;
 }
 
 impl Core for EngineRequests {
@@ -145,8 +146,8 @@ impl Core for EngineRequests {
         EngineRequests::left_by_earlier_runs(self)
     }
 
-    fn search(&self, query: String, limit: usize) -> Reply<Vec<SearchHit>> {
-        EngineRequests::search(self, query, limit)
+    fn search(&self, query: String, within: Vec<String>, limit: usize) -> Reply<Vec<SearchHit>> {
+        EngineRequests::search_in(self, query, within, limit)
     }
 }
 
@@ -242,7 +243,7 @@ impl Core for StoppedCore {
         stopped()
     }
 
-    fn search(&self, _: String, _: usize) -> Reply<Vec<SearchHit>> {
+    fn search(&self, _: String, _: Vec<String>, _: usize) -> Reply<Vec<SearchHit>> {
         stopped()
     }
 }

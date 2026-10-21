@@ -43,7 +43,8 @@
 //! - **Search** ([`EngineRequests::search`]): the store's own index of the messages' plain text ([`crate::search`]),
 //!   never the service's search. Each message is indexed as it is stored; the messages stored before are indexed by a
 //!   backfill that runs from the engine's start, a batch at a time ([`EngineOptions::index_batch`]) between the
-//!   loop's other work, told as [`Event::Indexed`] once it is over.
+//!   loop's other work and the runtime's other tasks, told as [`Event::Indexed`] once it is over. A search in some
+//!   conversations only ([`EngineRequests::search_in`]) leaves the others out before it counts the hits.
 //! - **Transient writes** ([`EngineRequests::transient`]: typing) go out through the outbox too, but as no row
 //!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
 //!   once and briefly ([`crate::MAX_TRANSIENT_WAIT`]), and a message post to its conversation drops it (told as
@@ -90,7 +91,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
-use crate::search::{Backfill, INDEX_BATCH};
+use crate::search::{Backfill, INDEX_BATCH, Step};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
 
 /// How the engine paces itself.
@@ -426,6 +427,8 @@ enum Query {
     LeftByEarlierRuns(Responder<Vec<OutboxEntry>>),
     Search {
         query: String,
+        /// The conversations to look in; every one when `None`.
+        within: Option<Vec<String>>,
         limit: usize,
         reply: Responder<Vec<SearchHit>>,
     },
@@ -585,7 +588,24 @@ impl EngineRequests {
     /// before the index existed is found once the backfill reached it ([`Event::Indexed`]).
     pub fn search(&self, query: impl Into<String>, limit: usize) -> Reply<Vec<SearchHit>> {
         let query = query.into();
-        self.query(|reply| Query::Search { query, limit, reply })
+        self.query(|reply| Query::Search {
+            query,
+            within: None,
+            limit,
+            reply,
+        })
+    }
+
+    /// As [`EngineRequests::search`], in the conversations of `within` only ([`Store::search_in`]): the others'
+    /// messages are left out before the hits are counted.
+    pub fn search_in(&self, query: impl Into<String>, within: Vec<String>, limit: usize) -> Reply<Vec<SearchHit>> {
+        let query = query.into();
+        self.query(|reply| Query::Search {
+            query,
+            within: Some(within),
+            limit,
+            reply,
+        })
     }
 
     fn query<T>(&self, query: impl FnOnce(Responder<T>) -> Query) -> Reply<T> {
@@ -781,9 +801,11 @@ where
                 },
                 _ = tick.tick() => self.on_tick().await,
                 looked = self.profiles.next(), if self.profiles.busy() => self.on_looked(looked),
-                // always ready while it runs: `select!` picks among the ready branches at random, so a request or an
-                // event waits at most for one batch
-                () = std::future::ready(()), if self.backfill.is_some() => self.index_step(),
+                // ready once the runtime's other tasks had their turn (the push channel's, on this current-thread
+                // runtime: an always-ready branch would never let them run until the backfill is over), and
+                // `select!` picks among the ready branches at random, so a request or an event waits at most for one
+                // batch
+                () = tokio::task::yield_now(), if self.backfill.is_some() => self.index_step(),
             }
             // whatever a read settled on its way (a sync after a write, a new conversation's sync, …)
             self.arrived(&[]);
@@ -801,12 +823,12 @@ where
             return;
         };
         match backfill.step(&mut self.store) {
-            Ok(_) if backfill.done() => {
+            Ok(Step::Done(_)) => {
                 let messages = backfill.indexed();
                 self.backfill = None;
                 self.emit(Event::Indexed { messages });
             }
-            Ok(_) => {}
+            Ok(Step::Indexed(_)) => {}
             Err(error) => {
                 self.backfill = None;
                 self.failed("indexing stored messages for search", error);
@@ -967,7 +989,18 @@ where
             Query::OutboxEntry(id, reply) => give(reply, store.outbox_entry(id)),
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
             Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
-            Query::Search { query, limit, reply } => give(reply, store.search(&query, limit)),
+            Query::Search {
+                query,
+                within,
+                limit,
+                reply,
+            } => give(
+                reply,
+                match within {
+                    Some(within) => store.search_in(&query, &within, limit),
+                    None => store.search(&query, limit),
+                },
+            ),
         }
     }
 

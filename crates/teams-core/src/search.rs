@@ -35,10 +35,10 @@ pub fn search_text(message: &Message) -> String {
 /// What one step of the backfill did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// A batch was indexed (how many of it); more may be left.
+    /// A full batch was indexed (how many of it); more may be left.
     Indexed(usize),
-    /// Nothing is left to index: the backfill is over.
-    Done,
+    /// The last batch was indexed (how many of it; none when nothing was left): the backfill is over.
+    Done(usize),
 }
 
 /// The backfill of the messages the index doesn't hold (see the module docs): one per engine run, from the store's
@@ -78,7 +78,8 @@ impl Backfill {
     }
 
     /// Indexes the next batch: the next messages after the last batch's that the index doesn't hold at their version,
-    /// their text read here and stored in one write. [`Step::Done`] once a batch comes short (nothing more is left).
+    /// their text read here and stored in one write. [`Step::Done`] for a batch that comes short (nothing more is left)
+    /// and for every step after it, [`Backfill::done`] from then on.
     ///
     /// # Errors
     ///
@@ -86,7 +87,7 @@ impl Backfill {
     /// it again.
     pub fn step(&mut self, store: &mut Store) -> Result<Step, StoreError> {
         if self.done {
-            return Ok(Step::Done);
+            return Ok(Step::Done(0));
         }
         let messages = store.messages_to_index(self.after.as_ref(), self.batch)?;
         let texts: Vec<IndexText> = messages
@@ -108,9 +109,7 @@ impl Backfill {
         }
         if messages.len() < self.batch {
             self.done = true;
-            if messages.is_empty() {
-                return Ok(Step::Done);
-            }
+            return Ok(Step::Done(indexed));
         }
         Ok(Step::Indexed(indexed))
     }

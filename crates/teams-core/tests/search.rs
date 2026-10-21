@@ -108,17 +108,17 @@ fn the_backfill_indexes_a_bounded_batch_per_step_until_nothing_is_left() -> Resu
     assert_eq!(backfill.step(&mut store)?, Step::Indexed(2));
     assert_eq!(
         backfill.step(&mut store)?,
-        Step::Indexed(1),
+        Step::Done(1),
         "a batch that comes short is the last"
     );
     assert!(backfill.done());
-    assert_eq!(backfill.step(&mut store)?, Step::Done);
+    assert_eq!(backfill.step(&mut store)?, Step::Done(0));
     assert_eq!(backfill.indexed(), 5);
     assert_eq!(found(&store, "note"), 5);
     assert_eq!(found(&store, "group"), 1);
     // a later backfill finds nothing to do
     let mut again = Backfill::new(2);
-    assert_eq!(again.step(&mut store)?, Step::Done);
+    assert_eq!(again.step(&mut store)?, Step::Done(0));
     assert_eq!(again.indexed(), 0);
     Ok(())
 }
@@ -141,7 +141,7 @@ fn a_backfill_that_stopped_goes_on_at_the_next_start_without_indexing_anything_t
         "the three left: two of the chat and the group's"
     );
     // a full batch may have more after it: the next step finds none
-    assert_eq!(next.step(&mut store)?, Step::Done);
+    assert_eq!(next.step(&mut store)?, Step::Done(0));
     assert!(next.done());
     assert_eq!(next.indexed(), 3);
     assert_eq!(found(&store, "note"), 6);
@@ -157,7 +157,7 @@ fn a_batch_of_messages_without_text_is_indexed_as_having_none() -> Result<(), St
         None,
     )?;
     let mut backfill = Backfill::new(10);
-    assert_eq!(backfill.step(&mut store)?, Step::Indexed(2));
+    assert_eq!(backfill.step(&mut store)?, Step::Done(2));
     assert!(backfill.done());
     assert_eq!(found(&store, "topic"), 0, "an event's markup isn't text");
     // and is never listed again

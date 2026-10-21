@@ -2133,6 +2133,24 @@ async fn a_message_is_found_once_stored_and_its_edit_and_delete_change_what_find
         expected,
         "a's own, stored by the sync after its write"
     );
+    assert_eq!(
+        hit_ids(
+            &b.handle
+                .search_in("zeppelin", vec![AB_CHAT.to_owned()], 10)
+                .await
+                .unwrap()
+        ),
+        expected,
+        "a search in the chat"
+    );
+    assert!(
+        b.handle
+            .search_in("zeppelin", vec![ABC_CHAT.to_owned()], 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a search in other chats only"
+    );
     let hit = b.handle.search("zeppelin", 10).await.unwrap().remove(0);
     assert_eq!(hit.sender.as_deref(), Some(LAB_A));
     assert!(hit.snippet.contains("\u{e000}zeppelin\u{e001}"), "{hit:?}");

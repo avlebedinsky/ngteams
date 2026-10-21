@@ -264,11 +264,73 @@ fn the_user_s_input_is_quoted_so_fts_syntax_is_only_text_and_never_fails() -> Re
     // input FTS5 would refuse as syntax finds nothing, and never fails
     for input in [
         "\"", "*", "-", ":", "(", ")", "()", "NEAR", "NEAR(", "\" OR \"", "a OR", "^", "+", "{x}", "x:y:z", "**a**",
+        "\0", "x\0", "\0\"",
     ] {
         store
             .search(input, 10)
             .unwrap_or_else(|error| panic!("{input:?} failed: {error}"));
     }
+    Ok(())
+}
+
+#[test]
+fn a_control_character_in_the_input_parts_terms_like_a_space_and_never_fails() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chats(&dir)?;
+    store_indexed(&mut store, &message(CHAT, "1001", 1, "glob a*b star", 1_000))?;
+    store_indexed(&mut store, &message(CHAT, "1008", 1, "plain filler text", 1_001))?;
+    // FTS5 reads a query only up to a NUL: inside a quoted term it was "unterminated string"; every control
+    // character is checked the same way
+    for ch in ('\0'..='\u{1f}').chain('\u{7f}'..='\u{9f}') {
+        for input in [
+            format!("plain{ch}filler"),
+            format!("{ch}plain filler{ch}"),
+            format!("pla{ch}"),
+        ] {
+            let hits = store
+                .search(&input, 10)
+                .unwrap_or_else(|error| panic!("{input:?} failed: {error}"));
+            let ids: Vec<&str> = hits.iter().map(|hit| hit.message_id.as_str()).collect();
+            assert_eq!(ids, ["1008"], "{input:?}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_search_in_some_chats_counts_only_their_hits_however_many_others_match() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chats(&dir)?;
+    let channel = "19:synthetic-channel@thread.tacv2";
+    store.upsert_conversation(&conversation(channel, ConversationKind::Channel))?;
+    store_indexed(&mut store, &message(CHAT, "1001", 1, "the zeppelin plan", 1_000))?;
+    store_indexed(&mut store, &message(GROUP, "2001", 1, "a zeppelin in the group", 2_000))?;
+    // newer than both, and more of them than the limit
+    for at in 0..20 {
+        let id = (3_000 + at).to_string();
+        store_indexed(
+            &mut store,
+            &message(channel, &id, 1, "zeppelin channel post", 3_000 + at),
+        )?;
+    }
+    let ids =
+        |hits: Vec<teams_store::SearchHit>| -> Vec<String> { hits.into_iter().map(|hit| hit.message_id).collect() };
+    let chats = [CHAT.to_owned(), GROUP.to_owned()];
+    assert_eq!(ids(store.search_in("zeppelin", &chats, 5)?), ["2001", "1001"]);
+    assert_eq!(
+        ids(store.search_in("zeppelin", &chats, 1)?),
+        ["2001"],
+        "at most the limit"
+    );
+    assert_eq!(ids(store.search_in("zeppelin", &[CHAT.to_owned()], 5)?), ["1001"]);
+    assert!(store.search_in("zeppelin", &[], 5)?.is_empty(), "no chat, no hit");
+    assert!(
+        store
+            .search("zeppelin", 5)?
+            .iter()
+            .all(|hit| hit.conversation_id == channel),
+        "a search in every chat counts the channel's"
+    );
     Ok(())
 }
 
@@ -279,6 +341,12 @@ fn the_match_expression_quotes_each_term_as_a_prefix() {
     assert_eq!(match_expression(r#"say "hi""#), Some(r#""say"* """hi"""*"#.to_owned()));
     assert_eq!(match_expression("NEAR(a b)"), Some(r#""NEAR(a"* "b)"*"#.to_owned()));
     assert_eq!(match_expression("- * : ( )"), None, "no term has a letter or a digit");
+    assert_eq!(
+        match_expression("foo\0bar\u{1}baz\u{85}qux"),
+        Some(r#""foo"* "bar"* "baz"* "qux"*"#.to_owned()),
+        "control characters part terms"
+    );
+    assert_eq!(match_expression("\0\u{7f}"), None);
     assert_eq!(match_expression(""), None);
     let many = (0..40).map(|at| format!("t{at}")).collect::<Vec<_>>().join(" ");
     let expression = match_expression(&many).expect("terms");

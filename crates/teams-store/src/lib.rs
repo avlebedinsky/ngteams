@@ -161,6 +161,8 @@ impl Store {
         }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // `rarray`: a search in some conversations binds them as one value (`Store::search_in`)
+        rusqlite::vtab::array::load_module(&conn)?;
         Ok(conn)
     }
 

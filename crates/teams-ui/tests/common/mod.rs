@@ -364,15 +364,17 @@ impl Core for FakeCore {
         self.answer("left_by_earlier_runs", || locked(&self.earlier).clone())
     }
 
-    /// The store's search, played on the messages held: a message not deleted whose content holds every term (any
-    /// case), the newest first, the first term marked in its snippet (the content as it is).
-    fn search(&self, query: String, limit: usize) -> Reply<Vec<SearchHit>> {
+    /// The store's search, played on the messages held: a message of a conversation of `within`, not deleted, whose
+    /// content holds every term (any case), the newest first, the first term marked in its snippet (the content as it
+    /// is).
+    fn search(&self, query: String, within: Vec<String>, limit: usize) -> Reply<Vec<SearchHit>> {
         locked(&self.searches).push(query.clone());
         self.answer("search", || {
             let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
             let mut hits: Vec<SearchHit> = locked(&self.messages)
                 .values()
                 .flatten()
+                .filter(|message| within.contains(&message.conversation_id))
                 .filter(|message| message.delete_time.is_none())
                 .filter(|message| {
                     let content = message.content.to_lowercase();

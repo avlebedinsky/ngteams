@@ -21,7 +21,7 @@ use teams_core::Event;
 use teams_store::search::{MATCH_END, MATCH_START};
 use teams_store::{Conversation, ConversationKind, Member, Message};
 use teams_ui::chat_view::{ChatView, PAGE};
-use teams_ui::search::{MIN_QUERY, YOU, searchable, split_snippet};
+use teams_ui::search::{MAX_HITS, MIN_QUERY, YOU, searchable, split_snippet};
 use teams_ui::settings::Settings;
 use teams_ui::shell::{Main, Shell};
 use teams_ui::{HitTarget, ViewTrace};
@@ -264,6 +264,45 @@ fn ctrl_shift_f_finds_the_listed_chats_messages_the_newest_first_and_enter_opens
     assert_eq!(revealed.len(), 1);
     assert_eq!(revealed[0]["conversation"], AB);
     assert_eq!(revealed[0]["messages"], serde_json::json!([OLD]));
+}
+
+#[test]
+fn hits_of_chats_the_list_doesn_t_show_never_take_the_listed_chats_places() {
+    let rig = seeded();
+    // a busy channel and the account's own stream: far more newer matches than the search shows
+    let stream = "48:notifications";
+    let mut messages = rig.core.messages.lock().unwrap();
+    for (conversation, base) in [(CHANNEL, 10_000), (stream, 20_000)] {
+        let posts = messages.entry(conversation.to_owned()).or_default();
+        for n in 0..i64::try_from(4 * MAX_HITS).unwrap() {
+            let id = (base + n).to_string();
+            posts.push(message(
+                conversation,
+                &id,
+                LAB_B,
+                "<p>zeppelin again and again</p>",
+                NOON + (10 + n) * MINUTE,
+            ));
+        }
+    }
+    drop(messages);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    cx.simulate_keystrokes("ctrl-shift-f");
+    cx.simulate_input("zeppelin");
+    draw(cx);
+    let shown: Vec<(String, String)> = search_hits(&shell, cx)
+        .into_iter()
+        .map(|(conversation, message, ..)| (conversation, message))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (TRIO.to_owned(), "9002".to_owned()),
+            (AB.to_owned(), "9001".to_owned()),
+            (AB.to_owned(), OLD.to_owned()),
+        ],
+        "the listed chats' hits, however many newer ones the others hold"
+    );
 }
 
 #[test]
