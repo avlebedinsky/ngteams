@@ -408,6 +408,34 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
         all expected by the reviewed list; no breach. The web client's posts and edits kept `crossPostChannels: []`
         and `onbehalfof: null` (none fell to `Unknown`). No lab browser left.
 
+      📝 The mention, after the user's decision of 2026-10-21 (side work on branch `m1-task-7-profile-reads`): loosen
+      the browser fence for the mention picker's people lookups, which only read. Under the user's rule that a denied
+      request may be loosened only when nothing it does or names leaves the a–b–c lab, the fence got a reviewed
+      read-by-`POST` list, a class of its own (`crates/proto-lab/src/post_read.rs`, `fence.log` `post_read`): the
+      middle tier's `users/fetchShortProfile` and `users/fetch` in their captured shape (query, headers, a JSON list of
+      MRIs), let through only when every MRI is a lab account of the roster, on `Classifier::mapped` (and so
+      `calling`), asked after the write mapping. Substrate's people search and the bot invokes stay denied
+      (`docs/backlog/bot-invokes-and-message-extensions.md`). `ab-chat-full` mentions b again: `@`, the picker's
+      highlighted suggestion checked to be b by its object id, b's name typed, checked again, Enter; the post's
+      `properties.mentions` must name b, and b's read must show it. Live runs (normal build, headless, under the live
+      lock, no breach, no lab browser left):
+      - 2026-10-20 22:07Z: the picker offered b (the profile lookups passed: 26 `post_read` allows, every answer naming
+        only the requested lab account), but the step's own name read threw in the page (a newline in its script);
+        every other step done but b's read, which waited for the mention; exit 1.
+      - 22:32Z: **the mention captured**, every step done (a: send, edit, react, unreact, mention, reply, react to the
+        reply, delete; b: read with the mention, react). `fence.log` (entries; each request is decided on two
+        sessions): every allowed write on the a–b chat (8 message, 2 of them the mention with b added, 6 typing, 2
+        edit, 2 delete, 8 reaction, 4 read receipt), 2 `post_read` allows (`user_fetch` of a lab account; the client
+        had the rest cached), the one lookup naming a bot denied; exit 1 only on b marking its own `48:mentions` item read
+        (`isread`), reviewed and added to the expected-deny list (still denied). The mention's wire form is in
+        `docs/protocol/chat.md` and `tests/fixtures/chatsvc/mention.json` (rewritten from this capture); the
+        classifier's mention rule already read that form.
+      - 22:40Z: a's chat never opened from its deep link within 180 s (machine under load, an export running); failed
+        before enforcement, only denies.
+      - A confirming run after the `48:mentions` review queued on the live lock from 22:56Z and was withdrawn at
+        00:50Z, never started: another agent's `ab-image` run held the lock the whole time. ⚠️ So no exit-0 run with
+        the mention yet; the next live run of `ab-chat-full` is that confirmation.
+
 ### Task 8: Group chats under the fence (a, b, c)
 **Files:**
 - Modify: `crates/teams-fence/src/membership.rs`, `crates/teams-fence/tests/membership.rs`,
