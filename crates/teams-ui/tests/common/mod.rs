@@ -45,6 +45,15 @@ pub struct FakeCore {
     pub unread: Mutex<HashMap<String, u64>>,
     /// Display names by MRI.
     pub names: Mutex<HashMap<String, String>>,
+    /// Reactions by message id.
+    pub reactions: Mutex<HashMap<String, Vec<Reaction>>>,
+    /// The account's read horizons by conversation.
+    pub horizons: Mutex<HashMap<String, ReadHorizon>>,
+    /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
+    /// newest first); once none is left it answers `None`. A conversation not named answers `None` at once.
+    pub older: Mutex<HashMap<String, Vec<Vec<Message>>>>,
+    /// The `limit` of each `messages` read, in order.
+    pub limits: Mutex<Vec<usize>>,
 }
 
 impl Default for FakeCore {
@@ -58,8 +67,34 @@ impl Default for FakeCore {
             members: Mutex::default(),
             unread: Mutex::default(),
             names: Mutex::default(),
+            reactions: Mutex::default(),
+            horizons: Mutex::default(),
+            older: Mutex::default(),
+            limits: Mutex::default(),
         }
     }
+}
+
+/// The store's page of `messages` (the newest first) older than `before`: at most `limit`, with the cursor for the
+/// next when more are older.
+pub fn page_of(messages: &[Message], before: Option<&PageCursor>, limit: usize) -> MessagePage {
+    let mut sorted: Vec<&Message> = messages.iter().collect();
+    sorted.sort_by(|one, other| (other.arrival_time, &other.id).cmp(&(one.arrival_time, &one.id)));
+    let older: Vec<&Message> = sorted
+        .into_iter()
+        .filter(|message| {
+            before.is_none_or(|cursor| (message.arrival_time, &message.id) < (cursor.arrival_time, &cursor.id))
+        })
+        .collect();
+    let page: Vec<Message> = older.iter().take(limit).map(|message| (*message).clone()).collect();
+    let next = (older.len() > limit)
+        .then(|| page.last())
+        .flatten()
+        .map(|last| PageCursor {
+            arrival_time: last.arrival_time,
+            id: last.id.clone(),
+        });
+    MessagePage { messages: page, next }
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -107,8 +142,21 @@ impl Core for FakeCore {
         self.ask("sync")
     }
 
-    fn load_older(&self, _conversation: String) -> Reply<Option<Synced>> {
-        self.ask("load_older")
+    fn load_older(&self, conversation: String) -> Reply<Option<Synced>> {
+        self.answer("load_older", || {
+            let mut older = locked(&self.older);
+            let page = older
+                .get_mut(&conversation)
+                .filter(|pages| !pages.is_empty())?
+                .remove(0);
+            let synced = Synced {
+                inserted: page.len(),
+                pages: 1,
+                ..Synced::default()
+            };
+            locked(&self.messages).entry(conversation).or_default().extend(page);
+            Some(synced)
+        })
     }
 
     fn conversations(&self, limit: usize) -> Reply<Vec<Conversation>> {
@@ -121,13 +169,15 @@ impl Core for FakeCore {
         })
     }
 
-    fn messages(&self, conversation: String, _before: Option<PageCursor>, limit: usize) -> Reply<MessagePage> {
-        self.answer("messages", || MessagePage {
-            messages: locked(&self.messages)
-                .get(&conversation)
-                .map(|messages| messages.iter().take(limit).cloned().collect())
-                .unwrap_or_default(),
-            next: None,
+    fn messages(&self, conversation: String, before: Option<PageCursor>, limit: usize) -> Reply<MessagePage> {
+        locked(&self.limits).push(limit);
+        self.answer("messages", || {
+            let messages = locked(&self.messages);
+            page_of(
+                messages.get(&conversation).map_or(&[][..], Vec::as_slice),
+                before.as_ref(),
+                limit,
+            )
         })
     }
 
@@ -135,8 +185,10 @@ impl Core for FakeCore {
         self.ask("message")
     }
 
-    fn reactions(&self, _conversation: String, _id: String) -> Reply<Vec<Reaction>> {
-        self.ask("reactions")
+    fn reactions(&self, _conversation: String, id: String) -> Reply<Vec<Reaction>> {
+        self.answer("reactions", || {
+            locked(&self.reactions).get(&id).cloned().unwrap_or_default()
+        })
     }
 
     fn members(&self, conversation: String) -> Reply<Vec<Member>> {
@@ -155,8 +207,8 @@ impl Core for FakeCore {
         self.answer("display_name", || locked(&self.names).get(&mri).cloned())
     }
 
-    fn read_horizon(&self, _conversation: String) -> Reply<Option<ReadHorizon>> {
-        self.ask("read_horizon")
+    fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
+        self.answer("read_horizon", || locked(&self.horizons).get(&conversation).cloned())
     }
 
     fn outbox_entry(&self, _id: i64) -> Reply<Option<OutboxEntry>> {

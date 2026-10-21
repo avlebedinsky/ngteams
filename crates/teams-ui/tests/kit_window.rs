@@ -8,7 +8,8 @@
 //! (through the nested compositor's own clipboard, never the desktop's), Shift-Enter then Enter, and a line too long
 //! for the box. Then it switches the theme live the way a desktop does: a fake settings portal on the sandbox's bus
 //! (`org.freedesktop.portal.Settings`, the one GPUI and the kit ask) says the colour scheme changed, and the window's
-//! theme follows to dark and back.
+//! theme follows to dark and back. Last, a message's link drawn by our rich text renderer is clicked with the virtual
+//! pointer and goes to the sandbox's no-op opener.
 //!
 //! IME composition can't be driven here (the sandbox has no input method); `tests/kit.rs` drives it through GPUI's
 //! input handler on the test context, with the clipboard's plain-text-only paste.
@@ -62,6 +63,7 @@ const PREFER_LIGHT: u32 = 2;
 fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
         Ok("textarea") => child(),
+        Ok("link") => link_child(),
         Ok(other) => Err(format!("unknown mode {other}").into()),
         Err(_) => parent(),
     };
@@ -193,6 +195,8 @@ fn parent() -> SandboxResult {
     };
     let portal = Portal::start(&sandbox)?;
     drive(&sandbox, &portal).map_err(|error| format!("{error}{}", sandbox.logs()))?;
+    a_message_s_link_opens_through_the_sandbox_s_opener(&sandbox)
+        .map_err(|error| format!("{error}{}", sandbox.logs()))?;
     say("teams-ui kit window: ok");
     Ok(())
 }
@@ -379,6 +383,83 @@ fn open(cx: &mut App) -> gpui::Result<()> {
         });
         cx.new(|cx| Pad::new(following, window, cx))
     })?;
+    Ok(())
+}
+
+/// The link of the `link` child's message.
+const LINK: &str = "https://example.invalid/teams-ui?link=1";
+
+/// A message's link, drawn by our rich text renderer in a window filling the output, clicked with the sandbox's
+/// virtual pointer: GPUI opens it through the sandbox's no-op opener (`xdg-open`, the private bus having no portal),
+/// never the desktop's.
+fn a_message_s_link_opens_through_the_sandbox_s_opener(sandbox: &Sandbox) -> SandboxResult {
+    let child = sandbox.spawn(&std::env::current_exe()?, &[], &[(CHILD_ENV, "link")])?;
+    let mut running = Running::new(child)?;
+    running
+        .line_where(STARTUP, |line| line == "ready")
+        .map_err(|error| running.fail(&format!("no ready line: {error:?}")))?;
+    let mut input = sandbox.input()?;
+    // the link's first words, at the window's top left (the window fills the output, with no gaps or border)
+    input.click(24, 16, ui_sandbox::input::keys::BTN_LEFT)?;
+    let wanted = ui_sandbox::opener::Opened {
+        launcher: "xdg-open".to_owned(),
+        args: vec![LINK.to_owned()],
+    };
+    ui_sandbox::wait_until(WAIT, || sandbox.opened().ok().filter(|opened| opened.contains(&wanted)))
+        .ok_or_else(|| running.fail(&format!("the opener never got the link: {:?}", sandbox.opened())))?;
+    sandbox.niri_msg(&["action", "close-window"])?;
+    let (status, stderr) = running.finish(WAIT)?;
+    if !status.success() {
+        return Err(format!("the link child exited {status}: {stderr}").into());
+    }
+    Ok(())
+}
+
+/// A message with one link, drawn large.
+struct LinkMessage {
+    rendered: Arc<teams_ui::rich_text::Rendered>,
+}
+
+impl Render for LinkMessage {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let id = gpui::SharedString::from("message-link");
+        div()
+            .size_full()
+            .bg(rgb(theme::LIGHT_PALETTE.background))
+            .text_size(px(32.0))
+            .child(teams_ui::rich_text::render(&id, &self.rendered, theme::LIGHT_PALETTE))
+    }
+}
+
+fn link_child() -> SandboxResult {
+    ui_sandbox::window_allowed()?;
+    let content = format!("<p><a href=\"{LINK}\">open the made-up page, a long link to click on</a></p>");
+    let rendered = Arc::new(teams_ui::rich_text::layout(
+        &teams_proto::chat::parse_html(&content),
+        &teams_ui::rich_text::Mentions::default(),
+    ));
+    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        let bounds = Bounds::centered(None, size(px(640.0), px(400.0)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            app_id: Some(APP_ID.to_owned()),
+            ..WindowOptions::default()
+        };
+        let opened = cx.open_window(options, |window, cx| {
+            after_frames(window, READY_FRAMES, |_, _| say("ready"));
+            cx.new(|_| LinkMessage { rendered })
+        });
+        if let Err(error) = opened {
+            eprintln!("failed to open the window: {error:#}");
+            cx.quit();
+        }
+    });
     Ok(())
 }
 

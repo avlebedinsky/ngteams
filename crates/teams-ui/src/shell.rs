@@ -1,6 +1,7 @@
 //! The shell: the window's three panes, Teams-like and compact. On the left the rail (Chat, Teams, and Settings at
 //! its foot), then the list pane (the [`ChatList`] for Chat; teams and channels for Teams, Task 16), resizable by the
-//! handle on its right edge, then the conversation pane (the chat opened, or the settings).
+//! handle on its right edge, then the conversation pane (the chat opened in a [`ChatView`] under its name, or the
+//! settings).
 //!
 //! The keyboard: Ctrl+K opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
@@ -17,6 +18,7 @@ use gpui_component::{ResizableState, h_resizable, resizable_panel};
 
 use crate::bridge::Core;
 use crate::chat_list::{ChatList, ChatListEvent};
+use crate::chat_view::{self, ChatView};
 use crate::models::Models;
 use crate::settings::SettingsModel;
 use crate::settings_view::SettingsView;
@@ -42,8 +44,9 @@ struct Bound;
 
 impl Global for Bound {}
 
-/// Binds the shell's keys (Ctrl+K: the switcher), once per app.
+/// Binds the shell's keys (Ctrl+K: the switcher) and the chat view's, once per app.
 pub fn init(cx: &mut App) {
+    chat_view::init(cx);
     if cx.has_global::<Bound>() {
         return;
     }
@@ -77,9 +80,13 @@ pub struct ShellParts {
 
 /// The shell (see the module docs).
 pub struct Shell {
+    core: Arc<dyn Core>,
+    models: Models,
     settings: Entity<SettingsModel>,
     trace: Arc<ViewTrace>,
     list: Entity<ChatList>,
+    /// The chat opened in the conversation pane.
+    chat: Option<Entity<ChatView>>,
     settings_view: Entity<SettingsView>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
     rail: RailItem,
@@ -100,7 +107,8 @@ impl Shell {
         } = parts;
         let selected = settings.read(cx).settings().selected_chat.clone();
         let list_trace = Arc::clone(&trace);
-        let list = cx.new(|cx| ChatList::new(core, models, list_trace, selected.clone(), cx));
+        let (list_core, list_models) = (Arc::clone(&core), models.clone());
+        let list = cx.new(|cx| ChatList::new(list_core, list_models, list_trace, selected.clone(), cx));
         let opened = cx.subscribe_in(&list, window, |this: &mut Self, _, event, window, cx| match event {
             ChatListEvent::Opened(id) => this.open_chat(id.clone(), window, cx),
         });
@@ -110,10 +118,17 @@ impl Shell {
         if let Some(id) = &selected {
             trace.record(&TraceLine::new("chat", "opened").conversation(id));
         }
+        let chat = selected.clone().map(|id| {
+            let (core, models, trace) = (Arc::clone(&core), models.clone(), Arc::clone(&trace));
+            cx.new(|cx| ChatView::new(core, models, trace, id, cx))
+        });
         Self {
+            core,
+            models,
             settings,
             trace,
             list,
+            chat,
             settings_view,
             switcher: None,
             rail: RailItem::Chats,
@@ -157,9 +172,21 @@ impl Shell {
         self.switcher.as_ref().map(|(switcher, _)| switcher)
     }
 
+    /// The chat view of the chat opened, if one is.
+    #[must_use]
+    pub fn chat(&self) -> Option<&Entity<ChatView>> {
+        self.chat.as_ref()
+    }
+
     /// Opens a chat in the conversation pane and keeps it as the selected chat; the switcher closes.
     pub fn open_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
+        let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
+        if shown != Some(true) {
+            let (core, models, trace) = (Arc::clone(&self.core), self.models.clone(), Arc::clone(&self.trace));
+            let conversation = id.clone();
+            self.chat = Some(cx.new(|cx| ChatView::new(core, models, trace, conversation, cx)));
+        }
         self.list.update(cx, |list, cx| list.select(Some(id.clone()), cx));
         let kept = id.clone();
         self.settings.update(cx, |settings, cx| {
@@ -308,8 +335,12 @@ impl Shell {
                     .read(cx)
                     .row(id)
                     .map_or_else(|| SharedString::from("Chat"), |row| row.name.clone());
+                let chat = self
+                    .chat
+                    .clone()
+                    .filter(|chat| chat.read(cx).conversation() == id.as_str());
                 pane.child(pane_header(name, palette).debug_selector(|| "chat-header".to_owned()))
-                    .child(div().flex_1())
+                    .child(div().flex_1().min_h_0().children(chat))
                     .into_any_element()
             }
             Main::Nothing => pane

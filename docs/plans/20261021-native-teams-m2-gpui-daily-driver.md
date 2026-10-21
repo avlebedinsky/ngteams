@@ -700,20 +700,43 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
 **Files:**
 - Create: `crates/teams-ui/src/{chat_view.rs,rich_text.rs}`, tests
 
-- [ ] tests first: a render test per `RichText` node, our own renderer (marks, breaks, paragraphs, mentions
+- [x] tests first: a render test per `RichText` node, our own renderer (marks, breaks, paragraphs, mentions
       highlighted (the account's own more strongly), links opened through `open_url` (the sandbox's no-op opener in
       tests), quotes, an image as a placeholder until Task 22); edited and deleted markers; reactions with counts and
       the account's own; `Control/*` never shown; no message HTML ever reaches a markdown or HTML renderer
-- [ ] the newest at the bottom (a bottom-aligned list that follows the tail while at the bottom); older pages when
+- [x] the newest at the bottom (a bottom-aligned list that follows the tail while at the bottom); older pages when
       fewer than a page of rows is above the view (`load_older`); a sender's messages grouped within 5 minutes; day
       separators; a "New messages" divider at the account's read horizon (`read_horizon`); a "Jump to newest" pill
       when scrolled up; rendered rich text cached per message id and version
-- [ ] the typing indicator from `Event::Typing { typing }`, cleared by `typing: false` or a timeout (from Task 10's
+- [x] the typing indicator from `Event::Typing { typing }`, cleared by `typing: false` or a timeout (from Task 10's
       capture; 5 s until then)
-- [ ] hover and keyboard actions on a message: reply, react, edit and delete (the account's own only); wired in Task 13
-- [ ] a long chat (1 000 messages from the mock) scrolls without loading everything at once (a measured bound in the
+- [x] hover and keyboard actions on a message: reply, react, edit and delete (the account's own only); wired in Task 13
+- [x] a long chat (1 000 messages from the mock) scrolls without loading everything at once (a measured bound in the
       test)
-- [ ] `cargo test -p teams-ui` and the gate pass
+- [x] `cargo test -p teams-ui` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - `rich_text.rs` lays `teams-proto`'s `RichText` out as blocks (a paragraph's text with styled pieces and link
+    ranges; quotes with a reply's sender) and draws them with GPUI's `StyledText`/`InteractiveText`; a mention is the
+    account's own when its `properties.mentions` entry (read by `teams-proto`'s reader) names it, and an entry in an
+    unseen form names nobody; an image is `[Image: alt]`, never its source; a link opens only if `http`, `https` or
+    `mailto`. Tested node by node on the test context (`tests/rich_text.rs`: a click opens through the test
+    platform's `open_url`) and in the sandbox (`tests/kit_window.rs`: a link clicked with the virtual pointer reaches
+    the no-op opener). `tests/reach.rs` refuses the kit's `TextView`/markdown/HTML views in the app crates.
+  - `chat_view.rs`: pages of 50 from the store; the service's older page (`load_older`) only once the store has none;
+    after three older loads in a row that bring nothing, rows near the top stop asking until asked again, and a failed
+    one shows "Try again". The "New messages" divider stays at the horizon read when the chat opened. A thread event
+    is a line of its own, a type this build doesn't show a placeholder naming no content. The shell keeps one
+    `ChatView` for the chat opened.
+  - Typing (`models.rs`): the timeout is Task 10's capture, 25 s (the web client's indicator went off then, or at the
+    sender's message; it never sent `Control/ClearTyping`): each signal has a stamp, so an older signal's timeout
+    never clears a newer one, and a delivered message from the typer clears it.
+  - Actions are told as `ChatViewEvent::Action`; keys in the message list's own context (`ChatMessages`, never
+    while compose's text area has the focus): Up/Down select, `r` reply, `a` react, `e` edit, Delete delete, Escape.
+  - The 1 000-message chat is on the fake core's store pages (`tests/chat_view.rs`), not `teams-mock`, whose chats
+    hold only the fixtures' messages: opening reads at most three pages, a frame lays out at most 80 rows, every
+    store read asks for one page. The in-process window test on `teams-mock` (`teams-app/tests/window.rs`) checks the
+    a–b chat's messages shown with their kinds and keeps a screenshot.
+  - The view trace gained `chat-view shown` (the newest 50 message ids and their kinds) and `typing shown`/`cleared`.
 
 ### Task 10: The chat shapes the UI still needs (capture)
 **Files:**

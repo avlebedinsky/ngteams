@@ -11,6 +11,9 @@
 //! - [`shell`]: the window's three panes: the rail (Chat, Teams, Settings), the list pane, resizable, and the
 //!   conversation pane; Ctrl+K opens the [`switcher`] (the chat switcher, fuzzy over the chats' names).
 //! - [`chat_list`]: the chats by last activity, from the store, kept up to date by the models' changes.
+//! - [`chat_view`]: a chat's messages, the newest at the bottom, paged from the store (and the service's older
+//!   history), grouped by sender, with day separators, the "New messages" divider, typing and the messages' actions;
+//!   [`rich_text`] is our own renderer of a message's sanitized rich text (never an HTML or markdown view).
 //! - [`settings`]: the settings and their file (`0600` in a `0700` directory; defaults for what can't be read);
 //!   [`settings_view`] changes them.
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
@@ -24,11 +27,13 @@
 //! one (nothing here hands GPUI another), so an image URL loads nothing. Pictures will reach a view only as bytes
 //! from the engine.
 //!
-//! M2 Tasks 6–8 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+//! M2 Tasks 6–9 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod bridge;
 pub mod chat_list;
+pub mod chat_view;
 pub mod models;
+pub mod rich_text;
 pub mod settings;
 pub mod settings_view;
 pub mod shell;
@@ -40,6 +45,7 @@ pub mod window;
 
 pub use bridge::{Bridge, Core, EventSource, StoppedCore};
 pub use chat_list::{ChatList, ChatListEvent, ChatRow};
+pub use chat_view::{ChatView, ChatViewEvent, MessageAction};
 pub use models::{Account, Chats, Engine, Link, Models, Status};
 pub use settings::{Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};

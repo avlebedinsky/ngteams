@@ -320,3 +320,33 @@ fn gpui_keeps_its_null_http_client_and_no_token_is_read_out() {
     }
     assert!(read >= 9, "the app crates' sources were read ({read} files)");
 }
+
+/// What the app crates' sources never name: the kit's markdown and HTML view (`TextView`, its `text` module, its
+/// `markdown`/`html` constructors) and its chat widgets. A message's text is drawn only by our own renderer
+/// (`rich_text`), from `teams-proto`'s sanitized model.
+const RENDERERS: [&str; 7] = [
+    "TextView",
+    "gpui_component::text",
+    "::markdown(",
+    "::html(",
+    "MessageScroller",
+    "gpui_component::message",
+    "gpui_component::bubble",
+];
+
+#[test]
+fn no_message_html_reaches_a_markdown_or_html_view() {
+    let mut read = 0;
+    for package in APP_CRATES {
+        for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
+            read += 1;
+            for renderer in RENDERERS {
+                assert!(!text.contains(renderer), "{} names {renderer}", path.display());
+            }
+        }
+    }
+    assert!(read >= 11, "the app crates' sources were read ({read} files)");
+    // the chat view draws a message's content through our renderer
+    let chat_view = fs::read_to_string(workspace_root().join("crates/teams-ui/src/chat_view.rs")).expect("UTF-8");
+    assert!(chat_view.contains("rich_text::render("));
+}
