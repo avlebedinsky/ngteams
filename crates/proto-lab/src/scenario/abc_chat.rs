@@ -33,7 +33,8 @@
 //!    message post to the group chat, and that very post must fail in a's page with `net::ERR_BLOCKED_BY_CLIENT`.
 //! 4. a sends the real message; then b and c, one after the other, open the web client at the group chat, so each
 //!    reads its history from the service (the fence denies the push channel's frames), and must show the message within
-//!    [`DELIVERY`](super::ab_chat::DELIVERY) and not the probe.
+//!    [`DELIVERY`](super::ab_chat::DELIVERY) and not the probe. A chat with unread messages opens at its "last
+//!    read" mark, the newest ones not rendered: each jumps to the newest ([`wait_for_newest`]).
 //! 5. Judged by [`policy`]: no deny but the three forced ones and the reviewed expected-deny list
 //!    ([`super::expected`]), and nothing denied on the group chat but those forced ones. The message and the members'
 //!    typing and read receipts pass only when the fence's live read finds the group chat's membership complete and all
@@ -56,7 +57,7 @@ use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
     CHAT_OPEN, DELIVERY, EARLIER_RUN_PROBE, ForcedPost, PROBE_FAIL, PROBE_MARKER, THIS_RUN_PROBE, chat_requests,
-    chat_url, failed_in_page, load_at, message_text, nonce, probe_text, save_screenshot, send,
+    chat_url, failed_in_page, load_at, message_text, nonce, probe_text, save_screenshot, send, wait_for_newest,
 };
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
@@ -409,9 +410,9 @@ impl MessageSteps<'_> {
         driver
             .wait_for_request(&format!("{alias} reads the a-b-c chat"), &opened, CHAT_OPEN)
             .await?;
-        driver
-            .wait_for_text(&format!("{alias} receives the message"), message, DELIVERY)
-            .await?;
+        // a chat with unread messages (each native run leaves some in the group chat) opens at its "last read" mark,
+        // the newest not rendered
+        wait_for_newest(&mut driver, &format!("{alias} receives the message"), message, DELIVERY).await?;
         if driver
             .shows_text(&format!("{alias} must not have the probe"), probe)
             .await?

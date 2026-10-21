@@ -24,7 +24,8 @@
 //!    ([`super::dsl::navigate_tab`]). Then a opens the chat again and, if it shows this run's image unsent (a message
 //!    with an image and this run's caption, [`mark_unsent_image`]), deletes it from its actions; any other message is
 //!    left alone. What it found and did is noted.
-//! 6. b opens the chat (it reads the chat's history), shows a's plain message, and the enforcement test's other half:
+//! 6. b opens the chat (it reads the chat's history), shows a's plain message (jumping to the newest,
+//!    `ab_chat::wait_for_newest`), and the enforcement test's other half:
 //!    b's copy must not have the probe (`ab_chat::not_received`). Whether b shows the caption is noted.
 //!
 //! Nothing the media service would hold is sent: every write to it is denied. The run fails (as any run) on a breach
@@ -45,7 +46,7 @@ use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
     COMPOSE, COMPOSE_CSS, DELIVERY, EARLIER_RUN_PROBE, THIS_RUN_PROBE, chat_link, chat_requests, chat_url, deny_probes,
-    enforce, load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, send, setup,
+    enforce, load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, send, setup, wait_for_newest,
 };
 use super::ab_chat_full::{CHAT_OPEN, PAGE_CALL, message_action};
 use super::dsl::{Driver, RequestPattern, StepError};
@@ -490,9 +491,7 @@ impl Image {
         drive
             .wait_for_request("b reads the a–b chat", opened, CHAT_OPEN)
             .await?;
-        drive
-            .wait_for_text("b shows a's plain message", &self.texts.plain, DELIVERY)
-            .await?;
+        wait_for_newest(&mut drive, "b shows a's plain message", &self.texts.plain, DELIVERY).await?;
         not_received(&mut drive, &self.probe).await?;
         report
             .notes

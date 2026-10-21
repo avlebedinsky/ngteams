@@ -19,7 +19,9 @@
 //! 3. a opens the web client and the chat with b, and proves enforcement live with this run's probe (`ab-chat`'s
 //!    step 4).
 //! 4. a sends the message; b, already showing the chat, must show it within [`DELIVERY`] (it can only come by push or
-//!    by a read b makes by itself) and never the probe. The time from a's Enter to b showing it is noted.
+//!    by a read b makes by itself) and never the probe. A chat with unread messages opens at its "last read" mark,
+//!    the newest ones not rendered, so b jumps to the newest while it waits ([`wait_for_newest`]): a jump that reads
+//!    the chat shows in the capture. The time from a's Enter to b showing it is noted.
 //! 5. a edits the message and reacts to it with a like ([`edit`], [`react`]); b must show the edit, and the reaction
 //!    must be answered with a 2xx. These steps failing fails the run but doesn't end it: the observation still runs.
 //! 6. Both pages stay open, nothing driven, for [`observation`] (when the activity is reported, longer than the
@@ -49,7 +51,7 @@ use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
     CHAT_OPEN, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_link, chat_requests, chat_url, deny_probes, enforce, load,
-    message_text, nonce, one_to_one_id, probe_text, save_screenshot, send,
+    message_text, nonce, one_to_one_id, probe_text, save_screenshot, send, wait_for_newest,
 };
 use super::dsl::{Driver, RequestPattern, SeenRequest, Selector, StepError};
 use super::expected::{ExpectedRequest, Review, TEAMS};
@@ -369,9 +371,13 @@ impl Steps<'_> {
         let message = message_text(self.nonce);
         send(&mut drive_a, "a (the message)", &message).await?;
         let sent = Instant::now();
-        drive_b
-            .wait_for_text("b shows the message without reloading", &message, DELIVERY)
-            .await?;
+        wait_for_newest(
+            &mut drive_b,
+            "b shows the message without reloading",
+            &message,
+            DELIVERY,
+        )
+        .await?;
         report.notes.push(format!(
             "a's message showed in b's open chat {} ms after a's Enter",
             sent.elapsed().as_millis()
@@ -436,7 +442,7 @@ impl Steps<'_> {
         let edit = async {
             edit(a, drive_a, &message, &edited).await?;
             let sent = Instant::now();
-            drive_b.wait_for_text("b shows the edit", &edited, DELIVERY).await?;
+            wait_for_newest(drive_b, "b shows the edit", &edited, DELIVERY).await?;
             Ok::<_, ScenarioError>(sent.elapsed())
         };
         match edit.await {

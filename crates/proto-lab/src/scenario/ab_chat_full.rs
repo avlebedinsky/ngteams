@@ -11,7 +11,8 @@
 //!    quote, reacts to the reply and leaves the reaction there (so b's read of the chat shows a reaction with its user),
 //!    and sends a last message and deletes it ([`Texts`]).
 //! 4. b opens the chat (it reads the chat's history: message pages and their sync state) and, once it shows a's first
-//!    message, the enforcement test's other half: b's copy of the chat must not have the probe
+//!    message (jumping to the newest: a chat with unread messages opens at its "last read" mark,
+//!    `ab_chat::wait_for_newest`), the enforcement test's other half: b's copy of the chat must not have the probe
 //!    (`ab_chat::not_received`). b then shows a's edited message, goes to its compose box (whether the client then
 //!    sends a read receipt is noted, not required), shows a's mention, and reacts to a's first message.
 //! 5. The run is judged as `ab-chat` is: a probe in b's copy fails it like any failed step.
@@ -45,7 +46,7 @@ use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
     self, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_in_url, chat_link, chat_requests, chat_url, deny_probes, enforce,
-    load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, setup,
+    load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, setup, wait_for_newest,
 };
 use super::dsl::{Driver, Key, RequestPattern, SeenRequest, Selector, StepError};
 use super::expected::Review;
@@ -456,19 +457,13 @@ impl Steps<'_> {
         drive
             .wait_for_request("b reads the a–b chat", opened, CHAT_OPEN)
             .await?;
-        drive
-            .wait_for_text("b shows a's first message", &self.texts.first, DELIVERY)
-            .await?;
+        wait_for_newest(drive, "b shows a's first message", &self.texts.first, DELIVERY).await?;
         not_received(drive, self.probe).await?;
         self.report
             .notes
             .push("enforcement: b's copy of the chat has a's message and not the probe".to_owned());
-        drive
-            .wait_for_text("b shows a's edited message", &self.texts.edited, DELIVERY)
-            .await?;
-        drive
-            .wait_for_text("b shows a's mention", &self.texts.mention, DELIVERY)
-            .await?;
+        wait_for_newest(drive, "b shows a's edited message", &self.texts.edited, DELIVERY).await?;
+        wait_for_newest(drive, "b shows a's mention", &self.texts.mention, DELIVERY).await?;
         drive.type_into("b goes to its compose box", COMPOSE, "").await?;
         match drive
             .wait_for_answer("b's read receipt", &self.writes.read_receipt, STEP)
