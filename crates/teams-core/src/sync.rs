@@ -20,6 +20,9 @@
 //!   a Trouter delivery) becomes a store row and goes through [`Outbox::receive`], which stores it by its id and
 //!   version and matches our own to its outbox row by `clientmessageid`. So a delivery and a sync that bring the same
 //!   message, in either order, leave one row at the newest version.
+//! - **Control messages are signals** (`Control/…`: typing, its end, any other control): never stored as a message
+//!   and never matched to an outbox row, even our own; a sync page's are counted in [`Synced::control`] and nothing
+//!   else, a delivery's is dropped ([`CatchUp::receive_message`] gives `None`).
 //! - **Versions are never guessed**: a message whose `version` this build can't read ([`Field::Unknown`], or none at
 //!   all) isn't stored, since it could be older or newer than the stored row; it is counted in [`Synced::skipped`],
 //!   and so is a reaction set with a time it can't read (its reactions stay as they were). A conversation whose
@@ -143,6 +146,9 @@ pub struct Synced {
     /// Entries not stored: not a message's shape, of another conversation, without a version or an arrival time this
     /// build can read. A message stored whose reaction set had a time it can't read counts here too.
     pub skipped: usize,
+    /// Control signals the pages carried (`Control/…`: typing, its end): dropped, neither stored nor counted as
+    /// messages.
+    pub control: usize,
     /// Pages read.
     pub pages: usize,
 }
@@ -167,6 +173,7 @@ impl Synced {
         self.updated += other.updated;
         self.unchanged += other.unchanged;
         self.skipped += other.skipped;
+        self.control += other.control;
         self.pages += other.pages;
     }
 }
@@ -509,7 +516,8 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// Stores a message that came in (a sync page's entry, or a Trouter delivery's resource) in `conversation`,
     /// through [`Outbox::receive`]; `None` when it isn't stored (see [`Synced::skipped`]). One of ours that isn't
     /// stored, because its version or its arrival time can't be read, is still matched to its outbox row
-    /// ([`Outbox::match_arrival`]).
+    /// ([`Outbox::match_arrival`]). A control message (`Control/…`) is a signal: `None`, never stored and never
+    /// matched to an outbox row ([`Synced::control`]).
     ///
     /// # Errors
     ///
@@ -521,6 +529,9 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         conversation: &str,
         message: &chat::Message,
     ) -> Result<Option<Received>, CatchUpError> {
+        if message.message_type.is_control() {
+            return Ok(None);
+        }
         let Some(row) = message_row(conversation, message) else {
             if let Some(arrival) = arrival(conversation, message) {
                 self.outbox.match_arrival(store, &arrival)?;
@@ -602,6 +613,10 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             ..Synced::default()
         };
         for message in page.messages.iter().rev() {
+            if message.message_type.is_control() {
+                synced.control += 1;
+                continue;
+            }
             match self.receive_message(store, conversation, message)? {
                 Some(received) => {
                     synced.count(received.applied);

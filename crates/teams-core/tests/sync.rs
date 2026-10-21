@@ -880,6 +880,43 @@ async fn an_unreadable_version_never_replaces_a_stored_one() {
     assert_eq!(a.message(CHAT, "1001"), stored);
 }
 
+/// `entry` as a control message of `messagetype` (typing and its end come with no content).
+fn control(mut entry: Value, messagetype: &str) -> Value {
+    entry["messagetype"] = json!(messagetype);
+    entry["content"] = json!("");
+    entry
+}
+
+#[tokio::test]
+async fn control_messages_on_a_sync_page_are_signals_never_stored() {
+    let server = scripted(vec![(
+        "",
+        page(
+            vec![
+                control(entry(1003, json!("1003")), "Control/ClearTyping"),
+                entry(1002, json!("1002")),
+                control(entry(1001, json!("1001")), "Control/Typing"),
+            ],
+            Some("s1"),
+            None,
+        ),
+    )])
+    .await;
+    let mut a = plain_account(&server);
+    let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert_eq!(
+        (synced.inserted, synced.unchanged, synced.skipped, synced.control),
+        (1, 0, 0, 2),
+        "{synced:?}"
+    );
+    assert_eq!(stored_ids(&a), ["1002"]);
+    assert!(
+        a.store.message(CHAT, "1001").unwrap().is_none(),
+        "typing isn't a message"
+    );
+    assert!(a.store.message(CHAT, "1003").unwrap().is_none(), "its end isn't either");
+}
+
 /// The `syncState` of every message read the plain service got, in order.
 async fn tokens_read(server: &MockServer) -> Vec<String> {
     server
@@ -1442,6 +1479,40 @@ async fn an_unstored_message_from_someone_else_or_another_conversation_matches_n
         .await
         .unwrap();
 
+    let after = a.store.outbox_entry(row.id).unwrap().unwrap();
+    assert_eq!((after.state, after.message_id), (OutboxState::Pending, None));
+    assert_eq!(post_count(&server).await, 1);
+}
+
+#[tokio::test]
+async fn our_control_message_with_a_rows_id_never_settles_it() {
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let (server, mut a) = posting_account(&clock).await;
+    let row = enqueue(&mut a.store, &send(CHAT, "typed, then sent")).unwrap();
+    lose_the_answer_and_the_check(&mut a, &row).await;
+
+    let typing = control(own_entry(&row, 1000), "Control/Typing");
+    let mut unversioned = control(own_entry(&row, 2000), "Control/ClearTyping");
+    unversioned["version"] = Value::Null;
+    mount_pages(
+        &server,
+        vec![("", page(vec![unversioned.clone(), typing.clone()], Some("s1"), None))],
+    )
+    .await;
+    let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+    assert_eq!(
+        (synced.changed(), synced.skipped, synced.control),
+        (0, 0, 2),
+        "{synced:?}"
+    );
+    // as Trouter deliveries
+    for entry in [typing, unversioned] {
+        let message: chat::Message = serde_json::from_value(entry).unwrap();
+        let received = a.catch_up.receive_message(&mut a.store, CHAT, &message).unwrap();
+        assert!(received.is_none());
+    }
+
+    assert!(stored_ids(&a).is_empty());
     let after = a.store.outbox_entry(row.id).unwrap().unwrap();
     assert_eq!((after.state, after.message_id), (OutboxState::Pending, None));
     assert_eq!(post_count(&server).await, 1);
