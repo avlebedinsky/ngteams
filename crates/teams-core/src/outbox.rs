@@ -384,8 +384,9 @@ pub struct Outbox<T> {
     me: Author,
     clock: Clock,
     /// The rows a read changed, until they are taken: by a message of ours coming in ([`Outbox::match_arrival`]), or
-    /// by an entry it couldn't read carrying a row's `clientmessageid` ([`Outbox::unreadable_seen`]). Each is kept as
-    /// the outbox last left it: a check that changes a kept row afterwards replaces it ([`Outbox::check_failed`]).
+    /// by an entry it couldn't read carrying a row's `clientmessageid` ([`Outbox::unreadable_seen`]). Each row is kept
+    /// once, as the outbox last left it: a later read that changes it replaces its copy ([`Outbox::keep_arrived`]), and
+    /// so does a check that changes it afterwards ([`Outbox::check_failed`]).
     arrived: Mutex<Vec<OutboxEntry>>,
     /// The rows that had their one more attempt after a 401, each with its `attempts_at_resend` then: another 401
     /// within the same budget fails the row, whatever came between (other answers, a check that couldn't sync, more
@@ -425,8 +426,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     /// The rows a read changed since the last call, oldest first, each as the outbox last left it: a row that became
     /// sent (or had its message id filled in) by [`Outbox::match_arrival`], whichever read brought the message (a sync
     /// page, a delivery, the check before another row's attempt), and a pending row a read met an entry it couldn't
-    /// read for ([`Outbox::unreadable_seen`]), which stays pending. One whose own check changed it after the read is
-    /// here as that check left it, never as the read did. A row a send returns may be among them too. They are kept
+    /// read for ([`Outbox::unreadable_seen`]), which stays pending. Each row is here once: one that several reads
+    /// changed is here as the last of them left it, and one whose own check changed it after the read as that check
+    /// left it, never as the read did. A row a send returns may be among them too. They are kept
     /// until taken: the engine takes them after every read it makes.
     pub fn take_arrived(&self) -> Vec<OutboxEntry> {
         std::mem::take(&mut *self.arrived.lock().unwrap_or_else(PoisonError::into_inner))
@@ -561,10 +563,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
         let arrived = store.outbox_arrived(client_message_id, arrival.id)?;
         if let Some(row) = &arrived {
-            self.arrived
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(row.clone());
+            self.keep_arrived(row);
         }
         Ok(arrived)
     }
@@ -595,10 +594,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             return Ok(None);
         }
         let seen = store.outbox_unreadable_seen(row.id, (self.clock)())?;
-        self.arrived
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(seen.clone());
+        self.keep_arrived(&seen);
         Ok(Some(seen))
     }
 
@@ -676,6 +672,16 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         let after = store.check_failed(row.id, &outcome)?;
         self.replace_arrived(&after);
         Ok(after)
+    }
+
+    /// Keeps `row`, as a read just changed it, for [`Outbox::take_arrived`]: in place of any copy of it an earlier
+    /// read kept, moved last as its latest change. One row is kept once, as the outbox last left it, whichever reads
+    /// changed it on the way (a sync page that holds an entry of it no read can take and then a readable one): an
+    /// earlier copy told after a later one would leave its owner with a row the store no longer has.
+    fn keep_arrived(&self, row: &OutboxEntry) {
+        let mut arrived = self.arrived.lock().unwrap_or_else(PoisonError::into_inner);
+        arrived.retain(|queued| queued.id != row.id);
+        arrived.push(row.clone());
     }
 
     /// `row` as it now stands in place of any copy of it kept for [`Outbox::take_arrived`], moved last as its latest

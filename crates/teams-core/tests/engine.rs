@@ -1200,6 +1200,46 @@ async fn an_unreadable_entry_a_check_meets_first_at_its_last_check_fails_the_row
     an_unreadable_entry_a_check_meets_first(MAX_FAILED_CHECKS - 1, OutboxState::Failed).await;
 }
 
+/// A post whose answer was lost, and whose check couldn't sync; then the service holds two entries of it, one no read
+/// can take and the readable one, and the next check, from the tick, meets both on one page: the unreadable one first
+/// (the row records it, still pending), then the readable one (the row is sent). The last [`Event::Outbox`] of the row
+/// is the row as sent, never the pending copy the same read kept before it.
+#[tokio::test]
+async fn a_check_meeting_an_unreadable_and_a_readable_entry_of_its_post_tells_the_row_last_as_sent() {
+    let lab = Lab::start().await;
+    let mut a = native(
+        &lab,
+        LAB_A,
+        How {
+            push: false,
+            ..How::default()
+        },
+    );
+    a.handle.sync().await.unwrap();
+    let row = a
+        .send_unanswered(AB_CHAT, "did it arrive? one of its entries can't be read")
+        .await;
+    let copied = lab.mock.copy_message(AB_CHAT, &row.client_message_id, |message| {
+        message["id"] = json!("9999999999999");
+        message["properties"] = json!("unreadable");
+    });
+    assert!(copied);
+
+    // the check, from the tick once the row's backoff is over
+    a.ahead.fetch_add(3_600_000, Ordering::SeqCst);
+    let told = a
+        .event(|event| match event {
+            Event::Outbox(entry) if entry.id == row.id => Some(entry.clone()),
+            _ => None,
+        })
+        .await;
+    let stored = told_last_as_it_stands(&mut a, told).await;
+    assert_eq!(stored.state, OutboxState::Sent, "{stored:?}");
+    assert!(stored.message_id.is_some(), "{stored:?}");
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1, "never sent again");
+    a.shutdown();
+}
+
 /// The service's echo of `from`'s message to `to`'s endpoints, which the mock queues for the chat's other members
 /// alone: the one queued for `other`, queued for `to` too.
 fn echo(lab: &Lab, from: &str, other: &str, to: &str) {

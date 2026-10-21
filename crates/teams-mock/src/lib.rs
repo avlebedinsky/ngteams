@@ -241,6 +241,28 @@ impl ChatServiceMock {
         true
     }
 
+    /// Adds a copy of the message of `conversation` that carries `client_message_id`, changed as `change` says, as
+    /// the conversation's newest entry, the original kept as it is (a test's stand-in for a second entry of one
+    /// message, one a client can't read, met by the same read as the readable one). `false` when there is no such
+    /// message.
+    pub fn copy_message(&self, conversation: &str, client_message_id: &str, change: impl FnOnce(&mut Value)) -> bool {
+        let mut world = self.lock();
+        let Some(conversation) = world.conversation_mut(conversation) else {
+            return false;
+        };
+        let Some(mut copy) = conversation
+            .messages
+            .iter()
+            .find(|message| message["clientmessageid"].as_str() == Some(client_message_id))
+            .cloned()
+        else {
+            return false;
+        };
+        change(&mut copy);
+        conversation.messages.push(copy);
+        true
+    }
+
     /// Every request the mock got, in order (to check what a client sent, and how often).
     pub async fn received_requests(&self) -> Vec<Request> {
         self.server.received_requests().await.unwrap_or_default()
