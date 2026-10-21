@@ -25,7 +25,7 @@ read.
 | 2b | a 3-person group chat of a, b and c, each message reaching both others | **met** (run 7: a's 10 messages each reached b and c natively, p95 1621 and 1615 ms; `abc-chat`: a's message shown by b's and c's web clients), under the accepted assumption above |
 | 3 | catch-up: b's socket closed, a sends, b reconnects with every message exactly once | **met** |
 | 4 | `fence.log`: allows only on the lab chats, no deny of a mapped write, own-state and frames only from the reviewed lists, no delivery response, lines whole | **met** (run 7: no deny at all) |
-| 5 | `proto-lab run ab-chat --headless` and `abc-chat` exit 0 | **met** (`abc-chat` exit 0 at 07:43Z; `ab-chat` exit 0 at 06:16Z and again at 07:52Z) |
+| 5 | `proto-lab run ab-chat --headless` and `abc-chat` exit 0 | **met** (`abc-chat` exit 0 at 07:43Z and again at 08:10Z, after the live test's group messages; `ab-chat` exit 0 at 06:16Z and again at 07:52Z) |
 | 6 | the gate | **met** (flakes below) |
 
 ## The live test
@@ -186,6 +186,16 @@ from other crates; `log` stays capped at `debug` at compile time, so no `trace!`
   06:06Z, before the fence change, exited 1 by design: the scenario then refused to message the group chat before
   opening a browser, because a's message would have been denied and the web client would have sent it again on
   every later load of a's profile.
+- `abc-chat` again after the live test: **exit 0** at 08:10Z (76 s; started 08:08:51Z). The 07:43Z pass ran before
+  `chat_live` (run 7) sent its 10 group messages, which nothing read afterwards, so b's and c's web clients then held
+  unread messages in the group chat, as b's did in the a–b chat when `ab-chat` failed. b's and c's receive step now
+  waits with `ab_chat::wait_for_newest` too (so do `ab-chat-full`'s, `ab-image`'s and `ab-trouter`'s), and the run
+  passed: a loaded at the group chat, the enforcement test passed in a's page, b and then c showed a's message and not
+  the probe. (Whether a jump was clicked isn't in the output.) `fence.log` (437 whole lines, 08:08:56Z–08:10:06Z): on
+  the recorded group chat `message` 2 and `typing` 4 allowed (each decided on the page's and the browser's session), no
+  allow on any other chat, 15 forced denies (the enforcement test's rules), 406 unclassified denies, all accepted by the
+  reviewed list (the Teams origins, the push channel's hosts, augloop, telemetry, substrate, …), and only own-state
+  token requests (`entra_token` 10) besides. No breach, no containment, no browser left running.
 
 ## 6. Gate and flakes
 
