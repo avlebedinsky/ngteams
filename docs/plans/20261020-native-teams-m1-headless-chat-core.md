@@ -920,8 +920,10 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Modify: `Cargo.toml` (member), `crates/teams-fence/src/log.rs` (cross-process appends), `crates/teams-fence/tests/*`,
   `README.md`
 
-- [ ] ⚠️ prerequisite before the first live run: the user has added permission rules for `teams-headless` like those
+- [x] ⚠️ prerequisite before the first live run: the user has added permission rules for `teams-headless` like those
       for `proto-lab` (Post-Completion)
+      (the user decided on 2026-10-21: `teams-headless` needs no separate permission rules; its live steps run under
+      bypass permissions, as the `proto-lab` runs did)
 - [x] `[lints] workspace = true`, listed in `members`
 - [x] `teams-headless <alias> sync|list|show <chat>|send <chat> <text>|edit|delete|react|watch`: `Fence::open_lab`,
       tokens from the Secret Service (`teams-lab`, through `LabPaths`), the store under the lab's data dir; refuses to
@@ -930,7 +932,7 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - [x] tests first: `fence.log` appends from several processes at once (a, b and c each run their own binary) stay
       whole lines: an advisory lock around each append and around `terminate_last_line`; a test with concurrent
       writer processes
-- [ ] live: a sends one message to b in the a–b chat with `send`, b sees it with `watch`; `fence.log` checked
+- [x] live: a sends one message to b in the a–b chat with `send`, b sees it with `watch`; `fence.log` checked
       - note (the live step, run later as its own step, after the prerequisite above): from a normal build
         (`cargo build -p teams-headless`), one process per account, both under one hold of the live lock, outputs
         under the lab's data dir (never the repo):
@@ -952,6 +954,21 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
         against a's `start_ms`); `fence.log`'s lines since a's `start_ms` hold a's `allow` for `message` on the a–b
         chat, b's `trouter_*` own frames and its endpoint registration, and no `deny` or `breach`;
         `pgrep -af teams-headless` is empty afterwards
+      - run 2026-10-21 05:24Z (load 2.4; normal build, taskset 0-3, one hold of the live lock; outputs in
+        `~/.local/share/teams-lab/headless/20261021T052443Z/`), **passed** on the first run; the script sent only
+        after b showed both `registered:true` and `caught_up` (else a would send nothing). Exit codes: a's send 0,
+        b's watch 0 (on SIGTERM), flock 0; `pgrep -af teams-headless` empty afterwards; no token-like string in any
+        output. a: catch-up of 6 conversations (296 inserted) on stderr, then `start_ms`, `original_arrival_time`,
+        `message_id` (both the same ms value) and `state sent`. b: `connected` (its endpoint), `caught_up` cause
+        `connected` (6 conversations, 292 inserted, b's first sync), `registration` `registered: true`, three
+        `caught_up` cause `message_loss` with nothing new, and the `message` event with a's id, sender a, the run's
+        nonce text, `replay: false`. Latency: a's start → b's receive 974 ms; `OriginalArrivalTime` → b's receive
+        183 ms (a's post took 791 ms). `fence.log` over the run's window, 7 lines, all whole, all `allow`: one
+        `message` on the a–b 1:1 chat (no typing), b's `endpoint_registration` POST to the registrar as own-state,
+        b's Trouter own frames `trouter_authenticate`, three `trouter_message_loss_ack` and `trouter_disconnect`
+        (no ping in the ~22 s it was up); no deny, no breach. First live check of `teams-trouter`: the real Trouter
+        took our non-CAE ic3 token, connect query, Origin and registration as built; right after connecting it sent
+        three message-loss signals, each acked and answered with a catch-up that found nothing
 - [x] `cargo test -p teams-headless -p teams-fence` and the gate pass; `cargo build -p teams-headless` runs `--help`
       (parallel run: crate-scoped gate; workspace gate after merge)
 
