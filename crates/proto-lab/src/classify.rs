@@ -267,13 +267,14 @@ impl Classifier {
 
     /// [`Classifier::classify`] of a request whose headers are known, as the browser fence pauses it: only with them
     /// can a request be a read by `POST` ([`crate::post_read`] checks the headers it depends on), and only when the
-    /// write mapping doesn't take it.
+    /// write mapping doesn't take it. Each header is its name and, as [`crate::fence_http::PausedRequest`] keeps it,
+    /// its value when the list reads it.
     #[must_use]
     pub fn classify_with_headers(
         &self,
         method: &str,
         url: &str,
-        headers: &[(String, String)],
+        headers: &[(String, Option<String>)],
         body: Option<&[u8]>,
     ) -> Classification {
         let method = method.to_ascii_uppercase();

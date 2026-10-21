@@ -37,7 +37,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::browser::Media;
-use crate::classify::Classifier;
+use crate::classify::{Classifier, strict_json};
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::without_query;
 use crate::fence_ws::FrameClassifier;
@@ -352,7 +352,7 @@ impl Steps<'_> {
     /// shows for b and waits again, and presses Enter only once the picker's highlighted suggestion is b, by b's object
     /// id in it ([`picker_offers`]); then it sends [`Texts::mention`] after the mention and checks that the post's
     /// `properties.mentions` names b. What the picker showed goes into the notes when it never offers b; the compose
-    /// box is emptied then.
+    /// box is emptied then, at best: the picker's error is what the step fails with, a failed emptying only a note.
     async fn mention(&mut self, drive: &mut Driver) -> Result<(), ScenarioError> {
         drive.type_into("a starts a mention", COMPOSE, "@").await?;
         let name = match self.pick_b(drive).await {
@@ -366,7 +366,11 @@ impl Steps<'_> {
                 for _ in 0..2 {
                     let _ = drive.press("a closes the picker", Key::ESCAPE).await;
                 }
-                clear_compose(drive).await?;
+                if let Err(cleanup) = clear_compose(drive).await {
+                    self.report
+                        .notes
+                        .push(format!("a: mention: the compose box couldn't be emptied: {cleanup}"));
+                }
                 return Err(error);
             }
         };
@@ -549,13 +553,14 @@ fn picker_state(mri: &str) -> String {
         .replace("NAME", SHOWN_NAME)
 }
 
-/// Whether a message post's body (`body`, read strictly) has `properties.mentions`, a JSON string of a list, with an
-/// entry whose `mri` is `mri`.
-fn mentions(body: Option<&str>, mri: &str) -> bool {
+/// Whether a message post's body (`body`, read strictly: the classifier's `strict_json`) has `properties.mentions`, a
+/// JSON string of a list (read strictly too), with an entry whose `mri` is `mri`.
+#[must_use]
+pub fn mentions(body: Option<&str>, mri: &str) -> bool {
     let mentions = body
-        .and_then(|body| serde_json::from_str::<Value>(body).ok())
+        .and_then(|body| strict_json(body.as_bytes()))
         .and_then(|body| body["properties"]["mentions"].as_str().map(str::to_owned))
-        .and_then(|mentions| serde_json::from_str::<Value>(&mentions).ok());
+        .and_then(|mentions| strict_json(mentions.as_bytes()));
     mentions
         .as_ref()
         .and_then(Value::as_array)

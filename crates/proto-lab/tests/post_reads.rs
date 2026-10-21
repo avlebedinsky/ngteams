@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use proto_lab::classify::{Classification, Classifier};
-use proto_lab::fence_http::{DenyCause, HttpFence, PausedRequest, Verdict};
-use proto_lab::post_read::{POST_READS, PostReadKind};
+use proto_lab::fence_http::{DenyCause, HttpFence, MalformedPause, PausedRequest, Verdict};
+use proto_lab::post_read::{HEADER_VALUES_READ, POST_READS, PostReadKind};
 use serde_json::{Value, json};
 use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
 
@@ -55,8 +55,14 @@ impl Lookup {
         self.body.to_string().into_bytes()
     }
 
+    /// Classified with its headers as the browser fence keeps them ([`PausedRequest::from_params`]). A pause the fence
+    /// couldn't read (never, here: every field it needs is given) is a read, which no test expects of a lookup by
+    /// `POST`, so it fails every assertion.
     fn classify(&self, classifier: &Classifier) -> Classification {
-        classifier.classify_with_headers(&self.method, &self.url(), &self.headers, Some(&self.body_bytes()))
+        let Ok(paused) = self.paused() else {
+            return Classification::Read;
+        };
+        classifier.classify_with_headers(&self.method, &self.url(), &paused.headers, Some(&self.body_bytes()))
     }
 
     fn names(&self) -> Vec<Mri> {
@@ -73,16 +79,28 @@ impl Lookup {
         }
     }
 
-    fn paused(&self) -> PausedRequest {
-        PausedRequest {
-            request_id: "interception-1".to_owned(),
-            headers: self.headers.clone(),
-            method: self.method.clone(),
-            url: self.url(),
-            body: Some(self.body_bytes()),
-            network_id: None,
-        }
+    /// The lookup as the browser fence reads it from a `Fetch.requestPaused` event.
+    fn paused(&self) -> Result<PausedRequest, MalformedPause> {
+        paused_event(&self.method, &self.url(), &self.headers, &self.body.to_string())
     }
+}
+
+/// A request read from a `Fetch.requestPaused` event, as the browser fence reads it.
+fn paused_event(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+) -> Result<PausedRequest, MalformedPause> {
+    let headers: serde_json::Map<String, Value> = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::from(value.as_str())))
+        .collect();
+    let params = json!({
+        "requestId": "interception-1",
+        "request": {"method": method, "url": url, "headers": headers, "postData": body},
+    });
+    PausedRequest::from_params(&params)
 }
 
 fn lookups() -> TestResult<Vec<Lookup>> {
@@ -309,10 +327,33 @@ fn a_query_other_than_the_captured_one_is_unknown() -> TestResult {
 /// A change to a lookup's headers.
 type Change = fn(&mut Vec<(String, String)>);
 
+/// Sets header `name` (as the fixture spells it) to `value`.
+fn set(headers: &mut [(String, String)], name: &str, value: &str) {
+    for (header, old) in headers.iter_mut() {
+        if header == name {
+            value.clone_into(old);
+        }
+    }
+}
+
+/// Asserts that each change makes every lookup unknown.
+fn assert_unknown_after(changes: &[(&str, Change)]) -> TestResult {
+    for &(what, change) in changes {
+        assert_unknown(
+            &Classifier::mapped(),
+            &variants(|lookup| {
+                change(&mut lookup.headers);
+                what.to_owned()
+            })?,
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn headers_other_than_the_captured_ones_are_unknown() -> TestResult {
     let content_type = |value: &str| ("content-type".to_owned(), value.to_owned());
-    let changes: [(&str, Change); 9] = [
+    assert_unknown_after(&[
         ("another origin", |headers| {
             headers.retain(|(name, _)| name != "Origin");
             headers.push(("Origin".to_owned(), "https://example.com".to_owned()));
@@ -341,16 +382,7 @@ fn headers_other_than_the_captured_ones_are_unknown() -> TestResult {
             headers.retain(|(name, _)| name != "content-type");
             headers.push(("content-type".to_owned(), "application/json".to_owned()));
         }),
-    ];
-    for (what, change) in changes {
-        assert_unknown(
-            &Classifier::mapped(),
-            &variants(|lookup| {
-                change(&mut lookup.headers);
-                what.to_owned()
-            })?,
-        );
-    }
+    ])?;
     // a header's name in another case is the same header
     for lookup in lookups()? {
         let mut renamed = lookup.clone();
@@ -369,6 +401,106 @@ fn headers_other_than_the_captured_ones_are_unknown() -> TestResult {
         // and without the headers (the plain `classify`) no lookup is a read by POST
         let classified = Classifier::mapped().classify(&lookup.method, &lookup.url(), Some(&lookup.body_bytes()));
         assert_eq!(classified, Classification::Unknown, "{}", lookup.name);
+    }
+    Ok(())
+}
+
+#[test]
+fn pinned_header_values_other_than_the_captured_ones_are_unknown() -> TestResult {
+    assert_unknown_after(&[
+        // the object id the captures always left empty, naming a lab account, an outsider or anything
+        ("a lab account's object id", |headers| {
+            set(headers, "x-ms-object-id", GUID_A);
+        }),
+        ("an outsider's object id", |headers| {
+            set(headers, "x-ms-object-id", GUID_X);
+        }),
+        ("an object id's MRI", |headers| {
+            set(headers, "x-ms-object-id", &lab_mri(GUID_B));
+        }),
+        ("a blank object id", |headers| {
+            set(headers, "x-ms-object-id", " ");
+        }),
+        // the client's flags, off their captured values
+        ("x-ms-migration False", |headers| {
+            set(headers, "x-ms-migration", "False");
+        }),
+        ("x-ms-migration true", |headers| {
+            set(headers, "x-ms-migration", "true");
+        }),
+        ("x-ms-test-user True", |headers| {
+            set(headers, "x-ms-test-user", "True");
+        }),
+        ("x-ms-client-request-type 1", |headers| {
+            set(headers, "x-ms-client-request-type", "1");
+        }),
+        ("x-ms-client-type web", |headers| {
+            set(headers, "x-ms-client-type", "web");
+        }),
+        // a flag left out plays no part (below), but one given twice, in another case, does
+        ("x-ms-test-user twice", |headers| {
+            headers.push(("X-MS-Test-User".to_owned(), "False".to_owned()));
+        }),
+    ])
+}
+
+#[test]
+fn callers_that_could_carry_an_id_are_unknown() -> TestResult {
+    assert_unknown_after(&[
+        ("a caller with an object id", |headers| {
+            set(headers, "x-ms-client-caller", &format!("use-chat-hook:{GUID_X}"));
+        }),
+        ("a caller with a hex run", |headers| {
+            set(headers, "x-ms-client-caller", "chat-deadbeef");
+        }),
+        ("an empty caller", |headers| {
+            set(headers, "x-ms-client-caller", "");
+        }),
+        ("a caller with a space", |headers| {
+            set(headers, "x-ms-client-caller", "use chat hook");
+        }),
+        ("a caller with a slash", |headers| {
+            set(headers, "x-ms-client-caller", "users/fetch");
+        }),
+        ("a caller too long", |headers| {
+            set(headers, "x-ms-client-caller", &"x".repeat(129));
+        }),
+    ])
+}
+
+#[test]
+fn callers_of_the_captured_kind_and_unpinned_values_pass() -> TestResult {
+    let passing: [(&str, Change); 7] = [
+        ("a caller with a colon", |headers| {
+            set(headers, "x-ms-client-caller", "startup-job:update-sync");
+        }),
+        ("a caller with a dot", |headers| {
+            set(headers, "x-ms-client-caller", "User.avatarUrl");
+        }),
+        ("a caller of 128 bytes", |headers| {
+            set(headers, "x-ms-client-caller", &"x".repeat(128));
+        }),
+        ("no caller", |headers| {
+            headers.retain(|(name, _)| name != "x-ms-client-caller");
+        }),
+        ("no object id", |headers| {
+            headers.retain(|(name, _)| name != "x-ms-object-id");
+        }),
+        ("no migration flag", |headers| {
+            headers.retain(|(name, _)| name != "x-ms-migration");
+        }),
+        ("another session id", |headers| {
+            set(headers, "x-ms-session-id", "another-made-up-session");
+        }),
+    ];
+    for (what, change) in passing {
+        let lookups = variants(|lookup| {
+            change(&mut lookup.headers);
+            what.to_owned()
+        })?;
+        for (variant, lookup) in lookups {
+            assert_eq!(lookup.classify(&Classifier::mapped()), lookup.allowed(), "{variant}");
+        }
     }
     Ok(())
 }
@@ -400,7 +532,8 @@ fn a_body_other_than_a_list_of_mris_is_unknown() -> TestResult {
     for lookup in lookups()? {
         let url = lookup.url();
         let classifier = Classifier::mapped();
-        let classify = |body| classifier.classify_with_headers("POST", &url, &lookup.headers, body);
+        let headers = lookup.paused()?.headers;
+        let classify = |body| classifier.classify_with_headers("POST", &url, &headers, body);
         for raw in [&b""[..], b"[", br#"["8:orgid:x"] ["8:orgid:y"]"#, b"not json"] {
             assert_eq!(classify(Some(raw)), Classification::Unknown, "{}", lookup.name);
         }
@@ -410,7 +543,41 @@ fn a_body_other_than_a_list_of_mris_is_unknown() -> TestResult {
 }
 
 #[test]
-fn the_bot_invokes_stay_unknown() {
+fn a_paused_lookup_keeps_no_credential() -> TestResult {
+    for lookup in lookups()? {
+        let mut with_token = lookup.clone();
+        set(&mut with_token.headers, "authorization", &format!("Bearer {TOKEN}"));
+        set(&mut with_token.headers, "Cookie", &format!("authtoken={TOKEN}"));
+        let paused = with_token.paused()?;
+        assert_eq!(paused.headers.len(), lookup.headers.len(), "every name is kept");
+        for (name, value) in &paused.headers {
+            let read = HEADER_VALUES_READ.contains(&name.to_ascii_lowercase().as_str());
+            assert_eq!(value.is_some(), read, "{}: {name}", lookup.name);
+        }
+        for credential in ["authorization", "Cookie"] {
+            assert!(
+                paused.headers.contains(&(credential.to_owned(), None)),
+                "{}: {credential}",
+                lookup.name
+            );
+        }
+        assert!(!format!("{paused:?}").contains(TOKEN), "{}", lookup.name);
+        // and the lookup still passes: the list reads no credential
+        assert_eq!(
+            with_token.classify(&Classifier::mapped()),
+            lookup.allowed(),
+            "{}",
+            lookup.name
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_bot_invokes_stay_unknown() -> TestResult {
+    let lab = lab()?;
+    let lookup = lookups()?.remove(0);
+    assert_eq!(lookup.origin, "https://teams.microsoft.com");
     let body = json!({
         "appId": "00000000-0000-4000-8000-0000000000b0",
         "conversation": {"id": format!("19:{GUID_A}_{GUID_B}@unq.gbl.spaces")},
@@ -420,15 +587,37 @@ fn the_bot_invokes_stay_unknown() {
         "value": {"commandContext": "compose"},
     })
     .to_string();
-    for classifier in [Classifier::mapped(), Classifier::calling()] {
-        for origin in ["https://teams.microsoft.com", "https://teams.cloud.microsoft"] {
-            let url = format!("{origin}/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000b0/invoke");
+    for origin in ["https://teams.microsoft.com", "https://teams.cloud.microsoft"] {
+        let url = format!("{origin}/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000b0/invoke");
+        // with the headers a listed lookup carries, its own origin among them, as the fence pauses it
+        let headers: Vec<(String, String)> = lookup
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.replace(&lookup.origin, origin)))
+            .collect();
+        let paused = paused_event("POST", &url, &headers, &body)?;
+        for classifier in [Classifier::mapped(), Classifier::calling()] {
             assert_eq!(
-                classifier.classify("POST", &url, Some(body.as_bytes())),
-                Classification::Unknown
+                classifier.classify_with_headers("POST", &url, &paused.headers, Some(body.as_bytes())),
+                Classification::Unknown,
+                "{url}"
             );
         }
+        assert_eq!(
+            lab.http.decide(&paused).await,
+            Verdict::Deny(DenyCause::Unclassified),
+            "{url}"
+        );
     }
+    assert_eq!(lab.http.denials().len(), 2);
+    let entries = log_entries(&lab.log_path)?;
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["reason"] == "unclassified" && entry.get("post_read").is_none()),
+        "{entries:?}"
+    );
+    Ok(())
 }
 
 struct Lab {
@@ -467,7 +656,7 @@ async fn a_lookup_of_lab_accounts_passes_logged_as_a_post_read() -> TestResult {
     let lookups = lookups()?;
     for lookup in &lookups {
         assert_eq!(
-            lab.http.decide(&lookup.paused()).await,
+            lab.http.decide(&lookup.paused()?).await,
             Verdict::Allow,
             "{}",
             lookup.name
@@ -511,7 +700,7 @@ async fn a_lookup_naming_anyone_but_lab_accounts_is_denied() -> TestResult {
                 ..lookup.clone()
             };
             assert_eq!(
-                lab.http.decide(&lookup.paused()).await,
+                lab.http.decide(&lookup.paused()?).await,
                 Verdict::Deny(DenyCause::Unclassified),
                 "{}: {body}",
                 lookup.name

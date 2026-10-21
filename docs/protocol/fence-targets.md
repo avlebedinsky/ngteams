@@ -221,8 +221,20 @@ An entry matches only all of it:
 - only the headers the fence saw on every lookup it paused (`Accept`, `Cookie`, `Origin`, `Referer`, `User-Agent`,
   `authorization`, `content-type` and the client's `x-client-ui-language`, `x-ms-client-caller`,
   `x-ms-client-request-type`, `x-ms-client-type`, `x-ms-client-version`, `x-ms-migration`, `x-ms-object-id`,
-  `x-ms-request-id`, `x-ms-session-id`, `x-ms-test-user`), none twice, `Content-Type` exactly
-  `application/json;charset=UTF-8`, and `Origin`, when there, the request's own origin;
+  `x-ms-request-id`, `x-ms-session-id`, `x-ms-test-user`), none twice, `Content-Type` there, and the values that
+  could change what the request does or name someone checked:
+  - pinned, when there, to the one value all 5869 captured lookups carried: `Content-Type`
+    `application/json;charset=UTF-8`, `x-ms-object-id` empty (it would name an account by its object id; the
+    captures never filled it in, so a lookup naming anyone there is unknown rather than checked against the roster),
+    `x-ms-migration` `True`, `x-ms-test-user` `False`, `x-ms-client-request-type` `0`, `x-ms-client-type`
+    `cdlworker`;
+  - `Origin`, when there, the request's own origin;
+  - `x-ms-client-caller`, the client component that asked (dozens of names seen, `use-chat-hook`, `User.avatarUrl`),
+    only a short name of ASCII letters, digits, `-`, `:`, `.` and `_` with no run of 8 hex digits, so no object id;
+  - the rest free, as none names anyone but the signed-in account or changes what is read: `authorization` and
+    `Cookie` (the account's own middle-tier credentials, for the host the request goes to anyway), `Accept` and
+    `x-client-ui-language` (the answer's format and language), `Referer`, `User-Agent`, `x-ms-client-version` (the
+    page and the client), `x-ms-request-id`, `x-ms-session-id` (correlation ids);
 - a body read strictly (one JSON value, no two keys alike in any case) that is a non-empty list of strings;
 - and, decided by the fence at that moment, every string an exact MRI of a lab account in `lab.toml`'s roster
   (`Fence::lab_accounts_only`; an approved service participant isn't a lab account).
@@ -235,7 +247,7 @@ with its `mri`, `objectId`, `displayName`, `givenName`, `surname`, `email`, `use
 `phones`, `accountEnabled`, `skypeTeamsInfo`, `featureSettings` and such; no other account's id or address.
 
 Not on the list, and denied: Substrate's search (`POST substrate.office.com/search/api/v1/suggestions`), whose answers
-list other people of the tenant (the user decides that one), and bot invokes, whose body hands the account's Entra
+list other people of the tenant (never allowed under the user's rule of 2026-10-21), and bot invokes, whose body hands the account's Entra
 token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
 
 ## How a run uses it
@@ -244,8 +256,9 @@ token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
   `FailClosed`.
 - `ab-chat` uses `Classifier::mapped` with `LiveMembershipSource`. The browser fence hands the source the account's
   chat service token from the page's own chat service requests (`HttpFence::with_credentials`: `HttpFence::handle`
-  takes it from the raw `Fetch.requestPaused` event's headers). A `PausedRequest` keeps the headers too, for the
-  read-by-`POST` list alone; the write mapping reads none. The event itself, headers included, has already been handed
+  takes it from the raw `Fetch.requestPaused` event's headers). A `PausedRequest` keeps every header's name, and the
+  value only of those the read-by-`POST` list reads (`Content-Type`, `Origin` and the pinned `x-ms-*` ones), never a
+  token or a cookie; the write mapping reads none. The event itself, headers included, has already been handed
   to the run's event watchers (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b 1:1 chat passes only when the read
   confirms its two members are lab accounts.
 - `ab-chat` opens the chat by b's MRI (`l/chat/0/0?users=<mri>`): by UPN the client first resolves the user with the
