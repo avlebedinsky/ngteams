@@ -700,12 +700,13 @@ impl Shared {
     }
 }
 
-/// One decision running, counted in [`Shared::deciding`] from before its task is spawned until the task ends (or is
-/// dropped unfinished).
+/// One decision running, counted in [`Shared::deciding`] and in [`RUNNING_ANYWHERE`] from before its task is spawned
+/// until the task ends (or is dropped unfinished).
 struct Deciding(Arc<Shared>);
 
 impl Deciding {
     fn start(shared: &Arc<Shared>) -> Self {
+        RUNNING_ANYWHERE.fetch_add(1, Ordering::SeqCst);
         shared.deciding.fetch_add(1, Ordering::SeqCst);
         Self(Arc::clone(shared))
     }
@@ -716,7 +717,44 @@ impl Drop for Deciding {
         if self.0.deciding.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.0.settled.notify_waiters();
         }
+        if RUNNING_ANYWHERE.fetch_sub(1, Ordering::SeqCst) == 1 {
+            SETTLED_ANYWHERE.notify_waiters();
+        }
     }
+}
+
+/// How many decisions and target armings are running in every fence of the process, dropped ones' included.
+static RUNNING_ANYWHERE: AtomicUsize = AtomicUsize::new(0);
+
+/// Notified when the last decision running anywhere finishes.
+static SETTLED_ANYWHERE: Notify = Notify::const_new();
+
+/// How many decisions and target armings are running in every fence of the process, dropped ones' included.
+#[must_use]
+pub fn running_anywhere() -> usize {
+    RUNNING_ANYWHERE.load(Ordering::SeqCst)
+}
+
+/// Waits up to `timeout` for the decisions and target armings still running in every fence of the process, and gives
+/// how many still were when the wait ended: what [`ArmedBrowser::close`] waits for, for the fences that were dropped
+/// instead of closed (`proto-lab` stopped by a signal, [`crate::stop`]).
+///
+/// A dropped fence's browser was killed first, so a decision that finishes after it answers nobody: it is only
+/// recorded (`fence.log`, the capture, [`Decisions`]). An arming that finishes after it can't confirm the kill
+/// contained its target and is recorded as [`Containment::Failed`], as one cut off by [`ArmedBrowser::close`] is.
+/// The runtime's other tasks have to run meanwhile, so this is awaited on the runtime the fences ran on.
+pub async fn settle_every_fence(timeout: Duration) -> usize {
+    let wait = async {
+        loop {
+            let settled = SETTLED_ANYWHERE.notified();
+            if running_anywhere() == 0 {
+                return;
+            }
+            settled.await;
+        }
+    };
+    let _ = tokio::time::timeout(timeout, wait).await;
+    running_anywhere()
 }
 
 /// What the fence decided in a run, read live: it outlives the [`ArmedBrowser`], so a run's denials can be read after

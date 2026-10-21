@@ -21,8 +21,9 @@
 //! 5. a's web client is loaded again, and for [`SETTLE`] the run notes whether it tries the image again: the client
 //!    sends a failed message again on a later load (M0), so an image left unsent here would be retried in later runs.
 //!    The navigation accepts the dialog the client puts up before its page is left while the image is unsent
-//!    ([`super::dsl::navigate_tab`]). Then a opens the chat again and deletes the newest message showing an image
-//!    ([`MARK_IMAGE_MESSAGE`]) from its actions, if one is shown; what it found and did is noted.
+//!    ([`super::dsl::navigate_tab`]). Then a opens the chat again and, if it shows this run's image unsent (a message
+//!    with an image and this run's caption, [`mark_unsent_image`]), deletes it from its actions; any other message is
+//!    left alone. What it found and did is noted.
 //! 6. b opens the chat (it reads the chat's history), shows a's plain message, and the enforcement test's other half:
 //!    b's copy must not have the probe (`ab_chat::not_received`). Whether b shows the caption is noted.
 //!
@@ -75,16 +76,28 @@ pub const SETTLE: Duration = Duration::from_secs(30);
 /// How long the compose box gets to show a pasted image.
 const PASTE_WAIT: Duration = Duration::from_secs(15);
 
-/// The page expression that marks the newest message showing an image as [`super::ab_chat_full::MARKED`] (the mark
-/// taken off any other), `true` when there is one.
-pub const MARK_IMAGE_MESSAGE: &str = r#"(() => {
+/// The page expression that marks the newest message showing an image whose text holds `caption` as
+/// [`super::ab_chat_full::MARKED`] (the mark taken off any other), `true` when there is one.
+///
+/// With this run's caption ([`Texts::caption`], which holds the run's nonce) such a message can only be this run's
+/// image left unsent: every media write of the run is denied, so its image never reached the media service. Any other
+/// message showing an image, delivered or an earlier run's, is never marked, so it is never deleted.
+#[must_use]
+pub fn mark_unsent_image(caption: &str) -> String {
+    let caption = serde_json::Value::String(caption.to_owned());
+    format!(
+        r#"(() => {{
   for (const e of document.querySelectorAll('[data-lab-mark]')) e.removeAttribute('data-lab-mark');
-  const found = [...document.querySelectorAll('[data-tid="chat-pane-message"]')].filter((e) => e.querySelector('img[src^="blob:"], img[src^="data:"], img[src*="/v1/objects/"]'));
+  const found = [...document.querySelectorAll('[data-tid="chat-pane-message"]')]
+    .filter((e) => (e.innerText ?? '').includes({caption}))
+    .filter((e) => e.querySelector('img[src^="blob:"], img[src^="data:"], img[src*="/v1/objects/"]'));
   const newest = found[found.length - 1];
   if (!newest) return false;
   newest.setAttribute('data-lab-mark', '');
   return true;
-})()"#;
+}})()"#
+    )
+}
 
 /// The test image's side, in pixels.
 const SIDE: u32 = 48;
@@ -421,9 +434,10 @@ impl Image {
         Ok(())
     }
 
-    /// Deletes, from a's chat with b, the newest message that shows an image (this run's or an earlier run's, left
-    /// unsent while its media writes are denied, which the client would otherwise try again on every later load): from
-    /// its actions, as a deletes a message in `ab-chat-full`. What it finds and does is noted; it fails nothing.
+    /// Deletes, from a's chat with b, this run's image left unsent while its media writes are denied (which the client
+    /// would otherwise try again on a later load): the newest message showing an image with this run's caption
+    /// ([`mark_unsent_image`]), from its actions, as a deletes a message in `ab-chat-full`. Without one, nothing is
+    /// deleted. What it finds and does is noted; it fails nothing.
     async fn discard_unsent(&self, a: &LabSession) -> Result<String, ScenarioError> {
         let mut drive = a.driver();
         drive.set_call_timeout(PAGE_CALL);
@@ -431,31 +445,32 @@ impl Image {
             .navigate("a opens the chat with b again", &chat_link(&self.mri_b))
             .await?;
         drive.wait_for("a's compose box", COMPOSE, CHAT_OPEN).await?;
+        let mark = mark_unsent_image(&self.texts.caption);
         let found = drive
             .wait_until_true(
-                "a finds a message with an image",
-                MARK_IMAGE_MESSAGE,
-                "a message with an image",
+                "a finds this run's unsent image",
+                &mark,
+                "a message with an image and this run's caption",
                 PASTE_WAIT,
             )
             .await;
         match found {
             Ok(()) => {}
-            Err(StepError::Timeout { .. }) => return Ok("none shown after loading again".to_owned()),
+            Err(StepError::Timeout { .. }) => return Ok("none of this run's shown after loading again".to_owned()),
             Err(error) => return Err(error.into()),
         }
         message_action(&mut drive, "a", "delete").await?;
         let gone = drive
             .wait_until_true(
-                "a's image message is gone",
-                &format!("!{MARK_IMAGE_MESSAGE}"),
-                "no message with an image",
+                "a's unsent image is gone",
+                &format!("!{mark}"),
+                "no message with an image and this run's caption",
                 PASTE_WAIT,
             )
             .await;
         Ok(match gone {
             Ok(()) => "deleted from its actions".to_owned(),
-            Err(_) => "delete picked, but a message with an image is still shown".to_owned(),
+            Err(_) => "delete picked, but this run's image is still shown".to_owned(),
         })
     }
 

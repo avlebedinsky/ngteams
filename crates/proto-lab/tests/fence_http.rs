@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use proto_lab::arming::{
-    ArmError, ArmOptions, ArmedBrowser, ArmedTarget, STEP_TIMEOUT, Step, TEAMS_ORIGINS, TargetKind,
+    self, ArmError, ArmOptions, ArmedBrowser, ArmedTarget, STEP_TIMEOUT, Step, TEAMS_ORIGINS, TargetKind,
 };
 use proto_lab::browser::{Browser, BrowserError, LaunchOptions};
 use proto_lab::capture::{Capture, Recorder, RtcHooks};
@@ -1445,6 +1445,51 @@ async fn closing_the_fence_waits_for_the_decisions_still_running() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let failed = decisions.verdict().unwrap_err();
     assert!(!failed.connection_lost, "{failed}");
+}
+
+#[tokio::test]
+async fn a_dropped_fence_kills_the_browser_first_and_its_decisions_running_still_land() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let lab = lab().unwrap();
+    let asked = Arc::new(tokio::sync::Notify::new());
+    let members = Slow {
+        delay: Duration::from_secs(2),
+        membership: Membership::Complete(vec![Mri::new(LAB_A), Mri::new(COWORKER)]),
+        asked: Arc::clone(&asked),
+    };
+    let http = HttpFence::new(Classifier::mapped(), Arc::clone(&lab.fence), Arc::new(members));
+    let options = ArmOptions {
+        service_worker_origins: Vec::new(),
+    };
+    let armed = ArmedBrowser::arm(fake.launch().await.unwrap(), http, ws_fence(&lab).unwrap(), &options)
+        .await
+        .unwrap();
+    let helper = fake.helper().unwrap();
+    let decisions = armed.decisions();
+    let pause = json!({
+        "requestId": "r-write",
+        "request": {"method": "POST", "url": CHAT, "postData": r#"{"messagetype":"Text","content":"hi"}"#, "headers": {}},
+        "resourceType": "Fetch",
+    });
+    fake.event(Some("S1"), "Fetch.requestPaused", &pause).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), asked.notified())
+        .await
+        .unwrap();
+
+    // what `proto-lab` does on a signal: the command (and its fence) is dropped, then the decisions are waited for
+    drop(armed);
+    assert_eq!(decisions.undecided(), 1, "the write's membership read is still running");
+    assert!(process::gone(helper).await, "the browser outlived its fence");
+    arming::settle_every_fence(Duration::from_secs(30)).await;
+
+    assert_eq!(decisions.undecided(), 0);
+    let causes: Vec<DenyCause> = decisions.denials().iter().map(|denial| denial.cause).collect();
+    assert_eq!(causes, [DenyCause::Fenced(DenyReason::Outsiders { count: 1 })]);
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert!(
+        entries.iter().any(|entry| entry["verdict"] == "deny"),
+        "the deny that landed after the drop is in fence.log: {entries:?}"
+    );
 }
 
 fn hang_up_on_close(method: &str, session: Option<&str>) -> bool {

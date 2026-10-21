@@ -19,7 +19,7 @@ impl Drop for Owned {
 
 #[tokio::test]
 async fn a_signal_drops_the_command_and_what_it_owns() -> Result<(), Box<dyn std::error::Error>> {
-    for (signal, name) in [(Signal::TERM, "SIGTERM"), (Signal::INT, "SIGINT")] {
+    for (signal, stopped) in [(Signal::TERM, Stopped::Terminate), (Signal::INT, Stopped::Interrupt)] {
         let dropped = Arc::new(AtomicBool::new(false));
         let owned = Owned(Arc::clone(&dropped));
         let command = async move {
@@ -31,10 +31,10 @@ async fn a_signal_drops_the_command_and_what_it_owns() -> Result<(), Box<dyn std
         tokio::time::sleep(Duration::from_millis(300)).await;
         kill_process(getpid(), signal)?;
         let outcome = tokio::time::timeout(Duration::from_secs(10), stopping).await??;
-        assert_eq!(outcome, Err(Stopped(name)));
+        assert_eq!(outcome, Err(stopped));
         assert!(
             dropped.load(Ordering::SeqCst),
-            "{name}: the command's own value was dropped"
+            "{stopped}: the command's own value was dropped"
         );
     }
     Ok(())
@@ -43,4 +43,12 @@ async fn a_signal_drops_the_command_and_what_it_owns() -> Result<(), Box<dyn std
 #[tokio::test]
 async fn a_command_that_ends_gives_its_outcome() {
     assert_eq!(until_stopped(async { 7 }).await, Ok(7));
+}
+
+#[test]
+fn a_stop_exits_with_its_own_signal_s_status() {
+    assert_eq!(Stopped::Interrupt.exit_code(), 130);
+    assert_eq!(Stopped::Terminate.exit_code(), 143);
+    assert_eq!(Stopped::Interrupt.to_string(), "stopped by SIGINT");
+    assert_eq!(Stopped::Terminate.to_string(), "stopped by SIGTERM");
 }

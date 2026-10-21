@@ -1165,27 +1165,40 @@ async fn a_navigation_the_page_holds_past_its_timeout_fails_in_time() -> TestRes
     .await
 }
 
-/// A chat with an avatar (an image from a URL) on the other account's message and two images of a's not yet uploaded
-/// (local previews).
+/// A chat with two images of this run's left unsent (local previews with this run's caption), and messages that must
+/// never be taken for one: an image delivered from the media service (another caption, the newest), an image without a
+/// caption, an avatar (an image from a URL) on the other account's message, and this run's caption without an image.
 const IMAGES_CHAT_PAGE: &str = r#"<!doctype html><html><body>
-<div data-tid="chat-pane-message" id="older"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div>
-<div data-tid="chat-pane-message" id="newer"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div>
+<div data-tid="chat-pane-message" id="older"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><p>lab image n1 caption</p></div>
+<div data-tid="chat-pane-message" id="newer"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><p>lab image n1 caption</p></div>
+<div data-tid="chat-pane-message" id="bare"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></div>
 <div data-tid="chat-pane-message" id="avatar"><img src="/avatar.png"><p>hello</p></div>
-<div data-tid="chat-pane-message" id="text"><p>no image</p></div>
+<div data-tid="chat-pane-message" id="text"><p>lab image n1 caption</p></div>
+<div data-tid="chat-pane-message" id="delivered"><img src="/v1/objects/made-up/views/imgo"><p>lab image n0 caption</p></div>
 </body></html>"#;
 
+/// Whether exactly one message of the page is marked.
+const ONE_MARK: &str = "document.querySelectorAll('[data-lab-mark]').length === 1";
+
+/// Whether no message of the page is marked.
+const NO_MARK: &str = "document.querySelectorAll('[data-lab-mark]').length === 0";
+
 #[tokio::test]
-async fn ab_image_marks_the_newest_message_showing_a_local_image() -> TestResult {
-    use proto_lab::scenario::ab_image::MARK_IMAGE_MESSAGE;
+async fn ab_image_marks_only_this_run_s_unsent_image() -> TestResult {
+    use proto_lab::scenario::ab_image::mark_unsent_image;
+    let mark = mark_unsent_image("lab image n1 caption");
     with_html(IMAGES_CHAT_PAGE, async |run| {
         let drive = &mut run.driver;
         drive
-            .wait_until_true("mark", MARK_IMAGE_MESSAGE, "a message with an image", Duration::from_secs(5))
+            .wait_until_true("mark", &mark, "this run's unsent image", Duration::from_secs(5))
             .await?;
         drive
             .wait_for("marked", Selector::Css("#newer[data-lab-mark]"), Duration::from_secs(1))
             .await?;
-        // once the marked ones are gone, the avatar alone isn't taken for one
+        drive
+            .wait_until_true("one mark", ONE_MARK, "one marked message", Duration::from_secs(1))
+            .await?;
+        // once this run's are gone, nothing else is taken for one: not the delivered image, not one without the caption
         drive
             .wait_until_true(
                 "remove",
@@ -1195,9 +1208,12 @@ async fn ab_image_marks_the_newest_message_showing_a_local_image() -> TestResult
             )
             .await?;
         let none = drive
-            .wait_until_true("mark again", MARK_IMAGE_MESSAGE, "a message with an image", Duration::from_millis(500))
+            .wait_until_true("mark again", &mark, "this run's unsent image", Duration::from_millis(500))
             .await;
         assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
+        drive
+            .wait_until_true("no mark", NO_MARK, "no marked message", Duration::from_secs(1))
+            .await?;
         Ok(())
     })
     .await
