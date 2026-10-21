@@ -25,8 +25,8 @@
 //!   budget over. An adopted row that had an attempt (in any run) begins with the sync check above, so a message an
 //!   earlier attempt got through isn't sent twice.
 //!
-//! The commands are those whose sealed request exists in `teams-proto` (a message post for now); M1 Task 12 adds the
-//! other chat writes. The sync the timeout check relies on is the [`ConversationSync`] seam, which M1 Task 17's
+//! The commands are a message post for now; the other chat writes have their sealed requests in `teams-proto` (M1 Task
+//! 12) and become commands with the engine (M1 Task 18). The sync the timeout check relies on is the [`ConversationSync`] seam, which M1 Task 17's
 //! catch-up sync fills.
 
 use std::error::Error;
@@ -37,8 +37,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teams_auth::token::TokenError;
-use teams_fence::{Denied, Fence, MembershipSource, Mri};
-use teams_proto::{Authorized, DEFAULT_RETRY_WAIT, HttpError, Mutating, Response, SendMessage, Transport};
+use teams_fence::{Denied, Fence, MembershipSource};
+use teams_proto::chat::MessageText;
+use teams_proto::{Author, Authorized, DEFAULT_RETRY_WAIT, HttpError, Mutating, Response, SendMessage, Transport};
 use teams_store::{
     Applied, AttemptOutcome, CheckFailed, Message, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState, Reaction,
     Store, StoreError,
@@ -62,8 +63,9 @@ const CLIENT_MESSAGE_ID_TRIES: usize = 3;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
-    /// Posts a message (its HTML content) to an existing chat.
-    Send { conversation: String, content: String },
+    /// Posts a message to an existing chat: its text, from which the request builds its HTML, its mentions and its
+    /// target.
+    Send { conversation: String, text: MessageText },
 }
 
 impl Command {
@@ -203,8 +205,8 @@ pub struct Outbox<T> {
     transport: Arc<T>,
     fence: Arc<Fence>,
     membership: Arc<dyn MembershipSource + Send>,
-    /// The account's MRI: only its messages are matched to outbox rows.
-    me: Mri,
+    /// The account: its messages go out as its, and only its messages are matched to outbox rows.
+    me: Author,
     clock: Clock,
 }
 
@@ -212,7 +214,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     /// An outbox for the account `me`, sending over `transport` under `fence`'s permits, with `membership` as the
     /// source the fence reads each target's members from on every attempt.
     #[must_use]
-    pub fn new(transport: Arc<T>, fence: Arc<Fence>, membership: Arc<dyn MembershipSource + Send>, me: Mri) -> Self {
+    pub fn new(transport: Arc<T>, fence: Arc<Fence>, membership: Arc<dyn MembershipSource + Send>, me: Author) -> Self {
         Self {
             transport,
             fence,
@@ -313,7 +315,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     fn is_mine(&self, message: &Message) -> bool {
-        message.sender.as_deref() == Some(self.me.as_str())
+        message.sender.as_deref() == Some(self.me.mri().as_str())
     }
 
     fn is_due(&self, row: &OutboxEntry) -> bool {
@@ -397,8 +399,10 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     /// One attempt: the row's request, a fresh permit for its target, and the transport.
     async fn attempt(&self, row: &OutboxEntry) -> Tried {
         match serde_json::from_str::<Command>(&row.payload) {
-            Ok(Command::Send { conversation, content }) => {
-                let request = SendMessage::new(conversation, content).with_client_message_id(&row.client_message_id);
+            Ok(Command::Send { conversation, text }) => {
+                let request = SendMessage::new(conversation, self.me.clone(), text)
+                    .composed_at(row.created_at)
+                    .with_client_message_id(&row.client_message_id);
                 self.deliver(request).await
             }
             Err(error) => Tried::NotSent(format!("the stored command can't be read: {error}")),

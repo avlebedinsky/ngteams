@@ -5,13 +5,14 @@
 //! made-up GUIDs filled in for its placeholders; a group chat's answers are `tests/fixtures/chatsvc/thread-group*.json`.
 //! No real MRI or token appears here.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 use teams_fence::{
-    ChatCredential, DenyReason, Fence, FenceLog, FetchFailure, LiveMembershipSource, MAX_BODY, Membership,
-    MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind, chat_service_path, is_group_chat_id,
-    one_to_one_pair, parse_thread,
+    ChatCredential, CredentialFuture, CredentialSource, DenyReason, Fence, FenceLog, FetchFailure,
+    LiveMembershipSource, MAX_BODY, Membership, MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind,
+    chat_service_path, is_group_chat_id, one_to_one_pair, parse_thread,
 };
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -708,5 +709,271 @@ async fn a_bearer_credential_from_a_base_reads_there_with_the_token_and_never_sh
         source.members(&chat()).await,
         Membership::Complete(vec![mri(GUID_A), mri(GUID_B)])
     );
+    Ok(())
+}
+
+/// A native client's credential source: the token it gives now (none when signed out), how often it was asked, the
+/// token it renews a refused one to (none: it has no renewed one), and the refused tokens it was told of.
+struct Tokens {
+    token: Mutex<Option<String>>,
+    asked: AtomicUsize,
+    when_refused: Mutex<Option<String>>,
+    refused: Mutex<Vec<String>>,
+}
+
+impl Tokens {
+    fn new(token: Option<&str>) -> Arc<Self> {
+        Arc::new(Self {
+            token: Mutex::new(token.map(str::to_owned)),
+            asked: AtomicUsize::new(0),
+            when_refused: Mutex::new(None),
+            refused: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A source that renews a refused token to `renewed`.
+    fn renewing(token: &str, renewed: &str) -> Arc<Self> {
+        let tokens = Self::new(Some(token));
+        *tokens.when_refused.lock().unwrap_or_else(PoisonError::into_inner) = Some(renewed.to_owned());
+        tokens
+    }
+
+    fn refused(&self) -> Vec<String> {
+        self.refused.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn renew(&self, token: &str) {
+        *self.token.lock().unwrap_or_else(PoisonError::into_inner) = Some(token.to_owned());
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+}
+
+impl CredentialSource for Tokens {
+    fn credential(&self) -> CredentialFuture<'_> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        let token = self.token.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        Box::pin(async move { ChatCredential::bearer("https://teams.microsoft.com/api/chatsvc/amer", &token?) })
+    }
+
+    fn credential_rejected<'a>(&'a self, rejected: &'a ChatCredential) -> CredentialFuture<'a> {
+        self.refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(rejected.expose_token().to_owned());
+        let renewed = self.when_refused.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(renewed) = &renewed {
+            *self.token.lock().unwrap_or_else(PoisonError::into_inner) = Some(renewed.clone());
+        }
+        Box::pin(async move { ChatCredential::bearer("https://teams.microsoft.com/api/chatsvc/amer", &renewed?) })
+    }
+}
+
+/// Answers every other thread read in `amer` with a 401, as the service answers a token it doesn't take.
+async fn refuse_the_rest(server: &MockServer) {
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401))
+        .with_priority(10)
+        .mount(server)
+        .await;
+}
+
+/// The bearer tokens the reads `server` received carried, in order.
+async fn bearers_sent(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|request| request.headers.get("authorization")?.to_str().ok().map(str::to_owned))
+        .collect()
+}
+
+fn refused() -> Membership {
+    Membership::Partial(PartialReason::FetchFailed(FetchFailure::Status(401)))
+}
+
+#[tokio::test]
+async fn a_refused_source_token_is_renewed_and_read_with_once_more() -> TestResult {
+    let server = MockServer::start().await;
+    let renewed = format!("{TOKEN}-renewed");
+    serve_bearer(&server, &renewed).await?;
+    refuse_the_rest(&server).await;
+    let tokens = Tokens::renewing(TOKEN, &renewed);
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential_source(tokens.clone());
+    let fence = Fence::new(
+        Roster::new([mri(GUID_A), mri(GUID_B)], []),
+        FenceLog::from_writer(std::io::sink()),
+    );
+
+    let permit = fence.check(Target::new(WriteKind::Message, chat()), &source).await;
+
+    assert!(permit.is_ok(), "{permit:?}");
+    assert_eq!(tokens.refused(), [TOKEN]);
+    assert_eq!(
+        bearers_sent(&server).await,
+        [format!("Bearer {TOKEN}"), format!("Bearer {renewed}")]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_renewed_token_refused_too_is_denied_after_two_reads() -> TestResult {
+    let server = MockServer::start().await;
+    let renewed = format!("{TOKEN}-renewed");
+    refuse_the_rest(&server).await;
+    let tokens = Tokens::renewing(TOKEN, &renewed);
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential_source(tokens.clone());
+    let fence = Fence::new(
+        Roster::new([mri(GUID_A), mri(GUID_B)], []),
+        FenceLog::from_writer(std::io::sink()),
+    );
+
+    let denied = fence
+        .check(Target::new(WriteKind::Message, chat()), &source)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        denied.reason(),
+        &DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Status(401)))
+    );
+    assert_eq!(
+        tokens.refused(),
+        [TOKEN],
+        "told once: the second refusal isn't read again"
+    );
+    assert_eq!(
+        bearers_sent(&server).await,
+        [format!("Bearer {TOKEN}"), format!("Bearer {renewed}")]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refusal_without_a_renewed_credential_is_not_read_again() -> TestResult {
+    // a source with no renewed token
+    let server = MockServer::start().await;
+    refuse_the_rest(&server).await;
+    let tokens = Tokens::new(Some(TOKEN));
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential_source(tokens.clone());
+    assert_eq!(source.members(&chat()).await, refused());
+    assert_eq!(tokens.refused(), [TOKEN]);
+    assert_eq!(bearers_sent(&server).await, [format!("Bearer {TOKEN}")]);
+
+    // a page's credential, which the source can't renew
+    let server = MockServer::start().await;
+    refuse_the_rest(&server).await;
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential(
+        ChatCredential::bearer("https://teams.microsoft.com/api/chatsvc/amer", TOKEN).ok_or("no credential")?,
+    );
+    assert_eq!(source.members(&chat()).await, refused());
+    assert_eq!(server.received_requests().await.unwrap_or_default().len(), 1);
+
+    // any other failure is not a refusal, and isn't read again either
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    let tokens = Tokens::renewing(TOKEN, &format!("{TOKEN}-renewed"));
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential_source(tokens.clone());
+    assert_eq!(
+        source.members(&chat()).await,
+        Membership::Partial(PartialReason::FetchFailed(FetchFailure::Status(403)))
+    );
+    assert!(tokens.refused().is_empty());
+    assert_eq!(server.received_requests().await.unwrap_or_default().len(), 1);
+    Ok(())
+}
+
+/// Serves the 1:1 chat's thread read in `amer` to the bearer `token` only.
+async fn serve_bearer(server: &MockServer, token: &str) -> TestResult {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/chatsvc/amer/v1/threads/{}", chat_id())))
+        .and(header("Authorization", format!("Bearer {token}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(thread()?))
+        .mount(server)
+        .await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_credential_source_is_asked_on_every_read_and_its_newest_token_is_used() -> TestResult {
+    let server = MockServer::start().await;
+    let renewed = format!("{TOKEN}-renewed");
+    serve_bearer(&server, TOKEN).await?;
+    serve_bearer(&server, &renewed).await?;
+    let tokens = Tokens::new(Some(TOKEN));
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential_source(tokens.clone());
+    assert!(source.has_credential());
+    let complete = Membership::Complete(vec![mri(GUID_A), mri(GUID_B)]);
+
+    assert_eq!(source.members(&chat()).await, complete);
+    tokens.renew(&renewed);
+    assert_eq!(source.members(&chat()).await, complete);
+
+    assert_eq!(tokens.asked(), 2, "asked on every read");
+    let sent: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|request| request.headers.get("authorization")?.to_str().ok().map(str::to_owned))
+        .collect();
+    assert_eq!(sent, [format!("Bearer {TOKEN}"), format!("Bearer {renewed}")]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_credential_source_without_a_token_denies_before_reading() -> TestResult {
+    let server = MockServer::start().await;
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential_source(Tokens::new(None));
+    let fence = Fence::new(
+        Roster::new([mri(GUID_A), mri(GUID_B)], []),
+        FenceLog::from_writer(std::io::sink()),
+    );
+
+    let denied = fence
+        .check(Target::new(WriteKind::Message, chat()), &source)
+        .await
+        .unwrap_err();
+
+    assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::NoCredential));
+    assert!(server.received_requests().await.unwrap_or_default().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_credential_set_later_replaces_the_source_and_the_other_way_round() -> TestResult {
+    let server = MockServer::start().await;
+    serve_bearer(&server, TOKEN).await?;
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    let signed_out = Tokens::new(None);
+    source.set_credential_source(signed_out.clone());
+    let credential =
+        ChatCredential::bearer("https://teams.microsoft.com/api/chatsvc/amer", TOKEN).ok_or("no credential")?;
+    source.set_credential(credential);
+    assert_eq!(
+        source.members(&chat()).await,
+        Membership::Complete(vec![mri(GUID_A), mri(GUID_B)])
+    );
+    assert_eq!(signed_out.asked(), 0, "the newest one wins");
+
+    source.set_credential_source(signed_out.clone());
+    assert_eq!(
+        source.members(&chat()).await,
+        Membership::Partial(PartialReason::NoCredential)
+    );
+    assert_eq!(signed_out.asked(), 1);
     Ok(())
 }

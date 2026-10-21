@@ -18,6 +18,7 @@
 use ego_tree::iter::Edge;
 use scraper::node::Element;
 use scraper::{Html, Node as HtmlNode};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
@@ -45,8 +46,9 @@ const DROPPED: &[&str] = &[
 /// Elements read as a paragraph.
 const PARAGRAPHS: &[&str] = &["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "pre"];
 
-/// A message's content as rich text.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A message's content as rich text. It is also what a message is written from
+/// ([`MessageText`](crate::chat::MessageText)), and serializes for the outbox's stored commands.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RichText {
     pub nodes: Vec<Node>,
     /// The content was longer than [`MAX_CONTENT`]: only its first part was read.
@@ -81,7 +83,7 @@ impl RichText {
 }
 
 /// One piece of rich text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Node {
     Text {
         text: String,
@@ -103,7 +105,7 @@ pub enum Node {
 }
 
 /// An image the content shows. Its source is kept, never fetched here.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub src: String,
     pub alt: Option<String>,
@@ -112,7 +114,7 @@ pub struct Image {
 }
 
 /// A quote. A reply's names the message it quotes; a plain `blockquote`'s fields are all `None`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quote {
     /// The quoted message's id (the quote's `itemid`).
     pub message_id: Option<String>,
@@ -127,7 +129,7 @@ pub struct Quote {
 }
 
 /// The marks on a text run.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Marks(u8);
 
 impl Marks {

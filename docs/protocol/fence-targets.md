@@ -239,6 +239,11 @@ Rules that keep the mapping fail-closed:
   no header). The event itself, headers included, has already been handed to the run's event watchers
   (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b 1:1 chat passes only when the read
   confirms its two members are lab accounts.
+- The native client (M1 Task 12) sends each chat write as a sealed request whose target is the table's: the chat for
+  every write on it, a message's and an edit's mentioned MRIs added, a new chat `New` with its members. Its live
+  member read takes the client's own credential from the native transport on every read (`CredentialSource`: the
+  account's `ic3` token as its session has it now, and the region's chat base, as `ChatCredential::bearer`); with no
+  token the read is `Partial(NoCredential)` and the write denied. Group chats stay denied as above.
 - `ab-chat` opens the chat by b's MRI (`l/chat/0/0?users=<mri>`): by UPN the client first resolves the user with the
   middle tier's `fetchShortProfile`, a `POST` the fence denies, and never opens the chat; by the chat's id a page that
   loaded before the chat existed says the user isn't in it.

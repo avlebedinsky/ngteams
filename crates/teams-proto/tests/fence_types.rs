@@ -11,8 +11,9 @@ use teams_fence::{
     Denied, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope, Target, WriteKind,
     WritePermit,
 };
+use teams_proto::chat::MessageText;
 use teams_proto::{
-    AddToCall, Authorized, Client, ConversationUrl, Mutating, OwnState, Read, Response, SendMessage, StartCall,
+    AddToCall, Author, Authorized, Client, ConversationUrl, Mutating, OwnState, Read, Response, SendMessage, StartCall,
     Transport, WriteError,
 };
 
@@ -48,6 +49,16 @@ fn fence() -> Fence {
 
 fn conversation(id: &str) -> Scope {
     Scope::Conversation { id: id.to_owned() }
+}
+
+/// A plain "hello" from a to `chat`.
+#[cfg(test)]
+fn hello(chat: &str) -> SendMessage {
+    SendMessage::new(
+        chat,
+        Author::new(Mri::new(LAB_A), "Lab A"),
+        MessageText::plain("hello").expect("plain text"),
+    )
 }
 
 fn message_to(id: &str) -> Target {
@@ -128,10 +139,10 @@ fn mutating_calls_and_permits_are_enforced_by_the_compiler() {
 
 #[test]
 fn send_message_targets_its_conversation() {
-    let request = SendMessage::new(CHAT_X, "hello");
+    let request = hello(CHAT_X);
     assert_eq!(request.target(), message_to(CHAT_X));
     assert_eq!(request.conversation(), CHAT_X);
-    assert_eq!(request.content(), "hello");
+    assert_eq!(request.text().html(), "<p>hello</p>");
 }
 
 #[tokio::test]
@@ -139,10 +150,7 @@ async fn a_permit_for_the_request_target_is_delivered() {
     let client = Client::new(Recording::default());
     let permit = check(message_to(CHAT_X)).await.expect("a lab-only target is allowed");
 
-    let answer = client
-        .write(SendMessage::new(CHAT_X, "hello"), permit)
-        .await
-        .expect("matching permit");
+    let answer = client.write(hello(CHAT_X), permit).await.expect("matching permit");
 
     assert_eq!(answer.status(), 201, "the transport's answer comes back");
     assert_eq!(client.transport().delivered(), vec![message_to(CHAT_X)]);
@@ -154,7 +162,7 @@ async fn a_permit_for_conversation_x_is_rejected_on_conversation_y() {
     let permit = check(message_to(CHAT_X)).await.expect("a lab-only target is allowed");
 
     let error = client
-        .write(SendMessage::new(CHAT_Y, "hello"), permit)
+        .write(hello(CHAT_Y), permit)
         .await
         .expect_err("another conversation");
 
@@ -178,10 +186,7 @@ async fn a_permit_for_another_kind_on_the_same_conversation_is_rejected() {
         .await
         .expect("a lab-only target is allowed");
 
-    let error = client
-        .write(SendMessage::new(CHAT_X, "hello"), permit)
-        .await
-        .expect_err("another kind");
+    let error = client.write(hello(CHAT_X), permit).await.expect_err("another kind");
 
     assert!(matches!(error, WriteError::TargetMismatch(_)), "{error:?}");
     assert!(client.transport().delivered().is_empty());
@@ -193,10 +198,7 @@ async fn a_permit_for_a_new_chat_does_not_cover_a_message_in_an_existing_one() {
     let new_chat = Target::new(WriteKind::ChatCreate, Scope::New).with_added([Mri::new(LAB_A), Mri::new(LAB_B)]);
     let permit = check(new_chat).await.expect("a lab-only target is allowed");
 
-    let error = client
-        .write(SendMessage::new(CHAT_X, "hello"), permit)
-        .await
-        .expect_err("another target");
+    let error = client.write(hello(CHAT_X), permit).await.expect_err("another target");
 
     assert!(matches!(error, WriteError::TargetMismatch(_)), "{error:?}");
     assert!(client.transport().delivered().is_empty());
@@ -205,7 +207,7 @@ async fn a_permit_for_a_new_chat_does_not_cover_a_message_in_an_existing_one() {
 #[tokio::test]
 async fn authorized_pairs_a_request_only_with_its_own_permit() {
     let matching = Authorized::new(
-        SendMessage::new(CHAT_X, "hello"),
+        hello(CHAT_X),
         check(message_to(CHAT_X)).await.expect("a lab-only target is allowed"),
     )
     .expect("matching permit");
@@ -213,7 +215,7 @@ async fn authorized_pairs_a_request_only_with_its_own_permit() {
     assert_eq!(matching.permit().target(), &matching.request().target());
 
     let mismatch = Authorized::new(
-        SendMessage::new(CHAT_Y, "hello"),
+        hello(CHAT_Y),
         check(message_to(CHAT_X)).await.expect("a lab-only target is allowed"),
     )
     .expect_err("another conversation");
@@ -227,7 +229,7 @@ async fn a_transport_failure_is_reported_as_such() {
     let permit = check(message_to(CHAT_X)).await.expect("a lab-only target is allowed");
 
     let error = client
-        .write(SendMessage::new(CHAT_X, "hello"), permit)
+        .write(hello(CHAT_X), permit)
         .await
         .expect_err("the transport fails");
 

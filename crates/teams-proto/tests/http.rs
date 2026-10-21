@@ -15,11 +15,12 @@ use teams_auth::secrets::{MemorySecretStore, Secret};
 use teams_auth::session::Session;
 use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
+use teams_proto::chat::MessageText;
 use teams_proto::{
-    Client, Credentials, DEFAULT_RETRY_WAIT, Endpoint, HttpError, HttpTransport, MAX_BODY, Mutating as _,
+    Author, Client, Credentials, DEFAULT_RETRY_WAIT, Endpoint, HttpError, HttpTransport, MAX_BODY, Mutating as _,
     ProbeOwnState, Read, SendMessage, Service, StartCall, Transport,
 };
-use wiremock::matchers::{body_json, header, method, path, query_param};
+use wiremock::matchers::{body_json, body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -29,6 +30,21 @@ const CHAT: &str = "19:lab-chat@thread.v2";
 const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 const MESSAGES: &str = "/api/chatsvc/amer/v1/users/ME/conversations/19:lab-chat@thread.v2/messages";
 const CONVERSATIONS: &str = "/api/chatsvc/amer/v1/users/ME/conversations";
+
+/// `text` from a to `chat`, as one paragraph.
+#[cfg(test)]
+fn text(chat: &str, text: &str) -> SendMessage {
+    SendMessage::new(
+        chat,
+        Author::new(Mri::new(LAB_A), "Lab A"),
+        MessageText::plain(text).unwrap(),
+    )
+}
+
+/// A plain "hello" from a to the lab chat.
+fn hello() -> SendMessage {
+    text(CHAT, "hello")
+}
 
 /// The placeholder token of generation `n`: the first one handed out is generation 0, and each rejection moves on.
 fn token(generation: usize) -> String {
@@ -273,7 +289,7 @@ async fn a_permitted_write_is_posted_in_its_wire_form_and_its_answer_comes_back(
         .and(header("x-ms-migration", "True"))
         .and(header("behavioroverride", "redirectAs404"))
         .and(header("content-type", "application/json"))
-        .and(body_json(json!({
+        .and(body_partial_json(json!({
             "content": "<p>hello</p>",
             "messagetype": "RichText/Html",
             "contenttype": "Text",
@@ -289,7 +305,7 @@ async fn a_permitted_write_is_posted_in_its_wire_form_and_its_answer_comes_back(
         .expect(1)
         .mount(&setup.server)
         .await;
-    let request = SendMessage::new(CHAT, "<p>hello</p>");
+    let request = hello();
     let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
     let answer = Client::new(setup.transport).write(request, permit).await.unwrap();
@@ -313,7 +329,7 @@ async fn a_message_with_a_client_message_id_is_posted_with_it_and_the_same_targe
     let setup = setup().await;
     Mock::given(method("POST"))
         .and(path(MESSAGES))
-        .and(body_json(json!({
+        .and(body_partial_json(json!({
             "content": "<p>hello</p>",
             "messagetype": "RichText/Html",
             "contenttype": "Text",
@@ -323,9 +339,9 @@ async fn a_message_with_a_client_message_id_is_posted_with_it_and_the_same_targe
         .expect(1)
         .mount(&setup.server)
         .await;
-    let request = SendMessage::new(CHAT, "<p>hello</p>").with_client_message_id("1234567890123456789");
+    let request = hello().with_client_message_id("1234567890123456789");
     assert_eq!(request.client_message_id(), Some("1234567890123456789"));
-    assert_eq!(request.target(), SendMessage::new(CHAT, "other").target());
+    assert_eq!(request.target(), text(CHAT, "other").target());
     let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
     let answer = Client::new(setup.transport).write(request, permit).await.unwrap();
@@ -342,7 +358,7 @@ async fn a_write_refused_with_401_comes_back_unsent_again_and_the_token_is_refre
         .expect(1)
         .mount(&setup.server)
         .await;
-    let request = SendMessage::new(CHAT, "hello");
+    let request = hello();
     let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
     let answer = setup
@@ -367,7 +383,7 @@ async fn a_throttled_write_comes_back_without_a_retry() {
         .expect(1)
         .mount(&setup.server)
         .await;
-    let request = SendMessage::new(CHAT, "hello");
+    let request = hello();
     let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
     let answer = Client::new(setup.transport).write(request, permit).await.unwrap();
@@ -687,7 +703,7 @@ async fn a_body_over_the_cap_is_refused() {
 #[tokio::test]
 async fn without_a_token_nothing_is_sent() {
     let setup = setup_with(FakeTokens::signed_out()).await;
-    let request = SendMessage::new(CHAT, "hello");
+    let request = hello();
     let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
     let read = setup.transport.read(&conversations()).await.unwrap_err();

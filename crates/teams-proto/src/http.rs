@@ -44,7 +44,10 @@ use serde_json::Value;
 use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
 use teams_auth::token::{TokenError, retry_after};
-use teams_fence::{AFD_HOSTS, Channel, Fence, RequestOutcome, RequestRecord, chat_service_path};
+use teams_fence::{
+    AFD_HOSTS, Channel, ChatCredential, CredentialFuture, CredentialSource, Fence, RequestOutcome, RequestRecord,
+    chat_service_path,
+};
 use url::Url;
 
 use crate::client::{Response, Transport};
@@ -465,6 +468,29 @@ impl<C: Credentials> Transport for HttpTransport<C> {
             let _ = self.credentials.bearer_rejected(IC3_AUDIENCE, &token).await;
         }
         Ok(answer)
+    }
+}
+
+/// The fence's live membership read, for a native client, reads with what the transport writes with: the account's
+/// `ic3` token as its session has it now (renewed before it expires) and the transport's chat base, as
+/// [`ChatCredential::bearer`]. No token, or none in a token's shape, is no credential, and the read is
+/// `Partial(NoCredential)`. A token the chat service refuses is renewed as a refused token of the transport's own is
+/// ([`Credentials::bearer_rejected`]), so the read is sent once more with the new one; a failed renewal is no renewed
+/// credential, and the read stays refused.
+impl<C: Credentials> CredentialSource for HttpTransport<C> {
+    fn credential(&self) -> CredentialFuture<'_> {
+        Box::pin(async move {
+            let token = self.credentials.bearer(IC3_AUDIENCE).await.ok()?;
+            ChatCredential::bearer(self.chat_base.as_str(), token.expose())
+        })
+    }
+
+    fn credential_rejected<'a>(&'a self, rejected: &'a ChatCredential) -> CredentialFuture<'a> {
+        Box::pin(async move {
+            let refused = Secret::new(rejected.expose_token());
+            let token = self.credentials.bearer_rejected(IC3_AUDIENCE, &refused).await.ok()?;
+            ChatCredential::bearer(self.chat_base.as_str(), token.expose())
+        })
     }
 }
 

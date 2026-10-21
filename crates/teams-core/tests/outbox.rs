@@ -24,9 +24,10 @@ use teams_core::{
     SyncError, enqueue, new_client_message_id,
 };
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
+use teams_proto::chat::{MessageText, Node, RichText};
 use teams_proto::{
-    Authorized, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport, Mutating, OwnState, Read, Response,
-    Transport,
+    Author, Authorized, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport, Mutating, OwnState, Read,
+    Response, Transport,
 };
 use teams_store::{
     Applied, AttemptOutcome, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState, Store,
@@ -365,7 +366,13 @@ async fn setup() -> Setup {
     let read_clock = Arc::clone(&clock);
     let clock_fn: Clock = Arc::new(move || read_clock.load(Ordering::SeqCst));
     let membership: Arc<dyn MembershipSource + Send> = members.clone();
-    let outbox = Outbox::new(Arc::new(transport), fence, membership, Mri::new(ME)).with_clock(clock_fn);
+    let outbox = Outbox::new(
+        Arc::new(transport),
+        fence,
+        membership,
+        Author::new(Mri::new(ME), "Lab A"),
+    )
+    .with_clock(clock_fn);
     let sync = ServiceSync {
         server: Arc::clone(&server),
         finds: AtomicBool::new(false),
@@ -390,7 +397,7 @@ async fn setup() -> Setup {
 fn hello() -> Command {
     Command::Send {
         conversation: CHAT.to_owned(),
-        content: "<p>hello</p>".to_owned(),
+        text: MessageText::plain("hello").unwrap(),
     }
 }
 
@@ -518,6 +525,59 @@ async fn a_denied_attempt_marks_the_row_denied_and_sends_nothing() {
         store.outbox_due(i64::MAX).unwrap().is_empty(),
         "a denied row isn't retried"
     );
+}
+
+#[tokio::test]
+async fn a_message_goes_out_from_the_account_with_its_text_composed_when_it_was_asked_for() {
+    let setup = setup().await;
+    setup.created().await;
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &hello()).unwrap();
+    setup.advance(Duration::from_secs(5));
+
+    send(&setup, &mut store, &row).await;
+
+    let requests = setup.server.received_requests().await.unwrap();
+    let body: Value = requests[0].body_json().unwrap();
+    assert_eq!(body["content"], "<p>hello</p>");
+    assert_eq!((&body["from"], &body["imdisplayname"]), (&json!(ME), &json!("Lab A")));
+    let composed = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(row.created_at) * 1_000_000).unwrap();
+    let iso = body["composetime"].as_str().unwrap();
+    assert_eq!(
+        time::OffsetDateTime::parse(iso, &time::format_description::well_known::Rfc3339).unwrap(),
+        composed,
+        "the row's time, not the attempt's"
+    );
+    assert_eq!(body["clientmessageid"], json!(row.client_message_id));
+}
+
+#[tokio::test]
+async fn a_message_mentioning_an_outsider_is_denied_though_the_chat_is_the_labs() {
+    let setup = setup().await;
+    setup.created().await;
+    let mut store = setup.open_store();
+    let mentioned = MessageText::new(
+        RichText {
+            nodes: vec![Node::Mention {
+                item_id: "0".to_owned(),
+                text: "Someone".to_owned(),
+            }],
+            truncated: false,
+        },
+        [("0".to_owned(), Mri::new("8:orgid:00000000-0000-4000-8000-0000000000ff"))],
+    )
+    .unwrap();
+    let command = Command::Send {
+        conversation: CHAT.to_owned(),
+        text: mentioned,
+    };
+    let row = enqueue(&mut store, &command).unwrap();
+
+    let denied = send(&setup, &mut store, &row).await;
+
+    assert_eq!(denied.state, OutboxState::Denied);
+    assert!(setup.posted().await.is_empty(), "nothing was sent");
+    assert_eq!(setup.log.verdicts(), ["deny"]);
 }
 
 #[tokio::test]

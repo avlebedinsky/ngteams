@@ -21,7 +21,8 @@ use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, CHAT_BASE, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B,
     LAB_C, NOTIFICATIONS, OUTSIDER, REGIONAL_HOST, TENANT,
 };
-use teams_proto::{Client, Credentials, Endpoint, HttpTransport, Read, SendMessage, Service};
+use teams_proto::chat::MessageText;
+use teams_proto::{Author, Client, Credentials, Endpoint, HttpTransport, Read, SendMessage, Service};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -550,7 +551,14 @@ async fn a_permitted_message_through_the_native_transport_reaches_the_other_memb
         )
         .await?;
     let answer = client
-        .write(SendMessage::new(AB_CHAT, "<p>hello b</p>"), permit)
+        .write(
+            SendMessage::new(
+                AB_CHAT,
+                Author::new(Mri::new(LAB_A), "Lab A"),
+                MessageText::plain("hello b")?,
+            ),
+            permit,
+        )
         .await?;
     assert_eq!(answer.status(), 201);
     let arrival = serde_json::from_slice::<Value>(answer.body())?["OriginalArrivalTime"].to_string();

@@ -6,7 +6,8 @@
 //! credential ([`ChatCredential`]), taken from a request the armed lab page itself sent to the chat service: its token
 //! (an Entra bearer token, as the web client sends today, or a skypetoken) and the chat service base that request went
 //! to; or, for a native client, its own `ic3` Entra token and the chat base from the account's region GTMs
-//! ([`ChatCredential::bearer`]). A made-up credential gets a 401 and a deny; nothing the
+//! ([`ChatCredential::bearer`]), taken fresh for every read from a [`CredentialSource`] (the native transport, over
+//! the account's session, which renews the token). A made-up credential gets a 401 and a deny; nothing the
 //! caller supplies can make up a member list.
 //!
 //! **What is supported** (M0 Task 11, from the web bundle; see `docs/protocol/fence-targets.md`): only 1:1 chats,
@@ -24,7 +25,9 @@
 //! members, or a body that isn't the expected thread.
 
 use std::fmt;
-use std::sync::{Mutex, PoisonError};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use percent_encoding::percent_decode_str;
@@ -51,6 +54,9 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The suffix of a 1:1 chat's conversation id.
 const ONE_TO_ONE_SUFFIX: &str = "@unq.gbl.spaces";
+
+/// A read the chat service refused the credential of (HTTP 401).
+const REFUSED: PartialReason = PartialReason::FetchFailed(FetchFailure::Status(401));
 
 /// Where the chat service is, as a validated base: never a caller-chosen path, port or query.
 #[derive(Clone, PartialEq, Eq)]
@@ -208,6 +214,13 @@ impl ChatCredential {
         })
     }
 
+    /// The token, for the [`CredentialSource`] that gave it to tell its session which token the chat service refused
+    /// ([`CredentialSource::credential_rejected`]). Never logged or shown: `Debug` redacts it.
+    #[must_use]
+    pub fn expose_token(&self) -> &str {
+        &self.token
+    }
+
     /// The header the live read sends the token in, in the page's form: its name and value.
     fn header(&self) -> (&'static str, Zeroizing<String>) {
         match self.scheme {
@@ -232,17 +245,62 @@ fn is_token(token: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
+/// The future of a [`CredentialSource`]'s credential.
+pub type CredentialFuture<'a> = Pin<Box<dyn Future<Output = Option<ChatCredential>> + Send + 'a>>;
+
+/// Where a native client's live read takes its credential from, fresh for every read: the account's own `ic3` token as
+/// its session has it now, and the chat base its region gives ([`ChatCredential::bearer`]). `None` when there is no
+/// token (signed out, a failed renewal): the read is then [`PartialReason::NoCredential`] and the write denied.
+///
+/// When the chat service refuses a credential it gave (a 401: a token revoked before it expires), the read asks it
+/// once for a renewed one ([`Self::credential_rejected`]) and reads once more with it; a second refusal, or no renewed
+/// credential, leaves the read [`PartialReason::FetchFailed`] and the write denied. So one check reads at most twice.
+///
+/// Any type may implement it: a credential decides only which token the read is sent with, never where it goes (the
+/// base is checked as [`ChatCredential::bearer`] checks it) or what the answer must hold.
+pub trait CredentialSource: Send + Sync {
+    /// The credential to read with now.
+    fn credential(&self) -> CredentialFuture<'_>;
+
+    /// A renewed credential after the chat service refused `rejected` (one this source gave), or `None` when there is
+    /// none to give. By default there is none, and the read stays refused.
+    fn credential_rejected<'a>(&'a self, rejected: &'a ChatCredential) -> CredentialFuture<'a> {
+        let _ = rejected;
+        Box::pin(async { None })
+    }
+}
+
+/// What a live source reads with.
+#[derive(Clone)]
+enum Credential {
+    None,
+    /// One credential, set by the caller ([`LiveMembershipSource::set_credential`]).
+    Fixed(ChatCredential),
+    /// A source asked on every read ([`LiveMembershipSource::set_credential_source`]).
+    Source(Arc<dyn CredentialSource>),
+}
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::Fixed(credential) => credential.fmt(f),
+            Self::Source(_) => f.write_str("Source"),
+        }
+    }
+}
+
 /// Why the live source couldn't be built.
 #[derive(Debug, thiserror::Error)]
 #[error("can't build the membership source's HTTPS client: {0}")]
 pub struct LiveSourceError(#[source] reqwest::Error);
 
 /// The membership source of a lab run that writes: it reads a scope's members from the chat service on every check,
-/// with the lab account's [`ChatCredential`] (see the module docs). Until a credential is set every scope is
-/// [`PartialReason::NoCredential`].
+/// with the lab account's [`ChatCredential`] (see the module docs). Until a credential or a [`CredentialSource`] is
+/// set every scope is [`PartialReason::NoCredential`].
 pub struct LiveMembershipSource {
     client: reqwest::Client,
-    credential: Mutex<Option<ChatCredential>>,
+    credential: Mutex<Credential>,
     /// Tests only: every read goes to this origin instead of the credential's host.
     #[cfg(feature = "test-support")]
     mock_origin: Option<String>,
@@ -251,7 +309,7 @@ pub struct LiveMembershipSource {
 impl fmt::Debug for LiveMembershipSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LiveMembershipSource")
-            .field("credential", &self.credential())
+            .field("credential", &self.current())
             .finish_non_exhaustive()
     }
 }
@@ -264,7 +322,7 @@ impl LiveMembershipSource {
     pub fn new() -> Result<Self, LiveSourceError> {
         Ok(Self {
             client: client(true)?,
-            credential: Mutex::new(None),
+            credential: Mutex::new(Credential::None),
             #[cfg(feature = "test-support")]
             mock_origin: None,
         })
@@ -279,24 +337,40 @@ impl LiveMembershipSource {
     pub fn with_mock_origin(origin: &str) -> Result<Self, LiveSourceError> {
         Ok(Self {
             client: client(false)?,
-            credential: Mutex::new(None),
+            credential: Mutex::new(Credential::None),
             mock_origin: Some(origin.trim_end_matches('/').to_owned()),
         })
     }
 
-    /// Uses `credential` for every read from now on, in place of any set before (the newest one wins).
+    /// Uses `credential` for every read from now on, in place of any credential or source set before (the newest one
+    /// wins).
     pub fn set_credential(&self, credential: ChatCredential) {
-        *self.credential.lock().unwrap_or_else(PoisonError::into_inner) = Some(credential);
+        *self.credential.lock().unwrap_or_else(PoisonError::into_inner) = Credential::Fixed(credential);
     }
 
-    /// Whether a credential has been set.
+    /// Asks `source` for the credential on every read from now on, in place of any credential or source set before:
+    /// a native client's own token, renewed as its session renews it.
+    pub fn set_credential_source(&self, source: Arc<dyn CredentialSource>) {
+        *self.credential.lock().unwrap_or_else(PoisonError::into_inner) = Credential::Source(source);
+    }
+
+    /// Whether a credential or a credential source has been set.
     #[must_use]
     pub fn has_credential(&self) -> bool {
-        self.credential().is_some()
+        !matches!(self.current(), Credential::None)
     }
 
-    fn credential(&self) -> Option<ChatCredential> {
+    fn current(&self) -> Credential {
         self.credential.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// The credential to read with now: the one set, or the source's answer.
+    async fn credential(current: &Credential) -> Option<ChatCredential> {
+        match current {
+            Credential::None => None,
+            Credential::Fixed(credential) => Some(credential.clone()),
+            Credential::Source(source) => source.credential().await,
+        }
     }
 
     /// The URL of a thread's read: the base's origin (or the mock's), its path to `v1`, then `threads/<id>`, the id one
@@ -316,13 +390,15 @@ impl LiveMembershipSource {
     }
 
     async fn one_to_one(&self, id: &str, pair: [Mri; 2]) -> Membership {
-        let Some(credential) = self.credential() else {
+        let current = self.current();
+        let Some(credential) = Self::credential(&current).await else {
             return Membership::Partial(PartialReason::NoCredential);
         };
-        let Some(url) = self.thread_url(&credential.base, id) else {
-            return Membership::Partial(PartialReason::FetchFailed(FetchFailure::Malformed));
+        let body = match self.read_thread(id, &credential).await {
+            Err(REFUSED) => self.read_renewed(id, &current, &credential).await,
+            read => read,
         };
-        let body = match self.fetch(url, &credential).await {
+        let body = match body {
             Ok(body) => body,
             Err(reason) => return Membership::Partial(reason),
         };
@@ -334,6 +410,32 @@ impl LiveMembershipSource {
                 Membership::Partial(PartialReason::FetchFailed(FetchFailure::Malformed))
             }
             membership => membership,
+        }
+    }
+
+    /// The thread `id`'s read with `credential`.
+    async fn read_thread(&self, id: &str, credential: &ChatCredential) -> Result<Vec<u8>, PartialReason> {
+        let url = self
+            .thread_url(&credential.base, id)
+            .ok_or(PartialReason::FetchFailed(FetchFailure::Malformed))?;
+        self.fetch(url, credential).await
+    }
+
+    /// The read once more after the service refused `rejected`, with the renewed credential `current`'s source gives;
+    /// still refused when `current` is a fixed credential (a page's, which can't be renewed here) or the source has
+    /// no renewed one.
+    async fn read_renewed(
+        &self,
+        id: &str,
+        current: &Credential,
+        rejected: &ChatCredential,
+    ) -> Result<Vec<u8>, PartialReason> {
+        let Credential::Source(source) = current else {
+            return Err(REFUSED);
+        };
+        match source.credential_rejected(rejected).await {
+            Some(renewed) => self.read_thread(id, &renewed).await,
+            None => Err(REFUSED),
         }
     }
 
