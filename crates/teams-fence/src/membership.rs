@@ -373,13 +373,10 @@ impl LiveMembershipSource {
         }
     }
 
-    /// The URL of a thread's read: the base's origin (or the mock's), its path to `v1`, then `threads/<id>`, the id one
-    /// encoded segment, and the fixed view.
-    fn thread_url(&self, base: &ChatBase, id: &str) -> Option<Url> {
-        let (origin, prefix) = base.origin_and_prefix();
-        #[cfg(feature = "test-support")]
-        let origin = self.mock_origin.clone().unwrap_or(origin);
-        let mut url = Url::parse(&origin).ok()?;
+    /// The URL of a thread's read: `origin` (the base's, or the mock's), the base's path to `v1` (`prefix`), then
+    /// `threads/<id>`, the id one encoded segment, and the fixed view.
+    fn thread_url(origin: &str, prefix: Vec<&str>, id: &str) -> Option<Url> {
+        let mut url = Url::parse(origin).ok()?;
         url.path_segments_mut()
             .ok()?
             .clear()
@@ -415,9 +412,10 @@ impl LiveMembershipSource {
 
     /// The thread `id`'s read with `credential`.
     async fn read_thread(&self, id: &str, credential: &ChatCredential) -> Result<Vec<u8>, PartialReason> {
-        let url = self
-            .thread_url(&credential.base, id)
-            .ok_or(PartialReason::FetchFailed(FetchFailure::Malformed))?;
+        let (origin, prefix) = credential.base.origin_and_prefix();
+        #[cfg(feature = "test-support")]
+        let origin = self.mock_origin.clone().unwrap_or(origin);
+        let url = Self::thread_url(&origin, prefix, id).ok_or(PartialReason::FetchFailed(FetchFailure::Malformed))?;
         self.fetch(url, credential).await
     }
 
