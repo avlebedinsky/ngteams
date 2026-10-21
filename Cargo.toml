@@ -14,6 +14,7 @@ members = [
     "crates/teams-proto",
     "crates/teams-store",
     "crates/teams-trouter",
+    "crates/teams-ui",
     "crates/ui-sandbox",
     "spikes/echo-call",
     "spikes/gpui-video",
@@ -40,6 +41,8 @@ teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }
 teams-store = { path = "crates/teams-store" }
 teams-trouter = { path = "crates/teams-trouter" }
+# the GPUI views and models over the engine
+teams-ui = { path = "crates/teams-ui" }
 # tests and lab runs only: the private compositor, bus, input and URI opener every GUI process runs in
 ui-sandbox = { path = "crates/ui-sandbox" }
 media-loop = { path = "spikes/media-loop" }

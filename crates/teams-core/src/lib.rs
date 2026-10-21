@@ -12,11 +12,14 @@
 //! - [`engine`]: one account's client on a tokio runtime and a thread of its own, reached through channels: actions
 //!   go out through the outbox, the push channel's deliveries and the catch-up come into the store, and a catch-up
 //!   runs after every reconnect. One engine per account (its lock); its request side is a cloneable handle of its own.
+//! - [`lab`]: a lab account's engine, assembled as every lab binary builds it (its session over the secret store the
+//!   binary hands in).
 //!
 //! M1 Tasks 13, 17 and 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`); M2 Task 5
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod engine;
+pub mod lab;
 pub mod outbox;
 pub mod sync;
 

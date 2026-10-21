@@ -57,7 +57,9 @@ fn refused<T: std::fmt::Debug>(result: &Result<T, SecretError>) -> bool {
 #[test]
 fn the_command_line_takes_the_lab_account_and_the_socket() -> TestResult {
     let cli = Cli::try_parse_from(["teams-app", "secrets", "--lab", "b", "--fd", "5"])?;
-    let Command::Secrets { alias, fd } = cli.command;
+    let Some(Command::Secrets { alias, fd }) = cli.command else {
+        return Err("the broker's subcommand".into());
+    };
     assert_eq!((alias, fd), (Alias::B, 5));
 
     for refused in [

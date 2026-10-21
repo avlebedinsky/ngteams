@@ -531,29 +531,57 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
 - Create: `crates/teams-ui/{Cargo.toml,src/lib.rs,src/bridge.rs,src/models.rs,src/trace.rs}`, tests in both
 - Modify: `Cargo.toml` (members, workspace deps), `crates/teams-app/src/main.rs`
 
-- [ ] tests first: `teams-app --lab <alias> --secrets-fd <n>` builds its parts as `teams-headless` does
+- [x] tests first: `teams-app --lab <alias> --secrets-fd <n>` builds its parts as `teams-headless` does
       (`Fence::open_lab`, `Session` over the broker's socket, the region, `LiveMembershipSource::for_fence` with the
       transport's credential, the store at `LabPaths::store_file`, Trouter); refuses to start without
       `--secrets-fd` and never opens `KeyringSecretStore` itself; refuses a `test-support` build; refuses to open a
       window unless its Wayland socket is inside the directory `TEAMS_APP_SANDBOX` names (as the GPUI spike does) and
       `DISPLAY` is unset; prints no token; another engine on the account (Task 5's lock) is reported and the app exits
-- [ ] tests first: the bridge owns the `EngineHandle`; one background task drains `next_event` and applies each event
+- [x] tests first: the bridge owns the `EngineHandle`; one background task drains `next_event` and applies each event
       to the models on GPUI's foreground (two views observing one model both see it); views share only the request
       side, behind the `Core` trait; a query answers through its `Reply`; shutdown ends the drain task and consumes
       the owned handle with `shutdown`, off the foreground, joining the engine's thread
-- [ ] tests first: GPUI's HTTP client is the null one: an `img()` of an `https` URL in a test window loads nothing and
+- [x] tests first: GPUI's HTTP client is the null one: an `img()` of an `https` URL in a test window loads nothing and
       no request leaves the process (no `set_http_client` in the app crates: a source test)
-- [ ] a manifest test (`cargo metadata --filter-platform` for the host): `teams-ui` and `teams-app` depend directly on
+- [x] a manifest test (`cargo metadata --filter-platform` for the host): `teams-ui` and `teams-app` depend directly on
       no HTTP or WebSocket client (`reqwest`, `hyper`, `tungstenite`, `ureq`, `isahc`, …): every request goes through
       `teams-core`
-- [ ] the view trace: one JSON line per view change (view, conversation and message ids, kinds, times; never text),
+- [x] the view trace: one JSON line per view change (view, conversation and message ids, kinds, times; never text),
       on a file descriptor the caller passes; a test that no message text or name reaches it
-- [ ] the signed-out state: when the `Session` reports an invalid grant (an expired or revoked refresh token), the
+- [x] the signed-out state: when the `Session` reports an invalid grant (an expired or revoked refresh token), the
       app shows "signed out" (the lab build: "run `proto-lab auth <alias>`"; the personal build reopens sign-in, Task
       27) and sends nothing more
-- [ ] an empty window opens in the sandbox on `teams-mock` (in-process test, `test-support`), and its screenshot shows
+- [x] an empty window opens in the sandbox on `teams-mock` (in-process test, `test-support`), and its screenshot shows
       it
-- [ ] `[lints] workspace = true`, listed in `members`; `cargo test -p teams-ui -p teams-app` and the gate pass
+- [x] `[lints] workspace = true`, listed in `members`; `cargo test -p teams-ui -p teams-app` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - The sandbox opt-in is `UI_SANDBOX_DIR`, the variable Task 3's sandbox sets for every client
+    (`ui_sandbox::in_sandbox`), not a `TEAMS_APP_SANDBOX` of the app's own (`teams_app::guard`, which also refuses a
+    non-empty `DISPLAY`). `teams-app` takes `ui-sandbox` as a normal dependency for that check.
+  - The lab engine's assembly moved out of `teams-headless` into `teams_core::lab::start` (generic over the secret
+    store), so both binaries build it one way: `teams-headless` hands in the keyring, `teams-app` the broker's
+    `BrokerSecretStore`; `teams_headless::lab::display_name` re-exports the core's.
+  - Signed out is the session's state: `Session` latches it once Entra refuses the refresh token (`invalid_grant`) or
+    none is stored, answers every later call with that error at once (a cached token included, nothing sent), and
+    tells it once (`watch_signed_out`). The app watches it (`teams_app::app::watch_sign_out`); `Bridge::sign_out`
+    shows the hint and shuts the engine down, so its requests answer `Stopped` (its push channel closes as on exit).
+  - The bridge takes the engine's owning side as an `EventSource` (the `EngineHandle` in the app, a fake in the view
+    tests), and `teams_core::Reply::ready` lets a fake core answer. The drain runs on GPUI's foreground; the blocking
+    `shutdown` on GPUI's background executor. GPUI's quit mode is `Explicit`, since GPUI would otherwise quit as the
+    last window closes, before the engine is shut down; the app quits once it is.
+  - GPUI's test context has a fake HTTP client of its own, so the null-client check runs in a real GPUI app in the
+    sandbox (`crates/teams-app/tests/window.rs`, `http` mode): an `img()` of an `https` URL on a loopback listener the
+    child holds, a request through `cx.http_client()` refused ("No HttpClient available"), the listener never
+    connected to. The source test also refuses `with_http_client` and any `.expose()` of a secret in the app crates
+    (`crates/teams-ui/tests/reach.rs`, which holds the manifest test too: direct normal and build dependencies).
+  - The window test is a `harness = false` test that runs itself again in the sandbox (GPUI on the main thread): a's
+    engine on `teams-mock`, the view trace on a pipe (the window opened, the push channel connected), a screenshot
+    under `target/ui-shots/` filled by the window's background, the window closed through niri, the app quit and the
+    account's engine lock free afterwards.
+  - The view trace takes ids only as `TraceId`: visible ASCII, all digits or with a `:` (a service id's shape);
+    anything else is left out and counted (`refused`); view, change and kind names are `&'static str`.
+  - `gpui-pre`'s `test-support` (a dev-dependency of `teams-ui` and `teams-app`) brings its own test crates into
+    `Cargo.lock` (`proptest`, `postage`, the screen-capture crates with their X11 bindings); only test builds use them.
 
 ### Task 7: The UI kit
 **Files:**

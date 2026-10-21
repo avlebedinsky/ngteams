@@ -8,23 +8,49 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
-# the broker's socket: whether the descriptor it is handed is open, before it is taken over
+# the app's window: GPUI's Linux platform, Wayland only
+gpui-pre.workspace = true
+gpui-pre-platform.workspace = true
+# the broker's socket and the trace's descriptor: whether a descriptor handed in is open, before it is taken over
 libc.workspace = true
-# the broker's socket: a Unix stream socket, made close-on-exec once taken over
-rustix = { workspace = true, features = ["net"] }
-# the broker's protocol, its server loop and the Secret Service store
+# the broker's socket: a Unix stream socket; the trace's descriptor: open for writing; both made close-on-exec
+rustix = { workspace = true, features = ["fs", "net"] }
+# the broker's protocol, its server loop and the Secret Service store; the app's client of it, and its session's
+# sign-out
 teams-auth.workspace = true
-# lab.toml: the account an alias names (its UPN), and the lab's keyring application
+# the lab account's engine, built as teams-headless builds it
+teams-core.workspace = true
+# lab.toml: the account an alias names (its UPN), and the lab's keyring application; the app's fence
 teams-fence.workspace = true
+# the bridge over the engine, the models, the window, the view trace
+teams-ui.workspace = true
 thiserror.workspace = true
-# the broker's runtime: its socket, the Secret Service connected on the first request
+# the broker's runtime: its socket, the Secret Service connected on the first request; the session's sign-out watch
 tokio = { workspace = true, features = ["net", "rt", "sync"] }
+# the check that a window opens only on the UI sandbox's compositor
+ui-sandbox.workspace = true
 
 [dev-dependencies]
+# the sign-out on GPUI's test context
+gpui-pre = { workspace = true, features = ["test-support"] }
+# the window test's screenshot, read back
+image = { workspace = true, features = ["png"] }
+serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt"] }
-# the broker run as a process: its environment cleared, only its socket passed through
-ui-sandbox.workspace = true
+# the window test's engine reaches the mock chat service and its Trouter through the test-support mock origins; the
+# app's binary refuses to run when a test build unified it in
+teams-fence = { workspace = true, features = ["test-support"] }
+teams-mock.workspace = true
+teams-proto = { workspace = true, features = ["test-support"] }
+teams-store.workspace = true
+teams-trouter = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+
+[[test]]
+# the app's window in the UI sandbox, on the mock: its own `main` (GPUI runs on the main thread), which runs itself
+# again inside the sandbox
+name = "window"
+harness = false
 
 [lints]
 workspace = true

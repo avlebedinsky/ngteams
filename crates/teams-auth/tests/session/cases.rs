@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use teams_auth::authz::{AuthzClient, AuthzError, Region, skypetoken_expiry, skypetoken_expiry_key, skypetoken_key};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{Secret, SecretStore};
-use teams_auth::session::{Clock, REFRESH_MARGIN, Renewal, Session};
+use teams_auth::session::{Clock, REFRESH_MARGIN, Renewal, Session, SignedOut};
 use teams_auth::token::{EntraConfig, SPACES_RESOURCE, TokenClient, TokenError};
 use tokio::sync::broadcast::error::TryRecvError;
 use wiremock::matchers::{header, method, path};
@@ -395,6 +395,96 @@ async fn without_a_stored_refresh_token_nothing_is_sent() -> TestResult {
         "{error:?}"
     );
     assert_eq!(lab.grants(), 0);
+    Ok(())
+}
+
+/// A session whose Entra refuses every grant with the invalid-grant fixture (an expired refresh token).
+async fn entra_refusing_the_grant() -> TestResult<(MockServer, Session<TestStore>)> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(TOKEN_PATH))
+        .respond_with(ResponseTemplate::new(400).set_body_json(fixture_body("entra-error-invalid-grant")?))
+        .mount(&server)
+        .await;
+    let store = TestStore::new(super::KIND, ACCOUNT)?;
+    store
+        .put(&refresh_token_key(ACCOUNT), &Secret::new(FIRST_REFRESH_TOKEN))
+        .await?;
+    let tokens =
+        TokenClient::new(EntraConfig::teams_native().with_authority(format!("{}/organizations/", server.uri())))?;
+    let authz = AuthzClient::with_endpoint(&format!("{}{AUTHZ_PATH}", server.uri()))?;
+    let session = Session::new(ACCOUNT, store, tokens, authz, stored_region()).with_clock(FakeClock::new());
+    Ok((server, session))
+}
+
+#[tokio::test]
+async fn an_invalid_grant_signs_the_session_out_and_nothing_is_sent_after_it() -> TestResult {
+    let (server, session) = entra_refusing_the_grant().await?;
+    let mut watcher = session.watch_signed_out();
+    assert_eq!(session.signed_out(), None);
+    assert!(watcher.borrow_and_update().is_none());
+
+    let error = session.access_token(IC3).await.expect_err("refused");
+    assert!(matches!(error, TokenError::InvalidGrant(_)), "{error:?}");
+    let Some(SignedOut::InvalidGrant(refusal)) = session.signed_out() else {
+        panic!("signed out by the invalid grant: {:?}", session.signed_out());
+    };
+    assert_eq!(refusal.error, "invalid_grant");
+    assert!(watcher.has_changed()?, "the watcher hears of it");
+    assert!(matches!(
+        &*watcher.borrow_and_update(),
+        Some(SignedOut::InvalidGrant(_))
+    ));
+    assert_eq!(requests(&server).await?, 1);
+
+    // every later call answers the same at once: no grant, no exchange, whichever audience or token
+    let later = [
+        session.access_token(IC3).await.map(|_| ()),
+        session.access_token(SPACES_RESOURCE).await.map(|_| ()),
+        session.refresh_rejected(IC3, &Secret::new("refused")).await.map(|_| ()),
+        session.skypetoken().await.map(|_| ()),
+        session.skypetoken_rejected(&Secret::new("refused")).await.map(|_| ()),
+    ];
+    for answer in later {
+        assert!(matches!(answer, Err(TokenError::InvalidGrant(_))), "{answer:?}");
+    }
+    assert_eq!(requests(&server).await?, 1, "nothing more was sent");
+    assert!(!watcher.has_changed()?, "told once");
+    assert!(format!("{session:?}").contains("signed_out: true"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_missing_refresh_token_signs_the_session_out_and_a_cached_token_is_not_handed_out() -> TestResult {
+    let lab = Lab::default().await?;
+    lab.session.access_token(IC3).await?;
+    assert_eq!(lab.grants(), 1);
+    lab.session.store().delete(&refresh_token_key(ACCOUNT)).await?;
+
+    let error = lab
+        .session
+        .access_token(SPACES_RESOURCE)
+        .await
+        .expect_err("not signed in");
+
+    assert!(matches!(error, TokenError::NotSignedIn { .. }), "{error:?}");
+    assert_eq!(lab.session.signed_out(), Some(SignedOut::NotSignedIn));
+    let cached = lab.session.access_token(IC3).await.expect_err("signed out");
+    assert!(
+        matches!(&cached, TokenError::NotSignedIn { account } if account == ACCOUNT),
+        "{cached:?}"
+    );
+    assert_eq!(lab.grants(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn throttling_does_not_sign_the_session_out() -> TestResult {
+    let (_server, _, session) = entra_throttling(Some("30")).await?;
+
+    session.access_token(IC3).await.expect_err("throttled");
+
+    assert_eq!(session.signed_out(), None);
     Ok(())
 }
 

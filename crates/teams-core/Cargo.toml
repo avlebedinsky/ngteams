@@ -12,7 +12,7 @@ getrandom.workspace = true
 serde.workspace = true
 # a command's outbox payload, and a message post's answer (`OriginalArrivalTime`)
 serde_json.workspace = true
-# a throttled token (`TokenError::Throttled`) waits like a throttled post
+# a throttled token (`TokenError::Throttled`) waits like a throttled post; a lab engine's session (`lab`)
 teams-auth.workspace = true
 teams-fence.workspace = true
 teams-proto.workspace = true

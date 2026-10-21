@@ -3,16 +3,31 @@
 use std::io;
 use std::os::fd::RawFd;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
-use teams_app::cli::{Cli, Command};
+use gpui::{App, WindowingModes};
+use teams_app::app::{self, Launch};
+use teams_app::cli::{Cli, Mode};
+use teams_app::guard;
 use teams_app::secrets::{self, LazyKeyring};
+use teams_app::trace::adopt_trace;
+use teams_auth::broker::BrokerSecretStore;
+use teams_fence::Fence;
 use teams_fence::lab::{Alias, LabConfig, LabLocations, LabPaths};
+use teams_ui::ViewTrace;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Secrets { alias, fd } => broker(alias, fd),
+    match cli.mode() {
+        Some(Mode::Secrets { alias, fd }) => broker(alias, fd),
+        Some(Mode::App {
+            alias,
+            secrets_fd,
+            trace_fd,
+        }) => run_app(alias, secrets_fd, trace_fd),
+        // the parser requires the app's arguments when no subcommand is given
+        None => fail("app", &"give --lab and --secrets-fd, or a subcommand"),
     }
 }
 
@@ -20,25 +35,76 @@ fn main() -> ExitCode {
 fn broker(alias: Alias, fd: RawFd) -> ExitCode {
     let socket = match secrets::adopt_socket(fd) {
         Ok(socket) => socket,
-        Err(error) => return fail(&error),
+        Err(error) => return fail("secrets", &error),
     };
     let config = match LabLocations::from_env().and_then(|locations| LabConfig::load(&locations)) {
         Ok(config) => config,
-        Err(error) => return fail(&error),
+        Err(error) => return fail("secrets", &error),
     };
     let scope = secrets::lab_scope(&config, alias);
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
-        Err(error) => return fail(&format!("can't start the async runtime: {error}")),
+        Err(error) => return fail("secrets", &format!("can't start the async runtime: {error}")),
     };
     let store = LazyKeyring::new(LabPaths::KEYRING_APPLICATION);
     match runtime.block_on(secrets::run(socket, &scope, &store, &mut io::stderr())) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => fail(&format!("{error}; the socket is closed")),
+        Err(error) => fail("secrets", &format!("{error}; the socket is closed")),
     }
 }
 
-fn fail(error: &dyn std::fmt::Display) -> ExitCode {
-    eprintln!("teams-app secrets: {error}");
+/// The app: refuses a `test-support` build, takes over its descriptors, refuses a window outside the UI sandbox,
+/// builds the account's engine over the broker's socket, and runs the window until it closes.
+fn run_app(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> ExitCode {
+    if let Some(refusal) = guard::test_support_refusal() {
+        return fail("app", &refusal);
+    }
+    let launch = match prepare(alias, secrets_fd, trace_fd) {
+        Ok(launch) => launch,
+        Err(error) => return fail("app", &error),
+    };
+    let failed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let failed_in_app = std::rc::Rc::clone(&failed);
+    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+        if let Err(error) = app::launch(cx, launch) {
+            eprintln!("teams-app: the window can't be opened: {error:#}");
+            failed_in_app.set(true);
+            cx.quit();
+        }
+    });
+    if failed.get() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Everything before the window: the descriptors first, before anything opens one of its own; then the sandbox
+/// check, the lab's config, the fence and the engine.
+fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<Launch, String> {
+    let socket = secrets::adopt_socket(secrets_fd).map_err(|error| error.to_string())?;
+    let trace = match trace_fd {
+        Some(fd) => ViewTrace::new(adopt_trace(fd).map_err(|error| error.to_string())?),
+        None => ViewTrace::off(),
+    };
+    guard::window_allowed_here()?;
+    let config = LabLocations::from_env()
+        .and_then(|locations| LabConfig::load(&locations))
+        .map_err(|error| error.to_string())?;
+    let fence = Arc::new(Fence::open_lab().map_err(|error| format!("the fence can't be opened: {error}"))?);
+    let secrets = BrokerSecretStore::new(socket, LabPaths::KEYRING_APPLICATION)
+        .map_err(|error| format!("the broker's socket: {error}"))?;
+    let lab = teams_core::lab::start(&config, alias, fence, secrets, true)
+        .map_err(|error| app::start_failure(alias, &error))?;
+    Ok(Launch {
+        alias,
+        signed_out: Some(lab.session.watch_signed_out()),
+        engine: lab.handle,
+        trace,
+    })
+}
+
+fn fail(what: &str, error: &dyn std::fmt::Display) -> ExitCode {
+    eprintln!("teams-app {what}: {error}");
     ExitCode::FAILURE
 }

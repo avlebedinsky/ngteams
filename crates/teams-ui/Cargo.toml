@@ -1,0 +1,29 @@
+[package]
+name = "teams-ui"
+description = "The GPUI views and models of the native Teams client over teams-core's engine: the bridge that owns the engine, the models it keeps up to date, the view trace; no request path of its own"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# the bridge's drain: the engine's next event or the stop, whichever comes first
+futures-util.workspace = true
+gpui-pre.workspace = true
+# the view trace: one JSON object per line
+serde_json.workspace = true
+# the engine: its request side (behind `Core`), its events and its shutdown
+teams-core.workspace = true
+# the rows the engine's queries answer with
+teams-store.workspace = true
+# the bridge's stop signal to its drain task (a runtime-free oneshot)
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# the views on GPUI's test context (`TestAppContext`): a fake core and a fake event source, no window system
+gpui-pre = { workspace = true, features = ["test-support"] }
+# the push channel's events the fake engine hands the bridge
+teams-trouter.workspace = true
+
+[lints]
+workspace = true

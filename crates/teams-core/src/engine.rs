@@ -303,6 +303,14 @@ pub enum EngineError {
 pub struct Reply<T>(oneshot::Receiver<Result<T, EngineError>>);
 
 impl<T> Reply<T> {
+    /// A reply already answered with `answer`: for a stand-in of the engine (a UI test's fake core) to hand back.
+    pub fn ready(answer: Result<T, EngineError>) -> Self {
+        let (reply, taken) = oneshot::channel();
+        // the receiver is held right here, so the answer is kept
+        let _ = reply.send(answer);
+        Self(taken)
+    }
+
     /// Waits for the answer on a thread that runs no async executor (it panics inside one, as tokio's does).
     ///
     /// # Errors

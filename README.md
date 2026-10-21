@@ -28,9 +28,10 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-proto` | Teams' internal API and the native HTTP transport. Three request classes only: reads (`GET`), a sealed own-state list logged to `fence.log` before it is sent (one entry: the messaging stack's endpoint registration), and sealed writes sent only as `Authorized<_>` with a `WritePermit` for their exact target (`SendMessage`, `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`, `ReadReceipt`, `Typing`, `CreateChat`; `StartCall`/`AddToCall` have no route yet). The chat model (`chat`: conversations, messages, versions, reactions, mentions, quotes, a sanitized rich-text tree, paging and sync links) and `MessageText`, which builds a message's markup and its mentioned MRIs from one value. The Trouter frame policy: a `FrameSink` that sends only the reviewed `OwnFrame`s, each logged first. A fixed host allowlist, `https` only, no proxy, no redirects, no hidden retries |
 | `crates/teams-store` | the account's SQLite store (`rusqlite`, bundled, WAL, `0600`): conversations, members, messages by version (edits, soft deletes), reactions per user, read horizons, sync state, the outbox; migrations; each open is a run, and a row of another open run is never taken over |
 | `crates/teams-trouter` | the native push channel: socket.io 0.9 over WSS to the Trouter hosts only, `user.authenticate` first, keep-alives, the registrar registration of the messaging stack, reconnects with backoff and on token renewal, deliveries turned into typed chat events and never answered (an incoming call included) |
-| `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out) |
+| `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out); a lab account's engine assembled as every lab binary builds it (`lab`) |
+| `crates/teams-ui` | the GPUI views and models over the engine: the bridge (it owns the engine, drains its events into the models on GPUI's foreground, shuts it down off it; views reach it only through `Core`), the models, the root view and window, the view trace (ids, kinds and times, never text); no HTTP or socket client, GPUI's HTTP client the null one |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; clients reach it through the `test-support` mock origins |
-| `crates/teams-app` | the lab's GPUI app for one lab account (from M2 Task 6), and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
+| `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and checks each fixture's `_synthetic` marker |
@@ -224,6 +225,23 @@ flock ~/.local/share/teams-lab/live.lock timeout --signal=INT --kill-after=60 15
   cargo test -p teams-headless --features live --test chat_live -- --nocapture
 ```
 
+## `teams-app`
+
+The lab app for one lab account, in the UI sandbox only (it refuses any other compositor, and `DISPLAY` set), with
+its credential broker started outside the sandbox on the other end of its socket pair:
+
+```sh
+teams-app --lab a --secrets-fd 3 [--trace-fd 4]   # a's window; tokens only through the broker on descriptor 3
+```
+
+It is built as `teams-headless` builds its client (`teams_core::lab::start`) and refuses a `test-support` build, so a
+lab run uses `cargo build -p teams-app --target-dir target/lab`. Another engine on the account (a second `teams-app`,
+a `teams-headless`) is reported and the app exits. `--trace-fd` gets the view trace, one JSON line per view change
+(ids, kinds and times, never text). When the session's refresh token is refused, the window shows the account signed
+out (run `proto-lab auth <alias>`) and the engine stops. Closing the window shuts the engine down, then quits.
+`crates/teams-app/tests/window.rs` runs the window in the sandbox on `teams-mock` and keeps its screenshot under
+`target/ui-shots/`.
+
 ## `teams-app secrets`
 
 The credential broker for a lab app in the UI sandbox, whose session bus is the sandbox's own: started outside the
@@ -315,7 +333,7 @@ D-Bus session bus, never the desktop session's compositor, bus or URI opener (`c
 checks that with canaries planted on the inherited addresses). Without weston 15, niri or `dbus-daemon` the sandbox
 tests say so and pass; `GPUI_SMOKE_REQUIRE=1` makes them fail instead. The GPUI smoke tests
 (`spikes/gpui-video/tests/smoke.rs`) run the window once on every GPU, chosen with `ZED_DEVICE_ID`. A sandboxed GUI
-binary (`gpui-video`, `ui-sandbox-probe`) refuses to open a window unless `WAYLAND_DISPLAY` is an absolute socket path
+binary (`gpui-video`, `ui-sandbox-probe`, `teams-app`) refuses to open a window unless `WAYLAND_DISPLAY` is an absolute socket path
 inside the dir `UI_SANDBOX_DIR` names, which only the sandbox sets. The video grid benchmark (`spikes/gpui-video/tests/bench.rs`)
 runs in the same sandbox; its measurement is ignored by default and run by hand with a release build:
 `cargo test --release -p gpui-video --test bench -- --ignored --nocapture`. Results and the decision are in
