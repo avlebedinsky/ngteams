@@ -39,6 +39,23 @@ A run that chats over the push channel uses `Classifier::messaging` and `FrameCl
   online is accepted, the user's decision of 2026-10-19), `trouter.processed_message_loss` and the disconnect `0::`;
 - nothing else: no settings reads, no call, and **no answer to any delivery** (`3:::` frames stay unknown and denied).
 
+## What the native client may send (M1 Task 15)
+
+The native client's socket sends only `teams_proto::OwnFrame`s, through `teams_proto::FrameSink`, each logged to
+`fence.log` (`event` `frame`: the socket's URL without its query and the frame's kind, never its text) before it goes
+out; a frame that can't be logged isn't sent. The list is sealed and holds the messaging stack's own session frames in
+the shapes above:
+
+| kind | frame |
+|---|---|
+| `trouter_authenticate` | `5:::{"name":"user.authenticate",…}`, the headers exactly `X-Ms-Test-User: False`, `Authorization`, `X-MS-Migration: True` (the messaging stack sent all three on every socket, the first one included; the calling stack's sockets sent no `X-Ms-Test-User`), plus the seven `connectparams` when a `trouter.connected` handed some over |
+| `trouter_ping` | `5:<n>+::{"name":"ping"}` |
+| `trouter_message_loss_ack` | `5:<n>+::{"name":"trouter.processed_message_loss",…}`, the indicators as they came (never an empty list) |
+| `trouter_disconnect` | `0::` |
+
+The sink numbers the acknowledged events itself (`<n>`, from 1 per socket). No `user.activity` and no answer to a
+delivery: neither has a type, so neither can be sent.
+
 ## Connect and the regional move
 
 - The client opens `wss://go.trouter.teams.microsoft.com/v4/c?tc=<json>&timeout=40&epid=<endpoint guid>&ccid=…&

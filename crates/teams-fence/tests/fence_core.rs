@@ -14,8 +14,8 @@ use fixture_guard::Guard;
 use teams_fence::lab::LabConfig;
 use teams_fence::{
     ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, DenyReason, FailClosed, Fence, FenceLog,
-    FetchFailure, Membership, MembershipFuture, MembershipSource, Mri, OpenError, PartialReason, RequestOutcome,
-    RequestRecord, Roster, Scope, Target, WriteKind,
+    FetchFailure, FrameRecord, Membership, MembershipFuture, MembershipSource, Mri, OpenError, PartialReason,
+    RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -758,6 +758,78 @@ fn request_entries_share_the_log_with_write_decisions_and_its_failure_mode() {
     };
     assert!(log.record_request(&record).is_err(), "a half-written entry fails");
     assert!(log.record_request(&record).is_err(), "and so does every later one");
+    let text = written.lock().unwrap().clone();
+    assert!(!text.contains(&b'\n'), "nothing after the half-written entry");
+}
+
+// --- the native client's own WebSocket frames ---
+
+#[test]
+fn a_frame_entry_names_the_socket_and_the_kind_but_not_the_query_or_any_token() {
+    let lab = try_lab().unwrap();
+    let log = lab.fence.log();
+    let url = format!("wss://user:{PLANTED_TOKEN}@trouter.example.com/v4/c?tc={PLANTED_TOKEN}&epid=e#{PLANTED_TOKEN}");
+    log.record_frame(&FrameRecord {
+        url: &url,
+        kind: "trouter_authenticate",
+    })
+    .unwrap();
+    log.record_frame(&FrameRecord {
+        url: "wss://trouter.example.com:443/v4/c",
+        kind: "trouter_ping",
+    })
+    .unwrap();
+
+    let entries = log_entries(&lab.log_path).unwrap();
+    let expected = [
+        serde_json::json!({
+            "verdict": "allow",
+            "event": "frame",
+            "channel": "web_socket",
+            "url": "wss://trouter.example.com/v4/c",
+            "own": "trouter_authenticate",
+        }),
+        serde_json::json!({
+            "verdict": "allow",
+            "event": "frame",
+            "channel": "web_socket",
+            "url": "wss://trouter.example.com:443/v4/c",
+            "own": "trouter_ping",
+        }),
+    ];
+    assert_eq!(entries.len(), expected.len());
+    for (entry, expected) in entries.iter().zip(&expected) {
+        let mut entry = entry.clone();
+        let ts = entry.as_object_mut().unwrap().remove("ts_ms").unwrap();
+        assert!(ts.as_u64().is_some_and(|ts| ts > 0));
+        assert_eq!(&entry, expected);
+    }
+    let text = fs::read_to_string(&lab.log_path).unwrap();
+    assert!(!text.contains(PLANTED_TOKEN), "{text}");
+}
+
+#[test]
+fn frame_entries_share_the_log_s_failure_mode() {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let sink = FillsUp {
+        written: Arc::clone(&written),
+        budget: 30,
+        failed: false,
+    };
+    let log = FenceLog::from_writer(sink);
+    let frame = FrameRecord {
+        url: "wss://trouter.example.com/v4/c",
+        kind: "trouter_ping",
+    };
+    assert!(log.record_frame(&frame).is_err(), "a half-written entry fails");
+    assert!(log.record_frame(&frame).is_err(), "and so does every later one");
+    let request = RequestRecord {
+        channel: Channel::WebSocket,
+        method: "SEND",
+        url: "wss://trouter.example.com/v4/c",
+        outcome: RequestOutcome::Own("trouter_session"),
+    };
+    assert!(log.record_request(&request).is_err(), "and every other kind of entry");
     let text = written.lock().unwrap().clone();
     assert!(!text.contains(&b'\n'), "nothing after the half-written entry");
 }

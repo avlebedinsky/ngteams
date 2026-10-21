@@ -1,0 +1,198 @@
+error[E0433]: cannot find `UserActivity` in `teams_proto`
+  --> tests/ui/proto_raw_frame.rs:13:37
+   |
+13 |     let _ = sink.send(&teams_proto::UserActivity::new()).await;
+   |                                     ^^^^^^^^^^^^ could not find `UserActivity` in `teams_proto`
+
+error[E0433]: cannot find `DeliveryResponse` in `teams_proto`
+  --> tests/ui/proto_raw_frame.rs:15:37
+   |
+15 |     let _ = sink.send(&teams_proto::DeliveryResponse::new(7)).await;
+   |                                     ^^^^^^^^^^^^^^^^ could not find `DeliveryResponse` in `teams_proto`
+
+error[E0277]: the trait bound `&str: OwnFrame` is not satisfied
+  --> tests/ui/proto_raw_frame.rs:12:23
+   |
+12 |     let _ = sink.send(&"5:2+::{\"name\":\"user.activity\",\"args\":[{\"state\":\"active\",\"cv\":\"x\"}]}").await;
+   |                  ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `OwnFrame` is not implemented for `&str`
+   |                  |
+   |                  required by a bound introduced by this call
+   |
+help: the following other types implement trait `OwnFrame`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   | impl OwnFrame for Authenticate {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Authenticate`
+...
+   | impl OwnFrame for Ping {
+   | ^^^^^^^^^^^^^^^^^^^^^^ `Ping`
+...
+   | impl OwnFrame for MessageLossAck {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MessageLossAck`
+...
+   | impl OwnFrame for Disconnect {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Disconnect`
+note: required by a bound in `FrameSink::<W>::send`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   |     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
+   |                          ^^^^^^^^ required by this bound in `FrameSink::<W>::send`
+
+error[E0277]: the trait bound `&str: OwnFrame` is not satisfied
+  --> tests/ui/proto_raw_frame.rs:12:13
+   |
+12 |     let _ = sink.send(&"5:2+::{\"name\":\"user.activity\",\"args\":[{\"state\":\"active\",\"cv\":\"x\"}]}").await;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `OwnFrame` is not implemented for `&str`
+   |
+help: the following other types implement trait `OwnFrame`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   | impl OwnFrame for Authenticate {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Authenticate`
+...
+   | impl OwnFrame for Ping {
+   | ^^^^^^^^^^^^^^^^^^^^^^ `Ping`
+...
+   | impl OwnFrame for MessageLossAck {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MessageLossAck`
+...
+   | impl OwnFrame for Disconnect {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Disconnect`
+note: required by a bound in `FrameSink::<W>::send`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   |     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
+   |                          ^^^^^^^^ required by this bound in `FrameSink::<W>::send`
+
+error[E0277]: the trait bound `&str: OwnFrame` is not satisfied
+  --> tests/ui/proto_raw_frame.rs:12:109
+   |
+12 |     let _ = sink.send(&"5:2+::{\"name\":\"user.activity\",\"args\":[{\"state\":\"active\",\"cv\":\"x\"}]}").await;
+   |                                                                                                             ^^^^^ the trait `OwnFrame` is not implemented for `&str`
+   |
+help: the following other types implement trait `OwnFrame`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   | impl OwnFrame for Authenticate {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Authenticate`
+...
+   | impl OwnFrame for Ping {
+   | ^^^^^^^^^^^^^^^^^^^^^^ `Ping`
+...
+   | impl OwnFrame for MessageLossAck {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MessageLossAck`
+...
+   | impl OwnFrame for Disconnect {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Disconnect`
+note: required by a bound in `FrameSink::<W>::send`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   |     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
+   |                          ^^^^^^^^ required by this bound in `FrameSink::<W>::send`
+
+error[E0277]: the trait bound `DeliveryAnswer: OwnFrame` is not satisfied
+  --> tests/ui/proto_raw_frame.rs:14:23
+   |
+14 |     let _ = sink.send(&DeliveryAnswer { id: 7 }).await;
+   |                  ---- ^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |                  |
+   |                  required by a bound introduced by this call
+   |
+help: the trait `OwnFrame` is not implemented for `DeliveryAnswer`
+  --> tests/ui/proto_raw_frame.rs:7:1
+   |
+ 7 | struct DeliveryAnswer {
+   | ^^^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `OwnFrame`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   | impl OwnFrame for Authenticate {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Authenticate`
+...
+   | impl OwnFrame for Ping {
+   | ^^^^^^^^^^^^^^^^^^^^^^ `Ping`
+...
+   | impl OwnFrame for MessageLossAck {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MessageLossAck`
+...
+   | impl OwnFrame for Disconnect {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Disconnect`
+note: required by a bound in `FrameSink::<W>::send`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   |     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
+   |                          ^^^^^^^^ required by this bound in `FrameSink::<W>::send`
+
+error[E0277]: the trait bound `DeliveryAnswer: OwnFrame` is not satisfied
+  --> tests/ui/proto_raw_frame.rs:14:13
+   |
+14 |     let _ = sink.send(&DeliveryAnswer { id: 7 }).await;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `OwnFrame` is not implemented for `DeliveryAnswer`
+  --> tests/ui/proto_raw_frame.rs:7:1
+   |
+ 7 | struct DeliveryAnswer {
+   | ^^^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `OwnFrame`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   | impl OwnFrame for Authenticate {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Authenticate`
+...
+   | impl OwnFrame for Ping {
+   | ^^^^^^^^^^^^^^^^^^^^^^ `Ping`
+...
+   | impl OwnFrame for MessageLossAck {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MessageLossAck`
+...
+   | impl OwnFrame for Disconnect {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Disconnect`
+note: required by a bound in `FrameSink::<W>::send`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   |     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
+   |                          ^^^^^^^^ required by this bound in `FrameSink::<W>::send`
+
+error[E0277]: the trait bound `DeliveryAnswer: OwnFrame` is not satisfied
+  --> tests/ui/proto_raw_frame.rs:14:50
+   |
+14 |     let _ = sink.send(&DeliveryAnswer { id: 7 }).await;
+   |                                                  ^^^^^ unsatisfied trait bound
+   |
+help: the trait `OwnFrame` is not implemented for `DeliveryAnswer`
+  --> tests/ui/proto_raw_frame.rs:7:1
+   |
+ 7 | struct DeliveryAnswer {
+   | ^^^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `OwnFrame`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   | impl OwnFrame for Authenticate {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Authenticate`
+...
+   | impl OwnFrame for Ping {
+   | ^^^^^^^^^^^^^^^^^^^^^^ `Ping`
+...
+   | impl OwnFrame for MessageLossAck {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MessageLossAck`
+...
+   | impl OwnFrame for Disconnect {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Disconnect`
+note: required by a bound in `FrameSink::<W>::send`
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   |     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
+   |                          ^^^^^^^^ required by this bound in `FrameSink::<W>::send`
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/ui/proto_raw_frame.rs:16:26
+   |
+16 |     let _ = writer.write(FrameText(String::from("3:::{\"id\":7,\"status\":200}"))).await;
+   |                          ^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> $WORKSPACE/crates/teams-proto/src/frame.rs
+   |
+   | pub struct FrameText(String);
+   |                      ^^^^^^ private field

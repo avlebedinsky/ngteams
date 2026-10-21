@@ -81,7 +81,7 @@
       "name": "the first socket's authentication, without reconnect parameters",
       "socket": "first",
       "direction": "out",
-      "frame": "5:::{\"name\":\"user.authenticate\",\"args\":[{\"headers\":{\"Authorization\":\"Bearer <token:1>\",\"X-MS-Migration\":\"True\"}}]}",
+      "frame": "5:::{\"name\":\"user.authenticate\",\"args\":[{\"headers\":{\"X-Ms-Test-User\":\"False\",\"Authorization\":\"Bearer <token:1>\",\"X-MS-Migration\":\"True\"}}]}",
       "expected": "own:trouter_session"
     },
     {

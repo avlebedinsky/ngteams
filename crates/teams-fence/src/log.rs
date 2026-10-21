@@ -23,6 +23,16 @@
 //! A WebSocket frame the audit saw leave the browser without an allow is logged the same way, with the verdict
 //! `breach` and the reason `sent_without_allow`.
 //!
+//! The native client's own Trouter frames ([`FrameRecord`]) are logged before each is sent, by the one socket sink
+//! that can send them (`teams_proto::FrameSink`): the channel, the socket's URL without its query, fragment or user
+//! info, and the frame's kind from the reviewed list, never its text (the authentication frame carries the account's
+//! token):
+//!
+//! ```json
+//! {"ts_ms":1760000000000,"verdict":"allow","event":"frame","channel":"web_socket","url":"wss://host/v4/c",
+//!  "own":"trouter_ping"}
+//! ```
+//!
 //! So is a target the browser fence couldn't arm ([`ArmingRecord`]): its type, the step that failed and how, whether
 //! its resume had been sent, whether it attached held (`waitingForDebugger`), what closing it gave and how it was
 //! contained, with the verdict `breach` when it may have run unguarded and `contained` when it can't have. No target
@@ -118,6 +128,24 @@ struct RequestEntry<'a> {
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'static str>,
+}
+
+/// An own frame the native client is about to send on a WebSocket: the socket's URL (logged without its query,
+/// fragment or user info) and the frame's kind on the reviewed list. Never the frame's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameRecord<'a> {
+    pub url: &'a str,
+    pub kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct FrameEntry {
+    ts_ms: u64,
+    verdict: &'static str,
+    event: &'static str,
+    channel: Channel,
+    url: String,
+    own: &'static str,
 }
 
 /// How an arming step failed.
@@ -316,6 +344,23 @@ impl FenceLog {
             own,
             reason,
             message,
+        })
+    }
+
+    /// Appends one own frame the native client is about to send, as a single line, and flushes it: the sink calls it
+    /// before the frame goes out and sends nothing it couldn't log. Once an append has failed, every later one fails
+    /// too.
+    ///
+    /// # Errors
+    /// When the entry can't be written, or an earlier append failed.
+    pub fn record_frame(&self, frame: &FrameRecord<'_>) -> io::Result<()> {
+        self.append(&FrameEntry {
+            ts_ms: now_ms(),
+            verdict: "allow",
+            event: "frame",
+            channel: Channel::WebSocket,
+            url: redact_url(frame.url),
+            own: frame.kind,
         })
     }
 

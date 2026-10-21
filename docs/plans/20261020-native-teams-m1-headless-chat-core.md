@@ -670,20 +670,37 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 **Files:**
 - Create: `crates/teams-proto/src/frame.rs`, `crates/teams-proto/tests/frame.rs`,
   `crates/fence-seal/tests/ui/{proto_raw_frame.rs,proto_own_frame.rs}` (+ `.stderr`)
+  (➕ `proto_frame_literal.rs`)
 - Modify: `crates/teams-proto/src/lib.rs`, `crates/teams-fence/src/{log.rs,target.rs}`,
-  `crates/teams-fence/tests/*`
+  `crates/teams-fence/tests/*` (➕ `docs/protocol/trouter.md`, `tests/fixtures/trouter/session.json`)
 
-- [ ] tests first (trybuild in `fence-seal`): a socket sink sends only `OwnFrame` (a sealed, reviewed list:
+- [x] tests first (trybuild in `fence-seal`): a socket sink sends only `OwnFrame` (a sealed, reviewed list:
       `user.authenticate`, keep-alives, the entries Task 14 reviewed); an unreviewed frame (raw text, `user.activity`,
       a response built by hand) doesn't compile, and `OwnFrame` can't be implemented or constructed outside
       `teams-proto`
-- [ ] tests first: `fence.log` gains a frame record (channel `WebSocket`, frame kind, never a token); every outgoing
+      (`FrameSink<W: FrameWriter>` with only `send<F: OwnFrame>`; the list: `Authenticate` (`user.authenticate`, the
+      messaging stack's three headers, the seven `connectparams` when there are some), `Ping`, `MessageLossAck`
+      (`trouter.processed_message_loss`, never an empty list) and `Disconnect` (`0::`), the Trouter session frames
+      Task 14 reviewed, without `user.activity`; the sink numbers acknowledged events itself; the frame's text is a
+      `FrameText` only the sink makes, its `Debug` the length only. `proto_raw_frame`: raw text, `user.activity`, a
+      hand-built delivery answer, a `FrameText` made outside; `proto_own_frame`: implementing `OwnFrame`; a third case,
+      `proto_frame_literal`: a reviewed frame built by struct literal (rustc reports that privacy error only in a file
+      with no other error). The fixture's first-socket `user.authenticate` gained the `X-Ms-Test-User` header every
+      messaging-stack socket sent in the captures)
+- [x] tests first: `fence.log` gains a frame record (channel `WebSocket`, frame kind, never a token); every outgoing
       frame is logged before it is sent; one that can't be logged isn't sent
-- [ ] only if Task 14 found harm **and** the user approved answering: a `DeliveryResponse` judged by the fence as a new
-      `WriteKind` (a delivery acknowledgement) on `Scope::Conversation`, so `Fence::check` does the membership read and
-      logs the decision; built only for a reviewed path on a complete, lab-only conversation; a `fence-seal` case
-      proves nothing outside `teams-fence`/`teams-proto` can mint one. Otherwise this checkbox is struck and recorded
-- [ ] `cargo test -p teams-proto -p teams-fence -p fence-seal` and the gate pass
+      (`FrameRecord` / `FenceLog::record_frame`: `{"verdict":"allow","event":"frame","channel":"web_socket","url":<the
+      socket without its query>,"own":<kind>}`; mutation-checked: logging after the send, and sending when the log
+      failed, each fail the tests)
+- [x] ~~only if Task 14 found harm **and** the user approved answering: a `DeliveryResponse` judged by the fence as a
+      new `WriteKind` (a delivery acknowledgement) on `Scope::Conversation`, so `Fence::check` does the membership read
+      and logs the decision; built only for a reviewed path on a complete, lab-only conversation; a `fence-seal` case
+      proves nothing outside `teams-fence`/`teams-proto` can mint one. Otherwise this checkbox is struck and recorded~~
+      (struck: Task 14 found no harm, deliveries stay unanswered, decided with Codex; no `DeliveryResponse`, no new
+      `WriteKind`, so `teams-fence/src/target.rs` is unchanged)
+- [x] `cargo test -p teams-proto -p teams-fence -p fence-seal` and the gate pass (parallel run: crate-scoped gate;
+      workspace gate after merge; `cargo test -p fixture-guard` and `proto-lab`'s `calling` tests too, for the fixture
+      change)
 
 ### Task 16: `teams-trouter`: the native push channel
 **Files:**
