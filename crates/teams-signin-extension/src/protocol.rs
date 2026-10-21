@@ -1,7 +1,8 @@
 //! The guard's wire: one line each way per question, on a Unix stream socket from each web process to
 //! `teams-signin`'s guard.
 //!
-//! - `armed <page id> <pid>`: the page's `send-request` handler is connected; answered `ok`.
+//! - `armed <page id> <pid>`: the page's `send-request` handler is connected; answered `ok`. The guard arms by page
+//!   id alone: the process id is told but not used (`docs/backlog/webkit-sign-in-guard-redirects.md`).
 //! - `request <page id> <method> <url>`: may this request go? Answered `allow` or `deny`.
 //!
 //! Anything else is answered `deny`, and the extension takes any answer but the expected one as a deny. A field never

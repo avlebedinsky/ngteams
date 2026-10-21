@@ -9,7 +9,10 @@ use teams_auth::signin::WindowAnswer;
 use url::{Host, Url};
 
 /// Why the window refuses a page that isn't local: the guard isn't complete (the plan's Task 24), so it never runs
-/// against the tenant until a later decision lifts this.
+/// against the tenant until a later decision lifts this. It holds for the whole run, not only the first URL: the guard
+/// denies every request off a loopback address (`Guard::local_only`), the navigation policy refuses every navigation
+/// off one, and the network session's only way out is a proxy that refuses everything (`crate::egress`), for the
+/// redirects `WebKit` follows without asking the guard.
 pub const NOT_LIVE: &str = "the sign-in window opens only a local page: its guard is not a complete fence \
      (docs/backlog/webkit-sign-in-guard-redirects.md); sign the lab in with `proto-lab auth`";
 
@@ -25,17 +28,17 @@ pub fn parse_args<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(args: I) -> Result
     }
 }
 
-/// Whether `url` is a page on this machine: `http` or `https` on a loopback address or `localhost`.
+/// Whether `url` is a page on this machine: `http` or `https` on a numeric loopback address. A name, `localhost`
+/// included, isn't: it is resolved by DNS, and the network session's proxy bypass is numeric only (`crate::egress`).
 #[must_use]
 pub fn is_local_page(url: &str) -> bool {
     let Ok(url) = Url::parse(url) else {
         return false;
     };
     let loopback = match url.host() {
-        Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
         Some(Host::Ipv4(address)) => address.is_loopback(),
         Some(Host::Ipv6(address)) => address.is_loopback(),
-        None => false,
+        Some(Host::Domain(_)) | None => false,
     };
     matches!(url.scheme(), "http" | "https") && loopback
 }

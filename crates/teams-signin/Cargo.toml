@@ -44,5 +44,10 @@ test-support = []
 name = "window"
 harness = false
 
+[[test]]
+# the answer channel on its own: its own `main` (a test harness prints to stdout), which runs itself again as a child
+name = "answer_channel"
+harness = false
+
 [lints]
 workspace = true

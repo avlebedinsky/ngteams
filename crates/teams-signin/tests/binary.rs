@@ -15,7 +15,6 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 fn only_a_page_on_this_machine_is_local() {
     for local in [
         "http://127.0.0.1:8080/authorize?x=1",
-        "https://localhost/authorize",
         "http://[::1]:9/a",
         "http://127.8.9.10/a",
     ] {
@@ -23,7 +22,11 @@ fn only_a_page_on_this_machine_is_local() {
     }
     for remote in [
         "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=x",
+        // a name is resolved by DNS and isn't in the proxy's numeric bypass, `localhost` included
+        "https://localhost/authorize",
+        "http://localhost:8080/a",
         "https://localhost.evil.test/a",
+        "http://192.0.2.1/a",
         "https://127.0.0.1.nip.io/a",
         "file:///etc/passwd",
         "ftp://127.0.0.1/a",

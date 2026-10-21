@@ -133,7 +133,7 @@ fn an_unarmed_page_gets_nothing() -> TestResult {
     assert_eq!(logged[0]["verdict"], "deny");
     assert_eq!(logged[1]["verdict"], "deny");
     match lab.events.try_recv()? {
-        GuardEvent::Armed { page, pid } => assert_eq!((page, pid), (PAGE, 1234)),
+        GuardEvent::Armed { page } => assert_eq!(page, PAGE),
         other @ GuardEvent::Redirect(_) => panic!("{other:?}"),
     }
     Ok(())
@@ -154,6 +154,51 @@ fn the_redirect_is_caught_logged_without_its_code_and_never_allowed() -> TestRes
     assert_eq!(logged[0]["reason"], "sign_in_redirect");
     assert_eq!(logged[0]["url"], NATIVE_CLIENT_REDIRECT);
     assert!(!fs::read_to_string(&lab.log_path)?.contains(CODE));
+    Ok(())
+}
+
+#[test]
+fn a_loopback_only_guard_denies_everything_off_loopback() -> TestResult {
+    let mut lab = lab()?;
+    lab.guard = lab.guard.local_only();
+    armed(&lab);
+    let _ = lab.events.try_recv()?;
+    let cases = [
+        ("GET", "http://127.0.0.1:8080/next?x=1", Decision::Allow),
+        ("GET", "http://[::1]:8080/next", Decision::Allow),
+        ("HEAD", "https://127.9.9.9/a", Decision::Allow),
+        (
+            "GET",
+            "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=x",
+            Decision::Deny,
+        ),
+        ("GET", "https://aadcdn.example.test/script.js?v=1", Decision::Deny),
+        ("GET", "http://192.0.2.1/img.png", Decision::Deny),
+        ("GET", "http://localhost:8080/next", Decision::Deny),
+        ("POST", TOKEN_URL, Decision::Deny),
+        ("POST", "https://login.microsoftonline.com/common/login", Decision::Deny),
+    ];
+    for (method, url, expected) in cases {
+        assert_eq!(lab.guard.decide(PAGE, method, url), expected, "{method} {url}");
+    }
+    // the redirect is still caught first, and logged as such
+    let url = format!("{NATIVE_CLIENT_REDIRECT}?code={CODE}&state=made-up");
+    assert_eq!(lab.guard.decide(PAGE, "GET", &url), Decision::Deny);
+    assert!(matches!(lab.events.try_recv()?, GuardEvent::Redirect(_)));
+    lab.guard.refuse("CONNECT", "192.0.2.1:443");
+    let logged = entries(&lab.log_path)?;
+    assert_eq!(logged.len(), cases.len() + 2, "one line per decision: {logged:?}");
+    for ((_, _, expected), entry) in cases.iter().zip(&logged) {
+        let verdict = if *expected == Decision::Allow { "allow" } else { "deny" };
+        assert_eq!(entry["verdict"], verdict, "{entry}");
+    }
+    assert_eq!(logged[cases.len()]["reason"], "sign_in_redirect");
+    let refused = &logged[cases.len() + 1];
+    assert_eq!(
+        (&refused["method"], &refused["url"]),
+        (&"CONNECT".into(), &"192.0.2.1:443".into())
+    );
+    assert_eq!(refused["verdict"], "deny");
     Ok(())
 }
 
@@ -214,7 +259,7 @@ fn the_socket_answers_the_extension_line_by_line() -> TestResult {
     assert_ne!(ALLOW, DENY);
 
     let events: Vec<GuardEvent> = lab.events.try_iter().collect();
-    assert!(matches!(events.as_slice(), [GuardEvent::Armed { page: PAGE, pid: 99 }]));
+    assert!(matches!(events.as_slice(), [GuardEvent::Armed { page: PAGE }]));
     // the four requests; a line that isn't one is answered, not logged
     assert_eq!(entries(&lab.log_path)?.len(), 4);
     Ok(())

@@ -7,14 +7,18 @@
 //!   logged to `fence.log` before it goes; the redirect is caught, never let through.
 //! - [`window`]: the webview set up behind the guard (`teams-signin-extension` in every web process), with what the
 //!   guard can't see switched off.
+//! - [`egress`]: the network session's only way off loopback, a proxy that refuses everything.
 //! - [`cli`]: the binary's refusals (a `test-support` build, a window outside the UI sandbox, a page that isn't local)
 //!   and its answer channel.
 //!
 //! **Not a complete fence** (decided with Codex, the plan's Task 24): a synchronous load's redirects and a kept-alive
 //! load's redirects after its page is gone are followed by `WebKit`'s network process without reaching the guard. So
-//! the binary opens only a local page ([`cli::NOT_LIVE`]): the window is tested offline, and the lab keeps signing in
-//! through `proto-lab auth` (`docs/backlog/webkit-sign-in-guard-redirects.md`).
+//! the binary opens only a local page ([`cli::NOT_LIVE`]) and the window stays on loopback for its whole run: the
+//! guard denies, and the navigation policy refuses, everything off a loopback address, and the network session goes
+//! anywhere else only through [`egress::BlackHole`], which refuses it. The window is tested offline, and the lab keeps
+//! signing in through `proto-lab auth` (`docs/backlog/webkit-sign-in-guard-redirects.md`).
 
 pub mod cli;
+pub mod egress;
 pub mod guard;
 pub mod window;

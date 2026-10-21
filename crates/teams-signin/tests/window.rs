@@ -17,13 +17,23 @@
 //!   redirected by a 307 reach their targets with no decision and no `fence.log` line; the same `POST` sent
 //!   asynchronously has its redirect decided and denied. A kept-alive `GET` redirected after its page is gone is
 //!   reported. If `WebKit` ever decides those redirects, this test fails and the backlog item can be revisited.
+//! - `remote`: the window stays on loopback for its whole run. The page names a "remote" host: this machine's own
+//!   non-loopback address (numeric, so not loopback to the guard, the policy or the proxy bypass), where two counting
+//!   listeners stand (HTTP and HTTPS ports), each proven reachable before the run. It sends a synchronous `GET` whose
+//!   302 goes there over HTTP and one whose 302 goes there over HTTPS (the gap), a `fetch` and an image there, a
+//!   kept-alive `GET` redirected there after its page is gone, a navigation there and one redirected there by a 302.
+//!   The listeners must accept no connection, the gap's two redirects must reach the window's refusing proxy (its
+//!   `GET http://…` and `CONNECT host:port` denied in `fence.log`), and the rest must be denied in `fence.log`. Without a
+//!   non-loopback address the listeners' check is skipped with a note (an error under `GPUI_SMOKE_REQUIRE=1`).
+//! - `crash`: once the page is up the window has its app id in niri's window list; then the test kills the child's
+//!   web processes, and the window must answer that its page's web process ended.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -36,7 +46,7 @@ use teams_auth::signin::{WindowAnswer, WindowRequest};
 use teams_auth::token::NATIVE_CLIENT_REDIRECT;
 use teams_fence::FenceLog;
 use teams_signin::window::{self, WindowConfig};
-use ui_sandbox::{Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
+use ui_sandbox::{Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip, wait_until};
 
 const MODE_ENV: &str = "TEAMS_SIGNIN_WINDOW_TEST";
 const PORT_ENV: &str = "TEAMS_SIGNIN_TEST_PORT";
@@ -49,7 +59,7 @@ const WAIT: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
     let outcome = match std::env::var(MODE_ENV).as_deref() {
-        Ok(scenario @ ("channels" | "gaps")) => child(scenario),
+        Ok(scenario @ ("channels" | "gaps" | "remote" | "crash")) => child(scenario),
         Ok(other) => Err(format!("unknown mode {other}").into()),
         Err(_) => parent(),
     };
@@ -111,17 +121,35 @@ fn parent() -> SandboxResult {
     let Some(sandbox) = sandbox_or_skip("teams-signin window", &SandboxOptions::default())? else {
         return Ok(());
     };
-    let channels =
-        run_scenario(&sandbox, "channels").map_err(|error| format!("channels: {error}{}", sandbox.logs()))?;
+    let none = Remote::none();
+    let channels = run_scenario(&sandbox, "channels", &none, |_, _, _| Ok(()))
+        .map_err(|error| format!("channels: {error}{}", sandbox.logs()))?;
     if std::env::var_os("TEAMS_SIGNIN_TEST_DUMP").is_some() {
         say(&format!("{:?}\n{}", channels.requests, channels.log_text));
     }
     check_channels(&channels)?;
-    let gaps = run_scenario(&sandbox, "gaps").map_err(|error| format!("gaps: {error}{}", sandbox.logs()))?;
+    let gaps = run_scenario(&sandbox, "gaps", &none, |_, _, _| Ok(()))
+        .map_err(|error| format!("gaps: {error}{}", sandbox.logs()))?;
     if std::env::var_os("TEAMS_SIGNIN_TEST_DUMP").is_some() {
         say(&format!("{:?}\n{}", gaps.requests, gaps.log_text));
     }
     check_gaps(&gaps)?;
+    let remote = Remote::start()?;
+    let run = run_scenario(&sandbox, "remote", &remote, |_, _, _| Ok(()))
+        .map_err(|error| format!("remote: {error}{}", sandbox.logs()))?;
+    if std::env::var_os("TEAMS_SIGNIN_TEST_DUMP").is_some() {
+        say(&format!("{:?}\n{}", run.requests, run.log_text));
+    }
+    check_remote(&run, &remote)?;
+    let crash = run_scenario(&sandbox, "crash", &remote, kill_web_processes)
+        .map_err(|error| format!("crash: {error}{}", sandbox.logs()))?;
+    check(
+        crash
+            .answer
+            .starts_with(&format!("answer failed {}", window::WEB_PROCESS_ENDED)),
+        "the window answers that its page's web process ended",
+        &crash,
+    )?;
     say("teams-signin window: ok");
     Ok(())
 }
@@ -159,10 +187,17 @@ impl Run {
     }
 }
 
-fn run_scenario(sandbox: &Sandbox, scenario: &str) -> SandboxResult<Run> {
-    let server = Server::start()?;
-    let web_sockets = WebSocketListener::start()?;
-    server.set_web_socket_port(web_sockets.port);
+/// What the test does while the window runs, before its answer.
+type During = fn(&Sandbox, &mut Running, &Server) -> SandboxResult;
+
+fn run_scenario(sandbox: &Sandbox, scenario: &str, remote: &Remote, during: During) -> SandboxResult<Run> {
+    let web_sockets = Counting::start(IpAddr::from([127, 0, 0, 1]))?;
+    let server = Server::start(Hosts {
+        web_socket_port: web_sockets.port,
+        remote_http: remote.http(),
+        remote_tls: remote.tls(),
+    })?;
+    remote.reset();
     let dir = tempfile::tempdir()?;
     let log_path = dir.path().join("fence.log");
     let home = dir.path().join("home");
@@ -187,7 +222,10 @@ fn run_scenario(sandbox: &Sandbox, scenario: &str) -> SandboxResult<Run> {
             ("GTK_A11Y", "none"),
         ],
     )?;
-    let running = Running::new(child)?;
+    let mut running = Running::new(child)?;
+    if let Err(error) = during(sandbox, &mut running, &server) {
+        return Err(running.fail(&error));
+    }
     let answer = running
         .line_where(RUN, |line| line.starts_with("answer "))
         .map_err(|error| format!("no answer: {error:?}"))?;
@@ -322,6 +360,193 @@ fn check_channels_log(run: &Run) -> SandboxResult {
     )
 }
 
+/// The "remote" host: this machine's own non-loopback address, with a counting listener for HTTP and one for HTTPS;
+/// or, on a machine without one, a documentation address nothing answers on (192.0.2.1, TEST-NET-1) and no listeners.
+struct Remote {
+    listeners: Option<(Counting, Counting)>,
+}
+
+impl Remote {
+    /// Stand-ins for the scenarios that name no remote host.
+    const fn none() -> Self {
+        Self { listeners: None }
+    }
+
+    fn start() -> SandboxResult<Self> {
+        let Some(address) = own_address() else {
+            if ui_sandbox::required() {
+                return Err("no non-loopback address to stand a remote host on, and GPUI_SMOKE_REQUIRE=1".into());
+            }
+            say("teams-signin window: no non-loopback address here: the remote listeners' check is skipped");
+            return Ok(Self::none());
+        };
+        let listeners = (Counting::start(address)?, Counting::start(address)?);
+        for listener in [&listeners.0, &listeners.1] {
+            listener.prove_reachable()?;
+        }
+        Ok(Self {
+            listeners: Some(listeners),
+        })
+    }
+
+    fn http(&self) -> String {
+        self.listeners
+            .as_ref()
+            .map_or_else(|| "192.0.2.1:8080".into(), |(http, _)| http.authority())
+    }
+
+    fn tls(&self) -> String {
+        self.listeners
+            .as_ref()
+            .map_or_else(|| "192.0.2.1:8443".into(), |(_, tls)| tls.authority())
+    }
+
+    fn reset(&self) {
+        if let Some((http, tls)) = &self.listeners {
+            http.reset();
+            tls.reset();
+        }
+    }
+
+    /// The connections the listeners accepted, once the ones already made have been accepted; `None` without them.
+    fn connections(&self) -> Option<usize> {
+        let (http, tls) = self.listeners.as_ref()?;
+        thread::sleep(Duration::from_millis(500));
+        Some(http.connections() + tls.connections())
+    }
+}
+
+/// This machine's address on its default route, if it isn't loopback: a UDP socket "connected" to a documentation
+/// address learns its source address without sending anything.
+fn own_address() -> Option<IpAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    let address = socket.local_addr().ok()?.ip();
+    (!address.is_loopback() && !address.is_unspecified()).then_some(address)
+}
+
+fn check_remote(run: &Run, remote: &Remote) -> SandboxResult {
+    check(
+        run.answer == format!("answer redirect {}", redirect_url()),
+        "the window hands the redirect",
+        run,
+    )?;
+    check(run.report("fired").is_some(), "the page sent everything", run)?;
+    for first in ["/gap-http", "/gap-https", "/nav-redirect"] {
+        check(run.got("GET", first), &format!("{first} (loopback) loaded"), run)?;
+    }
+    let (http, tls) = (remote.http(), remote.tls());
+    let denied = |method: &str, url: &str| {
+        run.log
+            .iter()
+            .any(|line| line["method"] == method && line["url"] == url && line["verdict"] == "deny")
+    };
+    check(
+        denied("GET", &format!("http://{http}/gap-http-target")),
+        "a synchronous GET's 302 off loopback (the gap) reaches the refusing proxy over HTTP, denied",
+        run,
+    )?;
+    check(
+        denied("CONNECT", &tls),
+        "a synchronous GET's 302 off loopback (the gap) reaches the refusing proxy over HTTPS, denied",
+        run,
+    )?;
+    for path in ["/fetch", "/img.png", "/nav", "/nav-target"] {
+        check(
+            denied("GET", &format!("http://{http}{path}")),
+            &format!("{path} off loopback is denied in fence.log"),
+            run,
+        )?;
+    }
+    check(
+        !run.log
+            .iter()
+            .any(|line| line["verdict"] == "allow" && line["url"].as_str().is_some_and(|url| url.contains(&http))),
+        "nothing off loopback is allowed",
+        run,
+    )?;
+    let keepalive = format!("http://{http}/keepalive-target");
+    say(&format!(
+        "teams-signin window: a kept-alive GET redirected off loopback after its page is gone: {}",
+        if denied("GET", &keepalive) {
+            "refused by the proxy"
+        } else {
+            "not followed"
+        }
+    ));
+    match remote.connections() {
+        Some(connections) => check(
+            connections == 0,
+            &format!("no connection reached the remote host's listeners ({connections} did)"),
+            run,
+        ),
+        None => Ok(()),
+    }
+}
+
+/// The `crash` scenario's step: once the page is up, its window is in niri's list under the window's app id, and
+/// every `WebKit` web process under the child is killed.
+fn kill_web_processes(sandbox: &Sandbox, running: &mut Running, server: &Server) -> SandboxResult {
+    if wait_until(RUN, || {
+        server
+            .requests()
+            .iter()
+            .any(|(_, path)| path == "/report?ready=1")
+            .then_some(())
+    })
+    .is_none()
+    {
+        return Err("the page never came up".into());
+    }
+    let windows = sandbox.niri_msg(&["windows"])?;
+    if !windows.contains(window::APP_ID) {
+        return Err(format!("no window with the app id {}: {windows}", window::APP_ID).into());
+    }
+    let web_processes: Vec<u32> = descendants(running.pid())
+        .into_iter()
+        .filter(|(_, name)| name.starts_with("WebKitWebProces"))
+        .map(|(pid, _)| pid)
+        .collect();
+    if web_processes.is_empty() {
+        return Err("no web process under the child".into());
+    }
+    for pid in web_processes {
+        let status = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()?;
+        if !status.success() {
+            return Err(format!("web process {pid} couldn't be killed").into());
+        }
+    }
+    Ok(())
+}
+
+/// Every process under `root`, with its name (`/proc`).
+fn descendants(root: u32) -> Vec<(u32, String)> {
+    let processes: Vec<(u32, u32, String)> = fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+            let (head, rest) = stat.rsplit_once(") ")?;
+            let name = head.split_once(" (")?.1.to_owned();
+            let parent: u32 = rest.split_whitespace().nth(1)?.parse().ok()?;
+            Some((pid, parent, name))
+        })
+        .collect();
+    let mut found = Vec::new();
+    let mut parents = vec![root];
+    while let Some(parent) = parents.pop() {
+        for (pid, _, name) in processes.iter().filter(|(_, of, _)| *of == parent) {
+            found.push((*pid, name.clone()));
+            parents.push(*pid);
+        }
+    }
+    found
+}
+
 fn check_gaps(run: &Run) -> SandboxResult {
     check(
         run.answer == format!("answer redirect {}", redirect_url()),
@@ -373,37 +598,35 @@ fn check_gaps(run: &Run) -> SandboxResult {
 
 // --- the local server ---
 
+/// The other hosts a page names: the `WebSocket` listener's port and the remote host's two authorities.
+struct Hosts {
+    web_socket_port: u16,
+    remote_http: String,
+    remote_tls: String,
+}
+
 /// A tiny HTTP/1.1 server: one request per connection, every one recorded.
 struct Server {
     port: u16,
     requests: Arc<Mutex<Vec<(String, String)>>>,
-    web_socket_port: Arc<Mutex<u16>>,
 }
 
 impl Server {
-    fn start() -> io::Result<Self> {
+    fn start(hosts: Hosts) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let web_socket_port = Arc::new(Mutex::new(0));
-        let (recorded, ws) = (Arc::clone(&requests), Arc::clone(&web_socket_port));
+        let recorded = Arc::clone(&requests);
+        let hosts = Arc::new(hosts);
         thread::spawn(move || {
             for stream in listener.incoming().map_while(Result::ok) {
-                let (recorded, ws) = (Arc::clone(&recorded), Arc::clone(&ws));
+                let (recorded, hosts) = (Arc::clone(&recorded), Arc::clone(&hosts));
                 thread::spawn(move || {
-                    let _ = handle(stream, port, &recorded, &ws);
+                    let _ = handle(stream, port, &recorded, &hosts);
                 });
             }
         });
-        Ok(Self {
-            port,
-            requests,
-            web_socket_port,
-        })
-    }
-
-    fn set_web_socket_port(&self, port: u16) {
-        *self.web_socket_port.lock().unwrap_or_else(PoisonError::into_inner) = port;
+        Ok(Self { port, requests })
     }
 
     fn requests(&self) -> Vec<(String, String)> {
@@ -411,7 +634,7 @@ impl Server {
     }
 }
 
-fn handle(stream: TcpStream, port: u16, recorded: &Mutex<Vec<(String, String)>>, ws: &Mutex<u16>) -> io::Result<()> {
+fn handle(stream: TcpStream, port: u16, recorded: &Mutex<Vec<(String, String)>>, hosts: &Hosts) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -440,8 +663,7 @@ fn handle(stream: TcpStream, port: u16, recorded: &Mutex<Vec<(String, String)>>,
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push((method.clone(), path.clone()));
-    let ws_port = *ws.lock().unwrap_or_else(PoisonError::into_inner);
-    respond(stream, &route(&path, port, ws_port))
+    respond(stream, &route(&path, port, hosts))
 }
 
 /// A response: status line, extra headers, content type and body.
@@ -484,11 +706,23 @@ fn text(body: &str) -> Response {
 const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\
     \x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
 
-fn route(path: &str, port: u16, ws_port: u16) -> Response {
+fn route(path: &str, port: u16, hosts: &Hosts) -> Response {
     let redirect_to = redirect_url();
+    let (http, tls) = (&hosts.remote_http, &hosts.remote_tls);
     match path.split('?').next().unwrap_or_default() {
-        "/authorize" if path.contains("scenario=channels") => page(&channels_page(ws_port, &redirect_to)),
+        "/authorize" if path.contains("scenario=channels") => page(&channels_page(hosts.web_socket_port, &redirect_to)),
+        "/authorize" if path.contains("scenario=remote") => page(&remote_page(http)),
+        "/authorize" if path.contains("scenario=crash") => {
+            page("<script>fetch('/report?ready=1').catch(() => {});</script>")
+        }
         "/authorize" => page(&gaps_page()),
+        "/gap-http" => redirect("302 Found", &format!("http://{http}/gap-http-target")),
+        "/gap-https" => redirect("302 Found", &format!("https://{tls}/gap-https-target")),
+        "/nav-redirect" => redirect("302 Found", &format!("http://{http}/nav-target")),
+        "/keepalive-remote" => {
+            thread::sleep(Duration::from_millis(1500));
+            redirect("302 Found", &format!("http://{http}/keepalive-target"))
+        }
         "/img.png" => Response {
             status: "200 OK",
             headers: Vec::new(),
@@ -554,6 +788,30 @@ const report = (k, v) => fetch('/report?' + k + '=' + encodeURIComponent(String(
     )
 }
 
+/// The `remote` scenario's page: every way it has to reach `http` (the remote host's HTTP authority) or, through
+/// `/gap-https`, its HTTPS one; then it ends on `/next`, which navigates to the redirect.
+fn remote_page(http: &str) -> String {
+    format!(
+        "<script>
+const report = (k, v) => fetch('/report?' + k + '=' + encodeURIComponent(String(v))).catch(() => {{}});
+const sync = (url) => {{ const x = new XMLHttpRequest(); x.open('GET', url, false); try {{ x.send(); }} catch (e) {{}} }};
+(async () => {{
+  sync('/gap-http');
+  sync('/gap-https');
+  try {{ await fetch('http://{http}/fetch'); }} catch (e) {{}}
+  await new Promise((done) => {{
+    const img = new Image(); img.onload = done; img.onerror = done; img.src = 'http://{http}/img.png';
+  }});
+  fetch('/keepalive-remote', {{keepalive: true}}).catch(() => {{}});
+  await report('fired', 1);
+  location.href = 'http://{http}/nav';
+  setTimeout(() => {{ location.href = '/nav-redirect'; }}, 400);
+  setTimeout(() => {{ location.href = '/next'; }}, 900);
+}})();
+</script>"
+    )
+}
+
 fn gaps_page() -> String {
     "<script>
 (async () => {
@@ -587,15 +845,16 @@ fn respond(mut stream: TcpStream, response: &Response) -> io::Result<()> {
     stream.flush()
 }
 
-/// A TCP listener a `WebSocket` would have to connect to; it counts connections and serves none.
-struct WebSocketListener {
+/// A TCP listener nothing may connect to (a `WebSocket`'s, the remote host's); it counts connections and serves none.
+struct Counting {
+    address: IpAddr,
     port: u16,
     connections: Arc<Mutex<usize>>,
 }
 
-impl WebSocketListener {
-    fn start() -> io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
+impl Counting {
+    fn start(address: IpAddr) -> io::Result<Self> {
+        let listener = TcpListener::bind((address, 0))?;
         let port = listener.local_addr()?.port();
         let connections = Arc::new(Mutex::new(0));
         let counted = Arc::clone(&connections);
@@ -604,7 +863,28 @@ impl WebSocketListener {
                 *counted.lock().unwrap_or_else(PoisonError::into_inner) += 1;
             }
         });
-        Ok(Self { port, connections })
+        Ok(Self {
+            address,
+            port,
+            connections,
+        })
+    }
+
+    fn authority(&self) -> String {
+        format!("{}:{}", self.address, self.port)
+    }
+
+    /// Connects once and waits for it to be counted, so a count of nothing later means something.
+    fn prove_reachable(&self) -> SandboxResult {
+        let _probe = TcpStream::connect((self.address, self.port))?;
+        wait_until(WAIT, || (self.connections() > 0).then_some(()))
+            .ok_or_else(|| format!("the listener on {} never counted a connection", self.authority()))?;
+        self.reset();
+        Ok(())
+    }
+
+    fn reset(&self) {
+        *self.connections.lock().unwrap_or_else(PoisonError::into_inner) = 0;
     }
 
     fn connections(&self) -> usize {

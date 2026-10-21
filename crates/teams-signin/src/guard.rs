@@ -5,6 +5,9 @@
 //!
 //! On top of the classifier:
 //! - a page that hasn't told the guard it is armed gets every request denied;
+//! - in loopback-only mode ([`Guard::local_only`], which the window always turns on while [`crate::cli::NOT_LIVE`]
+//!   holds) every request that isn't to a page on a loopback address ([`crate::cli::is_local_page`]) is denied, so no
+//!   decision of the guard lets the window off this machine;
 //! - the redirect to the registered redirect URI (it carries the authorization code) is never let through: it is
 //!   logged without its query ([`RequestOutcome::SignInRedirect`]) and handed to the window ([`GuardEvent::Redirect`]),
 //!   which hands it to the parent.
@@ -12,7 +15,7 @@
 //! [`GuardServer`] serves the guard on a Unix socket, one thread per web process connection
 //! (`teams_signin_extension::protocol`).
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -25,11 +28,14 @@ use teams_auth::secrets::Secret;
 use teams_fence::{Channel, FenceLog, RequestOutcome, RequestRecord};
 use teams_signin_extension::protocol::{ALLOW, DENY, LINE_LIMIT, OK, Query};
 
+use crate::cli::is_local_page;
+
 /// What the guard tells the window.
 #[derive(Debug)]
 pub enum GuardEvent {
-    /// A page's `send-request` handler is connected, in this web process.
-    Armed { page: u64, pid: u32 },
+    /// A page's `send-request` handler is connected. Arming is per page: the process id the extension tells is not
+    /// used, and only the view's first arming is waited for (`docs/backlog/webkit-sign-in-guard-redirects.md`).
+    Armed { page: u64 },
     /// The redirect to the registered redirect URI, caught (it carries the code).
     Redirect(Secret),
 }
@@ -46,8 +52,10 @@ pub struct Guard {
     classifier: Classifier,
     log: FenceLog,
     redirect: RedirectUri,
-    /// Armed pages, each with the process that armed it last.
-    armed: Mutex<BTreeMap<u64, u32>>,
+    /// Every request off a loopback address denied ([`Guard::local_only`]).
+    local_only: bool,
+    /// Armed pages.
+    armed: Mutex<BTreeSet<u64>>,
     events: Mutex<mpsc::Sender<GuardEvent>>,
 }
 
@@ -68,9 +76,18 @@ impl Guard {
             classifier: Classifier::sign_in(),
             log,
             redirect,
-            armed: Mutex::new(BTreeMap::new()),
+            local_only: false,
+            armed: Mutex::new(BTreeSet::new()),
             events: Mutex::new(events),
         }
+    }
+
+    /// The same guard denying every request that isn't to a page on a loopback address (after catching the redirect,
+    /// which is still caught and logged as such): the window's mode while [`crate::cli::NOT_LIVE`] holds.
+    #[must_use]
+    pub const fn local_only(mut self) -> Self {
+        self.local_only = true;
+        self
     }
 
     /// The same guard with one more own-state rule: tests stand a local endpoint in for one of Entra's. Only in a
@@ -85,12 +102,10 @@ impl Guard {
     /// The answer to one protocol line.
     pub fn answer(&self, line: &str) -> &'static str {
         match Query::parse(line) {
-            Some(Query::Armed { page, pid }) => {
-                self.armed
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(page, pid);
-                self.tell(GuardEvent::Armed { page, pid });
+            // the process id is on the wire but unused: arming is per page
+            Some(Query::Armed { page, .. }) => {
+                self.armed.lock().unwrap_or_else(PoisonError::into_inner).insert(page);
+                self.tell(GuardEvent::Armed { page });
                 OK
             }
             Some(Query::Request { page, method, url }) => match self.decide(page, &method, &url) {
@@ -107,7 +122,7 @@ impl Guard {
             .armed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(&page);
+            .contains(&page);
         if !armed {
             self.record(method, url, RequestOutcome::Unclassified);
             return Decision::Deny;
@@ -115,6 +130,10 @@ impl Guard {
         if self.redirect.matches(url) {
             self.record(method, url, RequestOutcome::SignInRedirect);
             self.tell(GuardEvent::Redirect(Secret::new(url)));
+            return Decision::Deny;
+        }
+        if self.local_only && !is_local_page(url) {
+            self.refuse(method, url);
             return Decision::Deny;
         }
         let outcome = match self.classifier.classify(method, url, None) {
@@ -137,6 +156,12 @@ impl Guard {
     /// to it); the window hands it on itself.
     pub fn caught_navigation(&self, url: &str) {
         self.record("GET", url, RequestOutcome::SignInRedirect);
+    }
+
+    /// Logs a deny for `method` `url` that never became a decided request: a navigation the window's policy refused,
+    /// or a connection the window's egress proxy refused ([`crate::egress`]).
+    pub fn refuse(&self, method: &str, url: &str) {
+        self.record(method, url, RequestOutcome::Unclassified);
     }
 
     /// Logs one decision; `false` when it couldn't be.

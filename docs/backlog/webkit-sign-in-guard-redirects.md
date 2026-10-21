@@ -22,6 +22,22 @@ rule list couldn't log a decision anyway, and WebKitGTK 2.54.1 has no setting th
 off. Either gap breaks "every decision logged before the request goes", so the guard isn't a complete fence and
 `teams-signin` opens only a local page (`teams_signin::cli::NOT_LIVE`); the lab signs in through `proto-lab auth`.
 
+While `NOT_LIVE` holds the window stays on loopback for its whole run, not only its first URL (a review of Task 24):
+the guard denies every request off a numeric loopback address (`Guard::local_only`), the navigation policy refuses
+every navigation off one, and the network session reaches anything else only through `teams_signin::egress`'s
+black hole, a proxy on loopback that logs and refuses every connection (the custom proxy settings put it under every
+load of the soup session, the gaps above included). The window test's `remote` scenario pins it: the gaps' redirects
+to this machine's own non-loopback address reach the black hole, and nothing reaches the listeners there. That is a
+bound for the offline window, not the egress guard below: the black hole refuses, it doesn't inspect and forward.
+
+Arming is checked for the view's first page only. A page's extension tells the guard it is armed (with its process
+id), the authorize URL opens only once the view's own page is, and a page with no armed record is denied; but a later
+web process (a process swap on a navigation, or one `WebKit` starts again) whose extension didn't load sends its
+requests without asking the guard, and nothing notices: the process id is told but not used, and `WebKitGTK` names
+no web process to the UI process to compare it with. The window ends its run when the page's web process ends
+(`WEB_PROCESS_ENDED`), which covers a crash but not a swap. Off loopback the black hole still refuses such a process's
+requests.
+
 What would close it, neither tried yet:
 - a mandatory, inspecting egress guard: the only way out of every WebKit subprocess that sends (the network process
   above all), with no direct connection and no uninspected tunnel possible, seeing method, URL and body; for HTTPS that

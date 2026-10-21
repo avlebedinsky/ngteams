@@ -1089,6 +1089,16 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
   - `webkit6` 0.6.1 needs `gtk4`'s `v4_10` (it names `gtk::Accessible`); `webkit6`'s `v2_52` API level (2.54.1 on the
     machine). WebKitGTK 2.50 dropped the hyperlink auditing setting and 2.48 the DNS prefetching one, so neither is
     set; an `<a ping>` reaches the guard through the cached-resource loader.
+  - Review fixes (round 1; settled with Codex, transcript under the run's
+    `discussions/fixer-task-24-not-live-bound/`): `NOT_LIVE` now holds for the whole run, not only the first URL.
+    The guard runs loopback-only (`Guard::local_only`), the navigation policy refuses anything off loopback, and the
+    network session's only way off loopback is `teams_signin::egress`'s black hole (a custom proxy that logs and
+    refuses; numeric `127.0.0.0/8` and `::1` bypass it, so `localhost` is no longer a local page). The window test's
+    `remote` scenario pins it. Arming is checked for the view's first page only, not "a process that never arms is
+    detected" as decided above: the process id is told but unused, and a later web process whose extension didn't
+    load goes unnoticed (recorded in the backlog item). The run ends when the page's web process ends (`crash`
+    scenario), and every end tears the view's web process and window down. The window has its Wayland app id
+    (`APP_ID`, as GTK's program name), and the answer channel has a test of its own (`tests/answer_channel.rs`).
 
 ### Task 25: Verify the lab acceptance
 **Files:**

@@ -10,7 +10,9 @@
 //! What this can't see (the plan's Task 24, decided with Codex): a synchronous load's redirects and a kept-alive load's
 //! redirects after its page is gone are followed by the network process without a second `send-request`, and
 //! `WebSockets` never pass it. So the window is not a complete fence; `teams-signin` keeps the features it can switch
-//! off off and refuses to run against anything but a loopback page.
+//! off off and stays on loopback for the whole run: it opens only a loopback page, its guard and navigation policy
+//! refuse everything off loopback, and its network session reaches anything else only through a proxy that refuses
+//! it (`teams_signin::egress`).
 //!
 //! The FFI is by hand: no Rust binding has `WebKit`'s web process extension API. Only the three `WebKit` functions
 //! below and two signals are used.
