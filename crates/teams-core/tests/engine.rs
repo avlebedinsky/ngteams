@@ -6,9 +6,10 @@
 //! the native client made, which is checked too); the catch-up after a dropped socket, each message stored
 //! once; a write throttled once that goes out from the engine's tick; a write whose check can't sync, answered as the
 //! row that waits; a post whose answer was lost and whose check couldn't sync, settled later by a catch-up or by its
-//! own echo over the push channel and told once either way; a delivery whose conversation can't be read, caught up
-//! from the tick; and an engine without a push channel that syncs on demand and refuses what the store says can't be
-//! done.
+//! own echo over the push channel and told once either way; such a post whose copy no read can take, met first by a
+//! check from the tick and told last as the row stands, waiting or given up; a delivery whose conversation can't be
+//! read, caught up from the tick; and an engine without a push channel that syncs on demand and refuses what the
+//! store says can't be done.
 //!
 //! Every write goes through each account's own fence over the lab roster, the 1:1 chats' members read live from the
 //! mock. Every id and token here is the mock's made-up one, never a real one.
@@ -19,18 +20,18 @@
 use std::fmt::Write as _;
 use std::future::{self, Future};
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
-use teams_core::Outbox;
 use teams_core::engine::{
     self, Action, Cause, EngineError, EngineHandle, EngineOptions, Event, MessageChange, Parts, Push,
 };
+use teams_core::{Clock, MAX_FAILED_CHECKS, Outbox};
 use teams_fence::lab::{LabConfig, record_abc_chat};
 use teams_fence::{
     Fence, FenceLog, LiveMembershipSource, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope,
@@ -312,6 +313,8 @@ struct Native {
     next_write: Arc<AtomicU16>,
     /// The next write reaches the service and its answer is lost ([`Interposed`]).
     lose_answer: Arc<AtomicBool>,
+    /// How far ahead of the wall clock the outbox's clock runs, in milliseconds (a row's backoff without waiting).
+    ahead: Arc<AtomicI64>,
     /// An [`Event::Failed`] is taken like any other event instead of failing the test.
     failures_expected: bool,
     _dir: tempfile::TempDir,
@@ -391,7 +394,8 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
         next: Arc::clone(&next_write),
         lose: Arc::clone(&lose_answer),
     };
-    let outbox = Outbox::new(Arc::new(interposed), fence, membership, author);
+    let ahead = Arc::new(AtomicI64::new(0));
+    let outbox = Outbox::new(Arc::new(interposed), fence, membership, author).with_clock(clock_ahead(&ahead));
     let handle = engine::start(Parts {
         store,
         client,
@@ -407,6 +411,7 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
         reads_fail,
         next_write,
         lose_answer,
+        ahead,
         failures_expected: false,
         _dir: dir,
     }
@@ -503,6 +508,17 @@ impl Native {
         row
     }
 
+    /// Moves the outbox's clock past row `id`'s backoff, so the tick checks it again; the row as that check left it,
+    /// told with `failed_checks` checks that couldn't tell whether it arrived.
+    async fn checked_from_the_tick(&mut self, id: i64, failed_checks: u32) -> OutboxEntry {
+        self.ahead.fetch_add(3_600_000, Ordering::SeqCst);
+        self.event(|event| match event {
+            Event::Outbox(entry) if entry.id == id && entry.failed_checks == failed_checks => Some(entry.clone()),
+            _ => None,
+        })
+        .await
+    }
+
     /// The events waiting now, taken: the outbox row `id` as each of them told it. A request answered first makes
     /// sure the engine is done with what came before it.
     async fn told_rows(&mut self, id: i64) -> Vec<OutboxEntry> {
@@ -539,6 +555,18 @@ fn send(conversation: &str, text: &str) -> Action {
         conversation: conversation.to_owned(),
         text: MessageText::plain(text).unwrap(),
     }
+}
+
+/// The outbox's clock: the wall clock, `ahead` milliseconds on.
+fn clock_ahead(ahead: &Arc<AtomicI64>) -> Clock {
+    let ahead = Arc::clone(ahead);
+    Arc::new(move || now_ms() + ahead.load(Ordering::SeqCst))
+}
+
+/// The wall clock in milliseconds since the Unix epoch.
+fn now_ms() -> i64 {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    i64::try_from(since.as_millis()).unwrap()
 }
 
 fn id_of(row: &OutboxEntry) -> String {
@@ -1108,6 +1136,68 @@ async fn a_write_whose_check_cant_sync_is_answered_as_the_row_that_waits() {
     assert_eq!(told, row);
     assert_eq!(lab.posts_to(AB_CHAT).await, 0);
     a.shutdown();
+}
+
+/// A post whose answer was lost has `failed_before` checks that couldn't sync; then the service's copy of it turns
+/// into an entry no read can take, and the next check, from the tick, meets it first: the row records it and the check
+/// fails. The last [`Event::Outbox`] of the row is the row as the store now has it, whether the check left it waiting
+/// or gave it up (`state`), never the copy the read kept before the check changed the row.
+async fn an_unreadable_entry_a_check_meets_first(failed_before: u32, state: OutboxState) {
+    let lab = Lab::start().await;
+    let mut a = native(
+        &lab,
+        LAB_A,
+        How {
+            push: false,
+            ..How::default()
+        },
+    );
+    a.handle.sync().await.unwrap();
+    let row = a
+        .send_unanswered(AB_CHAT, "did it arrive? its copy can't be read")
+        .await;
+
+    // more checks that can't sync, each from the tick once the row's backoff is over
+    a.reads_fail.store(true, Ordering::SeqCst);
+    for failed in 2..=failed_before {
+        a.checked_from_the_tick(row.id, failed).await;
+    }
+    a.reads_fail.store(false, Ordering::SeqCst);
+    let unreadable = lab.mock.change_message(AB_CHAT, &row.client_message_id, |message| {
+        message["properties"] = json!("unreadable");
+    });
+    assert!(unreadable);
+
+    let told = a.checked_from_the_tick(row.id, failed_before + 1).await;
+    let stored = told_last_as_it_stands(&mut a, told).await;
+    assert_eq!(stored.state, state, "{stored:?}");
+    assert!(stored.may_have_arrived(), "{stored:?}");
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1, "never sent again on its own");
+    a.shutdown();
+}
+
+/// Checks that `told`, the [`Event::Outbox`] of a row just taken, is the last one told of it and the row as the store
+/// has it; the row.
+async fn told_last_as_it_stands(a: &mut Native, told: OutboxEntry) -> OutboxEntry {
+    let later = a.told_rows(told.id).await;
+    let last = later.last().unwrap_or(&told);
+    let stored = a.handle.outbox_entry(told.id).await.unwrap().unwrap();
+    assert_eq!(
+        last, &stored,
+        "the last event is the row as it stands; told after it: {later:?}"
+    );
+    assert!(later.is_empty(), "told once: {later:?}");
+    stored
+}
+
+#[tokio::test]
+async fn an_unreadable_entry_a_check_meets_first_leaves_the_row_waiting_and_told_as_it_stands() {
+    an_unreadable_entry_a_check_meets_first(1, OutboxState::Pending).await;
+}
+
+#[tokio::test]
+async fn an_unreadable_entry_a_check_meets_first_at_its_last_check_fails_the_row_told_as_it_stands() {
+    an_unreadable_entry_a_check_meets_first(MAX_FAILED_CHECKS - 1, OutboxState::Failed).await;
 }
 
 /// The service's echo of `from`'s message to `to`'s endpoints, which the mock queues for the chat's other members

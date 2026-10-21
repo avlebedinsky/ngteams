@@ -223,6 +223,24 @@ impl ChatServiceMock {
         world.changed();
     }
 
+    /// Changes the message of `conversation` that carries `client_message_id` as `change` says, as every later read
+    /// gives it (a test's stand-in for an entry a client can't read); its `version` is whatever `change` leaves, so a
+    /// sync link already past it doesn't bring it again. `false` when there is no such message.
+    pub fn change_message(&self, conversation: &str, client_message_id: &str, change: impl FnOnce(&mut Value)) -> bool {
+        let mut world = self.lock();
+        let message = world.conversation_mut(conversation).and_then(|conversation| {
+            conversation
+                .messages
+                .iter_mut()
+                .find(|message| message["clientmessageid"].as_str() == Some(client_message_id))
+        });
+        let Some(message) = message else {
+            return false;
+        };
+        change(message);
+        true
+    }
+
     /// Every request the mock got, in order (to check what a client sent, and how often).
     pub async fn received_requests(&self) -> Vec<Request> {
         self.server.received_requests().await.unwrap_or_default()

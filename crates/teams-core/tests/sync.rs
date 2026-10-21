@@ -1542,6 +1542,11 @@ async fn an_entry_a_check_cannot_read_that_carries_the_rows_id_fails_the_check()
     let after = a.store.outbox_entry(row.id).unwrap().unwrap();
     assert_eq!((after.state, after.failed_checks), (OutboxState::Pending, 1));
     assert!(after.may_have_arrived(), "{after:?}");
+    assert_eq!(
+        a.outbox.take_arrived(),
+        std::slice::from_ref(&after),
+        "the copy the catch-up kept is the row as the check left it"
+    );
     let state = a.store.sync_state(CHAT).unwrap().unwrap();
     assert_eq!(
         state.sync_link,

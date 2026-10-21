@@ -10,10 +10,11 @@
 //!   be read back): a row that waits (a `Retry-After`, a check that couldn't sync, an older row on its
 //!   [`Lane`](crate::Lane)) is in the reply as it waits, and goes out from the engine's tick ([`Outbox::send_due`]);
 //!   every row that settles comes as [`Event::Outbox`] too, and so does every row our own message coming back
-//!   settles, by whichever read brought it (a catch-up, a delivery, a sync after a write, the check of another row):
-//!   one event per change of the row ([`Outbox::take_arrived`]). Once a write went through, its conversation is
-//!   synced, so the account's own change is in the store (a new chat with it). A row can be read back by its id
-//!   ([`EngineHandle::outbox_entry`]).
+//!   settles, by whichever read brought it (a catch-up, a delivery, a sync after a write, the check of another row),
+//!   and every row a read finds may have arrived (an entry it couldn't read carrying its `clientmessageid`): one event
+//!   per change of the row, the last one the row as it now stands ([`Outbox::take_arrived`]). Once a write went
+//!   through, its conversation is synced, so the account's own change is in the store (a new chat with it). A row can
+//!   be read back by its id ([`EngineHandle::outbox_entry`]).
 //! - **Events → store**: each delivery of the push channel ([`teams_trouter`]) goes through the catch-up's
 //!   [`CatchUp::receive_message`], the path a sync takes, so a message that comes both ways is stored once, at its
 //!   newest version; the account's own read horizon through [`CatchUp::receive_horizon`]. A delivery naming a
@@ -516,8 +517,9 @@ where
         let _ = self.events.send(event);
     }
 
-    /// Tells the owner of every row our own message coming back changed since the last look
-    /// ([`Outbox::take_arrived`]), apart from one already told as it now stands (in `told`).
+    /// Tells the owner of every row a read changed since the last look ([`Outbox::take_arrived`]): our own message
+    /// coming back, or an entry it couldn't read carrying a row's `clientmessageid` ([`Outbox::unreadable_seen`]);
+    /// apart from one already told as it now stands (in `told`).
     fn arrived(&self, told: &[OutboxEntry]) {
         for row in self.outbox.take_arrived() {
             if !told.contains(&row) {

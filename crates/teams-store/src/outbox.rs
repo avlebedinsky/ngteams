@@ -398,9 +398,10 @@ impl Store {
         Ok(updated)
     }
 
-    /// Records that the check before a new attempt on one of this run's pending rows couldn't be made (its
-    /// conversation couldn't be synced): nothing was sent, its `failed_checks` goes up, and it waits until `not_before`
-    /// or is failed. A row already `sent` (the check's sync matched our message before it failed) stays as it is.
+    /// Records that the check before a new attempt on one of this run's pending rows couldn't tell whether the last
+    /// one arrived (its conversation couldn't be synced, or a read met an entry it couldn't read carrying the row's
+    /// `clientmessageid`): nothing was sent, its `failed_checks` goes up, and it waits until `not_before` or is
+    /// failed. A row already `sent` (the check's sync matched our message before it failed) stays as it is.
     ///
     /// # Errors
     ///
