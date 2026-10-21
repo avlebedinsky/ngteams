@@ -1,0 +1,17 @@
+error[E0451]: field `_sealed` of struct `Ping` is private
+ --> tests/ui/proto_frame_literal.rs:7:20
+  |
+7 |     let _ = Ping { _sealed: () };
+  |                    ^^^^^^^ private field
+
+error[E0451]: field `_sealed` of struct `Disconnect` is private
+ --> tests/ui/proto_frame_literal.rs:8:26
+  |
+8 |     let _ = Disconnect { _sealed: () };
+  |                          ^^^^^^^ private field
+
+error[E0451]: field `indicators` of struct `MessageLossAck` is private
+ --> tests/ui/proto_frame_literal.rs:9:30
+  |
+9 |     let _ = MessageLossAck { indicators: Vec::new() };
+  |                              ^^^^^^^^^^ private field

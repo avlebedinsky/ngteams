@@ -6,7 +6,8 @@
 //! Anything unknown is denied: a failed, empty, paginated or truncated membership, an org-wide team or channel, an
 //! outside participant, a [`Scope::New`] target for a kind that doesn't create one. Every decision goes to `fence.log`
 //! ([`FenceLog`]), and so do the browser requests the browser fence decides without a membership check
-//! ([`RequestRecord`]) and the targets it couldn't arm ([`ArmingRecord`]).
+//! ([`RequestRecord`]), the targets it couldn't arm ([`ArmingRecord`]) and the native client's own WebSocket frames
+//! ([`FrameRecord`]).
 //!
 //! Nothing outside this crate can bend a decision: a lab binary builds its fence only with [`Fence::open_lab`] (the
 //! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed, so its sources are
@@ -26,7 +27,9 @@ pub use decision::{
     Denied, DenyReason, FailClosed, Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, OpenError,
     PartialReason, Roster, WritePermit,
 };
-pub use log::{ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, FenceLog, RequestOutcome, RequestRecord};
+pub use log::{
+    ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, FenceLog, FrameRecord, RequestOutcome, RequestRecord,
+};
 pub use membership::{
     AFD_HOSTS, ChatCredential, FETCH_TIMEOUT, LiveMembershipSource, LiveSourceError, MAX_BODY, REGIONAL_SUFFIX,
     chat_service_path, is_group_chat_id, one_to_one_pair, parse_thread,
