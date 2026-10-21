@@ -18,6 +18,8 @@
 //!   account's writes show there as they go out ([`sending`]: each outbox row's state, "send again").
 //! - [`compose`]: the compose box under a chat's messages: text with line breaks, links and mentions (by MRI, from the
 //!   chat's members) into a message, Enter sends, replies and edits, typing; every write through the engine.
+//! - [`search`]: local search (Ctrl+Shift+F, and the switcher's messages) over the messages the store holds, never the
+//!   service's search; a hit opens its chat at the message.
 //! - [`settings`]: the settings and their file (`0600` in a `0700` directory; defaults for what can't be read);
 //!   [`settings_view`] changes them.
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
@@ -35,7 +37,7 @@
 //! one (nothing here hands GPUI another), so an image URL loads nothing. Pictures reach a view only as bytes from
 //! the engine ([`people`]).
 //!
-//! M2 Tasks 6–14 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+//! M2 Tasks 6–15 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod bridge;
 pub mod bus;
@@ -47,6 +49,7 @@ pub mod models;
 pub mod notify;
 pub mod people;
 pub mod rich_text;
+pub mod search;
 pub mod sending;
 pub mod settings;
 pub mod settings_view;
@@ -66,6 +69,7 @@ pub use desktop::{Desktop, DesktopEvent, DesktopParts};
 pub use models::{Account, Chats, Engine, Feed, FeedEvent, Link, Models, Status};
 pub use notify::{Notice, NoticeKind, NotificationServer, Notifier, NotifierEvent};
 pub use people::Shown;
+pub use search::{Hit, HitTarget, Search, SearchEvent};
 pub use settings::{Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};
 pub use switcher::Switcher;

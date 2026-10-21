@@ -40,6 +40,10 @@
 //! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
 //!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
 //!   profile lookup under the fence's permit); each change stored is told as [`Event::Profile`].
+//! - **Search** ([`EngineRequests::search`]): the store's own index of the messages' plain text ([`crate::search`]),
+//!   never the service's search. Each message is indexed as it is stored; the messages stored before are indexed by a
+//!   backfill that runs from the engine's start, a batch at a time ([`EngineOptions::index_batch`]) between the
+//!   loop's other work, told as [`Event::Indexed`] once it is over.
 //! - **Transient writes** ([`EngineRequests::transient`]: typing) go out through the outbox too, but as no row
 //!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
 //!   once and briefly ([`crate::MAX_TRANSIENT_WAIT`]), and a message post to its conversation drops it (told as
@@ -75,7 +79,7 @@ use teams_proto::chat::{self, MessageText};
 use teams_proto::{Client, Credentials, HttpError, HttpTransport, Transport};
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
-    ReadHorizon, Store, StoreError,
+    ReadHorizon, SearchHit, Store, StoreError,
 };
 use teams_trouter::{
     Change, ChatEvent, Delivery, Down, MessageLoss, PushEvent, RegistrationReport, Stop, Trouter, TrouterCredentials,
@@ -86,6 +90,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
+use crate::search::{Backfill, INDEX_BATCH};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
 
 /// How the engine paces itself.
@@ -99,6 +104,8 @@ pub struct EngineOptions {
     /// How long after a profile lookup that failed on the way the person is looked up again, from the tick:
     /// [`PROFILE_RETRY`].
     pub profile_retry: Duration,
+    /// How many stored messages one step of the search backfill indexes at most ([`crate::search`]): [`INDEX_BATCH`].
+    pub index_batch: usize,
 }
 
 impl Default for EngineOptions {
@@ -107,6 +114,7 @@ impl Default for EngineOptions {
             tick: Duration::from_secs(1),
             catch_up_retry: Duration::from_secs(30),
             profile_retry: PROFILE_RETRY,
+            index_batch: INDEX_BATCH,
         }
     }
 }
@@ -283,6 +291,10 @@ pub enum Event {
     Profile { mri: String },
     /// Something the engine did on its own failed: what, and why.
     Failed { during: &'static str, error: EngineError },
+    /// The search backfill is over: every message the store held when the engine started (or that a run before left
+    /// unindexed) is indexed; `messages` is how many this run indexed. Told once per run, unless it failed
+    /// ([`Event::Failed`]; the next run goes on with it).
+    Indexed { messages: usize },
 }
 
 /// What the engine's requests can fail with.
@@ -412,6 +424,11 @@ enum Query {
     OutboxEntry(i64, Responder<Option<OutboxEntry>>),
     OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
     LeftByEarlierRuns(Responder<Vec<OutboxEntry>>),
+    Search {
+        query: String,
+        limit: usize,
+        reply: Responder<Vec<SearchHit>>,
+    },
 }
 
 /// The engine's request side: writes and queries, each answered by a [`Reply`]. Cloneable and `Send`, so a UI's
@@ -563,6 +580,14 @@ impl EngineRequests {
         self.query(Query::LeftByEarlierRuns)
     }
 
+    /// Up to `limit` stored messages whose text holds every term of `query` (the user's input, each term a prefix),
+    /// the newest first ([`Store::search`]): the account's own store, never the service's search. A message stored
+    /// before the index existed is found once the backfill reached it ([`Event::Indexed`]).
+    pub fn search(&self, query: impl Into<String>, limit: usize) -> Reply<Vec<SearchHit>> {
+        let query = query.into();
+        self.query(|reply| Query::Search { query, limit, reply })
+    }
+
     fn query<T>(&self, query: impl FnOnce(Responder<T>) -> Query) -> Reply<T> {
         self.ask(|reply| Request::Query(query(reply)))
     }
@@ -705,6 +730,8 @@ struct Core<C, T> {
     retry_at: Option<Instant>,
     /// Message-loss reports waiting for a catch-up that runs clean.
     losses: Vec<MessageLoss>,
+    /// The search backfill of the messages stored before ([`crate::search`]), until it is over or failed.
+    backfill: Option<Backfill>,
 }
 
 impl<C, T> Core<C, T>
@@ -734,6 +761,7 @@ where
             up: false,
             retry_at: None,
             losses: Vec::new(),
+            backfill: Some(Backfill::new(parts.options.index_batch)),
         }
     }
 
@@ -752,17 +780,37 @@ where
                     None => push = None,
                 },
                 _ = tick.tick() => self.on_tick().await,
-                looked = self.profiles.next(), if self.profiles.busy() => {
-                    if let Some(looked) = looked {
-                        self.on_looked(looked);
-                    }
-                }
+                looked = self.profiles.next(), if self.profiles.busy() => self.on_looked(looked),
+                // always ready while it runs: `select!` picks among the ready branches at random, so a request or an
+                // event waits at most for one batch
+                () = std::future::ready(()), if self.backfill.is_some() => self.index_step(),
             }
             // whatever a read settled on its way (a sync after a write, a new conversation's sync, …)
             self.arrived(&[]);
         }
         if let Some(push) = push {
             push.stop().await;
+        }
+    }
+
+    /// One batch of the search backfill; once it is over, told as [`Event::Indexed`]. One that fails is told and
+    /// given up for this run (the next run goes on where it stopped), so a store that keeps failing isn't tried in a
+    /// loop.
+    fn index_step(&mut self) {
+        let Some(backfill) = self.backfill.as_mut() else {
+            return;
+        };
+        match backfill.step(&mut self.store) {
+            Ok(_) if backfill.done() => {
+                let messages = backfill.indexed();
+                self.backfill = None;
+                self.emit(Event::Indexed { messages });
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.backfill = None;
+                self.failed("indexing stored messages for search", error);
+            }
         }
     }
 
@@ -872,8 +920,9 @@ where
         }
     }
 
-    /// A lookup finished: what it found stored, and told when it changed the store.
-    fn on_looked(&mut self, looked: crate::profiles::Looked) {
+    /// A lookup finished (`None`: none was under way): what it found stored, and told when it changed the store.
+    fn on_looked(&mut self, looked: Option<crate::profiles::Looked>) {
+        let Some(looked) = looked else { return };
         match self.profiles.store(&mut self.store, looked) {
             Ok(Some(profile)) => self.emit(Event::Profile { mri: profile.mri }),
             Ok(None) => {}
@@ -918,6 +967,7 @@ where
             Query::OutboxEntry(id, reply) => give(reply, store.outbox_entry(id)),
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
             Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
+            Query::Search { query, limit, reply } => give(reply, store.search(&query, limit)),
         }
     }
 

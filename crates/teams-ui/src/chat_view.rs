@@ -45,9 +45,12 @@
 //!   the shell hides it behind the settings), the window is active and the list is at the newest message, the
 //!   account's read horizon moves to the newest message from someone else that is after it, [`READ_DEBOUNCE`] after
 //!   the view settles, one at a time.
+//! - **Opened at a message** ([`ChatView::reveal`], a search's hit, M2 Task 15): the view reads the store back to the
+//!   message, scrolls to it and selects it; the list stops following the newest.
 //!
-//! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds; `typing
-//! shown`/`cleared`; `outbox shown`: the rows shown and their states), never text or a name.
+//! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds;
+//! `chat-view revealed`: the message opened at; `typing shown`/`cleared`; `outbox shown`: the rows shown and their
+//! states), never text or a name.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -586,6 +589,10 @@ pub struct ChatView {
     /// Whether the window is active (the user's).
     active: Activation,
     outbox_traced: Option<Vec<(String, &'static str)>>,
+    /// The message to open the view at (its arrival time and id), until a window load reads back to it.
+    reveal: Option<(i64, String)>,
+    /// The message the running window load reads back to, shown once it ends.
+    revealing: Option<(i64, String)>,
     /// The models' changes, the compose box's events and the window's activation.
     _subscriptions: [Subscription; 3],
 }
@@ -659,6 +666,8 @@ impl ChatView {
             receipts: 0,
             active: Activation::of(window),
             outbox_traced: None,
+            reveal: None,
+            revealing: None,
             _subscriptions: subscriptions,
         };
         view.kick(cx);
@@ -884,6 +893,35 @@ impl ChatView {
         }
     }
 
+    /// Opens the view at a message (a search's hit, by its arrival time and id): the next window load reads the store
+    /// back to it (once the running load ends), then the list scrolls to it, stops following the newest, and the
+    /// message is selected. A message the store no longer has (deleted from it since) leaves the view as it is.
+    pub fn reveal(&mut self, arrival_time: i64, message: String, cx: &mut Context<Self>) {
+        self.reveal = Some((arrival_time, message));
+        self.window_due = true;
+        self.kick(cx);
+    }
+
+    /// Shows the message a window load read back to ([`ChatView::reveal`]).
+    fn revealed(&mut self, (_, message): (i64, String), cx: &mut Context<Self>) {
+        let Some(index) = self
+            .items
+            .iter()
+            .position(|item| matches!(item, Item::Message(item) if item.id == message))
+        else {
+            return;
+        };
+        self.select(Some(message.clone()), cx);
+        self.list.pause_following_tail();
+        self.list.scroll_to_reveal_item(index);
+        self.trace.record(
+            &TraceLine::new("chat-view", "revealed")
+                .conversation(&self.conversation)
+                .messages([message.as_str()]),
+        );
+        cx.notify();
+    }
+
     /// Scrolls to the newest message and follows the tail again.
     pub fn jump_to_newest(&mut self, cx: &mut Context<Self>) {
         self.list.scroll_to_end();
@@ -1102,10 +1140,21 @@ impl ChatView {
         };
         let core = Arc::clone(&self.core);
         let conversation = self.conversation.clone();
-        let oldest = self
+        let held = self
             .messages
             .first()
             .map(|message| (message.arrival_time, message.id.clone()));
+        let oldest = if load == Load::Window {
+            // a message to open at, older than what is held, is read back to
+            self.revealing = self.reveal.take();
+            match (held, &self.revealing) {
+                (Some(held), Some(target)) if held <= *target => Some(held),
+                (_, Some(target)) => Some(target.clone()),
+                (held, None) => held,
+            }
+        } else {
+            held
+        };
         let next = self.next.clone();
         let first = self.loads == 0;
         let find = if load == Load::Window {
@@ -1142,6 +1191,11 @@ impl ChatView {
         }
         self.want_names(cx);
         self.rebuild(cx);
+        if load == Load::Window
+            && let Some(target) = self.revealing.take()
+        {
+            self.revealed(target, cx);
+        }
         self.kick(cx);
         self.want_receipt(cx);
     }

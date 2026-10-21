@@ -20,7 +20,9 @@ use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{Action, EngineHandle, EngineRequests, Event, Person, Reply, Transient, TransientSent};
-use teams_store::{Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon};
+use teams_store::{
+    Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit,
+};
 use tokio::sync::oneshot;
 
 use crate::models::Models;
@@ -65,6 +67,9 @@ pub trait Core: Send + Sync + 'static {
     fn outbox_unsettled(&self, conversation: String) -> Reply<Vec<OutboxEntry>>;
     /// The rows runs that have ended left pending or in flight.
     fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>>;
+    /// Up to `limit` stored messages whose text holds every term of `query`, the newest first: the store's own
+    /// index, never the service's search.
+    fn search(&self, query: String, limit: usize) -> Reply<Vec<SearchHit>>;
 }
 
 impl Core for EngineRequests {
@@ -138,6 +143,10 @@ impl Core for EngineRequests {
 
     fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>> {
         EngineRequests::left_by_earlier_runs(self)
+    }
+
+    fn search(&self, query: String, limit: usize) -> Reply<Vec<SearchHit>> {
+        EngineRequests::search(self, query, limit)
     }
 }
 
@@ -230,6 +239,10 @@ impl Core for StoppedCore {
     }
 
     fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>> {
+        stopped()
+    }
+
+    fn search(&self, _: String, _: usize) -> Reply<Vec<SearchHit>> {
         stopped()
     }
 }

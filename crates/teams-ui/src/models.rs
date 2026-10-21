@@ -265,8 +265,9 @@ impl Models {
                 chats.renamed(&mri);
                 cx.notify();
             }),
-            // how the push channel's registration went, and a waiting transient's send: nothing a view shows yet
-            Event::Registration(_) | Event::Transient(..) => {}
+            // how the push channel's registration went, a waiting transient's send, the search backfill over: nothing a
+            // view shows yet
+            Event::Registration(_) | Event::Transient(..) | Event::Indexed { .. } => {}
         }
     }
 

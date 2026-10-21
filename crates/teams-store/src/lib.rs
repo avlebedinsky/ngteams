@@ -9,6 +9,7 @@
 //! - [`outbox`]: writes waiting to go out, keyed by `clientmessageid`; a run sends only its own rows, and adopts only
 //!   rows of runs that have ended (each open run holds a lock of its own, `runs`); one engine per account holds the
 //!   engine lock ([`Store::engine_lock`]);
+//! - [`search`]: local search over the messages' plain text (FTS5), the text the core hands in (M2 Task 15);
 //! - [`schema`]: the migrations, applied in order on open.
 //!
 //! Every versioned write is an upsert that never lets an older version overwrite a newer one, so a Trouter delivery
@@ -24,6 +25,7 @@ pub mod outbox;
 pub mod profiles;
 mod runs;
 pub mod schema;
+pub mod search;
 pub mod state;
 
 use std::fs::File;
@@ -37,6 +39,7 @@ pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
 pub use profiles::{NameSource, PictureState, Profile, StoredPicture};
 pub use schema::SCHEMA_VERSION;
+pub use search::{IndexCursor, IndexText, SearchHit};
 pub use state::{ReadHorizon, SyncState};
 
 /// How long a write waits for another connection's lock (a second process on the same account) before it fails.

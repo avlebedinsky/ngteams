@@ -178,6 +178,7 @@ fn rig_with(
             tick: Duration::from_millis(50),
             catch_up_retry: Duration::from_millis(500),
             profile_retry: retry,
+            ..EngineOptions::default()
         },
         known_names: known,
     })

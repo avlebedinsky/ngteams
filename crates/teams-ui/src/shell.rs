@@ -5,13 +5,16 @@
 //!
 //! The keyboard: Ctrl+K opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
-//! at its next start. What the shell shows is traced (`chat opened`, `settings opened`, `switcher opened`/`closed`).
+//! at its next start. Ctrl+Shift+F opens the [`Search`] of the stored messages the same way (one of the two at a
+//! time); a message found there or in the switcher opens its chat at the message ([`ChatView::reveal`]). What the
+//! shell shows is traced (`chat opened`, `settings opened`, `switcher opened`/`closed`, `search opened`/`closed`).
 
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div, px, rgb,
+    AnyElement, AnyView, App, AppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _,
+    IntoElement, KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div,
+    px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ResizableState, h_resizable, resizable_panel};
@@ -20,13 +23,14 @@ use crate::bridge::Core;
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView};
 use crate::models::Models;
+use crate::search::{HitTarget, Search, SearchEvent};
 use crate::settings::SettingsModel;
 use crate::settings_view::SettingsView;
 use crate::switcher::{Switcher, SwitcherEvent};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
-actions!(teams_ui, [ToggleSwitcher]);
+actions!(teams_ui, [ToggleSwitcher, ToggleSearch]);
 
 /// The shell's key context.
 pub const CONTEXT: &str = "Shell";
@@ -44,14 +48,17 @@ struct Bound;
 
 impl Global for Bound {}
 
-/// Binds the shell's keys (Ctrl+K: the switcher) and the chat view's, once per app.
+/// Binds the shell's keys (Ctrl+K: the switcher; Ctrl+Shift+F: the search) and the chat view's, once per app.
 pub fn init(cx: &mut App) {
     chat_view::init(cx);
     if cx.has_global::<Bound>() {
         return;
     }
     cx.set_global(Bound);
-    cx.bind_keys([KeyBinding::new("ctrl-k", ToggleSwitcher, None)]);
+    cx.bind_keys([
+        KeyBinding::new("ctrl-k", ToggleSwitcher, None),
+        KeyBinding::new("ctrl-shift-f", ToggleSearch, None),
+    ]);
 }
 
 /// What the rail has chosen for the list pane.
@@ -89,6 +96,7 @@ pub struct Shell {
     chat: Option<Entity<ChatView>>,
     settings_view: Entity<SettingsView>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
+    search: Option<(Entity<Search>, Subscription)>,
     rail: RailItem,
     main: Main,
     panes: Entity<ResizableState>,
@@ -140,6 +148,7 @@ impl Shell {
             chat,
             settings_view,
             switcher: None,
+            search: None,
             rail: RailItem::Chats,
             main: selected.map_or(Main::Nothing, Main::Chat),
             panes: cx.new(|_| ResizableState::default()),
@@ -181,6 +190,12 @@ impl Shell {
         self.switcher.as_ref().map(|(switcher, _)| switcher)
     }
 
+    /// The search, while it is open.
+    #[must_use]
+    pub fn search(&self) -> Option<&Entity<Search>> {
+        self.search.as_ref().map(|(search, _)| search)
+    }
+
     /// The chat view of the chat opened, if one is.
     #[must_use]
     pub fn chat(&self) -> Option<&Entity<ChatView>> {
@@ -204,6 +219,7 @@ impl Shell {
         self.rail = RailItem::Chats;
         self.main = Main::Chat(id);
         self.close_switcher(window, cx);
+        self.close_search(window, cx);
         // the chat opened takes what is typed next, and is shown (read receipts may go)
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.set_shown(true, cx));
@@ -211,6 +227,15 @@ impl Shell {
             compose.update(cx, |compose, cx| compose.focus(window, cx));
         }
         cx.notify();
+    }
+
+    /// Opens a message's chat ([`Shell::open_chat`]) at the message: the chat view reads back to it, shows it and
+    /// selects it ([`ChatView::reveal`]).
+    pub fn open_message(&mut self, target: HitTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_chat(target.conversation.clone(), window, cx);
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.reveal(target.arrival_time, target.message, cx));
+        }
     }
 
     /// What a chat view is made of: the shell's own.
@@ -257,10 +282,13 @@ impl Shell {
             self.close_switcher(window, cx);
             return;
         }
+        self.close_search(window, cx);
         let list = self.list.clone();
-        let switcher = cx.new(|cx| Switcher::new(list, window, cx));
+        let core = Arc::clone(&self.core);
+        let switcher = cx.new(|cx| Switcher::new(list, core, window, cx));
         let events = cx.subscribe_in(&switcher, window, |this: &mut Self, _, event, window, cx| match event {
             SwitcherEvent::Open(id) => this.open_chat(id.clone(), window, cx),
+            SwitcherEvent::OpenMessage(target) => this.open_message(target.clone(), window, cx),
             SwitcherEvent::Dismissed => this.close_switcher(window, cx),
         });
         switcher.update(cx, |switcher, cx| switcher.focus(window, cx));
@@ -272,6 +300,33 @@ impl Shell {
     fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.take().is_some() {
             self.trace.record(&TraceLine::new("switcher", "closed"));
+            self.focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Opens the search of the stored messages (the switcher closes), or closes it when it is open.
+    pub fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.close_search(window, cx);
+            return;
+        }
+        self.close_switcher(window, cx);
+        let (core, list, trace) = (Arc::clone(&self.core), self.list.clone(), Arc::clone(&self.trace));
+        let search = cx.new(|cx| Search::new(core, list, trace, window, cx));
+        let events = cx.subscribe_in(&search, window, |this: &mut Self, _, event, window, cx| match event {
+            SearchEvent::Open(target) => this.open_message(target.clone(), window, cx),
+            SearchEvent::Dismissed => this.close_search(window, cx),
+        });
+        search.update(cx, |search, cx| search.focus(window, cx));
+        self.search = Some((search, events));
+        self.trace.record(&TraceLine::new("search", "opened"));
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.take().is_some() {
+            self.trace.record(&TraceLine::new("search", "closed"));
             self.focus.focus(window, cx);
             cx.notify();
         }
@@ -408,7 +463,7 @@ impl Render for Shell {
                     .child(self.list_pane(palette)),
             )
             .child(resizable_panel().child(self.main_pane(palette, cx)));
-        let switcher = self.switcher().map(|switcher| {
+        let overlay = |view: AnyView| {
             div()
                 .absolute()
                 .top(px(56.0))
@@ -416,17 +471,21 @@ impl Render for Shell {
                 .right_0()
                 .flex()
                 .justify_center()
-                .child(switcher.clone())
-        });
+                .child(view)
+        };
+        let switcher = self.switcher().map(|switcher| overlay(switcher.clone().into()));
+        let search = self.search().map(|search| overlay(search.clone().into()));
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| this.toggle_search(window, cx)))
             .relative()
             .size_full()
             .flex()
             .child(self.rail_view(palette, cx))
             .child(div().flex_1().h_full().min_w_0().child(panes))
             .children(switcher)
+            .children(search)
     }
 }

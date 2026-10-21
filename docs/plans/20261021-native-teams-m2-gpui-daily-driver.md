@@ -975,14 +975,49 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 - Create: `crates/teams-ui/src/search.rs`, a store migration (the FTS5 table), tests
 - Modify: `crates/teams-store/src/*`, `crates/teams-core/src/*` (plain text on upsert, the backfill, a search query)
 
-- [ ] tests first: the migration creates the FTS5 table only; `teams-core` hands each message's plain text (from
+- [x] tests first: the migration creates the FTS5 table only; `teams-core` hands each message's plain text (from
       `RichText`) when it stores it (edits replace, deletes remove); a backfill on the engine's start indexes rows
       stored before, in bounded batches, and resumes after a stop
-- [ ] tests first: a query across chats with its hits in order; user input quoted before `MATCH` (a query with `"`,
+- [x] tests first: a query across chats with its hits in order; user input quoted before `MATCH` (a query with `"`,
       `*`, `-`, `:`, `NEAR` and parentheses finds the literal text and never errors); a hit opens its chat at the
       message (Ctrl+Shift+F, and from the switcher)
-- [ ] the server's search is not used (Substrate lists other tenant users: never let through in the lab)
-- [ ] `cargo test -p teams-store -p teams-core -p teams-ui` and the gate pass
+- [x] the server's search is not used (Substrate lists other tenant users: never let through in the lab)
+- [x] `cargo test -p teams-store -p teams-core -p teams-ui` and the gate pass
+- Done (2026-10-22), where it differs from the lines above:
+  - Migration `0008_search` creates and fills nothing, but holds two tables, not one: the FTS5 table
+    (`message_search`: `unicode61` with diacritics removed, prefix indexes of 2 and 3 characters) and its bookkeeping,
+    `search_entries` (one row per message indexed, at the version its text was read from, its id the text's rowid; a
+    message without text has a row and no text). The backfill resumes from it and an edit replaces by it; a trigger
+    drops a text with its row (a conversation deleted cascades).
+  - The core indexes in the store's own write (`Store::upsert_message_indexed`, the text read by a closure the core
+    hands in, `teams_core::search_text`): `Outbox::receive`, the one way the core stores a message, uses it, so a
+    delivery, a catch-up, older history and our own message coming back are all indexed; a newer version replaces the
+    text, a deleted one (stored without content) removes it. The text is `RichText::plain_text` (a reply's quote
+    included), a `Text` message's content as it came, none for a thread event or a deleted message.
+  - The backfill (`teams_core::search::Backfill`): the messages whose index row is missing or older than their
+    version, in the store's order of conversation and id, `EngineOptions::index_batch` (200) a step, from the engine's
+    loop as a branch that is ready while it runs (`select!` picks at random, so a request waits for one batch at
+    most). Once over it is told as `Event::Indexed { messages }` (`teams-headless` prints `indexed`); a store error
+    is told and gives the backfill up for the run (the next start goes on). `EngineRequests::search(query, limit)`
+    answers from the store.
+  - The query: each whitespace-separated term with a letter or a digit is quoted as an FTS5 string (its `"` doubled)
+    and matched as a prefix, all of them needed, at most 16; a query of none finds nothing without asking SQLite. The
+    hits come the newest first, each with FTS5's snippet (the matches between U+E000 and U+E001, which are removed from
+    every indexed text). The store quotes; the views pass the input as typed.
+  - The views (`search.rs`): the search is the kit's command palette (its own filter off), the switcher lists the same
+    hits as a "Messages" group under its "Chats"; a query of at least 2 characters is asked (200 hits; those of chats
+    the list doesn't show, a channel's or an own stream's, are left out; 50 shown), each with the chat's name, the
+    sender (`Core::person`'s name, "You" for the account) and the matched text marked. Each change asks again and
+    drops the earlier search. One of the two is open at a time; Escape closes either. A hit opens through
+    `Shell::open_message`: the chat opens and `ChatView::reveal` reads the store back to the message (the window load
+    reads down to it), selects it and scrolls to it, and the list stops following the newest.
+  - The view trace gained `search opened`/`closed`/`shown` (the hits' conversation and message ids) and `chat-view
+    revealed`; a query or a text never.
+  - The server's search: `reach.rs`' `the_search_is_the_store_s_and_never_the_service_s` (no client crate names
+    Substrate's host or paths, the views ask only `Core::search`, the engine answers it from the store, and no
+    `Service` names Substrate). The tests: `teams-store/tests/search.rs`, `teams-core/tests/search.rs` and the engine's
+    two on the mock (`tests/engine.rs`), `teams-ui/tests/search.rs` on the fake core (whose search plays the store's).
+    The sandbox window test isn't extended: the keys are the view tests'.
 
 ### Task 16: Teams and channels, read-only
 **Files:**

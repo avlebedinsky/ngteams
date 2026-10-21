@@ -10,7 +10,8 @@ use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{Action, Answer, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
 use teams_store::{
-    Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction, ReadHorizon,
+    Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
+    ReadHorizon, SearchHit,
 };
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
@@ -82,6 +83,8 @@ pub struct FakeCore {
     pub held_unsettled: Mutex<Vec<Answer<Vec<OutboxEntry>>>>,
     /// The rows earlier runs left.
     pub earlier: Mutex<Vec<OutboxEntry>>,
+    /// Every search asked for, its query, in order.
+    pub searches: Mutex<Vec<String>>,
 }
 
 impl Default for FakeCore {
@@ -111,6 +114,7 @@ impl Default for FakeCore {
             hold_unsettled: Mutex::new(false),
             held_unsettled: Mutex::default(),
             earlier: Mutex::default(),
+            searches: Mutex::default(),
         }
     }
 }
@@ -359,6 +363,53 @@ impl Core for FakeCore {
     fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>> {
         self.answer("left_by_earlier_runs", || locked(&self.earlier).clone())
     }
+
+    /// The store's search, played on the messages held: a message not deleted whose content holds every term (any
+    /// case), the newest first, the first term marked in its snippet (the content as it is).
+    fn search(&self, query: String, limit: usize) -> Reply<Vec<SearchHit>> {
+        locked(&self.searches).push(query.clone());
+        self.answer("search", || {
+            let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+            let mut hits: Vec<SearchHit> = locked(&self.messages)
+                .values()
+                .flatten()
+                .filter(|message| message.delete_time.is_none())
+                .filter(|message| {
+                    let content = message.content.to_lowercase();
+                    !terms.is_empty() && terms.iter().all(|term| content.contains(term.as_str()))
+                })
+                .map(|message| SearchHit {
+                    conversation_id: message.conversation_id.clone(),
+                    message_id: message.id.clone(),
+                    arrival_time: message.arrival_time,
+                    sender: message.sender.clone(),
+                    sender_name: message.sender_name.clone(),
+                    snippet: marked(&message.content, &terms[0]),
+                })
+                .collect();
+            hits.sort_by(|one, other| {
+                (other.arrival_time, &other.message_id).cmp(&(one.arrival_time, &one.message_id))
+            });
+            hits.truncate(limit);
+            hits
+        })
+    }
+}
+
+/// `content` with its first match of `term` (lower case; ASCII content) between the store's match marks.
+fn marked(content: &str, term: &str) -> String {
+    let Some(at) = content.to_lowercase().find(term) else {
+        return content.to_owned();
+    };
+    let end = at + term.len();
+    format!(
+        "{}{}{}{}{}",
+        &content[..at],
+        teams_store::search::MATCH_START,
+        &content[at..end],
+        teams_store::search::MATCH_END,
+        &content[end..]
+    )
 }
 
 /// A bridge over fakes, as a test holds it.

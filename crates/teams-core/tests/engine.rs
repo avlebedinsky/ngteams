@@ -31,6 +31,7 @@ use teams_auth::token::TokenError;
 use teams_core::engine::{
     self, Action, Cause, EngineError, EngineHandle, EngineOptions, Event, MessageChange, Parts, Push, Source,
 };
+use teams_core::search::{Backfill, Step};
 use teams_core::{Clock, MAX_FAILED_CHECKS, Outbox, Transient, TransientSent};
 use teams_fence::lab::{LabConfig, record_abc_chat};
 use teams_fence::{
@@ -45,7 +46,10 @@ use teams_proto::{
     Author, Authorized, AuthorizedPostRead, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState,
     PostRead, Read, Response, Transport,
 };
-use teams_store::{Applied, Message, OutboxEntry, OutboxKind, OutboxState, Store, StoreError};
+use teams_store::{
+    Applied, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState, SearchHit, Store,
+    StoreError,
+};
 use teams_trouter::{Options, RegistrationReport, Trouter, TrouterCredentials};
 use tokio::sync::broadcast;
 
@@ -347,11 +351,13 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
     try_native_in(lab, me, how, Arc::new(tempfile::tempdir().unwrap())).unwrap()
 }
 
-/// The engine's pace in these tests: a fast tick and a short wait before a failed catch-up is tried again.
+/// The engine's pace in these tests: a fast tick, a short wait before a failed catch-up is tried again, and small
+/// batches of the search backfill.
 fn fast_options() -> EngineOptions {
     EngineOptions {
         tick: Duration::from_millis(50),
         catch_up_retry: Duration::from_millis(500),
+        index_batch: 3,
         ..EngineOptions::default()
     }
 }
@@ -2096,4 +2102,126 @@ async fn typing_is_fenced_like_any_write_and_refused_where_the_store_knows_no_ch
     );
     assert_eq!(a.log.lines().len(), 1, "the refused one reached no fence");
     a.shutdown();
+}
+
+// --- local search ---
+
+/// The hits' conversations and message ids, in order.
+fn hit_ids(hits: &[SearchHit]) -> Vec<(String, String)> {
+    hits.iter()
+        .map(|hit| (hit.conversation_id.clone(), hit.message_id.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_message_is_found_once_stored_and_its_edit_and_delete_change_what_finds_it() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    let mut b = native(&lab, LAB_B, How::default());
+    a.ready().await;
+    b.ready().await;
+    let id = id_of(&a.send(AB_CHAT, "the quarterly zeppelin report").await);
+    b.message_event(AB_CHAT, &id).await;
+    let expected = vec![(AB_CHAT.to_owned(), id.clone())];
+    assert_eq!(
+        hit_ids(&b.handle.search("zeppelin", 10).await.unwrap()),
+        expected,
+        "b's delivery"
+    );
+    assert_eq!(
+        hit_ids(&a.handle.search("QUARTERLY zep", 10).await.unwrap()),
+        expected,
+        "a's own, stored by the sync after its write"
+    );
+    let hit = b.handle.search("zeppelin", 10).await.unwrap().remove(0);
+    assert_eq!(hit.sender.as_deref(), Some(LAB_A));
+    assert!(hit.snippet.contains("\u{e000}zeppelin\u{e001}"), "{hit:?}");
+
+    a.write(Action::Edit {
+        conversation: AB_CHAT.to_owned(),
+        message_id: id.clone(),
+        text: MessageText::plain("the yearly airship report").unwrap(),
+    })
+    .await;
+    let (change, _, _) = b.message_event(AB_CHAT, &id).await;
+    assert_eq!(change, MessageChange::Edit);
+    assert!(
+        b.handle.search("zeppelin", 10).await.unwrap().is_empty(),
+        "the edit replaced the text"
+    );
+    assert_eq!(hit_ids(&b.handle.search("airship", 10).await.unwrap()), expected);
+
+    a.write(Action::Delete {
+        conversation: AB_CHAT.to_owned(),
+        message_id: id.clone(),
+    })
+    .await;
+    let (change, _, _) = b.message_event(AB_CHAT, &id).await;
+    assert_eq!(change, MessageChange::Delete);
+    assert!(
+        b.handle.search("airship", 10).await.unwrap().is_empty(),
+        "the delete removed it"
+    );
+    assert!(a.handle.search("airship", 10).await.unwrap().is_empty());
+    // a query of FTS syntax is only text, and never fails
+    assert!(b.handle.search("NEAR(\"report\" -*:", 10).await.is_ok());
+    a.shutdown();
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn the_engine_indexes_what_was_stored_before_from_its_start_going_on_where_a_stopped_backfill_was() {
+    let lab = Lab::start().await;
+    let dir = Arc::new(tempfile::tempdir().unwrap());
+    {
+        // the store as an earlier build left it: messages stored without their text, of which a backfill that stopped
+        // after its first batch indexed three
+        let mut store = Store::open(&dir.path().join("store").join("lab.sqlite")).unwrap();
+        store
+            .upsert_conversation(&Conversation {
+                id: AB_CHAT.to_owned(),
+                kind: ConversationKind::OneToOne,
+                topic: None,
+                version: 1,
+                last_activity: None,
+            })
+            .unwrap();
+        for at in 0..7_i64 {
+            let message = Message {
+                conversation_id: AB_CHAT.to_owned(),
+                id: (1_760_100_000_000 + at).to_string(),
+                version: 1,
+                client_message_id: None,
+                sender: Some(LAB_A.to_owned()),
+                sender_name: None,
+                message_type: "RichText/Html".to_owned(),
+                content: format!("<p>an old memo {at}</p>"),
+                properties: None,
+                arrival_time: 1_760_100_000_000 + at,
+                compose_time: None,
+                edit_time: None,
+                delete_time: None,
+            };
+            store.upsert_message(&message, None).unwrap();
+        }
+        assert_eq!(Backfill::new(3).step(&mut store).unwrap(), Step::Indexed(3));
+    }
+    let mut b = try_native_in(&lab, LAB_B, QUIET, Arc::clone(&dir)).unwrap_or_else(|error| panic!("{error}"));
+    let indexed = b
+        .event(|event| match event {
+            Event::Indexed { messages } => Some(*messages),
+            _ => None,
+        })
+        .await;
+    assert_eq!(
+        indexed, 4,
+        "the four the stopped backfill hadn't reached, in batches of three"
+    );
+    let hits = b.handle.search("memo", 50).await.unwrap();
+    assert_eq!(hits.len(), 7);
+    assert!(
+        hits.windows(2).all(|pair| pair[0].arrival_time > pair[1].arrival_time),
+        "the newest first"
+    );
+    b.shutdown();
 }

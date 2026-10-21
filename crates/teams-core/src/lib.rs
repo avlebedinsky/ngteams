@@ -14,6 +14,8 @@
 //!   runs after every reconnect. One engine per account (its lock); its request side is a cloneable handle of its own.
 //! - [`profiles`]: people's names and pictures, read in the background (Graph, else the middle tier's profile lookup)
 //!   and kept in the store.
+//! - [`search`]: local search: each message's plain text handed to the store's index as it is stored, and the
+//!   messages stored before indexed by a backfill in batches.
 //! - [`lab`]: a lab account's engine, assembled as every lab binary builds it (its session over the secret store the
 //!   binary hands in).
 //!
@@ -24,6 +26,7 @@ pub mod engine;
 pub mod lab;
 pub mod outbox;
 pub mod profiles;
+pub mod search;
 pub mod sync;
 
 pub use engine::{
@@ -36,6 +39,7 @@ pub use outbox::{
     UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id,
 };
 pub use profiles::{MAX_LOOKUPS, NameFrom, PROFILE_MAX_AGE, PROFILE_RETRY, Person};
+pub use search::{Backfill, INDEX_BATCH, search_text};
 pub use sync::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, Gaps, MAX_PAGES, StoredMessage,
     Synced,

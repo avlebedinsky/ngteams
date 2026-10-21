@@ -1,7 +1,7 @@
 //! What the app crates (`teams-ui` and `teams-app`) can reach: every request goes through `teams-core`, so neither
 //! depends directly on an HTTP or WebSocket client (read from `cargo metadata`, resolved for the host); GPUI's HTTP
-//! client stays the null one, so nothing in their sources hands GPUI another; and nothing in them reads a token's
-//! value out of its `Secret`.
+//! client stays the null one, so nothing in their sources hands GPUI another; nothing in them reads a token's value
+//! out of its `Secret`; and the search is the store's, never the service's (no client crate names Substrate).
 //!
 //! The UI kit's audit (M2 Task 7), what can be checked of it: `gpui-component`'s whole tree for the host holds no
 //! HTTP or WebSocket client, and every package in it is under a licence an Apache-2.0/MIT project can take; the
@@ -419,4 +419,38 @@ fn no_view_offers_creating_a_chat() {
     // compose writes through the engine's actions: a post, an edit
     let compose = fs::read_to_string(workspace_root().join("crates/teams-ui/src/compose.rs")).expect("UTF-8");
     assert!(compose.contains("self.core.write(action)"));
+}
+
+/// The crates the native client's requests are built and sent in, besides the app crates.
+const CLIENT_CRATES: [&str; 4] = ["teams-proto", "teams-core", "teams-trouter", "teams-store"];
+
+/// What names the service's search (Substrate): its host, and its search and suggestion paths.
+const SERVER_SEARCH: [&str; 4] = [
+    "substrate.office.com",
+    "search/api/",
+    "/suggestions",
+    "userknowledgebase",
+];
+
+/// The search is the store's (M2 Task 15), never the service's: Substrate's answers list other tenant users, so the lab
+/// never lets it through. No crate of the native client names its host or its paths (the transport reaches only the
+/// hosts of its `Service`s), the views ask only the engine's `search`, and the engine answers it from the store.
+#[test]
+fn the_search_is_the_store_s_and_never_the_service_s() {
+    let mut read = 0;
+    for package in APP_CRATES.iter().chain(&CLIENT_CRATES) {
+        for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
+            read += 1;
+            for named in SERVER_SEARCH {
+                assert!(!text.contains(named), "{} names {named}", path.display());
+            }
+        }
+    }
+    assert!(read >= 40, "the client crates' sources were read ({read} files)");
+    let search = fs::read_to_string(workspace_root().join("crates/teams-ui/src/search.rs")).expect("UTF-8");
+    assert!(search.contains("core.search(query, ASKED)"));
+    let engine = fs::read_to_string(workspace_root().join("crates/teams-core/src/engine.rs")).expect("UTF-8");
+    assert!(engine.contains("Query::Search { query, limit, reply } => give(reply, store.search(&query, limit))"));
+    let services = fs::read_to_string(workspace_root().join("crates/teams-proto/src/endpoint.rs")).expect("UTF-8");
+    assert!(!services.to_lowercase().contains("substrate"), "no Service for it");
 }

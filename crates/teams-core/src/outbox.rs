@@ -532,9 +532,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    /// Stores a message that came in (a Trouter delivery or a sync) and, when it is ours, matches it by its
-    /// `clientmessageid` to its row, which becomes sent with the message's id. The same message coming in again
-    /// (the other way, or a later version) is stored once, and its row is left as it is.
+    /// Stores a message that came in (a Trouter delivery or a sync) with its text for search ([`crate::search`]) and,
+    /// when it is ours, matches it by its `clientmessageid` to its row, which becomes sent with the message's id. The
+    /// same message coming in again (the other way, or a later version) is stored once, and its row is left as it is.
     ///
     /// # Errors
     ///
@@ -545,7 +545,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         message: &Message,
         reactions: Option<&[Reaction]>,
     ) -> Result<Received, OutboxError> {
-        let applied = store.upsert_message(message, reactions)?;
+        let applied = store.upsert_message_indexed(message, reactions, crate::search::search_text)?;
         let outbox = self.match_own(store, message)?;
         Ok(Received { applied, outbox })
     }

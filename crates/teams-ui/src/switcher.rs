@@ -2,16 +2,22 @@
 //! as the user types ([`fuzzy_score`]): Enter opens the chat highlighted, Escape closes the switcher whatever was typed.
 //! It is the live test's way into a chat: the keyboard, no screen coordinates.
 //!
-//! It reads the chat list's rows (one model for both), so a chat that changes while it is open shows changed.
+//! It reads the chat list's rows (one model for both), so a chat that changes while it is open shows changed. Under
+//! the chats it lists the messages the query finds in the store ([`crate::search`]): one chosen opens its chat at the
+//! message.
+
+use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Window, div, px, rgb,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::IndexPath;
-use gpui_component::command::{Command, CommandItem, CommandState};
+use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 
+use crate::bridge::Core;
 use crate::chat_list::ChatList;
+use crate::search::{self, Hit, HitTarget};
 use crate::theme;
 
 /// The most matches the switcher lists.
@@ -89,16 +95,28 @@ pub fn matches(query: &str, rows: &[(String, SharedString)]) -> Vec<(String, Sha
 pub enum SwitcherEvent {
     /// Open this chat.
     Open(String),
+    /// Open this chat at this message (a message the query found).
+    OpenMessage(HitTarget),
     /// Close the switcher.
     Dismissed,
 }
+
+/// The palette's section of the chats; the messages found are the next.
+const CHATS: usize = 0;
+/// The palette's section of the messages found.
+const MESSAGES: usize = 1;
 
 /// The switcher (see the module docs).
 pub struct Switcher {
     state: Entity<CommandState>,
     list: Entity<ChatList>,
+    core: Arc<dyn Core>,
     query: String,
     matches: Vec<(String, SharedString)>,
+    /// The messages the query finds, the newest first.
+    hits: Vec<Hit>,
+    /// The search for the latest query: a later query drops it.
+    searching: Option<Task<()>>,
     _observing: Subscription,
     /// Escape, before the palette's own binding (which first clears the query).
     _escape: Subscription,
@@ -107,7 +125,7 @@ pub struct Switcher {
 impl EventEmitter<SwitcherEvent> for Switcher {}
 
 impl Switcher {
-    pub fn new(list: Entity<ChatList>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(list: Entity<ChatList>, core: Arc<dyn Core>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = cx.new(|cx| CommandState::new(window, cx));
         let observing = cx.observe(&list, |this: &mut Self, _, cx| this.refilter(cx));
         let this = cx.weak_entity();
@@ -123,8 +141,11 @@ impl Switcher {
         let mut switcher = Self {
             state,
             list,
+            core,
             query: String::new(),
             matches: Vec::new(),
+            hits: Vec::new(),
+            searching: None,
             _observing: observing,
             _escape: escape,
         };
@@ -148,9 +169,42 @@ impl Switcher {
         &self.query
     }
 
+    /// The messages the query finds, listed under the chats, the newest first.
+    #[must_use]
+    pub fn hits(&self) -> &[Hit] {
+        &self.hits
+    }
+
+    /// Whether a search for the query runs.
+    #[must_use]
+    pub fn searching(&self) -> bool {
+        self.searching.is_some()
+    }
+
     fn set_query(&mut self, query: &str, cx: &mut Context<Self>) {
         query.clone_into(&mut self.query);
         self.refilter(cx);
+        self.search(cx);
+    }
+
+    /// Looks for the query's messages ([`search::find`]); a query too short finds none.
+    fn search(&mut self, cx: &mut Context<Self>) {
+        if !search::searchable(&self.query) {
+            self.searching = None;
+            self.hits.clear();
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        let chats = search::listed_chats(&self.list, cx);
+        let query = self.query.clone();
+        self.searching = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let hits = search::find(&*core, query, chats).await;
+            let _ = this.update(cx, |this, cx| {
+                this.searching = None;
+                this.hits = hits;
+                cx.notify();
+            });
+        }));
     }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
@@ -166,8 +220,19 @@ impl Switcher {
     }
 
     fn confirm(&mut self, index: IndexPath, cx: &mut Context<Self>) {
-        if let Some((id, _)) = self.matches.get(index.row) {
-            cx.emit(SwitcherEvent::Open(id.clone()));
+        let event = match index.section {
+            CHATS => self
+                .matches
+                .get(index.row)
+                .map(|(id, _)| SwitcherEvent::Open(id.clone())),
+            MESSAGES => self
+                .hits
+                .get(index.row)
+                .map(|hit| SwitcherEvent::OpenMessage(hit.target.clone())),
+            _ => None,
+        };
+        if let Some(event) = event {
+            cx.emit(event);
         }
     }
 }
@@ -177,14 +242,20 @@ impl Render for Switcher {
         let palette = theme::current(cx);
         let on_query = cx.weak_entity();
         let on_confirm = cx.weak_entity();
-        let items = self
+        let chats = self
             .matches
             .iter()
             .map(|(_, name)| CommandItem::new().label(name.clone()));
+        // the sections in order (an empty one is hidden, and keeps its number)
         let command = Command::new(&self.state)
             .filterable(false)
-            .placeholder("Go to a chat")
-            .items(items)
+            .placeholder("Go to a chat, or find a message")
+            .group(CommandGroup::new().label("Chats").items(chats))
+            .group(
+                CommandGroup::new()
+                    .label("Messages")
+                    .items(self.hits.iter().map(search::hit_item)),
+            )
             .on_query(move |query, _, cx| {
                 // a switcher already closed has nothing to filter
                 let _ = on_query.update(cx, |this, cx| this.set_query(query, cx));
@@ -192,7 +263,7 @@ impl Render for Switcher {
             .on_confirm(move |index, _, cx| {
                 let _ = on_confirm.update(cx, |this, cx| this.confirm(index, cx));
             })
-            .empty(|_, _, _| div().p_2().child("No chat matches"));
+            .empty(|_, _, _| div().p_2().child("No chat or message matches"));
         div()
             .debug_selector(|| "switcher".to_owned())
             .w(px(WIDTH))
