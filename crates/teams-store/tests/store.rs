@@ -149,22 +149,43 @@ fn opening_an_existing_store_at_once_all_open_it() {
     }
 }
 
-/// The POSIX locks this process holds on the file at `path`, from `/proc/locks` (SQLite locks with POSIX locks).
+/// The POSIX locks this process holds on the file at `path` (SQLite locks with POSIX locks), from the `lock:` lines of
+/// `/proc/self/fdinfo` of every descriptor open on that file. Each of those is one snapshot of the file's own locks,
+/// so locks other tests in the process (or other processes) take and drop meanwhile can't change the count.
+/// `/proc/locks` can't serve here: it lists every lock on the system and comes in several reads, each a fresh walk
+/// of the list by position, so a lock added or dropped between two reads repeats or skips a line.
 fn posix_locks_held_on(path: &Path) -> std::io::Result<usize> {
     use std::os::unix::fs::MetadataExt;
-    let inode = std::fs::metadata(path)?.ino().to_string();
-    let pid = std::process::id().to_string();
-    let locks = std::fs::read_to_string("/proc/locks")?;
-    Ok(locks
-        .lines()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>())
-        .filter(|fields| !fields.contains(&"->") && fields.contains(&"POSIX") && fields.contains(&pid.as_str()))
-        .filter(|fields| {
-            fields
-                .iter()
-                .any(|field| field.matches(':').count() == 2 && field.rsplit(':').next() == Some(inode.as_str()))
-        })
-        .count())
+    let file = std::fs::metadata(path)?;
+    let mut locks = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir("/proc/self/fd")? {
+        let fd = entry?.file_name();
+        // the metadata of the file the descriptor is open on, read by path: the file itself is never opened here
+        // (closing a descriptor of it would drop the process's locks); a descriptor closed meanwhile is skipped
+        let Ok(target) = std::fs::metadata(Path::new("/proc/self/fd").join(&fd)) else {
+            continue;
+        };
+        if (target.dev(), target.ino()) == (file.dev(), file.ino()) {
+            locks.extend(posix_locks_through(&fd, file.ino()));
+        }
+    }
+    Ok(locks.len())
+}
+
+/// The POSIX locks taken through the descriptor `fd`, without their line numbers (a descriptor shared by a `dup`
+/// lists the same locks), or none when `fd` is no longer open on `inode`.
+fn posix_locks_through(fd: &std::ffi::OsStr, inode: u64) -> Vec<String> {
+    let Ok(info) = std::fs::read_to_string(Path::new("/proc/self/fdinfo").join(fd)) else {
+        return Vec::new();
+    };
+    if !info.lines().any(|line| line == format!("ino:\t{inode}")) {
+        return Vec::new();
+    }
+    info.lines()
+        .filter_map(|line| line.strip_prefix("lock:\t"))
+        .map(|lock| lock.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+        .filter(|lock| lock.starts_with("POSIX "))
+        .collect()
 }
 
 #[test]
