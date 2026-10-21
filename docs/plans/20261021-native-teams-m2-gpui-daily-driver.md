@@ -940,23 +940,85 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
   tests
 - Modify: `crates/teams-auth/src/*` (the parent's side), `crates/teams-app/src/main.rs`
 
-- [ ] first, with Codex: can a WebKitGTK guard cover everything the page can send, as the browser fence does for
+- [x] first, with Codex: can a WebKitGTK guard cover everything the page can send, as the browser fence does for
       Chrome (CLAUDE.md: nothing runs live against the tenant before the fence is armed)? And the route: `webkit6`'s
       content filter plus `decide-policy`, or a hand-FFI web process extension (`cdylib`, its `unsafe` under the
       workspace lints). Recorded here before any code
-- [ ] tests first, offline, in the sandbox: a local fake sign-in page that redirects to the `nativeclient` URI with a
+- Decided with Codex (2026-10-21, agreed; transcript `transcript.md` under the run's
+  `~/.local/state/plan-exec-revmux/20261021-native-teams-m2-gpui-daily-driver/discussions/task-24-webkit-guard/`;
+  WebKit sources at the `webkitgtk-2.54.1` tag, the installed version):
+  - **Route: the hand-FFI web process extension**, as the offline implementation route. Its `send-request` handler
+    (`WebKitWebPage.cpp:313–325`: emitted synchronously, the request dropped when the handler says so) hands each
+    request's method and URL to `teams-signin`'s UI process, which classifies it with the `sign_in` rules, appends
+    the decision to `fence.log` (reads included: stricter than Chrome's unlogged reads) and only then answers; a
+    timeout, a socket error or a failed append is a deny, and a page whose socket broke denies everything. The content
+    filter plus `decide-policy` alone is rejected: `decide-policy` sees navigations only, a content rule list can't log
+    a decision, and its `request-method` is the *initiating document's* method, not the subresource's
+    (`ContentExtensionsBackend.cpp:243–273`), so it isn't a method fence at all.
+  - Further layers, defence in depth (each exercised by an offline test where it can be, not an audited switch-by-switch
+    guarantee): WebKit features off (`WebSocket`, which `send-request` never sees (`WebSocketChannel.cpp:149–180`),
+    `BeaconAPI`, `ServiceWorkers`, `SharedWorker`, `PushAPI`, `Notifications`, `WebTransport`, `LinkPreconnect`,
+    `LinkPrefetch`, `SpeculationRulesPrefetch`, `PrivateClickMeasurement`, `BackgroundFetchAPI`,
+    `ProcessSwapOnCrossSiteNavigation`, which reduces process swaps but is no single-process invariant), WebRTC,
+    hyperlink auditing, DNS prefetching, developer extras and the page cache off; an ephemeral network session; no new
+    windows; downloads refused; the `nativeclient` redirect caught by `decide-policy` and refused by the guard as a
+    request too, whichever comes first. Arming is correlated, not counted: a page's extension reports it armed (page
+    and process id) after it has connected that page's handler, the first load starts only once the view's own page is
+    armed, and a query from a page with no armed record is refused. A process that never arms is detected and the
+    view destroyed: detection and containment, not a proof that nothing ran.
+  - **Verdict: the guard is not complete**, so Task 24's live sign-in does not run. A synchronous load's redirect is
+    followed inside the network process (`NetworkResourceLoader.cpp:1438–1449`), and so is a kept-alive load's after
+    its page is gone (`1476–1483`), neither through a second `send-request`, a decision or a `fence.log` line;
+    `NetworkLoadChecker` doesn't apply content rules to them (`NetworkLoadChecker.h:199`, `.cpp:625–628`), and no
+    setting of 2.54.1 turns synchronous XHR or keepalive off. Either gap defeats "every decision logged before the
+    request goes" on its own. Offline regression tests pin them (a synchronous GET → 302, an allowed POST → 307 under
+    a test-only local own rule, an orphaned keepalive GET → 302), and `docs/backlog/webkit-sign-in-guard-redirects.md`
+    records what would close them: a mandatory, inspecting egress guard (the only way out of every relevant
+    subprocess, no direct connection or uninspected tunnel possible) with its own coverage proof, or a WebKit change.
+    The lab keeps signing in through `proto-lab auth`.
+- [x] tests first, offline, in the sandbox: a local fake sign-in page that redirects to the `nativeclient` URI with a
       code and the request's `state`; the redirect is caught in the navigation policy before it loads, the code is
       handed to the parent on a pipe (never logged), and `teams-auth` redeems it only for the account the ID token
       names (in the lab, the alias's account; in the personal build, the account it signs in)
-- [ ] tests first: the guard classifies each request as proto-lab's `sign_in` classifier does (`GET` reads, the
+- [x] tests first: the guard classifies each request as proto-lab's `sign_in` classifier does (`GET` reads, the
       seeded own-state rules in their exact shapes from Task 1, everything else denied), never by host alone; every
       decision is logged to `fence.log` (lab) before the request goes; a page's fetch, beacon, image, frame, worker
       and WebSocket outside that are refused; website data is ephemeral, service workers off, no new windows
-- [ ] only if Codex found the guard complete: one live sign-in of a lab account through it, under the live lock, only
+- [x] only if Codex found the guard complete: one live sign-in of a lab account through it, under the live lock, only
       Entra's sign-in form let through, stopped by any multi-factor prompt. Otherwise the webview stays
       offline-tested and the lab keeps signing in through `proto-lab auth`; the personal build's sign-in policy is
-      settled in Task 26
-- [ ] `cargo test -p teams-signin -p teams-auth` and the gate pass
+      settled in Task 26 (not run: the guard isn't complete, see the decision above; the binary refuses any page
+      that isn't on a loopback address, `teams_signin::cli::NOT_LIVE`)
+- [x] `cargo test -p teams-signin -p teams-auth` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - Three pieces: `teams-signin-extension` (the `cdylib` WebKit loads into every web process, hand FFI on
+    `glib-sys`/`gobject-sys` and three `webkitgtk-6.0` functions, each `unsafe` op in its own documented block; its
+    `rlib` side holds the guard's line protocol and the fail-closed client), `teams-signin` (lib + `teams-signin
+    --lab` binary: the guard, the webview's setup, the refusals) and `teams_auth::signin` (the parent's side: one JSON
+    request line on the window's stdin, one answer line on its stdout, `code_from_redirect` then `exchange_code`, so
+    the code is redeemed only for the account the ID token names). `teams-signin` depends on the extension crate, so
+    a `cargo build -p teams-signin` leaves the module in `deps/`, where the binary looks for it (or beside itself),
+    checks it exports WebKit's entry point and copies it alone into a private `0700` directory with the guard's socket.
+  - The answer channel is the binary's stdout, not a separate pipe descriptor: it duplicates stdout close-on-exec for
+    the answer and points stdout at stderr before GTK starts, so nothing GTK, WebKit or their processes print reaches
+    it (a test checks one line and nothing else). The code never reaches a log: `fence.log` keeps the redirect's URL
+    without its query, as `sign_in_redirect` (a new `RequestOutcome`, beside `Read`: the window logs its reads too).
+  - The window test (`crates/teams-signin/tests/window.rs`, `harness = false`, rerun inside the sandbox with a
+    private `HOME`) runs the window in-process, not through the binary: its second scenario needs a test-only local
+    own-state rule (`Guard::with_own`, `test-support`), which the binary refuses. It checks the redirect handed back,
+    no `POST`, popup or WebSocket connection reaching the local server, WebSocket, beacons and service workers off,
+    every request the server got allowed in `fence.log` first and the fetch, frame and worker posts denied there,
+    no code or state in `fence.log`, no website data kept; and it pins the gaps (a synchronous `GET` → 302 and an
+    allowed synchronous `POST` → 307 reach their targets undecided, the asynchronous `POST` → 307 is decided and
+    denied; a kept-alive `GET` redirected after its page navigated away was followed undecided too, reported). The
+    pipe to the parent is tested in `teams-auth` (`run_window` on a stand-in, the redemption on wiremock).
+  - The guard classifies with proto-lab's own `Classifier::sign_in` (a dependency on `proto-lab`), not a copy, so it
+    can't drift from the browser fence's rules; the personal build's sign-in policy (Task 26) may move it.
+  - `teams-app` is unchanged: with the guard incomplete, no app path opens the window against the tenant; the
+    personal build wires it in Task 27 under Task 26's policy.
+  - `webkit6` 0.6.1 needs `gtk4`'s `v4_10` (it names `gtk::Accessible`); `webkit6`'s `v2_52` API level (2.54.1 on the
+    machine). WebKitGTK 2.50 dropped the hyperlink auditing setting and 2.48 the DNS prefetching one, so neither is
+    set; an `<a ping>` reaches the guard through the cached-resource loader.
 
 ### Task 25: Verify the lab acceptance
 **Files:**

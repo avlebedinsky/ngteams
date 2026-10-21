@@ -1,0 +1,21 @@
+[package]
+name = "teams-signin-extension"
+description = "The sign-in window's WebKitGTK web process extension: hands every request a page sends to teams-signin's guard and drops it unless the guard allows it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# `cdylib`: the module WebKit loads into every web process; `rlib`: the guard's wire protocol, shared with
+# `teams-signin`, which depends on this crate so a build of it builds the module too
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# `g_variant_*` (the initialization data) and `g_signal_connect_data` (`page-created`, `send-request`): hand FFI on
+# the -sys crates, since no Rust binding has WebKit's web process extension API
+glib-sys.workspace = true
+gobject-sys.workspace = true
+
+[lints]
+workspace = true

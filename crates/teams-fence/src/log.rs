@@ -23,6 +23,9 @@
 //! A WebSocket frame the audit saw leave the browser without an allow is logged the same way, with the verdict
 //! `breach` and the reason `sent_without_allow`.
 //!
+//! The sign-in window (`teams-signin`) logs every request it decides the same way, its reads too (`"read": true`), and
+//! the redirect that carries the authorization code as a deny with the reason `sign_in_redirect` (never its query).
+//!
 //! The native client's own Trouter frames ([`FrameRecord`]) are logged before each is sent, by the one socket sink
 //! that can send them (`teams_proto::FrameSink`): the channel, the socket's URL without its query, fragment or user
 //! info, and the frame's kind from the reviewed list, never its text (the authentication frame carries the account's
@@ -111,6 +114,12 @@ pub enum RequestOutcome {
     /// Denied on purpose, whatever it is: the run forced a deny on it to check that a denied request never leaves the
     /// browser (an enforcement test).
     Forced,
+    /// A read (`GET`, `HEAD` or `OPTIONS`), let through. Only the sign-in window logs its reads (`teams-signin`: every
+    /// decision is logged before the request goes); the browser fence lets reads through unlogged.
+    Read,
+    /// The sign-in's redirect to the registered redirect URI, which carries the authorization code: caught and handed
+    /// to the parent process, never let through (`teams-signin`). Its query, where the code travels, isn't logged.
+    SignInRedirect,
 }
 
 /// A browser request the fence decided without a membership check. The URL is logged without its query, fragment or
@@ -134,6 +143,8 @@ struct RequestEntry<'a> {
     own: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     post_read: Option<&'static str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    read: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -358,7 +369,7 @@ impl FenceLog {
     /// When the entry can't be written, or an earlier append failed.
     pub fn record_request(&self, request: &RequestRecord<'_>) -> io::Result<()> {
         let (verdict, reason, message) = match request.outcome {
-            RequestOutcome::Own(_) | RequestOutcome::PostRead(_) => ("allow", None, None),
+            RequestOutcome::Own(_) | RequestOutcome::PostRead(_) | RequestOutcome::Read => ("allow", None, None),
             RequestOutcome::Unclassified => ("deny", Some("unclassified"), Some("no rule classifies this request")),
             RequestOutcome::SentWithoutAllow => (
                 "breach",
@@ -369,6 +380,11 @@ impl FenceLog {
                 "deny",
                 Some("forced"),
                 Some("denied on purpose by the run (an enforcement test)"),
+            ),
+            RequestOutcome::SignInRedirect => (
+                "deny",
+                Some("sign_in_redirect"),
+                Some("the sign-in's redirect, caught and handed to the parent; it never loads"),
             ),
         };
         self.append(&RequestEntry {
@@ -385,6 +401,7 @@ impl FenceLog {
                 RequestOutcome::PostRead(kind) => Some(kind),
                 _ => None,
             },
+            read: request.outcome == RequestOutcome::Read,
             reason,
             message,
         })

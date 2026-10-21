@@ -773,6 +773,52 @@ fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() 
 }
 
 #[test]
+fn the_sign_in_window_logs_its_reads_and_the_caught_redirect() {
+    let lab = try_lab().unwrap();
+    let log = lab.fence.log();
+    log.record_request(&RequestRecord {
+        channel: Channel::Http,
+        method: "GET",
+        url: &format!("https://login.example.com/common/oauth2/v2.0/authorize?state={PLANTED_TOKEN}"),
+        outcome: RequestOutcome::Read,
+    })
+    .unwrap();
+    log.record_request(&RequestRecord {
+        channel: Channel::Http,
+        method: "GET",
+        url: &format!("https://login.example.com/common/oauth2/nativeclient?code={PLANTED_TOKEN}"),
+        outcome: RequestOutcome::SignInRedirect,
+    })
+    .unwrap();
+    let entries = log_entries(&lab.log_path).unwrap();
+    let expected = [
+        serde_json::json!({
+            "verdict": "allow",
+            "channel": "http",
+            "method": "GET",
+            "url": "https://login.example.com/common/oauth2/v2.0/authorize",
+            "read": true,
+        }),
+        serde_json::json!({
+            "verdict": "deny",
+            "channel": "http",
+            "method": "GET",
+            "url": "https://login.example.com/common/oauth2/nativeclient",
+            "reason": "sign_in_redirect",
+            "message": "the sign-in's redirect, caught and handed to the parent; it never loads",
+        }),
+    ];
+    assert_eq!(entries.len(), expected.len());
+    for (entry, expected) in entries.iter().zip(&expected) {
+        let mut entry = entry.clone();
+        entry.as_object_mut().unwrap().remove("ts_ms").unwrap();
+        assert_eq!(&entry, expected);
+    }
+    let text = fs::read_to_string(&lab.log_path).unwrap();
+    assert!(!text.contains(PLANTED_TOKEN), "{text}");
+}
+
+#[test]
 fn request_entries_share_the_log_with_write_decisions_and_its_failure_mode() {
     let written = Arc::new(Mutex::new(Vec::new()));
     let sink = FillsUp {

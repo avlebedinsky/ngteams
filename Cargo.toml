@@ -12,6 +12,8 @@ members = [
     "crates/teams-headless",
     "crates/teams-mock",
     "crates/teams-proto",
+    "crates/teams-signin",
+    "crates/teams-signin-extension",
     "crates/teams-store",
     "crates/teams-trouter",
     "crates/teams-ui",
@@ -39,6 +41,8 @@ teams-fence = { path = "crates/teams-fence" }
 # tests only: a crate takes it under [dev-dependencies], never [dependencies] (crates/teams-mock/tests/mock.rs checks)
 teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }
+# the sign-in window's web process extension; `teams-signin` depends on it, so its build builds the module
+teams-signin-extension = { path = "crates/teams-signin-extension" }
 teams-store = { path = "crates/teams-store" }
 teams-trouter = { path = "crates/teams-trouter" }
 # the GPUI views and models over the engine
@@ -64,6 +68,15 @@ getrandom = "0.4.3"
 # are. Wayland only: without `x11`, GPUI's Linux platform has no X11 backend to fall back to.
 gpui-pre = { version = "=0.3.9", default-features = false, features = ["wayland"] }
 gpui-pre-platform = { version = "=0.3.9", default-features = false, features = ["wayland"] }
+# The sign-in window's web process extension (M2 Task 24): `g_variant_*` and `g_signal_connect_data` by hand, on
+# the -sys crates of the GLib that webkit6 and gtk4 link
+glib-sys = "0.22.9"
+gobject-sys = "0.22.9"
+# The sign-in window (M2 Task 24): GTK 4 and WebKitGTK 6.0 (2.54 on the machine; `v2_52` is the newest API level the
+# binding has), in `teams-signin`'s own process, apart from GPUI's main loop
+# `v4_10`: webkit6 0.6.1 names `gtk::Accessible`, which gtk4 has only from that API level on (GTK 4.24 here)
+gtk4 = { version = "0.11.5", features = ["v4_10"] }
+webkit6 = { version = "0.6.1", features = ["v2_52"] }
 # The UI kit (Apache-2.0; M2 Task 7's audit): built for `gpui-pre =0.3.9`, so it resolves to the vendored patched
 # copy above. It takes `gpui-pre` with its default features, so the workspace's GPUI gains `x11`, `font-kit` and
 # `windows-manifest` (the lab app refuses a set `DISPLAY`); none of the kit's own optional features.
