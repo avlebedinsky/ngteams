@@ -3,7 +3,8 @@
 //! `Event::Profile`; a name Graph doesn't give from the profile lookup, for a lab account only and under the fence's
 //! permit (logged to `fence.log` before it is sent); someone outside the lab never looked up by `POST` and named from
 //! their messages, else from the names the binary knows; one lookup per person at a time; a failed one not tried
-//! again before its wait; and an old profile read again by age.
+//! again before its wait, and tried again after it without anyone asking; and an old profile read again by age, its
+//! read time kept when a part failed.
 //!
 //! Tokens, ids and names here are made up; the answers follow the synthetic fixtures
 //! (`tests/fixtures/graph/profile.json`, `tests/fixtures/mt/short-profile.json`).
@@ -20,7 +21,7 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
-use teams_core::{NameFrom, Outbox, PROFILE_MAX_AGE};
+use teams_core::{NameFrom, Outbox, PROFILE_MAX_AGE, PROFILE_RETRY};
 use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::{Conversation, ConversationKind, Message, NameSource, PictureState, Profile, Store, StoredPicture};
@@ -125,17 +126,25 @@ struct Rig {
     server: MockServer,
     handle: EngineHandle,
     log: SharedLog,
+    store_file: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
 /// An engine of lab account a (the lab: a and b), its reads and its profile lookup on `server`, with `store` filled
 /// in before it starts and `known` as the names the binary knows.
 fn rig(server: MockServer, fill: impl FnOnce(&mut Store), known: Vec<(String, String)>) -> Rig {
-    rig_with(server, fill, known, true)
+    rig_with(server, fill, known, true, PROFILE_RETRY)
 }
 
-/// [`rig`], its reads' transport given the middle tier's base only when `middle_tier`.
-fn rig_with(server: MockServer, fill: impl FnOnce(&mut Store), known: Vec<(String, String)>, middle_tier: bool) -> Rig {
+/// [`rig`], its reads' transport given the middle tier's base only when `middle_tier`, a failed lookup tried again
+/// after `retry`.
+fn rig_with(
+    server: MockServer,
+    fill: impl FnOnce(&mut Store),
+    known: Vec<(String, String)>,
+    middle_tier: bool,
+    retry: Duration,
+) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let log = SharedLog::default();
     let fence = Arc::new(Fence::new(
@@ -168,6 +177,7 @@ fn rig_with(server: MockServer, fill: impl FnOnce(&mut Store), known: Vec<(Strin
         options: EngineOptions {
             tick: Duration::from_millis(50),
             catch_up_retry: Duration::from_millis(500),
+            profile_retry: retry,
         },
         known_names: known,
     })
@@ -176,6 +186,7 @@ fn rig_with(server: MockServer, fill: impl FnOnce(&mut Store), known: Vec<(Strin
         server,
         handle,
         log,
+        store_file,
         _dir: dir,
     }
 }
@@ -195,6 +206,12 @@ impl Rig {
                 _ => {}
             }
         }
+    }
+
+    /// Stops the engine and reads `who`'s stored profile.
+    fn stored_after_shutdown(self, who: &str) -> Option<Profile> {
+        self.handle.shutdown();
+        Store::open(&self.store_file).unwrap().profile(who).unwrap()
     }
 
     async fn requests_to(&self, wanted: &str) -> Vec<Request> {
@@ -389,7 +406,7 @@ async fn without_the_middle_tier_s_base_the_fence_isn_t_asked_for_a_lookup() {
         .mount(&server)
         .await;
     let known = vec![(mri(GUID_B), "lab-b".to_owned())];
-    let mut rig = rig_with(server, |_| {}, known, false);
+    let mut rig = rig_with(server, |_| {}, known, false, PROFILE_RETRY);
     let _ = rig.handle.person(mri(GUID_B)).await.unwrap();
     rig.profile_of(&mri(GUID_B)).await;
     let b = rig.handle.person(mri(GUID_B)).await.unwrap();
@@ -480,5 +497,53 @@ async fn an_old_profile_is_shown_and_read_again_and_a_failed_part_keeps_the_last
         person.picture.map(|picture| picture.media_type),
         Some("image/png".to_owned())
     );
+    // a part failed: the read time stays the old one, so the person is due again after the retry wait, not a day
+    let stored = rig.stored_after_shutdown(&mri(GUID_B)).expect("b's profile");
+    assert_eq!(stored.read_at, old.read_at);
+    assert_eq!(stored.name.as_deref(), Some("Lab Account B Renamed"));
+}
+
+#[tokio::test]
+async fn a_failed_lookup_is_tried_again_after_its_wait_without_anyone_asking_again() {
+    let server = MockServer::start().await;
+    // Graph's read fails on the way once, then answers
+    Mock::given(method("GET"))
+        .and(path(graph_user(GUID_B)))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(graph_user(GUID_B)))
+        .respond_with(user_answer(GUID_B, "Lab Account B"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(graph_picture(GUID_B)))
+        .respond_with(not_found())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(SHORT_PROFILE))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let mut rig = rig_with(server, |_| {}, Vec::new(), true, Duration::from_millis(300));
+
+    // asked once: the lookup fails, and what it left (nothing settled) is told
+    let _ = rig.handle.person(mri(GUID_B)).await.unwrap();
+    rig.profile_of(&mri(GUID_B)).await;
+    assert_eq!(rig.requests_to(&graph_user(GUID_B)).await.len(), 1);
+    // nobody asks again: the engine looks them up once the wait is over, and tells the name it found
+    rig.profile_of(&mri(GUID_B)).await;
+    assert_eq!(rig.requests_to(&graph_user(GUID_B)).await.len(), 2);
+    let person = rig.handle.person(mri(GUID_B)).await.unwrap();
+    assert_eq!(
+        (person.name.as_deref(), person.from),
+        (Some("Lab Account B"), Some(NameFrom::Graph))
+    );
+    // settled now: not looked up again
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(rig.requests_to(&graph_user(GUID_B)).await.len(), 2);
     rig.handle.shutdown();
 }

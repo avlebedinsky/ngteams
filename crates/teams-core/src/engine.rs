@@ -84,7 +84,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
-use crate::profiles::{Person, Profiles};
+use crate::profiles::{PROFILE_RETRY, Person, Profiles};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
 
 /// How the engine paces itself.
@@ -95,6 +95,9 @@ pub struct EngineOptions {
     /// How long after a catch-up that failed (or left a conversation unsynced), or a delivery that didn't reach the
     /// store, the next catch-up is tried: 30 s.
     pub catch_up_retry: Duration,
+    /// How long after a profile lookup that failed on the way the person is looked up again, from the tick:
+    /// [`PROFILE_RETRY`].
+    pub profile_retry: Duration,
 }
 
 impl Default for EngineOptions {
@@ -102,6 +105,7 @@ impl Default for EngineOptions {
         Self {
             tick: Duration::from_secs(1),
             catch_up_retry: Duration::from_secs(30),
+            profile_retry: PROFILE_RETRY,
         }
     }
 }
@@ -322,6 +326,13 @@ impl<T> Reply<T> {
         Self(taken)
     }
 
+    /// A reply answered later, through the [`Answer`] that comes with it: for a stand-in of the engine (a UI test's
+    /// fake core) to hold an answer back.
+    pub fn later() -> (Answer<T>, Self) {
+        let (reply, taken) = oneshot::channel();
+        (Answer(reply), Self(taken))
+    }
+
     /// Waits for the answer on a thread that runs no async executor (it panics inside one, as tokio's does).
     ///
     /// # Errors
@@ -343,6 +354,17 @@ impl<T> Future for Reply<T> {
 }
 
 type Responder<T> = oneshot::Sender<Result<T, EngineError>>;
+
+/// Where a [`Reply::later`] is answered; dropped unanswered, the reply is [`EngineError::Stopped`].
+#[derive(Debug)]
+pub struct Answer<T>(Responder<T>);
+
+impl<T> Answer<T> {
+    /// Answers the reply (nobody hears it once the reply is dropped).
+    pub fn send(self, answer: Result<T, EngineError>) {
+        let _ = self.0.send(answer);
+    }
+}
 
 /// A request to the engine's thread, with where its answer goes.
 enum Request {
@@ -686,7 +708,12 @@ where
     fn new(parts: Parts<C, T>, events: mpsc::UnboundedSender<Event>) -> Self {
         let outbox = Arc::new(parts.outbox);
         let me = outbox.me().mri().clone();
-        let profiles = Profiles::new(Arc::clone(&parts.client), Arc::clone(outbox.fence()), parts.known_names);
+        let profiles = Profiles::new(
+            Arc::clone(&parts.client),
+            Arc::clone(outbox.fence()),
+            parts.known_names,
+            parts.options.profile_retry,
+        );
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
         Self {
             store: parts.store,
@@ -1098,6 +1125,8 @@ where
         if self.up && self.retry_at.is_some_and(|at| Instant::now() >= at) {
             self.auto_catch_up(Cause::Retry).await;
         }
+        // profile lookups that failed on the way, their wait over
+        self.profiles.retry_due();
     }
 
     // --- catch-up ---

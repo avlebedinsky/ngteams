@@ -10,8 +10,10 @@
 //!   without one a view draws initials.
 //! - **Kept in the store** ([`teams_store::Profile`]) and read again once older than [`PROFILE_MAX_AGE`]. A read that
 //!   failed on the way (the network, a 5xx, a throttled or refused token) keeps what the last read gave for that part
-//!   and is tried again [`PROFILE_RETRY`] later, never sooner; an answer that settles it (a 404 for a picture, an
-//!   account Graph doesn't know, a lookup the fence denies) is kept as "none" until the next read by age.
+//!   and is tried again [`PROFILE_RETRY`] later (the engine's
+//!   [`EngineOptions::profile_retry`](crate::EngineOptions::profile_retry)), never sooner, from the engine's tick
+//!   whether or not a view asks for them again; an answer that settles it (a 404 for a picture, an account Graph
+//!   doesn't know, a lookup the fence denies) is kept as "none" until the next read by age.
 //! - **One lookup per person at a time**: a person asked for while their lookup is queued or running isn't looked up
 //!   again; at most [`MAX_LOOKUPS`] run at once, on the engine's runtime, so the engine's loop never waits for one.
 //! - **The bytes of a picture reach a view only from the engine** ([`Person::picture`]): nothing else reads them.
@@ -108,12 +110,19 @@ pub(crate) struct Profiles<C> {
     /// Queued or running.
     under_way: HashSet<String>,
     queued: VecDeque<String>,
-    /// After a failed lookup: not before then.
+    /// After a failed lookup: not before then, and then again.
     retry_at: HashMap<String, Instant>,
+    /// How long after a failed lookup it is tried again.
+    retry: Duration,
 }
 
 impl<C: Credentials + 'static> Profiles<C> {
-    pub(crate) fn new(client: Arc<Client<HttpTransport<C>>>, fence: Arc<Fence>, known: Vec<(String, String)>) -> Self {
+    pub(crate) fn new(
+        client: Arc<Client<HttpTransport<C>>>,
+        fence: Arc<Fence>,
+        known: Vec<(String, String)>,
+        retry: Duration,
+    ) -> Self {
         Self {
             client,
             fence,
@@ -123,6 +132,7 @@ impl<C: Credentials + 'static> Profiles<C> {
             under_way: HashSet::new(),
             queued: VecDeque::new(),
             retry_at: HashMap::new(),
+            retry,
         }
     }
 
@@ -185,7 +195,7 @@ impl<C: Credentials + 'static> Profiles<C> {
             match looked {
                 Some(looked) => return Some(looked),
                 None => {
-                    self.retry_at.insert(mri, Instant::now() + PROFILE_RETRY);
+                    self.retry_at.insert(mri, Instant::now() + self.retry);
                 }
             }
         }
@@ -195,7 +205,7 @@ impl<C: Credentials + 'static> Profiles<C> {
     pub(crate) fn store(&mut self, store: &mut Store, looked: Looked) -> Result<Option<Profile>, StoreError> {
         let old = store.profile(&looked.mri)?;
         if looked.name.failed() || looked.picture.failed() {
-            self.retry_at.insert(looked.mri.clone(), Instant::now() + PROFILE_RETRY);
+            self.retry_at.insert(looked.mri.clone(), Instant::now() + self.retry);
         } else {
             self.retry_at.remove(&looked.mri);
         }
@@ -207,7 +217,25 @@ impl<C: Credentials + 'static> Profiles<C> {
         Ok(Some(profile))
     }
 
-    /// Queues a lookup of `mri`, unless one is under way or one failed within [`PROFILE_RETRY`].
+    /// Queues the lookups that failed and whose wait is over (from the engine's tick): a person isn't left on what
+    /// a failed lookup gave until a view happens to ask for them again. Its change, when it brings one, is told as
+    /// any lookup's.
+    pub(crate) fn retry_due(&mut self) {
+        let now = Instant::now();
+        let mut due: Vec<String> = Vec::new();
+        self.retry_at.retain(|mri, at| {
+            let waits = now < *at;
+            if !waits {
+                due.push(mri.clone());
+            }
+            waits
+        });
+        for mri in due {
+            self.queue(&mri);
+        }
+    }
+
+    /// Queues a lookup of `mri`, unless one is under way or one failed within the retry wait.
     fn queue(&mut self, mri: &str) {
         if self.under_way.contains(mri) || self.retry_at.get(mri).is_some_and(|at| Instant::now() < *at) {
             return;

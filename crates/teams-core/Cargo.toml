@@ -9,6 +9,9 @@ publish.workspace = true
 [dependencies]
 # a fresh `clientmessageid` for each command, from the system random source
 getrandom.workspace = true
+# a lab engine's warning that the region's middle-tier base was refused (never its value); capped at `debug` at compile
+# time like teams-trouter's
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
 serde.workspace = true
 # a command's outbox payload, and a message post's answer (`OriginalArrivalTime`)
 serde_json.workspace = true

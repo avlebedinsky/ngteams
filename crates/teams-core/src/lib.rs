@@ -27,8 +27,8 @@ pub mod profiles;
 pub mod sync;
 
 pub use engine::{
-    Action, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, Parts, Push, Reply,
-    Source,
+    Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, Parts, Push,
+    Reply, Source,
 };
 pub use outbox::{
     Arrival, CHECK_RETRY_WAIT, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS, MAX_FAILED_CHECKS,

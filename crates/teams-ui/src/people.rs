@@ -4,8 +4,10 @@
 //! draws them. Without a picture an avatar shows the initials of a name; without a name, a blank one.
 //!
 //! A picture reaches a view only as bytes from the engine ([`Shown::of`]): nothing here names a URL, and GPUI's HTTP
-//! client stays the null one.
+//! client stays the null one. A [`Picture`]'s `Debug` shows its format and size, never its bytes.
 
+use std::fmt;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use gpui::{Image, ImageFormat, SharedString};
@@ -22,7 +24,7 @@ pub struct Shown {
     /// Where the name came from.
     pub from: Option<NameFrom>,
     /// Their picture, from the engine's bytes; `None` when they have none (or it wasn't read yet).
-    pub picture: Option<Arc<Image>>,
+    pub picture: Option<Picture>,
 }
 
 impl Shown {
@@ -48,7 +50,7 @@ impl Shown {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Face {
     pub named: bool,
-    pub picture: Option<Arc<Image>>,
+    pub picture: Option<Picture>,
 }
 
 impl Face {
@@ -59,26 +61,56 @@ impl Face {
     }
 }
 
-/// The image of a stored picture, for GPUI to decode when it is drawn: JPEG and PNG, the formats the engine keeps.
+/// A picture as a view holds it, for GPUI to decode when it is drawn. Its `Debug` shows only its format and size, as
+/// the engine's [`StoredPicture`] does: GPUI's own [`Image`] would print every byte.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Picture(Arc<Image>);
+
+impl Picture {
+    /// The image GPUI is handed.
+    #[must_use]
+    pub fn image(&self) -> &Arc<Image> {
+        &self.0
+    }
+}
+
+impl Deref for Picture {
+    type Target = Image;
+
+    fn deref(&self) -> &Image {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Picture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Picture")
+            .field("format", &self.0.format)
+            .field("bytes", &self.0.bytes.len())
+            .finish()
+    }
+}
+
+/// The picture of a stored one: JPEG and PNG, the formats the engine keeps.
 #[must_use]
-pub fn image_of(picture: &StoredPicture) -> Option<Arc<Image>> {
+pub fn image_of(picture: &StoredPicture) -> Option<Picture> {
     let format = match picture.media_type.as_str() {
         "image/jpeg" => ImageFormat::Jpeg,
         "image/png" => ImageFormat::Png,
         _ => return None,
     };
-    Some(Arc::new(Image::from_bytes(format, picture.bytes.clone())))
+    Some(Picture(Arc::new(Image::from_bytes(format, picture.bytes.clone()))))
 }
 
 /// An avatar of `size`: the picture when there is one, else the initials of `name`, else a blank one.
 #[must_use]
-pub fn avatar(name: Option<&SharedString>, picture: Option<&Arc<Image>>, size: Size) -> Avatar {
+pub fn avatar(name: Option<&SharedString>, picture: Option<&Picture>, size: Size) -> Avatar {
     let mut avatar = Avatar::new().with_size(size);
     if let Some(name) = name {
         avatar = avatar.name(name.clone());
     }
     if let Some(picture) = picture {
-        avatar = avatar.src(Arc::clone(picture));
+        avatar = avatar.src(Arc::clone(picture.image()));
     }
     avatar
 }

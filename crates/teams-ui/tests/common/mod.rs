@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
-use teams_core::{Action, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
+use teams_core::{Action, Answer, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
 use teams_store::{Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon};
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
@@ -47,6 +47,10 @@ pub struct FakeCore {
     pub names: Mutex<HashMap<String, String>>,
     /// People as their profiles have them, by MRI: answered before `names`.
     pub people: Mutex<HashMap<String, Person>>,
+    /// People whose answer is held back: made when asked, kept in `held` for the test to send.
+    pub hold_people: Mutex<HashSet<String>>,
+    /// The answers held back, as they were when asked.
+    pub held: Mutex<Vec<(Answer<Person>, Person)>>,
     /// Reactions by message id.
     pub reactions: Mutex<HashMap<String, Vec<Reaction>>>,
     /// The account's read horizons by conversation.
@@ -76,6 +80,8 @@ impl Default for FakeCore {
             unread: Mutex::default(),
             names: Mutex::default(),
             people: Mutex::default(),
+            hold_people: Mutex::default(),
+            held: Mutex::default(),
             reactions: Mutex::default(),
             horizons: Mutex::default(),
             older: Mutex::default(),
@@ -129,6 +135,19 @@ impl FakeCore {
 
     pub fn asked(&self) -> Vec<&'static str> {
         locked(&self.asked).clone()
+    }
+
+    fn person_now(&self, mri: String) -> Person {
+        if let Some(person) = locked(&self.people).get(&mri) {
+            return person.clone();
+        }
+        let name = locked(&self.names).get(&mri).cloned();
+        Person {
+            from: name.as_ref().map(|_| NameFrom::Message),
+            name,
+            picture: None,
+            mri,
+        }
     }
 }
 
@@ -215,18 +234,14 @@ impl Core for FakeCore {
     }
 
     fn person(&self, mri: String) -> Reply<Person> {
-        self.answer("person", || {
-            if let Some(person) = locked(&self.people).get(&mri) {
-                return person.clone();
-            }
-            let name = locked(&self.names).get(&mri).cloned();
-            Person {
-                from: name.as_ref().map(|_| NameFrom::Message),
-                name,
-                picture: None,
-                mri,
-            }
-        })
+        if !*locked(&self.stopped) && locked(&self.hold_people).contains(&mri) {
+            locked(&self.asked).push("person");
+            let (answer, reply) = Reply::later();
+            let person = self.person_now(mri);
+            locked(&self.held).push((answer, person));
+            return reply;
+        }
+        self.answer("person", || self.person_now(mri))
     }
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {

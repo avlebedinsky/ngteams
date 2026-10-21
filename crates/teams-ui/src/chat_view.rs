@@ -469,8 +469,11 @@ pub struct ChatView {
     history: History,
     /// The account's read horizon when the chat opened.
     horizon: Option<i64>,
-    /// People as the engine has them, by MRI (`None`: asked, no answer yet or none).
-    people: HashMap<String, Option<Shown>>,
+    /// People as the engine has them, by MRI: the ask whose answer the entry takes, and that answer (`None`: asked,
+    /// no answer yet or none).
+    people: HashMap<String, (u64, Option<Shown>)>,
+    /// The last ask's number: an answer to an earlier ask of someone asked again since is dropped.
+    asks: u64,
     /// The models' revision the people were last asked at: someone renamed since is asked again.
     people_seen: u64,
     /// Rendered rich text per message id, with the version it was rendered from.
@@ -545,6 +548,7 @@ impl ChatView {
             history: History::More,
             horizon: None,
             people: HashMap::new(),
+            asks: 0,
             people_seen,
             rendered: HashMap::new(),
             activities: HashMap::new(),
@@ -870,16 +874,18 @@ impl ChatView {
 
     fn ask_names(&mut self, wanted: Vec<String>, cx: &mut Context<Self>) {
         let me = self.core.me().to_owned();
+        let ask = self.asks + 1;
         let mut asked = Vec::new();
         for mri in wanted {
             if mri != me && !self.people.contains_key(&mri) {
-                self.people.insert(mri.clone(), None);
+                self.people.insert(mri.clone(), (ask, None));
                 asked.push(mri);
             }
         }
         if asked.is_empty() {
             return;
         }
+        self.asks = ask;
         let core = Arc::clone(&self.core);
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let mut found = Vec::new();
@@ -891,20 +897,21 @@ impl ChatView {
             if found.is_empty() {
                 return;
             }
-            let _ = this.update(cx, |view, cx| view.answered(found, cx));
+            let _ = this.update(cx, |view, cx| view.answered(ask, found, cx));
         })
         .detach();
     }
 
-    /// The engine answered for these people: the rows are built again when anyone changed.
-    fn answered(&mut self, found: Vec<(String, Shown)>, cx: &mut Context<Self>) {
+    /// The engine answered ask `ask` for these people: the rows are built again when anyone changed.
+    fn answered(&mut self, ask: u64, found: Vec<(String, Shown)>, cx: &mut Context<Self>) {
         let mut changed = false;
         for (mri, shown) in found {
-            // someone the view dropped meanwhile isn't added back; a later ask's answer replaces this one
-            let Some(entry) = self.people.get_mut(&mri) else {
+            // someone the view dropped meanwhile isn't added back, and someone asked again since takes only the later
+            // ask's answer, whichever comes first
+            let Some((asked, entry)) = self.people.get_mut(&mri) else {
                 continue;
             };
-            if entry.as_ref() != Some(&shown) {
+            if *asked == ask && entry.as_ref() != Some(&shown) {
                 *entry = Some(shown);
                 changed = true;
             }
@@ -963,7 +970,7 @@ impl ChatView {
 
     /// A person as the engine last answered, if it has.
     fn shown(&self, mri: &str) -> Option<&Shown> {
-        self.people.get(mri).and_then(Option::as_ref)
+        self.people.get(mri).and_then(|(_, shown)| shown.as_ref())
     }
 
     /// A message's sender's name and whether it is a name (not an MRI): their profile's, else the message's own,

@@ -240,6 +240,13 @@ fn a_picture_is_handed_to_gpui_only_as_the_engine_s_bytes_of_a_kept_format() {
         (image.format, image.bytes.as_slice()),
         (ImageFormat::Jpeg, &[0xFF, 0xD8][..])
     );
+    // formatted, a picture shows its format and size, never its bytes; nor does anything that holds one
+    assert_eq!(format!("{image:?}"), "Picture { format: Jpeg, bytes: 2 }");
+    let face = Face {
+        named: true,
+        picture: Some(image),
+    };
+    assert!(!format!("{face:?}").contains("255"), "{face:?}");
     for media_type in ["image/gif", "image/svg+xml", "text/html", ""] {
         let other = StoredPicture {
             media_type: media_type.to_owned(),
@@ -253,4 +260,35 @@ fn a_picture_is_handed_to_gpui_only_as_the_engine_s_bytes_of_a_kept_format() {
     let known = Shown::of(person(LAB_C, "lab-c", NameFrom::Known, None));
     assert!(!known.profiled());
     assert_eq!(known.picture, None);
+}
+
+#[test]
+fn an_answer_to_an_earlier_ask_never_replaces_a_later_one_in_the_chat_view() {
+    let rig = rig();
+    // b's first answer is held back, as an engine answering a batch of people one by one would be slow on it
+    rig.core.hold_people.lock().unwrap().insert(LAB_B.to_owned());
+    let (view, cx) = chat_window(&rig);
+
+    // b's profile changes meanwhile: b is asked again and that answer comes at once
+    rig.core.hold_people.lock().unwrap().clear();
+    rig.core.people.lock().unwrap().insert(
+        LAB_B.to_owned(),
+        person(LAB_B, "Graph Bee Renamed", NameFrom::Graph, None),
+    );
+    rig.send(Event::Profile { mri: LAB_B.to_owned() });
+    draw(cx);
+    assert_eq!(item(&view, cx, "200").sender_name.as_ref(), "Graph Bee Renamed");
+
+    // the first ask's answer, made before the change, comes last: it is dropped
+    let held = std::mem::take(&mut *rig.core.held.lock().unwrap());
+    assert_eq!(held.len(), 1);
+    for (answer, person) in held {
+        answer.send(Ok(person));
+    }
+    draw(cx);
+    let from_b = item(&view, cx, "200");
+    assert_eq!(
+        (from_b.sender_name.as_ref(), from_b.face.picture),
+        ("Graph Bee Renamed", None)
+    );
 }

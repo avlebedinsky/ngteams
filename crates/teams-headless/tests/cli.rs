@@ -344,6 +344,7 @@ fn start<T: Transport<Error = HttpError> + Send + 'static>(
         options: EngineOptions {
             tick: Duration::from_millis(50),
             catch_up_retry: Duration::from_millis(500),
+            ..EngineOptions::default()
         },
         known_names: Vec::new(),
     })

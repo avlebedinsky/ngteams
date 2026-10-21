@@ -21,7 +21,7 @@ use teams_auth::session::Session;
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
 use teams_fence::lab::{Alias, LabConfig};
 use teams_fence::{Fence, LiveMembershipSource, LiveSourceError, Mri};
-use teams_proto::{Author, BuildError, Client, HttpTransport};
+use teams_proto::{Author, BuildError, Client, Credentials, HttpTransport};
 use teams_store::{Store, StoreError};
 use teams_trouter::Trouter;
 
@@ -89,11 +89,10 @@ pub fn start<S: SecretStore + 'static>(
     let transport = Arc::new(HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?);
     let membership = LiveMembershipSource::for_fence(&fence)?;
     membership.set_credential_source(transport.clone());
-    let mut reads = HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?;
-    // the profile lookup's base; without one the lookup is refused and names come from Graph and the messages
-    if let Some(middle_tier) = session.service_base(MIDDLE_TIER_GTM) {
-        reads = reads.with_middle_tier(&middle_tier)?;
-    }
+    let reads = with_middle_tier(
+        || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base),
+        session.service_base(MIDDLE_TIER_GTM).as_deref(),
+    )?;
     let client = Arc::new(Client::new(reads));
     let push = if push {
         Some(Push::new(Trouter::new(
@@ -117,6 +116,26 @@ pub fn start<S: SecretStore + 'static>(
     Ok(LabEngine { handle, session })
 }
 
+/// The reads' transport `build` makes, given the middle tier's base (the profile lookup's) when the region has one
+/// the transport accepts. Without one, or with one of another form (logged, without its value), the lookup is
+/// refused and names come from Graph and the messages: an optional source of names never stops the engine.
+fn with_middle_tier<C: Credentials>(
+    build: impl Fn() -> Result<HttpTransport<C>, BuildError>,
+    middle_tier: Option<&str>,
+) -> Result<HttpTransport<C>, BuildError> {
+    let reads = build()?;
+    let Some(middle_tier) = middle_tier else {
+        return Ok(reads);
+    };
+    match reads.with_middle_tier(middle_tier) {
+        Err(BuildError::MiddleTierBase) => {
+            log::warn!("the region's middleTier base isn't of the form the transport accepts: no profile lookup");
+            build()
+        }
+        other => other,
+    }
+}
+
 /// The GTM the middle tier's base comes from (the profile lookup's).
 pub const MIDDLE_TIER_GTM: &str = "middleTier";
 
@@ -134,4 +153,62 @@ pub fn known_names(config: &LabConfig) -> Vec<(String, String)> {
 #[must_use]
 pub fn display_name(upn: &str) -> &str {
     upn.split_once('@').map_or(upn, |(local, _)| local)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::{self, Future};
+
+    use teams_auth::secrets::Secret;
+    use teams_auth::token::TokenError;
+    use teams_fence::{FenceLog, Roster};
+
+    use super::*;
+
+    /// Placeholder tokens; nothing is sent.
+    struct NoTokens;
+
+    impl Credentials for NoTokens {
+        fn bearer(&self, audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+            future::ready(Ok(Secret::new(format!("placeholder-token-for-{audience}"))))
+        }
+
+        fn bearer_rejected(
+            &self,
+            audience: &str,
+            _: &Secret,
+        ) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+            self.bearer(audience)
+        }
+    }
+
+    fn reads(middle_tier: Option<&str>) -> Result<HttpTransport<NoTokens>, BuildError> {
+        let fence = Arc::new(Fence::new(Roster::new([], []), FenceLog::from_writer(std::io::sink())));
+        let tokens = Arc::new(NoTokens);
+        with_middle_tier(
+            || {
+                HttpTransport::new(
+                    Arc::clone(&tokens),
+                    Arc::clone(&fence),
+                    "https://teams.microsoft.com/api/chatsvc/amer",
+                )
+            },
+            middle_tier,
+        )
+    }
+
+    #[test]
+    fn a_middle_tier_base_of_another_form_leaves_the_reads_without_the_lookup_and_the_engine_starting() {
+        let given = reads(Some("https://teams.microsoft.com/api/mt/part/amer-03")).unwrap();
+        assert!(given.has_middle_tier());
+        assert!(!reads(None).unwrap().has_middle_tier());
+        for other in [
+            "http://teams.microsoft.com/api/mt/part/amer-03",
+            "https://elsewhere.example/api/mt/part/amer-03",
+            "https://teams.microsoft.com/api/mt/part/AMER-03",
+            "not a url",
+        ] {
+            assert!(!reads(Some(other)).unwrap().has_middle_tier(), "{other}");
+        }
+    }
 }

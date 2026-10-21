@@ -347,6 +347,15 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
     try_native_in(lab, me, how, Arc::new(tempfile::tempdir().unwrap())).unwrap()
 }
 
+/// The engine's pace in these tests: a fast tick and a short wait before a failed catch-up is tried again.
+fn fast_options() -> EngineOptions {
+    EngineOptions {
+        tick: Duration::from_millis(50),
+        catch_up_retry: Duration::from_millis(500),
+        ..EngineOptions::default()
+    }
+}
+
 /// `me`'s native client as [`native`] makes it, on the store in `dir` (another engine's, perhaps), with a `fence.log`
 /// of its own; the engine's refusal when it can't start.
 fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempDir>) -> Result<Native, EngineError> {
@@ -397,10 +406,6 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
         Push::new(trouter)
     });
     let store = Store::open(&dir.path().join("store").join("lab.sqlite")).unwrap();
-    let options = EngineOptions {
-        tick: Duration::from_millis(50),
-        catch_up_retry: Duration::from_millis(500),
-    };
     let next_write = Arc::new(AtomicU16::new(if how.throttle_first_write { 429 } else { 0 }));
     let lose_answer = Arc::new(AtomicBool::new(false));
     let interposed = Interposed {
@@ -415,7 +420,7 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
         client,
         outbox,
         push,
-        options,
+        options: fast_options(),
         known_names: Vec::new(),
     })?;
     Ok(Native {

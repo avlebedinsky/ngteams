@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Datelike as _, Local, TimeZone};
 use gpui::{
-    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, Image, InteractiveElement as _, IntoElement,
+    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
     WeakEntity, Window, div, px, rgb, uniform_list,
 };
@@ -36,7 +36,7 @@ use teams_store::{Conversation, ConversationKind, Member, Message};
 
 use crate::bridge::Core;
 use crate::models::Models;
-use crate::people::{self, Shown};
+use crate::people::{self, Picture, Shown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
@@ -104,7 +104,7 @@ pub struct ChatRow {
     /// Whether `name` came from people's names or the chat's topic, not from MRIs.
     pub named: bool,
     /// A 1:1 chat's other member's picture, from the engine.
-    pub picture: Option<Arc<Image>>,
+    pub picture: Option<Picture>,
     /// The last message's first line.
     pub preview: SharedString,
     /// Milliseconds.
@@ -207,7 +207,7 @@ where
 struct Naming {
     name: SharedString,
     named: bool,
-    picture: Option<Arc<Image>>,
+    picture: Option<Picture>,
     /// The members whose names the name read (none for a topic).
     people: Vec<String>,
 }
