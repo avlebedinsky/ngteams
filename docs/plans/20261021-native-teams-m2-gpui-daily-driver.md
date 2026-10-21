@@ -943,6 +943,11 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
   - Which messages: a delivery notifies with no time or read check (it is new by definition; the mock's arrival
     times are older than its fixtures', so a horizon check would drop a live one); a catch-up's only after the push
     channel last went down (before it first connects: since the app started) and after the account's read horizon.
+    A replayed delivery (`replay`) the store didn't have notifies under the same rule as a catch-up's, unlike the
+    line above: a delivery missed in a silent drop comes back as a replay on the reconnect; one the store had stays
+    silent, as any message not newly stored does. The cutoff is when the socket last heard from the service (the
+    engine tells it with the drop) less `CLOCK_SKEW_MS`, not the moment the drop was noticed: a socket gone silent
+    in a suspend is noticed only later, and the service's times are compared with this machine's.
     In a team's channel only a mention notifies; the account's own streams (`48:`) and non-text messages never do.
     A mention reads "<name> mentioned you" (in "<chat>" for a group).
   - Collapsing: messages are gathered for 250 ms before they are shown, so a catch-up's come together; a chat keeps
