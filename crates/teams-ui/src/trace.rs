@@ -157,6 +157,23 @@ impl<'a> TraceLine<'a> {
         self
     }
 
+    /// A list's rows, in its order: each one's conversation, kind and unread count, kept together. A row whose id hasn't
+    /// an id's shape is left out whole (and counted), so the conversations, kinds and unread counts stay in step.
+    #[must_use]
+    pub fn rows<I: IntoIterator<Item = (&'a str, &'static str, u64)>>(mut self, rows: I) -> Self {
+        for (id, kind, unread) in rows {
+            match TraceId::new(id) {
+                Some(id) => {
+                    self.conversations.push(id);
+                    self.kinds.push(kind);
+                    self.unread.push(unread);
+                }
+                None => self.refused += 1,
+            }
+        }
+        self
+    }
+
     /// Unread counts, in the order of the conversations: numbers, never text.
     #[must_use]
     pub fn unread<I: IntoIterator<Item = u64>>(mut self, counts: I) -> Self {

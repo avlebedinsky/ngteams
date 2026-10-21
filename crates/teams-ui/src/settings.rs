@@ -5,14 +5,16 @@
 //!   messages notify ([`Notifications`]), the idle time before the account shows away, the account's manual status
 //!   ([`ManualStatus`]). Tasks 13 and 14 and Tasks 18–20 act on the ones this task only keeps.
 //! - **Forgiving to read**: a missing file gives the defaults; a file that can't be read or isn't TOML gives the
-//!   defaults and is reported; a value that is bad (of the wrong type, out of range, a name this build doesn't know)
+//!   defaults and is reported, and is never written over: changes hold in memory until the app quits, so the file
+//!   is there to mend by hand; a value that is bad (of the wrong type, out of range, a name this build doesn't know)
 //!   is reported and that one setting keeps its default, the others are taken; a key that names no setting is
 //!   reported and ignored. Every problem is a [`Problem`], shown by the settings view.
 //! - **Private to write**: the file is `0600` and its directory `0700`, written whole to a temporary file beside it
 //!   and renamed over it, so a crash leaves the old file or the new one. A file found readable by others is tightened
 //!   when it is read.
 //!
-//! [`SettingsModel`] is the GPUI entity the views share: a change goes to the file at once.
+//! [`SettingsModel`] is the GPUI entity the views share: a change goes to the file at once (unless it couldn't be
+//! read).
 
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, Read as _, Write as _};
@@ -404,6 +406,8 @@ pub struct SettingsModel {
     settings: Settings,
     file: Option<SettingsFile>,
     problems: Vec<Problem>,
+    /// The file couldn't be read: it is left as it is, and changes hold in memory.
+    held: bool,
 }
 
 impl SettingsModel {
@@ -411,10 +415,14 @@ impl SettingsModel {
     #[must_use]
     pub fn load(file: SettingsFile) -> Self {
         let Loaded { settings, problems } = file.load();
+        let held = problems
+            .iter()
+            .any(|problem| matches!(problem, Problem::Unreadable { .. }));
         Self {
             settings,
             file: Some(file),
             problems,
+            held,
         }
     }
 
@@ -425,6 +433,7 @@ impl SettingsModel {
             settings,
             file: None,
             problems: Vec::new(),
+            held: false,
         }
     }
 
@@ -445,8 +454,9 @@ impl SettingsModel {
         self.file.as_ref()
     }
 
-    /// Changes the settings and, when they changed, writes them to the file and tells the views. A save that fails is
-    /// kept as a problem (the latest one only) and the change holds in memory.
+    /// Changes the settings and, when they changed, writes them to the file and tells the views. A save that fails, or
+    /// one held back because the file couldn't be read (it would replace what the user wrote), is kept as a problem
+    /// (the latest one only) and the change holds in memory.
     pub fn change(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         let before = self.settings.clone();
         change(&mut self.settings);
@@ -455,10 +465,18 @@ impl SettingsModel {
         }
         self.problems
             .retain(|problem| !matches!(problem, Problem::Unsaved { .. }));
-        if let Some(file) = &self.file
-            && let Err(problem) = file.save(&self.settings)
-        {
-            self.problems.push(problem);
+        if let Some(file) = &self.file {
+            let saved = if self.held {
+                Err(Problem::Unsaved {
+                    path: file.shown(),
+                    why: "it couldn't be read, so it is left as it is".to_owned(),
+                })
+            } else {
+                file.save(&self.settings)
+            };
+            if let Err(problem) = saved {
+                self.problems.push(problem);
+            }
         }
         cx.notify();
     }

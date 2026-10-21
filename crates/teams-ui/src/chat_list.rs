@@ -4,8 +4,8 @@
 //! - **From the store only.** The list asks the engine's store ([`Core::conversations`], then per chat its members,
 //!   newest messages, unread count and people's names) when it opens and again each time the models say a chat
 //!   changed ([`crate::Chats::revision`]): a delivery, a catch-up, a read horizon, an outbox row. A row is built again
-//!   only when its chat changed since it was built; every row again after a catch-up, which may have brought the
-//!   names of people in other chats.
+//!   only when its chat changed since it was built, or when a message that carried a name came, in any chat, from
+//!   someone the row is named by ([`crate::Chats::named_at`]); every row again after a catch-up.
 //! - **Which chats**: 1:1, group and meeting chats. A team's channels belong to the Teams rail (Task 16) and the
 //!   account's own streams (`48:notes`, `48:notifications`, …) aren't chats: neither is listed.
 //! - **Names** (until Task 12 reads profiles): a 1:1 chat by the other member's newest `imdisplayname` in the store,
@@ -13,8 +13,10 @@
 //!   the initials of a name the store gave.
 //! - **Unread** is the store's count after the account's read horizon (`unread_count`).
 //!
-//! Opening a chat (a click, or the switcher) is told as [`ChatListEvent::Opened`]; the shell shows it. What the list
-//! shows is traced (`chat-list shown`: the chats' ids in order, their kinds and unread counts, never a name or text).
+//! A row clicked is told as [`ChatListEvent::Opened`]; the shell shows it. The switcher tells the shell itself
+//! ([`crate::switcher::SwitcherEvent::Open`]), and the shell only highlights the row ([`ChatList::select`]). What
+//! the list shows is traced (`chat-list shown`: the chats' ids in order, their kinds and unread counts, never a name
+//! or text).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -150,7 +152,8 @@ fn first_line(text: &str) -> String {
 }
 
 /// The preview line of a chat from its newest messages (newest first): the newest text message's first line, read
-/// from its sanitized rich text ("You: " before the account's own); empty when there is none.
+/// from its sanitized rich text, or as it came for a `Text` message ("You: " before the account's own); empty when
+/// there is none.
 #[must_use]
 pub fn preview(page: &[Message], me: &str) -> SharedString {
     let Some(message) = page.iter().find(|message| is_text(message)) else {
@@ -158,6 +161,9 @@ pub fn preview(page: &[Message], me: &str) -> SharedString {
     };
     let text = if message.delete_time.is_some() {
         DELETED.to_owned()
+    } else if message.message_type == "Text" {
+        // plain text: its `<` and `&` are the text's own
+        first_line(&message.content)
     } else {
         first_line(&parse_html(&message.content).plain_text())
     };
@@ -192,8 +198,16 @@ where
     at.format(format).to_string()
 }
 
-/// What a chat is called and whether that is a name (see the module docs).
-async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member]) -> (SharedString, bool) {
+/// What a chat is called and whether that is a name.
+struct Naming {
+    name: SharedString,
+    named: bool,
+    /// The members whose names the name read (none for a topic).
+    people: Vec<String>,
+}
+
+/// What a chat is called (see the module docs).
+async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member]) -> Naming {
     let topic = conversation
         .topic
         .as_deref()
@@ -202,11 +216,19 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
     if let Some(topic) = topic
         && conversation.kind != ConversationKind::OneToOne
     {
-        return (topic.to_owned().into(), true);
+        return Naming {
+            name: topic.to_owned().into(),
+            named: true,
+            people: Vec::new(),
+        };
     }
     let others = others(conversation, members, core.me());
     if others.is_empty() {
-        return ("Chat".into(), false);
+        return Naming {
+            name: "Chat".into(),
+            named: false,
+            people: Vec::new(),
+        };
     }
     let mut shown = Vec::new();
     let mut all_named = true;
@@ -222,11 +244,20 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
     if others.len() > NAMED_MEMBERS {
         name = format!("{name} +{}", others.len() - NAMED_MEMBERS);
     }
-    (name.into(), all_named)
+    Naming {
+        name: name.into(),
+        named: all_named,
+        people: others.into_iter().take(NAMED_MEMBERS).collect(),
+    }
 }
 
 /// A chat's row, from the store. A query that fails leaves its part empty: the row is still shown.
 pub async fn build_row(core: &dyn Core, conversation: &Conversation) -> ChatRow {
+    build(core, conversation).await.0
+}
+
+/// A chat's row, and the members whose names its name read.
+async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<String>) {
     let id = conversation.id.clone();
     let members = core.members(id.clone()).await.unwrap_or_default();
     let page = core
@@ -235,8 +266,8 @@ pub async fn build_row(core: &dyn Core, conversation: &Conversation) -> ChatRow 
         .map(|page| page.messages)
         .unwrap_or_default();
     let unread = core.unread_count(id.clone()).await.unwrap_or(0);
-    let (name, named) = name_of(core, conversation, &members).await;
-    ChatRow {
+    let Naming { name, named, people } = name_of(core, conversation, &members).await;
+    let row = ChatRow {
         kind: RowKind::of(&conversation.kind),
         name,
         named,
@@ -244,7 +275,8 @@ pub async fn build_row(core: &dyn Core, conversation: &Conversation) -> ChatRow 
         last_activity: conversation.last_activity,
         unread,
         id,
-    }
+    };
+    (row, people)
 }
 
 /// What the chat list tells the shell.
@@ -260,6 +292,8 @@ struct Cached {
     conversation: Conversation,
     /// The models' revision when it was built: a later change of its chat builds it again.
     at: u64,
+    /// The members whose names its name read: a later message carrying one's name builds it again.
+    people: Vec<String>,
     row: ChatRow,
 }
 
@@ -268,6 +302,9 @@ enum Planned {
     Keep(ChatRow),
     Build(Conversation),
 }
+
+/// A row a load built: its conversation, and the members whose names its name read.
+type Built = (Conversation, Vec<String>);
 
 /// The chat list view (see the module docs).
 pub struct ChatList {
@@ -397,7 +434,9 @@ impl ChatList {
             .filter(self::listed)
             .map(|conversation| match self.cache.get(&conversation.id) {
                 Some(cached)
-                    if cached.at >= chats.changed_at(&conversation.id) && cached.conversation == conversation =>
+                    if cached.at >= chats.changed_at(&conversation.id)
+                        && cached.people.iter().all(|mri| cached.at >= chats.named_at(mri))
+                        && cached.conversation == conversation =>
                 {
                     Planned::Keep(cached.row.clone())
                 }
@@ -407,14 +446,15 @@ impl ChatList {
     }
 
     /// Keeps the rows a load built, as of the models' revision `at`.
-    fn keep_built(&mut self, rows: &[ChatRow], built: Vec<Conversation>, at: u64) {
-        for conversation in built {
+    fn keep_built(&mut self, rows: &[ChatRow], built: Vec<Built>, at: u64) {
+        for (conversation, people) in built {
             let Some(row) = rows.iter().find(|row| row.id == conversation.id) else {
                 continue;
             };
             let cached = Cached {
                 row: row.clone(),
                 at,
+                people,
                 conversation,
             };
             self.cache.insert(cached.row.id.clone(), cached);
@@ -422,13 +462,7 @@ impl ChatList {
     }
 
     /// A load ended: its rows shown, the ones it built kept (unless the cache was dropped since it started).
-    fn loaded(
-        &mut self,
-        generation: u64,
-        at: u64,
-        rows: Option<(Vec<ChatRow>, Vec<Conversation>)>,
-        cx: &mut Context<Self>,
-    ) {
+    fn loaded(&mut self, generation: u64, at: u64, rows: Option<(Vec<ChatRow>, Vec<Built>)>, cx: &mut Context<Self>) {
         self.loading = None;
         self.loads += 1;
         if let Some((rows, built)) = rows {
@@ -455,10 +489,11 @@ impl ChatList {
         if self.traced.as_ref() == Some(&shown) {
             return;
         }
-        let line = TraceLine::new("chat-list", "shown")
-            .conversations(shown.iter().map(|(id, _, _)| id.as_str()))
-            .unread(shown.iter().map(|(_, _, unread)| *unread));
-        let line = shown.iter().fold(line, |line, (_, kind, _)| line.kind(kind.name()));
+        let line = TraceLine::new("chat-list", "shown").rows(
+            shown
+                .iter()
+                .map(|(id, kind, unread)| (id.as_str(), kind.name(), *unread)),
+        );
         self.trace.record(&line);
         self.traced = Some(shown);
     }
@@ -559,15 +594,16 @@ async fn load(core: Arc<dyn Core>, generation: u64, this: WeakEntity<ChatList>, 
 }
 
 /// The rows of a load, in its order, and the conversations it built rows for.
-async fn build_rows(core: &dyn Core, planned: Vec<Planned>) -> (Vec<ChatRow>, Vec<Conversation>) {
+async fn build_rows(core: &dyn Core, planned: Vec<Planned>) -> (Vec<ChatRow>, Vec<Built>) {
     let mut rows = Vec::with_capacity(planned.len());
     let mut built = Vec::new();
     for item in planned {
         match item {
             Planned::Keep(row) => rows.push(row),
             Planned::Build(conversation) => {
-                rows.push(build_row(core, &conversation).await);
-                built.push(conversation);
+                let (row, people) = build(core, &conversation).await;
+                rows.push(row);
+                built.push((conversation, people));
             }
         }
     }

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use gpui::{App, AppContext as _, Entity, SharedString};
 use teams_core::Event;
-use teams_store::OutboxEntry;
+use teams_store::{Message, OutboxEntry};
 
 /// The push channel, as the account's status shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +72,9 @@ pub struct Chats {
     revision: u64,
     /// Per conversation: the revision of its last change.
     changed: HashMap<String, u64>,
+    /// Per sender, by MRI: the revision of the last message told from them that carried a display name (which may be
+    /// a name the store didn't have, or a new one).
+    named: HashMap<String, u64>,
     /// Per conversation: who is typing now.
     typing: BTreeMap<String, BTreeSet<String>>,
     /// The outbox rows as last told, by id.
@@ -89,6 +92,13 @@ impl Chats {
     #[must_use]
     pub fn changed_at(&self, conversation: &str) -> u64 {
         self.changed.get(conversation).copied().unwrap_or(0)
+    }
+
+    /// The revision of the last message told from `mri` that carried a display name, in any conversation; 0 while
+    /// none was told.
+    #[must_use]
+    pub fn named_at(&self, mri: &str) -> u64 {
+        self.named.get(mri).copied().unwrap_or(0)
     }
 
     /// Who is typing in `conversation` now, by MRI.
@@ -150,9 +160,12 @@ impl Models {
             }),
             Event::CatchUpFailed { .. } => self.failed("catch-up", cx),
             Event::Failed { during, .. } => self.failed(during, cx),
-            Event::Message { conversation, .. }
-            | Event::ReadHorizon { conversation }
-            | Event::ConversationChanged { conversation } => self.changed(&conversation, cx),
+            Event::Message {
+                conversation, message, ..
+            } => self.message(&conversation, message.as_deref(), cx),
+            Event::ReadHorizon { conversation } | Event::ConversationChanged { conversation } => {
+                self.changed(&conversation, cx);
+            }
             Event::Typing {
                 conversation,
                 from,
@@ -201,6 +214,21 @@ impl Models {
     fn changed(&self, conversation: &str, cx: &mut App) {
         self.chats.update(cx, |chats, cx| {
             chats.change(conversation);
+            cx.notify();
+        });
+    }
+
+    /// A message stored or changed: its conversation changed, and its sender's name may have.
+    fn message(&self, conversation: &str, message: Option<&Message>, cx: &mut App) {
+        self.chats.update(cx, |chats, cx| {
+            chats.change(conversation);
+            let named = message.and_then(|message| {
+                let name = message.sender_name.as_deref().map(str::trim)?;
+                message.sender.as_ref().filter(|_| !name.is_empty())
+            });
+            if let Some(sender) = named {
+                chats.named.insert(sender.clone(), chats.revision);
+            }
             cx.notify();
         });
     }

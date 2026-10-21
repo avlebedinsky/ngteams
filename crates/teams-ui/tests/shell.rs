@@ -17,7 +17,7 @@ use teams_core::sync::CatchUpReport;
 use teams_core::{Cause, Event, MessageChange, Source};
 use teams_store::{Applied, Conversation, ConversationKind, Member, Message};
 use teams_trouter::{Down, Stop};
-use teams_ui::chat_list::{ChatList, DELETED, RowKind, format_time, listed, one_to_one_partner};
+use teams_ui::chat_list::{ChatList, DELETED, RowKind, format_time, listed, one_to_one_partner, preview};
 use teams_ui::settings::{ManualStatus, Notifications, Settings, SettingsModel};
 use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, RailItem, Shell, ShellParts};
 use teams_ui::switcher::{fuzzy_score, matches};
@@ -308,6 +308,81 @@ fn the_list_follows_the_engine_s_events_and_builds_again_only_what_changed() {
     assert_eq!(members_asked(&rig), before + 1 + 4);
     let ac = cx.update(|_, cx| list.read(cx).row(AC).cloned()).expect("row");
     assert_eq!((ac.name.as_ref(), ac.named), ("Lab Sea", true));
+}
+
+#[test]
+fn a_name_delivered_in_one_chat_renames_every_row_named_by_that_person() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    let list = list_of(&shell, cx);
+    let members_asked = |rig: &Rig| rig.core.asked().iter().filter(|name| **name == "members").count();
+    let before = members_asked(&rig);
+    let ac = cx.update(|_, cx| list.read(cx).row(AC).cloned()).expect("row");
+    assert_eq!((ac.name.as_ref(), ac.named), (LAB_C, false));
+
+    // c's first named message comes live in the trio: the store now names c
+    rig.core
+        .names
+        .lock()
+        .unwrap()
+        .insert(LAB_C.to_owned(), "Lab Sea".to_owned());
+    let mut named = message(TRIO, "9100", LAB_C, "<p>hi all</p>", 9_100);
+    named.sender_name = Some("Lab Sea".to_owned());
+    rig.send(Event::Message {
+        conversation: TRIO.to_owned(),
+        id: "9100".to_owned(),
+        change: MessageChange::New,
+        applied: Applied::Inserted,
+        message: Some(Box::new(named)),
+        source: Source::Delivery,
+    });
+    cx.run_until_parked();
+
+    // the trio (its own change), and the two rows named by c; the a–b row, named by b alone, is kept
+    assert_eq!(members_asked(&rig), before + 3);
+    let ac = cx.update(|_, cx| list.read(cx).row(AC).cloned()).expect("row");
+    assert_eq!((ac.name.as_ref(), ac.named), ("Lab Sea", true));
+    let unnamed = cx.update(|_, cx| list.read(cx).row(UNNAMED).cloned()).expect("row");
+    assert_eq!((unnamed.name.as_ref(), unnamed.named), ("Lab Bee, Lab Sea", true));
+}
+
+#[test]
+fn a_text_message_s_preview_is_its_text_as_it_came() {
+    let mut plain = message(AB, "1", LAB_B, "Use <name> here &amp; there\nsecond line", 1);
+    plain.message_type = "Text".to_owned();
+    assert_eq!(preview(&[plain], LAB_A).as_ref(), "Use <name> here &amp; there");
+    let rich = message(AB, "2", LAB_B, "<p>a &amp; <b>b</b></p>", 2);
+    assert_eq!(preview(&[rich], LAB_A).as_ref(), "a & b");
+}
+
+#[test]
+fn a_chat_whose_id_the_trace_refuses_leaves_the_trace_whole_rows_in_step() {
+    const ODD: &str = "19:odd.thread@thread.v2";
+    let rig = seeded();
+    rig.core
+        .conversations
+        .lock()
+        .unwrap()
+        .push(chat(ODD, ConversationKind::Meeting, Some("Odd"), 3_500));
+    rig.core.unread.lock().unwrap().insert(ODD.to_owned(), 5);
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Settings::default(), trace);
+    let list = list_of(&shell, cx);
+    assert_eq!(ids(&list, cx), [TRIO, ODD, AB, AC, UNNAMED], "the list shows it");
+
+    let lines = written.lines();
+    let line = lines
+        .iter()
+        .rev()
+        .find(|line| line["view"] == "chat-list")
+        .expect("traced");
+    assert_eq!(line["conversations"], serde_json::json!([TRIO, AB, AC, UNNAMED]));
+    assert_eq!(
+        line["kinds"],
+        serde_json::json!(["group", "one-to-one", "one-to-one", "group"])
+    );
+    assert_eq!(line["unread"], serde_json::json!([0, 2, 0, 0]));
+    assert_eq!(line["refused"], 1);
 }
 
 #[test]

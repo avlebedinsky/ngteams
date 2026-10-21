@@ -205,10 +205,11 @@ fn the_model_writes_each_change_at_once_and_only_a_change(cx: &mut TestAppContex
 #[gpui::test]
 fn a_save_that_fails_is_reported_and_the_change_holds(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
-    // the settings directory's place is taken by a file
-    fs::write(dir.path().join("ui"), "not a directory").expect("written");
-    let (file, _) = file_in(&dir);
+    // no file yet (the defaults, no problem), and its directory can't be made: the parent is read-only
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).expect("read-only");
+    let (file, path) = file_in(&dir);
     let model = cx.new(|_| SettingsModel::load(file));
+    assert!(cx.read(|cx| model.read(cx).problems().is_empty()));
     cx.update(|cx| model.update(cx, |model, cx| model.change(|settings| settings.idle_minutes = 30, cx)));
     let unsaved = |model: &SettingsModel| {
         model
@@ -221,10 +222,46 @@ fn a_save_that_fails_is_reported_and_the_change_holds(cx: &mut TestAppContext) {
         let model = model.read(cx);
         assert_eq!(model.settings().idle_minutes, 30);
         assert_eq!(unsaved(model), 1, "{:?}", model.problems());
-        // the file couldn't be read either: its directory's place is a file
-        assert!(matches!(model.problems()[0], Problem::Unreadable { .. }));
     });
     // a later failure replaces it: one at a time
     cx.update(|cx| model.update(cx, |model, cx| model.change(|settings| settings.idle_minutes = 60, cx)));
     assert_eq!(cx.read(|cx| unsaved(model.read(cx))), 1);
+    assert!(!path.exists());
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("writable again");
+}
+
+#[gpui::test]
+fn a_file_that_couldn_t_be_read_is_never_written_over(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (file, path) = file_in(&dir);
+    // the user's settings, with a slip that makes the file not TOML
+    let text = "notifications = \"mentions\"\nidle_minutes = 30\n[broken\n";
+    fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+    fs::write(&path, text).expect("written");
+    let model = cx.new(|_| SettingsModel::load(file));
+    cx.read(|cx| {
+        let model = model.read(cx);
+        assert_eq!(model.settings(), &Settings::default());
+        assert!(matches!(model.problems(), [Problem::Unreadable { .. }]));
+    });
+
+    // a chat opened (as the shell keeps it) and a setting changed: both hold in memory, the file stays as it was
+    cx.update(|cx| {
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.selected_chat = Some(CHAT.to_owned()), cx);
+            model.change(|settings| settings.send_typing = false, cx);
+        });
+    });
+    assert_eq!(fs::read_to_string(&path).expect("read"), text);
+    cx.read(|cx| {
+        let model = model.read(cx);
+        assert_eq!(model.settings().selected_chat.as_deref(), Some(CHAT));
+        assert!(!model.settings().send_typing);
+        let problems = model.problems();
+        assert!(matches!(problems[0], Problem::Unreadable { .. }), "{problems:?}");
+        assert!(
+            matches!(&problems[1..], [Problem::Unsaved { why, .. }] if why.contains("couldn't be read")),
+            "{problems:?}"
+        );
+    });
 }
