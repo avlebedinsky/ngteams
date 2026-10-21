@@ -20,10 +20,11 @@
 //! `chats.toml`. The id is recorded as soon as that deny names it, whatever happens after ([`record_creation`]): the
 //! chat exists from then on, and a later run without its id would create another one.
 //!
-//! **Messaging** (the id recorded; accounts a, b and c). It starts only once the fence can find a group chat's members
-//! complete ([`messaging_blocked`]); until then a message would be denied and resent on every later load, so the run
-//! fails before it opens anything. Group chats stay `Partial(Unsupported)` since M1 Task 8
-//! (`docs/backlog/group-chat-member-read-completeness.md`).
+//! **Messaging** (the id recorded; accounts a, b and c). It starts only when the lab's live source would read the
+//! recorded chat in full ([`messaging_blocked`]: the chat `chats.toml` records, and a, b and c's MRIs in `lab.toml`);
+//! otherwise a message would be denied and resent on every later load, so the run fails before it opens anything.
+//! Since the user's decision of 2026-10-21 the fence admits the lab's recorded group chat when both of its member
+//! reads agree on exactly a, b and c (`docs/protocol/fence-targets.md`).
 //! 1. a's fence force-denies this run's probe ([`THIS_RUN_PROBE`]), any first message ([`FIRST_MESSAGE`]) and any
 //!    earlier run's probe ([`EARLIER_RUN_PROBE`]), in that order (a deny names the first rule that matched it), from
 //!    before the page loads ([`forced_denies`]).
@@ -43,7 +44,7 @@
 
 use regex::Regex;
 use teams_fence::lab::{ChatRecord, LabChats, record_abc_chat};
-use teams_fence::{LiveMembershipSource, Scope, is_group_chat_id};
+use teams_fence::{Fence, LiveMembershipSource, Scope, is_group_chat_id};
 use url::Url;
 
 use crate::browser::Media;
@@ -142,7 +143,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let chats = LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
     match chats.abc {
         None => create(paths, &config, options).await,
-        Some(chat_id) => match messaging_blocked(&chat_id) {
+        Some(chat_id) => match messaging_blocked(&lab_source()?, &chat_id) {
             Some(reason) => {
                 let mut report = ScenarioReport::new(ScenarioName::AbcChat);
                 report.failures.push(reason);
@@ -153,16 +154,25 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     }
 }
 
-/// Why the messaging run must not start, if it mustn't: the fence can't find the group chat's members complete
-/// ([`LiveMembershipSource::reads_in_full`]), so its message would be denied, and the web client would send it again on
-/// every later load of a's profile, where every scenario would see it denied. Checked before any browser opens.
+/// The live source a session of this lab reads members with ([`LiveMembershipSource::for_fence`] of the lab's fence),
+/// for [`messaging_blocked`].
+fn lab_source() -> Result<LiveMembershipSource, ScenarioError> {
+    let fence = Fence::open_lab().map_err(|error| setup(error.to_string()))?;
+    LiveMembershipSource::for_fence(&fence).map_err(|error| setup(error.to_string()))
+}
+
+/// Why the messaging run must not start, if it mustn't: `source` (the lab's, as every session reads with it) won't
+/// read the group chat's members in full ([`LiveMembershipSource::reads_in_full`]: it isn't the chat `chats.toml`
+/// records, or the lab's a, b and c have no three MRIs), so its message would be denied, and the web client would send
+/// it again on every later load of a's profile, where every scenario would see it denied. Checked before any browser
+/// opens. Eligibility only: the read itself, on every write, decides.
 #[must_use]
-pub fn messaging_blocked(chat_id: &str) -> Option<String> {
+pub fn messaging_blocked(source: &LiveMembershipSource, chat_id: &str) -> Option<String> {
     let scope = Scope::Conversation { id: chat_id.to_owned() };
-    (!LiveMembershipSource::reads_in_full(&scope)).then(|| {
-        "the fence can't read the a-b-c chat's members in full (group chats stay Partial(Unsupported): \
-         docs/backlog/group-chat-member-read-completeness.md), so a message to it would be denied and then sent again \
-         on every later load of a's profile; nothing was opened"
+    (!source.reads_in_full(&scope)).then(|| {
+        "the fence won't read the a-b-c chat's members in full (it reads only the group chat chats.toml records as \
+         abc, and only with a, b and c's MRIs in lab.toml: docs/protocol/fence-targets.md), so a message to it would \
+         be denied and then sent again on every later load of a's profile; nothing was opened"
             .to_owned()
     })
 }

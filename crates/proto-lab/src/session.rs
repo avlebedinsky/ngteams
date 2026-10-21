@@ -623,7 +623,7 @@ impl LabSession {
         }
         let fence = Arc::new(Fence::open_lab()?);
         let (members, http): (Arc<dyn MembershipSource + Send>, _) = if options.live_members {
-            let live = Arc::new(LiveMembershipSource::new()?);
+            let live = Arc::new(LiveMembershipSource::for_fence(&fence)?);
             let http =
                 HttpFence::new(options.classifier, Arc::clone(&fence), live.clone()).with_credentials(live.clone());
             (live, http)

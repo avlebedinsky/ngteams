@@ -1,0 +1,11 @@
+error[E0599]: no method named `with_lab` found for struct `LiveMembershipSource` in the current scope
+  --> tests/ui/live_with_lab.rs:12:20
+   |
+12 |     let _ = source.with_lab(&config);
+   |                    ^^^^^^^^ method not found in `LiveMembershipSource`
+
+error[E0599]: no method named `with_deadline` found for struct `LiveMembershipSource` in the current scope
+  --> tests/ui/live_with_lab.rs:13:50
+   |
+13 |     let _ = LiveMembershipSource::new().unwrap().with_deadline(Duration::from_secs(1));
+   |                                                  ^^^^^^^^^^^^^ method not found in `LiveMembershipSource`

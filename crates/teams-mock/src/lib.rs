@@ -61,6 +61,7 @@ mod trouter;
 mod world;
 mod writes;
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
@@ -100,6 +101,25 @@ pub const AC_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000
 pub const AX_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-0000000000ff@unq.gbl.spaces";
 /// The a–b–c group chat of `thread-group.json`, empty.
 pub const ABC_CHAT: &str = "19:00000000000000000000000000000abc@thread.v2";
+
+/// A `lab.toml` (`teams_fence::lab::LabConfig::parse`) of the mock's lab: accounts a, b and c with the MRIs
+/// [`LAB_A`], [`LAB_B`] and [`LAB_C`], made-up UPNs, its data dir `data_dir`. A fence or a live membership source of
+/// it knows the lab's group chat once that dir's `chats.toml` records [`ABC_CHAT`].
+#[must_use]
+pub fn lab_toml(data_dir: &std::path::Path) -> String {
+    let accounts =
+        [("a", LAB_A), ("b", LAB_B), ("c", LAB_C)]
+            .into_iter()
+            .fold(String::new(), |mut out, (alias, mri)| {
+                let _ = write!(
+                    out,
+                    "\n[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.test\"\nmri = \"{mri}\"\n"
+                );
+                out
+            });
+    format!("data_dir = {:?}\n{accounts}", data_dir.display().to_string())
+}
+
 /// A team channel in a's list: read-only.
 pub const CHANNEL: &str = "19:channel0001@thread.tacv2";
 /// a's notifications stream: read-only.

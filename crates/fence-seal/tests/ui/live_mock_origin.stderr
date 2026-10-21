@@ -4,8 +4,13 @@ error[E0599]: no associated function or constant named `with_mock_origin` found 
 6 |     let _ = LiveMembershipSource::with_mock_origin("http://127.0.0.1:9");
   |                                   ^^^^^^^^^^^^^^^^ associated function or constant not found in `LiveMembershipSource`
   |
-note: if you're trying to build a new `LiveMembershipSource`, consider using `LiveMembershipSource::new` which returns `Result<LiveMembershipSource, LiveSourceError>`
+note: if you're trying to build a new `LiveMembershipSource` consider using one of the following associated functions:
+      LiveMembershipSource::new
+      LiveMembershipSource::for_fence
  --> $WORKSPACE/crates/teams-fence/src/membership.rs
   |
   |     pub fn new() -> Result<Self, LiveSourceError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn for_fence(fence: &Fence) -> Result<Self, LiveSourceError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
