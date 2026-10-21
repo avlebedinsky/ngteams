@@ -800,6 +800,37 @@ fn the_unread_count_follows_our_read_horizon() {
 }
 
 #[test]
+fn a_display_name_is_the_one_a_person_s_newest_message_carried_in_any_chat() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    store
+        .upsert_conversation(&conversation(GROUP, ConversationKind::Group, 1))
+        .expect("the group");
+    assert_eq!(store.display_name(PEER).expect("nothing stored"), None);
+
+    let named = |id: &str, arrival: i64, name: Option<&str>| Message {
+        sender_name: name.map(str::to_owned),
+        ..message(id, arrival, "text", arrival, PEER)
+    };
+    store
+        .upsert_message(&named("1000", 1000, Some("Old Name")), None)
+        .expect("old");
+    assert_eq!(store.display_name(PEER).expect("read"), Some("Old Name".to_owned()));
+    // a newer message in another chat carries the newer name
+    let mut elsewhere = named("2000", 2000, Some("New Name"));
+    elsewhere.conversation_id = GROUP.to_owned();
+    store.upsert_message(&elsewhere, None).expect("newer elsewhere");
+    // newer still, but without a name or with a blank one: skipped
+    store.upsert_message(&named("3000", 3000, None), None).expect("unnamed");
+    store
+        .upsert_message(&named("4000", 4000, Some("  ")), None)
+        .expect("blank");
+    assert_eq!(store.display_name(PEER).expect("read"), Some("New Name".to_owned()));
+    // another person's names are theirs
+    assert_eq!(store.display_name(THIRD).expect("read"), None);
+}
+
+#[test]
 fn a_read_horizon_set_later_wins_even_when_it_moves_back() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = with_chat(&dir).expect("a store with the chat");

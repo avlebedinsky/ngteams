@@ -11,15 +11,81 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{CHAT, LAB_B, Rig, Watcher, Written, conversation, message, outbox_row};
+use common::{LAB_B, Rig, Written};
 use futures_util::FutureExt as _;
-use gpui::{AppContext as _, TestAppContext};
+use gpui::{AppContext as _, Context, Entity, TestAppContext};
 use teams_core::{Event, MessageChange, Source};
-use teams_store::{Applied, Conversation, OutboxState};
+use teams_store::{Applied, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState};
 use teams_trouter::Down;
 use teams_ui::trace::TraceLine;
 use teams_ui::view::{Shown, status_text};
 use teams_ui::{Account, Bridge, Engine, Link, Root, TraceId, ViewTrace};
+
+const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+/// A view that counts how often a model told it to look again.
+struct Watcher {
+    seen: usize,
+    _observing: gpui::Subscription,
+}
+
+impl Watcher {
+    fn on<T: 'static>(model: &Entity<T>, cx: &mut Context<Self>) -> Self {
+        Self {
+            seen: 0,
+            _observing: cx.observe(model, |this, _, _| this.seen += 1),
+        }
+    }
+}
+
+fn conversation(id: &str) -> Conversation {
+    Conversation {
+        id: id.to_owned(),
+        kind: ConversationKind::OneToOne,
+        topic: None,
+        version: 1,
+        last_activity: Some(1_767_225_600_000),
+    }
+}
+
+/// A message of `CHAT` from b, with `text` and b's name `name`.
+fn message(id: &str, text: &str, name: &str) -> Message {
+    Message {
+        conversation_id: CHAT.to_owned(),
+        id: id.to_owned(),
+        version: 1,
+        client_message_id: Some("1234567890123456789".to_owned()),
+        sender: Some(LAB_B.to_owned()),
+        sender_name: Some(name.to_owned()),
+        message_type: "RichText/Html".to_owned(),
+        content: format!("<p>{text}</p>"),
+        properties: None,
+        arrival_time: 1_767_225_600_000,
+        compose_time: Some(1_767_225_600_000),
+        edit_time: None,
+        delete_time: None,
+    }
+}
+
+fn outbox_row(id: i64, state: OutboxState) -> OutboxEntry {
+    OutboxEntry {
+        id,
+        run_id: 1,
+        client_message_id: "1234567890123456789".to_owned(),
+        conversation_id: Some(CHAT.to_owned()),
+        kind: OutboxKind::Send,
+        payload: "{}".to_owned(),
+        state,
+        attempts: 1,
+        attempts_at_resend: 0,
+        failed_checks: 0,
+        not_before: None,
+        last_error: None,
+        message_id: None,
+        created_at: 1_767_225_600_000,
+        updated_at: 1_767_225_600_000,
+        unreadable_seen_at: None,
+    }
+}
 
 fn changed(conversation: &str) -> Event {
     Event::ConversationChanged {
@@ -287,7 +353,11 @@ fn the_root_view_traces_its_opening_and_each_status_it_shows() {
         .collect();
     assert_eq!(
         changes,
-        [("window", "opened"), ("status", "connected"), ("status", "offline")]
+        [
+            ("window", "opened"),
+            ("status", "connected"),
+            ("status", "reconnecting")
+        ]
     );
     assert_eq!(lines[0]["kinds"], serde_json::json!(["connecting"]));
     assert!(lines.iter().all(|line| line["at_ms"].as_u64().is_some_and(|at| at > 0)));

@@ -287,18 +287,25 @@ fn a_followed_window_sets_the_mode_from_its_appearance(cx: &mut TestAppContext) 
     drop(following);
 }
 
+/// What the app's window is opened over, without an engine.
+fn parts(cx: &mut gpui::App) -> teams_ui::ShellParts {
+    use gpui::AppContext as _;
+    teams_ui::ShellParts {
+        core: std::sync::Arc::new(teams_ui::StoppedCore::new(
+            "8:orgid:00000000-0000-4000-8000-00000000000a",
+        )),
+        models: teams_ui::Models::new(cx),
+        settings: cx.new(|_| teams_ui::SettingsModel::in_memory(teams_ui::Settings::default())),
+        trace: std::sync::Arc::new(teams_ui::ViewTrace::off()),
+    }
+}
+
 #[gpui::test]
 fn the_app_s_window_sets_the_kit_up_and_follows_its_appearance(cx: &mut TestAppContext) {
-    let models = cx.update(teams_ui::Models::new);
     let window = cx
         .update(|cx| {
-            teams_ui::window::open(
-                cx,
-                teams_ui::window::LAB_APP_ID,
-                "lab a".into(),
-                models,
-                std::sync::Arc::new(teams_ui::ViewTrace::off()),
-            )
+            let parts = parts(cx);
+            teams_ui::window::open(cx, teams_ui::window::LAB_APP_ID, "lab a".into(), parts)
         })
         .expect("the window opens");
     let root = cx
@@ -333,16 +340,10 @@ fn the_app_s_window_draws_at_the_theme_s_font_size(cx: &mut TestAppContext) {
     let bare = cx.add_window(|_, cx| teams_ui::Root::new(models, std::sync::Arc::new(teams_ui::ViewTrace::off()), cx));
     assert_eq!(rem_size(bare, cx), px(16.0));
 
-    let models = cx.update(teams_ui::Models::new);
     let window = cx
         .update(|cx| {
-            teams_ui::window::open(
-                cx,
-                teams_ui::window::LAB_APP_ID,
-                "lab a".into(),
-                models,
-                std::sync::Arc::new(teams_ui::ViewTrace::off()),
-            )
+            let parts = parts(cx);
+            teams_ui::window::open(cx, teams_ui::window::LAB_APP_ID, "lab a".into(), parts)
         })
         .expect("the window opens");
     assert_eq!(rem_size(window, cx), px(FONT_SIZE));

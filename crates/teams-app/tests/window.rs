@@ -5,10 +5,13 @@
 //!
 //! - `window`: lab account a's engine on the mock chat service and its Trouter (`teams-mock`, through the
 //!   `test-support` mock origins, a test roster and log), handed to the app as `teams-app` hands its own
-//!   ([`teams_app::app::launch`]). The parent waits for the window, checks its rem size is the theme's font size,
-//!   reads the view trace (the window opened, the push channel connected), screenshots the window (its background fills it; the shot is kept under
-//!   `target/ui-shots/`), closes it through niri, and checks that the app quit and its engine's thread was joined (the
-//!   account's engine lock is free).
+//!   ([`teams_app::app::launch`]), its settings in the test's own directory. The parent waits for the window, checks
+//!   its rem size is the theme's font size, reads the view trace (the window opened, the push channel connected, the
+//!   chat list filled from the store once the catch-up brought a's chats: the chats, not the channel or the
+//!   notifications stream), screenshots the window (the rail, the list and the conversation pane drawn; the shot is
+//!   kept under `target/ui-shots/`), drives the chat switcher with the sandbox's virtual keyboard (Ctrl+K opens it,
+//!   Escape closes it, Ctrl+K and Enter open the chat at its top), closes the window through niri, and checks that
+//!   the app quit and its engine's thread was joined (the account's engine lock is free).
 //! - `http`: a window with an `img()` of an `https` URL on a loopback listener the child holds. GPUI's HTTP client is
 //!   the null one: the image loads nothing, a request through `cx.http_client()` is refused, and the listener never
 //!   sees a connection.
@@ -39,12 +42,16 @@ use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_core::lab::display_name;
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
-use teams_mock::{ABC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
+use teams_mock::{
+    AB_CHAT, ABC_CHAT, AC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TrouterMock,
+    lab_toml,
+};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::view::BACKGROUND;
 use tokio::sync::broadcast;
+use ui_sandbox::input::{Modifier, VirtualInput, keys};
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
 
 /// Which mode the child runs in.
@@ -124,19 +131,39 @@ impl TraceReader {
 
     /// Waits for a line of `view` with `change`.
     fn wait_for(&mut self, view: &str, change: &str) -> SandboxResult {
-        let found = |line: &serde_json::Value| line["view"] == view && line["change"] == change;
-        if self.seen.iter().any(found) {
-            return Ok(());
+        self.wait_where(&format!("{view} {change}"), |line| {
+            line["view"] == view && line["change"] == change
+        })
+        .map(|_| ())
+    }
+
+    /// Waits for a line `found` takes (one seen already included), named `what` in the error.
+    fn wait_where(
+        &mut self,
+        what: &str,
+        found: impl Fn(&serde_json::Value) -> bool,
+    ) -> SandboxResult<serde_json::Value> {
+        if let Some(line) = self.seen.iter().find(|line| found(line)) {
+            return Ok(line.clone());
         }
+        self.next_where(what, found)
+    }
+
+    /// Waits for a line `found` takes among those not seen yet.
+    fn next_where(
+        &mut self,
+        what: &str,
+        found: impl Fn(&serde_json::Value) -> bool,
+    ) -> SandboxResult<serde_json::Value> {
         loop {
             let line = self
                 .lines
                 .recv_timeout(WAIT)
-                .map_err(|_| format!("no trace line {view} {change}; seen {:?}", self.seen))?;
+                .map_err(|_| format!("no trace line {what}; seen {:?}", self.seen))?;
             let hit = found(&line);
-            self.seen.push(line);
+            self.seen.push(line.clone());
             if hit {
-                return Ok(());
+                return Ok(line);
             }
         }
     }
@@ -198,6 +225,7 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
         .map_err(|error| running.fail(&format!("no ready line: {error:?}")))?;
     trace.wait_for("window", "opened")?;
     trace.wait_for("status", "connected")?;
+    let listed = the_chat_list_shows_a_s_chats(&mut trace).map_err(|error| running.fail(&error))?;
 
     let windows = sandbox.niri_msg(&["windows"])?;
     if !windows.contains(teams_ui::window::LAB_APP_ID) {
@@ -205,10 +233,18 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
     }
     let png = sandbox.screenshot("teams-app-window.png", true)?;
     fs::copy(&png, shots_dir()?.join("teams-app-window.png"))?;
-    let share = colour_share(&png, BACKGROUND)?;
-    if share < 0.8 {
-        return Err(running.fail(&format!("the window's background fills {share:.2} of it")));
+    let palette = teams_ui::theme::LIGHT_PALETTE;
+    for (region, color, least) in [
+        ("the rail", palette.rail, 0.02),
+        ("the list", palette.surface, 0.1),
+        ("the conversation pane", BACKGROUND, 0.2),
+    ] {
+        let share = colour_share(&png, color)?;
+        if share < least {
+            return Err(running.fail(&format!("{region}'s colour fills {share:.2} of the window")));
+        }
     }
+    the_switcher_opens_a_chat(sandbox, &mut trace, &listed).map_err(|error| running.fail(&error))?;
 
     sandbox.niri_msg(&["action", "close-window"])?;
     running
@@ -221,6 +257,81 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
     if let Some(odd) = trace.seen.iter().find(|line| !line.is_object()) {
         return Err(format!("a trace line isn't JSON: {odd}").into());
     }
+    Ok(())
+}
+
+/// The strings of a trace line's array `key`.
+fn strings(line: &serde_json::Value, key: &str) -> Vec<String> {
+    line[key]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The chat list, once the catch-up filled it from the mock: a's chats with their kinds, never the team's channel or
+/// a's notifications stream. Its chats in order.
+fn the_chat_list_shows_a_s_chats(trace: &mut TraceReader) -> SandboxResult<Vec<String>> {
+    let line = trace.wait_where("chat-list shown with a's chats", |line| {
+        let ids = strings(line, "conversations");
+        line["view"] == "chat-list"
+            && [AB_CHAT, AC_CHAT, ABC_CHAT]
+                .iter()
+                .all(|chat| ids.iter().any(|id| id == chat))
+    })?;
+    let ids = strings(&line, "conversations");
+    let kinds = strings(&line, "kinds");
+    if ids.iter().any(|id| id == CHANNEL || id == NOTIFICATIONS) {
+        return Err(format!("the list shows a channel or an own stream: {ids:?}").into());
+    }
+    let kind_of = |chat: &str| {
+        ids.iter()
+            .position(|id| id == chat)
+            .and_then(|at| kinds.get(at).cloned())
+    };
+    if kind_of(AB_CHAT).as_deref() != Some("one-to-one") || kind_of(ABC_CHAT).as_deref() != Some("group") {
+        return Err(format!("the chats' kinds: {ids:?} {kinds:?}").into());
+    }
+    Ok(ids)
+}
+
+/// Ctrl+K, the way into a chat with the keyboard alone.
+fn ctrl_k(input: &mut VirtualInput) -> SandboxResult {
+    let (key, _) = input.keymap().key_for('k').ok_or("k isn't on the US keymap")?;
+    input.key_with(&[Modifier::Ctrl], key)
+}
+
+/// The switcher with the sandbox's virtual keyboard: Ctrl+K opens it, Escape closes it; Ctrl+K and Enter open the chat
+/// at its top, one the list shows.
+fn the_switcher_opens_a_chat(sandbox: &Sandbox, trace: &mut TraceReader, listed: &[String]) -> SandboxResult {
+    let mut input = sandbox.input()?;
+    ctrl_k(&mut input)?;
+    trace.next_where("switcher opened", |line| {
+        line["view"] == "switcher" && line["change"] == "opened"
+    })?;
+    input.key(keys::ESC)?;
+    trace.next_where("switcher closed", |line| {
+        line["view"] == "switcher" && line["change"] == "closed"
+    })?;
+    ctrl_k(&mut input)?;
+    trace.next_where("switcher opened again", |line| {
+        line["view"] == "switcher" && line["change"] == "opened"
+    })?;
+    input.key(keys::ENTER)?;
+    let opened = trace.next_where("chat opened", |line| {
+        line["view"] == "chat" && line["change"] == "opened"
+    })?;
+    let chat = opened["conversation"].as_str().unwrap_or_default();
+    if !listed.iter().any(|id| id == chat) {
+        return Err(format!("the switcher opened {chat:?}, not a listed chat: {listed:?}").into());
+    }
+    trace.next_where("switcher closed after", |line| {
+        line["view"] == "switcher" && line["change"] == "closed"
+    })?;
     Ok(())
 }
 
@@ -382,6 +493,7 @@ fn child_window() -> SandboxResult {
     teams_app::guard::window_allowed_here()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(passed_trace_fd()?)?);
     let (lab, engine) = MockLab::start()?;
+    let settings = teams_ui::SettingsFile::new(lab.dir.path().join("ui").join("a.toml"));
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
@@ -393,6 +505,7 @@ fn child_window() -> SandboxResult {
                 broker: None,
                 signed_out: None,
                 trace,
+                settings,
             },
         );
         match launched {

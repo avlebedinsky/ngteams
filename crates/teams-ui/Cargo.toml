@@ -1,25 +1,34 @@
 [package]
 name = "teams-ui"
-description = "The GPUI views and models of the native Teams client over teams-core's engine: the bridge that owns the engine, the models it keeps up to date, the view trace; no request path of its own"
+description = "The GPUI views and models of the native Teams client over teams-core's engine: the bridge that owns the engine, the models it keeps up to date, the shell, the chat list, the chat switcher, the settings, the view trace; no request path of its own"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# the chat list's times, in the local time zone
+chrono.workspace = true
 # the bridge's drain: the engine's next event or the stop, whichever comes first
 futures-util.workspace = true
 gpui-pre.workspace = true
-# the UI kit: compose's text area and the theme now; the list, the command palette and the avatar in later tasks
+# the UI kit: compose's text area, the theme, the resizable panes, the command palette (the chat switcher), avatars,
+# buttons, switches and radios
 gpui-component.workspace = true
 # the view trace: one JSON object per line
 serde_json.workspace = true
 # the engine: its request side (behind `Core`), its events and its shutdown
 teams-core.workspace = true
+# a message's content read as rich text, for the chat list's preview line (sanitized, capped; never shown as HTML)
+teams-proto.workspace = true
 # the rows the engine's queries answer with
 teams-store.workspace = true
+# the settings file's problems
+thiserror.workspace = true
 # the bridge's stop signal to its drain task (a runtime-free oneshot)
 tokio = { workspace = true, features = ["sync"] }
+# the settings file
+toml.workspace = true
 
 [dev-dependencies]
 # the views on GPUI's test context (`TestAppContext`): a fake core and a fake event source, no window system
@@ -28,6 +37,8 @@ gpui-pre = { workspace = true, features = ["test-support"] }
 gpui-component = { workspace = true, features = ["test-support"] }
 # the kit's text area on the real platform, in the UI sandbox: GPUI's Linux platform, Wayland only
 gpui-pre-platform.workspace = true
+# the settings file, in a directory of its own per test
+tempfile.workspace = true
 # the push channel's events the fake engine hands the bridge
 teams-trouter.workspace = true
 # the compositor, private bus and virtual keyboard the kit window test runs in

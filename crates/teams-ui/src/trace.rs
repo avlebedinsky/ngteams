@@ -1,5 +1,6 @@
 //! The view trace: one JSON line per view change, for the live test to read what each view shows without reading the
-//! screen. A line holds the view, the change, the conversation and message ids it concerns, kinds and the time:
+//! screen. A line holds the view, the change, the conversation and message ids it concerns (a list's conversations in
+//! its order, with their unread counts), kinds and the time:
 //! `{"at_ms":1767225600000,"view":"window","change":"opened"}`.
 //!
 //! It never holds text: the view and the change are names fixed in the code (`&'static str`), kinds too, and an id
@@ -111,8 +112,10 @@ pub struct TraceLine<'a> {
     view: &'static str,
     change: &'static str,
     conversation: Option<TraceId<'a>>,
+    conversations: Vec<TraceId<'a>>,
     messages: Vec<TraceId<'a>>,
     kinds: Vec<&'static str>,
+    unread: Vec<u64>,
     refused: usize,
 }
 
@@ -124,8 +127,10 @@ impl<'a> TraceLine<'a> {
             view,
             change,
             conversation: None,
+            conversations: Vec::new(),
             messages: Vec::new(),
             kinds: Vec::new(),
+            unread: Vec::new(),
             refused: 0,
         }
     }
@@ -137,6 +142,25 @@ impl<'a> TraceLine<'a> {
             Some(id) => self.conversation = Some(id),
             None => self.refused += 1,
         }
+        self
+    }
+
+    /// The conversations a list shows, in its order, those with an id's shape.
+    #[must_use]
+    pub fn conversations<I: IntoIterator<Item = &'a str>>(mut self, ids: I) -> Self {
+        for id in ids {
+            match TraceId::new(id) {
+                Some(id) => self.conversations.push(id),
+                None => self.refused += 1,
+            }
+        }
+        self
+    }
+
+    /// Unread counts, in the order of the conversations: numbers, never text.
+    #[must_use]
+    pub fn unread<I: IntoIterator<Item = u64>>(mut self, counts: I) -> Self {
+        self.unread.extend(counts);
         self
     }
 
@@ -167,12 +191,19 @@ impl<'a> TraceLine<'a> {
         if let Some(conversation) = self.conversation {
             line.insert("conversation".to_owned(), json!(conversation.as_str()));
         }
+        if !self.conversations.is_empty() {
+            let ids: Vec<&str> = self.conversations.iter().map(TraceId::as_str).collect();
+            line.insert("conversations".to_owned(), json!(ids));
+        }
         if !self.messages.is_empty() {
             let ids: Vec<&str> = self.messages.iter().map(TraceId::as_str).collect();
             line.insert("messages".to_owned(), json!(ids));
         }
         if !self.kinds.is_empty() {
             line.insert("kinds".to_owned(), json!(self.kinds));
+        }
+        if !self.unread.is_empty() {
+            line.insert("unread".to_owned(), json!(self.unread));
         }
         if self.refused > 0 {
             line.insert("refused".to_owned(), json!(self.refused));

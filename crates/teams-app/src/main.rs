@@ -15,7 +15,7 @@ use teams_app::trace::adopt_trace;
 use teams_auth::broker::BrokerSecretStore;
 use teams_fence::Fence;
 use teams_fence::lab::{Alias, LabConfig, LabLocations, LabPaths};
-use teams_ui::ViewTrace;
+use teams_ui::{SettingsFile, ViewTrace};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -107,6 +107,7 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
         signed_out: Some(lab.session.watch_signed_out()),
         engine: lab.handle,
         trace,
+        settings: SettingsFile::new(config.paths().ui_settings_file(alias)),
     })
 }
 

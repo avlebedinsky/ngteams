@@ -28,6 +28,8 @@ use crate::models::Models;
 /// The engine's request side, as the views see it: writes and queries, each answered by a [`Reply`]. No view builds a
 /// request of its own; every write goes out through the engine's outbox, under the fence.
 pub trait Core: Send + Sync + 'static {
+    /// The account's MRI: who the engine writes as.
+    fn me(&self) -> &str;
     /// A write through the outbox; the reply is the row as its first send left it.
     fn write(&self, action: Action) -> Reply<OutboxEntry>;
     /// The explicit resend of an outbox row, by its id.
@@ -50,6 +52,8 @@ pub trait Core: Send + Sync + 'static {
     fn members(&self, conversation: String) -> Reply<Vec<Member>>;
     /// How many stored messages of a conversation the account hasn't read.
     fn unread_count(&self, conversation: String) -> Reply<u64>;
+    /// The name `mri`'s newest stored message carried, in any conversation.
+    fn display_name(&self, mri: String) -> Reply<Option<String>>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// An outbox row as it now stands.
@@ -61,6 +65,10 @@ pub trait Core: Send + Sync + 'static {
 }
 
 impl Core for EngineRequests {
+    fn me(&self) -> &str {
+        EngineRequests::me(self)
+    }
+
     fn write(&self, action: Action) -> Reply<OutboxEntry> {
         EngineRequests::write(self, action)
     }
@@ -105,6 +113,10 @@ impl Core for EngineRequests {
         EngineRequests::unread_count(self, conversation)
     }
 
+    fn display_name(&self, mri: String) -> Reply<Option<String>> {
+        EngineRequests::display_name(self, mri)
+    }
+
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
         EngineRequests::read_horizon(self, conversation)
     }
@@ -119,6 +131,95 @@ impl Core for EngineRequests {
 
     fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>> {
         EngineRequests::left_by_earlier_runs(self)
+    }
+}
+
+/// A core whose engine has stopped: every request answers [`EngineError::Stopped`](teams_core::EngineError::Stopped)
+/// and nothing goes anywhere. For views shown without an engine (a window's own tests).
+#[derive(Clone, Debug)]
+pub struct StoppedCore {
+    me: String,
+}
+
+impl StoppedCore {
+    /// A stopped core of the account `me`.
+    #[must_use]
+    pub fn new(me: impl Into<String>) -> Self {
+        Self { me: me.into() }
+    }
+}
+
+fn stopped<T>() -> Reply<T> {
+    Reply::ready(Err(teams_core::EngineError::Stopped))
+}
+
+impl Core for StoppedCore {
+    fn me(&self) -> &str {
+        &self.me
+    }
+
+    fn write(&self, _: Action) -> Reply<OutboxEntry> {
+        stopped()
+    }
+
+    fn resend(&self, _: i64) -> Reply<OutboxEntry> {
+        stopped()
+    }
+
+    fn transient(&self, _: Transient) -> Reply<TransientSent> {
+        stopped()
+    }
+
+    fn sync(&self) -> Reply<CatchUpReport> {
+        stopped()
+    }
+
+    fn load_older(&self, _: String) -> Reply<Option<Synced>> {
+        stopped()
+    }
+
+    fn conversations(&self, _: usize) -> Reply<Vec<Conversation>> {
+        stopped()
+    }
+
+    fn messages(&self, _: String, _: Option<PageCursor>, _: usize) -> Reply<MessagePage> {
+        stopped()
+    }
+
+    fn message(&self, _: String, _: String) -> Reply<Option<Message>> {
+        stopped()
+    }
+
+    fn reactions(&self, _: String, _: String) -> Reply<Vec<Reaction>> {
+        stopped()
+    }
+
+    fn members(&self, _: String) -> Reply<Vec<Member>> {
+        stopped()
+    }
+
+    fn unread_count(&self, _: String) -> Reply<u64> {
+        stopped()
+    }
+
+    fn display_name(&self, _: String) -> Reply<Option<String>> {
+        stopped()
+    }
+
+    fn read_horizon(&self, _: String) -> Reply<Option<ReadHorizon>> {
+        stopped()
+    }
+
+    fn outbox_entry(&self, _: i64) -> Reply<Option<OutboxEntry>> {
+        stopped()
+    }
+
+    fn outbox_unsettled(&self, _: String) -> Reply<Vec<OutboxEntry>> {
+        stopped()
+    }
+
+    fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>> {
+        stopped()
     }
 }
 

@@ -459,4 +459,23 @@ impl Store {
         )?;
         Ok(u64::try_from(count).unwrap_or_default())
     }
+
+    /// The name `mri`'s newest stored message carried (`imdisplayname`), in any conversation; `None` when no stored
+    /// message of theirs carried a name. A blank name is skipped.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn display_name(&self, mri: &str) -> Result<Option<String>, StoreError> {
+        let name = self
+            .conn
+            .prepare_cached(
+                "SELECT sender_name FROM messages
+                 WHERE sender = ?1 AND sender_name IS NOT NULL AND trim(sender_name) <> ''
+                 ORDER BY arrival_time DESC LIMIT 1",
+            )?
+            .query_row([mri], |row| row.get(0))
+            .optional()?;
+        Ok(name)
+    }
 }

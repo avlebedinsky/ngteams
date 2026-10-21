@@ -22,7 +22,7 @@ use teams_core::lab::LabError;
 use teams_core::{EngineHandle, Event};
 use teams_fence::lab::Alias;
 use teams_ui::window::{self, KitRoot, LAB_APP_ID};
-use teams_ui::{Bridge, Core, EventSource, Models, ViewTrace};
+use teams_ui::{Bridge, Core, EventSource, Models, SettingsFile, SettingsModel, ShellParts, ViewTrace};
 use tokio::sync::watch;
 
 /// What the app starts with.
@@ -36,6 +36,8 @@ pub struct Launch {
     /// whose tokens can't run out (a test's).
     pub signed_out: Option<watch::Receiver<Option<SignedOut>>>,
     pub trace: ViewTrace,
+    /// The account's settings file (`LabPaths::ui_settings_file`).
+    pub settings: SettingsFile,
 }
 
 /// What a lab account signed out is told to do.
@@ -102,6 +104,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<KitRoot>, En
         broker,
         signed_out,
         trace,
+        settings,
     } = launch;
     // GPUI would quit on its own as the last window closes (`QuitMode::Default` on Linux), before the engine is shut
     // down: the app quits itself once it is (`quit_when_closed`)
@@ -114,7 +117,17 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<KitRoot>, En
     if let Some(signed_out) = signed_out {
         watch_sign_out(signed_out, bridge.downgrade(), sign_in_hint(alias), cx);
     }
-    let window = match window::open(cx, LAB_APP_ID, title(alias), models, Arc::new(trace)) {
+    let settings = SettingsModel::load(settings);
+    for problem in settings.problems() {
+        eprintln!("teams-app: {problem}");
+    }
+    let parts = ShellParts {
+        core: bridge.read(cx).core(),
+        models,
+        settings: cx.new(|_| settings),
+        trace: Arc::new(trace),
+    };
+    let window = match window::open(cx, LAB_APP_ID, title(alias), parts) {
         Ok(window) => window,
         Err(error) => {
             return Err(LaunchFailed {

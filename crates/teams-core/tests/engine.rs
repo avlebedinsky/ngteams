@@ -1619,6 +1619,21 @@ async fn the_unread_count_and_the_read_horizon_follow_the_store() {
 }
 
 #[tokio::test]
+async fn the_requests_name_the_account_and_a_person_s_name_comes_from_the_store() {
+    let lab = Lab::start().await;
+    let b = native(&lab, LAB_B, QUIET);
+    assert_eq!(b.handle.me(), LAB_B);
+    assert_eq!(b.handle.requests().me(), LAB_B, "every clone names the account");
+    assert_eq!(b.handle.display_name(LAB_A).await.unwrap(), None, "nothing synced yet");
+
+    b.handle.sync().await.unwrap();
+    // the a–b chat's messages are a's, each carrying a's name
+    assert_eq!(b.handle.display_name(LAB_A).await.unwrap().as_deref(), Some("Lab A"));
+    assert_eq!(b.handle.display_name(LAB_C).await.unwrap(), None);
+    b.shutdown();
+}
+
+#[tokio::test]
 async fn a_row_an_earlier_run_left_goes_out_only_by_an_explicit_resend_which_looks_for_it_first() {
     let lab = Lab::start().await;
     let dir = Arc::new(tempfile::tempdir().unwrap());

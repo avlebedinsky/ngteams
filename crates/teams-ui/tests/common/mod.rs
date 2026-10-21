@@ -1,21 +1,19 @@
 //! Stand-ins for the engine the view tests run on: a fake event source the test feeds, and a fake core that records
 //! every request and answers from its own state. Every id here is made up.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use gpui::{AppContext as _, Context, Entity, TestAppContext};
+use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{Action, EngineError, Event, Reply, Transient, TransientSent};
-use teams_store::{
-    Conversation, ConversationKind, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor,
-    Reaction, ReadHorizon,
-};
+use teams_store::{Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon};
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
 
-pub const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+pub const LAB_A: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
 pub const LAB_B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
 
 /// The engine's owning side, fed by the test; counts its shutdowns.
@@ -34,26 +32,65 @@ impl EventSource for FakeEvents {
     }
 }
 
-/// The engine's request side: records each request by name, answers the conversation list from `conversations`
-/// and everything else `Stopped`.
-#[derive(Default)]
+/// The engine's request side: records each request by name, answers the store's reads from its own state (as account
+/// a) and everything else `Stopped`; with `stopped` set, every request answers `Stopped`.
 pub struct FakeCore {
+    pub me: String,
+    pub stopped: Mutex<bool>,
     pub asked: Mutex<Vec<&'static str>>,
     pub conversations: Mutex<Vec<Conversation>>,
+    /// Per conversation, the newest first.
+    pub messages: Mutex<HashMap<String, Vec<Message>>>,
+    pub members: Mutex<HashMap<String, Vec<Member>>>,
+    pub unread: Mutex<HashMap<String, u64>>,
+    /// Display names by MRI.
+    pub names: Mutex<HashMap<String, String>>,
+}
+
+impl Default for FakeCore {
+    fn default() -> Self {
+        Self {
+            me: LAB_A.to_owned(),
+            stopped: Mutex::new(false),
+            asked: Mutex::default(),
+            conversations: Mutex::default(),
+            messages: Mutex::default(),
+            members: Mutex::default(),
+            unread: Mutex::default(),
+            names: Mutex::default(),
+        }
+    }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl FakeCore {
     fn ask<T>(&self, name: &'static str) -> Reply<T> {
-        self.asked.lock().unwrap_or_else(PoisonError::into_inner).push(name);
+        locked(&self.asked).push(name);
         Reply::ready(Err(EngineError::Stopped))
     }
 
+    /// Records `name` and answers `answer`, unless the core is stopped.
+    fn answer<T>(&self, name: &'static str, answer: impl FnOnce() -> T) -> Reply<T> {
+        locked(&self.asked).push(name);
+        if *locked(&self.stopped) {
+            return Reply::ready(Err(EngineError::Stopped));
+        }
+        Reply::ready(Ok(answer()))
+    }
+
     pub fn asked(&self) -> Vec<&'static str> {
-        self.asked.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        locked(&self.asked).clone()
     }
 }
 
 impl Core for FakeCore {
+    fn me(&self) -> &str {
+        &self.me
+    }
+
     fn write(&self, _action: Action) -> Reply<OutboxEntry> {
         self.ask("write")
     }
@@ -75,16 +112,23 @@ impl Core for FakeCore {
     }
 
     fn conversations(&self, limit: usize) -> Reply<Vec<Conversation>> {
-        self.asked
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push("conversations");
-        let stored = self.conversations.lock().unwrap_or_else(PoisonError::into_inner);
-        Reply::ready(Ok(stored.iter().take(limit).cloned().collect()))
+        // the store's order: the latest activity first
+        self.answer("conversations", || {
+            let mut stored = locked(&self.conversations).clone();
+            stored.sort_by_key(|conversation| std::cmp::Reverse(conversation.last_activity));
+            stored.truncate(limit);
+            stored
+        })
     }
 
-    fn messages(&self, _conversation: String, _before: Option<PageCursor>, _limit: usize) -> Reply<MessagePage> {
-        self.ask("messages")
+    fn messages(&self, conversation: String, _before: Option<PageCursor>, limit: usize) -> Reply<MessagePage> {
+        self.answer("messages", || MessagePage {
+            messages: locked(&self.messages)
+                .get(&conversation)
+                .map(|messages| messages.iter().take(limit).cloned().collect())
+                .unwrap_or_default(),
+            next: None,
+        })
     }
 
     fn message(&self, _conversation: String, _id: String) -> Reply<Option<Message>> {
@@ -95,12 +139,20 @@ impl Core for FakeCore {
         self.ask("reactions")
     }
 
-    fn members(&self, _conversation: String) -> Reply<Vec<Member>> {
-        self.ask("members")
+    fn members(&self, conversation: String) -> Reply<Vec<Member>> {
+        self.answer("members", || {
+            locked(&self.members).get(&conversation).cloned().unwrap_or_default()
+        })
     }
 
-    fn unread_count(&self, _conversation: String) -> Reply<u64> {
-        self.ask("unread_count")
+    fn unread_count(&self, conversation: String) -> Reply<u64> {
+        self.answer("unread_count", || {
+            locked(&self.unread).get(&conversation).copied().unwrap_or(0)
+        })
+    }
+
+    fn display_name(&self, mri: String) -> Reply<Option<String>> {
+        self.answer("display_name", || locked(&self.names).get(&mri).cloned())
     }
 
     fn read_horizon(&self, _conversation: String) -> Reply<Option<ReadHorizon>> {
@@ -165,21 +217,6 @@ impl Rig {
     }
 }
 
-/// A view that counts how often a model told it to look again.
-pub struct Watcher {
-    pub seen: usize,
-    _observing: gpui::Subscription,
-}
-
-impl Watcher {
-    pub fn on<T: 'static>(model: &Entity<T>, cx: &mut Context<Self>) -> Self {
-        Self {
-            seen: 0,
-            _observing: cx.observe(model, |this, _, _| this.seen += 1),
-        }
-    }
-}
-
 /// What a trace wrote, shared with the test.
 #[derive(Clone, Default)]
 pub struct Written(pub Arc<Mutex<Vec<u8>>>);
@@ -208,55 +245,5 @@ impl Write for Written {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
-    }
-}
-
-pub fn conversation(id: &str) -> Conversation {
-    Conversation {
-        id: id.to_owned(),
-        kind: ConversationKind::OneToOne,
-        topic: None,
-        version: 1,
-        last_activity: Some(1_767_225_600_000),
-    }
-}
-
-/// A message of `CHAT` from b, with `text` and b's name `name`.
-pub fn message(id: &str, text: &str, name: &str) -> Message {
-    Message {
-        conversation_id: CHAT.to_owned(),
-        id: id.to_owned(),
-        version: 1,
-        client_message_id: Some("1234567890123456789".to_owned()),
-        sender: Some(LAB_B.to_owned()),
-        sender_name: Some(name.to_owned()),
-        message_type: "RichText/Html".to_owned(),
-        content: format!("<p>{text}</p>"),
-        properties: None,
-        arrival_time: 1_767_225_600_000,
-        compose_time: Some(1_767_225_600_000),
-        edit_time: None,
-        delete_time: None,
-    }
-}
-
-pub fn outbox_row(id: i64, state: OutboxState) -> OutboxEntry {
-    OutboxEntry {
-        id,
-        run_id: 1,
-        client_message_id: "1234567890123456789".to_owned(),
-        conversation_id: Some(CHAT.to_owned()),
-        kind: OutboxKind::Send,
-        payload: "{}".to_owned(),
-        state,
-        attempts: 1,
-        attempts_at_resend: 0,
-        failed_checks: 0,
-        not_before: None,
-        last_error: None,
-        message_id: None,
-        created_at: 1_767_225_600_000,
-        updated_at: 1_767_225_600_000,
-        unreadable_seen_at: None,
     }
 }

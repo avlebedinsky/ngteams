@@ -173,6 +173,13 @@ impl LabPaths {
         self.data_dir.join("store").join(format!("{}.sqlite", alias.as_str()))
     }
 
+    /// A lab account's app settings (`teams-ui`'s settings file: the selected chat, read receipts, typing,
+    /// notifications, the idle time, the manual status), `<data_dir>/ui/<alias>.toml`: lab data, never in the repo.
+    #[must_use]
+    pub fn ui_settings_file(&self, alias: Alias) -> PathBuf {
+        self.data_dir.join("ui").join(format!("{}.toml", alias.as_str()))
+    }
+
     /// The lab's own chats whose ids no account's MRIs give (the a–b–c group chat), `<data_dir>/chats.toml`
     /// ([`LabChats`]): lab data, never in the repo.
     #[must_use]

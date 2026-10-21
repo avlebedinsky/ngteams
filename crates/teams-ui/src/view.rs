@@ -1,13 +1,15 @@
-//! The window's root view. For now an empty window with the account's status in it (connecting, connected, offline,
-//! signed out), in the theme's colours; the shell, the chat list and the chat view come in Tasks 8 and 9.
+//! The window's root view: the [`Shell`] (the rail, the chat list, the conversation) once it is given one, the
+//! account's status alone before that; signed out, only that and what to do. It traces the window's opening and each
+//! status it shows (connecting, connected, reconnecting, offline, signed out).
 
 use std::sync::Arc;
 
 use gpui::{
-    Context, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, rgb,
+    Context, Entity, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, rgb,
 };
 
 use crate::models::{Account, Engine, Link, Models, Status};
+use crate::shell::Shell;
 use crate::theme;
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -15,13 +17,16 @@ use crate::trace::{TraceLine, ViewTrace};
 /// 0xRRGGBB.
 pub const BACKGROUND: u32 = theme::LIGHT_PALETTE.background;
 
-/// What the status line shows, by name: the trace's `change` for it.
+/// What the status shows, by name: the trace's `change` for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shown {
+    /// The push channel isn't up yet since the start.
     Connecting,
     Connected,
+    /// The push channel is down and reconnects by itself.
+    Reconnecting,
+    /// The push channel or the engine stopped for good: nothing new comes.
     Offline,
-    Stopped,
     SignedOut,
 }
 
@@ -31,10 +36,10 @@ impl Shown {
     pub fn of(status: &Status) -> Self {
         match (&status.account, status.engine, status.link) {
             (Account::SignedOut { .. }, _, _) => Self::SignedOut,
-            (_, Engine::Stopped, _) | (_, _, Link::Stopped) => Self::Stopped,
+            (_, Engine::Stopped, _) | (_, _, Link::Stopped) => Self::Offline,
             (_, _, Link::Starting) => Self::Connecting,
             (_, _, Link::Connected) => Self::Connected,
-            (_, _, Link::Down) => Self::Offline,
+            (_, _, Link::Down) => Self::Reconnecting,
         }
     }
 
@@ -44,22 +49,22 @@ impl Shown {
         match self {
             Self::Connecting => "connecting",
             Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
             Self::Offline => "offline",
-            Self::Stopped => "stopped",
             Self::SignedOut => "signed-out",
         }
     }
 }
 
-/// The status line's text.
+/// The status's text.
 #[must_use]
 pub fn status_text(status: &Status) -> SharedString {
     match (&status.account, Shown::of(status)) {
         (Account::SignedOut { hint }, _) => format!("Signed out: {hint}").into(),
         (_, Shown::Connecting) => "Connecting…".into(),
         (_, Shown::Connected) => "Connected".into(),
-        (_, Shown::Offline) => "Offline: reconnecting…".into(),
-        (_, Shown::Stopped | Shown::SignedOut) => "Stopped".into(),
+        (_, Shown::Reconnecting) => "Reconnecting…".into(),
+        (_, Shown::Offline | Shown::SignedOut) => "Offline".into(),
     }
 }
 
@@ -68,6 +73,7 @@ pub struct Root {
     models: Models,
     trace: Arc<ViewTrace>,
     shown: Shown,
+    shell: Option<Entity<Shell>>,
     _observing: Subscription,
     /// The theme following the window's appearance, while the window is open ([`Root::following`]).
     appearance: Option<Subscription>,
@@ -90,9 +96,17 @@ impl Root {
             models,
             trace,
             shown,
+            shell: None,
             _observing: observing,
             appearance: None,
         }
+    }
+
+    /// Shows `shell` in the window.
+    #[must_use]
+    pub fn with_shell(mut self, shell: Entity<Shell>) -> Self {
+        self.shell = Some(shell);
+        self
     }
 
     /// Keeps `appearance` (the theme following the window, [`theme::follow`]) for as long as the view lives.
@@ -108,7 +122,7 @@ impl Root {
         self.appearance.is_some()
     }
 
-    /// What the status line shows now.
+    /// What the status shows now.
     #[must_use]
     pub fn shown(&self) -> Shown {
         self.shown
@@ -118,20 +132,29 @@ impl Root {
     pub fn models(&self) -> &Models {
         &self.models
     }
+
+    /// The shell the window shows, if it was given one.
+    #[must_use]
+    pub fn shell(&self) -> Option<&Entity<Shell>> {
+        self.shell.as_ref()
+    }
 }
 
 impl Render for Root {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let text = status_text(self.models.status.read(cx));
         let colors = theme::current(cx);
-        div()
+        let root = div()
             .size_full()
             .flex()
             .flex_col()
-            .justify_center()
-            .items_center()
             .bg(rgb(colors.background))
-            .text_color(rgb(colors.foreground))
-            .child(text)
+            .text_color(rgb(colors.foreground));
+        match (&self.shell, self.shown) {
+            (Some(shell), shown) if shown != Shown::SignedOut => root.child(shell.clone()),
+            _ => root
+                .justify_center()
+                .items_center()
+                .child(status_text(self.models.status.read(cx))),
+        }
     }
 }

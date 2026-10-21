@@ -50,7 +50,10 @@ media-loop = { path = "spikes/media-loop" }
 async-channel = "2.5.0"
 # base64 bodies and frames in captures, decoded by the sanitizer
 base64 = "0.23.1"
-clap = { version = "4.6.7", features = ["derive"] }
+# the chat list's times in the local time zone (read from TZ and the zoneinfo files, no libc localtime): the version
+# the UI kit already links, with only its clock
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+clap ={ version = "4.6.7", features = ["derive"] }
 # STUN FINGERPRINT (CRC-32) for the echo call's TURN client
 crc32fast = "1.5.2"
 # gzip only, on the zlib-rs backend zip already uses

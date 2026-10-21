@@ -366,6 +366,7 @@ enum Query {
     },
     Members(String, Responder<Vec<Member>>),
     UnreadCount(String, Responder<u64>),
+    DisplayName(String, Responder<Option<String>>),
     ReadHorizon(String, Responder<Option<ReadHorizon>>),
     OutboxEntry(i64, Responder<Option<OutboxEntry>>),
     OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
@@ -378,9 +379,17 @@ enum Query {
 #[derive(Clone, Debug)]
 pub struct EngineRequests {
     requests: mpsc::UnboundedSender<Request>,
+    /// The account's MRI: who the engine writes as.
+    me: Arc<str>,
 }
 
 impl EngineRequests {
+    /// The account's MRI: who the engine writes as, and whose read horizon and unread counts it answers with.
+    #[must_use]
+    pub fn me(&self) -> &str {
+        &self.me
+    }
+
     /// Writes through the outbox (see the module docs); the reply is the row as its first send left it.
     pub fn write(&self, action: Action) -> Reply<OutboxEntry> {
         self.ask(|reply| Request::Write(action, reply))
@@ -466,6 +475,12 @@ impl EngineRequests {
     pub fn unread_count(&self, conversation: impl Into<String>) -> Reply<u64> {
         let conversation = conversation.into();
         self.query(|reply| Query::UnreadCount(conversation, reply))
+    }
+
+    /// The name `mri`'s newest stored message carried, in any conversation ([`Store::display_name`]).
+    pub fn display_name(&self, mri: impl Into<String>) -> Reply<Option<String>> {
+        let mri = mri.into();
+        self.query(|reply| Query::DisplayName(mri, reply))
     }
 
     /// The account's own stored read horizon in a conversation.
@@ -596,6 +611,7 @@ where
         .enable_all()
         .build()
         .map_err(EngineError::Runtime)?;
+    let me: Arc<str> = parts.outbox.me().mri().as_str().into();
     let (requests, received) = mpsc::unbounded_channel();
     let (events, taken) = mpsc::unbounded_channel();
     let (ending, ended) = std::sync::mpsc::channel();
@@ -610,7 +626,7 @@ where
         })
         .map_err(EngineError::Thread)?;
     Ok(EngineHandle {
-        requests: EngineRequests { requests },
+        requests: EngineRequests { requests, me },
         events: taken,
         thread: Some(thread),
         ended,
@@ -809,6 +825,7 @@ where
             } => give(reply, store.reactions(&conversation, &id)),
             Query::Members(conversation, reply) => give(reply, store.members(&conversation)),
             Query::UnreadCount(conversation, reply) => give(reply, store.unread_count(&conversation, self.me())),
+            Query::DisplayName(mri, reply) => give(reply, store.display_name(&mri)),
             Query::ReadHorizon(conversation, reply) => give(reply, store.read_horizon(&conversation, self.me())),
             Query::OutboxEntry(id, reply) => give(reply, store.outbox_entry(id)),
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),

@@ -660,21 +660,41 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
 - Create: `crates/teams-ui/src/{shell.rs,settings.rs,chat_list.rs,switcher.rs}`, tests
 - Modify: `crates/teams-ui/src/models.rs`
 
-- [ ] tests first: the shell's three panes (rail: Chats, Teams; the list; the conversation), resizable list pane
-- [ ] tests first: the settings model and its file (lab: `<data_dir>/ui/<alias>.toml`; personal: the build's own data
+- [x] tests first: the shell's three panes (rail: Chats, Teams; the list; the conversation), resizable list pane
+- [x] tests first: the settings model and its file (lab: `<data_dir>/ui/<alias>.toml`; personal: the build's own data
       dir; `0600`, its dir `0700`; a missing or unreadable file gives the defaults, a bad value is reported and the
       default kept): the selected chat, send typing, send read receipts, notifications (all, mentions only, off),
       idle time, the account's manual status; a settings view to change them
-- [ ] tests first (view tests on a fake core; in-process on `teams-mock`): conversations by last activity, a row's
+- [x] tests first (view tests on a fake core; in-process on `teams-mock`): conversations by last activity, a row's
       avatar (initials until Task 12), name, last message's first line, time and unread count from the store's
       horizon; kinds (1:1 named by the other member: their last `imdisplayname` in the store, else the MRI, until
       Task 12; the group chat by its topic or members; channels left to the Teams rail; the account's own streams
       hidden); live updates from events, catch-ups included; the connection state (connected, reconnecting, offline)
       from the push channel's events
-- [ ] tests first: the chat switcher (Ctrl+K, the kit's command palette): fuzzy match on chat names, Enter opens,
+- [x] tests first: the chat switcher (Ctrl+K, the kit's command palette): fuzzy match on chat names, Enter opens,
       Escape closes; the live test's way into a chat
-- [ ] opens from the store at once, then catches up; nothing shown comes from anywhere but the store
-- [ ] `cargo test -p teams-ui` and the gate pass
+- [x] opens from the store at once, then catches up; nothing shown comes from anywhere but the store
+- [x] `cargo test -p teams-ui` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - The settings view is a module of its own (`settings_view.rs`); `models.rs` is unchanged: the settings are an
+    entity of their own (`SettingsModel`), the chat list reads the existing `Chats` revisions.
+  - The chat list needs two things the engine didn't have: who the account is (`EngineRequests::me`, `Core::me`) and
+    a person's newest `imdisplayname` in the store, in any chat (`Store::display_name` over a new index, migration
+    `0006`; `EngineRequests::display_name`). The lab app's settings path is `LabPaths::ui_settings_file`.
+  - A row is built again only when its chat changed since it was built (`Chats::changed_at`); every row after a
+    catch-up, which may bring names from other chats. A load while one runs waits and runs once after it; a stopped
+    engine leaves the rows shown. The status's names are now connecting, connected, reconnecting (the push channel
+    down), offline (it or the engine stopped) and signed out; the list's header shows it.
+  - The switcher is the kit's command palette with its own filter off: ours matches fuzzily (the query's characters
+    in order, any case, runs and word starts ranked higher), at most 50 matches. The kit's Escape first clears a typed
+    query; ours closes the switcher at once (a keystroke interceptor while it is open). Ctrl+K toggles it.
+  - The view trace gained a list's conversations in order with their unread counts (`chat-list shown`), and `chat
+    opened`, `settings opened`, `rail`, `switcher opened`/`closed`.
+  - The in-process mock test is the app's window test (`crates/teams-app/tests/window.rs`): a's chat list filled by
+    the catch-up (the chats with their kinds, not the channel nor the notifications stream), the panes' colours in the
+    screenshot, and the switcher driven by the sandbox's virtual keyboard (Ctrl+K, Escape, Ctrl+K and Enter opening the
+    chat at its top). The view tests on the fake core are `crates/teams-ui/tests/shell.rs` and `settings.rs`.
+  - Avatars show the kit's initials of a name the store gave; a chat known only by MRIs gets the kit's empty avatar.
 
 ### Task 9: The chat view
 **Files:**
