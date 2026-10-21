@@ -4,11 +4,18 @@
 //! (through [`Core`](crate::Core)) when its [`Chats::revision`] moves. So every view of the same data (the list, the
 //! switcher, search) sees every change, and nothing shown comes from anywhere but the store.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
-use gpui::{App, AppContext as _, Entity, SharedString};
-use teams_core::Event;
+use gpui::{App, AppContext as _, AsyncApp, Entity, SharedString};
+use teams_core::{Event, Source};
 use teams_store::OutboxEntry;
+
+/// How long someone is shown typing after their last typing signal, unless they stop (`typing: false`) or a message
+/// of theirs is delivered first. M2 Task 10's capture (`docs/protocol/chat.md`, "The shapes the UI needs
+/// (chat-shapes)"): the web client's indicator went off about 25 s after the last typing delivery, or as soon as the
+/// sender's message arrived; the web client never sent `Control/ClearTyping`.
+pub const TYPING_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// The push channel, as the account's status shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,8 +79,11 @@ pub struct Chats {
     revision: u64,
     /// Per conversation: the revision of its last change.
     changed: HashMap<String, u64>,
-    /// Per conversation: who is typing now.
-    typing: BTreeMap<String, BTreeSet<String>>,
+    /// Per conversation: who is typing now, each with the stamp of their last signal (a timeout clears only the
+    /// signal it was started for).
+    typing: BTreeMap<String, BTreeMap<String, u64>>,
+    /// The last typing signal's stamp.
+    typing_stamp: u64,
     /// The outbox rows as last told, by id.
     outbox: BTreeMap<i64, OutboxEntry>,
 }
@@ -93,7 +103,11 @@ impl Chats {
 
     /// Who is typing in `conversation` now, by MRI.
     pub fn typing(&self, conversation: &str) -> impl Iterator<Item = &str> {
-        self.typing.get(conversation).into_iter().flatten().map(String::as_str)
+        self.typing
+            .get(conversation)
+            .into_iter()
+            .flat_map(BTreeMap::keys)
+            .map(String::as_str)
     }
 
     /// An outbox row as last told.
@@ -107,17 +121,32 @@ impl Chats {
         self.changed.insert(conversation.to_owned(), self.revision);
     }
 
-    fn set_typing(&mut self, conversation: &str, from: &str, typing: bool) -> bool {
-        let who = self.typing.entry(conversation.to_owned()).or_default();
-        let changed = if typing {
-            who.insert(from.to_owned())
-        } else {
-            who.remove(from)
+    /// Someone started typing: the stamp of this signal, and whether they weren't shown typing before.
+    fn start_typing(&mut self, conversation: &str, from: &str) -> (u64, bool) {
+        self.typing_stamp += 1;
+        let stamp = self.typing_stamp;
+        let shown = self
+            .typing
+            .entry(conversation.to_owned())
+            .or_default()
+            .insert(from.to_owned(), stamp)
+            .is_none();
+        (stamp, shown)
+    }
+
+    /// Someone stopped typing (with `stamp`: only if their last signal is that one); whether they were shown typing.
+    fn stop_typing(&mut self, conversation: &str, from: &str, stamp: Option<u64>) -> bool {
+        let Some(who) = self.typing.get_mut(conversation) else {
+            return false;
         };
+        if stamp.is_some_and(|stamp| who.get(from) != Some(&stamp)) {
+            return false;
+        }
+        let stopped = who.remove(from).is_some();
         if who.is_empty() {
             self.typing.remove(conversation);
         }
-        changed
+        stopped
     }
 }
 
@@ -150,6 +179,18 @@ impl Models {
             }),
             Event::CatchUpFailed { .. } => self.failed("catch-up", cx),
             Event::Failed { during, .. } => self.failed(during, cx),
+            Event::Message {
+                conversation,
+                message: Some(message),
+                source: Source::Delivery,
+                ..
+            } => {
+                // a delivered message of theirs ends their typing
+                if let Some(from) = &message.sender {
+                    self.stop_typing(&conversation, from, None, cx);
+                }
+                self.changed(&conversation, cx);
+            }
             Event::Message { conversation, .. }
             | Event::ReadHorizon { conversation }
             | Event::ConversationChanged { conversation } => self.changed(&conversation, cx),
@@ -208,8 +249,28 @@ impl Models {
     fn typing(&self, conversation: &str, from: Option<&str>, typing: bool, cx: &mut App) {
         // a typing signal that names no one can't be shown against anyone
         let Some(from) = from else { return };
+        if !typing {
+            self.stop_typing(conversation, from, None, cx);
+            return;
+        }
+        let stamp = self.chats.update(cx, |chats, cx| {
+            let (stamp, shown) = chats.start_typing(conversation, from);
+            if shown {
+                cx.notify();
+            }
+            stamp
+        });
+        let (models, conversation, from) = (self.clone(), conversation.to_owned(), from.to_owned());
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            cx.background_executor().timer(TYPING_TIMEOUT).await;
+            cx.update(|cx| models.stop_typing(&conversation, &from, Some(stamp), cx));
+        })
+        .detach();
+    }
+
+    fn stop_typing(&self, conversation: &str, from: &str, stamp: Option<u64>, cx: &mut App) {
         self.chats.update(cx, |chats, cx| {
-            if chats.set_typing(conversation, from, typing) {
+            if chats.stop_typing(conversation, from, stamp) {
                 cx.notify();
             }
         });

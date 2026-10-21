@@ -10,8 +10,10 @@
 //!   chat list filled from the store once the catch-up brought a's chats: the chats, not the channel or the
 //!   notifications stream), screenshots the window (the rail, the list and the conversation pane drawn; the shot is
 //!   kept under `target/ui-shots/`), drives the chat switcher with the sandbox's virtual keyboard (Ctrl+K opens it,
-//!   Escape closes it, Ctrl+K and Enter open the chat at its top), closes the window through niri, and checks that
-//!   the app quit and its engine's thread was joined (the account's engine lock is free).
+//!   Escape closes it, Ctrl+K and Enter open the chat at its top), checks the chat view shows that chat's messages
+//!   from the store (the a–b chat's with their kinds: its event, a deleted and an edited message), screenshots it
+//!   again, closes the window through niri, and checks that the app quit and its engine's thread was joined (the
+//!   account's engine lock is free).
 //! - `http`: a window with an `img()` of an `https` URL on a loopback listener the child holds. GPUI's HTTP client is
 //!   the null one: the image loads nothing, a request through `cx.http_client()` is refused, and the listener never
 //!   sees a connection.
@@ -244,7 +246,12 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
             return Err(running.fail(&format!("{region}'s colour fills {share:.2} of the window")));
         }
     }
-    the_switcher_opens_a_chat(sandbox, &mut trace, &listed).map_err(|error| running.fail(&error))?;
+    let chat = the_switcher_opens_a_chat(sandbox, &mut trace, &listed).map_err(|error| running.fail(&error))?;
+    the_chat_view_shows_its_messages(&mut trace, &chat).map_err(|error| running.fail(&error))?;
+    // the frames after the trace's line
+    thread::sleep(Duration::from_secs(1));
+    let png = sandbox.screenshot("teams-app-chat.png", true)?;
+    fs::copy(&png, shots_dir()?.join("teams-app-chat.png"))?;
 
     sandbox.niri_msg(&["action", "close-window"])?;
     running
@@ -305,9 +312,32 @@ fn ctrl_k(input: &mut VirtualInput) -> SandboxResult {
     input.key_with(&[Modifier::Ctrl], key)
 }
 
+/// The chat view of the chat opened: a `chat-view shown` line for it; the a–b chat's from the store with its event,
+/// its deleted and its edited message (the mock's `messages.json`).
+fn the_chat_view_shows_its_messages(trace: &mut TraceReader, chat: &str) -> SandboxResult {
+    let line = trace.wait_where("chat-view shown for the chat opened", |line| {
+        line["view"] == "chat-view"
+            && line["conversation"] == chat
+            && (chat != AB_CHAT || !strings(line, "messages").is_empty())
+    })?;
+    if chat != AB_CHAT {
+        return Ok(());
+    }
+    let kinds = strings(&line, "kinds");
+    for kind in ["event", "deleted", "edited", "text"] {
+        if !kinds.iter().any(|shown| shown == kind) {
+            return Err(format!("the a–b chat shows no {kind} message: {kinds:?}").into());
+        }
+    }
+    if strings(&line, "messages").len() != kinds.len() {
+        return Err(format!("a kind per message: {line}").into());
+    }
+    Ok(())
+}
+
 /// The switcher with the sandbox's virtual keyboard: Ctrl+K opens it, Escape closes it; Ctrl+K and Enter open the chat
-/// at its top, one the list shows.
-fn the_switcher_opens_a_chat(sandbox: &Sandbox, trace: &mut TraceReader, listed: &[String]) -> SandboxResult {
+/// at its top, one the list shows. The chat opened.
+fn the_switcher_opens_a_chat(sandbox: &Sandbox, trace: &mut TraceReader, listed: &[String]) -> SandboxResult<String> {
     let mut input = sandbox.input()?;
     ctrl_k(&mut input)?;
     trace.next_where("switcher opened", |line| {
@@ -325,14 +355,14 @@ fn the_switcher_opens_a_chat(sandbox: &Sandbox, trace: &mut TraceReader, listed:
     let opened = trace.next_where("chat opened", |line| {
         line["view"] == "chat" && line["change"] == "opened"
     })?;
-    let chat = opened["conversation"].as_str().unwrap_or_default();
-    if !listed.iter().any(|id| id == chat) {
+    let chat = opened["conversation"].as_str().unwrap_or_default().to_owned();
+    if !listed.contains(&chat) {
         return Err(format!("the switcher opened {chat:?}, not a listed chat: {listed:?}").into());
     }
     trace.next_where("switcher closed after", |line| {
         line["view"] == "switcher" && line["change"] == "closed"
     })?;
-    Ok(())
+    Ok(chat)
 }
 
 fn gpui_s_http_client_is_the_null_one(sandbox: &Sandbox) -> SandboxResult {
