@@ -9,8 +9,11 @@
 //!   then the transport. The reply is the row as that send left it, an error only when no row was made (or it can't
 //!   be read back): a row that waits (a `Retry-After`, a check that couldn't sync, an older row on its
 //!   [`Lane`](crate::Lane)) is in the reply as it waits, and goes out from the engine's tick ([`Outbox::send_due`]);
-//!   every row that settles comes as [`Event::Outbox`] too. Once a write went through, its conversation is synced, so
-//!   the account's own change is in the store (a new chat with it).
+//!   every row that settles comes as [`Event::Outbox`] too, and so does every row our own message coming back
+//!   settles, by whichever read brought it (a catch-up, a delivery, a sync after a write, the check of another row):
+//!   one event per change of the row ([`Outbox::take_arrived`]). Once a write went through, its conversation is
+//!   synced, so the account's own change is in the store (a new chat with it). A row can be read back by its id
+//!   ([`EngineHandle::outbox_entry`]).
 //! - **Events → store**: each delivery of the push channel ([`teams_trouter`]) goes through the catch-up's
 //!   [`CatchUp::receive_message`], the path a sync takes, so a message that comes both ways is stored once, at its
 //!   newest version; the account's own read horizon through [`CatchUp::receive_horizon`]. A delivery naming a
@@ -23,8 +26,8 @@
 //!   added or synced, the store failed), and a sync after a write that failed: what they would have stored is missed
 //!   until a catch-up brings it.
 //! - **Queries**: the conversation list, a page of a conversation's messages, one message, its reactions, a chat's
-//!   members, all read from the store on the engine's thread, which owns it; older history from the service
-//!   ([`EngineHandle::load_older`]).
+//!   members, an outbox row, all read from the store on the engine's thread, which owns it; older history from the
+//!   service ([`EngineHandle::load_older`]).
 //!
 //! The engine sends nothing of its own: every write goes out through the outbox, every read through the catch-up's
 //! client, and the push channel sends only its reviewed own frames. Without a push channel ([`Parts::push`] `None`:
@@ -212,7 +215,8 @@ pub enum Event {
     ReadHorizon { conversation: String },
     /// A conversation changed (its properties, its last message).
     ConversationChanged { conversation: String },
-    /// An outbox row as it settled: after its first send, a later retry, or our own message coming back.
+    /// An outbox row as it settled: after its first send, a later retry, or our own message coming back (by a
+    /// catch-up, a delivery or any other sync).
     Outbox(OutboxEntry),
     /// Something the engine did on its own failed: what, and why.
     Failed { during: &'static str, error: EngineError },
@@ -300,6 +304,7 @@ enum Request {
         reply: Responder<Vec<Reaction>>,
     },
     Members(String, Responder<Vec<Member>>),
+    OutboxEntry(i64, Responder<Option<OutboxEntry>>),
     Shutdown,
 }
 
@@ -375,6 +380,11 @@ impl EngineHandle {
     pub fn members(&self, conversation: impl Into<String>) -> Reply<Vec<Member>> {
         let conversation = conversation.into();
         self.ask(|reply| Request::Members(conversation, reply))
+    }
+
+    /// An outbox row as it now stands, by its id (a write's reply has it).
+    pub fn outbox_entry(&self, id: i64) -> Reply<Option<OutboxEntry>> {
+        self.ask(|reply| Request::OutboxEntry(id, reply))
     }
 
     /// The next event; `None` once the engine has stopped and every event was taken.
@@ -493,6 +503,8 @@ where
                 },
                 _ = tick.tick() => self.on_tick().await,
             }
+            // whatever a read settled on its way (a sync after a write, a new conversation's sync, …)
+            self.arrived(&[]);
         }
         if let Some(push) = push {
             push.stop().await;
@@ -502,6 +514,16 @@ where
     fn emit(&self, event: Event) {
         // an owner that dropped its handle takes no more events
         let _ = self.events.send(event);
+    }
+
+    /// Tells the owner of every row our own message coming back changed since the last look
+    /// ([`Outbox::take_arrived`]), apart from one already told as it now stands (in `told`).
+    fn arrived(&self, told: &[OutboxEntry]) {
+        for row in self.outbox.take_arrived() {
+            if !told.contains(&row) {
+                self.emit(Event::Outbox(row));
+            }
+        }
     }
 
     fn failed(&self, during: &'static str, error: impl Into<EngineError>) {
@@ -541,6 +563,7 @@ where
             }
             Request::LoadOlder(conversation, reply) => {
                 let older = self.catch_up.load_older(&mut self.store, &conversation).await;
+                self.arrived(&[]);
                 let _ = reply.send(older.map_err(EngineError::from));
             }
             Request::Conversations(limit, reply) => {
@@ -572,6 +595,9 @@ where
             Request::Members(conversation, reply) => {
                 let _ = reply.send(self.store.members(&conversation).map_err(EngineError::from));
             }
+            Request::OutboxEntry(id, reply) => {
+                let _ = reply.send(self.store.outbox_entry(id).map_err(EngineError::from));
+            }
             Request::Shutdown => {}
         }
     }
@@ -586,6 +612,8 @@ where
             Err(error) => self.row_after(row.id, error)?,
         };
         self.settled(&row).await;
+        // its own check's sync may have settled it, or another row, on the way
+        self.arrived(std::slice::from_ref(&row));
         Ok(row)
     }
 
@@ -733,13 +761,18 @@ where
     // --- the tick ---
 
     async fn on_tick(&mut self) {
-        match self.outbox.send_due(&mut self.store, &self.catch_up).await {
-            Ok(done) => {
-                for row in &done.rows {
-                    self.settled(row).await;
-                }
-            }
-            Err(error) => self.failed("sending the outbox's due rows", error),
+        let (done, error) = match self.outbox.send_due(&mut self.store, &self.catch_up).await {
+            Ok(done) => (done, None),
+            Err(failed) => (failed.done, Some(failed.error)),
+        };
+        for row in &done.rows {
+            self.settled(row).await;
+        }
+        // a row's check may have settled it, or another row, on the way: told after the rows as they were sent, so
+        // one a later row's check settled is told last as it now stands
+        self.arrived(&done.rows);
+        if let Some(error) = error {
+            self.failed("sending the outbox's due rows", error);
         }
         if self.up && self.retry_at.is_some_and(|at| Instant::now() >= at) {
             self.auto_catch_up(Cause::Retry).await;
@@ -754,7 +787,10 @@ where
             .catch_up
             .catch_up_if_due(&mut self.store, &mut self.gaps)
             .await
-            .transpose()?;
+            .transpose();
+        // our own messages it brought back settled their rows, whether or not it ran to the end
+        self.arrived(&[]);
+        let result = result?;
         match &result {
             Ok(report) if report.failed.is_empty() => {
                 self.retry_at = None;
@@ -850,9 +886,8 @@ where
         };
         match self.catch_up.receive_message(&mut self.store, &conversation, message) {
             Ok(Some(received)) => {
-                if let Some(row) = received.outbox.filter(|_| received.applied != Applied::Ignored) {
-                    self.emit(Event::Outbox(row));
-                }
+                // its row, when this delivery settled it (one a sync settled before was told then)
+                self.arrived(&[]);
                 let stored = match self.store.message(&conversation, &message.id) {
                     Ok(stored) => stored.map(Box::new),
                     Err(error) => {
@@ -869,8 +904,8 @@ where
                     replay,
                 });
             }
-            // a control signal, or a message this build can't read: nothing stored
-            Ok(None) => {}
+            // a control signal, or a message this build can't read: nothing stored (its row may be settled)
+            Ok(None) => self.arrived(&[]),
             Err(error) => self.missed("storing a delivered message", error),
         }
         if added && let Err(error) = self.catch_up.sync_messages(&mut self.store, &conversation).await {

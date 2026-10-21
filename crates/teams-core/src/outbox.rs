@@ -23,7 +23,9 @@
 //!   anything else go out meanwhile; a message post and a new chat wait for nothing.
 //! - **Our own message coming back** ([`Outbox::receive`], for a Trouter delivery and a sync alike) is stored once
 //!   (by its id and version) and matched by its `clientmessageid` to its row, which becomes sent with the message's
-//!   id; it may come back before the post's answer does, and the answer then changes nothing.
+//!   id; it may come back before the post's answer does, and the answer then changes nothing. A row a message coming
+//!   in changed is also kept for [`Outbox::take_arrived`], so that the engine tells its owner of it whichever read
+//!   (a sync page, a delivery, the check of another row) brought the message.
 //! - **No resend across runs**: a run sends only its own rows ([`teams_store::Store::outbox_due`]); rows an earlier
 //!   process left pending or in flight are listed by [`teams_store::Store::outbox_left_by_earlier_runs`] and go out
 //!   again only after an explicit [`teams_store::Store::resend`], which keeps their `clientmessageid` and starts their
@@ -38,7 +40,7 @@
 
 use std::error::Error;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -268,6 +270,16 @@ pub struct SentDue {
     pub unsynced: Vec<Unsynced>,
 }
 
+/// An [`Outbox::send_due`] the store failed during: the rows done before it, and the error.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct DueFailed {
+    /// The rows sent (or left waiting, or failed) before the store failed, as in [`SentDue`].
+    pub done: SentDue,
+    #[source]
+    pub error: OutboxError,
+}
+
 /// A row whose check before a new attempt couldn't sync its conversation.
 #[derive(Debug)]
 pub struct Unsynced {
@@ -352,6 +364,8 @@ pub struct Outbox<T> {
     /// The account: its messages go out as its, and only its messages are matched to outbox rows.
     me: Author,
     clock: Clock,
+    /// The rows a message coming in changed ([`Outbox::match_arrival`]), as it left them, until they are taken.
+    arrived: Mutex<Vec<OutboxEntry>>,
 }
 
 impl<T: Transport<Error = HttpError>> Outbox<T> {
@@ -365,6 +379,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             membership,
             me,
             clock: Arc::new(now_ms),
+            arrived: Mutex::new(Vec::new()),
         }
     }
 
@@ -381,6 +396,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         &self.me
     }
 
+    /// The rows a message coming in changed since the last call, as each change left them, oldest first: a row
+    /// that became sent (or had its message id filled in) by [`Outbox::match_arrival`], whichever read brought the
+    /// message (a sync page, a delivery, the check before another row's attempt). A row a send returns may be among
+    /// them too. They are kept until taken: the engine takes them after every read it makes.
+    pub fn take_arrived(&self) -> Vec<OutboxEntry> {
+        std::mem::take(&mut *self.arrived.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
     /// Sends every row of this run that is due, oldest first, as [`Outbox::send`] does; returns the rows as they
     /// end up. A row whose check can't sync doesn't hold up the rows after it: it is listed in
     /// [`SentDue::unsynced`] and waits (see the module docs). A row that waits behind an older one on its lane
@@ -388,13 +411,23 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     ///
     /// # Errors
     ///
-    /// [`OutboxError::Store`] when the store fails; the rows after it wait for the next call.
-    pub async fn send_due<S: ConversationSync>(&self, store: &mut Store, sync: &S) -> Result<SentDue, OutboxError> {
+    /// [`DueFailed`] when the store fails, with the rows done before it; the rows after it wait for the next call.
+    pub async fn send_due<S: ConversationSync>(&self, store: &mut Store, sync: &S) -> Result<SentDue, DueFailed> {
+        let mut done = SentDue::default();
+        match self.send_due_into(store, sync, &mut done).await {
+            Ok(()) => Ok(done),
+            Err(error) => Err(DueFailed { done, error }),
+        }
+    }
+
+    async fn send_due_into<S: ConversationSync>(
+        &self,
+        store: &mut Store,
+        sync: &S,
+        done: &mut SentDue,
+    ) -> Result<(), OutboxError> {
         let due = store.outbox_due((self.clock)())?;
-        let mut done = SentDue {
-            rows: Vec::with_capacity(due.len()),
-            unsynced: Vec::new(),
-        };
+        done.rows.reserve(due.len());
         for row in due {
             if waits_behind(store, &row)? {
                 continue;
@@ -408,7 +441,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 Err(error) => return Err(error),
             }
         }
-        Ok(done)
+        Ok(())
     }
 
     /// Sends one row of this run, if it is pending and due: attempts until it is sent, denied or failed, or waits
@@ -478,8 +511,8 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
 
     /// Matches a message that came in to its row without storing it, for one that can't be stored (its version or
     /// its arrival time can't be read); [`Outbox::receive`] matches a stored one the same way. When it is ours, the
-    /// message post with its `clientmessageid` in its conversation becomes sent with its id; a row already sent with
-    /// a message id stays as it is.
+    /// message post with its `clientmessageid` in its conversation becomes sent with its id, and is kept for
+    /// [`Outbox::take_arrived`]; a row already sent with a message id stays as it is.
     ///
     /// # Errors
     ///
@@ -498,7 +531,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         if row.state == OutboxState::Sent && row.message_id.is_some() {
             return Ok(Some(row));
         }
-        Ok(store.outbox_arrived(client_message_id, arrival.id)?)
+        let arrived = store.outbox_arrived(client_message_id, arrival.id)?;
+        if let Some(row) = &arrived {
+            self.arrived
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(row.clone());
+        }
+        Ok(arrived)
     }
 
     /// The row a message of ours belongs to ([`Outbox::match_arrival`]).

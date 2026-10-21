@@ -4,8 +4,10 @@
 //! a delete arrive; a read receipt; a group of three, under a stand-in for the group member read (the fence's live
 //! read denies group chats, which is checked too); a new chat; the catch-up after a dropped socket, each message stored
 //! once; a write throttled once that goes out from the engine's tick; a write whose check can't sync, answered as the
-//! row that waits; a delivery whose conversation can't be read, caught up from the tick; and an engine without a push
-//! channel that syncs on demand and refuses what the store says can't be done.
+//! row that waits; a post whose answer was lost and whose check couldn't sync, settled later by a catch-up or by its
+//! own echo over the push channel and told once either way; a delivery whose conversation can't be read, caught up
+//! from the tick; and an engine without a push channel that syncs on demand and refuses what the store says can't be
+//! done.
 //!
 //! Every write goes through each account's own fence over the lab roster, the 1:1 chats' members read live from the
 //! mock. Every id and token here is the mock's made-up one, never a real one.
@@ -150,10 +152,12 @@ impl Credentials for Reads {
 }
 
 /// The outbox's HTTP transport, whose next write can be answered before it reaches the service with the status
-/// `next` holds (0: none): a 429 with a short `Retry-After`, any other with no body.
+/// `next` holds (0: none): a 429 with a short `Retry-After`, any other with no body; or, while `lose` is set, reaches
+/// the service and has its answer lost (a 500 in its place), once.
 struct Interposed {
     inner: Arc<HttpTransport<Tokens>>,
     next: Arc<AtomicU16>,
+    lose: Arc<AtomicBool>,
 }
 
 impl Transport for Interposed {
@@ -168,6 +172,10 @@ impl Transport for Interposed {
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
+        if self.lose.swap(false, Ordering::SeqCst) {
+            self.inner.deliver(write).await?;
+            return Ok(Response::new(500, Vec::new()));
+        }
         match self.next.swap(0, Ordering::SeqCst) {
             0 => self.inner.deliver(write).await,
             429 => Ok(Response::new(429, Vec::new()).with_retry_after(Duration::from_millis(300))),
@@ -287,6 +295,8 @@ struct Native {
     reads_fail: Arc<AtomicBool>,
     /// The status the next write is answered with before it reaches the service ([`Interposed`]).
     next_write: Arc<AtomicU16>,
+    /// The next write reaches the service and its answer is lost ([`Interposed`]).
+    lose_answer: Arc<AtomicBool>,
     /// An [`Event::Failed`] is taken like any other event instead of failing the test.
     failures_expected: bool,
     _dir: tempfile::TempDir,
@@ -350,9 +360,11 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
         catch_up_retry: Duration::from_millis(500),
     };
     let next_write = Arc::new(AtomicU16::new(if how.throttle_first_write { 429 } else { 0 }));
+    let lose_answer = Arc::new(AtomicBool::new(false));
     let interposed = Interposed {
         inner: transport,
         next: Arc::clone(&next_write),
+        lose: Arc::clone(&lose_answer),
     };
     let outbox = Outbox::new(Arc::new(interposed), fence, membership, author);
     let handle = engine::start(Parts {
@@ -369,6 +381,7 @@ fn native(lab: &Lab, me: &'static str, how: How) -> Native {
         seen: String::new(),
         reads_fail,
         next_write,
+        lose_answer,
         failures_expected: false,
         _dir: dir,
     }
@@ -444,6 +457,41 @@ impl Native {
         assert_eq!(row.state, OutboxState::Sent, "{row:?}");
         assert!(row.message_id.is_some(), "{row:?}");
         row
+    }
+
+    /// Sends `text` to `conversation`: the post reaches the service, its answer is lost, and the reads fail, so its
+    /// check can't sync. The row as it waits, told as such; the reads work again afterwards.
+    async fn send_unanswered(&mut self, conversation: &str, text: &str) -> OutboxEntry {
+        self.lose_answer.store(true, Ordering::SeqCst);
+        self.reads_fail.store(true, Ordering::SeqCst);
+        let row = self.write(send(conversation, text)).await;
+        assert_eq!(row.state, OutboxState::Pending, "{row:?}");
+        assert_eq!((row.attempts, row.failed_checks), (1, 1), "{row:?}");
+        let told = self
+            .event(|event| match event {
+                Event::Outbox(entry) if entry.id == row.id => Some(entry.clone()),
+                _ => None,
+            })
+            .await;
+        assert_eq!(told, row);
+        self.reads_fail.store(false, Ordering::SeqCst);
+        row
+    }
+
+    /// The events waiting now, taken: the outbox row `id` as each of them told it. A request answered first makes
+    /// sure the engine is done with what came before it.
+    async fn told_rows(&mut self, id: i64) -> Vec<OutboxEntry> {
+        self.handle.conversations(1).await.unwrap();
+        let mut rows = Vec::new();
+        while let Some(event) = self.handle.try_next_event() {
+            let _ = writeln!(self.seen, "{event:?}");
+            if let Event::Outbox(row) = event
+                && row.id == id
+            {
+                rows.push(row);
+            }
+        }
+        rows
     }
 
     async fn stored(&self, conversation: &str, id: &str) -> Message {
@@ -995,6 +1043,142 @@ async fn a_write_whose_check_cant_sync_is_answered_as_the_row_that_waits() {
         .await;
     assert_eq!(told, row);
     assert_eq!(lab.posts_to(AB_CHAT).await, 0);
+    a.shutdown();
+}
+
+/// The service's echo of `from`'s message to `to`'s endpoints, which the mock queues for the chat's other members
+/// alone: the one queued for `other`, queued for `to` too.
+fn echo(lab: &Lab, from: &str, other: &str, to: &str) {
+    echo_changed(lab, from, other, to, |_| {});
+}
+
+/// [`echo`], its message changed by `change` first.
+fn echo_changed(lab: &Lab, from: &str, other: &str, to: &str, change: impl FnOnce(&mut Value)) {
+    let mut event = lab
+        .mock
+        .take_events(other)
+        .into_iter()
+        .find(|event| event.kind == EventKind::Message && event.from == from)
+        .unwrap();
+    change(&mut event.resource);
+    lab.mock.queue_event(to, event);
+}
+
+#[tokio::test]
+async fn a_post_whose_answer_was_lost_is_settled_by_a_later_catch_up_and_told_once() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    let row = a.send_unanswered(AB_CHAT, "did it arrive? ask the catch-up").await;
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+
+    // the catch-up finds the message: its row is sent, and told so once
+    let report = a.handle.sync().await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    let told = a.told_rows(row.id).await;
+    assert_eq!(told.len(), 1, "{told:?}\n{}", a.seen);
+    let sent = &told[0];
+    assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+    assert_eq!(sent.client_message_id, row.client_message_id);
+    let id = id_of(sent);
+    assert_eq!(a.handle.outbox_entry(row.id).await.unwrap().as_ref(), Some(sent));
+    assert_eq!(
+        a.stored(AB_CHAT, &id).await.client_message_id.as_deref(),
+        Some(row.client_message_id.as_str())
+    );
+
+    // its echo over the push channel changes nothing, and tells nothing more; nor does another catch-up
+    echo(&lab, LAB_A, LAB_B, LAB_A);
+    let (change, applied, _) = a.message_event(AB_CHAT, &id).await;
+    assert_eq!((change, applied), (MessageChange::New, Applied::Ignored));
+    a.handle.sync().await.unwrap();
+    let told = a.told_rows(row.id).await;
+    assert!(told.is_empty(), "{told:?}");
+    assert_eq!(a.copies(AB_CHAT, &id).await, 1);
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+    assert_eq!(a.log.verdicts("message", AB_CHAT), ["allow"]);
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn a_post_whose_answer_was_lost_is_settled_by_its_echo_over_the_push_channel_and_told_once() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    let row = a.send_unanswered(AB_CHAT, "did it arrive? ask the push channel").await;
+
+    // the echo settles the row, told before the message itself
+    echo(&lab, LAB_A, LAB_B, LAB_A);
+    let sent = a
+        .event(|event| match event {
+            Event::Outbox(entry) if entry.id == row.id => Some(entry.clone()),
+            Event::Message { .. } => panic!("the message was told before its row"),
+            _ => None,
+        })
+        .await;
+    assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+    let id = id_of(&sent);
+    let (change, applied, _) = a.message_event(AB_CHAT, &id).await;
+    assert_eq!((change, applied), (MessageChange::New, Applied::Inserted));
+
+    // a catch-up after it finds the row sent already, and tells nothing more
+    a.handle.sync().await.unwrap();
+    let told = a.told_rows(row.id).await;
+    assert!(told.is_empty(), "{told:?}");
+    assert_eq!(a.handle.outbox_entry(row.id).await.unwrap(), Some(sent));
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn a_post_whose_answer_was_lost_is_settled_by_an_echo_it_cant_store_and_told_once() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    let row = a
+        .send_unanswered(AB_CHAT, "did it arrive? its echo has no version")
+        .await;
+
+    // an echo whose version can't be read isn't stored, but it is a's own: its row is sent, and told so
+    echo_changed(&lab, LAB_A, LAB_B, LAB_A, |message| {
+        message.as_object_mut().unwrap().remove("version");
+    });
+    let sent = a
+        .event(|event| match event {
+            Event::Outbox(entry) if entry.id == row.id => Some(entry.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+    assert!(a.handle.message(AB_CHAT, id_of(&sent)).await.unwrap().is_none());
+    let told = a.told_rows(row.id).await;
+    assert!(told.is_empty(), "{told:?}");
+    assert_eq!(lab.posts_to(AB_CHAT).await, 1);
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn a_post_whose_answer_was_lost_is_settled_by_the_sync_after_another_write_and_told_once() {
+    let lab = Lab::start().await;
+    let mut a = native(
+        &lab,
+        LAB_A,
+        How {
+            push: false,
+            ..How::default()
+        },
+    );
+    a.handle.sync().await.unwrap();
+    let row = a.send_unanswered(AB_CHAT, "did it arrive? ask the next write").await;
+
+    // the next post goes through, and the sync after it brings the first one back too
+    let next = a.send(AB_CHAT, "the next one").await;
+    let told = a.told_rows(row.id).await;
+    assert_eq!(told.len(), 1, "{told:?}\n{}", a.seen);
+    assert_eq!(told[0].state, OutboxState::Sent, "{:?}", told[0]);
+    assert_ne!(told[0].message_id, next.message_id);
+    assert_eq!(a.copies(AB_CHAT, &id_of(&told[0])).await, 1);
+    assert_eq!(lab.posts_to(AB_CHAT).await, 2);
     a.shutdown();
 }
 

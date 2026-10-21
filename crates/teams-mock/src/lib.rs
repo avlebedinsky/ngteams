@@ -195,6 +195,14 @@ impl ChatServiceMock {
         self.lock().events.remove(mri).unwrap_or_default()
     }
 
+    /// Queues `event` for `mri` as the service would for one of its endpoints: the writer's own echo of its message,
+    /// say, which the mock never queues by itself. It is delivered as any queued event is (see [`TrouterMock`]).
+    pub fn queue_event(&self, mri: &str, event: ChatEvent) {
+        let mut world = self.lock();
+        world.events.entry(mri.to_owned()).or_default().push(event);
+        world.changed();
+    }
+
     /// Every request the mock got, in order (to check what a client sent, and how often).
     pub async fn received_requests(&self) -> Vec<Request> {
         self.server.received_requests().await.unwrap_or_default()
