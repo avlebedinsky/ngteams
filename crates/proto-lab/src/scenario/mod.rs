@@ -8,6 +8,8 @@
 //! - [`ab_chat_full`] (accounts a and b, as `ab-chat`): the a–b chat beyond a plain message, recorded: a sends, edits,
 //!   reacts and takes the reaction back, mentions b (picked from the mention picker only once it is b), replies with a
 //!   quote and reacts to it, and deletes; b reads (the mention among it) and reacts.
+//! - [`ab_image`] (accounts a and b, as `ab-chat`, every media service write force-denied): what the web client sends
+//!   when a sends an image in the a–b chat; recorded.
 //! - [`abc_chat`] (accounts a, b and c, writes mapped, members read live): the group chat of a, b and c, created once
 //!   (its id kept in the lab's `chats.toml`); messaging it (a sends, b and c receive, after a live enforcement test)
 //!   is refused before anything opens until the fence can read a group chat's members in full.
@@ -23,6 +25,7 @@
 
 pub mod ab_chat;
 pub mod ab_chat_full;
+pub mod ab_image;
 pub mod ab_trouter;
 pub mod abc_chat;
 pub mod dsl;
@@ -55,6 +58,9 @@ pub enum ScenarioName {
     /// Accounts a and b in the a–b chat beyond a plain message (an edit, reactions, a quoted reply, a delete, b's read
     /// and reaction), after the same enforcement test; recorded.
     AbChatFull,
+    /// Account a sends a made-up image in the a–b chat with every write to the media service denied, after the same
+    /// enforcement test; recorded.
+    AbImage,
     /// Account a creates the a–b–c group chat (once); messaging it is refused until the fence can read a group chat's
     /// members in full.
     AbcChat,
@@ -74,6 +80,7 @@ impl ScenarioName {
             Self::Load => "load",
             Self::AbChat => "ab-chat",
             Self::AbChatFull => "ab-chat-full",
+            Self::AbImage => "ab-image",
             Self::AbcChat => "abc-chat",
             Self::AbTrouter => "ab-trouter",
             Self::AbTrouterQuiet => "ab-trouter-quiet",
@@ -277,6 +284,7 @@ pub async fn run(
         ScenarioName::Load => load::run(paths, options).await,
         ScenarioName::AbChat => ab_chat::run(paths, options).await,
         ScenarioName::AbChatFull => ab_chat_full::run(paths, options).await,
+        ScenarioName::AbImage => ab_image::run(paths, options).await,
         ScenarioName::AbcChat => abc_chat::run(paths, options).await,
         ScenarioName::AbTrouter => ab_trouter::run(paths, options, ab_trouter::Activity::Reported).await,
         ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,

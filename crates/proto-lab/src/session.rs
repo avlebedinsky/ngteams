@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde_json::{Value, json};
+use serde_json::Value;
 use teams_fence::{FailClosed, Fence, LiveMembershipSource, LiveSourceError, MembershipSource, OpenError};
 use tokio::sync::mpsc;
 use url::Url;
@@ -45,7 +45,7 @@ use crate::commands::chrome::ChromeBuild;
 use crate::config::{Alias, LabPaths};
 use crate::fence_http::{Denial, ForcedDeny, HttpFence, RedirectCatch};
 use crate::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
-use crate::scenario::dsl::Driver;
+use crate::scenario::dsl::{Driver, NavigateError, navigate_tab};
 
 /// Where the web client starts.
 pub const TEAMS_URL: &str = "https://teams.microsoft.com/v2/";
@@ -516,7 +516,13 @@ pub enum SessionError {
     Undecided(usize),
     #[error(transparent)]
     LiveSource(#[from] LiveSourceError),
+    #[error("the tab didn't answer a navigation within {0:?}")]
+    Navigate(Duration),
 }
+
+/// How long [`LabSession::navigate`] waits for the tab to answer a navigation: as long as a step's call to a busy
+/// page may take ([`crate::scenario::ab_chat_full::PAGE_CALL`]).
+pub const NAVIGATE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// How a lab session runs.
 #[derive(Clone, Debug)]
@@ -695,16 +701,18 @@ impl LabSession {
         self.armed.frame_denials()
     }
 
-    /// Navigates the tab.
+    /// Navigates the tab, within [`NAVIGATE_TIMEOUT`] ([`navigate_tab`]: a dialog asking before the page is left is
+    /// accepted). Unbounded, a navigation held by such a dialog hung an `ab-image` run for two hours (2026-10-21).
     ///
     /// # Errors
-    /// When the browser refuses the navigation.
+    /// When the browser refuses the navigation, or doesn't answer it in time.
     pub async fn navigate(&self, url: &str) -> Result<(), SessionError> {
-        self.armed
-            .cdp()
-            .call(Some(&self.page), "Page.navigate", json!({"url": url}))
-            .await?;
-        Ok(())
+        navigate_tab(self.armed.cdp(), &self.page, url, NAVIGATE_TIMEOUT)
+            .await
+            .map_err(|error| match error {
+                NavigateError::Cdp(error) => SessionError::Cdp(error),
+                NavigateError::Timeout(waited) => SessionError::Navigate(waited),
+            })
     }
 
     /// Feeds the watch every event that has come in, waiting up to `wait` for one if none has. `false` once the

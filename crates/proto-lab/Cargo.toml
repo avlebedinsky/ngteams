@@ -29,7 +29,7 @@ httpdate.workspace = true
 # `proto-lab auth`: each region save stages in a file of its own before the rename
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "signal", "sync", "time"] }
 tokio-tungstenite.workspace = true
 url.workspace = true
 zip.workspace = true

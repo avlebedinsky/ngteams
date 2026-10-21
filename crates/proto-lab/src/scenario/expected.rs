@@ -11,8 +11,8 @@
 //!   denied on the chat the scenario writes to is ever expected.
 //!
 //! The one exception to both is a forced deny ([`DenyCause::Forced`]) whose rule's label the scenario names
-//! ([`Review::expecting_forced`]): the enforcement probes of `ab-chat` and `ab-chat-full`. Any other forced deny is
-//! unexpected.
+//! ([`Review::expecting_forced`]): the enforcement probes of `ab-chat`, `ab-chat-full` and `ab-image`, and
+//! `ab-image`'s media writes. Any other forced deny is unexpected.
 //!
 //! A scenario may also name classes of its own besides the list ([`Review::expecting_requests`]), expected under the
 //! same two conditions: `ab-trouter`'s are what comes up only with the push channel
@@ -22,9 +22,10 @@
 //! The classes are the ones the M0 acceptance runs of `ab-chat` showed on 2026-10-20 (both accounts) and that its
 //! `load`, `ab-chat`, `ab-chat-full` and `echo-call` captures since repeat, plus two first seen in `ab-chat-full`'s
 //! runs of 2026-10-20: the bot invokes an opening editor sends and the own activity feed's item read
-//! (`48:notifications`, `isread`), and one first seen once it mentioned b (2026-10-21): the same read on the
-//! account's own mentions stream (`48:mentions`). Each entry says why the scenario doesn't need it. A class that isn't
-//! here keeps failing the run until it is reviewed: writes on conversations other than the scenario's (a tenant team's thread, say), the calling stack's
+//! (`48:notifications`, `isread`), and one first seen on 2026-10-21, once `ab-chat-full` mentioned b and in
+//! `ab-image`'s run: the same read on the account's own mentions stream (`48:mentions`). Each entry says why the
+//! scenario doesn't need it. A class that isn't here keeps failing the run until it is reviewed: writes on
+//! conversations other than the scenario's (a tenant team's thread, say), the calling stack's
 //! own-state and every request on a call (`echo-call` needs those: `docs/backlog/fence-call-follow-ups.md`).
 
 use url::Url;
@@ -194,8 +195,9 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         method: "PUT",
         path: "/api/chatsvc/*/v1/users/ME/conversations/48%3Amentions/messages/*/properties",
         reason: "the account marking an item of its own mentions stream read (`?name=isread`, `{\"isread\":\"true\"}`), \
-                 seen once a's mention reached b (ab-chat-full, 2026-10-21): it changes only what the account's own \
-                 mentions show, and the scenario reads the mention from the chat, not from that stream",
+                 seen once a's mention reached b (ab-chat-full, 2026-10-21) and from b in ab-image (2026-10-21, six \
+                 retries of one item): like the activity feed's, it changes only what the account's own mentions show, \
+                 and the scenario reads the mention from the chat, not from that stream",
     },
     ExpectedRequest {
         class: "chat list by POST (CSA)",

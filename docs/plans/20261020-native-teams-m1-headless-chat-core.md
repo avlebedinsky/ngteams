@@ -860,16 +860,56 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 **Files:**
 - Modify: `docs/protocol/chat.md`, `crates/teams-proto/src/chat/*` (if built)
 
-- [ ] reading references is in Task 10 (AMS images, file cards); this task is about **sending** (and fetching, which
+- [x] reading references is in Task 10 (AMS images, file cards); this task is about **sending** (and fetching, which
       it needs)
-- [ ] capture an image sent by a in the a–b chat in the web client, with the AMS object creation and upload denied
+- [x] capture an image sent by a in the a–b chat in the web client, with the AMS object creation and upload denied
       first (what the client sends), then decide with Codex how an AMS object's target is read (its `permissions`
       naming the conversation) and whether its upload can be bound to it without a registry the fence can't verify;
       a breached run as in Development Approach
-- [ ] if the evidence holds: put AMS on the transport's allowlist, map it, build `SendImage` as a fenced write, test on
+      (new scenario `proto-lab run ab-image` (`crates/proto-lab/src/scenario/ab_image.rs`): `ab-chat`'s fence and
+      probes, every write to `…/v<n>/objects…` force-denied under its own label from before a's page loads; a pastes a
+      made-up PNG the scenario generates (`test_png`) with a caption and sends it; a's page is loaded again and an
+      unsent image deleted if shown; b reads the chat. Live, normal build, headless, under the live lock, 2026-10-21:
+      - 22:51Z: failed before anything of the image: b's browser was killed to contain a worker whose arming went
+        unanswered for 10 s (load ~25; `resume_sent: false`, contained, no breach). a sent nothing but its load-time
+        probe resends, force-denied.
+      - 22:52Z: the image went through the whole capture (below), then the run **hung for about two hours** and held
+        the live lock: reloading a's page, `LabSession::navigate`'s `Page.navigate` was never answered, because the web
+        client put up a `beforeunload` dialog for the pending image, which a headless browser shows to nobody and
+        which nothing answered; the navigation was the one page call without a bound. Stopped with SIGINT, which
+        ended `proto-lab` without dropping its browsers: both lab browsers were left and killed by hand. `fence.log`
+        over its whole window: allowed writes only on the a–b chat (the plain message and typing), 16 own Entra
+        token posts, no breach, no containment, nothing sent unguarded. Fixed: every navigation is bounded
+        (`dsl::navigate_tab`: 90 s for `LabSession::navigate`, the call timeout for `Driver::navigate`) and accepts a
+        `beforeunload` dialog holding it after 5 s; `proto-lab` runs each command `until_stopped`, so SIGINT/SIGTERM
+        drop it and its browsers (`stop.rs`); tests with a page that asks before it is left and a self-signalled
+        test. Live runs since go under the lock with `timeout --signal=INT`.
+      - 01:08Z: every step done in 11 min, no breach: enforcement passed (a's probe denied and failed in a's page, b's
+        copy without it); the paste took; the create denied 4 times; no caption post; after the reload no retry and
+        no pending image left. Exit 1 only on b's six denied `isread` puts on its own mentions feed (`48:mentions`),
+        reviewed afterwards and added to the expected-deny list next to the activity feed's (still denied).
+      What the client sends (`docs/protocol/chat.md`, "Images"): `POST https://us-prod.asyncgw.teams.microsoft.com/
+      v1/objects/` with the `ic3` bearer token and `X-MS-Migration`, body `type` `pish/image`, `permissions`
+      `{<a–b chat id>: ["read"]}`, `sharingMode` `Inline`, `filename`; retried with backoff, then pending; no upload,
+      no message post. Decided with Codex: the creation's target is readable from `permissions`, but the upload names
+      only the object and `forward` can widen an object's readers, so binding it needs an authoritative read of the
+      object's readers that was never captured (a create-to-upload handle is provenance, not the current audience),
+      and every shape past the creation is uncaptured. Transcript
+      `~/.local/state/plan-exec-revmux/20261020-native-teams-m1-headless-chat-core/discussions/task-20-ams-image-sending/`)
+- [x] if the evidence holds: put AMS on the transport's allowlist, map it, build `SendImage` as a fenced write, test on
       the mock, run it live in the a–b chat; otherwise file it to `docs/backlog/` and keep sending attachments out of
       M1 (OneDrive files go to M2 with Graph either way)
-- [ ] tests for whatever is built; the gate passes
+      (⚠️ the evidence doesn't hold: **deferred**, `docs/backlog/ams-image-sending.md` (the two blockers and the steps
+      that would settle them). Nothing on `HttpTransport`'s allowlist, no mapping, no `SendImage`; AMS object writes
+      stay `Unknown` everywhere (`fence-targets.md`). `teams-proto` untouched, so nothing conflicts with Task 12)
+- [x] tests for whatever is built; the gate passes (parallel run: crate-scoped gate; workspace gate after merge)
+      (`crates/proto-lab/tests/ab_image.rs`: the test image, the forced-deny rules, the policy; `scenario_dsl.rs`: the
+      paste/drop into a compose box, marking an unsent image, navigations held by a `beforeunload` dialog;
+      `tests/stop.rs`; `expected_denies.rs`: the mentions feed read. fmt, `cargo clippy -p proto-lab --all-targets`,
+      `scripts/lint-report.sh`, `cargo test -p proto-lab -p fixture-guard`. `scenario_dsl`'s
+      `keys_are_pressed_with_their_modifiers` typed before its page was parsed and failed every time under load ~20; it
+      now waits for its box. `capture::a_recorded_run_holds_…` failed twice in full runs (`results is not defined`,
+      seen by earlier tasks too) and passed solo)
 
 ### Task 21: Verify M1 acceptance criteria
 **Files:**

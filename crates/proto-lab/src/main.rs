@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use proto_lab::arming::DECISION_GRACE;
 use proto_lab::browser::Display;
 use proto_lab::bundles::import::{self, Imported};
 use proto_lab::bundles::index::{self, Kind};
@@ -21,6 +22,7 @@ use proto_lab::commands::thread_probe;
 use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_service_mri};
 use proto_lab::sanitize::Identities;
 use proto_lab::scenario::{self, RunOptions, ScenarioName};
+use proto_lab::stop::{after_stop, until_stopped};
 
 #[derive(Parser)]
 #[command(name = "proto-lab", about = "The Teams protocol lab harness")]
@@ -190,9 +192,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(cli)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
+    // a signal drops the command, and with it every lab browser it owns, before the process exits
+    match runtime.block_on(until_stopped(run(cli))) {
+        Ok(Ok(())) => ExitCode::SUCCESS,
+        Err(stopped) => ExitCode::from(after_stop(runtime, stopped, DECISION_GRACE)),
+        Ok(Err(error)) => {
             eprintln!("proto-lab: {error}");
             ExitCode::FAILURE
         }

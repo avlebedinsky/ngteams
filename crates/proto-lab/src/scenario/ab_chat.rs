@@ -44,7 +44,7 @@ use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// The message compose box's selector: the web client's rich-text editor (seen on 2026-10-20).
-const COMPOSE_CSS: &str = r#"[contenteditable="true"][role="textbox"]"#;
+pub const COMPOSE_CSS: &str = r#"[contenteditable="true"][role="textbox"]"#;
 
 /// The message compose box.
 pub const COMPOSE: Selector<'static> = Selector::Css(COMPOSE_CSS);

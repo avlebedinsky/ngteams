@@ -228,6 +228,13 @@ Rules that keep the mapping fail-closed:
     entry in a team channel (`PUT v1/threads/<channel>/members/<own MRI>`, `{"expiration": <n>}`) and a conversation
     property (`PUT v1/users/ME/conversations/<channel>/properties?name=lastTimeFavorited`). They are `Unknown` because
     channels aren't mapped, and denied; they would be denied by membership too.
+- Media objects (AMS) aren't mapped (M1 Task 20, decided with Codex): every write to `…/v1/objects…` is `Unknown` and
+  denied, on the async gateway (`*.asyncgw.teams.microsoft.com`, where the web client creates an image's object), on
+  the GTM `ams` host and on the Teams origin's `/asm/…` and `/ams/…` routes. An object's creation names its readers
+  (`permissions`, one key: the chat), so it could be mapped to `Conversation(<id>)`; but its upload
+  (`PUT v1/objects/<id>/content/<kind>`) names only the object, and binding it to that chat would take a registry of
+  what the fence permitted or an authoritative read of the object's current readers, which no capture has shown and
+  which `forward` could widen. So images aren't sent in M1 (`docs/backlog/ams-image-sending.md`, [chat.md](chat.md)).
 - Calls (`Call`, `CallAnswer`), meetings, invites and channel posts aren't mapped here: calling goes through other
   services. A run that calls (`Classifier::calling`, Task 18) maps only a call's start, as a new call of its caller and
   callees; every write on an existing call and any answer stay unknown ([calling-echo.md](calling-echo.md)). The middle tier (`/api/mt/…`, `/api/apps/…`) and CSA (`chatsvcagg`) mutating requests aren't

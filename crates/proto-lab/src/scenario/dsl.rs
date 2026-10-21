@@ -33,12 +33,53 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
+use crate::fence_http::without_query;
 
 /// How often a wait on the page looks again.
 pub const POLL: Duration = Duration::from_millis(200);
 
 /// How long one call to the page (an evaluation, an input, a navigation, a screenshot) may go unanswered.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a navigation waits for its answer before it looks for a dialog holding it ([`navigate_tab`]).
+pub const DIALOG_WAIT: Duration = Duration::from_secs(5);
+
+/// Why [`navigate_tab`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum NavigateError {
+    #[error(transparent)]
+    Cdp(#[from] CdpError),
+    #[error("the navigation got no answer within {0:?}")]
+    Timeout(Duration),
+}
+
+/// Navigates the tab `page` to `url`, within `timeout` in all.
+///
+/// A page that asks before it is left (a `beforeunload` handler, which the web client sets while a message of the
+/// compose box is still being sent, such as an image whose upload the fence denies) holds `Page.navigate` unanswered
+/// until its dialog is answered, and a headless browser shows that dialog to nobody: live, 2026-10-21, an `ab-image`
+/// run hung there for two hours. So when the navigation isn't answered within [`DIALOG_WAIT`], the dialog is accepted
+/// (`Page.handleJavaScriptDialog`, the page is left, as the step asked; an error there means no dialog is showing) and
+/// the navigation gets the rest of `timeout`.
+///
+/// # Errors
+/// [`NavigateError::Timeout`] when it isn't answered within `timeout`; [`NavigateError::Cdp`] when the browser refuses
+/// it or the connection goes.
+pub async fn navigate_tab(cdp: &Cdp, page: &SessionId, url: &str, timeout: Duration) -> Result<(), NavigateError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let navigate = cdp.call(Some(page), "Page.navigate", json!({"url": url}));
+    tokio::pin!(navigate);
+    if let Ok(answer) = tokio::time::timeout(DIALOG_WAIT.min(timeout), &mut navigate).await {
+        return answer.map(drop).map_err(NavigateError::from);
+    }
+    let accept = cdp.call(Some(page), "Page.handleJavaScriptDialog", json!({"accept": true}));
+    // no dialog showing is an error answer, and the wait for the navigation goes on either way
+    let _ = tokio::time::timeout_at(deadline, accept).await;
+    match tokio::time::timeout_at(deadline, navigate).await {
+        Ok(answer) => answer.map(drop).map_err(NavigateError::from),
+        Err(_) => Err(NavigateError::Timeout(timeout)),
+    }
+}
 
 /// Why a step failed.
 #[derive(Debug, thiserror::Error)]
@@ -276,12 +317,25 @@ impl Driver {
         &self.requests
     }
 
-    /// Navigates the tab.
+    /// Navigates the tab ([`navigate_tab`], within the call timeout; a dialog asking before the page is left is
+    /// accepted).
     ///
     /// # Errors
-    /// When the browser refuses the navigation.
+    /// When the browser refuses the navigation, or doesn't answer it within the call timeout.
     pub async fn navigate(&mut self, step: &str, url: &str) -> Result<(), StepError> {
-        self.call(step, "Page.navigate", json!({"url": url})).await.map(drop)
+        navigate_tab(&self.cdp, &self.page, url, self.call_timeout)
+            .await
+            .map_err(|error| match error {
+                NavigateError::Cdp(source) => StepError::Cdp {
+                    step: step.to_owned(),
+                    source,
+                },
+                NavigateError::Timeout(waited) => StepError::Timeout {
+                    step: step.to_owned(),
+                    waited,
+                    waiting_for: format!("the page to answer Page.navigate to {}", without_query(url)),
+                },
+            })
     }
 
     /// Waits up to `timeout` for the element `selector` finds to be in the page.

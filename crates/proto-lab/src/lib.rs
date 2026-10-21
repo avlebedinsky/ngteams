@@ -17,3 +17,4 @@ pub mod post_read;
 pub mod sanitize;
 pub mod scenario;
 pub mod session;
+pub mod stop;

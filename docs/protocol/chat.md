@@ -1,8 +1,8 @@
 # The chat service: conversations, messages and what happens to them
 
-Status: 2026-10-21, M1 Task 7. Written from what the lab saw, in our own words, plus the web bundle where nothing was
-captured (marked so). The chat service's base, credential, ids, member reads and the fence's mapping of writes are in
-[fence-targets.md](fence-targets.md); its token in [auth.md](auth.md).
+Status: 2026-10-21, M1 Task 7; images (sending, denied) 2026-10-21, M1 Task 20. Written from what the lab saw, in our
+own words, plus the web bundle where nothing was captured (marked so). The chat service's base, credential, ids, member
+reads and the fence's mapping of writes are in [fence-targets.md](fence-targets.md); its token in [auth.md](auth.md).
 
 Sources (all outside the repository, under the lab's data dir; fixtures are written from them by hand, synthetic):
 
@@ -18,6 +18,9 @@ Sources (all outside the repository, under the lab's data dir; fixtures are writ
   lab accounts through (fence-targets.md, "Reads by POST"): a mentioned b, picked from the picker (captures
   `captures/ab-chat-full/20261020T223250Z` for a and `…223251Z` for b, reference copies
   `reference/chat/ab-chat-full-mention-a.jsonl`, `…-b.jsonl`).
+- **ab-image**: `proto-lab run ab-image` of 2026-10-21 (M1 Task 20; accounts a and b, the a–b chat, captures
+  `captures/ab-image/20261020T225251Z` and `20261021T010819Z` for a, read locally, nothing exported): a pasted a
+  made-up image and sent it with every write to an AMS object denied ([Images](#images-sending-denied-ab-image)).
 - **bundle**: the web client `26260.1717.5229.7049`, for what no run showed.
 
 Every path below is relative to the chat service base (`…/api/chatsvc/<region>/`), and every id in a path is
@@ -100,8 +103,8 @@ every profile lookup; the account's display name since the lookups of lab accoun
   of objects (`messageId` a number, plus `message` null, `validationResult` `Valid`, `sharedRefId`, `replyChainId`) and
   `hasValidMsgReferences` true. A 1:1 chat has no reply chains: a quote is all a "reply" is.
 - **Mentions** (fixture `mention.json`): [below](#mentions-mention).
-- **Received attachments**: not seen; every message had `amsreferences` `[]` and `files` `"[]"`. Task 20 decides what
-  to do about attachments; their shapes need a capture with one.
+- **Received attachments**: not seen; every message had `amsreferences` `[]` and `files` `"[]"`. Sending images is
+  deferred out of M1 ([Images](#images-sending-denied-ab-image)), so no message with one has been read either.
 
 ## A message as sent (ab-chat-full, a)
 
@@ -109,6 +112,41 @@ every profile lookup; the account's display name since the lookups of lab accoun
 `version` `"0"`, `clientmessageid` a random numeric string (18 and 19 digits seen), `properties` with the empty JSON-string lists and
 `formatVariant`. It answers 201 with `{"OriginalArrivalTime": <ms>}`, and the new message's `id` is that time. Typing is
 the same post with `messagetype` `Control/Typing`, also answered with an arrival time.
+
+## Images: sending, denied (ab-image)
+
+What the web client does to send an image, with every write to an AMS object force-denied by the scenario (M1 Task 20).
+a typed a caption, pasted a made-up 48×48 PNG into the compose box of the a–b chat (a clipboard paste the editor took;
+it showed the image inline) and pressed Enter.
+
+- **The object's creation** went to the **async gateway**, not to the GTM `ams` host (`us-api.asm.skype.com`, which only
+  saw its token exchange): `POST https://us-prod.asyncgw.teams.microsoft.com/v1/objects/`, after an `OPTIONS`
+  preflight to the same URL. Its credential is the chat service's: `Authorization: Bearer` with the
+  `https://ic3.teams.office.com` token and `X-MS-Migration: True`; also `x-ams-post-sharing-mode: Inline`,
+  `x-ms-client-version`, `ms-cv` and `content-type: application/json`. The body, exactly:
+  `{"type": "pish/image", "permissions": {"<the a–b chat id>": ["read"]}, "sharingMode": "Inline", "filename":
+  "MicrosoftTeams-image.png"}`: the conversation that may read the object is the one key of `permissions`, and the
+  client renamed the pasted file.
+- **Denied**, the client tried the creation again with a growing pause (seven times over about five minutes in the
+  run of 22:52Z), then kept the message in the chat as being sent: a bubble with the image and a pending mark. It
+  **sent no upload** (that needs the creation's answer) and **no message post**, neither the caption nor
+  `amsreferences`. While the image was pending the page asked before being left (a `beforeunload` dialog), which in a headless browser shows to nobody and
+  holds any navigation; the scenario's navigations now accept it. After the page was left and loaded again the image was
+  gone and its creation wasn't tried again (the run of 01:08Z, 30 s watched).
+- **Bundle only** (never seen): the creation's answer is read as `{id}`; the content is then put with
+  `PUT v1/objects/<id>/content/imgpsh` (`application/octet-stream`; a ranged, resumable form with `Content-Range` too),
+  which names the object alone; `POST v1/objects/<id>/forward` with `{"permissions": {"<another conversation>":
+  ["read"]}}` lets another conversation read an existing object; `GET v1/objects/<id>/` reads the object (its answer's
+  shape unknown); the views are `v1/objects/<id>/views/<name>` (`imgo`, `imgpsh_fullsize_anim`, …) and their
+  `…/status`. The creation's `permissions` may carry further keys (`@:composer`), and its `type` is `sharing/file` or
+  `sharing/videototranscode` for other media.
+
+Why sending stays out of M1 (decided with Codex, `docs/backlog/ams-image-sending.md`): the creation's target can be read
+from its body, but the upload names only the object, so the fence could bind it to a conversation only through a
+registry of what it permitted (which the fence must not stand in) or an authoritative read of the object's current
+readers, which no capture has shown, and which `forward` could change between the read and the upload. Every answer past
+the creation is uncaptured too. The fence maps none of it: AMS objects are `Unknown` and denied
+([fence-targets.md](fence-targets.md)).
 
 ## Mentions (mention)
 
