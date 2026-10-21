@@ -350,3 +350,21 @@ fn no_message_html_reaches_a_markdown_or_html_view() {
     let chat_view = fs::read_to_string(workspace_root().join("crates/teams-ui/src/chat_view.rs")).expect("UTF-8");
     assert!(chat_view.contains("rich_text::render("));
 }
+
+/// Creating a chat is never offered (M2 Task 13): a group chat the native client creates is denied its writes
+/// (CLAUDE.md: it isn't recorded in `chats.toml`), and starting a 1:1 chat needs the people search, whose results list
+/// other tenant users. No app crate's source asks the engine for one.
+#[test]
+fn no_view_offers_creating_a_chat() {
+    let mut read = 0;
+    for package in APP_CRATES {
+        for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
+            read += 1;
+            assert!(!text.contains("CreateChat"), "{} names CreateChat", path.display());
+        }
+    }
+    assert!(read >= 13, "the app crates' sources were read ({read} files)");
+    // compose writes through the engine's actions: a post, an edit
+    let compose = fs::read_to_string(workspace_root().join("crates/teams-ui/src/compose.rs")).expect("UTF-8");
+    assert!(compose.contains("self.core.write(action)"));
+}

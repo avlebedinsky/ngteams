@@ -14,7 +14,10 @@
 //! - [`people`]: people as the views show them, a name and a picture from the engine (M2 Task 12).
 //! - [`chat_view`]: a chat's messages, the newest at the bottom, paged from the store (and the service's older
 //!   history), grouped by sender, with day separators, the "New messages" divider, typing and the messages' actions;
-//!   [`rich_text`] is our own renderer of a message's sanitized rich text (never an HTML or markdown view).
+//!   [`rich_text`] is our own renderer of a message's sanitized rich text (never an HTML or markdown view); the
+//!   account's writes show there as they go out ([`sending`]: each outbox row's state, "send again").
+//! - [`compose`]: the compose box under a chat's messages: text with line breaks, links and mentions (by MRI, from the
+//!   chat's members) into a message, Enter sends, replies and edits, typing; every write through the engine.
 //! - [`settings`]: the settings and their file (`0600` in a `0700` directory; defaults for what can't be read);
 //!   [`settings_view`] changes them.
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
@@ -33,9 +36,11 @@
 pub mod bridge;
 pub mod chat_list;
 pub mod chat_view;
+pub mod compose;
 pub mod models;
 pub mod people;
 pub mod rich_text;
+pub mod sending;
 pub mod settings;
 pub mod settings_view;
 pub mod shell;
@@ -48,6 +53,7 @@ pub mod window;
 pub use bridge::{Bridge, Core, EventSource, StoppedCore};
 pub use chat_list::{ChatList, ChatListEvent, ChatRow};
 pub use chat_view::{ChatView, ChatViewEvent, MessageAction};
+pub use compose::{Compose, ComposeEvent, ComposeParts};
 pub use models::{Account, Chats, Engine, Link, Models, Status};
 pub use people::Shown;
 pub use settings::{Settings, SettingsFile, SettingsModel};

@@ -127,6 +127,13 @@ impl Chats {
         self.outbox.get(&id)
     }
 
+    /// The outbox rows of `conversation` told since the start, as last told, the oldest first.
+    pub fn outbox_rows<'a>(&'a self, conversation: &'a str) -> impl Iterator<Item = &'a OutboxEntry> {
+        self.outbox
+            .values()
+            .filter(move |row| row.conversation_id.as_deref() == Some(conversation))
+    }
+
     fn change(&mut self, conversation: &str) {
         self.revision += 1;
         self.changed.insert(conversation.to_owned(), self.revision);
@@ -221,7 +228,8 @@ impl Models {
                 from,
                 typing,
             } => self.typing(&conversation, from.as_deref(), typing, cx),
-            Event::Outbox(entry) => self.outbox(entry, cx),
+            // a row just made shows at once as sending, then as each attempt leaves it
+            Event::Queued(entry) | Event::Outbox(entry) => self.outbox(entry, cx),
             Event::Profile { mri } => self.chats.update(cx, |chats, cx| {
                 chats.renamed(&mri);
                 cx.notify();

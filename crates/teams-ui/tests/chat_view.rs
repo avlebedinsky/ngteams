@@ -11,6 +11,9 @@
 #![cfg(test)]
 
 mod common;
+// the shell's and a chat view's parts over the rig
+#[path = "common/parts.rs"]
+mod parts;
 // names and pictures in the chat list and the chat view (M2 Task 12)
 #[path = "chat_view/people.rs"]
 mod people;
@@ -108,10 +111,9 @@ fn draw(cx: &mut VisualTestContext) {
 
 /// The chat view of the a–b chat in an 800×600 window of its own.
 fn chat_window(rig: &Rig, trace: Arc<ViewTrace>) -> (Entity<ChatView>, &'static mut VisualTestContext) {
-    let core = rig.cx.read(|cx| rig.bridge.read(cx).core());
-    let models = rig.models.clone();
+    let parts = parts::parts(rig, Settings::default(), trace);
     let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
-    let (view, cx) = app.add_window_view(|_, cx| ChatView::new(core, models, trace, AB.to_owned(), cx));
+    let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, AB.to_owned(), window, cx));
     cx.simulate_resize(size(px(800.0), px(600.0)));
     draw(cx);
     (view, cx)
@@ -275,6 +277,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         message_type: "RichText/Html".to_owned(),
         edited: false,
         reactions: Vec::new(),
+        outbox: None,
     }
 }
 
@@ -288,6 +291,7 @@ fn shape(items: &[Item]) -> Vec<String> {
             Item::NewMessages => "new".to_owned(),
             Item::Message(message) if message.header => format!("+{}", message.id),
             Item::Message(message) => message.id.clone(),
+            Item::Pending(pending) => format!("pending {}", pending.note.row),
         })
         .collect()
 }
@@ -939,12 +943,21 @@ fn hover_and_keyboard_actions_offer_edit_and_delete_on_the_account_s_own_only() 
     );
     cx.simulate_keystrokes("e delete r a");
     assert!(took(&events).is_empty(), "a deleted message offers no action");
-    cx.simulate_keystrokes("up e r");
+    // an edit and a reply go on in the compose box, which takes the focus: the list gets it back for the next key
+    let focus_list = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| view.read(cx).focus_handle().clone().focus(window, cx));
+    };
+    cx.simulate_keystrokes("up e");
+    focus_list(cx);
+    cx.simulate_keystrokes("r");
+    focus_list(cx);
     assert_eq!(
         took(&events),
         [action(MessageAction::Edit, "2"), action(MessageAction::Reply, "2")]
     );
-    cx.simulate_keystrokes("up e delete r a");
+    cx.simulate_keystrokes("up e delete r");
+    focus_list(cx);
+    cx.simulate_keystrokes("a");
     assert_eq!(
         took(&events),
         [action(MessageAction::Reply, "1"), action(MessageAction::React, "1")],
@@ -956,6 +969,9 @@ fn hover_and_keyboard_actions_offer_edit_and_delete_on_the_account_s_own_only() 
             .as_deref(),
         Some("1")
     );
+    // Escape closes the quick reactions react opened first, then the selection
+    cx.simulate_keystrokes("escape");
+    assert_eq!(cx.update(|_, cx| view.read(cx).reacting().map(str::to_owned)), None);
     cx.simulate_keystrokes("escape");
     assert_eq!(cx.update(|_, cx| view.read(cx).selected().map(str::to_owned)), None);
 }

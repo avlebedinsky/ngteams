@@ -855,22 +855,56 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 - Modify: `crates/teams-core/src/engine.rs` (`Action::Typing`, transient), `crates/teams-ui/src/chat_view.rs`,
   `docs/protocol/endpoints.md`
 
-- [ ] tests first (in-process, two accounts on `teams-mock`): plain text with line breaks and links → `MessageText`;
+- [x] tests first (in-process, two accounts on `teams-mock`): plain text with line breaks and links → `MessageText`;
       Enter sends, Shift-Enter breaks the line; a mention completed after `@` from the chat's members (names from Task
       12), only by MRI; a reply with its quote (Escape cancels); editing the account's own messages (Up in an empty
       box edits the last); deleting them (confirmed); the reactions Task 10 captured; each reaches the other account
       through the mock and leaves its `fence.log` line
-- [ ] typing as a transient engine action (Task 5), sent no more often than Task 10 measured and only while the
+- [x] typing as a transient engine action (Task 5), sent no more often than Task 10 measured and only while the
       compose box has text and focus; behind the "send typing" setting (on by default); tests that it is fenced like
       any write, never stored and never sent again after a restart or an unknown outcome
-- [ ] the read receipt when a chat is shown with the window focused, up to the newest message shown, debounced; behind
+- [x] the read receipt when a chat is shown with the window focused, up to the newest message shown, debounced; behind
       the "send read receipts" setting (on by default)
-- [ ] each message's outbox state shown (sending, sent, waiting, denied by the fence, failed, may have arrived);
+- [x] each message's outbox state shown (sending, sent, waiting, denied by the fence, failed, may have arrived);
       "send again" on a failed row or an earlier session's row is the engine's explicit `resend`, after a warning for
       a row that may have arrived; a denied write (an outsider mentioned on the mock) shows as denied and nothing is
       sent
-- [ ] creating a chat is not offered (a native group create is denied: CLAUDE.md; starting a 1:1 needs people search)
-- [ ] `cargo test -p teams-core -p teams-ui` and the gate pass
+- [x] creating a chat is not offered (a native group create is denied: CLAUDE.md; starting a 1:1 needs people search)
+- [x] `cargo test -p teams-core -p teams-ui` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - The engine needed no `Action::Typing`: typing has been `EngineRequests::transient` since Task 5, and its engine
+    tests (fenced per send, never stored, nothing after a restart or an unknown outcome) stand; this task's tests show
+    the compose box sends it through `Core::transient` and that it reaches b with a's `fence.log` line. The engine's
+    one change is `Event::Queued`: a row is told as it is made (or adopted by `resend`), before its first attempt, so
+    a post shows at once as sending (a write's reply comes only after the attempt, about 1.4 s live).
+    `teams-headless` prints it as `queued`.
+  - The compose box (`compose.rs`) is part of the chat view (one per chat opened, under the messages);
+    `ChatView::new` now takes the shell's parts and the window. A mention is the kit's atomic inline token
+    (`gpui-component`'s `InlineToken`, its id the MRI), put in only by the picker, which offers the chat's work-account
+    members but the account (`Core::members`, names from `Core::person`); a name typed is only text. A typed
+    `http`/`https`/`mailto` URL is sent as a plain `<a href>` with `properties.links` `"[]"`, not the web client's
+    anchor with its `links` entry. Each line is a paragraph. A reply's preview is the quoted message's text on one
+    line, cut at 300 characters (no capture showed a long one). An edit loads the message back without its marks (the
+    box has no formatting), its mentions as tokens by MRI and its quote kept as read back; a message showing an image
+    can't be edited. Typing goes at most once per 6 s (leading edge), not while editing.
+  - Keys: in the message list `r` and `e` move to the compose box (reply, edit), `a` opens the quick reactions (1–4
+    pick: like, heart, laugh, surprised), Delete asks and Enter confirms, Escape closes what is open first; in the
+    box Up and Down move in the mention picker, Enter or Tab choose, Escape closes it, then cancels a reply or an
+    edit. A reaction chip clicked sets or takes back the account's own.
+  - Read receipts: while the window is active and the list follows the newest, up to the newest message from someone
+    else after the account's horizon (read from the store on every load) that carries a `clientmessageid`, 800 ms
+    after the view settles, one at a time (a burst gives one, for the newest).
+  - Outbox states (`sending.rs`): a post shows as a pending message of its own (from the row the engine told, or the
+    store's unsettled rows) until its message is held; an edit, a delete or a reaction shows on its message. "Send
+    again" is offered on a failed row and an earlier session's (a warning first when it may have arrived), not on a
+    denied one (the fence would decide the same). A row that isn't sent stays shown: the store has no way to dismiss
+    one.
+  - The view trace gained `compose sent`/`replying`/`editing`/`cancelled` (the kind: message, reply, edit) and
+    `outbox shown` (the rows' ids and states).
+  - The two-account test (`crates/teams-ui/tests/compose_mock.rs`) runs a's chat view on GPUI's test context over a's
+    engine and b's engine headless. The mock gives a new message an arrival time before its fixture's, so there Up
+    edits the newest fixture message of a's (a quoted reply, whose quote the edit keeps); Up is also tested on the
+    fake core. The source test `no_view_offers_creating_a_chat` (`reach.rs`) checks no app crate names `CreateChat`.
 
 ### Task 14: Notifications and the tray
 **Files:**

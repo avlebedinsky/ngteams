@@ -157,6 +157,17 @@ impl Mentions {
     }
 }
 
+/// The MRI each mention of a message names, by its `itemid`, as `properties` (a stored message's, JSON text) lists
+/// them; an entry in a form no capture showed, or naming no MRI, names nobody (M2 Task 13: editing a message keeps its
+/// mentions by MRI).
+#[must_use]
+pub fn mentioned(properties: Option<&str>) -> std::collections::HashMap<String, String> {
+    read_mentions(properties)
+        .into_iter()
+        .filter_map(|mention| Some((mention.item_id, mention.mri?)))
+        .collect()
+}
+
 /// `properties.mentions` read by `teams-proto`'s own message reader; nothing when it isn't in a captured form.
 fn read_mentions(properties: Option<&str>) -> Vec<Mention> {
     let Some(properties) = properties.and_then(|text| serde_json::from_str::<Value>(text).ok()) else {

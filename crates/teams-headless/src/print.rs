@@ -244,6 +244,13 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         Event::ConversationChanged { conversation } => {
             json!({"event": "conversation_changed", "conversation": conversation})
         }
+        Event::Queued(row) => json!({
+            "event": "queued",
+            "row": row.id,
+            "kind": row.kind.as_str(),
+            "state": row.state.as_str(),
+            "conversation": row.conversation_id,
+        }),
         Event::Outbox(row) => json!({
             "event": "outbox",
             "row": row.id,

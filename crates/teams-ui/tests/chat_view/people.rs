@@ -134,11 +134,9 @@ fn list_window(rig: &Rig) -> (Entity<ChatList>, &'static mut VisualTestContext) 
 }
 
 fn chat_window(rig: &Rig) -> (Entity<ChatView>, &'static mut VisualTestContext) {
-    let core = rig.cx.read(|cx| rig.bridge.read(cx).core());
-    let models = rig.models.clone();
+    let parts = super::parts::parts(rig, Settings::default(), Arc::new(ViewTrace::off()));
     let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
-    let (view, cx) =
-        app.add_window_view(|_, cx| ChatView::new(core, models, Arc::new(ViewTrace::off()), AB.to_owned(), cx));
+    let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, AB.to_owned(), window, cx));
     cx.simulate_resize(size(px(800.0), px(600.0)));
     draw(cx);
     (view, cx)

@@ -8252,7 +8252,10 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "serde_json",
+ "teams-auth",
  "teams-core",
+ "teams-fence",
+ "teams-mock",
  "teams-proto",
  "teams-store",
  "teams-trouter",
@@ -8261,6 +8264,7 @@ dependencies = [
  "tokio",
  "toml 1.1.8+spec-1.1.0",
  "ui-sandbox",
+ "url",
  "zbus",
 ]
 

@@ -12,7 +12,8 @@
 //!   every row that settles comes as [`Event::Outbox`] too, and so does every row our own message coming back
 //!   settles, by whichever read brought it (a catch-up, a delivery, a sync after a write, the check of another row),
 //!   and every row a read finds may have arrived (an entry it couldn't read carrying its `clientmessageid`): one event
-//!   per change of the row, the last one the row as it now stands ([`Outbox::take_arrived`]). Once a write went
+//!   per change of the row, the last one the row as it now stands ([`Outbox::take_arrived`]); a row just made (or
+//!   adopted by a resend) is told first as [`Event::Queued`], before its first attempt. Once a write went
 //!   through, its conversation is synced, so the account's own change is in the store (a new chat with it). A row can
 //!   be read back by its id ([`EngineRequests::outbox_entry`]).
 //! - **Events → store**: each delivery of the push channel ([`teams_trouter`]) goes through the catch-up's
@@ -265,6 +266,10 @@ pub enum Event {
     /// A conversation changed (its properties, its last message): a delivery said so, or a read of the service changed
     /// it in the store (added it, or its version, last activity, read horizon, roster or messages).
     ConversationChanged { conversation: String },
+    /// A write's row was made, or an earlier one adopted by its explicit resend, and is about to go out: told before
+    /// its first attempt, so a view shows it at once as sending ([`Event::Outbox`] then tells it as the attempt left
+    /// it).
+    Queued(OutboxEntry),
     /// An outbox row as it settled: after its first send, a later retry, or our own message coming back (by a
     /// catch-up, a delivery or any other sync).
     Outbox(OutboxEntry),
@@ -930,6 +935,7 @@ where
             }
         }
         let row = enqueue(&mut self.store, &command)?;
+        self.emit(Event::Queued(row.clone()));
         self.send_row(row.id).await
     }
 
@@ -937,6 +943,7 @@ where
     /// new write is.
     async fn resend(&mut self, id: i64) -> Result<OutboxEntry, EngineError> {
         let row = self.store.resend(id)?;
+        self.emit(Event::Queued(row.clone()));
         self.send_row(row.id).await
     }
 

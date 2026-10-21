@@ -118,10 +118,19 @@ impl Shell {
         if let Some(id) = &selected {
             trace.record(&TraceLine::new("chat", "opened").conversation(id));
         }
-        let chat = selected.clone().map(|id| {
-            let (core, models, trace) = (Arc::clone(&core), models.clone(), Arc::clone(&trace));
-            cx.new(|cx| ChatView::new(core, models, trace, id, cx))
-        });
+        let chat_parts = ShellParts {
+            core: Arc::clone(&core),
+            models: models.clone(),
+            settings: settings.clone(),
+            trace: Arc::clone(&trace),
+        };
+        let chat = selected
+            .clone()
+            .map(|id| cx.new(|cx| ChatView::new(chat_parts, id, window, cx)));
+        if let Some(chat) = &chat {
+            let compose = chat.read(cx).compose().clone();
+            compose.update(cx, |compose, cx| compose.focus(window, cx));
+        }
         Self {
             core,
             models,
@@ -183,9 +192,9 @@ impl Shell {
         self.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
         let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
         if shown != Some(true) {
-            let (core, models, trace) = (Arc::clone(&self.core), self.models.clone(), Arc::clone(&self.trace));
+            let parts = self.parts();
             let conversation = id.clone();
-            self.chat = Some(cx.new(|cx| ChatView::new(core, models, trace, conversation, cx)));
+            self.chat = Some(cx.new(|cx| ChatView::new(parts, conversation, window, cx)));
         }
         self.list.update(cx, |list, cx| list.select(Some(id.clone()), cx));
         let kept = id.clone();
@@ -195,7 +204,22 @@ impl Shell {
         self.rail = RailItem::Chats;
         self.main = Main::Chat(id);
         self.close_switcher(window, cx);
+        // the chat opened takes what is typed next
+        if let Some(chat) = &self.chat {
+            let compose = chat.read(cx).compose().clone();
+            compose.update(cx, |compose, cx| compose.focus(window, cx));
+        }
         cx.notify();
+    }
+
+    /// What a chat view is made of: the shell's own.
+    fn parts(&self) -> ShellParts {
+        ShellParts {
+            core: Arc::clone(&self.core),
+            models: self.models.clone(),
+            settings: self.settings.clone(),
+            trace: Arc::clone(&self.trace),
+        }
     }
 
     /// Shows the settings in the conversation pane.

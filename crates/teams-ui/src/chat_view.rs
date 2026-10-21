@@ -28,32 +28,47 @@
 //! - **Typing**: who is typing now ([`crate::Chats::typing`]), under the messages; it goes off with their end of
 //!   typing, their message, or [`crate::models::TYPING_TIMEOUT`] after their last signal.
 //! - **Actions** on a message, under the pointer or selected with the keyboard (Up and Down, once the list has the
-//!   focus): reply and react, and for the account's own message edit and delete. They are told as
-//!   [`ChatViewEvent::Action`]; compose carries them out (M2 Task 13).
+//!   focus): reply and react, and for the account's own message edit and delete. Each is told as
+//!   [`ChatViewEvent::Action`] and carried out (M2 Task 13): a reply and an edit go to the [`Compose`] box under the
+//!   messages; react opens the quick reactions M2 Task 10 captured ([`QUICK_REACTIONS`], keys 1–4), and a reaction
+//!   chip clicked sets or takes back the account's own; delete asks first (Enter or the button confirms, Escape
+//!   cancels). Every write goes out through the engine ([`Core::write`]), never from the view.
+//! - **The account's writes as they go out** ([`crate::sending`]): a message post shows at once as a pending message of
+//!   its own (the engine tells its row as it is made), with its state, until its message is in the store; an edit, a
+//!   delete or a reaction shows its state on the message it acts on. "Send again" on a failed row or an earlier
+//!   session's is the engine's explicit [`Core::resend`], after a warning when its message may have arrived.
+//! - **Read receipts**: with the "send read receipts" setting on, while the window is active and the list is at the
+//!   newest message, the account's read horizon moves to the newest message from someone else that is after it,
+//!   [`READ_DEBOUNCE`] after the view settles, one at a time.
 //!
 //! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds; `typing
-//! shown`/`cleared`), never text or a name.
+//! shown`/`cleared`; `outbox shown`: the rows shown and their states), never text or a name.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
-use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone, Utc};
 use gpui::{
-    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, FocusHandle, FollowMode, Global,
-    InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState, ParentElement as _, Pixels,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
+    AnyElement, App, AppContext as _, AsyncApp, Context, ElementId, Entity, EventEmitter, FocusHandle, FollowMode,
+    Global, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState, ParentElement as _,
+    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
     actions, div, list, px, relative, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Sizable as _, Size};
-use teams_core::EngineError;
+use teams_core::{Action, Command, EngineError};
 use teams_proto::chat::{MessageType, RichText, ThreadActivity, parse_html, thread_activity};
-use teams_store::{Message, PageCursor, Reaction};
+use teams_store::{Message, OutboxEntry, OutboxKind, PageCursor, Reaction};
 
 use crate::bridge::Core;
+use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
 use crate::models::Models;
 use crate::people::{Face, Shown};
 use crate::rich_text::{self, Mentions, Rendered};
+use crate::sending::{self, Again, Note, RowState};
+use crate::settings::SettingsModel;
+use crate::shell::ShellParts;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -66,7 +81,12 @@ actions!(
         ReactToSelected,
         EditSelected,
         DeleteSelected,
-        ClearSelection
+        ClearSelection,
+        ConfirmDelete,
+        PickLike,
+        PickHeart,
+        PickLaugh,
+        PickSurprised
     ]
 );
 
@@ -89,6 +109,15 @@ pub const UNSUPPORTED: &str = "This message can't be shown here";
 pub const NEW_MESSAGES: &str = "New messages";
 /// Older loads in a row that may bring nothing before rows near the top stop asking for more by themselves.
 pub const MAX_FRUITLESS: u32 = 3;
+/// The quick reactions, in the order the web client's hover bar offered them (M2 Task 10, `docs/protocol/chat.md`,
+/// "Reactions (chat-shapes)"); keys 1–4 pick them once react is chosen.
+pub const QUICK_REACTIONS: [&str; 4] = ["like", "heart", "laugh", "surprised"];
+/// How long the view waits, once a read receipt is due, before it sends it (and looks again whether it still is).
+pub const READ_DEBOUNCE: Duration = Duration::from_millis(800);
+/// What the delete's confirmation asks.
+pub const CONFIRM_DELETE: &str = "Delete this message?";
+/// What "send again" warns of on a row whose message may have arrived.
+pub const MAY_HAVE_ARRIVED: &str = "This message may have arrived already. Send it again anyway?";
 
 /// Marks the view's key bindings as installed.
 struct Bound;
@@ -110,6 +139,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("e", EditSelected, context),
         KeyBinding::new("delete", DeleteSelected, context),
         KeyBinding::new("escape", ClearSelection, context),
+        KeyBinding::new("enter", ConfirmDelete, context),
+        KeyBinding::new("1", PickLike, context),
+        KeyBinding::new("2", PickHeart, context),
+        KeyBinding::new("3", PickLaugh, context),
+        KeyBinding::new("4", PickSurprised, context),
     ]);
 }
 
@@ -253,6 +287,17 @@ pub struct MessageItem {
     pub message_type: String,
     pub edited: bool,
     pub reactions: Vec<ReactionCount>,
+    /// The account's latest write on it that isn't sent (an edit, a delete, a reaction), as it stands.
+    pub outbox: Option<Note>,
+}
+
+/// A message post of the account's whose message isn't in the store yet: its row as it stands, and its text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingItem {
+    pub note: Note,
+    pub created_at: i64,
+    /// Its text as the row carries it; `None` when the row can't be read back.
+    pub body: Option<RenderedText>,
 }
 
 /// Whether a message of `message_type` counts unread, as [`teams_store::Store::unread_count`] counts it: `Text` and
@@ -286,6 +331,8 @@ pub enum Item {
     Day(NaiveDate),
     NewMessages,
     Message(MessageItem),
+    /// A message post on its way, after every message.
+    Pending(PendingItem),
 }
 
 /// The day separator's text.
@@ -503,38 +550,53 @@ pub struct ChatView {
     focus: FocusHandle,
     traced: Option<Vec<(String, &'static str)>>,
     typing_traced: bool,
-    _observing: Subscription,
+    settings: Entity<SettingsModel>,
+    compose: Entity<Compose>,
+    /// The message the quick reactions are open on.
+    reacting: Option<String>,
+    /// The message whose delete waits for its confirmation.
+    deleting: Option<String>,
+    /// The row whose "send again" waits for its confirmation (its message may have arrived).
+    resending: Option<i64>,
+    /// The conversation's outbox rows that aren't sent, as the store had them at the last load.
+    unsettled: Vec<OutboxEntry>,
+    /// The rows earlier sessions left, by id.
+    earlier: HashSet<i64>,
+    /// Rendered text of the pending message posts, per row id.
+    pending_rendered: HashMap<i64, Arc<Rendered>>,
+    /// The newest message the account has read up to (its arrival time): the store's horizon, or the last receipt.
+    read_upto: Option<i64>,
+    /// The read receipt's wait, while one is due.
+    receipt: Option<Task<()>>,
+    /// Read receipts sent.
+    receipts: u64,
+    /// Whether the window is active (the user's).
+    active: Activation,
+    outbox_traced: Option<Vec<(String, &'static str)>>,
+    /// The models' changes, the compose box's events and the window's activation.
+    _subscriptions: [Subscription; 3],
 }
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
 
 impl ChatView {
-    /// The view of `conversation`, loading from the store at once.
-    pub fn new(
-        core: Arc<dyn Core>,
-        models: Models,
-        trace: Arc<ViewTrace>,
-        conversation: String,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
-        list.set_follow_mode(FollowMode::Tail);
-        let view: WeakEntity<Self> = cx.entity().downgrade();
-        list.set_scroll_handler(move |_, _, cx| {
-            // the pill follows the scroll
-            let _ = view.update(cx, |_, cx| cx.notify());
-        });
-        let observing = cx.observe(&models.chats, |this: &mut Self, chats, cx| {
-            let at = chats.read(cx).changed_at(&this.conversation);
-            if at > this.seen {
-                this.seen = at;
-                this.window_due = true;
-                this.kick(cx);
-            }
-            this.typing_changed(cx);
-            this.renamed(cx);
-            cx.notify();
-        });
+    /// The view of `conversation` with its compose box, loading from the store at once.
+    pub fn new(parts: ShellParts, conversation: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let ShellParts {
+            core,
+            models,
+            settings,
+            trace,
+        } = parts;
+        let list = Self::following_list(cx);
+        let compose_parts = ComposeParts {
+            core: Arc::clone(&core),
+            settings: settings.clone(),
+            trace: Arc::clone(&trace),
+        };
+        let compose_of = conversation.clone();
+        let compose = cx.new(|cx| Compose::new(compose_parts, compose_of, window, cx));
+        let subscriptions = Self::subscriptions(&models, &compose, window, cx);
         let seen = models.chats.read(cx).changed_at(&conversation);
         let people_seen = models.chats.read(cx).revision();
         let mut view = Self {
@@ -569,11 +631,106 @@ impl ChatView {
             focus: cx.focus_handle(),
             traced: None,
             typing_traced: false,
-            _observing: observing,
+            settings,
+            compose,
+            reacting: None,
+            deleting: None,
+            resending: None,
+            unsettled: Vec::new(),
+            earlier: HashSet::new(),
+            pending_rendered: HashMap::new(),
+            read_upto: None,
+            receipt: None,
+            receipts: 0,
+            active: Activation::of(window),
+            outbox_traced: None,
+            _subscriptions: subscriptions,
         };
         view.kick(cx);
         view.typing_changed(cx);
         view
+    }
+
+    /// The message list: bottom-aligned, following the newest; its scroll moves the pill, and back at the newest a
+    /// read receipt may be due.
+    fn following_list(cx: &mut Context<Self>) -> ListState {
+        let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
+        list.set_follow_mode(FollowMode::Tail);
+        let view: WeakEntity<Self> = cx.entity().downgrade();
+        list.set_scroll_handler(move |_, _, cx| {
+            let _ = view.update(cx, |view, cx| {
+                view.want_receipt(cx);
+                cx.notify();
+            });
+        });
+        list
+    }
+
+    /// What the view follows: the models (its chat's changes, typing, names), its compose box's events and the
+    /// window's activation.
+    fn subscriptions(
+        models: &Models,
+        compose: &Entity<Compose>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> [Subscription; 3] {
+        let observing = cx.observe(&models.chats, |this: &mut Self, chats, cx| {
+            let at = chats.read(cx).changed_at(&this.conversation);
+            if at > this.seen {
+                this.seen = at;
+                this.window_due = true;
+                this.kick(cx);
+            }
+            this.typing_changed(cx);
+            this.renamed(cx);
+            cx.notify();
+        });
+        let compose_events = cx.subscribe_in(compose, window, |this: &mut Self, _, event, window, cx| match event {
+            ComposeEvent::EditLast => this.edit_last(window, cx),
+        });
+        let activation = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+            this.active = Activation::of(window);
+            this.want_receipt(cx);
+        });
+        [observing, compose_events, activation]
+    }
+
+    /// The compose box under the messages.
+    #[must_use]
+    pub fn compose(&self) -> &Entity<Compose> {
+        &self.compose
+    }
+
+    /// The message the quick reactions are open on.
+    #[must_use]
+    pub fn reacting(&self) -> Option<&str> {
+        self.reacting.as_deref()
+    }
+
+    /// The message whose delete waits for its confirmation.
+    #[must_use]
+    pub fn deleting(&self) -> Option<&str> {
+        self.deleting.as_deref()
+    }
+
+    /// The row whose "send again" waits for its confirmation.
+    #[must_use]
+    pub fn resending(&self) -> Option<i64> {
+        self.resending
+    }
+
+    /// The message posts on their way, the oldest first.
+    pub fn pending_items(&self) -> impl Iterator<Item = &PendingItem> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Pending(pending) => Some(pending),
+            _ => None,
+        })
+    }
+
+    /// Read receipts sent.
+    #[must_use]
+    pub fn receipts(&self) -> u64 {
+        self.receipts
     }
 
     #[must_use]
@@ -692,6 +849,7 @@ impl ChatView {
     pub fn jump_to_newest(&mut self, cx: &mut Context<Self>) {
         self.list.scroll_to_end();
         self.list.set_follow_mode(FollowMode::Tail);
+        self.want_receipt(cx);
         cx.notify();
     }
 
@@ -703,17 +861,152 @@ impl ChatView {
         }
     }
 
-    /// Chooses `action` on `message`, if the message offers it: told as [`ChatViewEvent::Action`].
-    pub fn act(&mut self, action: MessageAction, message: &str, cx: &mut Context<Self>) {
+    /// Chooses `action` on `message`, if the message offers it: told as [`ChatViewEvent::Action`], then carried out (a
+    /// reply or an edit in the compose box, the quick reactions opened, the delete's confirmation asked).
+    pub fn act(&mut self, action: MessageAction, message: &str, window: &mut Window, cx: &mut Context<Self>) {
         let offered = self
             .message_items()
             .find(|item| item.id == message)
             .is_some_and(|item| item.actions().contains(&action));
-        if offered {
-            cx.emit(ChatViewEvent::Action {
-                action,
-                message: message.to_owned(),
-            });
+        if !offered {
+            return;
+        }
+        cx.emit(ChatViewEvent::Action {
+            action,
+            message: message.to_owned(),
+        });
+        match action {
+            MessageAction::Reply => self.reply_to(message, window, cx),
+            MessageAction::Edit => self.edit(message, window, cx),
+            MessageAction::React => {
+                self.reacting = Some(message.to_owned());
+                self.focus.focus(window, cx);
+            }
+            MessageAction::Delete => {
+                self.deleting = Some(message.to_owned());
+                self.focus.focus(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A held message, by id.
+    fn held_message(&self, id: &str) -> Option<&Message> {
+        self.messages.iter().find(|message| message.id == id)
+    }
+
+    /// Starts a reply to `message` in the compose box.
+    fn reply_to(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(held) = self.held_message(message) else { return };
+        let (name, _) = self.sender_of(held);
+        let Some(quoted) = Quoted::of(held, &name) else { return };
+        self.compose
+            .update(cx, |compose, cx| compose.reply_to(quoted, window, cx));
+    }
+
+    /// Starts editing the account's `message` in the compose box: its text loaded back, its mentions by MRI.
+    fn edit(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(held) = self.held_message(message) else { return };
+        let mentioned = rich_text::mentioned(held.properties.as_deref());
+        let loaded = compose::load(&compose::rich_text_of(held), &mentioned);
+        let id = held.id.clone();
+        self.compose.update(cx, |compose, cx| match loaded {
+            Ok(loaded) => compose.edit(id, loaded, window, cx),
+            Err(why) => compose.show_problem(format!("This message can't be edited here: {why}"), cx),
+        });
+    }
+
+    /// Up in an empty compose box: the account's newest message that offers an edit.
+    fn edit_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let last = self
+            .message_items()
+            .filter(|item| item.actions().contains(&MessageAction::Edit))
+            .last()
+            .map(|item| item.id.clone());
+        if let Some(id) = last {
+            self.act(MessageAction::Edit, &id, window, cx);
+        }
+    }
+
+    /// Sets the account's reaction `key` on `message`, or takes it back when it is set.
+    pub fn toggle_reaction(&mut self, message: &str, key: &str, cx: &mut Context<Self>) {
+        self.reacting = None;
+        let Some(item) = self.message_items().find(|item| item.id == message) else {
+            return;
+        };
+        if !matches!(item.body, Body::Text(_)) {
+            return;
+        }
+        let mine = item
+            .reactions
+            .iter()
+            .any(|reaction| reaction.key == key && reaction.mine);
+        let (conversation, message_id, key) = (self.conversation.clone(), message.to_owned(), key.to_owned());
+        let action = if mine {
+            Action::Unreact {
+                conversation,
+                message_id,
+                key,
+            }
+        } else {
+            Action::React {
+                conversation,
+                message_id,
+                key,
+            }
+        };
+        // the row comes back as the engine's events; a write it refuses has no row to show
+        drop(self.core.write(action));
+        cx.notify();
+    }
+
+    /// Picks the `index`th quick reaction on the message they are open on.
+    fn pick(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let (Some(message), Some(key)) = (self.reacting.clone(), QUICK_REACTIONS.get(index)) {
+            self.toggle_reaction(&message, key, cx);
+        }
+    }
+
+    /// Deletes the message whose delete waits for its confirmation.
+    pub fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(message_id) = self.deleting.take() else { return };
+        drop(self.core.write(Action::Delete {
+            conversation: self.conversation.clone(),
+            message_id,
+        }));
+        cx.notify();
+    }
+
+    /// "Send again" on row `row`: the engine's explicit resend, after a warning when its message may have arrived.
+    pub fn send_again(&mut self, row: i64, cx: &mut Context<Self>) {
+        let again = self.note_of_row(row).map(|note| note.again);
+        match again {
+            Some(Again::AfterWarning) if self.resending != Some(row) => self.resending = Some(row),
+            Some(Again::AfterWarning | Again::Yes) => {
+                self.resending = None;
+                drop(self.core.resend(row));
+            }
+            Some(Again::No) | None => {}
+        }
+        cx.notify();
+    }
+
+    /// The note shown for row `row`.
+    fn note_of_row(&self, row: i64) -> Option<&Note> {
+        self.items.iter().find_map(|item| match item {
+            Item::Pending(pending) if pending.note.row == row => Some(&pending.note),
+            Item::Message(message) => message.outbox.as_ref().filter(|note| note.row == row),
+            _ => None,
+        })
+    }
+
+    /// Escape in the list: what is open closes first (the quick reactions, a confirmation), then the selection.
+    fn escape(&mut self, cx: &mut Context<Self>) {
+        let open = self.reacting.take().is_some() | self.deleting.take().is_some() | self.resending.take().is_some();
+        if open {
+            cx.notify();
+        } else {
+            self.select(None, cx);
         }
     }
 
@@ -787,11 +1080,17 @@ impl ChatView {
         self.want_names(cx);
         self.rebuild(cx);
         self.kick(cx);
+        self.want_receipt(cx);
     }
 
     fn take(&mut self, load: Load, read: Read) {
         if let Horizon::Read(horizon) = read.horizon {
             self.horizon = horizon;
+        }
+        if let Some(outbox) = read.outbox {
+            self.unsettled = outbox.unsettled;
+            self.earlier = outbox.earlier;
+            self.read_upto = self.read_upto.max(outbox.read_upto);
         }
         if let Some(history) = read.history {
             self.history = history;
@@ -1069,8 +1368,9 @@ impl ChatView {
         }
     }
 
-    /// A message's row, before it is arranged; `None` for a control message (a signal, never shown).
-    fn item(&mut self, message: &Message) -> Option<MessageItem> {
+    /// A message's row, before it is arranged, with the note `notes` has for it; `None` for a control message (a
+    /// signal, never shown).
+    fn item(&mut self, message: &Message, notes: &HashMap<String, Note>) -> Option<MessageItem> {
         if MessageType::from(message.message_type.clone()).is_control() {
             return None;
         }
@@ -1101,15 +1401,89 @@ impl ChatView {
             edited: message.edit_time.is_some() && !matches!(body, Body::Deleted),
             body,
             reactions,
+            outbox: notes.get(&message.id).cloned(),
         })
+    }
+
+    /// The notes shown on messages: per message id, the account's newest edit, delete or reaction on it that isn't
+    /// sent.
+    fn message_notes(&self, now_ms: i64) -> HashMap<String, Note> {
+        let mut notes = HashMap::new();
+        // the store's rows come the oldest first: the newest on a message is the one kept
+        for row in self.unsettled.iter().filter(|row| sending::shown_on_message(row.kind)) {
+            let target = sending::command_of(row).and_then(|command| command.message_id().map(str::to_owned));
+            if let Some(target) = target {
+                notes.insert(target, Note::of(row, self.earlier.contains(&row.id), now_ms));
+            }
+        }
+        notes
+    }
+
+    /// The message posts on their way: this session's as last told and the store's that aren't sent (a row told sent
+    /// stays sent), each until its message is held.
+    fn pending(&mut self, cx: &App, now_ms: i64) -> Vec<PendingItem> {
+        let mut rows: BTreeMap<i64, OutboxEntry> = self
+            .models
+            .chats
+            .read(cx)
+            .outbox_rows(&self.conversation)
+            .filter(|row| row.kind == OutboxKind::Send)
+            .map(|row| (row.id, row.clone()))
+            .collect();
+        for row in self.unsettled.iter().filter(|row| row.kind == OutboxKind::Send) {
+            let told_sent = rows
+                .get(&row.id)
+                .is_some_and(|told| told.state == teams_store::OutboxState::Sent);
+            if !told_sent {
+                rows.insert(row.id, row.clone());
+            }
+        }
+        let held: HashSet<&str> = self
+            .messages
+            .iter()
+            .filter_map(|message| message.client_message_id.as_deref())
+            .collect();
+        let shown: Vec<OutboxEntry> = rows
+            .into_values()
+            .filter(|row| !held.contains(row.client_message_id.as_str()))
+            .collect();
+        self.pending_rendered
+            .retain(|id, _| shown.iter().any(|row| row.id == *id));
+        shown
+            .iter()
+            .map(|row| PendingItem {
+                note: Note::of(row, self.earlier.contains(&row.id), now_ms),
+                created_at: row.created_at,
+                body: self.pending_body(row),
+            })
+            .collect()
+    }
+
+    /// A message post's text as its row carries it, laid out once per row.
+    fn pending_body(&mut self, row: &OutboxEntry) -> Option<RenderedText> {
+        if let Some(rendered) = self.pending_rendered.get(&row.id) {
+            return Some(RenderedText(Arc::clone(rendered)));
+        }
+        let Some(Command::Send { text, .. }) = sending::command_of(row) else {
+            return None;
+        };
+        let rendered = Arc::new(rich_text::layout(text.rich_text(), &Mentions::default()));
+        self.pending_rendered.insert(row.id, Arc::clone(&rendered));
+        Some(RenderedText(rendered))
     }
 
     /// Builds the rows again and tells the list which changed.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
+        let now_ms = Utc::now().timestamp_millis();
+        let notes = self.message_notes(now_ms);
         let messages = std::mem::take(&mut self.messages);
-        let rows: Vec<MessageItem> = messages.iter().filter_map(|message| self.item(message)).collect();
+        let rows: Vec<MessageItem> = messages
+            .iter()
+            .filter_map(|message| self.item(message, &notes))
+            .collect();
         self.messages = messages;
-        let items = arrange(rows, self.history, self.horizon, &Local);
+        let mut items = arrange(rows, self.history, self.horizon, &Local);
+        items.extend(self.pending(cx, now_ms).into_iter().map(Item::Pending));
         let anchor = Anchor::of(&self.list, &self.items);
         splice(&self.list, &self.items, &items);
         if let Some(anchor) = anchor {
@@ -1122,7 +1496,85 @@ impl ChatView {
             self.selected = None;
         }
         self.trace_items();
+        self.trace_outbox();
         cx.notify();
+    }
+
+    /// Traces the outbox rows shown and their states, when they changed (`outbox shown`: the rows' ids as
+    /// `messages`, their states as `kinds`).
+    fn trace_outbox(&mut self) {
+        let shown: Vec<(String, &'static str)> = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Pending(pending) => Some(&pending.note),
+                Item::Message(message) => message.outbox.as_ref(),
+                _ => None,
+            })
+            .map(|note| (note.row.to_string(), note.state.name()))
+            .collect();
+        let unchanged = match &self.outbox_traced {
+            Some(traced) => *traced == shown,
+            None => shown.is_empty(),
+        };
+        if unchanged {
+            return;
+        }
+        let line = TraceLine::new("outbox", "shown")
+            .conversation(&self.conversation)
+            .messages(shown.iter().map(|(id, _)| id.as_str()));
+        let line = shown.iter().fold(line, |line, (_, kind)| line.kind(kind));
+        self.trace.record(&line);
+        self.outbox_traced = Some(shown);
+    }
+
+    /// The newest message a read receipt would move the account's horizon to now, with its arrival time, if one is
+    /// due: the setting on, the window active, the list at the newest message, and someone else's message after the
+    /// horizon that the store counts unread (and that carries the `clientmessageid` a receipt names).
+    fn receipt_target(&self, cx: &App) -> Option<(String, i64)> {
+        let wanted = self.active == Activation::Active
+            && self.list.is_following_tail()
+            && self.settings.read(cx).settings().send_read_receipts;
+        if !wanted {
+            return None;
+        }
+        let me = self.core.me();
+        let newest = self.messages.iter().rev().find(|message| {
+            message.sender.as_deref().is_some_and(|sender| sender != me)
+                && counts_unread(&message.message_type)
+                && message.delete_time.is_none()
+                && message.client_message_id.is_some()
+        })?;
+        self.read_upto
+            .is_none_or(|upto| newest.arrival_time > upto)
+            .then(|| (newest.id.clone(), newest.arrival_time))
+    }
+
+    /// A read receipt goes out [`READ_DEBOUNCE`] from now when one is due, unless one waits already.
+    fn want_receipt(&mut self, cx: &mut Context<Self>) {
+        if self.receipt.is_some() || self.receipt_target(cx).is_none() {
+            return;
+        }
+        self.receipt = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            cx.background_executor().timer(READ_DEBOUNCE).await;
+            let _ = this.update(cx, ChatView::send_receipt);
+        }));
+    }
+
+    /// Sends the read receipt that is due now, if one still is.
+    fn send_receipt(&mut self, cx: &mut Context<Self>) {
+        self.receipt = None;
+        let Some((message_id, arrival)) = self.receipt_target(cx) else {
+            return;
+        };
+        self.read_upto = Some(arrival);
+        self.receipts += 1;
+        // the row comes back as the engine's events
+        drop(self.core.write(Action::Read {
+            conversation: self.conversation.clone(),
+            message_id,
+        }));
+        self.want_receipt(cx);
     }
 
     /// Traces the rows shown, when they changed.
@@ -1170,9 +1622,9 @@ impl ChatView {
         }
     }
 
-    fn act_on_selected(&mut self, action: MessageAction, cx: &mut Context<Self>) {
+    fn act_on_selected(&mut self, action: MessageAction, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(selected) = self.selected.clone() {
-            self.act(action, &selected, cx);
+            self.act(action, &selected, window, cx);
         }
     }
 
@@ -1191,6 +1643,7 @@ impl ChatView {
                 let item = item.clone();
                 self.message_row(&item, palette, cx)
             }
+            Some(Item::Pending(pending)) => pending_row(pending, palette, cx),
             None => div().into_any_element(),
         }
     }
@@ -1228,12 +1681,177 @@ impl ChatView {
         let row = if matches!(item.body, Body::Event(_)) {
             row.child(event_line(item, palette))
         } else {
+            let picker = (self.reacting.as_deref() == Some(item.id.as_str())).then(|| reaction_picker(item, cx));
             row.children(item.header.then(|| header_line(item, palette)))
                 .child(bubble(item, highlighted, palette))
-                .children(footer_line(item, palette))
+                .children(footer_line(item, palette, cx))
+                .children(item.outbox.as_ref().map(|note| note_line(note, palette, cx)))
+                .children(picker)
         };
         row.children(actions).into_any_element()
     }
+
+    /// What waits for the user's answer under the messages: the delete's confirmation, or the warning before "send
+    /// again" on a row whose message may have arrived.
+    fn confirmation(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Ask {
+            question,
+            yes,
+            label,
+            on_yes,
+        } = if self.deleting.is_some() {
+            Ask {
+                question: CONFIRM_DELETE,
+                yes: "confirm-delete",
+                label: "Delete",
+                on_yes: Box::new(ChatView::confirm_delete),
+            }
+        } else {
+            let row = self.resending?;
+            Ask {
+                question: MAY_HAVE_ARRIVED,
+                yes: "resend-anyway",
+                label: "Send again",
+                on_yes: Box::new(move |this, cx| this.send_again(row, cx)),
+            }
+        };
+        let confirm = Button::new(yes)
+            .label(label)
+            .primary()
+            .with_size(Size::XSmall)
+            .on_click(cx.listener(move |this, _, _, cx| on_yes(this, cx)));
+        let cancel = Button::new("confirm-cancel")
+            .label("Cancel")
+            .ghost()
+            .with_size(Size::XSmall)
+            .on_click(cx.listener(|this, _, _, cx| this.escape(cx)));
+        Some(
+            div()
+                .debug_selector(|| "confirmation".to_owned())
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .py_1()
+                .text_sm()
+                .border_t_1()
+                .border_color(rgb(palette.border))
+                .child(question)
+                .child(div().debug_selector(move || yes.to_owned()).child(confirm))
+                .child(div().debug_selector(|| "confirm-cancel".to_owned()).child(cancel))
+                .into_any_element(),
+        )
+    }
+}
+
+/// What a confirming button does.
+type OnYes = Box<dyn Fn(&mut ChatView, &mut Context<ChatView>)>;
+
+/// A question the view asks before it writes: its text, its confirming button's id and label, and what that does.
+struct Ask {
+    question: &'static str,
+    yes: &'static str,
+    label: &'static str,
+    on_yes: OnYes,
+}
+
+/// Whether the window is the one the user is using: read receipts go out only while it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Activation {
+    Active,
+    Inactive,
+}
+
+impl Activation {
+    fn of(window: &Window) -> Self {
+        if window.is_window_active() {
+            Self::Active
+        } else {
+            Self::Inactive
+        }
+    }
+}
+
+/// The quick reactions over a message: each sets the account's own, or takes it back when it is set.
+fn reaction_picker(item: &MessageItem, cx: &mut Context<ChatView>) -> AnyElement {
+    let buttons = QUICK_REACTIONS.iter().enumerate().map(|(index, key)| {
+        let message = item.id.clone();
+        let mine = item
+            .reactions
+            .iter()
+            .any(|reaction| reaction.key == *key && reaction.mine);
+        let button = Button::new(ElementId::Name(format!("pick-{key}-{message}").into()))
+            .label(format!("{} {}", index + 1, reaction_label(key)))
+            .with_size(Size::XSmall)
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&message, key, cx)));
+        let button = if mine { button.primary() } else { button.ghost() };
+        div().debug_selector(move || format!("pick-{key}")).child(button)
+    });
+    div()
+        .debug_selector(|| "reaction-picker".to_owned())
+        .flex()
+        .gap_1()
+        .pt_1()
+        .children(buttons)
+        .into_any_element()
+}
+
+/// An outbox row's state under the message it concerns, with "send again" when it is offered.
+fn note_line(note: &Note, palette: Palette, cx: &mut Context<ChatView>) -> AnyElement {
+    let row = note.row;
+    let again = (note.again != Again::No).then(|| {
+        div().debug_selector(move || format!("send-again-{row}")).child(
+            Button::new(ElementId::Name(format!("send-again-{row}").into()))
+                .label("Send again")
+                .ghost()
+                .with_size(Size::XSmall)
+                .on_click(cx.listener(move |this, _, _, cx| this.send_again(row, cx))),
+        )
+    });
+    let colour = match note.state {
+        RowState::Denied | RowState::Failed => palette.foreground,
+        _ => palette.muted_foreground,
+    };
+    div()
+        .debug_selector(move || format!("outbox-{row}"))
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(rgb(colour))
+        .child(note.text())
+        .children(again)
+        .into_any_element()
+}
+
+/// A message post on its way: the account's bubble, muted, with the row's state.
+fn pending_row(pending: &PendingItem, palette: Palette, cx: &mut Context<ChatView>) -> AnyElement {
+    let row = pending.note.row;
+    let id: SharedString = format!("pending-text-{row}").into();
+    let content = match &pending.body {
+        Some(text) => rich_text::render(&id, &text.0, palette),
+        None => muted(UNSUPPORTED, palette),
+    };
+    div()
+        .debug_selector(move || format!("pending-{row}"))
+        .w_full()
+        .px_4()
+        .pt(px(2.0))
+        .flex()
+        .flex_col()
+        .items_end()
+        .child(
+            div()
+                .max_w(relative(0.8))
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .opacity(0.7)
+                .bg(rgb(palette.selected))
+                .child(content),
+        )
+        .child(note_line(&pending.note, palette, cx))
+        .into_any_element()
 }
 
 /// The actions a message offers, as buttons over its row's top right corner.
@@ -1246,7 +1864,7 @@ fn actions_bar(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>)
                 .label(action.label())
                 .ghost()
                 .with_size(Size::XSmall)
-                .on_click(cx.listener(move |this, _, _, cx| this.act(action, &message, cx))),
+                .on_click(cx.listener(move |this, _, window, cx| this.act(action, &message, window, cx))),
         )
     });
     div()
@@ -1279,9 +1897,42 @@ struct Read {
     horizon: Horizon,
     /// The history's new state, when the load learnt it.
     history: Option<History>,
+    /// The account's writes and read horizon as the store has them now: read by every window load.
+    outbox: Option<OutboxRead>,
 }
 
-/// The window load: the newest messages down to `oldest`, and on the first load the account's read horizon.
+/// The account's writes in the conversation and its read horizon, as a window load read them.
+struct OutboxRead {
+    unsettled: Vec<OutboxEntry>,
+    earlier: HashSet<i64>,
+    /// The arrival time of the last message the account has read.
+    read_upto: Option<i64>,
+}
+
+/// The conversation's rows that aren't sent, the rows earlier sessions left, and the account's read horizon now; what
+/// can't be read is none.
+async fn outbox_read(core: &dyn Core, conversation: &str) -> OutboxRead {
+    let unsettled = core.outbox_unsettled(conversation.to_owned()).await.unwrap_or_default();
+    let earlier = core
+        .left_by_earlier_runs()
+        .await
+        .map(|rows| rows.into_iter().map(|row| row.id).collect())
+        .unwrap_or_default();
+    let read_upto = core
+        .read_horizon(conversation.to_owned())
+        .await
+        .ok()
+        .flatten()
+        .map(|horizon| horizon.last_read_arrival);
+    OutboxRead {
+        unsettled,
+        earlier,
+        read_upto,
+    }
+}
+
+/// The window load: the newest messages down to `oldest`, the account's writes and read horizon now, and on the first
+/// load that horizon for the "New messages" divider.
 async fn window(
     core: &dyn Core,
     conversation: &str,
@@ -1289,9 +1940,9 @@ async fn window(
     first: bool,
     held: &HashMap<String, i64>,
 ) -> Result<Read, EngineError> {
+    let outbox = outbox_read(core, conversation).await;
     let horizon = if first {
-        let horizon = core.read_horizon(conversation.to_owned()).await.ok().flatten();
-        Horizon::Read(horizon.map(|horizon| horizon.last_read_arrival))
+        Horizon::Read(outbox.read_upto)
     } else {
         Horizon::NotRead
     };
@@ -1305,6 +1956,7 @@ async fn window(
         }),
         horizon,
         history: None,
+        outbox: Some(outbox),
     })
 }
 
@@ -1330,6 +1982,7 @@ async fn older(
                 loaded: None,
                 horizon: Horizon::NotRead,
                 history: Some(history),
+                outbox: None,
             });
         }
         let Some((arrival_time, id)) = oldest else {
@@ -1348,6 +2001,7 @@ async fn older(
         }),
         horizon: Horizon::NotRead,
         history: None,
+        outbox: None,
     })
 }
 
@@ -1360,6 +2014,7 @@ fn key(item: &Item) -> Key {
         Item::Day(day) => (1, day.to_string()),
         Item::NewMessages => (2, String::new()),
         Item::Message(message) => (3, message.id.clone()),
+        Item::Pending(pending) => (4, pending.note.row.to_string()),
     }
 }
 
@@ -1598,8 +2253,8 @@ fn muted(text: &'static str, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// "Edited" and the reactions, if any.
-fn footer_line(item: &MessageItem, palette: Palette) -> Option<AnyElement> {
+/// "Edited" and the reactions, if any; a reaction clicked sets the account's own, or takes it back.
+fn footer_line(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
     if !item.edited && item.reactions.is_empty() {
         return None;
     }
@@ -1612,12 +2267,15 @@ fn footer_line(item: &MessageItem, palette: Palette) -> Option<AnyElement> {
     });
     let reactions = item.reactions.iter().map(|reaction| {
         let key = reaction.key.clone();
+        let (message, toggled) = (item.id.clone(), reaction.key.clone());
         let chip = div()
+            .id(ElementId::Name(format!("reaction-{}-{key}", item.id).into()))
             .debug_selector(move || format!("reaction-{key}"))
             .px_1()
             .rounded_md()
             .border_1()
             .text_xs()
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&message, &toggled, cx)))
             .child(format!("{} {}", reaction_label(&reaction.key), reaction.count));
         if reaction.mine {
             chip.border_color(rgb(palette.brand)).bg(rgb(palette.selected))
@@ -1679,11 +2337,24 @@ impl Render for ChatView {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.step_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step_selection(1, cx)))
-            .on_action(cx.listener(|this, _: &ReplyToSelected, _, cx| this.act_on_selected(MessageAction::Reply, cx)))
-            .on_action(cx.listener(|this, _: &ReactToSelected, _, cx| this.act_on_selected(MessageAction::React, cx)))
-            .on_action(cx.listener(|this, _: &EditSelected, _, cx| this.act_on_selected(MessageAction::Edit, cx)))
-            .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| this.act_on_selected(MessageAction::Delete, cx)))
-            .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.select(None, cx)))
+            .on_action(cx.listener(|this, _: &ReplyToSelected, window, cx| {
+                this.act_on_selected(MessageAction::Reply, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReactToSelected, window, cx| {
+                this.act_on_selected(MessageAction::React, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &EditSelected, window, cx| {
+                this.act_on_selected(MessageAction::Edit, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
+                this.act_on_selected(MessageAction::Delete, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.escape(cx)))
+            .on_action(cx.listener(|this, _: &ConfirmDelete, _, cx| this.confirm_delete(cx)))
+            .on_action(cx.listener(|this, _: &PickLike, _, cx| this.pick(0, cx)))
+            .on_action(cx.listener(|this, _: &PickHeart, _, cx| this.pick(1, cx)))
+            .on_action(cx.listener(|this, _: &PickLaugh, _, cx| this.pick(2, cx)))
+            .on_action(cx.listener(|this, _: &PickSurprised, _, cx| this.pick(3, cx)))
             .debug_selector(|| "chat-messages".to_owned())
             .relative()
             .flex_1()
@@ -1698,5 +2369,7 @@ impl Render for ChatView {
             .bg(rgb(palette.background))
             .child(messages)
             .children(typing)
+            .children(self.confirmation(palette, cx))
+            .child(self.compose.clone())
     }
 }

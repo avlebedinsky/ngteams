@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{Action, Answer, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
-use teams_store::{Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon};
+use teams_store::{
+    Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction, ReadHorizon,
+};
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
 
@@ -66,6 +68,16 @@ pub struct FakeCore {
     pub catch_up_before_history_complete: Mutex<HashMap<String, Vec<Message>>>,
     /// The `limit` of each `messages` read, in order.
     pub limits: Mutex<Vec<usize>>,
+    /// Every write asked for, in order; each is answered with a pending row of its own.
+    pub actions: Mutex<Vec<Action>>,
+    /// Every transient asked for, in order; each is answered sent.
+    pub transients: Mutex<Vec<Transient>>,
+    /// Every row resent, by id, in order.
+    pub resent: Mutex<Vec<i64>>,
+    /// The outbox rows that aren't sent, of any conversation, the oldest first.
+    pub unsettled: Mutex<Vec<OutboxEntry>>,
+    /// The rows earlier runs left.
+    pub earlier: Mutex<Vec<OutboxEntry>>,
 }
 
 impl Default for FakeCore {
@@ -88,6 +100,11 @@ impl Default for FakeCore {
             unsynced: Mutex::default(),
             catch_up_before_history_complete: Mutex::default(),
             limits: Mutex::default(),
+            actions: Mutex::default(),
+            transients: Mutex::default(),
+            resent: Mutex::default(),
+            unsettled: Mutex::default(),
+            earlier: Mutex::default(),
         }
     }
 }
@@ -116,6 +133,41 @@ pub fn page_of(messages: &[Message], before: Option<&PageCursor>, limit: usize) 
 
 fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A made-up outbox row `id` of `kind` in `state`, with no conversation and an empty payload.
+pub fn outbox_row(id: i64, kind: OutboxKind, state: OutboxState) -> OutboxEntry {
+    OutboxEntry {
+        id,
+        run_id: 1,
+        client_message_id: format!("{:019}", 1_000_000_000_000_000_000_i64 + id),
+        conversation_id: None,
+        kind,
+        payload: "{}".to_owned(),
+        state,
+        attempts: 0,
+        attempts_at_resend: 0,
+        failed_checks: 0,
+        not_before: None,
+        last_error: None,
+        message_id: None,
+        created_at: 1_767_225_600_000,
+        updated_at: 1_767_225_600_000,
+        unreadable_seen_at: None,
+    }
+}
+
+/// The conversation an action writes to.
+fn conversation_of(action: &Action) -> Option<String> {
+    match action {
+        Action::Send { conversation, .. }
+        | Action::Edit { conversation, .. }
+        | Action::Delete { conversation, .. }
+        | Action::React { conversation, .. }
+        | Action::Unreact { conversation, .. }
+        | Action::Read { conversation, .. } => Some(conversation.clone()),
+        Action::CreateChat { .. } => None,
+    }
 }
 
 impl FakeCore {
@@ -156,16 +208,26 @@ impl Core for FakeCore {
         &self.me
     }
 
-    fn write(&self, _action: Action) -> Reply<OutboxEntry> {
-        self.ask("write")
+    fn write(&self, action: Action) -> Reply<OutboxEntry> {
+        let mut actions = locked(&self.actions);
+        actions.push(action.clone());
+        let id = i64::try_from(actions.len()).unwrap();
+        drop(actions);
+        self.answer("write", || {
+            let mut row = outbox_row(id, OutboxKind::Send, OutboxState::Pending);
+            row.conversation_id = conversation_of(&action);
+            row
+        })
     }
 
-    fn resend(&self, _id: i64) -> Reply<OutboxEntry> {
-        self.ask("resend")
+    fn resend(&self, id: i64) -> Reply<OutboxEntry> {
+        locked(&self.resent).push(id);
+        self.answer("resend", || outbox_row(id, OutboxKind::Send, OutboxState::Pending))
     }
 
-    fn transient(&self, _transient: Transient) -> Reply<TransientSent> {
-        self.ask("transient")
+    fn transient(&self, transient: Transient) -> Reply<TransientSent> {
+        locked(&self.transients).push(transient);
+        self.answer("transient", || TransientSent::Sent)
     }
 
     fn sync(&self) -> Reply<CatchUpReport> {
@@ -268,12 +330,18 @@ impl Core for FakeCore {
         self.ask("outbox_entry")
     }
 
-    fn outbox_unsettled(&self, _conversation: String) -> Reply<Vec<OutboxEntry>> {
-        self.ask("outbox_unsettled")
+    fn outbox_unsettled(&self, conversation: String) -> Reply<Vec<OutboxEntry>> {
+        self.answer("outbox_unsettled", || {
+            locked(&self.unsettled)
+                .iter()
+                .filter(|row| row.conversation_id.as_deref() == Some(conversation.as_str()))
+                .cloned()
+                .collect()
+        })
     }
 
     fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>> {
-        self.ask("left_by_earlier_runs")
+        self.answer("left_by_earlier_runs", || locked(&self.earlier).clone())
     }
 }
 

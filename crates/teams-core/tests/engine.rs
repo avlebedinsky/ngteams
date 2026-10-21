@@ -1539,6 +1539,80 @@ async fn the_request_side_is_shared_from_any_thread_and_answers_stopped_once_the
     assert!(matches!(requests.conversations(1).await, Err(EngineError::Stopped)));
 }
 
+/// The events about outbox row `id` among `events`: `queued` for [`Event::Queued`], `outbox` for [`Event::Outbox`],
+/// each with the row's state.
+fn row_events(events: &[Event], id: i64) -> Vec<(&'static str, OutboxState)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Queued(row) if row.id == id => Some(("queued", row.state)),
+            Event::Outbox(row) if row.id == id => Some(("outbox", row.state)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_write_s_row_is_told_queued_before_its_first_attempt_and_so_is_a_resend() {
+    let lab = Lab::start().await;
+    let dir = Arc::new(tempfile::tempdir().unwrap());
+    let mut first = try_native_in(&lab, LAB_A, QUIET, Arc::clone(&dir)).unwrap_or_else(|error| panic!("{error}"));
+    first.handle.sync().await.unwrap();
+    first.drain().await;
+
+    // a view shows the row at once, as it waits for its first attempt, then as the attempt left it
+    let row = first.send(AB_CHAT, "shown at once").await;
+    let events = first.drain().await;
+    assert_eq!(
+        row_events(&events, row.id),
+        [("queued", OutboxState::Pending), ("outbox", OutboxState::Sent)]
+    );
+    let queued = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Queued(queued) if queued.id == row.id => Some(queued.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        (queued.attempts, queued.client_message_id.as_str()),
+        (0, row.client_message_id.as_str())
+    );
+
+    // a write the store rules out makes no row, so none is told
+    let refused = first
+        .handle
+        .write(Action::Delete {
+            conversation: AB_CHAT.to_owned(),
+            message_id: A_DELETED.to_owned(),
+        })
+        .await;
+    assert!(matches!(refused, Err(EngineError::Deleted { .. })), "{refused:?}");
+    assert!(
+        !first
+            .drain()
+            .await
+            .iter()
+            .any(|event| matches!(event, Event::Queued(_))),
+        "no row, nothing queued"
+    );
+
+    // a row an earlier run left is told queued again as its explicit resend adopts it
+    let left = first.send_unanswered(AB_CHAT, "left behind").await;
+    first.shutdown();
+    let mut second = native_once_free(&lab, LAB_A, &dir).await;
+    second.drain().await;
+    let resent = second.handle.resend(left.id).await.unwrap();
+    let events = second.drain().await;
+    assert_eq!(
+        row_events(&events, left.id).first(),
+        Some(&("queued", OutboxState::Pending)),
+        "{events:?}"
+    );
+    assert_eq!(resent.state, OutboxState::Sent);
+    second.shutdown();
+}
+
 /// An engine for `me` on the store in `dir`, once the one before it has let go of the account's lock (its thread ends
 /// after its handle is dropped, which isn't waited for).
 async fn native_once_free(lab: &Lab, me: &'static str, dir: &Arc<tempfile::TempDir>) -> Native {
