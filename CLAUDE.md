@@ -107,6 +107,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   Run `cargo test -p fixture-guard` after touching any `tests/fixtures/` or `docs/`: it checks the marker and scans
   for tokens, signatures, emails, MRIs, GUIDs (except `PUBLIC_GUIDS`), meeting links and passcodes.
 - `fence.log` keeps scope ids verbatim (a 1:1 chat id names both object ids): it is lab data, not sanitized material.
+- `docs/protocol/endpoints.md` lists every endpoint seen or used, with how the browser fence and the native client
+  treat it. A task that captures, maps, allowlists or uses a new endpoint, or changes how one is treated, adds or
+  updates its row in the same change; one seen in a capture and described nowhere goes in as "seen, not reviewed".
 
 ### Scenarios (`crates/proto-lab/src/scenario/`)
 
