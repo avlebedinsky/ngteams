@@ -48,7 +48,7 @@ use super::ab_chat::{
     self, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_in_url, chat_link, chat_requests, chat_url, deny_probes, enforce,
     load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, setup, wait_for_newest,
 };
-use super::dsl::{Driver, Key, RequestPattern, SeenRequest, Selector, StepError};
+use super::dsl::{Driver, Key, RequestPattern, SeenRequest, Selector, StepError, js_string};
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
@@ -728,9 +728,4 @@ async fn cancel_edit(drive: &mut Driver, text: &str) {
     if drive.evaluate("a goes back to its edit box", &focus).await.ok() == Some(Value::Bool(true)) {
         let _ = drive.press("a cancels the edit", Key::ESCAPE).await;
     }
-}
-
-/// A JavaScript string literal of `text`.
-fn js_string(text: &str) -> String {
-    Value::String(text.to_owned()).to_string()
 }

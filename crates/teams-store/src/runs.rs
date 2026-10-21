@@ -40,8 +40,13 @@ fn failed(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError {
     move |source| StoreError::File { path, source }
 }
 
+/// The name of a run's lock file in the directory.
+fn lock_name(run_id: i64) -> String {
+    format!("{run_id}{SUFFIX}")
+}
+
 fn lock_file(dir: &Path, run_id: i64) -> PathBuf {
-    dir.join(format!("{run_id}{SUFFIX}"))
+    dir.join(lock_name(run_id))
 }
 
 /// Creates the directory (`0700`) when missing and opens (creating, `0600`) the lock file `name` in it, unlocked.
@@ -70,7 +75,7 @@ pub(crate) fn open_lock(dir: &Path) -> Result<File, StoreError> {
 /// Creates the directory (`0700`) and takes the run's lock, held until the returned file is dropped. Called inside
 /// the transaction that adds the run.
 pub(crate) fn hold(dir: &Path, run_id: i64) -> Result<File, StoreError> {
-    let (file, path) = lock_file_in(dir, &format!("{run_id}{SUFFIX}"))?;
+    let (file, path) = lock_file_in(dir, &lock_name(run_id))?;
     // only a check holds it, and only for a moment: no open run has this id
     file.lock().map_err(failed(&path))?;
     Ok(file)

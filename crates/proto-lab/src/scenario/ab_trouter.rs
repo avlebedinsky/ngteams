@@ -53,7 +53,7 @@ use super::ab_chat::{
     CHAT_OPEN, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_link, chat_requests, chat_url, deny_probes, enforce, load,
     message_text, nonce, one_to_one_id, probe_text, save_screenshot, send, wait_for_newest,
 };
-use super::dsl::{Driver, RequestPattern, SeenRequest, Selector, StepError};
+use super::dsl::{Driver, RequestPattern, SeenRequest, Selector, StepError, js_string};
 use super::expected::{ExpectedRequest, Review, TEAMS};
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
@@ -500,7 +500,7 @@ async fn hover(session: &LabSession, driver: &Driver, text: &str) -> Result<(f64
          leaves('[data-tid=\"chat-pane-message\"] *'); if (!all.length) all = leaves('body *'); const e = \
          all[all.length - 1]; if (!e) return null; e.scrollIntoView({{block: 'center'}}); const r = \
          e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()",
-        serde_json::Value::String(text.to_owned())
+        js_string(text)
     );
     let point = driver.evaluate("find the message", &expression).await?;
     let (Some(x), Some(y)) = (point[0].as_f64(), point[1].as_f64()) else {
@@ -548,7 +548,7 @@ async fn edit(a: &LabSession, drive_a: &mut Driver, message: &str, edited: &str)
          (e.innerText || '').includes(t)); if (!e) return false; e.setAttribute('data-lab-editor', '1'); e.focus(); \
          const s = window.getSelection(); s.removeAllRanges(); const r = document.createRange(); \
          r.selectNodeContents(e); s.addRange(r); return true; }})()",
-        serde_json::Value::String(message.to_owned())
+        js_string(message)
     );
     drive_a
         .wait_until_true("a's message editor", &mark, "an editor holding the message", ACTION)
@@ -616,7 +616,7 @@ async fn click_visible(drive: &mut Driver, step: &str, css: &str, timeout: Durat
     let expression = format!(
         "(() => {{ const e = [...document.querySelectorAll({})].find(e => {{ const r = e.getBoundingClientRect(); \
          return r.width > 0 && r.height > 0; }}); if (!e) return false; e.click(); return true; }})()",
-        serde_json::Value::String(css.to_owned())
+        js_string(css)
     );
     drive
         .wait_until_true(

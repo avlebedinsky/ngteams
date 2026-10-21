@@ -14,8 +14,7 @@
 //! - [`Driver::wait_for_answer`]: a request matching a pattern was answered (or failed), and how;
 //! - [`Driver::navigate`], [`Driver::click`], [`Driver::type_into`], [`Driver::insert_text`] (into the focused
 //!   element), [`Driver::press_enter`], [`Driver::press`] (any
-//!   [`Key`]), [`Driver::hover`] and [`Driver::right_click`] (real mouse events, for what shows only under the
-//!   pointer).
+//!   [`Key`]) and [`Driver::hover`] (a real mouse event, for what shows only under the pointer).
 //!
 //! A wait goes on across a navigation of its page: an evaluation the browser refuses because the page navigated
 //! ([`navigated_away`]) is a look that found nothing yet. A wait that runs out fails with [`StepError::Timeout`],
@@ -449,18 +448,8 @@ impl Driver {
     /// When there is no such element, or the browser refuses the input.
     pub async fn hover(&mut self, step: &str, selector: Selector<'_>) -> Result<(), StepError> {
         let (x, y) = self.centre(step, selector).await?;
-        self.mouse(step, "mouseMoved", x, y, "none").await
-    }
-
-    /// Right-clicks the middle of the element `selector` finds, scrolled into view first: its context menu opens.
-    ///
-    /// # Errors
-    /// When there is no such element, or the browser refuses the input.
-    pub async fn right_click(&mut self, step: &str, selector: Selector<'_>) -> Result<(), StepError> {
-        let (x, y) = self.centre(step, selector).await?;
-        self.mouse(step, "mouseMoved", x, y, "none").await?;
-        self.mouse(step, "mousePressed", x, y, "right").await?;
-        self.mouse(step, "mouseReleased", x, y, "right").await
+        let params = json!({"type": "mouseMoved", "x": x, "y": y, "button": "none"});
+        self.call(step, "Input.dispatchMouseEvent", params).await.map(drop)
     }
 
     /// The middle of the element `selector` finds, in the viewport, once it is scrolled into view.
@@ -478,15 +467,6 @@ impl Driver {
                 reason: format!("no {selector} to point at"),
             }),
         }
-    }
-
-    /// One mouse event at `(x, y)`; `button` is `none`, `left` or `right`.
-    async fn mouse(&self, step: &str, kind: &str, x: f64, y: f64, button: &str) -> Result<(), StepError> {
-        let mut params = json!({"type": kind, "x": x, "y": y, "button": button});
-        if kind != "mouseMoved" {
-            params["clickCount"] = json!(1);
-        }
-        self.call(step, "Input.dispatchMouseEvent", params).await.map(drop)
     }
 
     /// Passes over every request seen so far: the next request wait matches only a request sent from now on.
@@ -882,6 +862,6 @@ pub fn navigated_away(error: &StepError) -> bool {
 }
 
 /// A JavaScript string literal of `text`.
-fn js_string(text: &str) -> String {
+pub(crate) fn js_string(text: &str) -> String {
     Value::String(text.to_owned()).to_string()
 }

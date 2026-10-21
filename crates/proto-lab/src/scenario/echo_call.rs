@@ -49,7 +49,7 @@ use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{EARLIER_RUN_PROBE, load, probe_rules, save_screenshot};
-use super::dsl::{Driver, Selector, StepError};
+use super::dsl::{Driver, Selector, StepError, js_string};
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
@@ -361,7 +361,7 @@ async fn call(session: &mut LabSession, options: RunOptions, report: &mut Scenar
     let still_up = driver
         .evaluate(
             "the call screen",
-            &format!("document.querySelector({}) !== null", js(HANG_UP_CSS)),
+            &format!("document.querySelector({}) !== null", js_string(HANG_UP_CSS)),
         )
         .await?;
     if still_up == Value::Bool(true) {
@@ -416,7 +416,7 @@ async fn click_text(driver: &mut Driver, step: &str, text: &str) -> Result<(), S
     let find = format!(
         "[...document.querySelectorAll('[role=menuitem],[role=tab],[role=treeitem],[role=option],[role=link],a,button')]\
          .find(e => (e.innerText ?? '').trim().split('\\n')[0].trim() === {})",
-        js(text)
+        js_string(text)
     );
     driver
         .wait_until_true(
@@ -441,11 +441,6 @@ async fn click_text(driver: &mut Driver, step: &str, text: &str) -> Result<(), S
         }
         .into())
     }
-}
-
-/// A JavaScript string literal of `text`.
-fn js(text: &str) -> String {
-    Value::String(text.to_owned()).to_string()
 }
 
 /// Steps 3 and 5 from the capture: the fence must have allowed a call start, and the WebRTC statistics must show audio

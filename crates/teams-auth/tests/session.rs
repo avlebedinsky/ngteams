@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
-use teams_auth::authz::{AuthzClient, AuthzError, Region, skypetoken_key};
+use teams_auth::authz::{AuthzClient, AuthzError, Region, skypetoken_expiry, skypetoken_expiry_key, skypetoken_key};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
 use teams_auth::session::{Clock, REFRESH_MARGIN, Renewal, Session};
@@ -196,10 +196,15 @@ impl Lab {
             .collect())
     }
 
-    async fn store_skypetoken(&self, token: &str) -> TestResult {
-        self.session
-            .store()
-            .put(&skypetoken_key(ACCOUNT), &Secret::new(token))
+    /// A skypetoken stored as a session keeps one: the token and the expiry it was kept with.
+    async fn store_skypetoken(&self, token: &str, expires_at: SystemTime) -> TestResult {
+        let store = self.session.store();
+        store.put(&skypetoken_key(ACCOUNT), &Secret::new(token)).await?;
+        store
+            .put(
+                &skypetoken_expiry_key(ACCOUNT),
+                &skypetoken_expiry(&Secret::new(token), expires_at),
+            )
             .await?;
         Ok(())
     }
@@ -388,7 +393,7 @@ async fn the_stored_skypetoken_is_used_while_it_is_good_past_the_margin() -> Tes
     let lab = Lab::default().await?;
     let expires_at = lab.clock.now() + Duration::from_secs(3_600);
     let stored = skypetoken_jwt(expires_at, "stored");
-    lab.store_skypetoken(&stored).await?;
+    lab.store_skypetoken(&stored, expires_at).await?;
 
     let skypetoken = lab.session.skypetoken().await?;
 
@@ -411,7 +416,8 @@ async fn the_skypetoken_is_renewed_only_after_refreshing_spaces_and_never_outliv
     let lab = Lab::default().await?;
     let start = lab.clock.now();
     // the stored one is within the margin
-    lab.store_skypetoken(&skypetoken_jwt(start + Duration::from_secs(60), "stored"))
+    let stored_until = start + Duration::from_secs(60);
+    lab.store_skypetoken(&skypetoken_jwt(stored_until, "stored"), stored_until)
         .await?;
     // a cached spaces token, good for hours: the renewal refreshes anyway
     let cached_spaces = lab.session.access_token(SPACES_RESOURCE).await?;
@@ -445,6 +451,16 @@ async fn the_skypetoken_is_renewed_only_after_refreshing_spaces_and_never_outliv
     // stored, the region taken, and both renewals announced, by expiry only
     let stored = lab.session.store().get(&skypetoken_key(ACCOUNT)).await?;
     assert_eq!(stored.map(|token| token.expose().to_owned()), Some(renewed_jwt.clone()));
+    let kept = lab.session.store().get(&skypetoken_expiry_key(ACCOUNT)).await?;
+    let capped = skypetoken_expiry(
+        &Secret::new(renewed_jwt.as_str()),
+        start + Duration::from_secs(LIFETIME),
+    );
+    assert_eq!(
+        kept.map(|expiry| expiry.expose().to_owned()),
+        Some(capped.expose().to_owned()),
+        "the capped expiry is stored with it"
+    );
     assert_eq!(lab.session.region().name.as_deref(), Some("emea"));
     assert_eq!(
         renewals.try_recv()?,
@@ -472,7 +488,8 @@ async fn a_refused_skypetoken_is_renewed_once_however_many_callers_it_was_refuse
     let start = lab.clock.now();
     // the stored one is good for an hour, yet a service refused it
     let stored = skypetoken_jwt(start + Duration::from_secs(3_600), "stored");
-    lab.store_skypetoken(&stored).await?;
+    lab.store_skypetoken(&stored, start + Duration::from_secs(3_600))
+        .await?;
     let renewed_jwt = skypetoken_jwt(start + Duration::from_secs(3_600), "renewed");
     lab.mount_authz(&renewed_jwt, "amer").await?;
 
@@ -492,8 +509,9 @@ async fn a_refused_skypetoken_is_renewed_once_however_many_callers_it_was_refuse
 async fn a_refused_skypetoken_is_not_handed_out_again_after_a_failed_renewal() -> TestResult {
     let lab = Lab::default().await?;
     // the stored one is good for an hour, yet a service refused it, and the renewal fails
-    let stored = skypetoken_jwt(lab.clock.now() + Duration::from_secs(3_600), "stored");
-    lab.store_skypetoken(&stored).await?;
+    let expires_at = lab.clock.now() + Duration::from_secs(3_600);
+    let stored = skypetoken_jwt(expires_at, "stored");
+    lab.store_skypetoken(&stored, expires_at).await?;
     Mock::given(method("POST"))
         .and(path(AUTHZ_PATH))
         .respond_with(ResponseTemplate::new(500))
@@ -524,8 +542,9 @@ async fn a_refused_skypetoken_is_not_handed_out_again_after_a_failed_renewal() -
 #[tokio::test]
 async fn a_refused_skypetoken_not_the_held_one_gets_the_held_one() -> TestResult {
     let lab = Lab::default().await?;
-    let stored = skypetoken_jwt(lab.clock.now() + Duration::from_secs(3_600), "stored");
-    lab.store_skypetoken(&stored).await?;
+    let expires_at = lab.clock.now() + Duration::from_secs(3_600);
+    let stored = skypetoken_jwt(expires_at, "stored");
+    lab.store_skypetoken(&stored, expires_at).await?;
 
     let skypetoken = lab
         .session
@@ -540,6 +559,60 @@ async fn a_refused_skypetoken_not_the_held_one_gets_the_held_one() -> TestResult
             .ok_or("recording is off")?
             .is_empty()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_skypetoken_expires_at_the_expiry_it_was_kept_with_not_its_later_exp() -> TestResult {
+    let lab = Lab::default().await?;
+    let start = lab.clock.now();
+    // as a session left it: the token's own exp is past the Entra token it was capped at
+    let stored = skypetoken_jwt(start + Duration::from_secs(7_200), "stored");
+    let capped = start + Duration::from_secs(3_600);
+    lab.store_skypetoken(&stored, capped).await?;
+
+    let skypetoken = lab.session.skypetoken().await?;
+    assert_eq!(skypetoken.token.expose(), stored);
+    assert_eq!(skypetoken.expires_at, capped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_skypetoken_without_its_expiry_is_renewed() -> TestResult {
+    let lab = Lab::default().await?;
+    let stored = skypetoken_jwt(lab.clock.now() + Duration::from_secs(3_600), "stored");
+    lab.session
+        .store()
+        .put(&skypetoken_key(ACCOUNT), &Secret::new(stored.as_str()))
+        .await?;
+    let renewed_jwt = skypetoken_jwt(lab.clock.now() + Duration::from_secs(3_600), "renewed");
+    lab.mount_authz(&renewed_jwt, "amer").await?;
+
+    assert_eq!(lab.session.skypetoken().await?.token.expose(), renewed_jwt);
+    assert_eq!(lab.requests_to(AUTHZ_PATH).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_skypetoken_with_another_tokens_expiry_is_renewed() -> TestResult {
+    let lab = Lab::default().await?;
+    let expires_at = lab.clock.now() + Duration::from_secs(3_600);
+    let stored = skypetoken_jwt(expires_at, "stored");
+    lab.store_skypetoken(&stored, expires_at).await?;
+    // another client stored its token between this one's reading of the token and of its expiry
+    let other = skypetoken_jwt(expires_at, "another client's");
+    lab.session
+        .store()
+        .put(
+            &skypetoken_expiry_key(ACCOUNT),
+            &skypetoken_expiry(&Secret::new(other), expires_at),
+        )
+        .await?;
+    let renewed_jwt = skypetoken_jwt(expires_at, "renewed");
+    lab.mount_authz(&renewed_jwt, "amer").await?;
+
+    assert_eq!(lab.session.skypetoken().await?.token.expose(), renewed_jwt);
+    assert_eq!(lab.requests_to(AUTHZ_PATH).await?.len(), 1);
     Ok(())
 }
 

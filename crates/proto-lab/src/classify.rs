@@ -344,8 +344,8 @@ fn map_write(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
     };
     let on = |kind, chat: &str| chat_scope(chat).map(|scope| Target::new(kind, scope));
     match (method, path.as_slice()) {
-        ("POST", ["users", "ME", "conversations", chat, "messages"]) => message_write(body?, chat, false),
-        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => message_write(body?, chat, true),
+        ("POST", ["users", "ME", "conversations", chat, "messages"]) => message_write(body?, chat, Post::New),
+        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => message_write(body?, chat, Post::Edit),
         ("DELETE", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Delete, chat),
         ("PUT" | "DELETE", ["users", "ME", "conversations", chat, "messages", _, "properties"])
             if name()? == "emotions" =>
@@ -376,17 +376,25 @@ fn chat_scope(id: &str) -> Option<Scope> {
     chat.then(|| Scope::Conversation { id: id.to_owned() })
 }
 
-/// A message post (`edit` false: a message or typing) or an edit (`edit` true: the whole message again, as the web
-/// client sends it) on the chat `chat`, its body read by [`strict_json`]; whoever it mentions is added ([`mentioned`]).
-/// An edit whose body isn't a message ([`message_kind`]), and a body that could reach beyond the chat ([`chat_only`]),
-/// are unknown.
-fn message_write(body: &[u8], chat: &str, edit: bool) -> Option<Target> {
+/// Which of the two message writes a request is.
+#[derive(Clone, Copy)]
+enum Post {
+    /// A new message or typing, posted to the chat.
+    New,
+    /// An edit: the whole message again, as the web client sends it.
+    Edit,
+}
+
+/// A message post or an edit ([`Post`]) on the chat `chat`, its body read by [`strict_json`]; whoever it mentions is
+/// added ([`mentioned`]). An edit whose body isn't a message ([`message_kind`]), and a body that could reach beyond the
+/// chat ([`chat_only`]), are unknown.
+fn message_write(body: &[u8], chat: &str, post: Post) -> Option<Target> {
     let body = strict_json(body)?;
     chat_only(&body)?;
-    let kind = match (message_kind(&body)?, edit) {
-        (kind, false) => kind,
-        (WriteKind::Message, true) => WriteKind::Edit,
-        (_, true) => return None,
+    let kind = match (message_kind(&body)?, post) {
+        (kind, Post::New) => kind,
+        (WriteKind::Message, Post::Edit) => WriteKind::Edit,
+        (_, Post::Edit) => return None,
     };
     Some(Target::new(kind, chat_scope(chat)?).with_added(mentioned(&body)?))
 }

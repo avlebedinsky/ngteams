@@ -49,7 +49,7 @@ use super::ab_chat::{
     enforce, load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, send, setup, wait_for_newest,
 };
 use super::ab_chat_full::{CHAT_OPEN, PAGE_CALL, message_action};
-use super::dsl::{Driver, RequestPattern, StepError};
+use super::dsl::{Driver, RequestPattern, StepError, js_string};
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
@@ -85,7 +85,7 @@ const PASTE_WAIT: Duration = Duration::from_secs(15);
 /// message showing an image, delivered or an earlier run's, is never marked, so it is never deleted.
 #[must_use]
 pub fn mark_unsent_image(caption: &str) -> String {
-    let caption = serde_json::Value::String(caption.to_owned());
+    let caption = js_string(caption);
     format!(
         r#"(() => {{
   for (const e of document.querySelectorAll('[data-lab-mark]')) e.removeAttribute('data-lab-mark');
@@ -218,9 +218,9 @@ fn png_chunk(png: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
 pub fn image_event(png: &[u8], file_name: &str, how: &str) -> String {
     use base64::Engine as _;
     let data = base64::engine::general_purpose::STANDARD.encode(png);
-    let file_name = serde_json::Value::String(file_name.to_owned());
-    let compose = serde_json::Value::String(COMPOSE_CSS.to_owned());
-    let how = serde_json::Value::String(how.to_owned());
+    let file_name = js_string(file_name);
+    let compose = js_string(COMPOSE_CSS);
+    let how = js_string(how);
     format!(
         r#"(() => {{
   const editor = document.querySelector({compose});
@@ -247,7 +247,7 @@ pub fn image_event(png: &[u8], file_name: &str, how: &str) -> String {
 pub fn compose_has_image() -> String {
     format!(
         "!!document.querySelector({})?.querySelector('img')",
-        serde_json::Value::String(COMPOSE_CSS.to_owned())
+        js_string(COMPOSE_CSS)
     )
 }
 

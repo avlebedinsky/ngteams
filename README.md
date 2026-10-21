@@ -68,7 +68,7 @@ outside the repo:
 | `…/auth/<alias>.json` | the account's region, partition, region GTMs and skypetoken expiry from `auth` (`0600`) |
 | `…/status-<alias>.json` | `login`'s steps, and why it stopped |
 | `…/media/tone-440.wav` | the fake microphone's tone for `echo-call` |
-| Secret Service, application `teams-lab` | refresh tokens and skypetokens, per account |
+| Secret Service, application `teams-lab` | refresh tokens and skypetokens (each with its expiry, capped at its Entra token's), per account |
 | lab-automation's `lab-accounts.json` (mode `0600`) | the lab accounts' passwords, read only by `login` |
 
 ## Building

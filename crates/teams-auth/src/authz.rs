@@ -16,9 +16,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderMap, WWW_AUTHENTICATE};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::claims::{payload, text, time};
@@ -30,6 +33,9 @@ use crate::token::{retry_after, seconds};
 pub const AUTHZ_ENDPOINT: &str = "https://teams.microsoft.com/api/authsvc/v1.0/authz";
 /// The audience name a skypetoken is stored under, next to the account's refresh token.
 pub const SKYPETOKEN: &str = "skypetoken";
+/// The audience name a stored skypetoken's expiry is kept under ([`skypetoken_expiry`]): its `exp`, or earlier when
+/// it was capped at the Entra token it was exchanged for, which a skypetoken read back must not outlive either.
+pub const SKYPETOKEN_EXPIRY: &str = "skypetoken-expiry";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest `errorCode` kept from a refusal; Teams' codes are short identifiers.
@@ -47,6 +53,23 @@ pub const CHAT_BASE_GTM: &str = "chatServiceAfd";
 #[must_use]
 pub fn skypetoken_key(account: &str) -> SecretKey {
     SecretKey::new(account, SKYPETOKEN)
+}
+
+/// Where the expiry of `account`'s stored skypetoken lives in a [`SecretStore`] ([`SKYPETOKEN_EXPIRY`]).
+#[must_use]
+pub fn skypetoken_expiry_key(account: &str) -> SecretKey {
+    SecretKey::new(account, SKYPETOKEN_EXPIRY)
+}
+
+/// What is stored under [`skypetoken_expiry_key`] for `token` expiring at `expires_at`: its Unix seconds, a space and
+/// the token's SHA-256 (base64url), which binds the expiry to the one token it was kept with.
+#[must_use]
+pub fn skypetoken_expiry(token: &Secret, expires_at: SystemTime) -> Secret {
+    Secret::new(format!("{} {}", unix_seconds(expires_at), token_digest(token)))
+}
+
+fn token_digest(token: &Secret) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(token.expose().as_bytes()))
 }
 
 /// Why the exchange is made, as the `ms-teams-authz-type` header tells Teams.
@@ -165,16 +188,36 @@ pub struct Skypetoken {
 }
 
 impl Skypetoken {
-    /// A skypetoken read back from a [`SecretStore`], with `region` (stored apart from it): `None` unless it is a JWT
-    /// with an `exp`, since an expiry that can't be read can't be trusted.
-    pub(crate) fn from_stored(token: Secret, region: Region) -> Option<Self> {
+    /// A skypetoken read back from a [`SecretStore`], with the `expiry` stored next to it ([`Self::store`]) and
+    /// `region` (stored apart from both): `None` unless it is a JWT with an `exp` and its stored expiry
+    /// ([`skypetoken_expiry`]) is readable and was kept with this token, since an expiry that can't be read, or is
+    /// another token's (one stored by another client between this one's two reads), can't be trusted. It expires at
+    /// the earlier of the two.
+    pub(crate) fn from_stored(token: Secret, expiry: Option<&Secret>, region: Region) -> Option<Self> {
         let claims = payload(token.expose())?;
+        let (seconds, digest) = expiry?.expose().split_once(' ')?;
+        if digest != token_digest(&token) {
+            return None;
+        }
+        let kept = UNIX_EPOCH.checked_add(Duration::from_secs(seconds.parse().ok()?))?;
         Some(Self {
-            expires_at: time(&claims, "exp")?,
+            expires_at: time(&claims, "exp")?.min(kept),
             skype_id: text(&claims, "skypeid"),
             region,
             token,
         })
+    }
+
+    /// Stores it under `account`, replacing the one there: the token, then its expiry ([`skypetoken_expiry`]). A
+    /// store failing between the two leaves the token with an expiry that isn't its own, which isn't read back
+    /// ([`Self::from_stored`]).
+    ///
+    /// # Errors
+    /// A store failure.
+    pub(crate) async fn store<S: SecretStore>(&self, store: &S, account: &str) -> Result<(), SecretError> {
+        store.put(&skypetoken_key(account), &self.token).await?;
+        let expiry = skypetoken_expiry(&self.token, self.expires_at);
+        store.put(&skypetoken_expiry_key(account), &expiry).await
     }
 }
 
@@ -297,8 +340,9 @@ impl AuthzClient {
         }
     }
 
-    /// [`Self::exchange`], then stores the skypetoken under `account` ([`skypetoken_key`]), replacing the one there.
-    /// On an error nothing is stored, and a skypetoken already stored is left as it was.
+    /// [`Self::exchange`], with the skypetoken's expiry capped at `spaces_expires_at` (the Entra token's), then stores
+    /// it under `account` ([`skypetoken_key`], its expiry under [`skypetoken_expiry_key`]), replacing the one there.
+    /// When the exchange fails nothing is stored, and a skypetoken already stored is left as it was.
     ///
     /// # Errors
     /// As [`Self::exchange`], or a store failure.
@@ -307,10 +351,12 @@ impl AuthzClient {
         store: &S,
         account: &str,
         spaces_token: &Secret,
+        spaces_expires_at: SystemTime,
         kind: AuthzKind,
     ) -> Result<Skypetoken, AuthzError> {
-        let skypetoken = self.exchange(spaces_token, kind).await?;
-        store.put(&skypetoken_key(account), &skypetoken.token).await?;
+        let mut skypetoken = self.exchange(spaces_token, kind).await?;
+        skypetoken.expires_at = skypetoken.expires_at.min(spaces_expires_at);
+        skypetoken.store(store, account).await?;
         Ok(skypetoken)
     }
 }
