@@ -1031,20 +1031,50 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 **Files:**
 - Create: `crates/teams-headless/tests/chat_live.rs` (`required-features = ["live"]`), `docs/m1-acceptance.md`
 
-- [ ] the live test is an orchestrator only: it opens no fence, holds no token and sends nothing. It spawns the
+- [x] the live test is an orchestrator only: it opens no fence, holds no token and sends nothing. It spawns the
       binary built by `cargo build -p teams-headless --target-dir target/lab` (path from `TEAMS_HEADLESS_BIN`; it
       fails if unset), reads its output and parses `fence.log`. A binary built with `test-support` refuses to run, so
       the test fails rather than writes
-- [ ] (`PROTO_LAB_LIVE=1`): native a sends N = 50 messages to b in the a–b chat; native b receives each over Trouter;
+      (`crates/teams-headless/tests/chat_live.rs`, feature `live`, skips without `PROTO_LAB_LIVE=1`; one process per
+      account at a time, each bounded, SIGINT then kill; outputs and `summary.json` under
+      `<data_dir>/headless/<time>-chat-live/`; checks every output for token-like strings. Run under the live lock as
+      README's `teams-headless` section shows)
+- [x] (`PROTO_LAB_LIVE=1`): native a sends N = 50 messages to b in the a–b chat; native b receives each over Trouter;
       **send → receive p95 under 2 s** (p50/p95/max reported)
+      (run 6, 2026-10-21 06:09Z: p50 1107 ms, p95 1370 ms, max 1499 ms; the post, start → `OriginalArrivalTime`, p50
+      877 / p95 1149, the delivery to b p50 234 / p95 306: most of the time is the post with its fresh member read.
+      Run 5 06:00Z passed too, p95 1586. Runs 1–4 failed on two `teams-trouter`/`teams-proto` bugs, fixed here with
+      tests: a delivery with a **negative socket.io id** (signed 32-bit; 267 of 2515 captured) was dropped as
+      unreadable (18, 3 and 3 of 50 lost), and a push URL whose **endpoint id held `-` or `_`** (base64url; 11 of 28
+      captured) was refused, so that connect went unregistered (run 2). Found with a new opt-in
+      `TEAMS_HEADLESS_LOG=debug`. Every run's `fence.log` window clean; `docs/m1-acceptance.md`)
 - [ ] an edit and a reaction (both arrive on b); a 3-person group chat of a, b and c (each message reaches both
       others), unless the user decided otherwise after Task 8
-- [ ] a catch-up check: b's socket closed, a sends, b reconnects and has every message exactly once
-- [ ] `fence.log` for the run: allows only on the lab chats, no deny of a mapped write, no own-state request or
+      (edit and reaction **met**: b saw them 1115 and 1168 ms after a's command started. ⚠️ The group chat is **being
+      fixed**: the user's decision of 2026-10-21 is that M1 doesn't exit on 1:1 chats only; group chats are fixed as
+      separate work after this task, the fence loosened if needed, and the group parts rerun after the fence change.
+      Until then the live test checks the fence's current answer: a's group message denied (`partial: unsupported`),
+      the row `denied`, nothing sent, b got nothing in the group chat. This box stays open for that rerun)
+- [x] a catch-up check: b's socket closed, a sends, b reconnects and has every message exactly once
+      (b's second watch caught up the 3 messages on connect; b's store held each of the run's 53 messages once)
+- [x] `fence.log` for the run: allows only on the lab chats, no deny of a mapped write, no own-state request or
       Trouter frame off the list, no delivery response (or, if Task 15 built them, only for lab chats), lines whole
+      (run 6: 73 whole lines; allows on the a–b chat only: message 53, edit, reaction, read receipt 1 each; own
+      `endpoint_registration` 2 and frames `trouter_authenticate` 2, `trouter_message_loss_ack` 6, `trouter_ping` 4,
+      `trouter_disconnect` 2; one deny, the group write above; nothing else. The test checks this itself)
 - [ ] `proto-lab run ab-chat --headless` and `abc-chat` exit 0
-- [ ] the gate passes; write `docs/m1-acceptance.md` (numbers, fence summary, flakes, any breached run next to its
+      (`ab-chat` **met**: exit 0 at 06:16Z, no breach. Its runs at 06:05Z and 06:12Z failed at "b receives the message", no
+      breach: the native runs left ~200 messages b's web client hadn't read, so it opened the chat at "last read" and
+      didn't render a's message (b's native read receipt, a step added to the live test with a new `teams-headless
+      read` command, moved b's stored horizon but not the web client's mark). `ab-chat` now clicks "Jump to newest"
+      while it waits (`ab_chat::wait_for_newest`, page test). ⚠️ `abc-chat` exits 1 by design before opening a
+      browser: its messaging part is **being fixed** with the group chat (the user's decision of 2026-10-21) and
+      reruns after the fence change; this box stays open for it)
+- [x] the gate passes; write `docs/m1-acceptance.md` (numbers, fence summary, flakes, any breached run next to its
       clean rerun)
+      (fmt, clippy workspace all-targets all-features, `scripts/lint-report.sh`, `PROTO_LAB_REQUIRE_CHROME=1 cargo test
+      --workspace --no-fail-fast`: 1064 passed, 0 failed, no flake, load ~4; fixture-guard after the doc edits. No
+      breached run: the native runs arm no browser, and the three `ab-chat` runs reported no breach or containment)
 
 ### Task 22: [Final] Update documentation
 - [ ] README.md: the M1 crates, `teams-headless`, the new scenarios and `probe`, tests
@@ -1091,7 +1121,9 @@ TEAMS_HEADLESS_BIN=target/lab/debug/teams-headless PROTO_LAB_LIVE=1 \
 - Approving any new service participant (none planned in M1).
 - After Task 8, only if the evidence doesn't show a group chat's member read complete: whether M1 exits on 1:1 chats
   (group chats on the mock only) or waits for more evidence. **Open since Task 8 (2026-10-20): the evidence didn't
-  show it** (`docs/backlog/group-chat-member-read-completeness.md`).
+  show it** (`docs/backlog/group-chat-member-read-completeness.md`). **Decided 2026-10-21: M1 doesn't exit on 1:1
+  chats only**; group chats are fixed as separate work after Task 21, the fence loosened if needed, and Task 21's
+  group parts rerun after the fence change.
 - After Task 14, only if unanswered chat deliveries harm the client: whether the native client may answer reviewed
   chat deliveries on lab-only chats (this revises the M0 rule that delivery responses stay denied).
 - Before M2: whether the user's own account passes Conditional Access with the native client (M0's open question 6 of

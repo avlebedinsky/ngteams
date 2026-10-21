@@ -16,6 +16,8 @@
 //!    id) must fail in a's page with `net::ERR_BLOCKED_BY_CLIENT`.
 //! 5. a sends the real message. b then opens the chat with a and must show it within [`DELIVERY`], and must not show
 //!    the probe: b reads the chat's history from the service, so the probe missing there means it never got there.
+//!    A chat with unread messages opens at its "last read" mark, the newest ones not rendered: b jumps to the newest
+//!    ([`wait_for_newest`]).
 //! 6. After the run, judged by [`policy`]: no deny but the two probes' forced ones and the reviewed expected-deny list
 //!    ([`super::expected`]), and nothing denied on the a–b chat but the probes.
 //!
@@ -269,9 +271,7 @@ impl Steps<'_> {
         drive_b
             .wait_for_request("b reads the a–b chat", &opened, CHAT_OPEN)
             .await?;
-        drive_b
-            .wait_for_text("b receives the message", &message, DELIVERY)
-            .await?;
+        wait_for_newest(&mut drive_b, "b receives the message", &message, DELIVERY).await?;
         report.notes.push("a's message reached b".to_owned());
         not_received(&mut drive_b, &probe).await?;
         report
@@ -279,6 +279,29 @@ impl Steps<'_> {
             .push("enforcement: b's copy of the chat has the message and not the probe".to_owned());
         Ok(())
     }
+}
+
+/// The button the web client shows over a chat it opened at its "last read" mark, with unread messages below (the lab
+/// accounts' web client is in English).
+pub const JUMP_TO_NEWEST: &str = "Jump to newest";
+
+/// Waits up to `timeout` for `text` in the page, clicking [`JUMP_TO_NEWEST`] whenever it shows: a chat with unread
+/// messages opens at its "last read" mark, and the messages below it aren't rendered, so their text isn't in the page
+/// (a native client's run in the same chat leaves dozens of them). A click only scrolls the chat.
+///
+/// # Errors
+/// [`StepError::Timeout`] when the text doesn't show in time.
+pub async fn wait_for_newest(drive: &mut Driver, step: &str, text: &str, timeout: Duration) -> Result<(), StepError> {
+    let expression = format!(
+        "(() => {{ if ((document.body?.innerText ?? '').includes({text})) return true; \
+         const jump = [...document.querySelectorAll('button')].find(b => (b.innerText ?? '').trim() === {jump}); \
+         if (jump) jump.click(); return false; }})()",
+        text = serde_json::Value::String(text.to_owned()),
+        jump = serde_json::Value::String(JUMP_TO_NEWEST.to_owned()),
+    );
+    drive
+        .wait_until_true(step, &expression, &format!("the text {text:?}"), timeout)
+        .await
 }
 
 /// The other half of the live enforcement test, on b's page once it has read the chat's history from the service and

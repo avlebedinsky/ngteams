@@ -242,6 +242,25 @@ fn the_captured_chat_updates_read_as_a_chat_update_and_the_read_horizon() {
 }
 
 #[test]
+fn a_delivery_with_a_negative_id_is_read() {
+    // the service's delivery ids are signed 32-bit numbers: about one in ten live ones is negative
+    for id in ["-2134536761", "-1", "0", "2135268894"] {
+        let frame = format!(
+            r#"3:::{{"id":{id},"method":"POST","url":"/v4/f/E/messaging","headers":{{}},"body":"{{\"resourceType\":\"NewMessage\",\"resource\":{{\"id\":\"1\",\"messagetype\":\"Text\",\"to\":\"19:x@thread.v2\"}}}}"}}"#
+        );
+        let Incoming::Delivery(raw) = decode(&frame).unwrap() else {
+            panic!("{id}: a delivery");
+        };
+        assert_eq!(raw.id.to_string(), id);
+        assert_eq!(Delivery::from_raw(&raw).id, raw.id);
+    }
+    for id in ["1.5", "\"7\"", "null"] {
+        let frame = format!(r#"3:::{{"id":{id},"method":"POST","url":"/v4/f/E/messaging","headers":{{}},"body":""}}"#);
+        assert!(decode(&frame).is_err(), "{id}");
+    }
+}
+
+#[test]
 fn a_stored_replay_is_told_from_a_live_delivery_and_an_unknown_kind_is_kept_by_its_name() {
     let stored = r#"3:::{"id":7,"method":"POST","url":"/v4/f/E/messaging","headers":{"trouter-request":"{\"id\":\"x\",\"mstore\":true,\"flow\":\"messaging\",\"seq\":3}"},"body":"{\"type\":\"EventMessage\",\"resourceType\":\"ThreadUpdate\",\"resource\":{}}"}"#;
     let Incoming::Delivery(raw) = decode(stored).unwrap() else {

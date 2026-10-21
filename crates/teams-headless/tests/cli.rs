@@ -50,7 +50,9 @@ fn help_names_every_command() {
     let output = Command::new(BINARY).arg("--help").output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let help = String::from_utf8(output.stdout).unwrap();
-    for command in ["sync", "list", "show", "send", "edit", "delete", "react", "watch"] {
+    for command in [
+        "sync", "list", "show", "send", "edit", "delete", "react", "read", "watch",
+    ] {
         assert!(
             help.lines().any(|line| line.trim_start().starts_with(command)),
             "{command}: {help}"
@@ -507,6 +509,36 @@ async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
     b.shutdown();
     a.shutdown();
     lists_and_shows_the_edited_message(&lab, &id, arrival);
+}
+
+#[tokio::test]
+async fn b_s_read_moves_its_read_horizon_up_to_a_s_message() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+    commands::sync(&a, &mut Vec::new()).await.unwrap();
+    let (state, sent) = write(&mut a, post("read me, b")).await;
+    assert_eq!(state, OutboxState::Sent, "{sent:?}");
+    let id = field(&sent, "message_id").to_owned();
+    let mut b = lab.engine(LAB_B, false);
+    commands::sync(&b, &mut Vec::new()).await.unwrap();
+    let read = Action::Read {
+        conversation: AB_CHAT.to_owned(),
+        message_id: id.clone(),
+    };
+    let (state, printed) = write(&mut b, read).await;
+    assert_eq!(state, OutboxState::Sent, "{printed:?}");
+    let keys: Vec<&str> = printed.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(keys, ["start_ms", "message_id", "state"], "{printed:?}");
+    let horizons = lab
+        .mock
+        .received_requests()
+        .await
+        .into_iter()
+        .filter(|request| request.method.as_str() == "PUT" && request.url.query() == Some("name=consumptionhorizon"))
+        .count();
+    assert_eq!(horizons, 1, "b's read receipt reached the service once");
+    a.shutdown();
+    b.shutdown();
 }
 
 /// a's store as `list` and `show` print it: the a–b chat, and in it a's message `id`, edited, with a's like.

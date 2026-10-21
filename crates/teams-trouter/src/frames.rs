@@ -38,7 +38,9 @@ pub struct Event {
 /// A delivery as it came: `{"id":…,"method":…,"url":…,"headers":{…},"body":"<text>"}`.
 #[derive(Clone, PartialEq)]
 pub struct RawDelivery {
-    pub id: u64,
+    /// The socket.io message's id: a signed 32-bit number, negative for about one delivery in ten (the captures,
+    /// and an M1 Task 21 live run that lost those deliveries while it read the id as unsigned).
+    pub id: i64,
     pub method: String,
     /// The push URL's path (`/v4/f/<endpoint id>/messaging`).
     pub url: String,
@@ -107,7 +109,11 @@ pub fn decode(text: &str) -> Result<Incoming, DecodeError> {
         }),
         1 => Ok(Incoming::Connect),
         2 => Ok(Incoming::Heartbeat),
-        3 => data.and_then(delivery).map(Incoming::Delivery).ok_or(invalid),
+        3 => data
+            .and_then(delivery)
+            .map(Incoming::Delivery)
+            .ok_or(invalid)
+            .inspect_err(|_| log::debug!("trouter: {}", unreadable_delivery(data))),
         5 => event(id, data.ok_or(invalid)?).map(Incoming::Event).ok_or(invalid),
         6 => ack(data.ok_or(invalid)?).ok_or(invalid),
         other => Ok(Incoming::Other { kind: other }),
@@ -125,7 +131,7 @@ fn delivery(data: &str) -> Option<RawDelivery> {
     };
     let text = |fields: &Map<String, Value>, key: &str| fields.get(key).and_then(Value::as_str).map(str::to_owned);
     Some(RawDelivery {
-        id: fields.get("id")?.as_u64()?,
+        id: fields.get("id")?.as_i64()?,
         method: text(&fields, "method")?,
         url: text(&fields, "url")?,
         body: text(&fields, "body").unwrap_or_default(),
@@ -135,6 +141,47 @@ fn delivery(data: &str) -> Option<RawDelivery> {
             Some(_) => return None,
         },
     })
+}
+
+/// Why a delivery's data didn't read, by its shape only: its length, the JSON error's kind and position, the fields
+/// missing or of another type; never a value.
+fn unreadable_delivery(data: Option<&str>) -> String {
+    let Some(data) = data else {
+        return "a delivery without data".to_owned();
+    };
+    let fields = match serde_json::from_str::<Value>(data) {
+        Ok(Value::Object(fields)) => fields,
+        Ok(_) => return format!("a delivery of {} bytes that isn't a JSON object", data.len()),
+        Err(error) => {
+            return format!(
+                "a delivery of {} bytes that isn't JSON: {:?} at line {} column {}",
+                data.len(),
+                error.classify(),
+                error.line(),
+                error.column()
+            );
+        }
+    };
+    let kind = |key: &str| match fields.get(key) {
+        None => "missing",
+        Some(Value::String(_)) => "string",
+        Some(Value::Number(number)) if number.is_i64() => "integer",
+        Some(Value::Number(_)) => "number",
+        Some(Value::Object(_)) => "object",
+        Some(Value::Array(_)) => "array",
+        Some(Value::Bool(_)) => "bool",
+        Some(Value::Null) => "null",
+    };
+    format!(
+        "a delivery of {} bytes: id {}, method {}, url {}, body {}, headers {}; keys {:?}",
+        data.len(),
+        kind("id"),
+        kind("method"),
+        kind("url"),
+        kind("body"),
+        kind("headers"),
+        fields.keys().collect::<Vec<_>>()
+    )
 }
 
 /// `<id>[+]` and the event's JSON.

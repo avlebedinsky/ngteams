@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+# `TEAMS_HEADLESS_LOG=debug`: our crates' debug lines on stderr (src/debug_log.rs); capped at `debug` at compile time,
+# as teams-trouter takes it
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
 # `watch --json`: one JSON object per event
 serde_json.workspace = true
 # the account's tokens: its refresh token and skypetoken in the Secret Service (`teams-lab`), renewed by its session
@@ -31,6 +34,15 @@ teams-mock.workspace = true
 teams-proto = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[features]
+# builds the live acceptance test (`tests/chat_live.rs`); it still runs only with PROTO_LAB_LIVE=1, so `--all-features`
+# stays offline
+live = []
+
+[[test]]
+name = "chat_live"
+required-features = ["live"]
 
 [lints]
 workspace = true

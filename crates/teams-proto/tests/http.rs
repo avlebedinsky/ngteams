@@ -500,6 +500,14 @@ fn a_registration_names_only_a_guid_endpoint_and_a_trouter_push_url() {
         EndpointRegistration::messaging(EPID, "https://pub-ent-zz-01-f.trouter.teams.microsoft.com/v4/f/Abc123/")
             .is_some()
     );
+    // the endpoint id is base64url: live ids carry `-` and `_` (an `_` refused once cost a whole run its registration)
+    for url in [
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/Synthetic_Endpoint0000A/",
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/Synthetic-Endpoint0000A/",
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/-Synthetic_Endpoint000_/",
+    ] {
+        assert!(EndpointRegistration::messaging(EPID, url).is_some(), "{url}");
+    }
     for epid in [
         "",
         "not-a-guid",
@@ -521,6 +529,10 @@ fn a_registration_names_only_a_guid_endpoint_and_a_trouter_push_url() {
         "https://user@x.trouter.teams.microsoft.com/v4/f/abc/",
         "https://X.trouter.teams.microsoft.com/v4/f/abc/",
         "https://x.trouter.teams.microsoft.com/v4/c/abc/",
+        "https://x.trouter.teams.microsoft.com/v4/f/ab.c/",
+        "https://x.trouter.teams.microsoft.com/v4/f/ab%2Fc/",
+        "https://x.trouter.teams.microsoft.com/v4/f/ab+c/",
+        "https://x.trouter.teams.microsoft.com/v4/f/ab=/",
     ] {
         assert!(EndpointRegistration::messaging(EPID, url).is_none(), "{url}");
     }

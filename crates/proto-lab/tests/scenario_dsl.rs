@@ -312,6 +312,26 @@ async fn ab_chat_sends_and_a_stalled_page_fails_its_steps_in_time() -> TestResul
     .await
 }
 
+/// A chat opened at its "last read" mark: the newest message shows only after "Jump to newest".
+const LAST_READ_PAGE: &str = r#"<!doctype html><html><body><div id="list">an older message</div>
+<button onclick="setTimeout(() => { document.getElementById('list').insertAdjacentHTML('beforeend',
+'<div>the newest message</div>'); this.remove(); }, 100)">Jump to newest</button></body></html>"#;
+
+#[tokio::test]
+async fn ab_chat_jumps_to_the_newest_message_of_a_chat_opened_at_its_last_read_mark() -> TestResult {
+    with_html(LAST_READ_PAGE, async |run| {
+        assert!(!run.driver.shows_text("before", "the newest message").await?);
+        ab_chat::wait_for_newest(&mut run.driver, "b", "the newest message", Duration::from_secs(5)).await?;
+        let error = ab_chat::wait_for_newest(&mut run.driver, "b", "never sent", Duration::from_millis(500))
+            .await
+            .err()
+            .ok_or("a text that never shows was found")?;
+        assert!(matches!(error, StepError::Timeout { .. }), "{error:?}");
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test]
 async fn typing_and_enter_send_and_the_text_shows() -> TestResult {
     with_page(async |run| {

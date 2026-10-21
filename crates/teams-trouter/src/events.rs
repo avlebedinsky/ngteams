@@ -23,8 +23,8 @@ use crate::frames::RawDelivery;
 /// A chat delivery: its event, whether it is a stored replay, and the service's id for it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Delivery {
-    /// The socket.io message's `id` (the same for a stored delivery from one connect to the next).
-    pub id: u64,
+    /// The socket.io message's `id` (the same for a stored delivery from one connect to the next), signed.
+    pub id: i64,
     /// `X-Microsoft-Skype-Message-ID`: at most a hint for telling deliveries apart.
     pub message_id: Option<String>,
     /// A stored delivery, replayed on connect (`"mstore":true`).
@@ -95,6 +95,7 @@ impl ChatEvent {
             return unknown("");
         };
         let resource_type = body["resourceType"].as_str().unwrap_or_default();
+        log::debug!("trouter: a delivery of kind {resource_type:?}");
         let resource = &body["resource"];
         let event = match resource_type {
             "NewMessage" => new_message(resource),

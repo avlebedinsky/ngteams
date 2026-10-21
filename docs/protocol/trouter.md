@@ -79,7 +79,9 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
 - **Registration**: the messaging stack's, as `teams_proto::EndpointRegistration` (an own-state request, logged
   first): the body above with `templateKey` `TeamsCDLWebWorker_2.6` and `platformUIVersion` the `tc`'s `v`, on every
   `trouter.connected`, again 30 s before its hour ends, after a failure again 123 s later. The transport sends the
-  registrar `X-MS-Migration: True` and `X-Ms-Test-User: False` with the token.
+  registrar `X-MS-Migration: True` and `X-Ms-Test-User: False` with the token. The push URL's endpoint id is
+  base64url; until M1 Task 21 the registration refused one with a `-` or `_` (11 of the 28 ids in the captures), so such an
+  endpoint went unregistered and got no deliveries.
 - **Reconnect**: at once for a renewal, a missing pong, an `unauthorized` disconnect (with a new token) or a `dup`,
   but never twice within 10 s; otherwise after a backoff of `1 s · 2^n` ±20 %, capped at 300 s, whose count starts
   again after a connection stayed up a minute; a throttled token service's `Retry-After` is a floor on that wait,
@@ -127,7 +129,7 @@ name>","se":"<ms>","st":"<ms>"}}]}`
 
 | field | meaning |
 |---|---|
-| `id` | the endpoint (connection) id; the last part of the push URLs |
+| `id` | the endpoint (connection) id, 22 base64url characters (letters, digits, `-`, `_`); the last part of the push URLs |
 | `ccid` | a short form of `id` |
 | `url`, `surl` | the push URLs, `https://<name>-f.trouter.teams.microsoft.com:8443/v4/f/<id>/` and the same on `:3443`; the registration names `surl` |
 | `curlb` | `https://<name>-t.trouter.teams.microsoft.com:443`, a base for client-to-client links |
@@ -183,6 +185,9 @@ Chat events reach the **messaging stack's** socket as socket.io messages:
 
 `3:::{"id":<number>,"method":"POST","url":"/v4/f/<endpoint id>/messaging","headers":{…},"body":"<json text>"}`
 
+- `id` is a signed 32-bit number: of the 2515 deliveries in the captures 267 had a negative one. Until M1 Task 21 the
+  native client read it as unsigned and silently dropped those deliveries (3 to 18 of 50 messages in a live run); it
+  reads it signed now.
 - Headers: `X-Trouter-Delivery-Control: async; ttl=900; flow=messaging; prio=normal` (typing adds
   `resilience=nostorenoloss`), `X-Microsoft-Skype-Message-ID` (a GUID per delivery), `trouter-request`
   (`{"id":"<guid>","src":"<address>","port":3443}`), `Trouter-Timeout` / `Trouter-TimeoutMs` (about 117 s), `MS-CV`,

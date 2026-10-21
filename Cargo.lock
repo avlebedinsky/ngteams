@@ -6375,6 +6375,7 @@ name = "teams-headless"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "log",
  "serde_json",
  "teams-auth",
  "teams-core",

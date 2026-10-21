@@ -830,6 +830,13 @@ impl Link {
             .endpoint
             .as_ref()
             .is_some_and(|endpoint| raw.url == format!("/v4/f/{endpoint}/messaging"));
+        // the delivery's number and kind of path only, never its body or headers
+        log::debug!(
+            "trouter: delivery {} stored={} ours={ours} body_bytes={}",
+            raw.id,
+            raw.is_stored(),
+            raw.body.len()
+        );
         if ours {
             PushEvent::Delivery(Delivery::from_raw(raw))
         } else {

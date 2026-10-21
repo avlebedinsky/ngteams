@@ -32,6 +32,7 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    teams_headless::debug_log::init_from_env();
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -164,6 +165,13 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
             };
             (action, wait)
         }
+        Command::Read { chat, message, wait } => (
+            Action::Read {
+                conversation: conversation(lab, &chat)?,
+                message_id: message,
+            },
+            wait,
+        ),
         Command::Sync | Command::List { .. } | Command::Show { .. } | Command::Watch { .. } => {
             return Err("not a write".into());
         }

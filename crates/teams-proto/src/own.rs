@@ -69,8 +69,8 @@ pub struct EndpointRegistration {
 impl EndpointRegistration {
     /// The registration of the endpoint `registration_id` (a GUID in lowercase hex with dashes, the socket's `epid`)
     /// at `push_url`; `None` unless `push_url` is a Trouter push URL as written: `https`, a host `<name>` +
-    /// [`TROUTER_DOMAIN`] (letters, digits, `-`), an optional port, the path `/v4/f/<endpoint id>/` (letters and
-    /// digits), no query, fragment or user info.
+    /// [`TROUTER_DOMAIN`] (letters, digits, `-`), an optional port, the path `/v4/f/<endpoint id>/` (base64url: letters,
+    /// digits, `-`, `_`), no query, fragment or user info.
     #[must_use]
     pub fn messaging(registration_id: &str, push_url: &str) -> Option<Self> {
         (is_guid(registration_id) && is_push_url(push_url)).then(|| Self {
@@ -153,7 +153,10 @@ fn is_push_url(text: &str) -> bool {
         && !name.is_empty()
         && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         && !endpoint.is_empty()
-        && endpoint.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        // the endpoint id is base64url: letters, digits, `-` and `_` (live ids carry both)
+        && endpoint
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
         && url.query().is_none()
         && url.fragment().is_none()
         && url.username().is_empty()

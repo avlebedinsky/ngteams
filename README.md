@@ -156,6 +156,7 @@ teams-headless a send b 'hello'           # a post; prints start_ms, original_ar
 teams-headless a edit b <message> 'text'  # one of a's messages, edited
 teams-headless a delete b <message>       # one of a's messages, deleted
 teams-headless a react b <message> like [--remove]
+teams-headless b read a <message>         # b's read horizon in the a–b chat moved up to that message (a read receipt)
 teams-headless b watch [--json]           # every event of the push channel with its receive time, until SIGINT/SIGTERM
 ```
 
@@ -163,7 +164,18 @@ A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab
 recorded in `chats.toml`), or a conversation id. Each write first catches up (its summary on stderr), then waits up to
 `--wait` seconds (120) for a write that has to wait out a `Retry-After`; it exits non-zero unless the write went
 through. `watch` answers no delivery and no call; it exits 0 on SIGINT or SIGTERM, non-zero when the push channel
-stopped on its own.
+stopped on its own. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on stderr (Trouter's packets and
+deliveries by kind and size, never a payload); nothing else is logged.
+
+The live acceptance test (M1 Task 21, `tests/chat_live.rs`) only spawns a normally built binary and reads its output
+and `fence.log`; run it under the live lock:
+
+```sh
+cargo build -p teams-headless --target-dir target/lab
+flock ~/.local/share/teams-lab/live.lock timeout --signal=INT --kill-after=60 1500 \
+  env TEAMS_HEADLESS_BIN=$PWD/target/lab/debug/teams-headless PROTO_LAB_LIVE=1 \
+  cargo test -p teams-headless --features live --test chat_live -- --nocapture
+```
 
 ## Captures and fixtures
 

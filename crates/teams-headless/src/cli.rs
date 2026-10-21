@@ -90,6 +90,17 @@ pub enum Command {
         #[arg(long, default_value_t = DEFAULT_WAIT_SECS)]
         wait: u64,
     },
+    /// Moves the account's read horizon in a chat up to a message (a read receipt, which the chat's members may see),
+    /// after a catch-up.
+    Read {
+        /// `a`, `b`, `c`, `abc` or a conversation id.
+        chat: ChatArg,
+        /// The message's id.
+        message: String,
+        /// Seconds to wait for a write that waits to settle.
+        #[arg(long, default_value_t = DEFAULT_WAIT_SECS)]
+        wait: u64,
+    },
     /// Listens on the push channel (Trouter) until SIGINT or SIGTERM, catching up on every connect; prints each event
     /// as it is received, with its receive time. Answers no delivery and no call.
     Watch {
