@@ -1060,13 +1060,14 @@ included, stays denied without a read. Designed with Codex (transcript
       unreadable (18, 3 and 3 of 50 lost), and a push URL whose **endpoint id held `-` or `_`** (base64url; 11 of 28
       captured) was refused, so that connect went unregistered (run 2). Found with a new opt-in
       `TEAMS_HEADLESS_LOG=debug`. Every run's `fence.log` window clean; `docs/m1-acceptance.md`)
-- [ ] an edit and a reaction (both arrive on b); a 3-person group chat of a, b and c (each message reaches both
+- [x] an edit and a reaction (both arrive on b); a 3-person group chat of a, b and c (each message reaches both
       others), unless the user decided otherwise after Task 8
-      (edit and reaction **met**: b saw them 1115 and 1168 ms after a's command started. ⚠️ The group chat is **being
-      fixed**: the user's decision of 2026-10-21 is that M1 doesn't exit on 1:1 chats only; group chats are fixed as
-      separate work after this task, the fence loosened if needed, and the group parts rerun after the fence change.
-      Until then the live test checks the fence's current answer: a's group message denied (`partial: unsupported`),
-      the row `denied`, nothing sent, b got nothing in the group chat. This box stays open for that rerun)
+      (edit and reaction **met**: b saw them 1115 and 1168 ms after a's command started (run 7: 1235 and 1044). The
+      group chat **met** after the fence change (the user's decision of 2026-10-21; the fence admits only the lab's
+      recorded `abc` chat when both member reads agree on exactly a, b and c, an accepted assumption, not evidence:
+      CLAUDE.md, `fence-targets.md` "The lab's group chat"): live run 7, 07:44Z, c with a watch of its own, a's 10
+      messages to `abc` each reached b and c, send → receive p50/p95 1285/1621 ms at b and 1303/1615 at c, each once
+      in b's and c's stores; `chat_live.rs` now checks this instead of the deny. `docs/m1-acceptance.md` §2)
 - [x] a catch-up check: b's socket closed, a sends, b reconnects and has every message exactly once
       (b's second watch caught up the 3 messages on connect; b's store held each of the run's 53 messages once)
 - [x] `fence.log` for the run: allows only on the lab chats, no deny of a mapped write, no own-state request or
@@ -1074,19 +1075,22 @@ included, stays denied without a read. Designed with Codex (transcript
       (run 6: 73 whole lines; allows on the a–b chat only: message 53, edit, reaction, read receipt 1 each; own
       `endpoint_registration` 2 and frames `trouter_authenticate` 2, `trouter_message_loss_ack` 6, `trouter_ping` 4,
       `trouter_disconnect` 2; one deny, the group write above; nothing else. The test checks this itself)
-- [ ] `proto-lab run ab-chat --headless` and `abc-chat` exit 0
+- [x] `proto-lab run ab-chat --headless` and `abc-chat` exit 0
       (`ab-chat` **met**: exit 0 at 06:16Z, no breach. Its runs at 06:05Z and 06:12Z failed at "b receives the message", no
       breach: the native runs left ~200 messages b's web client hadn't read, so it opened the chat at "last read" and
       didn't render a's message (b's native read receipt, a step added to the live test with a new `teams-headless
       read` command, moved b's stored horizon but not the web client's mark). `ab-chat` now clicks "Jump to newest"
-      while it waits (`ab_chat::wait_for_newest`, page test). ⚠️ `abc-chat` exits 1 by design before opening a
-      browser: its messaging part is **being fixed** with the group chat (the user's decision of 2026-10-21) and
-      reruns after the fence change; this box stays open for it)
+      while it waits (`ab_chat::wait_for_newest`, page test). After the fence change: `abc-chat` **exit 0** at 07:43Z
+      (a's probe force-denied and failed in a's page, a's message shown by b's and c's web clients; allows only on the
+      `abc` chat, no breach; its first attempt at 07:42Z never opened a browser, the `TMPDIR` given didn't exist yet).
+      `ab-chat` again **exit 0** at 07:52Z; its 07:48Z run failed at "b receives the message", no breach: b's client
+      showed a "New messages" pill instead of "Jump to newest", which `wait_for_newest` now clicks too, page test)
 - [x] the gate passes; write `docs/m1-acceptance.md` (numbers, fence summary, flakes, any breached run next to its
       clean rerun)
       (fmt, clippy workspace all-targets all-features, `scripts/lint-report.sh`, `PROTO_LAB_REQUIRE_CHROME=1 cargo test
       --workspace --no-fail-fast`: 1064 passed, 0 failed, no flake, load ~4; fixture-guard after the doc edits. No
-      breached run: the native runs arm no browser, and the three `ab-chat` runs reported no breach or containment)
+      breached run: the native runs arm no browser, and the three `ab-chat` runs reported no breach or containment.
+      After the group runs: the gate again, 1081 passed, 0 failed, load 9–23; fixture-guard after the doc edits)
 
 ### Task 22: [Final] Update documentation
 - [ ] README.md: the M1 crates, `teams-headless`, the new scenarios and `probe`, tests

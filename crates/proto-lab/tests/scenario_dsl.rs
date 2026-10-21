@@ -317,9 +317,15 @@ const LAST_READ_PAGE: &str = r#"<!doctype html><html><body><div id="list">an old
 <button onclick="setTimeout(() => { document.getElementById('list').insertAdjacentHTML('beforeend',
 '<div>the newest message</div>'); this.remove(); }, 100)">Jump to newest</button></body></html>"#;
 
-#[tokio::test]
-async fn ab_chat_jumps_to_the_newest_message_of_a_chat_opened_at_its_last_read_mark() -> TestResult {
-    with_html(LAST_READ_PAGE, async |run| {
+/// The same chat with the web client's other pill, "New messages", a `role="button"` element with an icon.
+const NEW_MESSAGES_PAGE: &str = r#"<!doctype html><html><body><div id="list">an older message</div>
+<div role="button" onclick="setTimeout(() => { document.getElementById('list').insertAdjacentHTML('beforeend',
+'<div>the newest message</div>'); this.remove(); }, 100)"><svg width="8" height="8"></svg>
+New messages </div></body></html>"#;
+
+/// `wait_for_newest` on `page`: the newest message shows after the click, and a text that never shows times out.
+async fn jumps_to_the_newest_message(page: &'static str) -> TestResult {
+    with_html(page, async |run| {
         assert!(!run.driver.shows_text("before", "the newest message").await?);
         ab_chat::wait_for_newest(&mut run.driver, "b", "the newest message", Duration::from_secs(5)).await?;
         let error = ab_chat::wait_for_newest(&mut run.driver, "b", "never sent", Duration::from_millis(500))
@@ -330,6 +336,16 @@ async fn ab_chat_jumps_to_the_newest_message_of_a_chat_opened_at_its_last_read_m
         Ok(())
     })
     .await
+}
+
+#[tokio::test]
+async fn ab_chat_jumps_to_the_newest_message_of_a_chat_opened_at_its_last_read_mark() -> TestResult {
+    jumps_to_the_newest_message(LAST_READ_PAGE).await
+}
+
+#[tokio::test]
+async fn ab_chat_follows_the_new_messages_pill_too() -> TestResult {
+    jumps_to_the_newest_message(NEW_MESSAGES_PAGE).await
 }
 
 #[tokio::test]

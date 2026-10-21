@@ -9,17 +9,19 @@
 //!   each; every one reaches b over Trouter, and the time from a's send start to b's receive has a p95 under
 //!   [`P95_LIMIT_MS`] (p50, p95 and max reported, with the post and the delivery apart).
 //! - a edits its first message and reacts to it; both reach b.
-//! - The a–b–c group chat: its member read can't be shown complete (M1 Task 8), so the fence denies a group write
-//!   (`Partial(Unsupported)`) and nothing goes out; the test checks exactly that, and that b receives nothing in the
-//!   group chat. Group chats are being fixed (the user's decision of 2026-10-21: M1 doesn't exit on 1:1 chats only;
-//!   `docs/backlog/group-chat-member-read-completeness.md`); once the fence lets a group write out, this part changes
-//!   to "each message reaches both others".
+//! - The a–b–c group chat (`chats.toml`'s `abc`): c watches too, in a process of its own; a sends
+//!   [`GROUP_MESSAGES`] messages to the group chat, and each reaches both b's and c's watch (latencies reported per
+//!   receiver, not held to a limit). The fence lets these writes out only because it reads this one recorded chat as
+//!   complete when both of its member reads agree on exactly a, b and c: an assumption the user accepted on
+//!   2026-10-21, not evidence (`CLAUDE.md`, `docs/protocol/fence-targets.md`, "The lab's group chat").
 //! - Catch-up: b's watch stops (its socket closes), a sends [`GAP_MESSAGES`] more, b watches again, and b's store then
 //!   has every message of the run exactly once (each catch-up must sync every conversation); then b reads the chat up
 //!   to the run's last message: a read receipt, which moves b's stored read horizon (the consumption horizon) but not
 //!   b's web client's "last read" mark (`ab_chat::wait_for_newest` deals with that).
-//! - `fence.log` over the run: whole lines; allows only on the a–b chat (message, edit, reaction, read receipt); one
-//!   deny, the group write; only reviewed own-state requests and own Trouter frames; nothing else (no breach, no delivery response).
+//! - b's store holds every group message exactly once, and so does c's.
+//! - `fence.log` over the run: whole lines; allows only on the a–b chat (message, edit, reaction, read receipt) and
+//!   messages on the recorded group chat; no deny at all, so none of a mapped write; only reviewed own-state requests
+//!   and own Trouter frames; nothing else (no write on any other chat, no breach, no delivery response).
 //!
 //! Built only with `--features live`, and even then it skips unless `PROTO_LAB_LIVE=1`, so
 //! `cargo test --all-features` stays offline. Run it under the lab's live lock (`flock
@@ -45,16 +47,16 @@ use teams_proto::{Authenticate, Disconnect, EndpointRegistration, MessageLossAck
 const MESSAGES: usize = 50;
 /// How many messages a sends while b's watch is down.
 const GAP_MESSAGES: usize = 3;
+/// How many messages a sends to the a–b–c group chat while b and c watch.
+const GROUP_MESSAGES: usize = 10;
 /// The acceptance target for a's send start → b's receive, at the 95th percentile.
 const P95_LIMIT_MS: i64 = 2000;
 /// How long one one-shot command may take.
 const COMMAND_LIMIT: Duration = Duration::from_secs(180);
-/// How long b's watch may take to register and catch up.
+/// How long a watch may take to register and catch up.
 const READY_LIMIT: Duration = Duration::from_secs(180);
-/// How long a message, an edit or a reaction may take to reach b after its send returned.
+/// How long a message, an edit or a reaction may take to reach a watch after its send returned.
 const ARRIVAL_LIMIT: Duration = Duration::from_secs(60);
-/// How long b listens after the group write was denied, for anything arriving in the group chat.
-const QUIET: Duration = Duration::from_secs(10);
 /// How long b's second watch stays up after it caught up.
 const SETTLE: Duration = Duration::from_secs(10);
 /// How many messages `show` reads back: every message of the run, with room to spare.
@@ -272,7 +274,12 @@ struct Sent {
 
 /// a sends `text` to b; fails unless it went through.
 fn send(live: &Live, name: &str, text: &str) -> Sent {
-    let run = live.run(name, &["a", "send", "b", text]);
+    send_to(live, name, "b", text)
+}
+
+/// a sends `text` to `chat` (as `teams-headless` names a chat: `b`, `abc`); fails unless it went through.
+fn send_to(live: &Live, name: &str, chat: &str, text: &str) -> Sent {
+    let run = live.run(name, &["a", "send", chat, text]);
     assert!(run.status.success(), "{name}: {:?}\n{}", run.status, run.stdout);
     assert_eq!(run.field("state"), Some("sent"), "{name}");
     Sent {
@@ -283,13 +290,13 @@ fn send(live: &Live, name: &str, text: &str) -> Sent {
     }
 }
 
-/// When b received a message event of `change` for `id` in the a–b chat (the first one).
-fn received(events: &[Value], ab_chat: &str, id: &str, change: &str) -> Option<i64> {
+/// When a watch received a message event of `change` for `id` in `chat` (the first one).
+fn received(events: &[Value], chat: &str, id: &str, change: &str) -> Option<i64> {
     events
         .iter()
         .find(|event| {
             event["event"] == "message"
-                && event["conversation"] == ab_chat
+                && event["conversation"] == chat
                 && event["id"] == id
                 && event["change"] == change
         })
@@ -316,16 +323,16 @@ fn stats(mut values: Vec<i64>) -> Value {
     })
 }
 
-/// Latency per message: send start → b's receive, and its two parts (start → `OriginalArrivalTime`, the post; and
-/// `OriginalArrivalTime` → b's receive, the delivery; the service's clock against ours, so either part may be off by
-/// the clocks' skew).
-fn latency(sent: &[Sent], watch: &Watch, ab_chat: &str) -> Value {
+/// Latency per message in `chat`: send start → the watch's receive, and its two parts (start →
+/// `OriginalArrivalTime`, the post; and `OriginalArrivalTime` → the receive, the delivery; the service's clock against
+/// ours, so either part may be off by the clocks' skew).
+fn latency(sent: &[Sent], watch: &Watch, chat: &str) -> Value {
     let events = watch.events();
     let mut total = Vec::new();
     let mut post = Vec::new();
     let mut delivery = Vec::new();
     for message in sent {
-        let receive = received(&events, ab_chat, &message.id, "new").unwrap();
+        let receive = received(&events, chat, &message.id, "new").unwrap();
         total.push(receive - message.start_ms);
         if let Some(arrival) = message.arrival_ms {
             post.push(arrival - message.start_ms);
@@ -348,7 +355,7 @@ fn a_reaches_b_natively_and_the_fence_holds() {
     let sent = send_all(&live, &mut watch, nonce);
     let latency = latency(&sent, &watch, &live.ab_chat);
     let edit_and_reaction = edit_and_react(&live, &mut watch, &sent[0]);
-    group_write_is_denied(&live, &mut watch, nonce);
+    let (group, group_latency) = group_reaches_b_and_c(&live, &mut watch, nonce);
     assert!(watch.stop().success(), "b's first watch didn't exit cleanly");
     let gap = catch_up(&live, nonce);
     let mut texts: Vec<String> = sent
@@ -358,7 +365,10 @@ fn a_reaches_b_natively_and_the_fence_holds() {
         .map(|message| message.text.clone())
         .collect();
     texts.push(edited_text(&sent[0]));
-    every_message_once(&live, &texts);
+    every_message_once(&live, "b", "a", &texts);
+    let group_texts: Vec<String> = group.iter().map(|message| message.text.clone()).collect();
+    every_message_once(&live, "b", "abc", &group_texts);
+    every_message_once(&live, "c", "abc", &group_texts);
     b_reads_up_to(&live, gap.last().unwrap());
     let fence = fence_log_holds(&live, log_start);
     no_token_printed(&live.out);
@@ -367,8 +377,10 @@ fn a_reaches_b_natively_and_the_fence_holds() {
         "ended_ms": now_ms(),
         "messages": MESSAGES,
         "gap_messages": GAP_MESSAGES,
+        "group_messages": GROUP_MESSAGES,
         "latency_ms": latency,
         "edit_and_reaction_ms": edit_and_reaction,
+        "group_latency_ms": group_latency,
         "fence_log": fence,
     });
     fs::write(live.out.join("summary.json"), format!("{summary:#}\n")).unwrap();
@@ -434,21 +446,30 @@ fn edit_and_react(live: &Live, watch: &mut Watch, first: &Sent) -> Value {
     json!({"edit": edited - edit_start, "reaction": reacted - react_start})
 }
 
-/// a's message to the a–b–c group chat is denied by the fence (the group chat's member read isn't complete), so it
-/// isn't sent: a's `send` fails with the row `denied`, and b receives nothing in the group chat.
-fn group_write_is_denied(live: &Live, watch: &mut Watch, nonce: i64) {
-    let text = format!("M1 Task 21 live {nonce} group");
-    let run = live.run("a-send-abc", &["a", "send", "abc", &text]);
-    assert!(!run.status.success(), "the group write went through: {}", run.stdout);
-    assert_eq!(run.field("state"), Some("denied"), "{}", run.stdout);
-    std::thread::sleep(QUIET);
-    assert!(watch.running(), "b's watch ended");
-    let in_group = watch
-        .events()
-        .into_iter()
-        .filter(|event| event["conversation"] == live.group_chat.as_str())
-        .count();
-    assert_eq!(in_group, 0, "b received events in the group chat");
+/// c watches too (its own process, ready as b's was); a sends [`GROUP_MESSAGES`] messages to the a–b–c group chat, one
+/// `send` each, and each of them reaches both b's watch (`b_watch`, still up) and c's. Gives a's posts and the
+/// latencies per receiver; c's watch is stopped before it returns.
+fn group_reaches_b_and_c(live: &Live, b_watch: &mut Watch, nonce: i64) -> (Vec<Sent>, Value) {
+    let mut c_watch = Watch::start(live, "c", "c-watch");
+    let sent: Vec<Sent> = (1..=GROUP_MESSAGES)
+        .map(|n| {
+            let text = format!("M1 Task 21 live {nonce} group g{n:02}");
+            send_to(live, &format!("a-send-abc-{n:02}"), "abc", &text)
+        })
+        .collect();
+    for message in &sent {
+        for watch in [&mut *b_watch, &mut c_watch] {
+            watch.until(ARRIVAL_LIMIT, &format!("received {}", message.text), |events| {
+                received(events, &live.group_chat, &message.id, "new")
+            });
+        }
+    }
+    let latency = json!({
+        "b": latency(&sent, b_watch, &live.group_chat),
+        "c": latency(&sent, &c_watch, &live.group_chat),
+    });
+    assert!(c_watch.stop().success(), "c's watch didn't exit cleanly");
+    (sent, latency)
 }
 
 /// b's socket closed: a sends [`GAP_MESSAGES`], then b watches again, catching up on connect.
@@ -477,22 +498,23 @@ fn shown_text(line: &str) -> Option<&str> {
     })
 }
 
-/// b's store has each of the run's messages exactly once.
-fn every_message_once(live: &Live, texts: &[String]) {
-    let show = live.run("b-show", &["b", "show", "a", "--limit", &SHOW_LIMIT.to_string()]);
-    assert!(show.status.success(), "show: {:?}", show.status);
+/// `alias`'s store has each of `texts` exactly once in `chat` (as `teams-headless` names a chat: `a`, `abc`).
+fn every_message_once(live: &Live, alias: &str, chat: &str, texts: &[String]) {
+    let name = format!("{alias}-show-{chat}");
+    let show = live.run(&name, &[alias, "show", chat, "--limit", &SHOW_LIMIT.to_string()]);
+    assert!(show.status.success(), "{name}: {:?}", show.status);
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for text in show.stdout.lines().filter_map(shown_text) {
         *counts.entry(text).or_default() += 1;
     }
     for text in texts {
-        assert_eq!(counts.get(text.as_str()), Some(&1), "{text} in b's store");
+        assert_eq!(counts.get(text.as_str()), Some(&1), "{text} in {alias}'s store");
     }
 }
 
 /// b reads the a–b chat up to `last`: the live check of the read-receipt write, which moves b's stored read horizon
 /// (the consumption horizon). It doesn't move b's web client's "last read" mark, so that client still opens the chat
-/// there (`proto-lab run ab-chat` clicks "Jump to newest", `ab_chat::wait_for_newest`).
+/// there (`proto-lab run ab-chat` clicks "Jump to newest" or "New messages", `ab_chat::wait_for_newest`).
 fn b_reads_up_to(live: &Live, last: &Sent) {
     let read = live.run("b-read", &["b", "read", "a", &last.id]);
     assert!(
@@ -506,13 +528,14 @@ fn b_reads_up_to(live: &Live, last: &Sent) {
 #[derive(Debug, Default)]
 struct FenceCounts {
     writes: BTreeMap<String, usize>,
+    group_writes: BTreeMap<String, usize>,
     own_requests: BTreeMap<String, usize>,
     own_frames: BTreeMap<String, usize>,
-    group_denies: usize,
 }
 
 /// `fence.log`'s lines since `start` (a byte offset): whole JSON lines; allows only for the a–b chat's message,
-/// edit, reaction and read receipt; one deny, the group write; own-state requests and frames only of the reviewed kinds.
+/// edit, reaction and read receipt and the recorded group chat's messages; no deny; own-state requests and frames only
+/// of the reviewed kinds.
 fn fence_log_holds(live: &Live, start: u64) -> Value {
     let log = fs::read(&live.fence_log).unwrap();
     let run = &log[usize::try_from(start).unwrap()..];
@@ -529,13 +552,15 @@ fn fence_log_holds(live: &Live, start: u64) -> Value {
     assert_eq!(counts.writes.get("edit"), Some(&1), "{counts:?}");
     assert_eq!(counts.writes.get("reaction"), Some(&1), "{counts:?}");
     assert_eq!(counts.writes.get("read_receipt"), Some(&1), "{counts:?}");
-    assert_eq!(counts.group_denies, 1, "{counts:?}");
+    assert_eq!(counts.writes.len(), 4, "{counts:?}");
+    let group = BTreeMap::from([("message".to_owned(), GROUP_MESSAGES)]);
+    assert_eq!(counts.group_writes, group, "{counts:?}");
     json!({
         "lines": lines,
         "allowed_writes": counts.writes,
+        "allowed_group_writes": counts.group_writes,
         "own_requests": counts.own_requests,
         "own_frames": counts.own_frames,
-        "denied_group_writes": counts.group_denies,
     })
 }
 
@@ -544,21 +569,26 @@ impl FenceCounts {
         let verdict = entry["verdict"].as_str().unwrap_or_default();
         if let Some(kind) = entry["kind"].as_str() {
             let conversation = entry["scope"]["conversation"]["id"].as_str().unwrap_or_default();
-            if verdict == "deny" {
-                let group = kind == "message"
-                    && conversation == live.group_chat
-                    && entry["reason"] == json!({"partial": "unsupported"});
-                assert!(group, "an unexpected deny: {kind} {}", entry["reason"]);
-                self.group_denies += 1;
-                return;
-            }
-            assert_eq!(verdict, "allow", "{kind}");
-            assert!(conversation == live.ab_chat, "a {kind} allowed off the a–b chat");
-            assert!(
-                ["message", "edit", "reaction", "read_receipt"].contains(&kind),
-                "a {kind} allowed"
-            );
-            *self.writes.entry(kind.to_owned()).or_default() += 1;
+            // The run's writes are all allowed: a deny is a mapped write the fence refused (a group chat's read
+            // that didn't come out complete among them).
+            assert_eq!(verdict, "allow", "a {kind} denied: {}", entry["reason"]);
+            let writes = if conversation == live.ab_chat {
+                assert!(
+                    ["message", "edit", "reaction", "read_receipt"].contains(&kind),
+                    "a {kind} allowed on the a–b chat"
+                );
+                &mut self.writes
+            } else {
+                // Only the recorded group chat, and only a's messages: a write allowed on any other chat (another
+                // group chat among them) fails the run.
+                assert!(
+                    conversation == live.group_chat,
+                    "a {kind} allowed off the a–b and the recorded group chat"
+                );
+                assert_eq!(kind, "message", "a {kind} allowed on the group chat");
+                &mut self.group_writes
+            };
+            *writes.entry(kind.to_owned()).or_default() += 1;
             return;
         }
         assert_eq!(verdict, "allow", "a line that is no allow: {}", entry["event"]);

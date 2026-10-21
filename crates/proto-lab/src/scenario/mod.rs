@@ -61,8 +61,8 @@ pub enum ScenarioName {
     /// Account a sends a made-up image in the a–b chat with every write to the media service denied, after the same
     /// enforcement test; recorded.
     AbImage,
-    /// Account a creates the a–b–c group chat (once); messaging it is refused until the fence can read a group chat's
-    /// members in full.
+    /// Account a creates the a–b–c group chat (once); later runs: a messages it, b and c show it, after the same
+    /// enforcement test.
     AbcChat,
     /// b's push channel while a sends, edits and reacts in the a–b chat; recorded.
     AbTrouter,

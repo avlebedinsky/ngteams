@@ -285,19 +285,26 @@ impl Steps<'_> {
 /// accounts' web client is in English).
 pub const JUMP_TO_NEWEST: &str = "Jump to newest";
 
-/// Waits up to `timeout` for `text` in the page, clicking [`JUMP_TO_NEWEST`] whenever it shows: a chat with unread
-/// messages opens at its "last read" mark, and the messages below it aren't rendered, so their text isn't in the page
-/// (a native client's run in the same chat leaves dozens of them). A click only scrolls the chat.
+/// The pill the web client shows instead of [`JUMP_TO_NEWEST`] over the same chat when a new message arrived while it
+/// was open (seen live on 2026-10-21, b's client after a native run left about 65 unread messages).
+pub const NEW_MESSAGES: &str = "New messages";
+
+/// Waits up to `timeout` for `text` in the page, clicking [`JUMP_TO_NEWEST`] or [`NEW_MESSAGES`] (a `button` or a
+/// `role="button"` element) whenever one shows: a chat with unread messages opens at its "last read" mark, and the
+/// messages below it aren't rendered, so their text isn't in the page (a native client's run in the same chat leaves
+/// dozens of them). A click only scrolls the chat.
 ///
 /// # Errors
 /// [`StepError::Timeout`] when the text doesn't show in time.
 pub async fn wait_for_newest(drive: &mut Driver, step: &str, text: &str, timeout: Duration) -> Result<(), StepError> {
     let expression = format!(
         "(() => {{ if ((document.body?.innerText ?? '').includes({text})) return true; \
-         const jump = [...document.querySelectorAll('button')].find(b => (b.innerText ?? '').trim() === {jump}); \
+         const labels = {labels}; \
+         const jump = [...document.querySelectorAll('button, [role=\"button\"]')] \
+           .find(b => labels.includes((b.innerText ?? '').trim())); \
          if (jump) jump.click(); return false; }})()",
         text = serde_json::Value::String(text.to_owned()),
-        jump = serde_json::Value::String(JUMP_TO_NEWEST.to_owned()),
+        labels = serde_json::json!([JUMP_TO_NEWEST, NEW_MESSAGES]),
     );
     drive
         .wait_until_true(step, &expression, &format!("the text {text:?}"), timeout)
