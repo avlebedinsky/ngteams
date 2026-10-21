@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{HeaderMap, LOCATION, WWW_AUTHENTICATE};
 use serde_json::{Map, Value, json};
-use teams_auth::authz::Region;
+use teams_auth::authz::{Region, RegionFileError};
 use teams_auth::claims::TokenSummary;
 use teams_auth::secrets::SecretStore;
 use teams_auth::token::{Scope, TokenClient, TokenError};
@@ -52,9 +52,8 @@ pub const CONVERSATIONS_PATH: &str = "v1/users/ME/conversations";
 /// the start (`startTime=1`), every kind (`targetType=All`).
 pub const CONVERSATIONS_QUERY: &str = "view=msnp24Equivalent&pageSize=200&startTime=1&targetType=All";
 
-/// The GTM the chat base comes from: the web client's (`useChatServiceAfd`); [`Region::base`] falls back to
-/// `chatService` when the region lacks it.
-pub const CHAT_BASE_GTM: &str = "chatServiceAfd";
+// the GTM the chat base comes from, kept at this path for the commands and their tests
+pub use teams_auth::authz::CHAT_BASE_GTM;
 
 /// How long one read may take, end to end.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -146,10 +145,8 @@ pub enum ProbeError {
     NoChat(Alias, Alias),
     #[error("no a-b-c group chat to read: {0}")]
     NoGroupChat(String),
-    #[error("can't read the region record {path} (run `proto-lab auth`): {source}")]
-    Region { path: String, source: std::io::Error },
-    #[error("{0} isn't a region record (run `proto-lab auth`)")]
-    BadRegion(String),
+    #[error("{0} (run `proto-lab auth`)")]
+    Region(#[from] RegionFileError),
     #[error("the region has neither a chatServiceAfd nor a chatService GTM")]
     NoChatBase,
     #[error("the chat base from the GTMs isn't a chat service base: {0:?}")]
@@ -411,17 +408,7 @@ fn chat_id(config: &LabConfig, alias: Alias, partner: Alias) -> Result<String, P
 }
 
 pub(crate) fn read_region(config: &LabConfig, alias: Alias) -> Result<Region, ProbeError> {
-    let file = region_file(config.paths(), alias);
-    let shown = file.display().to_string();
-    let text = std::fs::read_to_string(&file).map_err(|source| ProbeError::Region {
-        path: shown.clone(),
-        source,
-    })?;
-    serde_json::from_str::<Value>(&text)
-        .ok()
-        .as_ref()
-        .and_then(Region::from_json)
-        .ok_or(ProbeError::BadRegion(shown))
+    Ok(Region::load(&region_file(config.paths(), alias))?)
 }
 
 /// The chat base from the region's GTMs ([`CHAT_BASE_GTM`], else its fallback, trimmed: [`Region::base`]) without a

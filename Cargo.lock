@@ -6321,6 +6321,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sha2 0.11.1",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "url",
@@ -6367,6 +6368,24 @@ dependencies = [
  "url",
  "wiremock",
  "zeroize",
+]
+
+[[package]]
+name = "teams-headless"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde_json",
+ "teams-auth",
+ "teams-core",
+ "teams-fence",
+ "teams-mock",
+ "teams-proto",
+ "teams-store",
+ "teams-trouter",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

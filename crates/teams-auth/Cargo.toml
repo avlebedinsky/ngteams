@@ -22,6 +22,8 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# the region record read back from a file
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 wiremock.workspace = true
 

@@ -373,13 +373,10 @@ impl LiveMembershipSource {
         }
     }
 
-    /// The URL of a thread's read: the base's origin (or the mock's), its path to `v1`, then `threads/<id>`, the id one
-    /// encoded segment, and the fixed view.
-    fn thread_url(&self, base: &ChatBase, id: &str) -> Option<Url> {
-        let (origin, prefix) = base.origin_and_prefix();
-        #[cfg(feature = "test-support")]
-        let origin = self.mock_origin.clone().unwrap_or(origin);
-        let mut url = Url::parse(&origin).ok()?;
+    /// The URL of a thread's read: `origin` (the base's, or the mock's), the base's path to `v1` (`prefix`), then
+    /// `threads/<id>`, the id one encoded segment, and the fixed view.
+    fn thread_url(origin: &str, prefix: Vec<&str>, id: &str) -> Option<Url> {
+        let mut url = Url::parse(origin).ok()?;
         url.path_segments_mut()
             .ok()?
             .clear()
@@ -415,9 +412,10 @@ impl LiveMembershipSource {
 
     /// The thread `id`'s read with `credential`.
     async fn read_thread(&self, id: &str, credential: &ChatCredential) -> Result<Vec<u8>, PartialReason> {
-        let url = self
-            .thread_url(&credential.base, id)
-            .ok_or(PartialReason::FetchFailed(FetchFailure::Malformed))?;
+        let (origin, prefix) = credential.base.origin_and_prefix();
+        #[cfg(feature = "test-support")]
+        let origin = self.mock_origin.clone().unwrap_or(origin);
+        let url = Self::thread_url(&origin, prefix, id).ok_or(PartialReason::FetchFailed(FetchFailure::Malformed))?;
         self.fetch(url, credential).await
     }
 
@@ -526,6 +524,21 @@ pub fn one_to_one_pair(id: &str) -> Option<[Mri; 2]> {
     }
     let mri = |oid: &str| Mri::new(format!("8:orgid:{}", oid.to_ascii_lowercase()));
     Some([mri(first), mri(second)])
+}
+
+/// The 1:1 chat id of two work accounts, as the web client builds it: `19:<oid>_<oid>@unq.gbl.spaces`, the two object
+/// ids (lowercase) sorted; [`one_to_one_pair`] reads it back. `None` unless both MRIs are `8:orgid:<oid>` (a GUID) of
+/// two different accounts.
+#[must_use]
+pub fn one_to_one_id(mri_a: &str, mri_b: &str) -> Option<String> {
+    let oid = |mri: &str| {
+        let oid = mri.strip_prefix("8:orgid:")?;
+        is_guid(oid).then(|| oid.to_ascii_lowercase())
+    };
+    let mut oids = [oid(mri_a)?, oid(mri_b)?];
+    oids.sort();
+    let [first, second] = oids;
+    (first != second).then(|| format!("19:{first}_{second}{ONE_TO_ONE_SUFFIX}"))
 }
 
 /// The suffix of a group (or meeting) chat's conversation id.

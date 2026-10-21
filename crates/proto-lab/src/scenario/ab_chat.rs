@@ -43,6 +43,10 @@ use super::dsl::{Driver, RequestPattern, Selector, StepError};
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
+// the 1:1 chat id, built where the fence reads it back (`teams_fence::one_to_one_pair`); kept at this path for the
+// scenarios and their tests
+pub use teams_fence::one_to_one_id;
+
 /// The message compose box's selector: the web client's rich-text editor (seen on 2026-10-20).
 pub const COMPOSE_CSS: &str = r#"[contenteditable="true"][role="textbox"]"#;
 
@@ -96,21 +100,6 @@ pub fn policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
         review = review.with_mapped_target(chat_url(chat_id)?);
     }
     Ok(DenyPolicy::Reviewed(review))
-}
-
-/// The 1:1 chat id of two work accounts, as the web client builds it: `19:<oid>_<oid>@unq.gbl.spaces`, the two object
-/// ids (lowercase) sorted. `None` unless both MRIs are `8:orgid:<oid>` of two different accounts.
-#[must_use]
-pub fn one_to_one_id(mri_a: &str, mri_b: &str) -> Option<String> {
-    let oid = |mri: &str| {
-        let oid = mri.strip_prefix("8:orgid:")?.to_ascii_lowercase();
-        let shaped = oid.len() == 36 && oid.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
-        shaped.then_some(oid)
-    };
-    let mut oids = [oid(mri_a)?, oid(mri_b)?];
-    oids.sort();
-    let [first, second] = oids;
-    (first != second).then(|| format!("19:{first}_{second}@unq.gbl.spaces"))
 }
 
 /// The web client's deep link that starts, or opens, the 1:1 chat with the account `mri`. By MRI, not by UPN: the

@@ -12,7 +12,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
-use teams_auth::authz::{AUTHZ_ENDPOINT, AuthzClient, AuthzError, AuthzKind, Region, skypetoken_key};
+use teams_auth::authz::{
+    AUTHZ_ENDPOINT, AuthzClient, AuthzError, AuthzKind, CHAT_BASE_GTM, Region, RegionFileError, skypetoken_key,
+};
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
 use wiremock::matchers::{body_string, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -473,4 +475,33 @@ fn the_region_round_trips_through_its_json() {
         None
     );
     assert_eq!(Region::from_json(&json!({"region": null, "partition": null})), None);
+}
+
+#[test]
+fn a_saved_region_record_is_read_back_from_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a.json");
+    let region = Region {
+        name: Some("emea".to_owned()),
+        partition: None,
+        endpoints: BTreeMap::from([(
+            "chatService".to_owned(),
+            " https://teams.microsoft.com/api/chatsvc/emea ".to_owned(),
+        )]),
+    };
+    // the lab saves the skypetoken's expiry beside the region's keys
+    let mut saved = region.to_json();
+    saved["skypetokenExpiresAt"] = json!(1_700_000_000);
+    std::fs::write(&file, saved.to_string()).unwrap();
+    let read = Region::load(&file).unwrap();
+    assert_eq!(read, region);
+    assert_eq!(
+        read.base(CHAT_BASE_GTM),
+        Some("https://teams.microsoft.com/api/chatsvc/emea")
+    );
+
+    std::fs::write(&file, "{\"region\": 1}").unwrap();
+    assert!(matches!(Region::load(&file), Err(RegionFileError::NotARecord(path)) if path == file));
+    let missing = dir.path().join("b.json");
+    assert!(matches!(Region::load(&missing), Err(RegionFileError::Read { path, .. }) if path == missing));
 }

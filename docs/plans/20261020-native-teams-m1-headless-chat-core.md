@@ -922,16 +922,38 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 
 - [ ] ⚠️ prerequisite before the first live run: the user has added permission rules for `teams-headless` like those
       for `proto-lab` (Post-Completion)
-- [ ] `[lints] workspace = true`, listed in `members`
-- [ ] `teams-headless <alias> sync|list|show <chat>|send <chat> <text>|edit|delete|react|watch`: `Fence::open_lab`,
+- [x] `[lints] workspace = true`, listed in `members`
+- [x] `teams-headless <alias> sync|list|show <chat>|send <chat> <text>|edit|delete|react|watch`: `Fence::open_lab`,
       tokens from the Secret Service (`teams-lab`, through `LabPaths`), the store under the lab's data dir; refuses to
       run when built with `test-support` (which every mock origin implies); prints no token. `send` prints its start
       time, `OriginalArrivalTime` and message id; `watch --json` prints each received event with its receive time
-- [ ] tests first: `fence.log` appends from several processes at once (a, b and c each run their own binary) stay
+- [x] tests first: `fence.log` appends from several processes at once (a, b and c each run their own binary) stay
       whole lines: an advisory lock around each append and around `terminate_last_line`; a test with concurrent
       writer processes
 - [ ] live: a sends one message to b in the a–b chat with `send`, b sees it with `watch`; `fence.log` checked
-- [ ] `cargo test -p teams-headless -p teams-fence` and the gate pass; `cargo build -p teams-headless` runs `--help`
+      - note (the live step, run later as its own step, after the prerequisite above): from a normal build
+        (`cargo build -p teams-headless`), one process per account, both under one hold of the live lock, outputs
+        under the lab's data dir (never the repo):
+        ```sh
+        cargo build -p teams-headless
+        OUT=~/.local/share/teams-lab/headless/$(date -u +%Y%m%dT%H%M%SZ); mkdir -p -m 0700 "$OUT"
+        flock ~/.local/share/teams-lab/live.lock sh -c '
+          timeout --signal=INT --kill-after=60 300 target/debug/teams-headless b watch --json \
+            > "$0/b-watch.jsonl" 2> "$0/b-watch.err" & WATCH=$!
+          timeout 120 sh -c "until grep -q registered.:true $0/b-watch.jsonl \
+            && grep -q caught_up $0/b-watch.jsonl; do sleep 1; done"
+          timeout --signal=INT --kill-after=60 180 target/debug/teams-headless a send b "M1 Task 19 live: a to b" \
+            > "$0/a-send.txt" 2> "$0/a-send.err"
+          sleep 10; kill -TERM "$WATCH"; wait
+        ' "$OUT"
+        ```
+        Then: `a-send.txt` has `state sent` and a `message_id`; `b-watch.jsonl` has a `registration` with
+        `registered: true`, a `caught_up` (cause `connected`) and a `message` event with that id (its `received_ms`
+        against a's `start_ms`); `fence.log`'s lines since a's `start_ms` hold a's `allow` for `message` on the a–b
+        chat, b's `trouter_*` own frames and its endpoint registration, and no `deny` or `breach`;
+        `pgrep -af teams-headless` is empty afterwards
+- [x] `cargo test -p teams-headless -p teams-fence` and the gate pass; `cargo build -p teams-headless` runs `--help`
+      (parallel run: crate-scoped gate; workspace gate after merge)
 
 ### Task 20: Attachments: decide sending, then build it or defer it
 **Files:**
