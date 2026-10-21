@@ -22,6 +22,7 @@ pub mod sync;
 pub use engine::{Action, Cause, EngineError, EngineHandle, EngineOptions, Event, MessageChange, Parts, Push, Reply};
 pub use outbox::{
     Arrival, CHECK_RETRY_WAIT, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS, MAX_FAILED_CHECKS,
-    Outbox, OutboxError, Received, Sent, SentDue, SyncError, Unsynced, create_chat, enqueue, new_client_message_id,
+    Outbox, OutboxError, Received, Sent, SentDue, SyncError, UnreadableSeen, Unsynced, create_chat, enqueue,
+    new_client_message_id,
 };
 pub use sync::{CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, ConversationFailed, Gaps, MAX_PAGES, Synced};

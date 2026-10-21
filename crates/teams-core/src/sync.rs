@@ -28,10 +28,10 @@
 //!   and so is a reaction set with a time it can't read (its reactions stay as they were). A conversation whose
 //!   version can't be read keeps its stored row (only a later last activity is taken) and has its messages synced.
 //!   Our own message among those not stored is still matched to its outbox row by its id, `clientmessageid`,
-//!   sender and conversation ([`Outbox::match_arrival`]), and inside the outbox's check a page holding an entry it
-//!   can't read at all that carries the `clientmessageid` of a pending row of this run that had an attempt fails the
-//!   check before it is applied ([`CatchUpError::CheckFellShort`]); an ordinary catch-up applies such a page and so
-//!   loses that evidence (`docs/backlog/catch-up-consumes-an-unreadable-entry-of-a-pending-row.md`).
+//!   sender and conversation ([`Outbox::match_arrival`]). An entry a page holds that can't be read at all but carries
+//!   the `clientmessageid` of a message post that had an attempt is recorded on that row before the page is applied
+//!   ([`Outbox::unreadable_seen`]), by every read alike: the read moves on, and the row's check then can't tell
+//!   whether its message arrived, so the row isn't sent again on its own.
 //! - **When**: on start and after every reconnect of the push channel ([`Gaps`], [`CatchUp::catch_up_if_due`]). The
 //!   channel is connected first and the catch-up runs after, so nothing falls between the two: what arrives after the
 //!   connect comes as a delivery, what came before by the catch-up, and what comes both ways is stored once.
@@ -55,8 +55,7 @@ use teams_fence::Mri;
 use teams_proto::chat::{self, ChatReadError, ChatReads, Field, MAX_PAGE_SIZE, MessagePage};
 use teams_proto::{Client, Credentials, HttpError, HttpTransport, Transport};
 use teams_store::{
-    Applied, Conversation, ConversationKind, Member, Message, OutboxKind, OutboxState, Reaction, ReadHorizon, Store,
-    StoreError, SyncState,
+    Applied, Conversation, ConversationKind, Member, Message, Reaction, ReadHorizon, Store, StoreError, SyncState,
 };
 
 use crate::outbox::{Arrival, Clock, ConversationSync, Outbox, OutboxError, Received, SyncError, now_ms};
@@ -82,25 +81,13 @@ pub enum CatchUpError {
     #[error("the conversation list ran past {MAX_PAGES} pages, so its sync link wasn't moved on")]
     TooManyPages,
     /// The outbox's check paged back [`MAX_PAGES`] pages without reaching a message older than its row (or the end
-    /// of a gap), or read a page holding an entry it can't read that carries a pending row's `clientmessageid`:
-    /// whether the row's message arrived can't be told.
-    #[error(
-        "the outbox's check read {MAX_PAGES} older pages without reaching its row's time, or a page holding an \
-         entry it can't read with a pending row's clientmessageid"
-    )]
+    /// of a gap): whether the row's message arrived can't be told.
+    #[error("the outbox's check read {MAX_PAGES} older pages without reaching its row's time")]
     CheckFellShort,
     /// A sync answer ran past [`MAX_PAGES`] while the rest of an earlier one was still unread: its sync link wasn't
     /// moved on (the pages it read are stored). The next sync reads on from the earlier one first.
     #[error("a sync answer ran past {MAX_PAGES} pages while an earlier one's rest was still unread")]
     GapPending,
-}
-
-/// Who a page is read for: the outbox's check guards its pages against entries it can't read
-/// ([`CatchUp::guard_page`]), an ordinary catch-up doesn't.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Reader {
-    CatchUp,
-    Check,
 }
 
 /// Which of a conversation's kept links an older page is read from.
@@ -374,30 +361,20 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// does; the sync state then stays as it was (a kept gap may have been read on). [`CatchUpError::GapPending`]
     /// when the answer is cut at [`MAX_PAGES`] while an earlier gap is still unread: the sync link stays.
     pub async fn sync_messages(&self, store: &mut Store, conversation: &str) -> Result<Synced, CatchUpError> {
-        self.sync_messages_for(store, conversation, Reader::CatchUp).await
-    }
-
-    /// [`CatchUp::sync_messages`], its pages read for `reader`.
-    async fn sync_messages_for(
-        &self,
-        store: &mut Store,
-        conversation: &str,
-        reader: Reader,
-    ) -> Result<Synced, CatchUpError> {
         if store.conversation(conversation)?.is_none() {
             self.add_conversation(store, conversation).await?;
         }
         let reads = ChatReads::new(&self.client);
         let kept = store.sync_state(conversation)?;
         let Some((kept, link)) = kept.and_then(|state| state.sync_link.clone().map(|link| (state, link))) else {
-            return self.first_read(store, &reads, conversation, reader).await;
+            return self.first_read(store, &reads, conversation).await;
         };
         let mut synced = Synced::default();
-        let kept = self.read_gap(store, kept, &mut synced, reader).await?;
+        let kept = self.read_gap(store, kept, &mut synced).await?;
         let page = reads.messages_from(conversation, &link).await?;
-        synced.add(self.apply_page(store, conversation, &page, reader)?);
+        synced.add(self.apply_page(store, conversation, &page)?);
         let (left, walked) = self
-            .follow_back(store, conversation, page.backward_link(), MAX_PAGES - 1, reader)
+            .follow_back(store, conversation, page.backward_link(), MAX_PAGES - 1)
             .await?;
         synced.add(walked);
         if left.is_some() && kept.gap_link.is_some() {
@@ -423,14 +400,13 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         store: &mut Store,
         kept: SyncState,
         synced: &mut Synced,
-        reader: Reader,
     ) -> Result<SyncState, CatchUpError> {
         if kept.gap_link.is_none() {
             return Ok(kept);
         }
         let conversation = kept.conversation_id.clone();
         let (gap_link, walked) = self
-            .follow_back(store, &conversation, kept.gap_link.as_deref(), MAX_PAGES, reader)
+            .follow_back(store, &conversation, kept.gap_link.as_deref(), MAX_PAGES)
             .await?;
         synced.add(walked);
         let state = SyncState {
@@ -455,7 +431,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             return Ok(None);
         };
         let chain = Chain::next(&kept);
-        self.older_page(store, kept, chain, Reader::CatchUp).await
+        self.older_page(store, kept, chain).await
     }
 
     /// Reads the next page of one of a conversation's kept chains; `None` when that chain has no link.
@@ -464,7 +440,6 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         store: &mut Store,
         kept: SyncState,
         chain: Chain,
-        reader: Reader,
     ) -> Result<Option<Synced>, CatchUpError> {
         let link = match chain {
             Chain::Gap => kept.gap_link.as_deref(),
@@ -475,7 +450,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         };
         let conversation = kept.conversation_id.as_str();
         let page = ChatReads::new(&self.client).messages_from(conversation, link).await?;
-        let synced = self.apply_page(store, conversation, &page, reader)?;
+        let synced = self.apply_page(store, conversation, &page)?;
         let older = page.backward_link().map(str::to_owned);
         let state = match chain {
             Chain::Gap => SyncState {
@@ -499,11 +474,10 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
 
     /// The outbox's check (see the module docs): syncs `conversation`, then reads older pages until the stored state
     /// says everything since `since` less [`CLOCK_SKEW_MS`] is stored ([`Chain::unread_since`]), whatever this sync
-    /// itself read: a gap or a history read an earlier sync, check or start left unread is read here. Every page it
-    /// reads, its first sync's included, is guarded before it is applied ([`CatchUp::guard_page`]).
+    /// itself read: a gap or a history read an earlier sync, check or start left unread is read here.
     async fn sync_since(&self, store: &mut Store, conversation: &str, since: i64) -> Result<(), CatchUpError> {
         let stop = since.saturating_sub(CLOCK_SKEW_MS);
-        self.sync_messages_for(store, conversation, Reader::Check).await?;
+        self.sync_messages(store, conversation).await?;
         let mut pages = 0;
         loop {
             // a sync that succeeded kept a state: none can't be told complete
@@ -514,7 +488,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             if pages == MAX_PAGES {
                 return Err(CatchUpError::CheckFellShort);
             }
-            self.older_page(store, state, chain, Reader::Check).await?;
+            self.older_page(store, state, chain).await?;
             pages += 1;
         }
     }
@@ -555,11 +529,10 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         store: &mut Store,
         reads: &ChatReads<'_, C>,
         conversation: &str,
-        reader: Reader,
     ) -> Result<Synced, CatchUpError> {
         let kept_gap = store.sync_state(conversation)?.and_then(|state| state.gap_link);
         let page = reads.messages(conversation, self.page_size).await?;
-        let synced = self.apply_page(store, conversation, &page, reader)?;
+        let synced = self.apply_page(store, conversation, &page)?;
         let backward_link = page.backward_link().map(str::to_owned);
         let state = SyncState {
             conversation_id: conversation.to_owned(),
@@ -583,7 +556,6 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         conversation: &str,
         from: Option<&str>,
         budget: usize,
-        reader: Reader,
     ) -> Result<(Option<String>, Synced), CatchUpError> {
         let reads = ChatReads::new(&self.client);
         let mut synced = Synced::default();
@@ -594,25 +566,17 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
                 return Ok((Some(next), synced));
             }
             let page = reads.messages_from(conversation, &next).await?;
-            synced.add(self.apply_page(store, conversation, &page, reader)?);
+            synced.add(self.apply_page(store, conversation, &page)?);
             read += 1;
             link = page.backward_link().map(str::to_owned);
         }
         Ok((None, synced))
     }
 
-    /// Stores a page's messages, the oldest first; a page read for the outbox's check is guarded first
-    /// ([`CatchUp::guard_page`]).
-    fn apply_page(
-        &self,
-        store: &mut Store,
-        conversation: &str,
-        page: &MessagePage,
-        reader: Reader,
-    ) -> Result<Synced, CatchUpError> {
-        if reader == Reader::Check {
-            Self::guard_page(store, conversation, page)?;
-        }
+    /// Stores a page's messages, the oldest first, once every entry it can't read that carries an outbox row's
+    /// `clientmessageid` is recorded on that row ([`CatchUp::note_unreadable`]).
+    fn apply_page(&self, store: &mut Store, conversation: &str, page: &MessagePage) -> Result<Synced, CatchUpError> {
+        self.note_unreadable(store, conversation, page)?;
         let mut synced = Synced {
             skipped: page.unreadable.len(),
             pages: 1,
@@ -636,25 +600,14 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         Ok(synced)
     }
 
-    /// The outbox's check can't tell from a page whether a row's message arrived when the page holds an entry it can't
-    /// read at all that carries the `clientmessageid` of a pending message post of this run in `conversation` that
-    /// had an attempt: [`CatchUpError::CheckFellShort`], before the page is applied or any link moves past it. Who
-    /// sent such an entry isn't inferred, and its row isn't matched from it.
-    fn guard_page(store: &Store, conversation: &str, page: &MessagePage) -> Result<(), CatchUpError> {
+    /// Every entry of a page it can't read at all that carries a `clientmessageid` is handed to the outbox
+    /// ([`Outbox::unreadable_seen`]), before the page is applied or any link moves past it: the message post of
+    /// `conversation` with that id, if it had an attempt, may have arrived, and its row records it, so its check
+    /// doesn't send it again on its own however far the reads move on.
+    fn note_unreadable(&self, store: &mut Store, conversation: &str, page: &MessagePage) -> Result<(), CatchUpError> {
         for entry in &page.unreadable {
-            let Some(client_message_id) = entry.get("clientmessageid").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(row) = store.outbox_by_client_message_id(client_message_id)? else {
-                continue;
-            };
-            let awaits_check = row.kind == OutboxKind::Send
-                && row.state == OutboxState::Pending
-                && row.run_id == store.run_id()
-                && row.attempts > 0
-                && row.conversation_id.as_deref() == Some(conversation);
-            if awaits_check {
-                return Err(CatchUpError::CheckFellShort);
+            if let Some(client_message_id) = entry.get("clientmessageid").and_then(Value::as_str) {
+                self.outbox.unreadable_seen(store, conversation, client_message_id)?;
             }
         }
         Ok(())

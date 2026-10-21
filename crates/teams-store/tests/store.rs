@@ -1265,6 +1265,81 @@ fn a_resend_starts_the_rows_budget_over_and_keeps_its_attempt_count() {
 }
 
 #[test]
+fn an_unreadable_entry_seen_for_a_row_is_kept_until_an_explicit_resend() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = open(&dir).expect("open the store");
+    let id = store.enqueue(&send("1001")).expect("enqueue").id;
+    let fresh = store.outbox_entry(id).expect("read").expect("the row");
+    assert_eq!(fresh.unreadable_seen_at, None);
+    assert!(!fresh.may_have_arrived());
+    store.begin_attempt(id).expect("begin");
+    let retry = AttemptOutcome::Retry {
+        not_before: 0,
+        error: "timed out".to_owned(),
+    };
+    store.finish_attempt(id, &retry).expect("retry");
+
+    let seen = store.outbox_unreadable_seen(id, 5_000).expect("seen");
+    assert_eq!(
+        (seen.state, seen.unreadable_seen_at),
+        (OutboxState::Pending, Some(5_000))
+    );
+    assert!(seen.may_have_arrived());
+    let again = store.outbox_unreadable_seen(id, 6_000).expect("seen again");
+    assert_eq!(again.unreadable_seen_at, Some(5_000), "the first sighting is kept");
+
+    // given up, it still may have arrived: the record outlives its checks
+    let give_up = CheckFailed::GiveUp {
+        error: "may have arrived".to_owned(),
+    };
+    let failed = store.check_failed(id, &give_up).expect("give up");
+    assert_eq!(
+        (failed.state, failed.unreadable_seen_at),
+        (OutboxState::Failed, Some(5_000))
+    );
+    assert!(failed.may_have_arrived());
+
+    // the explicit resend is the owner's decision to send it all the same
+    let resent = store.resend(id).expect("resend");
+    assert_eq!((resent.state, resent.unreadable_seen_at), (OutboxState::Pending, None));
+    assert!(!resent.may_have_arrived());
+
+    // a row our message came back for is sent: nothing is recorded on it
+    let sent = store.enqueue(&send("1002")).expect("enqueue").id;
+    store.outbox_arrived("1002", "2000").expect("arrived");
+    let after = store.outbox_unreadable_seen(sent, 7_000).expect("sent");
+    assert_eq!((after.state, after.unreadable_seen_at), (OutboxState::Sent, None));
+    assert!(!after.may_have_arrived());
+    assert!(matches!(
+        store.outbox_unreadable_seen(9_999, 7_000),
+        Err(StoreError::UnknownOutboxEntry(9_999))
+    ));
+}
+
+#[test]
+fn an_earlier_runs_row_keeps_what_was_seen_for_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let in_flight = {
+        let mut earlier = open(&dir).expect("open the store");
+        let id = earlier.enqueue(&send("1001")).expect("enqueue").id;
+        earlier.begin_attempt(id).expect("begin");
+        id
+    };
+    let mut store = open(&dir).expect("open the store again");
+    // another run's row: this run records what it saw for it all the same
+    store.outbox_unreadable_seen(in_flight, 5_000).expect("seen");
+    let left = store.outbox_left_by_earlier_runs().expect("left");
+    assert_eq!(left.len(), 1);
+    assert_eq!(
+        (left[0].state, left[0].unreadable_seen_at),
+        (OutboxState::Sending, Some(5_000))
+    );
+    assert!(left[0].may_have_arrived());
+    let adopted = store.resend(in_flight).expect("explicit resend");
+    assert_eq!(adopted.unreadable_seen_at, None);
+}
+
+#[test]
 fn a_store_of_the_first_schema_is_migrated_with_its_outbox_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = store_path(&dir);
@@ -1324,6 +1399,43 @@ fn a_sync_state_of_the_second_schema_is_migrated_without_a_gap_or_a_reach() {
     assert_eq!(state.backward_link.as_deref(), Some("https://chat.example.invalid/b"));
     // how far its history read reached isn't known: a check reads on from the link
     assert_eq!((state.backward_oldest, state.gap_link), (None, None));
+}
+
+#[test]
+fn an_outbox_row_of_the_third_schema_is_migrated_with_nothing_seen_for_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("store dir");
+    let raw = rusqlite::Connection::open(&path).expect("create directly");
+    for migration in [
+        include_str!("../src/migrations/0001_initial.sql"),
+        include_str!("../src/migrations/0002_outbox_budget.sql"),
+        include_str!("../src/migrations/0003_sync_chains.sql"),
+    ] {
+        raw.execute_batch(migration).expect("an earlier migration");
+    }
+    raw.pragma_update(None, "user_version", 3).expect("version 3");
+    raw.execute_batch(
+        "INSERT INTO runs (id, started_at) VALUES (1, 0);
+         INSERT INTO outbox (run_id, client_message_id, conversation_id, kind, payload, state, attempts, created_at,
+             updated_at)
+         VALUES (1, '1001', NULL, 'send', '{}', 'failed', 2, 0, 0);",
+    )
+    .expect("a row of the third schema");
+    drop(raw);
+
+    let store = Store::open(&path).expect("open and migrate");
+
+    assert_eq!(store.schema_version().expect("schema version"), SCHEMA_VERSION);
+    let row = store
+        .outbox_by_client_message_id("1001")
+        .expect("read")
+        .expect("the row");
+    assert_eq!(
+        (row.state, row.attempts, row.unreadable_seen_at),
+        (OutboxState::Failed, 2, None)
+    );
+    assert!(!row.may_have_arrived());
 }
 
 #[test]

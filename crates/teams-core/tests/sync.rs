@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
-    CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, Gaps, MAX_PAGES, Outbox, OutboxError, enqueue,
-    outbox::ConversationSync,
+    CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, Gaps, MAX_FAILED_CHECKS, MAX_PAGES, Outbox, OutboxError,
+    UnreadableSeen, enqueue, outbox::ConversationSync,
 };
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_mock::{
@@ -34,7 +34,9 @@ use teams_proto::{
     Author, Authorized, Client, Credentials, Failure, HttpError, HttpTransport, Mutating, OwnState, Read, Response,
     Transport,
 };
-use teams_store::{Applied, Conversation, ConversationKind, Member, Message, OutboxEntry, OutboxState, Store};
+use teams_store::{
+    Applied, AttemptOutcome, Conversation, ConversationKind, Member, Message, OutboxEntry, OutboxState, Store,
+};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const CHAT_BASE: &str = teams_mock::CHAT_BASE;
@@ -1523,14 +1525,11 @@ async fn an_entry_a_check_cannot_read_that_carries_the_rows_id_fails_the_check()
     let clock = Arc::new(AtomicI64::new(now_ms()));
     let (server, mut a) = posting_account(&clock).await;
     let row = enqueue(&mut a.store, &send(CHAT, "unreadable")).unwrap();
-    // not a message's shape (`properties` must be an object), but it names the row's clientmessageid
-    let mut raw = own_entry(&row, 1000);
-    raw["properties"] = json!("unreadable");
     mount_pages(
         &server,
         vec![
             ("", page(vec![], Some("s1"), None)),
-            ("s1", page(vec![raw], Some("s2"), None)),
+            ("s1", page(vec![unreadable(&row, 1000)], Some("s2"), None)),
         ],
     )
     .await;
@@ -1538,27 +1537,115 @@ async fn an_entry_a_check_cannot_read_that_carries_the_rows_id_fails_the_check()
 
     a.fault(Fault::LoseAnswer);
     let error = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap_err();
-    let OutboxError::Sync { source, .. } = &error else {
-        panic!("{error:?}");
-    };
-    assert!(
-        matches!(
-            source.downcast_ref::<CatchUpError>(),
-            Some(CatchUpError::CheckFellShort)
-        ),
-        "{error:?}"
-    );
+    assert_unreadable_seen(&error);
     assert_eq!(post_count(&server).await, 1, "not sent again");
     let after = a.store.outbox_entry(row.id).unwrap().unwrap();
     assert_eq!((after.state, after.failed_checks), (OutboxState::Pending, 1));
+    assert!(after.may_have_arrived(), "{after:?}");
     let state = a.store.sync_state(CHAT).unwrap().unwrap();
-    assert_eq!(state.sync_link, Some(link("s1")), "the cursor stays before that page");
+    assert_eq!(
+        state.sync_link,
+        Some(link("s2")),
+        "the check moves past the page: the row keeps what it saw"
+    );
+}
 
-    // an ordinary catch-up isn't held up by it
+#[tokio::test]
+async fn an_unreadable_entry_an_ordinary_catch_up_moves_past_keeps_later_checks_from_sending_the_row_again() {
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let (server, mut a) = posting_account(&clock).await;
+    let row = enqueue(&mut a.store, &send(CHAT, "unreadable, then caught up")).unwrap();
+    lose_the_answer_and_the_check(&mut a, &row).await;
+    a.outbox.take_arrived();
+    mount_pages(
+        &server,
+        vec![
+            ("", page(vec![unreadable(&row, 1000)], Some("s1"), None)),
+            // what every later check reads: nothing new
+            ("s1", page(vec![], Some("s1"), None)),
+        ],
+    )
+    .await;
+
     let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
-    assert_eq!(synced.skipped, 1);
+    assert_eq!((synced.changed(), synced.skipped), (0, 1), "{synced:?}");
     let state = a.store.sync_state(CHAT).unwrap().unwrap();
-    assert_eq!(state.sync_link, Some(link("s2")));
+    assert_eq!(state.sync_link, Some(link("s1")), "the catch-up isn't held up by it");
+    let seen = a.store.outbox_entry(row.id).unwrap().unwrap();
+    assert_eq!(seen.state, OutboxState::Pending);
+    assert!(seen.may_have_arrived(), "{seen:?}");
+    assert_eq!(
+        a.outbox.take_arrived(),
+        std::slice::from_ref(&seen),
+        "the row's change is told"
+    );
+
+    // every later check fails, until the row is given up; nothing goes out again on its own
+    for _ in seen.failed_checks..MAX_FAILED_CHECKS {
+        clock.fetch_add(3_600_000, Ordering::SeqCst);
+        let error = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap_err();
+        assert_unreadable_seen(&error);
+    }
+    let given_up = a.store.outbox_entry(row.id).unwrap().unwrap();
+    assert_eq!(
+        (given_up.state, given_up.failed_checks),
+        (OutboxState::Failed, MAX_FAILED_CHECKS)
+    );
+    assert!(given_up.may_have_arrived(), "{given_up:?}");
+    assert!(
+        given_up.last_error.as_deref().unwrap().contains("may have arrived"),
+        "{given_up:?}"
+    );
+    assert_eq!(post_count(&server).await, 1, "never sent again on its own");
+
+    // only an explicit resend sends it again, with the same clientmessageid
+    a.store.resend(row.id).unwrap();
+    let sent = a.outbox.send(&mut a.store, &a.catch_up, row.id).await.unwrap();
+    assert_eq!(sent.state, OutboxState::Sent);
+    assert_eq!(post_count(&server).await, 2);
+}
+
+#[tokio::test]
+async fn an_unreadable_entry_marks_only_a_post_of_its_conversation_that_had_an_attempt() {
+    const OTHER: &str = "19:00000000000000000000000000000abc@thread.v2";
+    let clock = Arc::new(AtomicI64::new(now_ms()));
+    let (server, mut a) = posting_account(&clock).await;
+    let unsent = enqueue(&mut a.store, &send(CHAT, "never attempted")).unwrap();
+    let elsewhere = enqueue(&mut a.store, &send(OTHER, "posted to another chat")).unwrap();
+    a.store.begin_attempt(elsewhere.id).unwrap();
+    let lost = AttemptOutcome::Retry {
+        not_before: 0,
+        error: "timed out".to_owned(),
+    };
+    a.store.finish_attempt(elsewhere.id, &lost).unwrap();
+    let entries = vec![unreadable(&unsent, 1000), unreadable(&elsewhere, 2000)];
+    mount_pages(&server, vec![("", page(entries, Some("s1"), None))]).await;
+
+    let synced = a.catch_up.sync_messages(&mut a.store, CHAT).await.unwrap();
+
+    assert_eq!(synced.skipped, 2, "{synced:?}");
+    for row in [unsent, elsewhere] {
+        let after = a.store.outbox_entry(row.id).unwrap().unwrap();
+        assert_eq!(after.unreadable_seen_at, None, "{after:?}");
+    }
+    assert!(a.outbox.take_arrived().is_empty());
+}
+
+/// An entry no read takes for a message (`properties` must be an object) that carries `row`'s clientmessageid, as our
+/// own message would come back `offset` ms after the row was made.
+fn unreadable(row: &OutboxEntry, offset: i64) -> Value {
+    let mut raw = own_entry(row, offset);
+    raw["properties"] = json!("unreadable");
+    raw
+}
+
+/// The error of a check that read, or a read before it had read, an entry it can't read carrying its row's
+/// clientmessageid.
+fn assert_unreadable_seen(error: &OutboxError) {
+    let OutboxError::Sync { source, .. } = error else {
+        panic!("{error:?}");
+    };
+    assert!(source.downcast_ref::<UnreadableSeen>().is_some(), "{error:?}");
 }
 
 /// How many message posts the plain service got.

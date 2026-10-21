@@ -383,13 +383,21 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
   (`0004_*`), `crates/teams-core/tests/sync.rs`, `crates/teams-store/tests/store.rs`
 - Delete: `docs/backlog/catch-up-consumes-an-unreadable-entry-of-a-pending-row.md`
 
-- [ ] tests first (plain wiremock, as the backlog's regressions): an ordinary catch-up meets an unreadable entry
+- [x] tests first (plain wiremock, as the backlog's regressions): an ordinary catch-up meets an unreadable entry
       carrying a pending row's `clientmessageid`, moves on, and a later check must not send the row again
-- [ ] the fix: the row records (a new migration) that such an entry was seen, and its check treats the row as
+- [x] the fix: the row records (a new migration) that such an entry was seen, and its check treats the row as
       possibly arrived: it is not sent again on its own (the backlog's proposal: the check fails and gives up at
       `MAX_FAILED_CHECKS`), only by an explicit resend; the row's state says "may have arrived", which the UI shows
       before it offers "send again" (Task 13); decide with Codex if the item's options leave a real choice
-- [ ] `cargo test -p teams-core -p teams-store` and the gate pass; delete the backlog item
+- [x] `cargo test -p teams-core -p teams-store` and the gate pass; delete the backlog item
+- Done (2026-10-21): migration `0004` adds `outbox.unreadable_seen_at` (the first sighting's time);
+  `OutboxEntry::may_have_arrived()` is that record on a row not sent, the state Task 13 shows. Every read alike (an
+  ordinary catch-up, a check, `load_older`) records it through `Outbox::unreadable_seen` for a message post of the
+  entry's conversation, of any run, that had an attempt, then moves on: the check no longer refuses such a page (the
+  old `Reader`/`guard_page` split is gone), it fails on the record (`UnreadableSeen`) as one that couldn't sync,
+  until `MAX_FAILED_CHECKS`. The recorded row is told like an arrived one (`take_arrived`, so `Event::Outbox`).
+  `Store::resend` clears the record: the resend is the owner's decision after the warning. No Codex round: the plan
+  and Task 13 settle each option the item left (give up at `MAX_FAILED_CHECKS`, resend sends).
 
 ### Task 3: The UI sandbox
 **Files:**

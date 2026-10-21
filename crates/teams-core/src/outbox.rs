@@ -17,6 +17,13 @@
 //!   nothing: the row waits [`CHECK_RETRY_WAIT`], doubled for each check of its that failed before. A row is given up
 //!   (failed) after [`MAX_ATTEMPTS`] attempts or [`MAX_FAILED_CHECKS`] checks that couldn't sync, both counted since
 //!   it was made or last resent.
+//! - **An entry no read can take that carries a row's `clientmessageid`** ([`Outbox::unreadable_seen`]): any read
+//!   (an ordinary catch-up as much as a check) that meets one for a message post of its conversation that had an
+//!   attempt records it on the row and moves on, so the conversation's sync is never held up by it. Its message may
+//!   have arrived, and once the read moved past the entry no later sync tells, so every check of the row fails
+//!   ([`UnreadableSeen`]) as one that couldn't sync does, until it is given up at [`MAX_FAILED_CHECKS`]: it isn't sent
+//!   again on its own, only by an explicit resend ([`OutboxEntry::may_have_arrived`] says so to its owner first). Our
+//!   message coming back readable after all still settles it.
 //! - **Writes on one thing go out in the order they were asked for** ([`Lane`]): a row waits, sending nothing, while
 //!   an older pending row of this run acts on the same message (an edit, a delete, a reaction or taking it back) or,
 //!   for a read receipt, on the same conversation's read horizon; so a take-back sent while its reaction waits out a
@@ -262,6 +269,12 @@ pub enum OutboxError {
     #[error("the command can't be stored: {0}")]
     Payload(#[source] serde_json::Error),
 }
+
+/// A check before a new attempt couldn't tell whether the row's message arrived because a read met an entry it couldn't
+/// read at all carrying the row's `clientmessageid` ([`Outbox::unreadable_seen`]): the row isn't sent again on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a read met an entry it couldn't read carrying its clientmessageid, so it may have arrived")]
+pub struct UnreadableSeen;
 
 /// What one [`Outbox::send_due`] did.
 #[derive(Debug, Default)]
@@ -547,6 +560,39 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         Ok(arrived)
     }
 
+    /// A read met an entry it couldn't read at all, in `conversation`, carrying `client_message_id`: when that is the
+    /// `clientmessageid` of a message post of `conversation` (of any run) that had an attempt and isn't known sent, its
+    /// message may have arrived, and the row records it ([`Store::outbox_unreadable_seen`]; see the module docs).
+    /// Returns the row when this recorded it, which is also kept for [`Outbox::take_arrived`]. Who sent the entry isn't
+    /// inferred, and the row isn't matched from it.
+    ///
+    /// # Errors
+    ///
+    /// [`OutboxError::Store`] when the store fails.
+    pub fn unreadable_seen(
+        &self,
+        store: &mut Store,
+        conversation: &str,
+        client_message_id: &str,
+    ) -> Result<Option<OutboxEntry>, OutboxError> {
+        let Some(row) = store.outbox_by_client_message_id(client_message_id)? else {
+            return Ok(None);
+        };
+        let may_have_arrived = findable(&row) == Some(conversation)
+            && row.state != OutboxState::Sent
+            && row.attempts > 0
+            && row.unreadable_seen_at.is_none();
+        if !may_have_arrived {
+            return Ok(None);
+        }
+        let seen = store.outbox_unreadable_seen(row.id, (self.clock)())?;
+        self.arrived
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(seen.clone());
+        Ok(Some(seen))
+    }
+
     /// The row a message of ours belongs to ([`Outbox::match_arrival`]).
     fn match_own(&self, store: &mut Store, message: &Message) -> Result<Option<OutboxEntry>, OutboxError> {
         let arrival = Arrival {
@@ -559,9 +605,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// Before a new attempt: syncs the row's conversation and looks for its `clientmessageid` among our messages.
-    /// Found, the row is sent; `None` when it wasn't found (or a row of its kind can't be looked for). A sync that fails
-    /// leaves the row waiting its backoff, or fails it ([`Outbox::check_failed`]), and is returned as
-    /// [`OutboxError::Sync`].
+    /// Found, the row is sent; `None` when it wasn't found (or a row of its kind can't be looked for). A sync that fails,
+    /// or a row a read met an unreadable entry for ([`UnreadableSeen`]), leaves the row waiting its backoff, or fails
+    /// it ([`Outbox::check_failed`]), and is returned as [`OutboxError::Sync`].
     async fn look_for_arrival<S: ConversationSync>(
         &self,
         store: &mut Store,
@@ -572,7 +618,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             return Ok(None);
         };
         if let Err(source) = sync.sync_conversation_since(store, conversation, row.created_at).await {
-            let after = self.check_failed(store, row, &source)?;
+            let error =
+                format!("the conversation couldn't be synced to look for it ({source}); whether it arrived is unknown");
+            let after = self.check_failed(store, row, error)?;
             if after.state == OutboxState::Sent {
                 // the sync matched it before it failed
                 return Ok(Some(after));
@@ -584,22 +632,25 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             // the sync's own receive matched it
             return Ok(Some(current));
         }
-        match store.message_by_client_id(conversation, &row.client_message_id)? {
-            Some(message) if self.is_mine(&message) => Ok(store.outbox_arrived(&row.client_message_id, &message.id)?),
-            _ => Ok(None),
+        if let Some(message) = store.message_by_client_id(conversation, &row.client_message_id)?
+            && self.is_mine(&message)
+        {
+            return Ok(store.outbox_arrived(&row.client_message_id, &message.id)?);
         }
+        if current.unreadable_seen_at.is_some() {
+            self.check_failed(store, &current, UnreadableSeen.to_string())?;
+            return Err(OutboxError::Sync {
+                id: row.id,
+                source: Box::new(UnreadableSeen),
+            });
+        }
+        Ok(None)
     }
 
-    /// A check that couldn't sync: the row waits its backoff, or is failed at its last check.
-    fn check_failed(
-        &self,
-        store: &mut Store,
-        row: &OutboxEntry,
-        source: &SyncError,
-    ) -> Result<OutboxEntry, OutboxError> {
+    /// A check that couldn't tell whether the row's message arrived, for the reason `error`: the row waits its
+    /// backoff, or is failed at its last check.
+    fn check_failed(&self, store: &mut Store, row: &OutboxEntry, error: String) -> Result<OutboxEntry, OutboxError> {
         let failed = row.failed_checks.saturating_add(1);
-        let error =
-            format!("the conversation couldn't be synced to look for it ({source}); whether it arrived is unknown");
         let outcome = if failed >= MAX_FAILED_CHECKS {
             CheckFailed::GiveUp {
                 error: format!("{error}, so it isn't sent again; given up after {failed} checks"),
