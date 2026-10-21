@@ -1,6 +1,6 @@
 [package]
 name = "teams-core"
-description = "The native client's core: commands go out through the outbox and the fence (sync and the engine come in M1 Tasks 17-18)"
+description = "The native client's core: commands go out through the outbox and the fence, and a catch-up sync keeps the store up to date (the engine comes in M1 Task 18)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,8 +20,12 @@ teams-store.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# the sync tests write as the other lab accounts straight to the mock chat service
+reqwest.workspace = true
 # the tests' fence runs over a test roster, a test log and fake membership sources
 teams-fence = { workspace = true, features = ["test-support"] }
+# the sync tests' chat service, from the synthetic fixtures
+teams-mock.workspace = true
 # the transport reaches wiremock through its mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

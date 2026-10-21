@@ -855,11 +855,24 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Create: `crates/teams-core/src/sync.rs`, `crates/teams-core/tests/sync.rs`
 - Modify: `crates/teams-core/{Cargo.toml,src/lib.rs}`
 
-- [ ] tests first (on `teams-mock`): first sync fills the store; a sync after a gap (socket down, messages sent
+- [x] tests first (on `teams-mock`): first sync fills the store; a sync after a gap (socket down, messages sent
       meanwhile) catches up exactly once; Trouter events and sync agree (no duplicates, versions respected); a
       reconnect triggers a catch-up
-- [ ] the outbox's timeout check (Task 13) uses it to look for a `clientmessageid`
-- [ ] `cargo test -p teams-core` and the gate pass
+      (`teams_core::sync::CatchUp`: the conversation list (whole, then its `syncState` link), each new or changed
+      conversation upserted after its messages synced, its read horizon and its members (thread read when the list's
+      `rosterVersion` is newer); the list's link moves on only when every conversation synced. Messages: the newest page
+      first (its `backwardLink` kept, `load_older` pages back), then the conversation's sync link; a sync answer's own
+      `backwardLink` (never captured) is followed while its pages bring anything new, up to `MAX_PAGES`, the rest left
+      as older history. Everything goes through `receive_message` → `Outbox::receive`, the path a Trouter delivery
+      takes; a message whose `version` can't be read (unknown or missing) isn't stored, a reaction set with an
+      unreadable time isn't merged. `Gaps` says when a catch-up is due (on start, after every drop of the push
+      channel); the engine (Task 18) wires it to Trouter's connects, which Task 16 builds. Deliveries are played by
+      the mock's queued events' resources; plain wiremock for the shapes the mock doesn't serve)
+- [x] the outbox's timeout check (Task 13) uses it to look for a `clientmessageid`
+      (`CatchUp` implements `ConversationSync`; tested with a lost answer (found, posted once) and a dropped request
+      (sent again with the same id))
+- [x] `cargo test -p teams-core` and the gate pass (parallel run: crate-scoped gate; workspace gate after merge:
+      fmt, clippy and test on `teams-core`, `lint-report.sh`, pinned to 4 cores)
 
 ### Task 18: The `teams-core` engine
 **Files:**

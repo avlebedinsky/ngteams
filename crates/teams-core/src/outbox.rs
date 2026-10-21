@@ -100,6 +100,20 @@ pub trait ConversationSync: Sync {
         store: &'a mut Store,
         conversation: &'a str,
     ) -> impl Future<Output = Result<(), SyncError>> + Send + 'a;
+
+    /// As [`ConversationSync::sync_conversation`], for a message we sent no earlier than `since` (milliseconds since
+    /// the Unix epoch: the row's `created_at`); the outbox's check calls this one. A sync that reads the newest
+    /// messages a page at a time reads back until it reaches one older than `since`, and fails when it can't, so a
+    /// message we sent is never missed for being more than a page back. By default it is
+    /// [`ConversationSync::sync_conversation`], for a sync that reads everything at once.
+    fn sync_conversation_since<'a>(
+        &'a self,
+        store: &'a mut Store,
+        conversation: &'a str,
+        _since: i64,
+    ) -> impl Future<Output = Result<(), SyncError>> + Send + 'a {
+        self.sync_conversation(store, conversation)
+    }
 }
 
 /// The time in milliseconds since the Unix epoch, as the outbox reads it for `not_before`.
@@ -148,6 +162,18 @@ pub struct Unsynced {
 pub struct Received {
     pub applied: Applied,
     pub outbox: Option<OutboxEntry>,
+}
+
+/// What a message that came in is matched to its outbox row by ([`Outbox::match_arrival`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Arrival<'a> {
+    /// The conversation it came in.
+    pub conversation: &'a str,
+    /// The service's id for it.
+    pub id: &'a str,
+    pub client_message_id: Option<&'a str>,
+    /// Its sender's MRI.
+    pub sender: Option<&'a str>,
 }
 
 /// A fresh `clientmessageid`: a random 19-digit number, as the web client makes them.
@@ -322,22 +348,40 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         row.state == OutboxState::Pending && row.not_before.is_none_or(|not_before| not_before <= (self.clock)())
     }
 
-    /// The row a message of ours belongs to: a message post with its `clientmessageid`, in its conversation. A row
-    /// already sent with a message id stays as it is.
-    fn match_own(&self, store: &mut Store, message: &Message) -> Result<Option<OutboxEntry>, OutboxError> {
-        let Some(client_message_id) = message.client_message_id.as_deref().filter(|_| self.is_mine(message)) else {
+    /// Matches a message that came in to its row without storing it, for one that can't be stored (its version or
+    /// its arrival time can't be read); [`Outbox::receive`] matches a stored one the same way. When it is ours, the
+    /// message post with its `clientmessageid` in its conversation becomes sent with its id; a row already sent with
+    /// a message id stays as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`OutboxError::Store`] when the store fails.
+    pub fn match_arrival(&self, store: &mut Store, arrival: &Arrival<'_>) -> Result<Option<OutboxEntry>, OutboxError> {
+        let mine = arrival.sender == Some(self.me.as_str());
+        let Some(client_message_id) = arrival.client_message_id.filter(|_| mine) else {
             return Ok(None);
         };
         let Some(row) = store.outbox_by_client_message_id(client_message_id)? else {
             return Ok(None);
         };
-        if findable(&row) != Some(message.conversation_id.as_str()) {
+        if findable(&row) != Some(arrival.conversation) {
             return Ok(None);
         }
         if row.state == OutboxState::Sent && row.message_id.is_some() {
             return Ok(Some(row));
         }
-        Ok(store.outbox_arrived(client_message_id, &message.id)?)
+        Ok(store.outbox_arrived(client_message_id, arrival.id)?)
+    }
+
+    /// The row a message of ours belongs to ([`Outbox::match_arrival`]).
+    fn match_own(&self, store: &mut Store, message: &Message) -> Result<Option<OutboxEntry>, OutboxError> {
+        let arrival = Arrival {
+            conversation: &message.conversation_id,
+            id: &message.id,
+            client_message_id: message.client_message_id.as_deref(),
+            sender: message.sender.as_deref(),
+        };
+        self.match_arrival(store, &arrival)
     }
 
     /// Before a new attempt: syncs the row's conversation and looks for its `clientmessageid` among our messages.
@@ -353,7 +397,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         let Some(conversation) = findable(row) else {
             return Ok(None);
         };
-        if let Err(source) = sync.sync_conversation(store, conversation).await {
+        if let Err(source) = sync.sync_conversation_since(store, conversation, row.created_at).await {
             let after = self.check_failed(store, row, &source)?;
             if after.state == OutboxState::Sent {
                 // the sync matched it before it failed
@@ -547,7 +591,7 @@ fn message_id(answer: &Response) -> Option<String> {
 }
 
 /// Milliseconds since the Unix epoch.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();

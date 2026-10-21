@@ -841,12 +841,17 @@ fn sync_state_is_kept_per_conversation() {
         conversation_id: CHAT.to_owned(),
         sync_link: Some("https://chat.example.invalid/v1/sync?syncState=one".to_owned()),
         backward_link: Some("https://chat.example.invalid/v1/back?page=2".to_owned()),
+        backward_oldest: Some(1_760_000_000_000),
+        gap_link: Some("https://chat.example.invalid/v1/back?page=gap".to_owned()),
         history_complete: false,
         updated: 100,
     };
     store.set_sync_state(&state).expect("set");
+    assert_eq!(store.sync_state(CHAT).expect("read"), Some(state.clone()));
     let done = SyncState {
         backward_link: None,
+        backward_oldest: None,
+        gap_link: None,
         history_complete: true,
         updated: 200,
         ..state.clone()
@@ -1286,6 +1291,39 @@ fn a_store_of_the_first_schema_is_migrated_with_its_outbox_rows() {
         .expect("the row");
     assert_eq!((row.attempts, row.attempts_at_resend, row.failed_checks), (3, 0, 0));
     assert_eq!(row.attempts_since_resend(), 3);
+}
+
+#[test]
+fn a_sync_state_of_the_second_schema_is_migrated_without_a_gap_or_a_reach() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("store dir");
+    let raw = rusqlite::Connection::open(&path).expect("create directly");
+    raw.execute_batch(include_str!("../src/migrations/0001_initial.sql"))
+        .expect("the first migration");
+    raw.execute_batch(include_str!("../src/migrations/0002_outbox_budget.sql"))
+        .expect("the second migration");
+    raw.pragma_update(None, "user_version", 2).expect("version 2");
+    raw.execute(
+        "INSERT INTO conversations (id, kind, version) VALUES (?1, 'one_to_one', 1)",
+        [CHAT],
+    )
+    .expect("a conversation");
+    raw.execute(
+        "INSERT INTO conversation_sync (conversation_id, sync_link, backward_link, history_complete, updated)
+         VALUES (?1, 'https://chat.example.invalid/s', 'https://chat.example.invalid/b', 0, 5)",
+        [CHAT],
+    )
+    .expect("a sync state of the second schema");
+    drop(raw);
+
+    let store = Store::open(&path).expect("open and migrate");
+
+    assert_eq!(store.schema_version().expect("schema version"), SCHEMA_VERSION);
+    let state = store.sync_state(CHAT).expect("read").expect("the state");
+    assert_eq!(state.backward_link.as_deref(), Some("https://chat.example.invalid/b"));
+    // how far its history read reached isn't known: a check reads on from the link
+    assert_eq!((state.backward_oldest, state.gap_link), (None, None));
 }
 
 #[test]
