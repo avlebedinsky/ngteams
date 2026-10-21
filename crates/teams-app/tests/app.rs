@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser as _;
 use gpui::{AppContext as _, TestAppContext};
-use teams_app::app::{sign_in_hint, start_failure, watch_sign_out};
-use teams_app::cli::{Cli, Mode};
+use teams_app::app::{AppEngine, sign_in_hint, start_failure, watch_sign_out};
+use teams_app::cli::{Cli, Mode, ModeError};
 use teams_app::guard::window_allowed;
 use teams_app::trace::{TraceFdError, adopt_trace};
 use teams_auth::broker::{BrokerScope, BrokerSecretStore, Op, serve};
@@ -46,7 +46,7 @@ fn the_command_line_takes_the_app_or_the_broker() -> TestResult {
     let app = Cli::try_parse_from(["teams-app", "--lab", "b", "--secrets-fd", "5", "--trace-fd", "6"])?;
     assert_eq!(
         app.mode(),
-        Some(Mode::App {
+        Ok(Mode::App {
             alias: Alias::B,
             secrets_fd: 5,
             trace_fd: Some(6)
@@ -55,14 +55,16 @@ fn the_command_line_takes_the_app_or_the_broker() -> TestResult {
     let untraced = Cli::try_parse_from(["teams-app", "--lab", "a", "--secrets-fd", "3"])?;
     assert_eq!(
         untraced.mode(),
-        Some(Mode::App {
+        Ok(Mode::App {
             alias: Alias::A,
             secrets_fd: 3,
             trace_fd: None
         })
     );
     let broker = Cli::try_parse_from(["teams-app", "secrets", "--lab", "c", "--fd", "4"])?;
-    assert_eq!(broker.mode(), Some(Mode::Secrets { alias: Alias::C, fd: 4 }));
+    assert_eq!(broker.mode(), Ok(Mode::Secrets { alias: Alias::C, fd: 4 }));
+    let shared = Cli::try_parse_from(["teams-app", "--lab", "a", "--secrets-fd", "3", "--trace-fd", "3"])?;
+    assert_eq!(shared.mode(), Err(ModeError::SharedDescriptor(3)));
 
     for refused in [
         &["teams-app"][..],
@@ -93,6 +95,23 @@ fn without_the_broker_s_socket_the_app_does_not_start() -> TestResult {
     let output = Command::new(BINARY).args(["--lab", "a"]).output()?;
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(String::from_utf8(output.stderr)?.contains("--secrets-fd"));
+    Ok(())
+}
+
+#[test]
+fn one_descriptor_named_for_both_the_broker_and_the_trace_is_refused_before_either_is_taken() -> TestResult {
+    let home = tempfile::tempdir()?;
+    let output = Command::new(BINARY)
+        .args(["--lab", "a", "--secrets-fd", "3", "--trace-fd", "3"])
+        .env_clear()
+        .env("HOME", home.path())
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("both name descriptor 3"), "{stderr}");
+    assert!(!stderr.contains("test-support"), "refused first: {stderr}");
+    assert_eq!(std::fs::read_dir(home.path())?.count(), 0, "nothing was created");
     Ok(())
 }
 
@@ -279,6 +298,39 @@ fn another_engine_on_the_account_is_reported_and_this_one_exits() -> TestResult 
     assert!(message.contains("another engine runs on lab account a"), "{message}");
     assert!(message.contains("engine.lock"), "{message}");
     running.handle.shutdown();
+    Ok(())
+}
+
+#[test]
+fn a_shutdown_held_up_by_a_broker_that_never_answers_ends_the_exchange_after_its_grace() -> TestResult {
+    let lab = TempLab::new()?;
+    // the broker's end, held but never answered: the Secret Service waiting on an unlock prompt nobody answers
+    let (server, client) = UnixStream::pair()?;
+    let closer = client.try_clone()?;
+    let secrets = BrokerSecretStore::new(client, LabPaths::KEYRING_APPLICATION)?;
+    let LabEngine { handle, .. } = start(&lab, secrets)?;
+    let waiting = handle.sync();
+    // the session's request for the refresh token reached the broker: the engine waits on its answer
+    let mut header = [0; 4];
+    std::io::Read::read_exact(&mut &server, &mut header)?;
+
+    let (done, ended) = std::sync::mpsc::channel();
+    let engine = AppEngine::new(handle, Some(closer), Duration::from_millis(200));
+    std::thread::spawn(move || {
+        teams_ui::EventSource::shutdown(engine);
+        let _ = done.send(());
+    });
+
+    assert!(
+        ended.recv_timeout(WAIT).is_ok(),
+        "the shutdown ended though the broker never answered"
+    );
+    assert!(waiting.blocking_wait().is_err(), "the read got no token");
+    // the engine's thread was joined: its lock is free for the next one
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (again, _) = broker(&runtime)?;
+    start(&lab, again)?.handle.shutdown();
+    drop(server);
     Ok(())
 }
 

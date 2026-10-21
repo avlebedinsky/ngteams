@@ -12,6 +12,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{CHAT, LAB_B, Rig, Watcher, Written, conversation, message, outbox_row};
+use futures_util::FutureExt as _;
 use gpui::{AppContext as _, TestAppContext};
 use teams_core::{Event, MessageChange, Source};
 use teams_store::{Applied, Conversation, OutboxState};
@@ -150,6 +151,37 @@ fn shutdown_ends_the_drain_and_shuts_the_engine_down_once() {
     rig.cx.update(|cx| rig.bridge.update(cx, Bridge::shutdown).detach());
     rig.cx.run_until_parked();
     assert_eq!(rig.shutdowns(), 1, "a second shutdown has nothing left to do");
+}
+
+#[test]
+fn a_later_shutdown_ends_only_once_the_engine_is_joined_and_a_dropped_one_goes_on() {
+    let rig = Rig::start();
+
+    // the sign-out's shutdown, then the window closing: both before the engine's thread is joined
+    let (first, mut second) = rig.cx.update(|cx| {
+        rig.bridge
+            .update(cx, |bridge, cx| (bridge.shutdown(cx), bridge.shutdown(cx)))
+    });
+    assert_eq!(rig.shutdowns(), 0, "nothing has run yet");
+    assert!(
+        (&mut second).now_or_never().is_none(),
+        "the later shutdown waits for the engine's join"
+    );
+    assert!(rig.cx.read(|cx| rig.bridge.read(cx).running()), "not joined yet");
+    // the caller that started it went away: the shutdown goes on all the same
+    drop(first);
+    rig.cx.run_until_parked();
+
+    assert_eq!(rig.shutdowns(), 1);
+    assert_eq!((&mut second).now_or_never(), Some(()), "ended with the join");
+    assert!(!rig.cx.read(|cx| rig.bridge.read(cx).running()));
+    let mut after = rig.cx.update(|cx| rig.bridge.update(cx, Bridge::shutdown));
+    assert_eq!(
+        (&mut after).now_or_never(),
+        Some(()),
+        "once joined, a shutdown ends at once"
+    );
+    assert_eq!(rig.shutdowns(), 1);
 }
 
 /// A view that asks the conversation list once, as views will: through `Core`, awaiting its `Reply`.
@@ -308,10 +340,23 @@ fn no_message_text_or_name_reaches_the_trace() {
 
 #[test]
 fn a_trace_id_has_a_service_id_s_shape_only() {
-    for id in [CHAT, LAB_B, "48:notifications", "1767225600001", "7"] {
+    for id in [
+        CHAT,
+        LAB_B,
+        "48:notifications",
+        "48:mentions",
+        "19:0123456789abcdef0123456789abcdef@thread.v2",
+        "19:meeting_AbCdEf0123-_xyz@thread.v2",
+        "19:channel0001@thread.tacv2",
+        "19:channel0001@thread.tacv2;messageid=1767225600000",
+        "28:00000000-0000-4000-8000-0000000000ec",
+        "1767225600001",
+        "4611686018427387904",
+        "7",
+    ] {
         assert_eq!(TraceId::new(id).map(|id| id.as_str()), Some(id), "{id}");
     }
-    let long = format!("19:{}", "a".repeat(600));
+    let long = format!("19:{}@thread.v2", "a".repeat(600));
     for refused in [
         "",
         "hello",
@@ -319,6 +364,20 @@ fn a_trace_id_has_a_service_id_s_shape_only() {
         "lab-b",
         "19: spaced",
         "Привет:мир",
+        // one word of text with a colon, a time, a link, a name typed last name first
+        "re:done",
+        "note:",
+        "ok:)",
+        "10:30",
+        "Doe:John",
+        "https://example.com/x",
+        "19:bob@example.com",
+        "19:x@thread.v2;messageid=1",
+        "19:@thread.v2",
+        "48:hello",
+        "8:orgid:bob",
+        "28:echo",
+        "123456789012345678901",
         long.as_str(),
     ] {
         assert_eq!(TraceId::new(refused), None, "{refused}");

@@ -3,9 +3,10 @@
 //! `{"at_ms":1767225600000,"view":"window","change":"opened"}`.
 //!
 //! It never holds text: the view and the change are names fixed in the code (`&'static str`), kinds too, and an id
-//! goes in only as a [`TraceId`], which takes a service id's shape only (a message or row id's digits, or a
-//! conversation or account id with its `:`), so a message's text or a person's name can't pass for one. Whatever
-//! isn't such an id is left out and counted (`"refused"`).
+//! goes in only as a [`TraceId`], which takes only the service id shapes the captures showed (a message or row id's
+//! digits, a `19:…@thread.v2`-style conversation, an own `48:` stream, an `8:orgid:<guid>` or bot `28:<guid>`
+//! account), so a message's text, a link or a person's name can't pass for one. Whatever isn't such an id is left
+//! out and counted (`"refused"`).
 //!
 //! The caller hands the writer in (the app: a descriptor it was given, `--trace-fd`); a line that can't be written is
 //! lost, and the view goes on.
@@ -19,8 +20,30 @@ use serde_json::{Map, Value, json};
 /// The longest id the trace takes.
 const MAX_ID: usize = 512;
 
-/// A service id the trace may hold (see the module docs): 1 to 512 visible ASCII characters, and either all digits
-/// (a message's or an outbox row's id) or with a `:` in it (a conversation's or an account's id).
+/// The most digits a numeric id has: a message's id (milliseconds), a `clientmessageid` (18 and 19 digits seen), an
+/// outbox row's id (an `i64`).
+const MAX_DIGITS: usize = 20;
+
+/// What follows `19:<thread>@` in a conversation id (`docs/protocol/fence-targets.md`, "Ids"): a 1:1 chat, a group or
+/// meeting chat, a team's channel.
+const THREAD_DOMAINS: [&str; 4] = ["unq.gbl.spaces", "thread.v2", "thread.tacv2", "thread.skype"];
+
+/// The domains of a channel, whose reply chain is `<channel id>;messageid=<root id>`.
+const CHANNEL_DOMAINS: [&str; 2] = ["thread.tacv2", "thread.skype"];
+
+/// The account's own streams the captures showed (`48:<name>`).
+const OWN_STREAMS: [&str; 4] = ["notes", "notifications", "mentions", "calllogs"];
+
+/// A service id the trace may hold (see the module docs), in one of the shapes the captures showed
+/// (`docs/protocol/fence-targets.md`, "Ids"), at most 512 bytes:
+///
+/// - a number of 1 to 20 digits: a message's, a `clientmessageid`, an outbox row's;
+/// - a conversation: `19:<thread>@<domain>`, the thread letters, digits, `_` and `-`, the domain one of
+///   [`THREAD_DOMAINS`], or a channel's reply chain `19:<thread>@<channel domain>;messageid=<number>`; an own stream
+///   `48:<name>` ([`OWN_STREAMS`]);
+/// - an account: `8:orgid:<guid>`, a bot `28:<guid>`.
+///
+/// Anything else (a word, a time like `10:30`, `re:done`, a link, a name) is not an id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TraceId<'a>(&'a str);
 
@@ -28,15 +51,58 @@ impl<'a> TraceId<'a> {
     /// `id` if it has an id's shape.
     #[must_use]
     pub fn new(id: &'a str) -> Option<Self> {
-        let visible = !id.is_empty() && id.len() <= MAX_ID && id.bytes().all(|byte| byte.is_ascii_graphic());
-        let shaped = id.bytes().all(|byte| byte.is_ascii_digit()) || id.contains(':');
-        (visible && shaped).then_some(Self(id))
+        let shaped = is_number(id) || is_conversation(id) || is_account(id);
+        (id.len() <= MAX_ID && shaped).then_some(Self(id))
     }
 
     #[must_use]
     pub fn as_str(&self) -> &'a str {
         self.0
     }
+}
+
+fn is_number(id: &str) -> bool {
+    (1..=MAX_DIGITS).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_conversation(id: &str) -> bool {
+    if let Some(stream) = id.strip_prefix("48:") {
+        return OWN_STREAMS.contains(&stream);
+    }
+    let Some(rest) = id.strip_prefix("19:") else {
+        return false;
+    };
+    let (thread, root) = match rest.split_once(";messageid=") {
+        Some((thread, root)) => (thread, Some(root)),
+        None => (rest, None),
+    };
+    let Some((local, domain)) = thread.split_once('@') else {
+        return false;
+    };
+    let domain = match root {
+        Some(root) => is_number(root) && CHANNEL_DOMAINS.contains(&domain),
+        None => THREAD_DOMAINS.contains(&domain),
+    };
+    domain
+        && !local.is_empty()
+        && local
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn is_account(id: &str) -> bool {
+    id.strip_prefix("8:orgid:")
+        .or_else(|| id.strip_prefix("28:"))
+        .is_some_and(is_guid)
+}
+
+/// `8-4-4-4-12` hex digits.
+fn is_guid(text: &str) -> bool {
+    text.len() == 36
+        && text.bytes().enumerate().all(|(at, byte)| match at {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 /// One line of the trace, built up and then [recorded](ViewTrace::record).

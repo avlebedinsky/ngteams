@@ -2,24 +2,36 @@
 //!
 //! [`launch`] runs inside GPUI's `run`: it hands the engine to a [`Bridge`], opens the main window over the bridge's
 //! models with the view trace, watches the session for a sign-out ([`watch_sign_out`]) and, once the last window
-//! closes, shuts the engine down (off the foreground, joining its thread) and quits.
+//! closes, shuts the engine down (off the foreground, joining its thread) and quits. A window that can't be opened
+//! shuts the engine down too, and the caller quits once that shutdown has ended ([`LaunchFailed`]).
+//!
+//! The engine is held as an [`AppEngine`]: its shutdown waits [`SHUTDOWN_GRACE`] for the engine's thread, then shuts
+//! the broker's socket down, so an exchange waiting on the broker (the Secret Service asking the user to unlock it,
+//! with the window already closed) ends and the engine with it, instead of keeping a windowless app and the account's
+//! engine lock until the prompt is answered.
 
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::{App, AppContext as _, AsyncApp, Entity, QuitMode, SharedString, WeakEntity, WindowHandle};
+use gpui::{App, AppContext as _, AsyncApp, Entity, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
 use teams_auth::session::SignedOut;
 use teams_core::EngineError;
-use teams_core::EngineHandle;
 use teams_core::lab::LabError;
+use teams_core::{EngineHandle, Event};
 use teams_fence::lab::Alias;
 use teams_ui::window::{self, LAB_APP_ID};
-use teams_ui::{Bridge, Core, Models, Root, ViewTrace};
+use teams_ui::{Bridge, Core, EventSource, Models, Root, ViewTrace};
 use tokio::sync::watch;
 
 /// What the app starts with.
 pub struct Launch {
     pub alias: Alias,
     pub engine: EngineHandle,
+    /// A second descriptor of the app's end of the broker's socket, shut down when the engine's shutdown overruns
+    /// ([`AppEngine`]); `None` for an engine that reaches no broker (a test's).
+    pub broker: Option<UnixStream>,
     /// The session's signed-out state ([`teams_auth::session::Session::watch_signed_out`]); `None` for an engine
     /// whose tokens can't run out (a test's).
     pub signed_out: Option<watch::Receiver<Option<SignedOut>>>,
@@ -38,14 +50,56 @@ pub fn title(alias: Alias) -> SharedString {
     format!("Teams (lab {alias})").into()
 }
 
+/// How long the engine's shutdown waits for its thread before it shuts the broker's socket down ([`AppEngine`]).
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// The engine as the app holds it: its handle, and the broker's socket to shut down when its shutdown overruns its
+/// grace (see the module docs).
+pub struct AppEngine {
+    engine: EngineHandle,
+    broker: Option<UnixStream>,
+    grace: Duration,
+}
+
+impl AppEngine {
+    #[must_use]
+    pub fn new(engine: EngineHandle, broker: Option<UnixStream>, grace: Duration) -> Self {
+        Self { engine, broker, grace }
+    }
+}
+
+impl EventSource for AppEngine {
+    fn next_event(&mut self) -> impl Future<Output = Option<Event>> {
+        self.engine.next_event()
+    }
+
+    fn shutdown(self) {
+        let Self { engine, broker, grace } = self;
+        engine.shutdown_within(grace, || {
+            if let Some(broker) = &broker {
+                // a socket already closed by the broker has nothing left to end
+                let _ = broker.shutdown(Shutdown::Both);
+            }
+        });
+    }
+}
+
+/// The window couldn't be opened: why, and the engine's shutdown, which ends once its thread is joined (the caller
+/// quits after it).
+pub struct LaunchFailed {
+    pub error: String,
+    pub stopped: Task<()>,
+}
+
 /// Starts the app inside GPUI's `run` (see the module docs): the main window and the bridge holding the engine.
 ///
 /// # Errors
-/// The window can't be opened (the bridge is shut down then).
-pub fn launch(cx: &mut App, launch: Launch) -> gpui::Result<(WindowHandle<Root>, Entity<Bridge>)> {
+/// The window can't be opened: the bridge is shut down then, and [`LaunchFailed::stopped`] ends once it is.
+pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<Root>, Entity<Bridge>), LaunchFailed> {
     let Launch {
         alias,
         engine,
+        broker,
         signed_out,
         trace,
     } = launch;
@@ -55,6 +109,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> gpui::Result<(WindowHandle<Root>,
     let models = Models::new(cx);
     let core: Arc<dyn Core> = Arc::new(engine.requests());
     let drained = models.clone();
+    let engine = AppEngine::new(engine, broker, SHUTDOWN_GRACE);
     let bridge = cx.new(|cx| Bridge::start(engine, core, drained, cx));
     if let Some(signed_out) = signed_out {
         watch_sign_out(signed_out, bridge.downgrade(), sign_in_hint(alias), cx);
@@ -62,8 +117,10 @@ pub fn launch(cx: &mut App, launch: Launch) -> gpui::Result<(WindowHandle<Root>,
     let window = match window::open(cx, LAB_APP_ID, title(alias), models, Arc::new(trace)) {
         Ok(window) => window,
         Err(error) => {
-            bridge.update(cx, Bridge::shutdown).detach();
-            return Err(error);
+            return Err(LaunchFailed {
+                error: format!("{error:#}"),
+                stopped: bridge.update(cx, Bridge::shutdown),
+            });
         }
     };
     quit_when_closed(bridge.clone(), cx);
@@ -94,12 +151,17 @@ fn quit_when_closed(bridge: Entity<Bridge>, cx: &mut App) {
     cx.on_window_closed(move |cx, _| {
         if cx.windows().is_empty() {
             let stopped = bridge.update(cx, Bridge::shutdown);
-            cx.spawn(async move |cx: &mut AsyncApp| {
-                stopped.await;
-                cx.update(|cx| cx.quit());
-            })
-            .detach();
+            quit_after(stopped, cx);
         }
+    })
+    .detach();
+}
+
+/// Quits the app once `stopped` (the engine's shutdown) has ended.
+pub fn quit_after(stopped: Task<()>, cx: &mut App) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        stopped.await;
+        cx.update(|cx| cx.quit());
     })
     .detach();
 }

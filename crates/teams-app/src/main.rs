@@ -20,14 +20,14 @@ use teams_ui::ViewTrace;
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.mode() {
-        Some(Mode::Secrets { alias, fd }) => broker(alias, fd),
-        Some(Mode::App {
+        Ok(Mode::Secrets { alias, fd }) => broker(alias, fd),
+        Ok(Mode::App {
             alias,
             secrets_fd,
             trace_fd,
         }) => run_app(alias, secrets_fd, trace_fd),
-        // the parser requires the app's arguments when no subcommand is given
-        None => fail("app", &"give --lab and --secrets-fd, or a subcommand"),
+        // refused before either descriptor is taken over
+        Err(error) => fail("app", &error),
     }
 }
 
@@ -66,10 +66,11 @@ fn run_app(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> ExitCode
     let failed = std::rc::Rc::new(std::cell::Cell::new(false));
     let failed_in_app = std::rc::Rc::clone(&failed);
     gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
-        if let Err(error) = app::launch(cx, launch) {
-            eprintln!("teams-app: the window can't be opened: {error:#}");
+        if let Err(failed) = app::launch(cx, launch) {
+            eprintln!("teams-app: the window can't be opened: {}", failed.error);
             failed_in_app.set(true);
-            cx.quit();
+            // the engine's thread is joined before the app quits
+            app::quit_after(failed.stopped, cx);
         }
     });
     if failed.get() {
@@ -87,6 +88,10 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
         Some(fd) => ViewTrace::new(adopt_trace(fd).map_err(|error| error.to_string())?),
         None => ViewTrace::off(),
     };
+    // shut down if the engine's shutdown overruns, to end an exchange still waiting on the broker
+    let broker = socket
+        .try_clone()
+        .map_err(|error| format!("the broker's socket: {error}"))?;
     guard::window_allowed_here()?;
     let config = LabLocations::from_env()
         .and_then(|locations| LabConfig::load(&locations))
@@ -98,6 +103,7 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
         .map_err(|error| app::start_failure(alias, &error))?;
     Ok(Launch {
         alias,
+        broker: Some(broker),
         signed_out: Some(lab.session.watch_signed_out()),
         engine: lab.handle,
         trace,

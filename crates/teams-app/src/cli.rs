@@ -63,18 +63,36 @@ pub enum Mode {
     Secrets { alias: Alias, fd: RawFd },
 }
 
+/// A command line the parser took but the app refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ModeError {
+    /// The app's arguments are missing: the parser requires them when no subcommand is given, so a parsed command line
+    /// never has this.
+    #[error("give --lab and --secrets-fd, or a subcommand")]
+    Incomplete,
+    /// The broker's socket and the view trace name the same descriptor: each is taken over as a descriptor of its own,
+    /// and trace lines would go into the broker's protocol.
+    #[error("--secrets-fd and --trace-fd both name descriptor {0}: each needs a descriptor of its own")]
+    SharedDescriptor(RawFd),
+}
+
 impl Cli {
-    /// What the command line asks for. The parser has made sure the app's arguments are there when no subcommand is.
-    #[must_use]
-    pub fn mode(&self) -> Option<Mode> {
+    /// What the command line asks for.
+    ///
+    /// # Errors
+    /// See [`ModeError`].
+    pub fn mode(&self) -> Result<Mode, ModeError> {
         match (&self.command, self.app.alias, self.app.secrets_fd) {
-            (Some(Command::Secrets { alias, fd }), _, _) => Some(Mode::Secrets { alias: *alias, fd: *fd }),
-            (None, Some(alias), Some(secrets_fd)) => Some(Mode::App {
+            (Some(Command::Secrets { alias, fd }), _, _) => Ok(Mode::Secrets { alias: *alias, fd: *fd }),
+            (None, Some(_), Some(secrets_fd)) if self.app.trace_fd == Some(secrets_fd) => {
+                Err(ModeError::SharedDescriptor(secrets_fd))
+            }
+            (None, Some(alias), Some(secrets_fd)) => Ok(Mode::App {
                 alias,
                 secrets_fd,
                 trace_fd: self.app.trace_fd,
             }),
-            (None, _, _) => None,
+            (None, _, _) => Err(ModeError::Incomplete),
         }
     }
 }

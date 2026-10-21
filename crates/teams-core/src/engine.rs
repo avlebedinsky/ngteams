@@ -61,6 +61,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::mpsc::RecvTimeoutError;
 use std::task::{Context, Poll};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -511,6 +512,8 @@ pub struct EngineHandle {
     requests: EngineRequests,
     events: mpsc::UnboundedReceiver<Event>,
     thread: Option<JoinHandle<()>>,
+    /// Disconnected once the engine's thread has ended: nothing is ever sent on it.
+    ended: std::sync::mpsc::Receiver<()>,
 }
 
 impl Deref for EngineHandle {
@@ -558,6 +561,18 @@ impl EngineHandle {
             let _ = thread.join();
         }
     }
+
+    /// As [`EngineHandle::shutdown`], but when the engine's thread hasn't ended within `grace`, calls `overdue` once
+    /// (to end what holds the engine up: a secret store waiting on a prompt nobody answers) and then waits for it.
+    pub fn shutdown_within(mut self, grace: Duration, overdue: impl FnOnce()) {
+        let _ = self.requests.requests.send(Request::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            if let Err(RecvTimeoutError::Timeout) = self.ended.recv_timeout(grace) {
+                overdue();
+            }
+            let _ = thread.join();
+        }
+    }
 }
 
 /// Starts an engine on a thread of its own, with its own tokio runtime, once it holds the account's engine lock
@@ -583,6 +598,7 @@ where
         .map_err(EngineError::Runtime)?;
     let (requests, received) = mpsc::unbounded_channel();
     let (events, taken) = mpsc::unbounded_channel();
+    let (ending, ended) = std::sync::mpsc::channel();
     let thread = std::thread::Builder::new()
         .name("teams-core".to_owned())
         .spawn(move || {
@@ -590,12 +606,14 @@ where
             // its tasks (the push channel's) and the store are gone before another engine may start
             drop(runtime);
             drop(lock);
+            drop(ending);
         })
         .map_err(EngineError::Thread)?;
     Ok(EngineHandle {
         requests: EngineRequests { requests },
         events: taken,
         thread: Some(thread),
+        ended,
     })
 }
 

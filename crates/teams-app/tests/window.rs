@@ -380,6 +380,7 @@ fn child_window() -> SandboxResult {
             Launch {
                 alias: Alias::A,
                 engine,
+                broker: None,
                 signed_out: None,
                 trace,
             },
@@ -390,9 +391,9 @@ fn child_window() -> SandboxResult {
                     after_frames(window, READY_FRAMES, |_, _| say("ready"));
                 });
             }
-            Err(error) => {
-                *failed_in_app.lock().unwrap_or_else(PoisonError::into_inner) = Some(format!("{error:#}"));
-                cx.quit();
+            Err(failed) => {
+                *failed_in_app.lock().unwrap_or_else(PoisonError::into_inner) = Some(failed.error);
+                app::quit_after(failed.stopped, cx);
             }
         }
     });

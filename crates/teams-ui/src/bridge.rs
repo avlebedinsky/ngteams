@@ -6,14 +6,17 @@
 //! engine's [`EngineRequests`]; in a view test a fake), and await each query's [`Reply`] on GPUI's executor.
 //!
 //! [`Bridge::shutdown`] stops the drain, takes the owner back from it and shuts the engine down on GPUI's background
-//! executor, never the foreground ([`EventSource::shutdown`] blocks until the engine's thread is joined). From then on
-//! every request answers `Stopped`: nothing more goes out. [`Bridge::sign_out`] does the same once the account's
-//! session can't renew its tokens, and shows the account signed out.
+//! executor, never the foreground ([`EventSource::shutdown`] blocks until the engine's thread is joined). Every call,
+//! the first and any later one, answers with a task that ends only once that join has: a caller that quits after it
+//! never quits before the engine is joined. The bridge keeps the shutdown going whether or not a caller keeps its
+//! task. From then on every request answers `Stopped`: nothing more goes out. [`Bridge::sign_out`] does the same once
+//! the account's session can't renew its tokens, and shows the account signed out.
 
 use std::pin::pin;
 use std::sync::Arc;
 
-use futures_util::future::{Either, select};
+use futures_util::FutureExt as _;
+use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{Action, EngineHandle, EngineRequests, Event, Reply, Transient, TransientSent};
@@ -149,12 +152,22 @@ struct Draining {
     task: Task<Shutdown>,
 }
 
+/// Where the engine's owner is.
+enum Held {
+    /// With the drain.
+    Draining(Draining),
+    /// Being shut down: the task ends once the engine's thread is joined. Every [`Bridge::shutdown`] awaits this one.
+    Stopping(Shared<Task<()>>),
+    /// Shut down, its thread joined.
+    Stopped,
+}
+
 /// The engine as the UI holds it (see the module docs). A GPUI entity: [`Bridge::start`] builds it in a
 /// `cx.new(...)`.
 pub struct Bridge {
     core: Arc<dyn Core>,
     models: Models,
-    draining: Option<Draining>,
+    held: Held,
 }
 
 impl Bridge {
@@ -170,7 +183,7 @@ impl Bridge {
         Self {
             core,
             models,
-            draining: Some(Draining { stop, task }),
+            held: Held::Draining(Draining { stop, task }),
         }
     }
 
@@ -185,26 +198,39 @@ impl Bridge {
         &self.models
     }
 
-    /// Whether the engine is still held (not shut down yet).
+    /// Whether the engine is still held: not shut down, or its thread not joined yet.
     #[must_use]
     pub fn running(&self) -> bool {
-        self.draining.is_some()
+        !matches!(self.held, Held::Stopped)
     }
 
     /// Stops the drain and shuts the engine down off the foreground; the task ends once the engine's thread is
-    /// joined. A second call has nothing left to do.
+    /// joined. A later call starts nothing new: its task ends with the first one's join, at once when that is done.
+    /// Dropping the task doesn't cancel the shutdown.
     pub fn shutdown(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        let Some(Draining { stop, task }) = self.draining.take() else {
-            return Task::ready(());
+        let stopping = match std::mem::replace(&mut self.held, Held::Stopped) {
+            Held::Draining(draining) => self.stop(draining, cx),
+            Held::Stopping(stopping) => stopping,
+            Held::Stopped => return Task::ready(()),
         };
+        self.held = Held::Stopping(stopping.clone());
+        cx.spawn(async move |_, _: &mut AsyncApp| stopping.await)
+    }
+
+    /// The shutdown itself: the drain stopped and its owner taken back, the engine shut down on the background
+    /// executor, then the models and the bridge told.
+    fn stop(&self, Draining { stop, task }: Draining, cx: &mut Context<Self>) -> Shared<Task<()>> {
         // a drain that already ended (the engine stopped on its own) has dropped its receiver
         let _ = stop.send(());
         let models = self.models.clone();
-        cx.spawn(async move |_, cx: &mut AsyncApp| {
+        cx.spawn(async move |bridge, cx: &mut AsyncApp| {
             let shutdown = task.await;
             cx.background_spawn(async move { shutdown() }).await;
             cx.update(|cx| models.engine_stopped(cx));
+            // a bridge that is gone has nobody left to ask
+            let _ = bridge.update(cx, |bridge, _| bridge.held = Held::Stopped);
         })
+        .shared()
     }
 
     /// The account's session can't renew its tokens: shows it signed out with `hint` and shuts the engine down

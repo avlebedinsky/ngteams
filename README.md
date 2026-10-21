@@ -237,8 +237,10 @@ teams-app --lab a --secrets-fd 3 [--trace-fd 4]   # a's window; tokens only thro
 It is built as `teams-headless` builds its client (`teams_core::lab::start`) and refuses a `test-support` build, so a
 lab run uses `cargo build -p teams-app --target-dir target/lab`. Another engine on the account (a second `teams-app`,
 a `teams-headless`) is reported and the app exits. `--trace-fd` gets the view trace, one JSON line per view change
-(ids, kinds and times, never text). When the session's refresh token is refused, the window shows the account signed
-out (run `proto-lab auth <alias>`) and the engine stops. Closing the window shuts the engine down, then quits.
+(ids, kinds and times, never text), on a descriptor of its own (one named for both is refused). When the session's
+refresh token is refused, the window shows the account signed out (run `proto-lab auth <alias>`) and the engine stops.
+Closing the window shuts the engine down, then quits; an engine still waiting on the broker after 5 s (an unlock prompt
+nobody answers) has the broker's socket shut down under it.
 `crates/teams-app/tests/window.rs` runs the window in the sandbox on `teams-mock` and keeps its screenshot under
 `target/ui-shots/`.
 
