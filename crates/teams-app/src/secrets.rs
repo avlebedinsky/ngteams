@@ -7,7 +7,8 @@
 //! a broker that only refuses or only sees its socket close never reaches the session bus. It opens no window and no
 //! other desktop client, prints nothing on stdout, writes on stderr only the requests it refused or failed (their
 //! operation, account and audience, never a value) and why it stopped, and exits when the socket closes: with 0 when
-//! the peer closed it between requests, else non-zero after closing it itself (a malformed or oversized frame).
+//! the peer closed it between requests or while a request waited on the store (a keyring unlock prompt included),
+//! else non-zero after closing it itself (a malformed or oversized frame).
 //!
 //! Whoever starts it keeps no copy of the broker's end: the app's end closing (the app exiting) is what ends it.
 //!

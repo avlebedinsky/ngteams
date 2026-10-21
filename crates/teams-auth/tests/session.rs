@@ -45,7 +45,7 @@ impl TestStore {
                 let scope = BrokerScope::new("teams-lab", account);
                 tokio::spawn(async move { serve(server, &*store, &scope, |_| {}).await });
                 Self::Broker {
-                    client: BrokerSecretStore::new(client, "teams-lab"),
+                    client: BrokerSecretStore::new(client, "teams-lab")?,
                     behind,
                 }
             }

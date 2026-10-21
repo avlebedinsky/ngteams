@@ -1,7 +1,8 @@
 //! The credential broker on a socket pair: the client store gets, puts and deletes the scope's own items through the
 //! broker's store, anything outside the scope is refused and reaches no store, a malformed or oversized frame on either
-//! side closes the socket, and no value reaches a `Debug`, an error or a note. The broker's store is a
-//! `MemorySecretStore` (or a failing one): nothing here reaches a keyring or a bus.
+//! side closes the socket, the peer closing while the store waits ends the broker at once, and no value reaches a
+//! `Debug`, an error or a note. The broker's store is a `MemorySecretStore` (or a failing or waiting one): nothing here
+//! reaches a keyring or a bus.
 
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixStream;
@@ -68,7 +69,7 @@ impl Broker {
 fn connect(store: &Arc<MemorySecretStore>, application: &str) -> TestResult<(BrokerSecretStore, Broker)> {
     let (server, client) = socket_pair()?;
     Ok((
-        BrokerSecretStore::new(client, application),
+        BrokerSecretStore::new(client, application)?,
         Broker::start(Arc::clone(store), server),
     ))
 }
@@ -194,7 +195,7 @@ impl SecretStore for Failing {
 #[tokio::test]
 async fn a_store_failure_is_answered_and_the_connection_stays() -> TestResult {
     let (server, client) = socket_pair()?;
-    let client = BrokerSecretStore::new(client, APPLICATION);
+    let client = BrokerSecretStore::new(client, APPLICATION)?;
     let broker = Broker::start(Arc::new(Failing), server);
 
     for _ in 0..2 {
@@ -220,12 +221,93 @@ async fn a_stored_secret_too_large_for_a_frame_is_answered_as_a_failure() -> Tes
     backing
         .put(&key(ACCOUNT, SPACES), &Secret::new("x".repeat(MAX_FRAME)))
         .await?;
-    let (client, _broker) = connect(&backing, APPLICATION)?;
+    let (client, broker) = connect(&backing, APPLICATION)?;
 
     let error = client.get(&key(ACCOUNT, SPACES)).await.expect_err("too large");
     assert!(matches!(error, SecretError::Broker(BrokerError::Store(_))), "{error:?}");
+    // the note tells what the client got: a failure, not a find
+    let notes = broker.notes();
+    assert!(
+        notes.first().is_some_and(|note| note.ends_with(": the store failed")),
+        "{notes:?}"
+    );
+    assert!(notes.iter().all(|note| !note.contains("found")), "{notes:?}");
     // the connection stays
     assert_eq!(value(&client, ACCOUNT, "missing").await?, None);
+    Ok(())
+}
+
+/// A store whose every call waits forever, as one waiting on a keyring unlock prompt nobody answers.
+struct Waiting;
+
+impl SecretStore for Waiting {
+    fn put(&self, _: &SecretKey, _: &Secret) -> impl Future<Output = Result<(), SecretError>> + Send {
+        std::future::pending()
+    }
+
+    fn get(&self, _: &SecretKey) -> impl Future<Output = Result<Option<Secret>, SecretError>> + Send {
+        std::future::pending()
+    }
+
+    fn delete(&self, _: &SecretKey) -> impl Future<Output = Result<(), SecretError>> + Send {
+        std::future::pending()
+    }
+}
+
+/// How long a broker gets to notice its peer, far above the moment it takes.
+const NOTICE: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[tokio::test]
+async fn the_peer_closing_while_the_store_waits_ends_the_broker_at_once() -> TestResult {
+    let (server, mut client) = socket_pair()?;
+    let broker = Broker::start(Arc::new(Waiting), server);
+    let get = request(1, &[APPLICATION.as_bytes(), ACCOUNT.as_bytes(), SPACES.as_bytes()]);
+    client.write_all(&frame(&get))?;
+    drop(client);
+
+    let notes = Arc::clone(&broker.notes);
+    let end = tokio::time::timeout(NOTICE, broker.end()).await??;
+    assert!(end.is_ok(), "{end:?}");
+    // the request went unanswered
+    assert!(notes.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_byte_from_the_peer_while_the_store_waits_is_malformed() -> TestResult {
+    let (server, mut client) = socket_pair()?;
+    let broker = Broker::start(Arc::new(Waiting), server);
+    let get = request(1, &[APPLICATION.as_bytes(), ACCOUNT.as_bytes(), SPACES.as_bytes()]);
+    client.write_all(&frame(&get))?;
+    client.write_all(&[0])?;
+
+    let end = tokio::time::timeout(NOTICE, broker.end()).await??;
+    assert!(matches!(end, Err(ServeError::Malformed)), "{end:?}");
+    // the broker closed its end, unanswered
+    let mut back = Vec::new();
+    client.read_to_end(&mut back)?;
+    assert!(back.is_empty(), "{back:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_non_blocking_end_is_put_in_blocking_mode() -> TestResult {
+    let (mut server, client) = UnixStream::pair()?;
+    client.set_nonblocking(true)?;
+    let client = BrokerSecretStore::new(client, APPLICATION)?;
+    // a broker slow to answer "missing": a non-blocking read would find nothing yet and fail the call
+    let answering = std::thread::spawn(move || {
+        let mut buffer = [0; 1024];
+        if server.read(&mut buffer).is_ok_and(|read| read > 0) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = server.write_all(&frame(&[2]));
+        }
+        while server.read(&mut buffer).is_ok_and(|read| read > 0) {}
+    });
+
+    assert_eq!(value(&client, ACCOUNT, SPACES).await?, None);
+    drop(client);
+    answering.join().map_err(|_| "the answering thread panicked")?;
     Ok(())
 }
 
@@ -367,7 +449,7 @@ fn client_answered_with(answer: Vec<u8>) -> TestResult<(BrokerSecretStore, std::
         }
         while server.read(&mut buffer).is_ok_and(|read| read > 0) {}
     });
-    Ok((BrokerSecretStore::new(client, APPLICATION), answering))
+    Ok((BrokerSecretStore::new(client, APPLICATION)?, answering))
 }
 
 #[tokio::test]
@@ -405,7 +487,7 @@ async fn a_malformed_answer_closes_the_connection_for_every_later_call() -> Test
 async fn a_broker_gone_fails_the_call_and_every_later_one() -> TestResult {
     let (server, client) = UnixStream::pair()?;
     drop(server);
-    let client = BrokerSecretStore::new(client, APPLICATION);
+    let client = BrokerSecretStore::new(client, APPLICATION)?;
 
     let error = client.get(&key(ACCOUNT, SPACES)).await.expect_err("gone");
     assert!(matches!(error, SecretError::Broker(BrokerError::Io(_))), "{error:?}");

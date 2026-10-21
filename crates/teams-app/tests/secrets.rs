@@ -129,7 +129,7 @@ async fn run_serves_the_scopes_own_items_and_refuses_the_rest() -> TestResult {
         let end = run(server, &scope, &store, &mut log).await;
         (end, store, String::from_utf8_lossy(&log).into_owned())
     });
-    let client = BrokerSecretStore::new(client, "teams-lab");
+    let client = BrokerSecretStore::new(client, "teams-lab")?;
 
     client.put(&key(UPN_B, SPACES), &Secret::new(PLANTED)).await?;
     let got = client.get(&key(UPN_B, SPACES)).await?.ok_or("stored")?;
@@ -259,8 +259,8 @@ impl Broker {
 #[tokio::test]
 async fn the_broker_refuses_another_account_or_application_and_exits_when_the_socket_closes() -> TestResult {
     let broker = Broker::start()?;
-    let lab = BrokerSecretStore::new(broker.socket.try_clone()?, "teams-lab");
-    let personal = BrokerSecretStore::new(broker.socket.try_clone()?, "teams-personal");
+    let lab = BrokerSecretStore::new(broker.socket.try_clone()?, "teams-lab")?;
+    let personal = BrokerSecretStore::new(broker.socket.try_clone()?, "teams-personal")?;
 
     assert!(refused(&lab.get(&key(UPN_A, SPACES)).await));
     assert!(refused(&lab.put(&key(UPN_A, SPACES), &Secret::new(PLANTED)).await));

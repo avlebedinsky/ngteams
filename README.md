@@ -237,7 +237,8 @@ It serves `get`, `put` and `delete` of the account's own items, by audience, and
 application "refused" without reaching a store; a malformed or oversized frame closes the socket. It connects the
 Secret Service only on the first request it serves, opens no window, prints nothing on stdout, notes on stderr only
 the requests it refused or failed (operation, account, audience; never a value), and exits when the socket closes (0
-when the peer closed it between requests). The starter keeps no copy of the broker's end.
+when the peer closed it between requests, or while a request waited on the store, an unlock prompt included). The
+starter keeps no copy of the broker's end.
 
 ## Captures and fixtures
 

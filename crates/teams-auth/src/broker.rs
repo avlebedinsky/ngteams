@@ -12,7 +12,9 @@
 //! status byte (done, found, missing, refused, failed) and, when found, the secret as a field, when failed, the store's
 //! error as one. A frame that is none of these, a length out of range, or an end of stream inside a frame ends the
 //! conversation: the side that read it closes the socket, and the client's later calls fail at once
-//! ([`BrokerError::Closed`]).
+//! ([`BrokerError::Closed`]). The client sends nothing while a request waits for its answer: a byte then ends the
+//! conversation too, and the client closing its end then ends it at once, unanswered (a keyring unlock prompt can hold
+//! a request for as long as the user leaves it open).
 //!
 //! No value is shown by either side: [`Secret`] has no `Display` and a redacted `Debug`, the frames that carry one are
 //! zeroed on drop, and a [`Note`] names only the operation, the account and the audience.
@@ -290,8 +292,9 @@ impl Request {
 }
 
 impl Answer {
-    /// The answer as a frame; a found secret too large for one is answered as a failure.
-    fn encode(&self) -> Zeroizing<Vec<u8>> {
+    /// The answer as a frame, and the outcome that frame tells the client: a found secret too large for one is
+    /// answered, and so told, as a failure.
+    fn encode(&self) -> (Zeroizing<Vec<u8>>, Outcome) {
         let encoded = match self {
             Self::Done => frame(ANSWER_DONE, &[]),
             Self::Found(secret) => frame(ANSWER_FOUND, &[secret.expose()]),
@@ -299,9 +302,13 @@ impl Answer {
             Self::Refused => frame(ANSWER_REFUSED, &[]),
             Self::Failed(text) => frame(ANSWER_FAILED, &[truncated(text, MAX_FAILURE_TEXT)]),
         };
-        encoded
-            .or_else(|| frame(ANSWER_FAILED, &["the stored secret doesn't fit in one frame"]))
-            .unwrap_or_default()
+        match encoded {
+            Some(encoded) => (encoded, self.outcome()),
+            None => (
+                frame(ANSWER_FAILED, &["the stored secret doesn't fit in one frame"]).unwrap_or_default(),
+                Outcome::Failed,
+            ),
+        }
     }
 
     fn decode(body: &[u8]) -> Option<Self> {
@@ -347,9 +354,11 @@ fn truncated(text: &str, limit: usize) -> &str {
 }
 
 /// Serves `store`'s items in `scope` on `stream` until the peer closes it (`Ok`), one request at a time, each answered
-/// before the next is read. A request outside `scope` is answered "refused" and reaches no store. A malformed or
-/// oversized frame, or an end inside one, ends it with an error, and `stream` is closed on return either way.
-/// `note` hears of each request answered.
+/// before the next is read. A request outside `scope` is answered "refused" and reaches no store. The peer closing
+/// `stream` while a request waits on the store ends it at once (`Ok`), the store call dropped and the request
+/// unanswered; a byte from the peer then is malformed. A malformed or oversized frame, or an end inside one, ends it
+/// with an error, and `stream` is closed on return either way. `note` hears of each request answered, with the outcome
+/// its answer tells the peer.
 ///
 /// # Errors
 /// See [`ServeError`].
@@ -365,16 +374,40 @@ where
 {
     while let Some(body) = read_request(&mut stream).await? {
         let request = Request::decode(&body).ok_or(ServeError::Malformed)?;
-        let answer = answer(store, scope, &request).await;
+        let Some(answer) = answer_unless_closed(&mut stream, store, scope, &request).await? else {
+            return Ok(());
+        };
+        let (encoded, outcome) = answer.encode();
         note(&Note {
             op: request.op,
             key: &request.key,
-            outcome: answer.outcome(),
+            outcome,
         });
-        stream.write_all(&answer.encode()).await?;
+        stream.write_all(&encoded).await?;
         stream.flush().await?;
     }
     Ok(())
+}
+
+/// `request`'s answer, or `None` when the peer closed `stream` while the store worked on it (a keyring unlock prompt
+/// can hold it for as long as the user leaves it open); the store call is dropped then. The peer sends nothing while
+/// its request waits, so a byte then is malformed.
+async fn answer_unless_closed<T: AsyncRead + Unpin, S: SecretStore>(
+    stream: &mut T,
+    store: &S,
+    scope: &BrokerScope,
+    request: &Request,
+) -> Result<Option<Answer>, ServeError> {
+    let mut byte = [0; 1];
+    tokio::select! {
+        // an answer ready as the peer closes is still sent: the write then finds the close
+        biased;
+        answer = answer(store, scope, request) => Ok(Some(answer)),
+        read = stream.read(&mut byte) => match read? {
+            0 => Ok(None),
+            _ => Err(ServeError::Malformed),
+        },
+    }
 }
 
 /// The next request's body, or `None` when the peer closed the stream between frames.
@@ -449,14 +482,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl BrokerSecretStore {
-    /// A store asking the broker on the other end of `stream` for `application`'s items. The stream is used in
-    /// blocking mode.
-    #[must_use]
-    pub fn new(stream: UnixStream, application: impl Into<String>) -> Self {
-        Self {
+    /// A store asking the broker on the other end of `stream` for `application`'s items. The stream is put in
+    /// blocking mode (an end taken from tokio, or inherited, may come non-blocking).
+    ///
+    /// # Errors
+    /// The stream's mode can't be set.
+    pub fn new(stream: UnixStream, application: impl Into<String>) -> io::Result<Self> {
+        stream.set_nonblocking(false)?;
+        Ok(Self {
             application: application.into(),
             connection: Arc::new(Mutex::new(Some(stream))),
-        }
+        })
     }
 
     #[must_use]
