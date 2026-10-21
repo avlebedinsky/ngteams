@@ -657,6 +657,7 @@ fn a_request_pattern_with_a_body_text_matches_only_a_body_holding_it() -> TestRe
         status: None,
         failed: None,
         body: body.map(str::to_owned),
+        sent_ms: None,
     };
     let any = RequestPattern::new(Some("POST"), "/messages$")?;
     let message = any.clone().with_body_containing("lab message");
@@ -1029,6 +1030,7 @@ fn seen(status: Option<u16>, failed: Option<&str>) -> SeenRequest {
         status,
         failed: failed.map(str::to_owned),
         body: None,
+        sent_ms: None,
     }
 }
 
@@ -1360,6 +1362,137 @@ async fn ab_image_marks_only_this_run_s_unsent_image() -> TestResult {
         assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
         drive
             .wait_until_true("no mark", NO_MARK, "no marked message", Duration::from_secs(1))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A request's send time is the event's `wallTime` in whole ms; an event without one (or with a time no clock gives)
+/// leaves it unknown.
+#[tokio::test]
+async fn a_request_s_send_time_is_read_from_its_wall_time() -> TestResult {
+    let (events, watch) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = Driver::new(silent_cdp().await?, SessionId::new("S-page"), watch);
+    let request = json!({"method": "POST", "url": "http://127.0.0.1/api/send"});
+    for (id, wall_time) in [
+        ("1", json!(1_792_527_333.116_4)),
+        ("2", Value::Null),
+        ("3", json!(-1.0)),
+        ("4", json!("1792527333")),
+    ] {
+        events.send(network_event(
+            "Network.requestWillBeSent",
+            json!({"requestId": id, "request": request, "wallTime": wall_time}),
+        ))?;
+    }
+    driver.seen_so_far();
+    let times: Vec<Option<u64>> = driver.requests().iter().map(|seen| seen.sent_ms).collect();
+    assert_eq!(times, [Some(1_792_527_333_116), None, None, None]);
+    Ok(())
+}
+
+/// A page whose box tells Shift+Enter (a line break) from Enter (a send), as the web client's compose box does.
+const LINES_PAGE: &str = r#"<!doctype html><html><body>
+<div id="out"></div>
+<div contenteditable="true" role="textbox" data-tid="box" id="box"></div>
+<script>
+document.getElementById('box').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  document.getElementById('out').textContent += event.shiftKey ? '[break]' : '[send]';
+});
+</script></body></html>"#;
+
+#[tokio::test]
+async fn shift_enter_is_a_line_break_and_not_a_send() -> TestResult {
+    with_html(LINES_PAGE, async |run| {
+        run.driver.type_into("type", Selector::Tid("box"), "one").await?;
+        // a space pressed as a key types one
+        run.driver.press("space", Key::SPACE).await?;
+        run.driver
+            .wait_until_true(
+                "spaced",
+                "document.getElementById('box').textContent.replace('\\u00a0', ' ') === 'one '",
+                "the box to hold 'one '",
+                Duration::from_secs(5),
+            )
+            .await?;
+        run.driver.press("break", Key::SHIFT_ENTER).await?;
+        run.driver.press_enter("send").await?;
+        run.driver
+            .wait_for_text("keys", "[break][send]", Duration::from_secs(5))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A page with a message's hover bar as the web client's bundle builds it: quick reactions marked
+/// `message-hover-reactions` (one hidden), the same reaction again in the message's menu (`message-reaction`), and other
+/// actions; and a typing indicator that shows after 1.5 s, hides by `aria-hidden` at 2 s, shows again at 2.5 s and goes
+/// from the page at 3 s.
+const SHAPES_PAGE: &str = r#"<!doctype html><html><body>
+<div data-tid="chat-pane-message">
+  <button data-tid="message-actions-like" data-inp="message-hover-reactions">like</button>
+  <button data-tid="message-actions-heart" data-inp="message-hover-reactions">heart</button>
+  <button data-tid="message-actions-angry" data-inp="message-hover-reactions" style="display: none">angry</button>
+  <button data-tid="message-hover-action-edit">edit</button>
+  <button data-tid="message-actions-more">more</button>
+  <div role="menu"><button data-tid="message-actions-like" data-inp="message-reaction">like</button>
+  <button data-tid="message-actions-surprised" data-inp="message-reaction">surprised</button></div>
+</div>
+<script>
+const show = () => {
+  const e = document.createElement('div'); e.dataset.tid = 'typing-indicator'; e.id = 'typing'; e.textContent = 'typing';
+  document.body.append(e);
+};
+setTimeout(show, 1500);
+setTimeout(() => document.getElementById('typing').setAttribute('aria-hidden', 'true'), 2000);
+setTimeout(() => document.getElementById('typing').removeAttribute('aria-hidden'), 2500);
+setTimeout(() => document.getElementById('typing').remove(), 3000);
+</script></body></html>"#;
+
+#[tokio::test]
+async fn chat_shapes_reads_the_hover_bar_s_quick_reactions_once_each() -> TestResult {
+    use proto_lab::scenario::chat_shapes::HOVER_REACTIONS;
+    with_html(SHAPES_PAGE, async |run| {
+        let expected = r#"["message-actions-like","message-actions-heart","message-actions-surprised"]"#;
+        run.driver
+            .wait_until_true(
+                "reactions",
+                &format!("JSON.stringify({HOVER_REACTIONS}) === {expected:?}"),
+                "the visible quick reactions, each once",
+                Duration::from_secs(5),
+            )
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn chat_shapes_records_when_the_typing_indicator_shows_and_goes() -> TestResult {
+    use proto_lab::scenario::chat_shapes::TYPING_RECORDER;
+    with_html(SHAPES_PAGE, async |run| {
+        let drive = &mut run.driver;
+        drive
+            .wait_until_true("install", TYPING_RECORDER, "the recorder", Duration::from_secs(5))
+            .await?;
+        // installed twice, it keeps its log
+        drive
+            .wait_until_true("again", TYPING_RECORDER, "the recorder", Duration::from_secs(5))
+            .await?;
+        let changes = "JSON.stringify((window.__labTyping ?? []).map((change) => change[1])) === \
+                       '[true,false,true,false]' && window.__labTyping.every((change, i, all) => \
+                       Number.isInteger(change[0]) && (i === 0 || change[0] >= all[i - 1][0]))";
+        drive
+            .wait_until_true(
+                "changes",
+                changes,
+                "shown, hidden, shown, gone",
+                Duration::from_secs(10),
+            )
             .await?;
         Ok(())
     })

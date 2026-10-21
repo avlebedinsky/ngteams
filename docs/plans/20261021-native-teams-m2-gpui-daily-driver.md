@@ -700,15 +700,29 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
 - Modify: `crates/proto-lab/src/scenario/ab_chat_full.rs` (or a new scenario), `docs/protocol/chat.md`,
   `tests/fixtures/chatsvc/*` (synthetic), `docs/protocol/endpoints.md`
 
-- [ ] live, under the fence, in the a–b chat: each of the web client's default reactions (not only `like`), set and
+- [x] live, under the fence, in the a–b chat: each of the web client's default reactions (not only `like`), set and
       taken back; typing while a message is typed (how often it is sent, how long the indicator stays on the other
       side) and whether `Control/ClearTyping` goes out; a reply with its quote and a message with line breaks and a
       link, unless M1's captures already show them; a mention of b in the group chat (`abc`). Every write on the a–b
       or the recorded group chat
-- [ ] tests first for any mapping row the capture corrects; shapes into `chat.md` with their source, synthetic
+- [x] tests first for any mapping row the capture corrects; shapes into `chat.md` with their source, synthetic
       fixtures of every form seen
-- [ ] live run recorded here (a breached run as CLAUDE.md says); `cargo test -p proto-lab -p fixture-guard` and the
+- [x] live run recorded here (a breached run as CLAUDE.md says); `cargo test -p proto-lab -p fixture-guard` and the
       gate pass
+
+Done (2026-10-21): a new scenario, `proto-lab run chat-shapes` (`crates/proto-lab/src/scenario/chat_shapes.rs`, a and
+b under the messaging classifier so b's push channel is up; the reply with its quote was M1's, `reply.json`). Three
+live runs, each **exit 0, no breach**, every allowed write on the a–b chat or the recorded group chat (`fence.log`:
+reactions, typing and messages on the a–b chat, one message adding b and typing on the group chat): 16:56Z (text
+inserted), 17:03Z (a quiet start, a key pressed after the link), 17:10Z (keys pressed). Findings (`chat.md`, "The
+shapes the UI needs"): the quick reactions are `like`, `heart`, `laugh`, `surprised`, side by side; the web client
+never sent `Control/ClearTyping`, sent typing sparsely (none during 45 s of steady presses, one just after they
+stopped; the bundle throttles it to one per 6 s), and b's indicator went **about 25 s** after the last typing delivery
+or when a's message arrived (Task 9's typing timeout: 25 s, not 5 s); Shift+Enter makes paragraphs, a typed link an
+anchor plus a `properties.links` entry; the group mention is the 1:1 form, its feed entry `mentionInChat`. The
+capture corrected reading, not mapping: the service joins read-back paragraphs with CRLF, which `teams-proto`'s
+reader now drops beside a paragraph or a quote (tests first). Fixtures `reactions.json`, `lines.json`,
+`mention-group.json`; the link preview read (`/urlp/v1/url/info`) is in `endpoints.md` as seen, not reviewed.
 
 ### Task 11: The native read by `POST` (`PostRead`)
 **Files:**

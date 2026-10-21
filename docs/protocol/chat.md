@@ -1,6 +1,7 @@
 # The chat service: conversations, messages and what happens to them
 
-Status: 2026-10-21, M1 Task 7; images (sending, denied) 2026-10-21, M1 Task 20. Written from what the lab saw, in our
+Status: 2026-10-21, M1 Task 7; images (sending, denied) 2026-10-21, M1 Task 20; the shapes the UI needs (every quick
+reaction, typing, lines and links, a group mention) 2026-10-21, M2 Task 10. Written from what the lab saw, in our
 own words, plus the web bundle where nothing was captured (marked so). The chat service's base, credential, ids, member
 reads and the fence's mapping of writes are in [fence-targets.md](fence-targets.md); its token in [auth.md](auth.md).
 
@@ -21,6 +22,11 @@ Sources (all outside the repository, under the lab's data dir; fixtures are writ
 - **ab-image**: `proto-lab run ab-image` of 2026-10-21 (M1 Task 20; accounts a and b, the a–b chat, captures
   `captures/ab-image/20261020T225251Z` and `20261021T010819Z` for a, read locally, nothing exported): a pasted a
   made-up image and sent it with every write to an AMS object denied ([Images](#images-sending-denied-ab-image)).
+- **chat-shapes**: three `proto-lab run chat-shapes` runs of 2026-10-21 (M2 Task 10; accounts a and b under the
+  messaging classifier, so b's push channel was up; captures `captures/chat-shapes/20261021T165600Z`, `…170305Z` and
+  `…171041Z` for a, `…165601Z`, `…170308Z` and `…171041Z-2` for b, read locally, nothing exported): a set and took back
+  each quick reaction, typed while b's open chat recorded its typing indicator, sent a message of three lines with a
+  link, and mentioned b in the lab's group chat ([The shapes the UI needs](#the-shapes-the-ui-needs-chat-shapes)).
 - **bundle**: the web client `26260.1717.5229.7049`, for what no run showed.
 
 Every path below is relative to the chat service base (`…/api/chatsvc/<region>/`), and every id in a path is
@@ -193,8 +199,8 @@ captured form is the one it reads.
 `reply.json`, `edit.json`, `delete.json`, `reaction.json` and the `writes.json` cases): a post with every key the web
 client sent (`id` `-1`, `version` `"0"`, the `conversationLink` `blah/<chat>` it sends, the empty JSON-string lists,
 `onbehalfof` and `policyViolation` null, `crossPostChannels` `[]`), the edit as the whole message again, the soft
-delete, the reaction and its take-back, the read horizon, typing (`Control/Typing` only: typing stopped wasn't
-captured) and a new chat (`fixedRoster` and `uniquerosterthread` for a 1:1 chat, neither for a group). A message's
+delete, the reaction and its take-back, the read horizon, typing (`Control/Typing` only: the web client never sent
+typing stopped, [Typing](#typing-chat-shapes)) and a new chat (`fixedRoster` and `uniquerosterthread` for a 1:1 chat, neither for a group). A message's
 text is a typed rich-text value with the MRI of each mention, from which `content`, `properties.mentions` and the
 write's target are all built; raw HTML can't be sent. Times go out as the web client writes them
 (`2026-01-01T00:00:00.000Z`), an edit's `version` and `properties.edittime` being one instant.
@@ -204,6 +210,75 @@ built in one place only, `mention_span` and `mention_entry` in `crates/teams-pro
 the bundle in Task 12, brought to the capture when the capture reached the M1 branch), and a no-break space written
 `&nbsp;` as the web client writes the one after a mention. Its tests compare the post with `mention.json` and read the
 mention back from both the post and the chat's copy.
+
+## The shapes the UI needs (chat-shapes)
+
+What M2's chat view and compose box need beyond M1's captures. Every write went to the a–b chat or the lab's group
+chat, mapped and judged by the fence with members read live; the three runs exited 0 with no breach.
+
+### Reactions (chat-shapes)
+
+Fixture: `tests/fixtures/chatsvc/reactions.json`.
+
+- The hover bar a message shows under the pointer offered four quick reactions, the same in every run: **`like`,
+  `heart`, `laugh`, `surprised`** (`data-tid` `message-actions-<key>`, marked `data-inp="message-hover-reactions"`).
+  The bundle takes the list from the account's settings or the service's config, with that list as its fallback, and
+  turns `like` into `yes-tone<n>` for an account that chose a skin tone (bundle only; the lab accounts chose none).
+- Each is set and taken back exactly as the like (`PUT`/`DELETE …/messages/<id>/properties?name=emotions`, the key in
+  the body, answered 200 with the texts `200` and `null`). The keys stand side by side: setting one never took another
+  back, so one account can hold all four on one message.
+- Read back (b's `MessageUpdate` deliveries, each carrying the whole message), `properties.emotions` lists the keys in
+  the order they were first set, each with its users; a key taken back stays with `users: []`, and
+  `annotationsSummary.emotions` counts only the keys that still have a user (`{}` once none has). Each change raised the
+  message's `version`.
+
+### Typing (chat-shapes)
+
+- **What a sends**: the post M1 saw and the native client sends, key for key (`{"content": "", "contenttype":
+  "Application/Message", "messagetype": "Control/Typing"}`), answered 201. **No `Control/ClearTyping`** went out in
+  any run: not when a stopped typing, not when it emptied its compose box (15–18 s watched after), not when it sent.
+- **When**: sparse. With a pressing a key twice a second for 45 s (keys pressed in one run, text inserted in
+  another), no typing post went out while it typed; one went 0.2–1.6 s after the presses stopped, and one or two
+  within a few seconds of a's sending a message (3.2 s and 7.2 s after it in one run). The closest two posts were
+  4.0 s apart, the next 16.9 s. The bundle sends it through a throttle on the editor's changes, leading edge, at most one
+  per `typingIndicator.notificationFrequency` (6 000 ms unless the service's config says otherwise), only in a chat of
+  2 to 20 members (`maxRosterSizeInGroupChatChatServiceLimit`, default 20), never while a message is being edited and
+  never in a reply chain (bundle only). Why the steady presses of the headless run brought none is not known.
+- **What b shows**: b's indicator (`data-tid="typing-indicator"`) showed within 0.3 s of each typing delivery and went
+  **about 25 s after the last one** (24.7–24.9 s after its delivery; 25.6–26.3 s after a's post) while a's text was still
+  in the box, in all three runs; it went at once when a message from a arrived (1.0 and 1.2 s after a's post, as it was
+  delivered). A typing delivery is a `NewMessage` of `messagetype` `Control/Typing` with
+  `X-Trouter-Delivery-Control: …; resilience=nostorenoloss` ([trouter.md](trouter.md)).
+- For the native client: send `Control/Typing` on input at most once every 6 s and nothing when typing stops; show
+  another's typing for 25 s after their last `Control/Typing`, or until a message from them arrives.
+
+### Lines and links (chat-shapes)
+
+Fixture: `tests/fixtures/chatsvc/lines.json`.
+
+- Shift+Enter in the compose box starts a **new paragraph**: three lines went out as `<p>…</p><p>…</p><p>…</p>`, no
+  `<br>`. Read back, the service had joined the paragraphs with CRLF (`</p>\r\n<p>`); that is markup, not text, and
+  `teams-proto`'s reader drops whitespace beside a paragraph or a quote (the quoted reply's CRLF after its quote too).
+- A link typed and followed by a space became an anchor: `<a href="<url>" rel="noreferrer noopener" title="<url>"
+  target="_blank"><url></a>`, and `properties.links` (a JSON string) held `[{"@type":
+  "http://schema.skype.com/HyperLink", "itemid": "0", "url": "<url>", "previewenabled": true, "preview":
+  {"previewurl": ""}}]`. Inserted with its text in one go, the link stayed plain text and `links` stayed `"[]"`.
+- With a link in the compose box the client asked the async gateway for its preview, `GET
+  /urlp/v1/url/info?url=<url>` (a read: the gateway fetched the URL and answered its title, status and favicon;
+  [endpoints.md](endpoints.md)). The native client doesn't ask for previews.
+
+### A mention in the group chat (chat-shapes)
+
+Fixture: `tests/fixtures/chatsvc/mention-group.json`.
+
+- The post is the 1:1 chat's ([Mentions](#mentions-mention)) to the group chat, key for key; the fence took b as its
+  added participant and let it out, b being a lab account. The picker offered b by name in the group chat as it does in
+  the 1:1 chat.
+- b's delivery of the message carries `mentiontypes` `["person"]` beside the resource (`[]` on other messages); the
+  message reads back as the 1:1 mention does (no `<readonly>`, `itemid` a number).
+- b's `48:notifications` stream got an entry of `activityType` **`mentionInChat`**, subtype `person` (the activity feed's
+  form for a group chat), and its `48:mentions` stream one of `activityType` `mentions`, reason and subtype `mention`,
+  each pointing at the message (`T_<chat>_M_<message>`) as in the 1:1 chat.
 
 ## Read horizons
 

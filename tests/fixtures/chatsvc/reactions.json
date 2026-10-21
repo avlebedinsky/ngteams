@@ -1,0 +1,84 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: every quick reaction the web client's hover bar offered on a's own message in the a-b 1:1 chat, set one after another and then taken back one after another, chat-shapes runs of 2026-10-21 (captures chat-shapes/20261021T165600Z and 20261021T170305Z for a, 20261021T165601Z and 20261021T170308Z for b, read locally). The hover bar offered like, heart, laugh and surprised (data-tid message-actions-<key>), the same four in both runs; each set is a PUT and each taking back a DELETE of the message's emotions property, answered 200 with the bare texts 200 and null as reaction.json's like, and the keys stand side by side: setting one never took another back. b's open chat got each change as a MessageUpdate delivery carrying the whole message; read_back_* are those messages' reaction fields after the fourth set, after the first taking back and after the last. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md.",
+  "offered": ["like", "heart", "laugh", "surprised"],
+  "set": [
+    {"method": "PUT", "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties", "query": "name=emotions", "body": {"emotions": {"key": "like", "value": 1760000020000}}},
+    {"method": "PUT", "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties", "query": "name=emotions", "body": {"emotions": {"key": "heart", "value": 1760000023000}}},
+    {"method": "PUT", "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties", "query": "name=emotions", "body": {"emotions": {"key": "laugh", "value": 1760000026000}}},
+    {"method": "PUT", "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties", "query": "name=emotions", "body": {"emotions": {"key": "surprised", "value": 1760000029000}}}
+  ],
+  "set_response": {"status": 200, "body_text": "200"},
+  "taken_back": [
+    {"method": "DELETE", "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties", "query": "name=emotions", "body": {"emotions": {"key": "like"}}},
+    {"method": "DELETE", "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties", "query": "name=emotions", "body": {"emotions": {"key": "heart"}}},
+    {"method": "DELETE", "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties", "query": "name=emotions", "body": {"emotions": {"key": "laugh"}}},
+    {"method": "DELETE", "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages/1760000010000/properties", "query": "name=emotions", "body": {"emotions": {"key": "surprised"}}}
+  ],
+  "taken_back_response": {"status": 200, "body_text": "null"},
+  "read_back_all_set": {
+    "id": "1760000010000",
+    "clientmessageid": "5555555555555555555",
+    "content": "<p>a made-up message</p>",
+    "messagetype": "RichText/Html",
+    "contenttype": "Text",
+    "from": "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "imdisplayname": "Lab A",
+    "originalarrivaltime": "2025-10-09T08:53:30.0000000Z",
+    "composetime": "2025-10-09T08:53:30.0000000Z",
+    "type": "Message",
+    "sequenceId": 40,
+    "version": "1760000029700",
+    "annotationsSummary": {"emotions": {"like": 1, "heart": 1, "laugh": 1, "surprised": 1}},
+    "properties": {
+      "mentions": "[]",
+      "cards": "[]",
+      "links": "[]",
+      "files": "[]",
+      "formatVariant": "TEAMS",
+      "emotions": [
+        {"key": "like", "users": [{"mri": "8:orgid:<guid:a>", "time": 1760000020700, "value": "1760000020000"}]},
+        {"key": "heart", "users": [{"mri": "8:orgid:<guid:a>", "time": 1760000023700, "value": "1760000023000"}]},
+        {"key": "laugh", "users": [{"mri": "8:orgid:<guid:a>", "time": 1760000026700, "value": "1760000026000"}]},
+        {"key": "surprised", "users": [{"mri": "8:orgid:<guid:a>", "time": 1760000029700, "value": "1760000029000"}]}
+      ]
+    }
+  },
+  "read_back_first_taken_back": {
+    "id": "1760000010000",
+    "clientmessageid": "5555555555555555555",
+    "content": "<p>a made-up message</p>",
+    "messagetype": "RichText/Html",
+    "contenttype": "Text",
+    "from": "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "type": "Message",
+    "version": "1760000032700",
+    "annotationsSummary": {"emotions": {"heart": 1, "laugh": 1, "surprised": 1}},
+    "properties": {
+      "emotions": [
+        {"key": "like", "users": []},
+        {"key": "heart", "users": [{"mri": "8:orgid:<guid:a>", "time": 1760000023700, "value": "1760000023000"}]},
+        {"key": "laugh", "users": [{"mri": "8:orgid:<guid:a>", "time": 1760000026700, "value": "1760000026000"}]},
+        {"key": "surprised", "users": [{"mri": "8:orgid:<guid:a>", "time": 1760000029700, "value": "1760000029000"}]}
+      ]
+    }
+  },
+  "read_back_all_taken_back": {
+    "id": "1760000010000",
+    "clientmessageid": "5555555555555555555",
+    "content": "<p>a made-up message</p>",
+    "messagetype": "RichText/Html",
+    "contenttype": "Text",
+    "from": "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "type": "Message",
+    "version": "1760000041700",
+    "annotationsSummary": {},
+    "properties": {
+      "emotions": [
+        {"key": "like", "users": []},
+        {"key": "heart", "users": []},
+        {"key": "laugh", "users": []},
+        {"key": "surprised", "users": []}
+      ]
+    }
+  }
+}

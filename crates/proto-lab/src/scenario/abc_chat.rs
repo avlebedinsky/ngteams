@@ -157,7 +157,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 
 /// The live source a session of this lab reads members with ([`LiveMembershipSource::for_fence`] of the lab's fence),
 /// for [`messaging_blocked`].
-fn lab_source() -> Result<LiveMembershipSource, ScenarioError> {
+pub(crate) fn lab_source() -> Result<LiveMembershipSource, ScenarioError> {
     let fence = Fence::open_lab().map_err(|error| setup(error.to_string()))?;
     LiveMembershipSource::for_fence(&fence).map_err(|error| setup(error.to_string()))
 }

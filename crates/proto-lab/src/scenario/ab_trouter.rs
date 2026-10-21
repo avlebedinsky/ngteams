@@ -476,7 +476,7 @@ impl Steps<'_> {
 }
 
 /// Sizes `session`'s page to [`VIEWPORT`].
-async fn size(session: &LabSession) -> Result<(), ScenarioError> {
+pub(crate) async fn size(session: &LabSession) -> Result<(), ScenarioError> {
     let (width, height) = VIEWPORT;
     session
         .cdp()

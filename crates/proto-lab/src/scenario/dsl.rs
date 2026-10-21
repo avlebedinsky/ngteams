@@ -184,6 +184,22 @@ impl Key {
         text: None,
         modifiers: 0,
     };
+    /// Shift+Enter: a line break in the compose box, where Enter alone sends.
+    pub const SHIFT_ENTER: Self = Self {
+        key: "Enter",
+        code: "Enter",
+        virtual_key: 13,
+        text: Some("\r"),
+        modifiers: 8,
+    };
+    /// Space, pressed as a key (an editor may act on the key, an autolink, where an inserted space does nothing).
+    pub const SPACE: Self = Self {
+        key: " ",
+        code: "Space",
+        virtual_key: 32,
+        text: Some(" "),
+        modifiers: 0,
+    };
     /// Ctrl+A: selects everything in the focused editor.
     pub const SELECT_ALL: Self = Self {
         key: "a",
@@ -275,6 +291,9 @@ pub struct SeenRequest {
     /// Its body, when the event carried it inline (`postData`); kept in memory only, for
     /// [`RequestPattern::with_body_containing`].
     pub body: Option<String>,
+    /// When it was sent, in ms since the Unix epoch (the event's `wallTime`), if the event said: what a scenario times
+    /// a signal by (`chat-shapes`' typing posts).
+    pub sent_ms: Option<u64>,
 }
 
 /// Drives one armed tab (see the module docs).
@@ -718,6 +737,7 @@ impl Driver {
                     status: None,
                     failed: None,
                     body: request["postData"].as_str().map(str::to_owned),
+                    sent_ms: wall_time_ms(&params["wallTime"]),
                 });
             }
             "Network.responseReceived" => {
@@ -859,6 +879,13 @@ pub fn navigated_away(error: &StepError) -> bool {
         StepError::Cdp { source: CdpError::Remote { error, .. }, .. }
             if NAVIGATED_AWAY.iter().any(|text| error.message.contains(text))
     )
+}
+
+/// A `Network.requestWillBeSent`'s `wallTime` (seconds since the Unix epoch, with a fraction) in whole ms; `None` for
+/// anything but a finite, non-negative number.
+fn wall_time_ms(wall_time: &Value) -> Option<u64> {
+    let since_epoch = Duration::try_from_secs_f64(wall_time.as_f64()?).ok()?;
+    u64::try_from(since_epoch.as_millis()).ok()
 }
 
 /// A JavaScript string literal of `text`.
