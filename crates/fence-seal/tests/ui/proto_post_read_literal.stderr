@@ -1,0 +1,7 @@
+error[E0451]: fields `request` and `permit` of struct `AuthorizedPostRead` are private
+ --> tests/ui/proto_post_read_literal.rs:8:34
+  |
+8 |     let _ = AuthorizedPostRead { request, permit };
+  |                                  ^^^^^^^  ^^^^^^ private field
+  |                                  |
+  |                                  private field

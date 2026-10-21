@@ -1001,6 +1001,13 @@ impl teams_proto::Transport for FlakyRegistrar {
         future::ready(Ok(teams_proto::Response::new(status, Vec::new())))
     }
 
+    fn post_read<R: teams_proto::PostRead + Send>(
+        &self,
+        _read: teams_proto::AuthorizedPostRead<R>,
+    ) -> impl Future<Output = Result<teams_proto::Response, io::Error>> + Send {
+        future::ready(Err(io::Error::other("the push channel reads nothing by POST")))
+    }
+
     fn deliver<R: teams_proto::Mutating + Send>(
         &self,
         _write: teams_proto::Authorized<R>,

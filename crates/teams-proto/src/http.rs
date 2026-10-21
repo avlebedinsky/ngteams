@@ -1,14 +1,18 @@
 //! The native HTTP transport (M1 Task 5): the one way the native client sends anything to Teams over HTTP.
 //!
-//! [`HttpTransport`] takes the three classes of request [`Transport`] defines and nothing else: a [`Read`] (always a
+//! [`HttpTransport`] takes the four classes of request [`Transport`] defines and nothing else: a [`Read`] (always a
 //! `GET`), an [`OwnState`] request (the sealed, reviewed list, logged to `fence.log` before it is sent; one that can't
-//! be logged isn't sent), and an [`Authorized`] write (its sealed wire form, under the permit `Fence::check` issued for
-//! its target). It has no method that takes a URL, a method or a body of the caller's choosing.
+//! be logged isn't sent), an [`AuthorizedPostRead`] (an entry of the sealed `PostRead` list under the permit
+//! `Fence::check_post_read` gave for its exact MRIs: read back against the entry's captured shape, logged before it is
+//! sent, sent once) and an [`Authorized`] write (its sealed wire form, under the permit `Fence::check` issued for its
+//! target). It has no method that takes a URL, a method or a body of the caller's choosing.
 //!
 //! - **Hosts**: a fixed allowlist. Every URL is built from a [`Service`]'s base and checked before anything is sent:
 //!   the chat service exactly as [`teams_fence::chat_service_path`] accepts it (the base the account's region gives,
 //!   `chatServiceAfd`), the registrar on an AFD host (`https://<AFD host>/registrar/…`), and Trouter's HTTP side
-//!   (`https://go.trouter.teams.microsoft.com/`). An endpoint with an empty, `.` or `..` segment is refused, and so is
+//!   (`https://go.trouter.teams.microsoft.com/`), and, once the transport was given the account's middle-tier base
+//!   ([`HttpTransport::with_middle_tier`], the GTM `middleTier`: `https://<AFD host>/api/mt/part/<partition>`), that
+//!   base's `beta/users/…` endpoints. An endpoint with an empty, `.` or `..` segment is refused, and so is
 //!   any URL whose decoded path isn't exactly the base's plus the endpoint's segments. Entra and authz aren't on it
 //!   (they stay in `teams-auth`'s own clients, the reviewed exception), and neither is AMS.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
@@ -20,14 +24,20 @@
 //!   set, which the service took with our own non-CAE token, M1 Task 3); the registrar the same token with
 //!   `X-MS-Migration: True` and `X-Ms-Test-User: False` (the messaging stack's registration in the ab-trouter
 //!   captures of 2026-10-20; the calling stack's in the echo-call capture had no `X-Ms-Test-User`); Trouter's HTTP
-//!   side none (its probe carried none).
+//!   side none (its probe carried none); the middle tier the account's `api.spaces.skype.com` token with the values
+//!   every captured profile lookup carried (`x-ms-migration: True`, `x-ms-test-user: False`, `x-ms-client-type:
+//!   cdlworker`, `x-ms-client-request-type: 0`, an empty `x-ms-object-id`) and its body as
+//!   `application/json;charset=UTF-8`.
 //! - **Retries** (the transport's part of the plan's retry table), for reads and own-state requests: a 401 makes the
 //!   session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's maximum,
 //!   [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is the
 //!   only retry. The retry after a wait asks the session for its token again, never sends the one held before it: a
 //!   session signed out during the wait answers its error, and nothing is sent. Any other answer that isn't a success
 //!   is [`HttpError::Status`]. A write is never sent again here: its answer comes back whatever the status, for the
-//!   outbox to decide, and after a 401 the session refreshes the refused token for the outbox's next attempt.
+//!   outbox to decide, and after a 401 the session refreshes the refused token for the outbox's next attempt. Nor is a
+//!   read by `POST`: one permit, one send; its answer comes back as a read's does (a failure status as
+//!   [`HttpError::Status`]), and after a 401 the session refreshes the refused token for a later request under a new
+//!   permit.
 //! - **Tests** reach a mock only through [`HttpTransport::with_mock_origin`] (`test-support`): plain `http` to a
 //!   loopback origin, the URL built and checked as above first.
 //!
@@ -45,7 +55,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName
 use serde_json::Value;
 use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
-use teams_auth::token::{TokenError, retry_after};
+use teams_auth::token::{SPACES_RESOURCE, TokenError, retry_after};
 use teams_fence::{
     AFD_HOSTS, Channel, ChatCredential, CredentialFuture, CredentialSource, Fence, RequestOutcome, RequestRecord,
     chat_service_path,
@@ -55,11 +65,15 @@ use url::Url;
 use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Service};
 use crate::own::OwnState;
+use crate::post_read::{AuthorizedPostRead, PostRead};
 use crate::read::Read;
 use crate::write::{Authorized, Mutating};
 
 /// The Entra audience of the token the chat service and the registrar take.
 pub const IC3_AUDIENCE: &str = "https://ic3.teams.office.com";
+
+/// The Entra audience of the token the middle tier takes.
+pub const MIDDLE_TIER_AUDIENCE: &str = SPACES_RESOURCE;
 
 /// Trouter's HTTP host.
 pub const TROUTER_HOST: &str = "go.trouter.teams.microsoft.com";
@@ -113,9 +127,13 @@ pub enum HttpError {
     /// The write has no wire form the native transport has a route for (a call); nothing was sent.
     #[error("the native transport has no route for this write")]
     NoRoute,
-    /// An own-state request whose `fence.log` entry couldn't be written; it wasn't sent.
-    #[error("fence.log can't be written, so the own-state request wasn't sent: {0}")]
+    /// An own-state request or a read by `POST` whose `fence.log` entry couldn't be written; it wasn't sent.
+    #[error("fence.log can't be written, so the request wasn't sent: {0}")]
     LogUnavailable(#[source] io::Error),
+    /// A read by `POST` whose request isn't exactly its entry's captured shape, or names other MRIs than its permit;
+    /// nothing was sent, logged or asked of the session.
+    #[error("the read by POST isn't its entry's captured shape; nothing was sent")]
+    Unknown,
     /// The session couldn't give a token; nothing (more) was sent.
     #[error("no token for the request: {0}")]
     Credentials(#[source] TokenError),
@@ -139,6 +157,12 @@ pub enum Refusal {
     /// A chat service endpoint that doesn't start with `v1`.
     #[error("a chat service endpoint that doesn't start with `v1`")]
     ChatPath,
+    /// A middle-tier request on a transport that wasn't given the account's middle-tier base.
+    #[error("no middle-tier base")]
+    NoMiddleTier,
+    /// A middle-tier endpoint that isn't under `beta/users/`.
+    #[error("a middle-tier endpoint that isn't under `beta/users/`")]
+    MiddleTierPath,
     /// The URL built isn't on the host allowlist, or its path isn't exactly the base's and the endpoint's.
     #[error("the URL isn't on the transport's allowlist")]
     NotAllowed,
@@ -165,6 +189,9 @@ pub enum BuildError {
     /// Not a chat service base the transport accepts (see [`HttpTransport::new`]).
     #[error("not a chat service base the transport accepts")]
     ChatBase,
+    /// Not a middle-tier base the transport accepts (see [`HttpTransport::with_middle_tier`]).
+    #[error("not a middle-tier base the transport accepts")]
+    MiddleTierBase,
     /// Not a loopback `http` origin with a port.
     #[error("not a loopback http origin")]
     MockOrigin,
@@ -182,6 +209,8 @@ pub struct HttpTransport<C> {
     chat_base: Url,
     /// The AFD host the registrar is reached on.
     registrar_host: &'static str,
+    /// The middle-tier base (`https://<AFD host>/api/mt/part/<partition>`, no trailing slash), once given.
+    middle_tier: Option<Url>,
     max_retry_wait: Duration,
     /// Tests only: every request goes to this origin instead, with the path and query it was built and checked with.
     /// Only [`HttpTransport::with_mock_origin`] (`test-support`) sets it; without that feature it is always `None`.
@@ -193,6 +222,7 @@ impl<C> fmt::Debug for HttpTransport<C> {
         f.debug_struct("HttpTransport")
             .field("chat_base", &self.chat_base.as_str())
             .field("registrar_host", &self.registrar_host)
+            .field("middle_tier", &self.middle_tier.as_ref().map(Url::as_str))
             .field("max_retry_wait", &self.max_retry_wait)
             .finish_non_exhaustive()
     }
@@ -260,9 +290,22 @@ impl<C: Credentials> HttpTransport<C> {
             fence,
             chat_base,
             registrar_host,
+            middle_tier: None,
             max_retry_wait: MAX_RETRY_WAIT,
             mock_origin: None,
         })
+    }
+
+    /// The transport with the account's middle-tier base, the region's GTM `middleTier` (trimmed): `https`, an AFD host
+    /// ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path `/api/mt/part/<partition>` exactly (the
+    /// partition a lowercase region, `-` and a number: `amer-03`), one trailing slash allowed, no query or fragment.
+    /// Without it, every middle-tier request is refused ([`Refusal::NoMiddleTier`]).
+    ///
+    /// # Errors
+    /// [`BuildError::MiddleTierBase`] for any other base.
+    pub fn with_middle_tier(mut self, base: &str) -> Result<Self, BuildError> {
+        self.middle_tier = Some(parse_middle_tier_base(base).ok_or(BuildError::MiddleTierBase)?);
+        Ok(self)
     }
 
     /// Another cap on the wait before a throttled read or own-state request is sent again.
@@ -298,6 +341,8 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Trouter => {
                 Url::parse(&format!("https://{TROUTER_HOST}/")).map_err(|_| refused(Refusal::NotAllowed))?
             }
+            Service::MiddleTier if !is_middle_tier_endpoint(endpoint) => return Err(refused(Refusal::MiddleTierPath)),
+            Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier))?,
         };
         url.path_segments_mut()
             .map_err(|()| refused(Refusal::NotAllowed))?
@@ -306,7 +351,7 @@ impl<C: Credentials> HttpTransport<C> {
         if !endpoint.query().is_empty() {
             url.query_pairs_mut().extend_pairs(endpoint.query());
         }
-        if allowed(service, &url, endpoint) {
+        if allowed(service, &url, endpoint, self.middle_tier.as_ref()) {
             Ok(url)
         } else {
             Err(refused(Refusal::NotAllowed))
@@ -394,26 +439,85 @@ impl<C: Credentials> HttpTransport<C> {
 
     /// One request with the service's headers, and its answer read.
     async fn send(&self, outgoing: &Outgoing<'_>, token: Option<&Secret>) -> Result<Response, HttpError> {
-        let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        let headers = plain_headers(outgoing.service, outgoing.body.is_some());
+        let body = outgoing.body.map(|body| body.to_string().into_bytes());
+        self.send_as(outgoing.method.clone(), outgoing.url, &headers, token, body)
+            .await
+    }
+
+    /// One request with exactly `headers` (lower-cased names, none of them a credential) and the bearer `token`, and
+    /// its answer read.
+    async fn send_as(
+        &self,
+        method: reqwest::Method,
+        url: &Url,
+        headers: &[(String, String)],
+        token: Option<&Secret>,
+        body: Option<Vec<u8>>,
+    ) -> Result<Response, HttpError> {
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| HttpError::Unknown)?;
+            let value = HeaderValue::from_str(value).map_err(|_| HttpError::Unknown)?;
+            map.append(name, value);
+        }
         if let Some(token) = token {
             let mut value = HeaderValue::from_str(&format!("Bearer {}", token.expose()))
                 .map_err(|_| HttpError::Refused(Refusal::Token))?;
             value.set_sensitive(true);
-            headers.insert(AUTHORIZATION, value);
+            map.insert(AUTHORIZATION, value);
         }
-        for (name, value) in service_headers(outgoing.service) {
-            headers.insert(HeaderName::from_static(name), HeaderValue::from_static(value));
-        }
-        let mut request = self
-            .client
-            .request(outgoing.method.clone(), self.destination(outgoing.url))
-            .headers(headers);
-        if let Some(body) = outgoing.body {
-            request = request.header(CONTENT_TYPE, "application/json").body(body.to_string());
+        let mut request = self.client.request(method, self.destination(url)).headers(map);
+        if let Some(body) = body {
+            request = request.body(body);
         }
         let answer = request.send().await.map_err(|error| failure(&error))?;
         read_answer(answer).await
+    }
+
+    /// Sends a read by `POST` (see [`Transport::post_read`]): the request built from the entry, read back against the
+    /// entry's captured shape and the permit's MRIs, its token, its `fence.log` record, then one send.
+    async fn send_post_read<R: PostRead + Send>(&self, read: AuthorizedPostRead<R>) -> Result<Response, HttpError> {
+        let shape = read.shape();
+        let wire = read.wire();
+        let service = shape.service();
+        let url = self.url_for(service, wire.endpoint())?;
+        let mut headers = plain_headers(service, true);
+        headers.extend(wire.headers().iter().cloned());
+        let body = serde_json::to_vec(wire.body()).map_err(|_| HttpError::Unknown)?;
+        let query: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect();
+        let names = shape
+            .read_back(wire.endpoint().segments(), &query, &headers, &body)
+            .ok_or(HttpError::Unknown)?;
+        if names != read.permit().names() {
+            return Err(HttpError::Unknown);
+        }
+        let token = self.token(service).await?;
+        let record = RequestRecord {
+            channel: Channel::Http,
+            method: "POST",
+            url: url.as_str(),
+            outcome: RequestOutcome::PostRead(R::KIND),
+        };
+        self.fence
+            .log()
+            .record_request(&record)
+            .map_err(HttpError::LogUnavailable)?;
+        let answer = self
+            .send_as(reqwest::Method::POST, &url, &headers, token.as_ref(), Some(body))
+            .await?;
+        if let (401, Some(audience), Some(refused)) = (answer.status(), audience(service), &token) {
+            // the session refreshes the refused token for a later request, under a new permit; this one isn't resent
+            let _ = self.credentials.bearer_rejected(audience, refused).await;
+        }
+        if answer.is_success() {
+            Ok(answer)
+        } else {
+            Err(HttpError::Status(Box::new(answer)))
+        }
     }
 }
 
@@ -450,6 +554,13 @@ impl<C: Credentials> Transport for HttpTransport<C> {
             };
             self.exchange(outgoing, Some(R::KIND)).await
         }
+    }
+
+    fn post_read<R: PostRead + Send>(
+        &self,
+        read: AuthorizedPostRead<R>,
+    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.send_post_read(read)
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
@@ -502,8 +613,28 @@ impl<C: Credentials> CredentialSource for HttpTransport<C> {
 fn audience(service: Service) -> Option<&'static str> {
     match service {
         Service::ChatService | Service::Registrar => Some(IC3_AUDIENCE),
+        Service::MiddleTier => Some(MIDDLE_TIER_AUDIENCE),
         Service::Trouter => None,
     }
+}
+
+/// The headers a request to `service` goes out with besides its token, by lower-cased name: `Accept`, the body's
+/// `Content-Type` when it has one, and the service's own.
+fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
+    let content_type = match service {
+        Service::MiddleTier => "application/json;charset=UTF-8",
+        Service::ChatService | Service::Registrar | Service::Trouter => "application/json",
+    };
+    let mut headers = vec![(ACCEPT.as_str().to_owned(), "application/json".to_owned())];
+    if body {
+        headers.push((CONTENT_TYPE.as_str().to_owned(), content_type.to_owned()));
+    }
+    headers.extend(
+        service_headers(service)
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+    );
+    headers
 }
 
 /// The headers `service` takes besides the token, as the web client sends them.
@@ -511,13 +642,21 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
     match service {
         Service::ChatService => &[("x-ms-migration", "True"), ("behavioroverride", "redirectAs404")],
         Service::Registrar => &[("x-ms-migration", "True"), ("x-ms-test-user", "False")],
+        Service::MiddleTier => &[
+            ("x-ms-client-request-type", "0"),
+            ("x-ms-client-type", "cdlworker"),
+            ("x-ms-migration", "True"),
+            ("x-ms-object-id", ""),
+            ("x-ms-test-user", "False"),
+        ],
         Service::Trouter => &[],
     }
 }
 
 /// Whether `url`, built for `endpoint` on `service`, is on the allowlist: `https`, no user info, port or fragment, an
-/// allowed host, and a decoded path that is exactly the service's base path and the endpoint's segments.
-fn allowed(service: Service, url: &Url, endpoint: &Endpoint) -> bool {
+/// allowed host, and a decoded path that is exactly the service's base path and the endpoint's segments (the middle
+/// tier's: the base the transport was given, `middle_tier`, and an endpoint under `beta/users/`).
+fn allowed(service: Service, url: &Url, endpoint: &Endpoint, middle_tier: Option<&Url>) -> bool {
     let plain = url.scheme() == "https"
         && url.username().is_empty()
         && url.password().is_none()
@@ -537,7 +676,57 @@ fn allowed(service: Service, url: &Url, endpoint: &Endpoint) -> bool {
             Service::Trouter => {
                 url.host_str() == Some(TROUTER_HOST) && decoded_path(url).is_some_and(|path| path == segments)
             }
+            Service::MiddleTier => middle_tier.is_some_and(|base| on_middle_tier(base, url, endpoint)),
         }
+}
+
+/// Whether `url` is `endpoint` (under `beta/users/`) on the middle-tier `base`, and nothing else: its host and its
+/// decoded path the base's plus the endpoint's segments.
+fn on_middle_tier(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
+    let segments = endpoint.segments();
+    let base_path = decoded_path(base).unwrap_or_default();
+    url.host_str() == base.host_str()
+        && is_middle_tier_endpoint(endpoint)
+        && decoded_path(url).is_some_and(|path| {
+            path.len() == base_path.len() + segments.len() && path.starts_with(&base_path) && path.ends_with(segments)
+        })
+}
+
+/// A middle-tier endpoint under `beta/users/`, with at least one segment after it.
+fn is_middle_tier_endpoint(endpoint: &Endpoint) -> bool {
+    matches!(endpoint.segments(), [beta, users, _, ..] if beta == "beta" && users == "users")
+}
+
+/// The middle-tier base, if `base` is one [`HttpTransport::with_middle_tier`] accepts.
+fn parse_middle_tier_base(base: &str) -> Option<Url> {
+    if base.contains(['?', '#']) || base.trim() != base {
+        return None;
+    }
+    let base = base.strip_suffix('/').unwrap_or(base);
+    let url = Url::parse(base).ok()?;
+    let plain = url.scheme() == "https"
+        && url.host_str().is_some_and(|host| AFD_HOSTS.contains(&host))
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        // the base as it was given, not one the parser normalized
+        && url.as_str() == base;
+    let path = decoded_path(&url)?;
+    let partition = matches!(
+        path.as_slice(),
+        [api, mt, part, partition] if api == "api" && mt == "mt" && part == "part" && is_partition(partition)
+    );
+    (plain && partition).then_some(url)
+}
+
+/// A middle-tier partition: a lowercase region, `-`, a number (`amer-03`).
+fn is_partition(partition: &str) -> bool {
+    partition.split_once('-').is_some_and(|(region, number)| {
+        !region.is_empty()
+            && region.bytes().all(|byte| byte.is_ascii_lowercase())
+            && !number.is_empty()
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// The URL's path segments, percent-decoded; a bare `/` is none.

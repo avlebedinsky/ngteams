@@ -16,6 +16,12 @@ pub enum Service {
     Registrar,
     /// Trouter's HTTP side, `https://go.trouter.teams.microsoft.com/`.
     Trouter,
+    /// The middle tier at the account's middle-tier base, the region's GTM `middleTier`
+    /// (`https://<AFD host>/api/mt/part/<partition>`, the partition a region and a number: `amer-03`), which a
+    /// transport reaches only once it was given one (`HttpTransport::with_middle_tier`). Its endpoints are under
+    /// `beta/users/`. It takes the account's token for `https://api.spaces.skype.com`. The reads by `POST` of the sealed
+    /// `PostRead` list go here (the profile lookups).
+    MiddleTier,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

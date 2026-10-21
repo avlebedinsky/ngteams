@@ -1,20 +1,24 @@
 //! The client: every mutating call takes a [`WritePermit`] and goes through [`Authorized::new`] before it reaches the
-//! [`Transport`]. A transport takes requests of three classes only: a [`Read`], an [`OwnState`] request, or an
-//! [`Authorized`] write.
+//! [`Transport`], and every read by `POST` takes a [`PostReadPermit`] and goes through [`AuthorizedPostRead::new`]. A
+//! transport takes requests of four classes only: a [`Read`], an [`OwnState`] request, an [`AuthorizedPostRead`], or
+//! an [`Authorized`] write.
 
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use teams_fence::WritePermit;
+use teams_fence::{PostReadPermit, WritePermit};
 
 use crate::own::OwnState;
+use crate::post_read::{AuthorizedPostRead, PostRead, PostReadMismatch};
 use crate::read::Read;
 use crate::write::{Authorized, Mutating, TargetMismatch};
 
-/// Carries requests to the service, of three classes only: a [`Read`] (always a `GET`), an [`OwnState`] request (the
-/// reviewed, sealed list) and an [`Authorized`] write, which it can't be handed without the permit for its target.
+/// Carries requests to the service, of four classes only: a [`Read`] (always a `GET`), an [`OwnState`] request (the
+/// reviewed, sealed list), an [`AuthorizedPostRead`] (an entry of the sealed `PostRead` list, which it can't be handed
+/// without the permit for its exact MRIs) and an [`Authorized`] write, which it can't be handed without the permit for
+/// its target.
 pub trait Transport: Sync {
     type Error: Error + Send + Sync + 'static;
 
@@ -23,6 +27,13 @@ pub trait Transport: Sync {
 
     /// Sends a reviewed own-state request.
     fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
+
+    /// Sends a permitted read by `POST`, once, logged to `fence.log` before it goes, and only in its entry's captured
+    /// shape.
+    fn post_read<R: PostRead + Send>(
+        &self,
+        read: AuthorizedPostRead<R>,
+    ) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 
     /// Sends an authorized write and returns the service's answer, whatever its status: what to do about a refusal is
     /// the caller's (the outbox's) decision.
@@ -164,6 +175,21 @@ impl<T: Transport> Client<T> {
         self.transport.own_state(request).await
     }
 
+    /// Sends one read by `POST` under the permit `Fence::check_post_read` gave for its entry and its exact MRIs. The
+    /// permit is consumed.
+    ///
+    /// # Errors
+    /// [`PostReadError::Mismatch`] when the permit was given for another entry or other MRIs (checked before anything
+    /// is sent), [`PostReadError::Transport`] when the transport refuses or fails it.
+    pub async fn post_read<R: PostRead + Send>(
+        &self,
+        request: R,
+        permit: PostReadPermit,
+    ) -> Result<Response, PostReadError<T::Error>> {
+        let read = AuthorizedPostRead::new(request, permit)?;
+        self.transport.post_read(read).await.map_err(PostReadError::Transport)
+    }
+
     /// Sends one mutating request under the permit `teams-fence` issued for its target, and returns the service's
     /// answer. The permit is consumed.
     ///
@@ -178,4 +204,15 @@ impl<T: Transport> Client<T> {
         let write = Authorized::new(request, permit)?;
         self.transport.deliver(write).await.map_err(WriteError::Transport)
     }
+}
+
+/// Why a read by `POST` didn't go out or come back.
+#[derive(Debug, thiserror::Error)]
+pub enum PostReadError<E> {
+    /// The permit was given for another entry or other MRIs; nothing reached the transport.
+    #[error(transparent)]
+    Mismatch(#[from] PostReadMismatch),
+    /// The transport refused or failed it.
+    #[error("the read by POST failed: {0}")]
+    Transport(#[source] E),
 }

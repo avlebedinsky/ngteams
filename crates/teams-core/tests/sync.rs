@@ -31,8 +31,8 @@ use teams_mock::{
 };
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
-    Author, Authorized, Client, Credentials, Failure, HttpError, HttpTransport, Mutating, OwnState, Read, Response,
-    Transport,
+    Author, Authorized, AuthorizedPostRead, Client, Credentials, Failure, HttpError, HttpTransport, Mutating, OwnState,
+    PostRead, Read, Response, Transport,
 };
 use teams_store::{
     Applied, AttemptOutcome, Conversation, ConversationKind, Member, Message, OutboxEntry, OutboxState, Store,
@@ -97,6 +97,13 @@ impl Transport for Flaky {
 
     fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
         self.inner.own_state(request)
+    }
+
+    fn post_read<R: PostRead + Send>(
+        &self,
+        read: AuthorizedPostRead<R>,
+    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.post_read(read)
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {

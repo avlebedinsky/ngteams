@@ -1,0 +1,49 @@
+{
+  "_synthetic": "Made up, in the shape of the middle tier's answers to the web client's users/fetchShortProfile lookups that the browser fence let through for lab accounts (ab-chat-full's capture of 2026-10-20, read locally from its sanitized reference copy): HTTP 200, application/json; charset=utf-8, the body {\"type\": ..., \"value\": [one profile per MRI asked]}, every lookup seen naming one account. A profile has its displayName, type, email, isShortProfile (true), mri, objectId, tenantName, userPrincipalName and userType; givenName and surname only when the account has them (one lab account has neither). Names, addresses and the tenant name are made up; <guid:a> and <guid:b> are lab accounts' object ids, tests fill them in.",
+  "status": 200,
+  "content_type": "application/json; charset=utf-8",
+  "cases": [
+    {
+      "name": "an account without a given name or a surname",
+      "asked": ["8:orgid:<guid:a>"],
+      "answer": {
+        "type": "Microsoft.SkypeSpaces.MiddleTier.Models.IUserIdentity",
+        "value": [
+          {
+            "displayName": "Lab Account A",
+            "type": "ADUser",
+            "email": "lab-a@lab.example.com",
+            "isShortProfile": true,
+            "mri": "8:orgid:<guid:a>",
+            "objectId": "<guid:a>",
+            "tenantName": "Lab Example",
+            "userPrincipalName": "lab-a@lab.example.com",
+            "userType": "Member"
+          }
+        ]
+      }
+    },
+    {
+      "name": "an account with a given name and a surname",
+      "asked": ["8:orgid:<guid:b>"],
+      "answer": {
+        "type": "Microsoft.SkypeSpaces.MiddleTier.Models.IUserIdentity",
+        "value": [
+          {
+            "displayName": "Lab Account B",
+            "type": "ADUser",
+            "email": "lab-b@lab.example.com",
+            "givenName": "Lab",
+            "isShortProfile": true,
+            "mri": "8:orgid:<guid:b>",
+            "objectId": "<guid:b>",
+            "surname": "Account B",
+            "tenantName": "Lab Example",
+            "userPrincipalName": "lab-b@lab.example.com",
+            "userType": "Member"
+          }
+        ]
+      }
+    }
+  ]
+}
