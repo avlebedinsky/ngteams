@@ -425,7 +425,10 @@ fn the_connection_state_follows_the_push_channel() {
         endpoint: "00000000-0000-4000-8000-0000000000e1".to_owned(),
     });
     assert_eq!(text(&rig), "Connected");
-    rig.send(Event::Disconnected(Down::Closed));
+    rig.send(Event::Disconnected {
+        down: Down::Closed,
+        heard: None,
+    });
     assert_eq!(text(&rig), "Reconnecting…");
     rig.send(Event::PushStopped(Stop::Requested));
     assert_eq!(text(&rig), "Offline");

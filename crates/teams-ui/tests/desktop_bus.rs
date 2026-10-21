@@ -6,10 +6,12 @@
 //!   `ActionInvoked` for a body comes back as the notification's id, any other action doesn't.
 //! - [`BusTray`]: the item registers its own name with the watcher; its title, tooltip, icon and status say the unread
 //!   total, and change with it (`NewTitle` told); a click and the menu's "Open" ask for the window, the menu's "Quit"
-//!   for the quit; its menu lays out "Open Teams" and "Quit".
+//!   for the quit; its menu lays out "Open Teams" and "Quit". It follows its watcher: the watcher stopped is told
+//!   `Gone`, started again `Registered` (the item registered with it again), and the bus killed ends the stream.
 //! - The bus the app is given is the only one: a child process whose `DBUS_SESSION_BUS_ADDRESS` is unset (or names
-//!   a bus that isn't there) and whose `$XDG_RUNTIME_DIR/bus` is a listening canary connects nowhere (the canary is
-//!   never reached), and one whose address is the private bus reaches it and nothing else.
+//!   a bus that isn't there) and whose `$XDG_RUNTIME_DIR/bus` is a listening canary takes the app's own way to a bus
+//!   (`bus::connect_given` on `bus::address_from_env`, which `Desktop::connect` takes) and connects nowhere (the
+//!   canary is never reached), and one whose address is the private bus reaches it and nothing else.
 //!
 //! Without `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
@@ -25,7 +27,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use teams_ui::bus;
 use teams_ui::notify::{BusNotifications, Notice, NoticeKind, NotificationServer as _};
-use teams_ui::tray::{BusTray, ITEM_PATH, MENU_OPEN, MENU_PATH, MENU_QUIT, TrayEvent, TrayIcon as _};
+use teams_ui::tray::{BusTray, Hosted, ITEM_PATH, MENU_OPEN, MENU_PATH, MENU_QUIT, TrayEvent, TrayIcon as _};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use ui_sandbox::bus::PrivateBus;
@@ -143,7 +145,7 @@ fn the_tray_item_registers_shows_the_total_and_asks_for_the_window_and_the_quit(
     runtime().block_on(async {
         let connection = bus::connect(private.address()).await.unwrap();
         let (events, mut asked) = mpsc::unbounded_channel();
-        let tray = BusTray::start(&connection, "ms-teams-lab", "Teams (lab a)", events)
+        let (tray, _hosted) = BusTray::start(&connection, "ms-teams-lab", "Teams (lab a)", events)
             .await
             .unwrap();
         let name = tray.name().to_owned();
@@ -217,6 +219,37 @@ fn the_tray_item_registers_shows_the_total_and_asks_for_the_window_and_the_quit(
     });
 }
 
+#[test]
+fn the_tray_item_follows_its_watcher_and_is_gone_with_the_bus() {
+    let Some((_dir, private)) = private_bus("the tray item follows its watcher") else {
+        return;
+    };
+    runtime().block_on(async {
+        let connection = bus::connect(private.address()).await.unwrap();
+        let (events, _asked) = mpsc::unbounded_channel();
+        let (tray, mut hosted) = BusTray::start(&connection, "ms-teams-lab", "Teams (lab a)", events)
+            .await
+            .unwrap();
+        assert_eq!(private.tray_items().len(), 1);
+        // the panel quits: nothing shows the item
+        private.stop_watcher().unwrap();
+        let change = tokio::time::timeout(WAIT, hosted.next()).await.unwrap();
+        assert_eq!(change, Some(Hosted::Gone));
+        // and starts again: the item registers with the new watcher
+        private.start_watcher().unwrap();
+        let change = tokio::time::timeout(WAIT, hosted.next()).await.unwrap();
+        assert_eq!(change, Some(Hosted::Registered));
+        let items = private.tray_items();
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[1].service, tray.name());
+        assert_eq!(items[1].sender, connection.unique_name().unwrap().to_string());
+        // the bus goes away: the item with it
+        drop(private);
+        let change = tokio::time::timeout(WAIT, hosted.next()).await.unwrap();
+        assert_eq!(change, None);
+    });
+}
+
 /// A canary: a listening socket nobody should connect to; how many did.
 struct Canary {
     listener: UnixListener,
@@ -259,28 +292,29 @@ fn child(mode: &str, env: &[(&str, &str)]) -> String {
     stdout
 }
 
-/// The child: what the app does with the environment it was started with (`bus::address_from_env`), as the app
-/// does it: the notifications and the tray item on that bus, or nothing.
+/// The child: what the app does with the environment it was started with, the way the app does it
+/// (`bus::connect_given` on `bus::address_from_env`, as `Desktop::connect`): the notifications and the tray item on
+/// that bus, or nothing. A way that fell back elsewhere would reach the canary (and wait there for an answer the
+/// canary never gives, so the child gives up after [`WAIT`]).
 fn as_the_app(mode: &str) {
     runtime().block_on(async {
-        let address = bus::address_from_env();
+        let connected = tokio::time::timeout(WAIT, bus::connect_given(bus::address_from_env())).await;
+        let connected = connected.expect("the child's connect never ended: it reached a bus that never answered");
         match mode {
             "unset" => {
-                assert!(matches!(address, Err(bus::BusError::NotGiven)), "{address:?}");
+                assert!(matches!(connected, Err(bus::BusError::NotGiven)), "{connected:?}");
                 println!("child: no bus");
             }
             "gone" => {
-                let address = address.unwrap();
-                let refused = bus::connect(&address).await;
-                assert!(matches!(refused, Err(bus::BusError::Connect(_))), "{refused:?}");
+                assert!(matches!(connected, Err(bus::BusError::Connect(_))), "{connected:?}");
                 println!("child: refused");
             }
             "given" => {
-                let connection = bus::connect(&address.unwrap()).await.unwrap();
+                let connection = connected.unwrap();
                 let (server, _) = BusNotifications::start(&connection, "child").await.unwrap();
                 server.show(&notice(NoticeKind::Message, "Bee", "hi"), 0).await.unwrap();
                 let (events, _asked) = mpsc::unbounded_channel();
-                BusTray::start(&connection, "child", "child", events).await.unwrap();
+                let (_tray, _hosted) = BusTray::start(&connection, "child", "child", events).await.unwrap();
                 println!("child: shown");
             }
             other => panic!("unknown mode {other}"),

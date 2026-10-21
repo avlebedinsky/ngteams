@@ -68,7 +68,7 @@ use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::task::{Context, Poll};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
@@ -233,8 +233,10 @@ pub enum Event {
     Connected { endpoint: String },
     /// How a registration of the push channel's endpoint went: deliveries come only to a registered one.
     Registration(RegistrationReport),
-    /// The push channel is down; it reconnects, and a catch-up is due.
-    Disconnected(Down),
+    /// The push channel is down; it reconnects, and a catch-up is due. `heard`: when its socket last read a frame once
+    /// connected, the last moment the channel was known to deliver (a socket that went down silently is noticed only
+    /// later); `None` when it never connected (see [`PushEvent::Disconnected`]).
+    Disconnected { down: Down, heard: Option<SystemTime> },
     /// The push channel stopped for good.
     PushStopped(Stop),
     /// A catch-up ran on its own (not one [`EngineRequests::sync`] asked for), and why.
@@ -1192,10 +1194,10 @@ where
             PushEvent::Delivery(delivery) => self.on_delivery(delivery).await,
             // an incoming call, or another endpoint's push: never acted on, never answered
             PushEvent::Ignored(_) => {}
-            PushEvent::Disconnected(down) => {
+            PushEvent::Disconnected { down, heard } => {
                 self.up = false;
                 self.gaps.disconnected();
-                self.emit(Event::Disconnected(down));
+                self.emit(Event::Disconnected { down, heard });
             }
             PushEvent::Stopped(stop) => {
                 self.up = false;

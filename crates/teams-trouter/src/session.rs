@@ -120,8 +120,11 @@ pub enum PushEvent {
     Delivery(Delivery),
     /// A delivery that isn't a chat event of this endpoint. It is never answered.
     Ignored(Ignored),
-    /// The socket is down; the client reconnects.
-    Disconnected(Down),
+    /// The socket is down; the client reconnects. `heard`: when (by the client's clock) the socket last read a frame
+    /// once connected (a delivery, a pong, any frame), the last moment the channel was known to work; a socket that
+    /// went down silently (a suspend, a half-open connection) is noticed only later, by a late pong. `None` when
+    /// the socket never got its `trouter.connected`.
+    Disconnected { down: Down, heard: Option<SystemTime> },
     /// The client stopped; nothing more comes.
     Stopped(Stop),
 }
@@ -310,6 +313,7 @@ where
             last_endpoint: None,
             last_immediate: None,
             last_dup: None,
+            heard: None,
         };
         TrouterHandle {
             events: received,
@@ -390,6 +394,8 @@ struct Run<T, K> {
     last_immediate: Option<Instant>,
     /// When the service last disconnected for a `dup`.
     last_dup: Option<Instant>,
+    /// When the connection under way last read a frame once connected ([`PushEvent::Disconnected`]).
+    heard: Option<SystemTime>,
 }
 
 impl<T, K> Run<T, K> {
@@ -414,7 +420,8 @@ where
                 }
                 End::Again(down, wait) => (down, wait),
             };
-            self.emit(PushEvent::Disconnected(down));
+            let heard = self.heard.take();
+            self.emit(PushEvent::Disconnected { down, heard });
             if started.elapsed() >= self.trouter.options.stable_after {
                 self.level = 0;
             }
@@ -685,7 +692,13 @@ impl Link {
                 }
                 Some(End::Stop(Stop::Requested))
             }
-            Step::Frame(frame) => self.on_frame(frame, run).await,
+            Step::Frame(frame) => {
+                let end = self.on_frame(frame, run).await;
+                if end.is_none() && self.endpoint.is_some() {
+                    run.heard = Some(run.trouter.clock.now());
+                }
+                end
+            }
             Step::HelloLate => Some(End::Again(Down::HelloTimeout, Wait::Backoff)),
             Step::PongLate => Some(End::Again(Down::PongTimeout, Wait::None)),
             Step::Ping => self.ping().await,

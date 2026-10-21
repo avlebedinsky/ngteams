@@ -9,6 +9,9 @@
 //!   `org.kde.StatusNotifierItem-<pid>-1`, registered with the watcher (`org.kde.StatusNotifierWatcher`). Activating
 //!   it (a click) or the menu's "Open" asks for the window ([`TrayEvent::Open`]); "Quit" quits the app
 //!   ([`TrayEvent::Quit`]). Without a watcher on the bus there is no item, and closing the window quits the app.
+//! - **The watcher's comings and goings** ([`Hosted`]): the item follows the owner of the watcher's name. A new owner
+//!   (a panel restarted) gets the item registered again; one that leaves with none after it, or the connection to the
+//!   bus lost, leaves the item shown nowhere, which the app is told so closing its window quits it again.
 //!
 //! In a view test the item is a fake [`TrayIcon`].
 
@@ -16,7 +19,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
 use futures_util::future::BoxFuture;
+use futures_util::stream::BoxStream;
 use gpui::{AppContext as _, AsyncApp, Context, WeakEntity};
 use tokio::sync::mpsc::UnboundedSender;
 use zbus::Connection;
@@ -52,6 +57,15 @@ pub enum TrayEvent {
     Open,
     /// Quit the app.
     Quit,
+}
+
+/// What became of the watcher the item is registered with ([`BusTray::start`]'s stream).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hosted {
+    /// A new watcher took the name, and the item is registered with it.
+    Registered,
+    /// The watcher left (or a new one refused the item): the item is shown nowhere until another comes.
+    Gone,
 }
 
 /// The tray item, as the [`Tray`] sees it.
@@ -481,6 +495,20 @@ impl Menu {
     }
 }
 
+/// Registers the item named `name` with the watcher on `connection`.
+async fn register(connection: &Connection, name: &str) -> zbus::Result<()> {
+    connection
+        .call_method(
+            Some(WATCHER_NAME),
+            WATCHER_PATH,
+            Some(WATCHER_NAME),
+            "RegisterStatusNotifierItem",
+            &(name,),
+        )
+        .await?;
+    Ok(())
+}
+
 /// The item on the bus (see the module docs).
 pub struct BusTray {
     connection: Connection,
@@ -489,28 +517,53 @@ pub struct BusTray {
 
 impl BusTray {
     /// Serves the item and its menu on `connection` as `app` (its id `app_id`), takes its name and registers it with
-    /// the watcher; what the user asks of it goes to `events`.
+    /// the watcher; what the user asks of it goes to `events`. With it, what becomes of the watcher from then on
+    /// ([`Hosted`]: the item registered again with each new one); the stream ends once the connection to the bus is
+    /// lost, the item gone with it.
     ///
     /// # Errors
-    /// The objects or the name can't be had, or no watcher takes the item (then nothing of it is left on the bus).
+    /// The objects or the name can't be had, the watcher's comings and goings can't be followed, or no watcher takes
+    /// the item (then nothing of it is left on the bus).
     pub async fn start(
         connection: &Connection,
         app_id: &str,
         app: &str,
         events: UnboundedSender<TrayEvent>,
-    ) -> zbus::Result<Self> {
+    ) -> zbus::Result<(Self, BoxStream<'static, Hosted>)> {
         let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
         let tray = Self {
             connection: connection.clone(),
             name,
         };
+        // followed before the first registration, so no new watcher between the two is missed
+        let owners = zbus::fdo::DBusProxy::new(connection)
+            .await?
+            .receive_name_owner_changed_with_args(&[(0, WATCHER_NAME)])
+            .await?;
         match tray.serve(app_id, app, events).await {
-            Ok(()) => Ok(tray),
+            Ok(()) => {}
             Err(error) => {
                 tray.withdraw().await;
-                Err(error)
+                return Err(error);
             }
         }
+        let (registering, closing) = (connection.clone(), connection.clone());
+        let name = tray.name.clone();
+        let hosted = owners
+            .then(move |changed| {
+                let (connection, name) = (registering.clone(), name.clone());
+                async move {
+                    let owned = changed.args().is_ok_and(|args| args.new_owner().is_some());
+                    if owned && register(&connection, &name).await.is_ok() {
+                        Hosted::Registered
+                    } else {
+                        Hosted::Gone
+                    }
+                }
+            })
+            .take_until(async move { closing.closed().await })
+            .boxed();
+        Ok((tray, hosted))
     }
 
     async fn serve(&self, app_id: &str, app: &str, events: UnboundedSender<TrayEvent>) -> zbus::Result<()> {
@@ -524,16 +577,7 @@ impl BusTray {
         server.at(ITEM_PATH, item).await?;
         server.at(MENU_PATH, Menu { events }).await?;
         self.connection.request_name(self.name.as_str()).await?;
-        self.connection
-            .call_method(
-                Some(WATCHER_NAME),
-                WATCHER_PATH,
-                Some(WATCHER_NAME),
-                "RegisterStatusNotifierItem",
-                &(self.name.as_str(),),
-            )
-            .await?;
-        Ok(())
+        register(&self.connection, &self.name).await
     }
 
     /// Takes the item and its name off the bus.

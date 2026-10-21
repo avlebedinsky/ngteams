@@ -285,16 +285,18 @@ typing, read receipts, notifications, the idle time, the manual status) live in 
 its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is
 printed and shown in the settings view.
 Messages from others notify on the desktop as the "notifications" setting says (all, mentions only, off; a mention is
-marked; in a team's channel only a mention), never for the chat shown in a focused window, the account's own, a
-replayed delivery or older history; a catch-up's only when it arrived after the push channel last went down and is
-unread; more than three of one chat collapse into one. Activating one opens its chat. The tray item shows the unread
-total ("Open Teams", "Quit"); closing the window keeps the app in the tray when there is one, and quits it when there
-isn't. Both go only to the session bus the app is given (its `DBUS_SESSION_BUS_ADDRESS`, the sandbox's private bus),
+marked; in a team's channel only a mention), never for the chat shown in a focused window, the account's own, one
+already stored or older history; a catch-up's (or a replayed delivery the store didn't have) only when it arrived
+after the push channel was last heard before it went down and is unread; more than three of one chat collapse into
+one. Activating one opens its chat. The tray item shows the unread total ("Open Teams", "Quit") and follows the tray's
+watcher (registered again with a new one); closing the window keeps the app in the tray while a watcher has the item,
+and quits it when none does (the window comes back if the item goes while it is closed). Both go only to the session bus the app is given (its `DBUS_SESSION_BUS_ADDRESS`, the sandbox's private bus),
 never `$XDG_RUNTIME_DIR/bus` or another, and are left out without one.
 `crates/teams-app/tests/window.rs` runs the window in the sandbox on `teams-mock` (the chat list filled by the
 catch-up, the switcher driven by the virtual keyboard, the chat it opens shown in the chat view with that chat's
 messages from the store; a message of c's notifying on the sandbox's fake server and its activation opening its chat;
-the tray item keeping the app when the window closes, opening it again and quitting it) and keeps its two screenshots
+the tray item keeping the app when the window closes, the window back when the watcher leaves and the item
+registered again with a new one, opening it again and quitting it) and keeps its two screenshots
 under `target/ui-shots/`: `teams-app-window.png` (the window as the catch-up filled it) and `teams-app-chat.png` (the
 chat opened).
 

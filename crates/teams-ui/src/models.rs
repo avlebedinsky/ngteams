@@ -5,7 +5,7 @@
 //! switcher, search) sees every change, and nothing shown comes from anywhere but the store.
 
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, SharedString};
 use teams_core::{Event, MessageChange, Source};
@@ -187,6 +187,12 @@ pub enum FeedEvent {
     },
     /// The account's own read horizon in a conversation moved.
     Read { conversation: String },
+    /// A conversation changed (a delivery said so, or a read of the service changed it in the store: a catch-up tells
+    /// a read horizon it stored this way, not as [`FeedEvent::Read`]).
+    Changed { conversation: String },
+    /// The push channel went down: `heard` is when its socket last read a frame once connected, the last moment it
+    /// was known to deliver; `None` when it never connected.
+    Down { heard: Option<SystemTime> },
 }
 
 /// The engine's events that single things act on, told one by one ([`FeedEvent`]); it holds nothing.
@@ -219,7 +225,7 @@ impl Models {
         self.feed(&event, cx);
         match event {
             Event::Connected { .. } => self.set_link(Link::Connected, cx),
-            Event::Disconnected(_) => self.set_link(Link::Down, cx),
+            Event::Disconnected { .. } => self.set_link(Link::Down, cx),
             Event::PushStopped(_) => self.set_link(Link::Stopped, cx),
             Event::CaughtUp { .. } => self.status.update(cx, |status, cx| {
                 status.catch_ups += 1;
@@ -264,7 +270,8 @@ impl Models {
         }
     }
 
-    /// Tells a message newly stored, or a read horizon that moved, on the [`Feed`].
+    /// Tells a message newly stored, a read horizon that moved, a conversation that changed or the push channel gone
+    /// down, on the [`Feed`].
     fn feed(&self, event: &Event, cx: &mut App) {
         let told = match event {
             Event::Message {
@@ -282,6 +289,10 @@ impl Models {
             Event::ReadHorizon { conversation } => FeedEvent::Read {
                 conversation: conversation.clone(),
             },
+            Event::ConversationChanged { conversation } => FeedEvent::Changed {
+                conversation: conversation.clone(),
+            },
+            Event::Disconnected { heard, .. } => FeedEvent::Down { heard: *heard },
             _ => return,
         };
         self.feed.update(cx, |_, cx| cx.emit(told));

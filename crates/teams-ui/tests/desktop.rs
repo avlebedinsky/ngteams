@@ -1,6 +1,8 @@
 //! The desktop on GPUI's test context, over the fake engine (`common`), a fake notification server and a fake tray
 //! item: the unread total the tray shows (the listed chats only, counted again as chats change); closing the window
-//! quits without a tray item and keeps the app with one, which shows the window again; activating a notification
+//! quits without a tray item and keeps the app with one, which shows the window again; a tray item gone (its
+//! watcher left, the bus lost) while the window is closed opens it again, and closing it then quits; activating a
+//! notification
 //! opens its chat, in a window opened again if it was closed; the chat shown in a focused window never notifies; the
 //! tray's "Quit". The same item on the sandbox's real private bus is `tests/desktop_bus.rs`. Every id and name is made
 //! up.
@@ -270,7 +272,7 @@ fn with_a_tray_item_closing_the_window_keeps_the_app_and_the_tray_shows_it_again
     let d = OnDesktop::start();
     d.rig
         .cx
-        .update(|cx| d.desktop.update(cx, |desktop, _| desktop.set_in_tray(true)));
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.set_in_tray(true, cx)));
     let window = d.open();
     d.close(window);
     assert_eq!(d.window(), None);
@@ -291,11 +293,47 @@ fn with_a_tray_item_closing_the_window_keeps_the_app_and_the_tray_shows_it_again
 }
 
 #[test]
+fn a_tray_item_gone_brings_the_window_back_and_closing_it_then_quits() {
+    let d = OnDesktop::start();
+    d.rig
+        .cx
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.set_in_tray(true, cx)));
+    let window = d.open();
+    d.close(window);
+    assert_eq!(d.window(), None);
+    // the watcher leaves (or the bus is lost): nothing would show the app any more
+    d.rig
+        .cx
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.set_in_tray(false, cx)));
+    d.rig.cx.run_until_parked();
+    let back = d.window().expect("the window back");
+    assert_eq!(d.traced("tray", "gone"), 1);
+    assert_eq!(d.traced("window", "opened"), 2);
+    assert_eq!(*d.asked.lock().unwrap(), []);
+    // a new watcher has the item again: closing keeps the app
+    d.rig
+        .cx
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.set_in_tray(true, cx)));
+    assert_eq!(d.traced("tray", "registered"), 2);
+    d.close(back);
+    assert_eq!(*d.asked.lock().unwrap(), []);
+    d.tray(TrayEvent::Open);
+    let last = d.window().expect("the window shown from the tray");
+    // gone while the window is open: it stays, and closing it quits
+    d.rig
+        .cx
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.set_in_tray(false, cx)));
+    assert_eq!(d.window().map(|window| window.window_id()), Some(last.window_id()));
+    d.close(last);
+    assert_eq!(*d.asked.lock().unwrap(), [DesktopEvent::Quit]);
+}
+
+#[test]
 fn activating_a_notification_opens_its_chat_in_a_window_opened_again() {
     let d = OnDesktop::start();
     d.rig
         .cx
-        .update(|cx| d.desktop.update(cx, |desktop, _| desktop.set_in_tray(true)));
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.set_in_tray(true, cx)));
     let window = d.open();
     assert_eq!(d.main(), Some(Main::Nothing));
     d.deliver(TRIO, "1", LAB_C);

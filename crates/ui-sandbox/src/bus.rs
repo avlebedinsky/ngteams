@@ -8,7 +8,8 @@
 //!
 //! On it, from this process (each over a connection to this bus's address, never one taken from the environment):
 //! a fake notification server (`org.freedesktop.Notifications`) and a fake `StatusNotifierItem` watcher
-//! (`org.kde.StatusNotifierWatcher`), each recording every call with its sender.
+//! (`org.kde.StatusNotifierWatcher`), each recording every call with its sender. The watcher can be stopped and
+//! started again ([`PrivateBus::stop_watcher`], [`PrivateBus::start_watcher`]), as a panel that restarts.
 
 use std::{
     collections::HashMap,
@@ -261,8 +262,10 @@ pub struct PrivateBus {
     daemon: Child,
     address: String,
     records: Shared,
-    /// The fakes' connections, kept open for the bus's life.
+    /// The notification server's connection, kept open for the bus's life.
     connections: Vec<Connection>,
+    /// The watcher's connection, while it runs.
+    watcher: Mutex<Option<Connection>>,
 }
 
 impl Drop for PrivateBus {
@@ -295,6 +298,7 @@ impl PrivateBus {
             address,
             records: Shared::default(),
             connections: Vec::new(),
+            watcher: Mutex::new(None),
         };
         if wait_until(SOCKET_WAIT, || socket.exists().then_some(())).is_none() {
             let log = fs::read_to_string(dir.join(LOG)).unwrap_or_default();
@@ -313,14 +317,42 @@ impl PrivateBus {
             .name(NOTIFICATIONS_NAME)?
             .serve_at(NOTIFICATIONS_PATH, notifications)?
             .build()?;
-        let watcher = Watcher {
-            records: Arc::clone(&self.records),
-        };
-        let watcher = Builder::address(self.address.as_str())?
-            .name(WATCHER_NAME)?
-            .serve_at(WATCHER_PATH, watcher)?
-            .build()?;
-        self.connections.extend([notifications, watcher]);
+        self.connections.push(notifications);
+        self.start_watcher()
+    }
+
+    fn watcher(&self) -> std::sync::MutexGuard<'_, Option<Connection>> {
+        self.watcher.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Starts the fake watcher on a connection of its own, unless it runs: it takes the watcher's name, and what
+    /// registers with it is recorded with what registered before.
+    ///
+    /// # Errors
+    /// The connection or the name can't be had.
+    pub fn start_watcher(&self) -> SandboxResult {
+        let mut running = self.watcher();
+        if running.is_none() {
+            let watcher = Watcher {
+                records: Arc::clone(&self.records),
+            };
+            let connection = Builder::address(self.address.as_str())?
+                .name(WATCHER_NAME)?
+                .serve_at(WATCHER_PATH, watcher)?
+                .build()?;
+            *running = Some(connection);
+        }
+        Ok(())
+    }
+
+    /// Stops the fake watcher, as a panel that quits: its connection closes, so its name has no owner.
+    ///
+    /// # Errors
+    /// The connection can't be closed.
+    pub fn stop_watcher(&self) -> SandboxResult {
+        if let Some(connection) = self.watcher().take() {
+            connection.close()?;
+        }
         Ok(())
     }
 

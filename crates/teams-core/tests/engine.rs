@@ -962,8 +962,14 @@ async fn a_dropped_socket_is_caught_up_after_the_reconnect_each_message_stored_o
     b.ready().await;
 
     lab.trouter.drop_sockets(LAB_B);
-    b.event(|event| matches!(event, Event::Disconnected(_)).then_some(()))
+    let heard = b
+        .event(|event| match event {
+            Event::Disconnected { heard, .. } => Some(*heard),
+            _ => None,
+        })
         .await;
+    // when the socket was last heard, handed on as the push channel told it
+    assert!(heard.is_some_and(|heard| heard <= std::time::SystemTime::now()));
     let mut missed = Vec::new();
     for n in 0..3 {
         missed.push(id_of(&a.send(AB_CHAT, &format!("sent while b was away, {n}")).await));
@@ -1475,7 +1481,7 @@ async fn a_delivery_whose_conversation_cant_be_read_is_caught_up_from_the_tick()
             cause: Cause::Retry,
             report,
         } => report.failed.is_empty().then_some(()),
-        Event::Disconnected(_) => panic!("b's socket dropped"),
+        Event::Disconnected { .. } => panic!("b's socket dropped"),
         _ => None,
     })
     .await;

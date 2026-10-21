@@ -1,6 +1,7 @@
 //! The push channel against `teams-mock`'s Trouter and chat service, reached through the `test-support` mock origins:
 //! connect, authenticate as the first frame, register the messaging endpoint, keep-alives, deliveries that are never
-//! answered (an incoming call's included), a dropped socket and the regional reconnect with its replay, the service's
+//! answered (an incoming call's included), a dropped socket and the regional reconnect with its replay, when a socket
+//! that went down was last heard (not when a missing pong was noticed), the service's
 //! disconnects, a regional host given up, token renewal (a fake clock, the real session over a mock Entra, before the
 //! service's `1::`), a session signed out before the service's `1::`, a throttled token service, the stop (also while
 //! a socket opens), no token in any log record, and that every frame the socket sent is a reviewed own frame logged
@@ -396,7 +397,7 @@ async fn chat_event(push: &mut TrouterHandle) -> (bool, ChatEvent) {
 #[cfg(test)]
 async fn down(push: &mut TrouterHandle) -> Down {
     next(push, |event| match event {
-        PushEvent::Disconnected(down) => Some(down),
+        PushEvent::Disconnected { down, .. } => Some(down),
         _ => None,
     })
     .await
@@ -555,6 +556,58 @@ async fn pings_are_answered_and_a_missing_pong_means_a_reconnect() {
     assert_eq!(lab.trouter.sockets().len(), 2);
     push.stop().await;
     sent_only_logged_own_frames(&lab).await;
+}
+
+#[tokio::test]
+async fn a_socket_gone_silent_says_when_it_was_last_heard_not_when_that_was_noticed() {
+    let lab = Lab::start().await;
+    let started = lab.clock.now();
+    let mut push = lab.client().spawn();
+    connected(&mut push).await;
+    lab.trouter.set_pongs(false);
+    // two pings' time: every pong answered before is read, and the next ping waits for one that never comes (a late
+    // pong is noticed only after 1.5 s)
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let silent_since = lab.clock.now();
+    // a suspend: the clock jumps on before the missing pong is noticed
+    lab.clock.advance(Duration::from_secs(600));
+    let (down, heard) = next(&mut push, |event| match event {
+        PushEvent::Disconnected { down, heard } => Some((down, heard)),
+        _ => None,
+    })
+    .await;
+    assert!(matches!(down, Down::PongTimeout), "{down:?}");
+    let heard = heard.expect("the socket was connected");
+    assert!(
+        started <= heard && heard <= silent_since,
+        "last heard {heard:?}, not between the start {started:?} and the silence {silent_since:?}"
+    );
+    push.stop().await;
+}
+
+#[tokio::test]
+async fn a_socket_that_never_connected_says_nothing_was_heard() {
+    let lab = Lab::start().await;
+    // the service's `1::` and the authentication, then the socket closed without a `trouter.connected`
+    lab.trouter.withhold_connected(1);
+    let mut push = lab.client().spawn();
+    let (down, heard) = next(&mut push, |event| match event {
+        PushEvent::Disconnected { down, heard } => Some((down, heard)),
+        _ => None,
+    })
+    .await;
+    assert!(matches!(down, Down::Closed), "{down:?}");
+    assert_eq!(heard, None);
+    // the next one connects, and a drop of it was heard
+    connected(&mut push).await;
+    lab.trouter.drop_sockets(LAB_B);
+    let heard = next(&mut push, |event| match event {
+        PushEvent::Disconnected { heard, .. } => Some(heard),
+        _ => None,
+    })
+    .await;
+    assert!(heard.is_some());
+    push.stop().await;
 }
 
 #[tokio::test]

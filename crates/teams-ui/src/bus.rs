@@ -66,6 +66,16 @@ pub async fn connect(address: &str) -> Result<Connection, BusError> {
         .map_err(BusError::Connect)
 }
 
+/// A connection to the bus the app was given (`address`, as [`address_from_env`] read it): the one way the app
+/// reaches a bus ([`crate::desktop::Desktop::connect`]). Without an address, or at one that can't be reached, there is
+/// none, and nothing else is tried.
+///
+/// # Errors
+/// The address's own error, or [`connect`]'s.
+pub async fn connect_given(address: Result<String, BusError>) -> Result<Connection, BusError> {
+    connect(&address?).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;

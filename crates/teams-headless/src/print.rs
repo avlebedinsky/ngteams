@@ -217,7 +217,7 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         Event::Registration(RegistrationReport::Failed(error)) => {
             json!({"event": "registration", "registered": false, "error": error})
         }
-        Event::Disconnected(down) => json!({"event": "disconnected", "reason": format!("{down:?}")}),
+        Event::Disconnected { down, .. } => json!({"event": "disconnected", "reason": format!("{down:?}")}),
         Event::PushStopped(stop) => json!({"event": "push_stopped", "reason": format!("{stop:?}")}),
         Event::CaughtUp { cause: why, report } => json!({
             "event": "caught_up",

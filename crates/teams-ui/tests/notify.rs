@@ -1,8 +1,11 @@
 //! The notifications on GPUI's test context, over the fake engine (`common`) and a fake notification server that
-//! records what it is asked: which messages notify (someone else's, delivered or brought by a catch-up after the push
-//! channel went down and unread; never the account's own, a replay, one the store already had, history, an edit; the
-//! "notifications" setting; a chat shown in a focused window; channels and own streams), a mention marked, more than
-//! three of one chat collapsed into one, activating one opening its chat, a chat read closing its notifications.
+//! records what it is asked: which messages notify (someone else's, delivered, or brought by a catch-up or a replay
+//! after the push channel was last heard before it went down and unread; never the account's own, one the store
+//! already had, history, an edit; the "notifications" setting; a chat shown in a focused window, asked again before
+//! its notifications show; channels and own streams), a mention marked, more than three of one chat collapsed into
+//! one (still marked when an earlier one mentioned the account), activating one opening its chat, a chat read (its
+//! horizon moved, or a catch-up changed it) closing its notifications, a chat opened while its messages were looked
+//! at showing none of them.
 //! The same server on the sandbox's real private bus is `tests/desktop_bus.rs`. Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
@@ -13,12 +16,12 @@ mod common;
 mod notices;
 
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity};
 use notices::{Asked, FakeServer, chat, message};
-use teams_core::{Event, MessageChange, Source};
+use teams_core::{CLOCK_SKEW_MS, Event, MessageChange, Source};
 use teams_store::{Applied, ConversationKind, Member, Message, ReadHorizon};
 use teams_trouter::Down;
 use teams_ui::ViewTrace;
@@ -187,7 +190,7 @@ fn a_delivered_message_from_someone_else_notifies_with_its_name_and_first_line()
 }
 
 #[test]
-fn the_account_s_own_a_replay_one_already_stored_history_and_an_edit_never_notify() {
+fn the_account_s_own_a_replay_from_before_the_start_one_already_stored_history_and_an_edit_never_notify() {
     let n = Notifying::start(Settings::default());
     n.arrive(message(AB, "1", LAB_A, "<p>mine</p>", 5_000), Source::Delivery);
     n.arrive(message(AB, "2", LAB_B, "<p>again</p>", 5_001), Source::Replay);
@@ -317,10 +320,15 @@ fn channels_notify_only_mentions_and_own_streams_never() {
     );
 }
 
+/// `millis` milliseconds after the epoch.
+fn at(millis: i64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(u64::try_from(millis).unwrap())
+}
+
 #[test]
-fn a_catch_up_s_message_notifies_only_if_it_came_after_the_push_channel_went_down_and_is_unread() {
+fn a_catch_up_s_message_notifies_only_if_it_came_after_the_push_channel_was_last_heard_and_is_unread() {
     let n = Notifying::start(Settings::default());
-    let started = n.rig.cx.read(|cx| n.notifier.read(cx).down_since());
+    let started = n.rig.cx.read(|cx| n.notifier.read(cx).cutoff());
     // before the first connect: since the start
     n.arrive(
         message(AB, "1", LAB_B, "<p>while the app was off</p>", started - 60_000),
@@ -331,54 +339,77 @@ fn a_catch_up_s_message_notifies_only_if_it_came_after_the_push_channel_went_dow
     n.rig.send(Event::Connected {
         endpoint: "endpoint-1".to_owned(),
     });
-    n.rig.send(Event::Disconnected(Down::Closed));
-    let down = n.rig.cx.read(|cx| n.notifier.read(cx).down_since());
-    assert!(down >= started, "{down} {started}");
+    // a suspend: the socket was last heard twenty minutes ago, its missing pong noticed only now
+    let heard = now_ms() - 20 * 60_000;
+    n.rig.send(Event::Disconnected {
+        down: Down::PongTimeout,
+        heard: Some(at(heard)),
+    });
+    let cutoff = n.rig.cx.read(|cx| n.notifier.read(cx).cutoff());
+    assert_eq!(
+        cutoff,
+        heard - CLOCK_SKEW_MS,
+        "the cutoff is when it was last heard, not when the drop was told"
+    );
+    // a socket that never connected moves nothing
+    n.rig.send(Event::Disconnected {
+        down: Down::Closed,
+        heard: None,
+    });
+    assert_eq!(n.rig.cx.read(|cx| n.notifier.read(cx).cutoff()), cutoff);
     n.rig.core.horizons.lock().unwrap().insert(
         TRIO.to_owned(),
         ReadHorizon {
             conversation_id: TRIO.to_owned(),
             user: LAB_A.to_owned(),
-            last_read_arrival: down + 2_000,
-            updated: down + 2_000,
+            last_read_arrival: heard + 180_000,
+            updated: heard + 180_000,
             raw: None,
         },
     );
-    let later = now_ms().max(down) + 10_000;
     n.arrive(
-        message(AB, "2", LAB_B, "<p>before the drop</p>", down - 1),
+        message(AB, "2", LAB_B, "<p>before the drop</p>", cutoff - 1),
         Source::CatchUp,
     );
-    n.arrive(message(AB, "3", LAB_B, "<p>missed</p>", later), Source::CatchUp);
+    // after it was last heard, before the drop was noticed
+    n.arrive(
+        message(AB, "3", LAB_B, "<p>missed in the silence</p>", heard + 60_000),
+        Source::CatchUp,
+    );
     // read on another device: at or before the horizon
     n.arrive(
-        message(TRIO, "4", LAB_C, "<p>read elsewhere</p>", down + 1_000),
+        message(TRIO, "4", LAB_C, "<p>read elsewhere</p>", heard + 120_000),
         Source::CatchUp,
     );
     n.arrive(
-        message(TRIO, "5", LAB_C, "<p>not read</p>", down + 3_000),
+        message(TRIO, "5", LAB_C, "<p>not read</p>", heard + 240_000),
         Source::CatchUp,
+    );
+    // pushed again on the reconnect, never stored before: missed as well
+    n.arrive(
+        message(AB, "6", LAB_B, "<p>replayed</p>", heard + 300_000),
+        Source::Replay,
     );
     n.settle();
     let bodies: Vec<String> = n.server.shown().into_iter().map(|notice| notice.body).collect();
-    assert_eq!(bodies, ["missed", "not read"]);
+    assert_eq!(bodies, ["missed in the silence", "replayed", "not read"]);
 }
 
 #[test]
 fn more_than_three_in_one_chat_collapse_into_one() {
     let n = Notifying::start(Settings::default());
-    // five at once: straight into one
+    // a catch-up of messages that arrived before the app started notifies nothing, even five at once
     for id in 1..=5 {
         n.arrive(
             message(TRIO, &id.to_string(), LAB_C, "<p>burst</p>", 5_000 + id),
             Source::CatchUp,
         );
     }
-    // a catch-up after the start, unread: they notify
     n.settle();
     let asked = n.server.asked();
     assert!(asked.is_empty(), "arrived before the start: {asked:?}");
 
+    // five at once that arrived after the start, unread: straight into one
     let n = Notifying::start(Settings::default());
     let base = now_ms() + 60_000;
     for id in 1..=5 {
@@ -449,6 +480,98 @@ fn more_than_three_in_one_chat_collapse_into_one() {
 }
 
 #[test]
+fn a_mention_shown_before_still_marks_the_notification_its_chat_collapses_into() {
+    let n = Notifying::start(Settings::default());
+    n.arrive(
+        mentioning(message(AB, "1", LAB_B, "<p>you there?</p>", 5_000), LAB_A),
+        Source::Delivery,
+    );
+    n.settle();
+    assert_eq!(n.server.shown()[0].kind, NoticeKind::Mention);
+    for id in 2..=4 {
+        n.arrive(
+            message(AB, &id.to_string(), LAB_B, "<p>more</p>", 5_000),
+            Source::Delivery,
+        );
+    }
+    n.settle();
+    let collapsed = n.server.shown().last().cloned().unwrap();
+    assert_eq!(
+        (collapsed.kind, collapsed.body.as_str()),
+        (NoticeKind::Collapsed, "4 new messages, one or more mentioning you")
+    );
+    // the next replaces it, still marked
+    n.arrive(message(AB, "5", LAB_B, "<p>and more</p>", 5_000), Source::Delivery);
+    n.settle();
+    assert_eq!(
+        n.server.shown().last().unwrap().body,
+        "5 new messages, one or more mentioning you"
+    );
+    // once read, the chat starts again: no mark left over
+    n.rig.core.unread.lock().unwrap().insert(AB.to_owned(), 0);
+    n.rig.send(Event::ReadHorizon {
+        conversation: AB.to_owned(),
+    });
+    for id in 6..=9 {
+        n.arrive(
+            message(AB, &id.to_string(), LAB_B, "<p>later</p>", 5_000),
+            Source::Delivery,
+        );
+    }
+    n.settle();
+    assert_eq!(n.server.shown().last().unwrap().body, "4 new messages");
+}
+
+#[test]
+fn a_chat_shown_or_opened_while_its_messages_are_looked_at_shows_none_of_them() {
+    let n = Notifying::start(Settings::default());
+    n.rig.core.hold_people.lock().unwrap().insert(LAB_B.to_owned());
+    // every name asked answered, one ask after another (the chat's name, then the sender's)
+    let release = |n: &Notifying| {
+        let mut answered = 0;
+        loop {
+            let held: Vec<_> = n.rig.core.held.lock().unwrap().drain(..).collect();
+            if held.is_empty() {
+                break;
+            }
+            for (answer, person) in held {
+                answer.send(Ok(person));
+                answered += 1;
+            }
+            n.rig.cx.run_until_parked();
+        }
+        assert!(answered > 0, "nothing held");
+    };
+    // the names are asked; the chat is focused before the answers come
+    n.arrive(message(AB, "1", LAB_B, "<p>one</p>", 5_000), Source::Delivery);
+    n.settle();
+    *n.viewing.lock().unwrap() = Some(AB.to_owned());
+    release(&n);
+    assert_eq!(n.server.asked(), []);
+
+    // one shown, then another waits for its sender's name while the first is activated: the chat was opened after
+    // the second came, so it shows nothing
+    *n.viewing.lock().unwrap() = None;
+    n.arrive(message(AB, "2", LAB_B, "<p>two</p>", 5_001), Source::Delivery);
+    n.settle();
+    release(&n);
+    let first = n.rig.cx.read(|cx| n.notifier.read(cx).shown())[0].0;
+    n.arrive(message(AB, "3", LAB_B, "<p>three</p>", 5_002), Source::Delivery);
+    n.settle();
+    n.rig
+        .cx
+        .update(|cx| n.notifier.update(cx, |notifier, cx| notifier.activated(first, cx)));
+    release(&n);
+    let bodies: Vec<String> = n.server.shown().into_iter().map(|notice| notice.body).collect();
+    assert_eq!(bodies, ["two"]);
+    // a later one shows again
+    n.arrive(message(AB, "4", LAB_B, "<p>four</p>", 5_003), Source::Delivery);
+    n.settle();
+    release(&n);
+    assert_eq!(n.server.shown().last().unwrap().body, "four");
+}
+
+#[test]
 fn activating_one_opens_its_chat_and_closes_the_chat_s_others() {
     let n = Notifying::start(Settings::default());
     n.arrive(message(AB, "1", LAB_B, "<p>one</p>", 5_000), Source::Delivery);
@@ -494,6 +617,21 @@ fn a_chat_read_to_its_end_closes_its_notifications() {
     assert_eq!(n.server.closed(), [] as [u32; 0]);
     n.rig.core.unread.lock().unwrap().insert(AB.to_owned(), 0);
     n.rig.send(Event::ReadHorizon {
+        conversation: AB.to_owned(),
+    });
+    assert_eq!(n.server.closed(), [1]);
+    assert_eq!(n.rig.cx.read(|cx| n.notifier.read(cx).shown()), []);
+}
+
+#[test]
+fn a_chat_a_catch_up_finds_read_closes_its_notifications() {
+    let n = Notifying::start(Settings::default());
+    n.arrive(message(AB, "1", LAB_B, "<p>one</p>", 5_000), Source::Delivery);
+    n.settle();
+    // read on another device while the push channel was down: the catch-up stores the horizon and tells the chat
+    // changed
+    n.rig.core.unread.lock().unwrap().insert(AB.to_owned(), 0);
+    n.rig.send(Event::ConversationChanged {
         conversation: AB.to_owned(),
     });
     assert_eq!(n.server.closed(), [1]);

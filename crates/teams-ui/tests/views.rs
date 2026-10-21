@@ -124,7 +124,10 @@ fn each_event_reaches_its_model() {
         endpoint: "00000000-0000-4000-8000-0000000000e1".to_owned(),
     });
     assert_eq!(status(&rig).link, Link::Connected);
-    rig.send(Event::Disconnected(Down::Closed));
+    rig.send(Event::Disconnected {
+        down: Down::Closed,
+        heard: None,
+    });
     assert_eq!(status(&rig).link, Link::Down);
 
     rig.send(Event::Typing {
@@ -339,7 +342,10 @@ fn the_root_view_traces_its_opening_and_each_status_it_shows() {
     });
     // a status change that shows nothing new traces nothing
     rig.send(Event::Registration(teams_trouter::RegistrationReport::Registered));
-    rig.send(Event::Disconnected(Down::Closed));
+    rig.send(Event::Disconnected {
+        down: Down::Closed,
+        heard: None,
+    });
 
     let lines = written.lines();
     let changes: Vec<(&str, &str)> = lines

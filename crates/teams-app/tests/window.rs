@@ -14,9 +14,11 @@
 //!   from the store (the a–b chat's with their kinds: its event, a deleted and an edited message), and screenshots it
 //!   again. Then c posts on the mock to another of a's chats: the app's notification reaches the sandbox's fake
 //!   notification server (from the connection its tray item is on), and activating it opens that chat. The tray item
-//!   is registered with the fake watcher under the app's name; the window closed through niri leaves the app running,
-//!   a click on the item opens the window again, and once it is closed again the menu's "Quit" quits the app, whose
-//!   engine's thread was joined (the account's engine lock is free).
+//!   is registered with the fake watcher under the app's name; the window closed through niri leaves the app running.
+//!   The watcher stopped (a panel quitting) brings the window back, as no tray shows the app any more; started again,
+//!   it has the item registered with it again, and the window closed leaves the app running again. A click on the
+//!   item opens the window again, and once it is closed again the menu's "Quit" quits the app, whose engine's thread
+//!   was joined (the account's engine lock is free).
 //! - `http`: a window with an `img()` of an `https` URL on a loopback listener the child holds. GPUI's HTTP client is
 //!   the null one: the image loads nothing, a request through `cx.http_client()` is refused, and the listener never
 //!   sees a connection.
@@ -429,8 +431,9 @@ fn a_message_notifies_and_opens_its_chat(
     Ok(())
 }
 
-/// The tray item: registered under the app's name, its title the app's; closing the window keeps the app, a click on
-/// the item opens the window again, and the menu's "Quit" quits.
+/// The tray item: registered under the app's name, its title the app's; closing the window keeps the app, the watcher
+/// gone brings the window back and a new one has the item again, a click on the item opens the window again, and the
+/// menu's "Quit" quits.
 fn the_tray_keeps_the_app_and_quits_it(sandbox: &Sandbox, trace: &mut TraceReader, running: &Running) -> SandboxResult {
     let name = format!("org.kde.StatusNotifierItem-{}-1", running.pid());
     let items = sandbox.bus().tray_items();
@@ -451,10 +454,8 @@ fn the_tray_keeps_the_app_and_quits_it(sandbox: &Sandbox, trace: &mut TraceReade
     trace.next_where("window closed", |line| {
         line["view"] == "window" && line["change"] == "closed"
     })?;
-    match running.line_where(STAYS, |line| line == "engine-released") {
-        Err(LineError::Timeout) => {}
-        other => return Err(format!("the app didn't stay in the tray: {other:?}").into()),
-    }
+    stays(running)?;
+    the_tray_follows_its_watcher(sandbox, trace, running, &name)?;
     item.call_method("Activate", &(0_i32, 0_i32))?;
     trace.next_where("tray open", |line| line["view"] == "tray" && line["change"] == "open")?;
     trace.next_where("window opened again", |line| {
@@ -476,6 +477,61 @@ fn the_tray_keeps_the_app_and_quits_it(sandbox: &Sandbox, trace: &mut TraceReade
     menu.call_method("Event", &(MENU_QUIT, "clicked", zbus::zvariant::Value::from(""), 0_u32))?;
     trace.next_where("tray quit", |line| line["view"] == "tray" && line["change"] == "quit")?;
     Ok(())
+}
+
+/// The app stays up (its engine isn't released) for [`STAYS`] after its window closed.
+fn stays(running: &Running) -> SandboxResult {
+    match running.line_where(STAYS, |line| line == "engine-released") {
+        Err(LineError::Timeout) => Ok(()),
+        other => Err(format!("the app didn't stay in the tray: {other:?}").into()),
+    }
+}
+
+/// With the window closed into the tray: the watcher stopped brings the window back (nothing shows the app any more),
+/// started again has the item `name` registered with it again, and the window closed leaves the app up again.
+fn the_tray_follows_its_watcher(
+    sandbox: &Sandbox,
+    trace: &mut TraceReader,
+    running: &Running,
+    name: &str,
+) -> SandboxResult {
+    let registered = |sandbox: &Sandbox| {
+        sandbox
+            .bus()
+            .tray_items()
+            .iter()
+            .filter(|item| item.service == name)
+            .count()
+    };
+    let before = registered(sandbox);
+    sandbox.bus().stop_watcher()?;
+    trace.next_where("tray gone", |line| line["view"] == "tray" && line["change"] == "gone")?;
+    trace.next_where("window back", |line| {
+        line["view"] == "window" && line["change"] == "opened"
+    })?;
+    wait_until(WAIT, || {
+        sandbox
+            .niri_msg(&["windows"])
+            .ok()
+            .filter(|windows| windows.contains(teams_ui::window::LAB_APP_ID))
+    })
+    .ok_or("the window didn't come back when the watcher left")?;
+    sandbox.bus().start_watcher()?;
+    trace.next_where("tray registered again", |line| {
+        line["view"] == "tray" && line["change"] == "registered"
+    })?;
+    if registered(sandbox) != before + 1 {
+        return Err(format!(
+            "the item didn't register with the new watcher: {:?}",
+            sandbox.bus().tray_items()
+        )
+        .into());
+    }
+    sandbox.niri_msg(&["action", "close-window"])?;
+    trace.next_where("window closed into the tray again", |line| {
+        line["view"] == "window" && line["change"] == "closed"
+    })?;
+    stays(running)
 }
 
 fn gpui_s_http_client_is_the_null_one(sandbox: &Sandbox) -> SandboxResult {

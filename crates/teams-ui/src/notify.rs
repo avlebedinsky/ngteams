@@ -4,17 +4,24 @@
 //! stored, from someone else, a text message not deleted, in a chat (not one of the account's own streams). Then, as
 //! the "notifications" setting says ([`Notifications`]: all, mentions only, off), and only when the chat isn't the
 //! one shown in a focused window:
-//! - one delivered over the push channel notifies; a replayed delivery ([`Source::Replay`]), one the store already had
-//!   (not newly stored), older history ([`Source::History`]) and an edit, a delete or a reaction never do;
-//! - one a catch-up brought ([`Source::CatchUp`]) notifies only if it arrived after the push channel last went down
-//!   (or after the app started, before it first connected) and is unread (after the account's read horizon);
+//! - one delivered over the push channel notifies; one the store already had (not newly stored), older history
+//!   ([`Source::History`]) and an edit, a delete or a reaction never do;
+//! - one a catch-up brought ([`Source::CatchUp`]), or a replayed delivery ([`Source::Replay`]: the service pushing
+//!   again on a reconnect what it pushed before, newly stored when the earlier push never reached the app), notifies
+//!   only if it is unread (after the account's read horizon) and arrived after the cutoff ([`Notifier::cutoff`]): the
+//!   app's start until the push channel first goes down, then the moment it was last known to deliver before it last
+//!   went down (when its socket last heard from the service, as the engine tells it: a socket gone silent in a suspend
+//!   is noticed only later), less [`CLOCK_SKEW_MS`], since the service's times are compared with this machine's;
 //! - in a team's channel only a mention of the account notifies (channels are the Teams rail's, read-only in M2).
 //!
 //! A mention of the account is marked as such ("… mentioned you"). Messages are gathered for [`GATHER`] before they
 //! are shown, so a catch-up's are seen together: up to [`SINGLES`] of one chat are shown one by one; more than that
 //! collapse into one notification of the chat ("N new messages"), which the ones shown before give way to (closed)
-//! and later ones replace. A chat's notifications are closed once it is read (its read horizon moves and nothing in
-//! it is unread), opened from one, or shown in a focused window when the next message comes.
+//! and later ones replace; it says "one or more mentioning you" while any message it stands for (one shown before it
+//! included) mentioned the account. A chat's notifications are closed once it is read (its read horizon moves, or a
+//! read of the service changes the chat, and nothing in it is unread), opened from one, or shown in a focused window
+//! when the next message comes. Whether a chat is shown in a focused window is asked again just before its
+//! notifications are shown, and a chat opened or read while its messages were being looked at shows none of them.
 //!
 //! **Activating one** (its body, the `default` action) opens its chat: [`NotifierEvent::Open`], which the
 //! [`Desktop`](crate::desktop::Desktop) acts on.
@@ -36,7 +43,7 @@ use futures_util::StreamExt as _;
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, WeakEntity};
-use teams_core::Source;
+use teams_core::{CLOCK_SKEW_MS, Source};
 use teams_store::{Conversation, ConversationKind, Message};
 use zbus::Connection;
 use zbus::proxy::CacheProperties;
@@ -44,7 +51,7 @@ use zbus::zvariant::Value;
 
 use crate::bridge::Core;
 use crate::chat_list::{self, LIST_LIMIT};
-use crate::models::{FeedEvent, Link, Models};
+use crate::models::{FeedEvent, Models};
 use crate::people::Shown;
 use crate::rich_text::Mentions;
 use crate::settings::{Notifications, SettingsModel};
@@ -129,6 +136,8 @@ struct ChatNotices {
     collapsed: Option<u32>,
     /// The messages notified since the chat was last read.
     count: usize,
+    /// One of them mentioned the account.
+    mentioned: bool,
 }
 
 impl ChatNotices {
@@ -142,7 +151,9 @@ struct Batch {
     candidates: Vec<Candidate>,
     level: Notifications,
     viewing: Option<String>,
-    down_since: i64,
+    cutoff: i64,
+    /// The notifier's count of forgotten chats when the batch was taken: a chat forgotten after it shows nothing of it.
+    taken: u64,
     core: Arc<dyn Core>,
     server: Arc<dyn NotificationServer>,
 }
@@ -154,9 +165,8 @@ pub struct Notifier {
     trace: Arc<ViewTrace>,
     server: Option<Arc<dyn NotificationServer>>,
     viewing: Viewing,
-    /// When the push channel last went down, in milliseconds: the start, until it first goes down.
-    down_since: i64,
-    link: Link,
+    /// A catch-up's message notifies only when it arrived after this, in milliseconds ([`Notifier::cutoff`]).
+    cutoff: i64,
     /// Messages gathered, not yet processed.
     pending: Vec<Candidate>,
     /// A gathering is under way (it processes what is pending until nothing is).
@@ -164,15 +174,18 @@ pub struct Notifier {
     shown: HashMap<String, ChatNotices>,
     /// Every notification shown, by the server's id: its chat.
     ids: HashMap<u32, String>,
-    _subscriptions: [Subscription; 2],
+    /// How many times a chat's notifications were forgotten (closed, its count started again), and per chat that
+    /// count when it last was.
+    forgets: u64,
+    forgotten: HashMap<String, u64>,
+    _feed: Subscription,
 }
 
 impl EventEmitter<NotifierEvent> for Notifier {}
 
-/// Now, in milliseconds since the epoch.
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+/// Milliseconds since the epoch of `time` (0 before it).
+fn millis(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH)
         .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
 }
 
@@ -180,7 +193,7 @@ fn now_ms() -> i64 {
 /// decided when it is processed.
 #[must_use]
 pub fn may_notify(me: &str, conversation: &str, message: &Message, source: Source) -> bool {
-    matches!(source, Source::Delivery | Source::CatchUp)
+    matches!(source, Source::Delivery | Source::Replay | Source::CatchUp)
         && message.sender.as_deref().is_some_and(|sender| sender != me)
         && chat_list::is_text(message)
         && message.delete_time.is_none()
@@ -202,29 +215,23 @@ impl Notifier {
                 message,
                 source,
             } => this.arrived(conversation, message, *source, cx),
-            FeedEvent::Read { conversation } => this.read(conversation, cx),
+            FeedEvent::Read { conversation } | FeedEvent::Changed { conversation } => this.read(conversation, cx),
+            FeedEvent::Down { heard } => this.went_down(*heard),
         });
-        let status = cx.observe(&models.status, |this: &mut Self, status, cx| {
-            let link = status.read(cx).link;
-            if this.link == Link::Connected && link != Link::Connected {
-                this.down_since = now_ms();
-            }
-            this.link = link;
-        });
-        let link = models.status.read(cx).link;
         Self {
             core,
             settings,
             trace,
             server: None,
             viewing: Box::new(|_| None),
-            down_since: now_ms(),
-            link,
+            cutoff: millis(SystemTime::now()),
             pending: Vec::new(),
             gathering: false,
             shown: HashMap::new(),
             ids: HashMap::new(),
-            _subscriptions: [feed, status],
+            forgets: 0,
+            forgotten: HashMap::new(),
+            _feed: feed,
         }
     }
 
@@ -244,10 +251,20 @@ impl Notifier {
         self.viewing = viewing;
     }
 
-    /// When the push channel last went down (or the start), in milliseconds.
+    /// A catch-up's message (or a replayed delivery newly stored) notifies only when it arrived after this, in
+    /// milliseconds since the epoch: the app's start until the push channel first goes down, then the moment it was
+    /// last known to deliver before its last drop less [`CLOCK_SKEW_MS`] (see the module docs).
     #[must_use]
-    pub fn down_since(&self) -> i64 {
-        self.down_since
+    pub fn cutoff(&self) -> i64 {
+        self.cutoff
+    }
+
+    /// The push channel went down, last heard at `heard`: the cutoff moves there. One that never connected moves
+    /// nothing (what it would have delivered is still missed since the last drop, or the start).
+    fn went_down(&mut self, heard: Option<SystemTime>) {
+        if let Some(heard) = heard {
+            self.cutoff = millis(heard).saturating_sub(CLOCK_SKEW_MS);
+        }
     }
 
     /// The notifications shown now, by the server's id, with their chats.
@@ -303,8 +320,10 @@ impl Notifier {
         .detach();
     }
 
-    /// Closes `conversation`'s notifications and starts its count again.
+    /// Closes `conversation`'s notifications and starts its count again; a batch taken before shows none of it.
     fn forget(&mut self, conversation: &str, cx: &mut Context<Self>) {
+        self.forgets += 1;
+        self.forgotten.insert(conversation.to_owned(), self.forgets);
         let Some(notices) = self.shown.remove(conversation) else {
             return;
         };
@@ -338,7 +357,8 @@ impl Notifier {
             candidates,
             level: self.settings.read(cx).settings().notifications,
             viewing: (self.viewing)(cx),
-            down_since: self.down_since,
+            cutoff: self.cutoff,
+            taken: self.forgets,
             core: Arc::clone(&self.core),
             server,
         })
@@ -349,6 +369,7 @@ impl Notifier {
         let notices = self.shown.entry(conversation.to_owned()).or_default();
         notices.singles.push(id);
         notices.count += 1;
+        notices.mentioned |= kind == NoticeKind::Mention;
         self.ids.insert(id, conversation.to_owned());
         self.trace.record(
             &TraceLine::new("notification", "shown")
@@ -357,8 +378,9 @@ impl Notifier {
         );
     }
 
-    /// `conversation`'s notifications collapsed into `id`, for `count` messages; the singles it replaced are gone.
-    fn shown_collapsed(&mut self, conversation: &str, id: u32, count: usize) {
+    /// `conversation`'s notifications collapsed into `id`, for `count` messages (`mentioned`: one mentioned the
+    /// account); the singles it replaced are gone.
+    fn shown_collapsed(&mut self, conversation: &str, id: u32, count: usize, mentioned: bool) {
         let notices = self.shown.entry(conversation.to_owned()).or_default();
         for single in notices.singles.drain(..) {
             self.ids.remove(&single);
@@ -367,6 +389,7 @@ impl Notifier {
             self.ids.remove(&old);
         }
         notices.count = count;
+        notices.mentioned = mentioned;
         self.ids.insert(id, conversation.to_owned());
         self.trace.record(
             &TraceLine::new("notification", "shown")
@@ -402,7 +425,8 @@ async fn process(this: &WeakEntity<Notifier>, batch: Batch, cx: &mut AsyncApp) {
         candidates,
         level,
         viewing,
-        down_since,
+        cutoff,
+        taken,
         core,
         server,
     } = batch;
@@ -417,13 +441,27 @@ async fn process(this: &WeakEntity<Notifier>, batch: Batch, cx: &mut AsyncApp) {
             continue;
         }
         let stored = conversations.iter().find(|stored| stored.id == conversation);
-        let chosen = choose(&*core, stored, candidates, level, down_since).await;
+        let chosen = choose(&*core, stored, candidates, level, cutoff).await;
         if chosen.is_empty() {
             continue;
         }
         let (chat, notices) = describe(&*core, &conversation, stored, chosen).await;
-        show(this, &*server, &conversation, &chat, notices, cx).await;
+        // asked again after the reads above, right before what is shown is read (nothing waits in between)
+        let due = this.update(cx, |this, cx| still_due(this, &conversation, taken, cx));
+        if due.is_ok_and(|due| due) {
+            show(this, &*server, &conversation, &chat, notices, cx).await;
+        }
     }
+}
+
+/// Whether `conversation`'s notices of a batch taken at `taken` may still be shown: it isn't shown in a focused window
+/// now (if it is, what was shown for it is done with), and it wasn't opened or read since the batch was taken.
+fn still_due(this: &mut Notifier, conversation: &str, taken: u64, cx: &mut Context<Notifier>) -> bool {
+    if (this.viewing)(cx).as_deref() == Some(conversation) {
+        this.forget(conversation, cx);
+        return false;
+    }
+    this.forgotten.get(conversation).is_none_or(|at| *at <= taken)
 }
 
 /// The candidates of one chat that notify, each with whether it mentions the account.
@@ -432,7 +470,7 @@ async fn choose(
     stored: Option<&Conversation>,
     candidates: Vec<Candidate>,
     level: Notifications,
-    down_since: i64,
+    cutoff: i64,
 ) -> Vec<(Candidate, bool)> {
     let channel = stored.is_some_and(|stored| stored.kind == ConversationKind::Channel);
     let mut horizon = None;
@@ -442,9 +480,9 @@ async fn choose(
         if (level == Notifications::Mentions || channel) && !mention {
             continue;
         }
-        if candidate.source == Source::CatchUp {
+        if matches!(candidate.source, Source::CatchUp | Source::Replay) {
             let arrival = candidate.message.arrival_time;
-            if arrival <= down_since {
+            if arrival <= cutoff {
                 continue;
             }
             if horizon.is_none() {
@@ -533,10 +571,17 @@ async fn show(
     notices: Vec<Notice>,
     cx: &mut AsyncApp,
 ) {
-    let Ok((count, singles, collapsed)) = this.update(cx, |this, _| {
-        this.shown.get(conversation).map_or((0, Vec::new(), None), |notices| {
-            (notices.count, notices.singles.clone(), notices.collapsed)
-        })
+    let Ok((count, singles, collapsed, mentioned)) = this.update(cx, |this, _| {
+        this.shown
+            .get(conversation)
+            .map_or((0, Vec::new(), None, false), |notices| {
+                (
+                    notices.count,
+                    notices.singles.clone(),
+                    notices.collapsed,
+                    notices.mentioned,
+                )
+            })
     }) else {
         return;
     };
@@ -552,7 +597,8 @@ async fn show(
     for id in singles {
         server.close(id).await;
     }
-    let mention = notices.iter().any(|notice| notice.kind == NoticeKind::Mention);
+    // a mention shown before, one by one or in the collapsed one this replaces, is still among the messages
+    let mention = mentioned || notices.iter().any(|notice| notice.kind == NoticeKind::Mention);
     let notice = Notice {
         conversation: conversation.to_owned(),
         kind: NoticeKind::Collapsed,
@@ -560,7 +606,7 @@ async fn show(
         body: collapsed_body(total, mention),
     };
     if let Ok(id) = server.show(&notice, collapsed.unwrap_or(0)).await {
-        let _ = this.update(cx, |this, _| this.shown_collapsed(conversation, id, total));
+        let _ = this.update(cx, |this, _| this.shown_collapsed(conversation, id, total, mention));
     }
 }
 

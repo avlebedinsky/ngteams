@@ -3,16 +3,19 @@
 //!
 //! - The window opens over the shell's parts ([`Desktop::open_window`]); closed, it can be opened again from the tray
 //!   or a notification, over the same models ([`Desktop::show`]).
-//! - **Closing the window keeps the app in the tray** once its tray item is up (a watcher took it); without one,
+//! - **Closing the window keeps the app in the tray** while its tray item is up (a watcher took it); without one,
 //!   closing the window quits ([`DesktopEvent::Quit`], which the app acts on: it shuts the engine down, then quits).
+//!   The item follows the watcher ([`Hosted`]): a watcher that leaves (a panel restarting, or gone for good) or the
+//!   bus lost takes the item down, and a new watcher brings it up again. Taken down while the window is closed, the
+//!   window opens again: the app is never left running with no window and no item to bring it back.
 //! - A notification activated opens its chat in the window, opened again if it was closed; the tray's "Open" (or a
 //!   click on the item) shows the window, its "Quit" quits.
 //! - The notifier is told the chat shown in a focused window, which never notifies.
 //! - [`Desktop::connect`] connects to the bus the app is given ([`crate::bus`]) and puts the notifications and the
 //!   tray item on it; without one, neither is there and nothing else is tried.
 //!
-//! What it does is traced: `window opened` (the root view's), `window closed`, `tray open`/`quit`, and the notifier's
-//! and the tray's own lines.
+//! What it does is traced: `window opened` (the root view's), `window closed`, `tray open`/`quit`, `tray
+//! registered`/`gone` (the item up or down), and the notifier's and the tray's own lines.
 
 use std::sync::Arc;
 
@@ -28,7 +31,7 @@ use crate::bus::{self, BusError};
 use crate::notify::{BusNotifications, Notifier, NotifierEvent};
 use crate::shell::{Main, ShellParts};
 use crate::trace::TraceLine;
-use crate::tray::{BusTray, Tray, TrayEvent};
+use crate::tray::{BusTray, Hosted, Tray, TrayEvent};
 use crate::view::Root;
 use crate::window::{self, KitRoot};
 
@@ -154,9 +157,18 @@ impl Desktop {
         self.in_tray
     }
 
-    /// The tray item is up (or gone again): closing the window keeps the app (or quits it).
-    pub fn set_in_tray(&mut self, in_tray: bool) {
+    /// The tray item is up (a watcher has it), or down again (its watcher left, or the bus was lost): closing the
+    /// window keeps the app, or quits it. Down while the window is closed, the window opens again.
+    pub fn set_in_tray(&mut self, in_tray: bool, cx: &mut Context<Self>) {
+        if self.in_tray == in_tray {
+            return;
+        }
         self.in_tray = in_tray;
+        let change = if in_tray { "registered" } else { "gone" };
+        self.parts.shell.trace.record(&TraceLine::new("tray", change));
+        if !in_tray && self.window.is_none() {
+            self.show(cx);
+        }
     }
 
     /// Opens the main window ([`window::open`]); the one open already, if it is.
@@ -233,11 +245,7 @@ impl Desktop {
         let app_id = self.parts.app_id;
         let app_name = self.parts.app_name.to_string();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let connection = match address {
-                Ok(address) => bus::connect(&address).await,
-                Err(error) => Err(error),
-            };
-            let connection = match connection {
+            let connection = match bus::connect_given(address).await {
                 Ok(connection) => connection,
                 Err(error) => return vec![error.to_string()],
             };
@@ -289,18 +297,30 @@ async fn tray(
     cx: &mut AsyncApp,
 ) -> zbus::Result<()> {
     let (events, mut asked) = mpsc::unbounded_channel();
-    let item = BusTray::start(connection, app_id, app_name, events).await?;
+    let (item, mut hosted) = BusTray::start(connection, app_id, app_name, events).await?;
     let _ = this.update(cx, |this, cx| {
-        this.in_tray = true;
+        this.set_in_tray(true, cx);
         this.tray.update(cx, |tray, cx| tray.set_icon(Arc::new(item), cx));
     });
-    let this = this.clone();
+    let asking = this.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
         while let Some(event) = asked.recv().await {
-            if this.update(cx, |this, cx| this.tray_asked(event, cx)).is_err() {
+            if asking.update(cx, |this, cx| this.tray_asked(event, cx)).is_err() {
                 break;
             }
         }
+    })
+    .detach();
+    let this = this.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Some(change) = hosted.next().await {
+            let up = change == Hosted::Registered;
+            if this.update(cx, |this, cx| this.set_in_tray(up, cx)).is_err() {
+                return;
+            }
+        }
+        // the bus is lost: the item with it
+        let _ = this.update(cx, |this, cx| this.set_in_tray(false, cx));
     })
     .detach();
     Ok(())
