@@ -435,6 +435,17 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
       - A confirming run after the `48:mentions` review queued on the live lock from 22:56Z and was withdrawn at
         00:50Z, never started: another agent's `ab-image` run held the lock the whole time. ⚠️ So no exit-0 run with
         the mention yet; the next live run of `ab-chat-full` is that confirmation.
+      - 2026-10-21 01:42Z (confirming, after the review fixes of `m1-task-7-profile-reads-r1`: a `PausedRequest` keeps
+        header values only for those the list reads, never a token or cookie; the lookup's `x-ms-object-id` pinned to
+        its captured empty value, `x-ms-migration`, `x-ms-test-user`, `x-ms-client-request-type`, `x-ms-client-type`
+        to theirs, `x-ms-client-caller` a short name with no object id in it): **exit 0**, every step done (a: send,
+        edit, react, unreact, mention (the picker offered b, picked, the post's `properties.mentions` named b), reply,
+        react to the reply, delete; b: read, react; no read receipt within 30 s), the probe denied in a's page and never
+        at b. `fence.log` (903 entries): 36 allowed writes, all on the a–b chat (8 message, 2 of them the mention with
+        b added, 6 typing, 2 edit, 2 delete, 8 reaction, 10 read receipt), 4 own Entra token posts, 15 forced denies
+        (the probes), 848 unclassified denies, all expected by the reviewed list; no breach, no lab browser left. No
+        `post_read` allow this time: the client had the lab accounts' profiles cached, and the one lookup it sent named
+        a bot and was denied (its headers carried every pinned value as captured).
 
 ### Task 8: Group chats under the fence (a, b, c)
 **Files:**
