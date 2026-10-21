@@ -30,7 +30,7 @@ use teams_auth::claims::TokenSummary;
 use teams_auth::pkce::PkceError;
 use teams_auth::redirect::RedirectError;
 use teams_auth::secrets::{Secret, SecretStore};
-use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError};
+use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError, Tokens};
 use tokio::sync::mpsc;
 
 use crate::classify::Classifier;
@@ -177,7 +177,7 @@ pub async fn authorize<S: SecretStore>(
         }
     }
     let skypetoken = if options.skypetoken {
-        Some(skypetoken(store, &account.upn, &refreshed.access_token).await)
+        Some(skypetoken(store, &account.upn, &refreshed).await)
     } else {
         None
     };
@@ -193,10 +193,16 @@ pub async fn authorize<S: SecretStore>(
 async fn skypetoken<S: SecretStore>(
     store: &S,
     account: &str,
-    spaces_token: &Secret,
+    spaces: &Tokens,
 ) -> Result<SkypetokenSummary, AuthzError> {
     let skypetoken = AuthzClient::new()?
-        .exchange_and_store(store, account, spaces_token, AuthzKind::ExplicitLogin)
+        .exchange_and_store(
+            store,
+            account,
+            &spaces.access_token,
+            spaces.expires_at,
+            AuthzKind::ExplicitLogin,
+        )
         .await?;
     Ok(SkypetokenSummary::from(&skypetoken))
 }

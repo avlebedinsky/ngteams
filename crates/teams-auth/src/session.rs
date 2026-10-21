@@ -1,7 +1,7 @@
 //! One signed-in account's tokens while a client runs (M1 Task 4).
 //!
 //! - **An access token per audience**, from the account's one stored refresh token, kept in memory only and refreshed
-//!   once it is within the session's margin ([`REFRESH_MARGIN`] by default) of its expiry. However many callers ask
+//!   once it is within the session's margin ([`REFRESH_MARGIN`]) of its expiry. However many callers ask
 //!   for an audience at once, one refresh grant serves them all; grants for different audiences are serialized too,
 //!   so a refresh token Entra rotates is read and replaced by one grant at a time (the rotated one is stored by
 //!   [`TokenClient::refresh`]).
@@ -14,7 +14,8 @@
 //!   ([`AuthzKind::TokenRefresh`]) only with that fresh token: one that runs out within the margin is refused before
 //!   anything is sent ([`TokenError::StaleEntraToken`]), since authz copies the Entra token's expiry into the
 //!   skypetoken. A renewed skypetoken never outlives its Entra token (its expiry is
-//!   capped at it) and replaces the stored one; its answer's region replaces the session's.
+//!   capped at it) and replaces the stored one, its capped expiry stored next to it so that a later session reads it
+//!   back as it was kept; its answer's region replaces the session's.
 //! - **Retries** (the session's part of the plan's retry table): none hidden here. Entra's or authz's 429 and 503 are
 //!   [`TokenError::Throttled`] with the `Retry-After` given, for the caller to wait out. The session keeps to that
 //!   wait itself too, per service: callers that were already waiting when the throttling answer came get it as well,
@@ -30,7 +31,7 @@
 //!   read through [`Region::base`]: trimmed, with a fallback for names the region lacks.
 //!
 //! Nothing here logs. No `Debug` output or error carries a token: [`Secret`] redacts itself, and the session's own
-//! `Debug` names only the account, the margin and which audiences it holds.
+//! `Debug` names only the account and which audiences it holds.
 //!
 //! Sign-in and renewal POSTs (Entra's token endpoint, authz) go through [`TokenClient`] and [`AuthzClient`], the
 //! reviewed exception to the native request policy: they touch only the account's own credentials.
@@ -42,11 +43,11 @@ use std::time::{Duration, SystemTime};
 
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
-use crate::authz::{AuthzClient, AuthzKind, Region, Skypetoken, skypetoken_key};
+use crate::authz::{AuthzClient, AuthzKind, Region, Skypetoken, skypetoken_expiry_key, skypetoken_key};
 use crate::secrets::{Secret, SecretStore};
 use crate::token::{SPACES_RESOURCE, Scope, TokenClient, TokenError, Tokens};
 
-/// How long before its expiry a token is refreshed by default.
+/// How long before its expiry a token is refreshed.
 pub const REFRESH_MARGIN: Duration = Duration::from_mins(5);
 
 /// How many renewal notifications a slow subscriber may fall behind before it misses some
@@ -104,7 +105,6 @@ pub struct Session<S> {
     tokens: TokenClient,
     authz: AuthzClient,
     clock: Arc<dyn Clock>,
-    margin: Duration,
     /// One slot per audience, each behind its own lock: the refresh of one audience doesn't hold up another's cached
     /// token.
     audiences: Mutex<BTreeMap<String, Arc<AsyncMutex<Option<AccessToken>>>>>,
@@ -124,7 +124,6 @@ impl<S> fmt::Debug for Session<S> {
         let audiences: Vec<String> = lock(&self.audiences).keys().cloned().collect();
         f.debug_struct("Session")
             .field("account", &self.account)
-            .field("margin", &self.margin)
             .field("audiences", &audiences)
             .finish_non_exhaustive()
     }
@@ -132,7 +131,7 @@ impl<S> fmt::Debug for Session<S> {
 
 impl<S: SecretStore> Session<S> {
     /// A session for `account` (its UPN, the name its refresh token and skypetoken are stored under in `store`), with
-    /// the account's stored `region`, the system clock and [`REFRESH_MARGIN`].
+    /// the account's stored `region` and the system clock.
     #[must_use]
     pub fn new(account: impl Into<String>, store: S, tokens: TokenClient, authz: AuthzClient, region: Region) -> Self {
         let (renewals, _) = broadcast::channel(RENEWAL_BACKLOG);
@@ -142,7 +141,6 @@ impl<S: SecretStore> Session<S> {
             tokens,
             authz,
             clock: Arc::new(SystemClock),
-            margin: REFRESH_MARGIN,
             audiences: Mutex::default(),
             grants: AsyncMutex::new(()),
             skypetoken: AsyncMutex::default(),
@@ -157,13 +155,6 @@ impl<S: SecretStore> Session<S> {
     #[must_use]
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
-        self
-    }
-
-    /// Another refresh margin.
-    #[must_use]
-    pub fn with_margin(mut self, margin: Duration) -> Self {
-        self.margin = margin;
         self
     }
 
@@ -274,11 +265,12 @@ impl<S: SecretStore> Session<S> {
         self.renew_into(&mut slot, tickets).await
     }
 
-    /// Fills an empty slot with the stored skypetoken, if there is one with a readable expiry.
+    /// Fills an empty slot with the stored skypetoken, if there is one with a readable expiry, stored next to it.
     async fn load_stored_skypetoken(&self, slot: &mut SkypetokenSlot) -> Result<(), TokenError> {
         if slot.held.is_none() {
             let stored = self.store.get(&skypetoken_key(&self.account)).await?;
-            slot.held = stored.and_then(|token| Skypetoken::from_stored(token, self.region()));
+            let expiry = self.store.get(&skypetoken_expiry_key(&self.account)).await?;
+            slot.held = stored.and_then(|token| Skypetoken::from_stored(token, expiry.as_ref(), self.region()));
         }
         Ok(())
     }
@@ -332,9 +324,7 @@ impl<S: SecretStore> Session<S> {
             .map_err(TokenError::from);
         let mut skypetoken = self.authz_backoff.record(exchanged, self.clock.now())?;
         skypetoken.expires_at = skypetoken.expires_at.min(spaces.expires_at);
-        self.store
-            .put(&skypetoken_key(&self.account), &skypetoken.token)
-            .await?;
+        skypetoken.store(&self.store, &self.account).await?;
         *lock(&self.region) = skypetoken.region.clone();
         self.announce(Renewal::Skypetoken {
             expires_at: skypetoken.expires_at,
@@ -381,7 +371,7 @@ impl<S: SecretStore> Session<S> {
     fn fresh(&self, expires_at: SystemTime) -> bool {
         expires_at
             .duration_since(self.clock.now())
-            .is_ok_and(|left| left > self.margin)
+            .is_ok_and(|left| left > REFRESH_MARGIN)
     }
 
     fn announce(&self, renewal: Renewal) {

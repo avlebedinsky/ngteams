@@ -13,7 +13,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 use teams_auth::authz::{
-    AUTHZ_ENDPOINT, AuthzClient, AuthzError, AuthzKind, CHAT_BASE_GTM, Region, RegionFileError, skypetoken_key,
+    AUTHZ_ENDPOINT, AuthzClient, AuthzError, AuthzKind, CHAT_BASE_GTM, Region, RegionFileError, skypetoken_expiry,
+    skypetoken_expiry_key, skypetoken_key,
 };
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
 use wiremock::matchers::{body_string, header, method, path};
@@ -426,17 +427,27 @@ fn only_an_authz_url_is_an_endpoint() {
 }
 
 #[tokio::test]
-async fn the_skypetoken_is_stored_under_the_account_and_a_refusal_stores_nothing() {
+async fn the_skypetoken_is_stored_under_the_account_with_its_capped_expiry_and_a_refusal_stores_nothing() {
     let store = MemorySecretStore::new();
     let key = skypetoken_key(ACCOUNT);
     assert_eq!(key.audience(), "skypetoken");
+    let expiry_key = skypetoken_expiry_key(ACCOUNT);
+    assert_eq!(expiry_key.audience(), "skypetoken-expiry");
+    let spaces_expires_at = UNIX_EPOCH + Duration::from_secs(unix(SystemTime::now()) + 60);
 
     let refused = Fixture::load("authz-403-no-license").unwrap();
     let server = MockServer::start().await;
     let client = refused.mount(&server).await.unwrap();
     store.put(&key, &Secret::new("an-older-skypetoken")).await.unwrap();
+    store.put(&expiry_key, &Secret::new("1")).await.unwrap();
     client
-        .exchange_and_store(&store, ACCOUNT, &spaces_token(), AuthzKind::TokenRefresh)
+        .exchange_and_store(
+            &store,
+            ACCOUNT,
+            &spaces_token(),
+            spaces_expires_at,
+            AuthzKind::TokenRefresh,
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -444,17 +455,33 @@ async fn the_skypetoken_is_stored_under_the_account_and_a_refusal_stores_nothing
         "an-older-skypetoken",
         "a refusal leaves the stored one"
     );
+    assert_eq!(
+        store.get(&expiry_key).await.unwrap().unwrap().expose(),
+        "1",
+        "and its expiry"
+    );
 
     let ok = Fixture::load("authz-ok").unwrap();
     server.reset().await;
     let client = ok.mount(&server).await.unwrap();
     let skypetoken = client
-        .exchange_and_store(&store, ACCOUNT, &spaces_token(), AuthzKind::ExplicitLogin)
+        .exchange_and_store(
+            &store,
+            ACCOUNT,
+            &spaces_token(),
+            spaces_expires_at,
+            AuthzKind::ExplicitLogin,
+        )
         .await
         .unwrap();
     assert_eq!(
         store.get(&key).await.unwrap().unwrap().expose(),
         skypetoken.token.expose()
+    );
+    assert_eq!(skypetoken.expires_at, spaces_expires_at, "capped at the Entra token");
+    assert_eq!(
+        store.get(&expiry_key).await.unwrap().unwrap().expose(),
+        skypetoken_expiry(&skypetoken.token, spaces_expires_at).expose()
     );
 }
 

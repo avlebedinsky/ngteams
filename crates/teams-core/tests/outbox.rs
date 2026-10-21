@@ -797,6 +797,79 @@ async fn a_second_401_fails_the_row() {
 }
 
 #[tokio::test]
+async fn a_check_that_cant_sync_between_two_401s_doesnt_give_the_row_another_attempt() {
+    let setup = setup().await;
+    setup.answer(401).await;
+    setup.sync.fails.store(true, Ordering::SeqCst);
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &hello()).unwrap();
+
+    let error = setup.outbox.send(&mut store, &setup.sync, row.id).await.unwrap_err();
+    assert!(matches!(error, OutboxError::Sync { .. }), "{error:?}");
+    assert_eq!(
+        setup.posted().await.len(),
+        1,
+        "the check before the new attempt couldn't sync"
+    );
+
+    setup.sync.fails.store(false, Ordering::SeqCst);
+    setup.advance(CHECK_RETRY_WAIT);
+    let failed = send(&setup, &mut store, &row).await;
+
+    assert_eq!(failed.state, OutboxState::Failed);
+    assert_eq!(failed.last_error.as_deref(), Some("HTTP 401"));
+    assert_eq!(setup.posted().await.len(), 2, "one new attempt, no more");
+}
+
+#[tokio::test]
+async fn a_401_after_another_answer_still_fails_a_row_that_had_its_one_more_attempt() {
+    let setup = setup().await;
+    for (priority, status) in [(1, 401), (2, 500)] {
+        Mock::given(method("POST"))
+            .and(path(MESSAGES))
+            .respond_with(ResponseTemplate::new(status))
+            .up_to_n_times(1)
+            .with_priority(priority)
+            .mount(&setup.server)
+            .await;
+    }
+    setup.answer(401).await;
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &hello()).unwrap();
+
+    let failed = send(&setup, &mut store, &row).await;
+
+    assert_eq!(failed.state, OutboxState::Failed);
+    assert_eq!(failed.last_error.as_deref(), Some("HTTP 401"));
+    assert_eq!(setup.posted().await.len(), 3, "401, 500, 401");
+}
+
+#[tokio::test]
+async fn a_resend_gives_a_row_given_up_after_a_401_its_one_more_attempt_again() {
+    let setup = setup().await;
+    setup.answer_once(401, None).await;
+    setup.created().await;
+    setup.sync.fails.store(true, Ordering::SeqCst);
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &hello()).unwrap();
+    // the 401's one more attempt waits for a check that never syncs, until the row is given up
+    for _ in 0..MAX_FAILED_CHECKS {
+        let error = setup.outbox.send(&mut store, &setup.sync, row.id).await.unwrap_err();
+        assert!(matches!(error, OutboxError::Sync { .. }), "{error:?}");
+        setup.advance(Duration::from_secs(3_600));
+    }
+    assert_eq!(store.outbox_entry(row.id).unwrap().unwrap().state, OutboxState::Failed);
+
+    setup.sync.fails.store(false, Ordering::SeqCst);
+    store.resend(row.id).unwrap();
+    setup.answer_once(401, None).await;
+    let sent = send(&setup, &mut store, &row).await;
+
+    assert_eq!(sent.state, OutboxState::Sent);
+    assert_eq!(setup.posted().await.len(), 3, "401, then after the resend 401 and 201");
+}
+
+#[tokio::test]
 async fn a_429_waits_its_retry_after_before_a_new_attempt_with_the_same_client_message_id() {
     let setup = setup().await;
     setup.answer_once(429, Some("7")).await;

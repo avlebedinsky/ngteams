@@ -41,7 +41,7 @@ use crate::session::{LabSession, SessionOptions, SessionState, TEAMS_URL};
 
 use regex::Regex;
 
-use super::dsl::{Driver, RequestPattern, Selector, StepError};
+use super::dsl::{Driver, RequestPattern, Selector, StepError, js_string};
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
@@ -303,7 +303,7 @@ pub async fn wait_for_newest(drive: &mut Driver, step: &str, text: &str, timeout
          const jump = [...document.querySelectorAll('button, [role=\"button\"]')] \
            .find(b => labels.includes((b.innerText ?? '').trim())); \
          if (jump) jump.click(); return false; }})()",
-        text = serde_json::Value::String(text.to_owned()),
+        text = js_string(text),
         labels = serde_json::json!([JUMP_TO_NEWEST, NEW_MESSAGES]),
     );
     drive
@@ -373,8 +373,8 @@ pub async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), Scen
     driver.type_into(&format!("{who} types"), COMPOSE, text).await?;
     let sent = format!(
         "!(document.querySelector({})?.innerText ?? '').includes({})",
-        serde_json::Value::String(COMPOSE_CSS.to_owned()),
-        serde_json::Value::String(text.to_owned())
+        js_string(COMPOSE_CSS),
+        js_string(text)
     );
     let step = format!("{who} sends");
     for _ in 0..SEND_TRIES {

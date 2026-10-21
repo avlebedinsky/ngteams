@@ -6,7 +6,8 @@
 //!   [`Fence::check`] reads the target's members fresh from the membership source and logs its decision before
 //!   anything goes out. A denied attempt marks the row denied and sends nothing; a permit covers that one attempt.
 //! - **The outbox's part of the retry table** (the plan's Technical Details): a 2xx is sent; a 401 is tried once more
-//!   at once (the transport has had the session refresh the refused token); a 429 or 503 waits its `Retry-After`
+//!   at once (the transport has had the session refresh the refused token), once in the row's budget: a later 401
+//!   fails the row, whatever came between; a 429 or 503 waits its `Retry-After`
 //!   ([`DEFAULT_RETRY_WAIT`] without one) as the row's `not_before`; any other 4xx (and any other answer) fails the
 //!   row, never retried. A network error or a timeout, and a 5xx other than 503, leave it unknown whether the message
 //!   arrived: before the next attempt the conversation is synced ([`ConversationSync`]) and searched for the row's
@@ -38,6 +39,7 @@
 //! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice. The sync
 //! the check relies on is the [`ConversationSync`] seam, which M1 Task 17's catch-up sync fills.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -366,6 +368,10 @@ pub struct Outbox<T> {
     clock: Clock,
     /// The rows a message coming in changed ([`Outbox::match_arrival`]), as it left them, until they are taken.
     arrived: Mutex<Vec<OutboxEntry>>,
+    /// The rows that had their one more attempt after a 401, each with its `attempts_at_resend` then: another 401
+    /// within the same budget fails the row, whatever came between (other answers, a check that couldn't sync, more
+    /// [`Outbox::send`] calls); a resend starts a new budget, and with it a new allowance.
+    refreshed: Mutex<BTreeMap<i64, u32>>,
 }
 
 impl<T: Transport<Error = HttpError>> Outbox<T> {
@@ -380,6 +386,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             me,
             clock: Arc::new(now_ms),
             arrived: Mutex::new(Vec::new()),
+            refreshed: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -459,7 +466,6 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         sync: &S,
         id: i64,
     ) -> Result<OutboxEntry, OutboxError> {
-        let mut refreshed = false;
         loop {
             let row = entry(store, id)?;
             if row.state == OutboxState::Pending && row.run_id != store.run_id() {
@@ -475,7 +481,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             }
             let row = store.begin_attempt(id)?;
             let tried = self.attempt(&row).await;
-            let (outcome, again) = self.settle(&row, tried, &mut refreshed);
+            let (outcome, again) = self.settle(&row, tried);
             let row = store.finish_attempt(id, &outcome)?;
             if !again || row.state != OutboxState::Pending {
                 return Ok(row);
@@ -687,7 +693,23 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// What an attempt makes of the row, and whether another attempt follows at once.
-    fn settle(&self, row: &OutboxEntry, tried: Tried, refreshed: &mut bool) -> (AttemptOutcome, bool) {
+    fn settle(&self, row: &OutboxEntry, tried: Tried) -> (AttemptOutcome, bool) {
+        let unauthorized = matches!(&tried, Tried::Answered(answer) if answer.status() == 401);
+        let mut refreshed = self.refreshed.lock().unwrap_or_else(PoisonError::into_inner);
+        let budget = row.attempts_at_resend;
+        let used = refreshed.get(&row.id) == Some(&budget);
+        let settled = self.settle_tried(row, tried, used);
+        if !matches!(settled.0, AttemptOutcome::Retry { .. }) {
+            // the row leaves pending here; one that leaves it elsewhere keeps an entry a resend makes stale
+            refreshed.remove(&row.id);
+        } else if unauthorized {
+            refreshed.insert(row.id, budget);
+        }
+        settled
+    }
+
+    /// [`Outbox::settle`] for a row that had its one more attempt after a 401 in this budget (`refreshed`) or not.
+    fn settle_tried(&self, row: &OutboxEntry, tried: Tried, refreshed: bool) -> (AttemptOutcome, bool) {
         match tried {
             Tried::Answered(answer) => self.settle_answer(row, &answer, refreshed),
             Tried::Denied(denied) => (
@@ -702,7 +724,8 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    fn settle_answer(&self, row: &OutboxEntry, answer: &Response, refreshed: &mut bool) -> (AttemptOutcome, bool) {
+    /// `refreshed`: the row had its one more attempt after a 401 in this budget.
+    fn settle_answer(&self, row: &OutboxEntry, answer: &Response, refreshed: bool) -> (AttemptOutcome, bool) {
         let status = answer.status();
         match status {
             200..=299 => (
@@ -711,8 +734,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 },
                 false,
             ),
-            401 if !*refreshed => {
-                *refreshed = true;
+            401 if !refreshed => {
                 let error = "HTTP 401, the token was refreshed".to_owned();
                 (self.retry(row, Duration::ZERO, error), true)
             }

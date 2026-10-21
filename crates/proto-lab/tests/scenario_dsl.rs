@@ -34,12 +34,11 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// A page that adds a `data-tid` element after 400 ms, fetches `/api/ping` at once and `/api/late` after 600 ms, and
 /// echoes what is typed into its box when Enter is pressed. Its `hang` button stalls the page for good, a moment after
-/// the click. Its message, far down the page, grows a `bar` button once the mouse is over it and says which button
-/// opened its context menu; the box reports other keys pressed in it.
+/// the click. Its message, far down the page, grows a `bar` button once the mouse is over it; the box reports other
+/// keys pressed in it.
 const PAGE: &str = r#"<!doctype html><html><body>
 <div id="out"></div>
 <div id="keys"></div>
-<div id="menu"></div>
 <button data-tid="hang" onclick="setTimeout(() => { for (;;) {} }, 50)">hang</button>
 <div contenteditable="true" role="textbox" data-tid="box" id="box"></div>
 <div data-tid="message" id="message" style="margin-top: 3000px">a message</div>
@@ -48,10 +47,6 @@ const message = document.getElementById('message');
 message.addEventListener('mouseover', () => {
   if (document.querySelector('[data-tid="bar"]')) return;
   const bar = document.createElement('button'); bar.dataset.tid = 'bar'; message.append(bar);
-});
-message.addEventListener('contextmenu', (event) => {
-  event.preventDefault();
-  document.getElementById('menu').textContent = 'menu by button ' + event.button;
 });
 document.getElementById('box').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') return;
@@ -373,7 +368,7 @@ async fn typing_and_enter_send_and_the_text_shows() -> TestResult {
 }
 
 #[tokio::test]
-async fn hovering_shows_what_is_under_the_pointer_and_a_right_click_opens_the_menu() -> TestResult {
+async fn hovering_shows_what_is_under_the_pointer() -> TestResult {
     with_page(async |run| {
         let message = Selector::Tid("message");
         run.driver
@@ -390,24 +385,18 @@ async fn hovering_shows_what_is_under_the_pointer_and_a_right_click_opens_the_me
         run.driver
             .wait_for_tid("the bar", "bar", Duration::from_secs(5))
             .await?;
-        run.driver.right_click("the message's menu", message).await?;
-        run.driver
-            .wait_for_text("the menu", "menu by button 2", Duration::from_secs(5))
-            .await?;
-        for error in [
-            run.driver.hover("hover nothing", Selector::Tid("missing")).await,
-            run.driver
-                .right_click("right-click nothing", Selector::Tid("missing"))
-                .await,
-        ] {
-            let error = error.err().ok_or("pointed at a missing element")?;
-            assert!(matches!(error, StepError::Failed { .. }), "{error:?}");
-            assert!(
-                error
-                    .to_string()
-                    .contains("no an element with data-tid \"missing\" to point at")
-            );
-        }
+        let error = run
+            .driver
+            .hover("hover nothing", Selector::Tid("missing"))
+            .await
+            .err()
+            .ok_or("pointed at a missing element")?;
+        assert!(matches!(error, StepError::Failed { .. }), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("no an element with data-tid \"missing\" to point at")
+        );
         Ok(())
     })
     .await

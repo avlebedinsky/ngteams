@@ -37,6 +37,7 @@ use crate::accounts::{ACCOUNTS_FILE, AccountsError, AccountsFile, Credentials};
 use crate::cdp::{Cdp, CdpError, SessionId};
 use crate::classify::Classifier;
 use crate::config::{Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri};
+use crate::scenario::dsl::js_string;
 use crate::session::{FenceReport, LabSession, NotAGuid, SessionError, SessionState, Settling, TEAMS_URL};
 
 /// What a sign-in page shows, as [`probe`] finds it. A field is the selector of the one element of its kind a person
@@ -394,11 +395,6 @@ async fn click(cdp: &Cdp, page: &SessionId, selector: &str) -> Result<(), LoginE
         return Err(LoginError::FieldGone);
     }
     Ok(())
-}
-
-/// A selector as a JavaScript string literal.
-fn js_string(text: &str) -> String {
-    Value::String(text.to_owned()).to_string()
 }
 
 async fn press_next(cdp: &Cdp, page: &SessionId) -> Result<(), LoginError> {
