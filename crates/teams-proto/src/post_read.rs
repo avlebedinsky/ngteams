@@ -285,8 +285,8 @@ impl ShortProfileLookup {
     /// The profiles the answer `body` gives, each of an MRI this lookup asked for.
     ///
     /// # Errors
-    /// [`AnswerError::Malformed`] unless the body is `{"type": …, "value": [profile, …]}` with an `mri` in each
-    /// profile; [`AnswerError::Unasked`] when any profile is of an MRI the lookup didn't ask for (the answer is
+    /// [`AnswerError::Malformed`] unless the body is `{"type": "…", "value": [profile, …]}` (both keys, as every
+    /// captured answer has them) with an `mri` in each profile; [`AnswerError::Unasked`] when any profile is of an MRI the lookup didn't ask for (the answer is
     /// dropped whole: an entry's answer names only the accounts asked for).
     pub fn read_answer(&self, body: &[u8]) -> Result<Vec<ShortProfile>, AnswerError> {
         let answer: Answer = serde_json::from_slice(body).map_err(|_| AnswerError::Malformed)?;
@@ -313,6 +313,9 @@ impl PostRead for ShortProfileLookup {
 /// The middle tier's answer to a profile lookup, as captured: `{"type": "…IUserIdentity", "value": [profile, …]}`.
 #[derive(Deserialize)]
 struct Answer {
+    /// Required, as every captured answer carries it; what it names isn't read.
+    #[serde(rename = "type")]
+    _kind: String,
     value: Vec<RawProfile>,
 }
 

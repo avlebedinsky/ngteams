@@ -699,7 +699,8 @@ fn an_answer_naming_anyone_not_asked_for_is_dropped_whole() {
             .map(|profiles| profiles.len()),
         Ok(2)
     );
-    for malformed in [&b"[]"[..], b"{}", b"{\"value\": [{}]}", b"not json"] {
+    let untyped = serde_json::to_vec(&json!({"value": [{"mri": LAB_A}]})).unwrap();
+    for malformed in [&b"[]"[..], b"{}", b"{\"value\": [{}]}", &untyped[..], b"not json"] {
         assert_eq!(lookup(&[LAB_A]).read_answer(malformed), Err(AnswerError::Malformed));
     }
 }

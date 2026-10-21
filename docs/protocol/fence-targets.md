@@ -369,8 +369,8 @@ the captured query). It goes out only this way:
 - Then the `api.spaces.skype.com` token, the request logged as the browser's are (`"post_read": <kind>`, the URL
   without its query; not sent when that fails), and one send: a read by `POST` is never retried under its permit. A
   401 makes the session refresh the refused token for a later lookup under a new permit.
-- `ShortProfileLookup::read_answer` reads the answer (`{"type": …, "value": [profile, …]}`) and drops it whole if any
-  profile is of an MRI the lookup didn't ask for.
+- `ShortProfileLookup::read_answer` reads the answer (`{"type": …, "value": [profile, …]}`, both keys required as
+  every captured answer has them) and drops it whole if any profile is of an MRI the lookup didn't ask for.
 
 Not yet on the native list: `users/fetch` (Task 12 decides whether names need it) and presence's `getpresence`
 (Task 17).
