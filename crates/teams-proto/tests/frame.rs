@@ -165,11 +165,15 @@ fn fixture_frame(name: &str) -> String {
     frame["frame"].as_str().unwrap().to_owned()
 }
 
-/// A socket.io event frame split into its header (`5:::`, `5:<n>+::`) and its JSON.
+/// A frame with its acknowledgement id (the `<n>` of `5:<n>+::`) taken out, the only part a socket numbers itself.
 #[cfg(test)]
-fn split(text: &str) -> (&str, Value) {
-    let start = text.find('{').unwrap();
-    (&text[..start], serde_json::from_str(&text[start..]).unwrap())
+fn without_ack_id(text: &str) -> String {
+    match text.strip_prefix("5:").and_then(|rest| rest.split_once("+::")) {
+        Some((id, event)) if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) => {
+            format!("5:<n>+::{event}")
+        }
+        _ => text.to_owned(),
+    }
 }
 
 fn fixture_params() -> ConnectParams {
@@ -207,25 +211,31 @@ async fn each_own_frame_has_the_shape_the_messaging_stack_sent() {
     setup.sink.send(&Ping::new()).await.unwrap();
     setup.sink.send(&Disconnect::new()).await.unwrap();
 
-    let sent = setup.socket.texts();
-    let expected = [
-        fixture_frame("authentication with the reconnect parameters an earlier trouter.connected handed over"),
-        fixture_frame("the first socket's authentication, without reconnect parameters"),
-        fixture_frame("the client's acknowledgement of that report, the indicators handed back as they came"),
-        fixture_frame("the keep-alive, every 40 s and after every response the client sends"),
-    ];
-    assert_eq!(sent.len(), 5);
-    for (text, expected) in sent.iter().zip(&expected) {
-        let (header, event) = split(text);
-        let (expected_header, expected_event) = split(expected);
-        assert_eq!(event, expected_event, "{header}");
-        assert_eq!(
-            header.starts_with("5:::"),
-            expected_header.starts_with("5:::"),
-            "{header} vs {expected_header}"
-        );
+    // byte for byte, key order included (the captured one, whatever serde_json's features in this build): only the
+    // acknowledgement ids differ, the fixture's socket having numbered a `user.activity` the native client doesn't send
+    let sent: Vec<String> = setup.socket.texts().iter().map(|text| without_ack_id(text)).collect();
+    let expected: Vec<String> = [
+        "authentication with the reconnect parameters an earlier trouter.connected handed over",
+        "the first socket's authentication, without reconnect parameters",
+        "the client's acknowledgement of that report, the indicators handed back as they came",
+        "the keep-alive, every 40 s and after every response the client sends",
+        "the client's disconnect",
+    ]
+    .into_iter()
+    .map(|name| without_ack_id(&fixture_frame(name)))
+    .collect();
+    assert_eq!(sent, expected);
+}
+
+#[test]
+fn only_the_ack_id_is_taken_out_of_a_frame() {
+    assert_eq!(
+        without_ack_id("5:12+::{\"name\":\"ping\"}"),
+        "5:<n>+::{\"name\":\"ping\"}"
+    );
+    for text in ["5:::{\"name\":\"ping\"}", "0::", "5:+::{}", "5:1a+::{}"] {
+        assert_eq!(without_ack_id(text), text);
     }
-    assert_eq!(sent[4], fixture_frame("the client's disconnect"));
 }
 
 #[tokio::test]
@@ -332,6 +342,46 @@ async fn a_socket_failure_comes_back_after_the_frame_was_logged() {
     let next = sink.send(&Ping::new()).await;
     assert!(matches!(next, Err(FrameError::Write(Closed))));
     assert_eq!(log.lines().len(), 2, "each attempt is logged before it is tried");
+}
+
+/// A writer error that hands the unsent frame back and shows it in its `Debug` and `Display`, as tungstenite's
+/// `WriteBufferFull` hands the message back.
+#[derive(Debug, thiserror::Error)]
+#[error("the write buffer is full: {0}")]
+struct BufferFull(String);
+
+struct FullWriter;
+
+impl FrameWriter for FullWriter {
+    type Error = BufferFull;
+
+    fn write(&mut self, text: FrameText) -> impl Future<Output = Result<(), BufferFull>> + Send {
+        future::ready(Err(BufferFull(text.into_string())))
+    }
+}
+
+#[tokio::test]
+async fn a_writer_error_that_holds_the_frame_shows_it_nowhere() {
+    let mut sink = FrameSink::new(FullWriter, fence(SharedLog::default()), SOCKET);
+    let failed = sink
+        .send(&Authenticate::new(&Secret::new(PLANTED_TOKEN), None))
+        .await
+        .unwrap_err();
+
+    let mut shown = vec![format!("{failed:?}"), failed.to_string()];
+    let mut source = std::error::Error::source(&failed);
+    while let Some(error) = source {
+        shown.push(format!("{error:?} {error}"));
+        source = error.source();
+    }
+    for shown in &shown {
+        assert!(!shown.contains(PLANTED_TOKEN), "{shown}");
+    }
+    assert_eq!(shown.len(), 2, "the writer's error isn't the source: {shown:?}");
+    assert!(
+        matches!(&failed, FrameError::Write(BufferFull(text)) if text.contains(PLANTED_TOKEN)),
+        "the caller still gets the writer's error by matching the variant"
+    );
 }
 
 #[test]

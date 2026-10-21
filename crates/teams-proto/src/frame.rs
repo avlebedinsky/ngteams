@@ -21,6 +21,10 @@
 //! The sink numbers the events that ask for an acknowledgement itself (`<n>` above, from 1 per socket) and logs every
 //! frame to `fence.log` ([`FrameRecord`]: the socket, the frame's kind, never its text) before it hands it to the
 //! writer; a frame that can't be logged isn't sent.
+//!
+//! The frames' JSON is written by this module's own writer ([`Object`]) with its keys in the order the messaging stack
+//! sent them, byte for byte: `serde_json`'s `Map` keeps insertion order only with its `preserve_order` feature, which
+//! another crate in a build may or may not turn on, so the bytes on the socket would change with what else is compiled.
 
 use std::error::Error;
 use std::fmt;
@@ -28,7 +32,7 @@ use std::future::Future;
 use std::io;
 use std::sync::Arc;
 
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_fence::{Fence, FrameRecord};
 
@@ -41,20 +45,19 @@ pub trait OwnFrame: sealed::Sealed {
 }
 
 mod sealed {
-    use serde_json::Value;
-
     /// The seal on [`OwnFrame`](super::OwnFrame): a public trait no other crate can name. Its implementations are the
     /// reviewed list, and it carries the frame's content, which only this crate reads.
     pub trait Sealed {
         fn event(&self) -> Event;
     }
 
-    /// A frame's content, as the sink encodes it (socket.io 0.9).
+    /// A frame's content, as the sink encodes it (socket.io 0.9): an event is its JSON text, keys in the captured
+    /// order.
     pub enum Event {
         /// `5:::<json>`: an event that asks for no acknowledgement.
-        Plain(Value),
+        Plain(String),
         /// `5:<n>+::<json>`: an event the service acknowledges with `6:::<n>+[…]`.
-        Acknowledged(Value),
+        Acknowledged(String),
         /// `0::`.
         Disconnect,
     }
@@ -75,6 +78,20 @@ pub struct ConnectParams {
     pub se: String,
     /// The start, in ms.
     pub st: String,
+}
+
+impl ConnectParams {
+    fn to_json(&self) -> String {
+        Object::new()
+            .string("issuer", &self.issuer)
+            .string("scae", &self.scae)
+            .string("sig", &self.sig)
+            .string("sr", &self.sr)
+            .string("sp", &self.sp)
+            .string("se", &self.se)
+            .string("st", &self.st)
+            .finish()
+    }
 }
 
 impl fmt::Debug for ConnectParams {
@@ -113,30 +130,21 @@ impl Authenticate {
 
 impl sealed::Sealed for Authenticate {
     fn event(&self) -> Event {
-        let mut argument = Map::new();
-        argument.insert(
-            "headers".to_owned(),
-            json!({
-                "X-Ms-Test-User": "False",
-                "Authorization": format!("Bearer {}", self.token.expose()),
-                "X-MS-Migration": "True",
-            }),
-        );
+        let headers = Object::new()
+            .string("X-Ms-Test-User", "False")
+            .string("Authorization", &format!("Bearer {}", self.token.expose()))
+            .string("X-MS-Migration", "True")
+            .finish();
+        let mut argument = Object::new().raw("headers", &headers);
         if let Some(params) = &self.params {
-            argument.insert(
-                "connectparams".to_owned(),
-                json!({
-                    "issuer": params.issuer,
-                    "scae": params.scae,
-                    "sig": params.sig,
-                    "sr": params.sr,
-                    "sp": params.sp,
-                    "se": params.se,
-                    "st": params.st,
-                }),
-            );
+            argument = argument.raw("connectparams", &params.to_json());
         }
-        Event::Plain(json!({"name": "user.authenticate", "args": [argument]}))
+        Event::Plain(
+            Object::new()
+                .string("name", "user.authenticate")
+                .raw("args", &array([argument.finish()]))
+                .finish(),
+        )
     }
 }
 
@@ -159,7 +167,7 @@ impl Ping {
 
 impl sealed::Sealed for Ping {
     fn event(&self) -> Event {
-        Event::Acknowledged(json!({"name": "ping"}))
+        Event::Acknowledged(Object::new().string("name", "ping").finish())
     }
 }
 
@@ -191,15 +199,19 @@ impl MessageLossAck {
 
 impl sealed::Sealed for MessageLossAck {
     fn event(&self) -> Event {
-        let indicators: Vec<Value> = self
-            .indicators
-            .iter()
-            .map(|indicator| json!({"tag": indicator.tag, "etag": indicator.etag}))
-            .collect();
-        Event::Acknowledged(json!({
-            "name": "trouter.processed_message_loss",
-            "args": [{"droppedIndicators": indicators}],
-        }))
+        let indicators = array(self.indicators.iter().map(|indicator| {
+            Object::new()
+                .string("tag", &indicator.tag)
+                .string("etag", &indicator.etag)
+                .finish()
+        }));
+        let argument = Object::new().raw("droppedIndicators", &indicators).finish();
+        Event::Acknowledged(
+            Object::new()
+                .string("name", "trouter.processed_message_loss")
+                .raw("args", &array([argument]))
+                .finish(),
+        )
     }
 }
 
@@ -230,6 +242,54 @@ impl OwnFrame for Disconnect {
     const KIND: &'static str = "trouter_disconnect";
 }
 
+/// A JSON object written key by key, in the order the keys are given (see the module docs).
+struct Object(String);
+
+impl Object {
+    fn new() -> Self {
+        Self(String::from("{"))
+    }
+
+    fn key(mut self, key: &str) -> Self {
+        if self.0.len() > 1 {
+            self.0.push(',');
+        }
+        push_string(&mut self.0, key);
+        self.0.push(':');
+        self
+    }
+
+    /// `key` with a string `value`.
+    fn string(self, key: &str, value: &str) -> Self {
+        let mut object = self.key(key);
+        push_string(&mut object.0, value);
+        object
+    }
+
+    /// `key` with `json`, a value already written.
+    fn raw(self, key: &str, json: &str) -> Self {
+        let mut object = self.key(key);
+        object.0.push_str(json);
+        object
+    }
+
+    fn finish(mut self) -> String {
+        self.0.push('}');
+        self.0
+    }
+}
+
+/// Appends `value` as a JSON string, escaped by `serde_json` (a lone string has no key order to lose).
+fn push_string(out: &mut String, value: &str) {
+    out.push_str(&Value::from(value).to_string());
+}
+
+/// A JSON array of `items`, each a value already written.
+fn array(items: impl IntoIterator<Item = String>) -> String {
+    let items: Vec<String> = items.into_iter().collect();
+    format!("[{}]", items.join(","))
+}
+
 /// A frame's text as it goes on the socket, made only by a [`FrameSink`]. `Debug` shows its length only: the
 /// authentication frame carries the account's token.
 pub struct FrameText(String);
@@ -255,21 +315,34 @@ impl fmt::Debug for FrameText {
 /// A socket's write half, as a [`FrameSink`] uses it: it takes only the [`FrameText`] the sink makes. The socket's
 /// owner hands it to the sink and keeps no other way to send.
 pub trait FrameWriter: Send {
+    /// Why a frame wasn't sent. It may hold the unsent frame, token and all (tungstenite's `WriteBufferFull` hands the
+    /// message back), so [`FrameError`] never shows it: the caller takes it out of [`FrameError::Write`] by name and
+    /// mustn't print it.
     type Error: Error + Send + Sync + 'static;
 
     /// Sends one text frame.
     fn write(&mut self, text: FrameText) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-/// Why a frame wasn't sent. No variant carries a frame's text.
-#[derive(Debug, thiserror::Error)]
+/// Why a frame wasn't sent. Its `Debug`, `Display` and `source` never show a frame's text: the writer's error in
+/// [`FrameError::Write`] may hold the unsent frame ([`FrameWriter::Error`]), so none of them shows it.
+#[derive(thiserror::Error)]
 pub enum FrameError<E: Error + 'static> {
     /// Its `fence.log` entry couldn't be written; it wasn't sent.
     #[error("fence.log can't be written, so the frame wasn't sent: {0}")]
     LogUnavailable(#[source] io::Error),
-    /// The socket failed to send it (after it was logged).
-    #[error("the socket failed to send the frame: {0}")]
-    Write(#[source] E),
+    /// The socket failed to send it (after it was logged): the writer's error, reached only by matching the variant.
+    #[error("the socket failed to send the frame")]
+    Write(E),
+}
+
+impl<E: Error + 'static> fmt::Debug for FrameError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LogUnavailable(error) => f.debug_tuple("LogUnavailable").field(error).finish(),
+            Self::Write(_) => f.write_str("Write(<the writer's error, not shown: it may hold the frame>)"),
+        }
+    }
 }
 
 /// What the sink did with a frame.
