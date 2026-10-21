@@ -520,7 +520,8 @@ impl Driver {
     /// denied).
     ///
     /// # Errors
-    /// [`StepError::Timeout`] when it hasn't failed in time, [`StepError::Failed`] when it got a response instead.
+    /// [`StepError::Timeout`] when it hasn't failed in time, [`StepError::Failed`] when it got a response instead
+    /// (even when it failed after the response, as an answered `fetch` the page drops does).
     pub async fn wait_for_failure(
         &mut self,
         step: &str,
@@ -538,7 +539,8 @@ impl Driver {
     /// gives it: the request a `Fetch.requestPaused` event names by its `networkId`.
     ///
     /// # Errors
-    /// [`StepError::Timeout`] when it hasn't failed in time, [`StepError::Failed`] when it got a response instead.
+    /// [`StepError::Timeout`] when it hasn't failed in time, [`StepError::Failed`] when it got a response instead
+    /// (even when it failed after the response, as an answered `fetch` the page drops does).
     pub async fn wait_for_failure_of(
         &mut self,
         step: &str,
@@ -550,7 +552,10 @@ impl Driver {
             .await
     }
 
-    /// Waits up to `timeout` for the first seen request `this` picks to fail, and gives it.
+    /// Waits up to `timeout` for the first seen request `this` picks to fail, and gives it. A request that got a
+    /// response left the browser, so it didn't fail even when a failure follows the response (a page that drops an
+    /// answered `fetch` before its body is read gets `net::ERR_ABORTED` after it): the response is looked at first, or
+    /// the verdict would hang on whether a look came between the two events.
     async fn wait_failed(
         &mut self,
         step: &str,
@@ -562,9 +567,6 @@ impl Driver {
         loop {
             self.drain();
             if let Some(seen) = self.requests.iter().find(|seen| this(seen)) {
-                if seen.failed.is_some() {
-                    return Ok(seen.clone());
-                }
                 if let Some(status) = seen.status {
                     return Err(StepError::Failed {
                         step: step.to_owned(),
@@ -573,6 +575,9 @@ impl Driver {
                             seen.method, seen.url
                         ),
                     });
+                }
+                if seen.failed.is_some() {
+                    return Ok(seen.clone());
                 }
             }
             self.wait_for_events(step, deadline, timeout, waiting_for).await?;

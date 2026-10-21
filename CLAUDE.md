@@ -136,13 +136,14 @@ What the code does and why. A change that undoes one of these needs a new reason
 
 ### Chrome under load
 
-The machine is often loaded by other agents' builds (load average 30–75), and then two tests are known to flake on
-timing:
+The machine is often loaded by other agents' builds (load average 30–75), and then
+`browser::a_browser_that_exits_early_is_reported` is known to flake on timing. Rerun that one test before calling it
+a failure; never raise a timeout or skip an arming step to make it pass.
 
-- `scenario_dsl::a_request_is_waited_for_even_when_it_came_first_and_matched_once` (`net::ERR_ABORTED`);
-- `browser::a_browser_that_exits_early_is_reported`.
-
-Rerun that one test before calling it a failure; never raise a timeout or skip an arming step to make it pass.
+- A test reads a page only after it has loaded (`tests/common/page.rs`'s `navigate`): `Page.navigate` answers at
+  commit, before the page's scripts have run. A read that throws after that is a real error, never retried.
+- Under load Chrome can take over 15 s to start, failing a test with `Timeout(15s)` at `Browser::launch`; that is
+  load, not the test.
 
 **A fence breach is never a flake.** Under load an arming step can go unanswered for 10 s; the target is then closed,
 and the run is reported breached when its resume was sent or its close couldn't be confirmed. Whether such a breach is

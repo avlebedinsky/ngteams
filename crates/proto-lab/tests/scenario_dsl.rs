@@ -9,9 +9,10 @@ mod page;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
-use proto_lab::cdp::{CdpError, RemoteError};
+use proto_lab::cdp::{Cdp, CdpError, Event, RemoteError, SessionId};
 use proto_lab::classify::{Classifier, OwnKind, OwnRule};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
@@ -23,6 +24,7 @@ use proto_lab::scenario::ab_chat_full::{self, Texts, Writes};
 use proto_lab::scenario::dsl::{self, Driver, Key, RequestPattern, SeenRequest, Selector, StepError};
 use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport, echo_call};
 use proto_lab::session::FenceReport;
+use serde_json::{Value, json};
 use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Roster};
 use url::Url;
 use wiremock::matchers::{method, path};
@@ -409,6 +411,68 @@ async fn a_wait_goes_on_across_navigations_of_its_page() -> TestResult {
         Ok(())
     })
     .await
+}
+
+/// A connection to a local endpoint that takes commands and never answers: for a driver whose waits read only the
+/// events a test feeds it.
+async fn silent_cdp() -> TestResult<Cdp> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await
+            && let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await
+        {
+            while let Some(Ok(_)) = socket.next().await {}
+        }
+    });
+    let (cdp, _events) = Cdp::connect(&format!("ws://{address}")).await?;
+    Ok(cdp)
+}
+
+fn network_event(method: &str, params: Value) -> Event {
+    Event {
+        session_id: Some(SessionId::new("S-page")),
+        method: method.to_owned(),
+        params,
+    }
+}
+
+/// A `fetch` the page drops once it is answered fails after its response (`net::ERR_ABORTED`, seen on a loaded
+/// machine): it still got a response, whether the wait looks between the two events or only after both.
+#[tokio::test]
+async fn a_request_answered_and_then_aborted_got_a_response_and_didnt_fail() -> TestResult {
+    let (events, watch) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = Driver::new(silent_cdp().await?, SessionId::new("S-page"), watch);
+    let request = json!({"method": "GET", "url": "http://127.0.0.1/api/late"});
+    events.send(network_event(
+        "Network.requestWillBeSent",
+        json!({"requestId": "1", "request": request}),
+    ))?;
+    events.send(network_event(
+        "Network.responseReceived",
+        json!({"requestId": "1", "response": {"status": 204}}),
+    ))?;
+    events.send(network_event(
+        "Network.loadingFailed",
+        json!({"requestId": "1", "errorText": "net::ERR_ABORTED"}),
+    ))?;
+    let late = RequestPattern::new(None, "/api/late$")?;
+    let seen = driver
+        .wait_for_request("the late one", &late, Duration::from_secs(1))
+        .await?;
+    let error = driver
+        .wait_for_failure("the late one fails", &seen, Duration::from_secs(1))
+        .await
+        .err()
+        .ok_or("an answered request counted as failed")?;
+    assert!(error.to_string().contains("got a response (204)"), "{error}");
+    let error = driver
+        .wait_for_failure_of("the late one by its id", "1", Duration::from_secs(1))
+        .await
+        .err()
+        .ok_or("an answered request counted as failed")?;
+    assert!(error.to_string().contains("got a response (204)"), "{error}");
+    Ok(())
 }
 
 #[test]
