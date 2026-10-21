@@ -347,6 +347,7 @@ impl<'a> Render<'a> {
             return Err(ComposeError::Quote);
         };
         let time_ms: u64 = time.parse().map_err(|_| ComposeError::Quote)?;
+        within_depth(&quote.body, depth + 1)?;
         let preview = RichText {
             nodes: quote.body.clone(),
             truncated: false,
@@ -371,6 +372,23 @@ impl<'a> Render<'a> {
             .push(json!({"messageId": message_id, "sender": sender, "time": time_ms}));
         Ok(())
     }
+}
+
+/// Checks that `nodes`, inside `depth` containers, nest no deeper than [`MAX_DEPTH`], as [`Render::nodes`] checks what
+/// it renders: for content that is kept in the text but not rendered (a reply's preview, sent as its plain text), so a
+/// text too deep to store and read back is refused when it is made.
+fn within_depth(nodes: &[Node], depth: usize) -> Result<(), ComposeError> {
+    if depth > MAX_DEPTH {
+        return Err(ComposeError::TooDeep);
+    }
+    for node in nodes {
+        match node {
+            Node::Paragraph(children) | Node::Link { children, .. } => within_depth(children, depth + 1)?,
+            Node::Quote(quote) => within_depth(&quote.body, depth + 1)?,
+            Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Image(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// An `http`, `https` or `mailto` URL.

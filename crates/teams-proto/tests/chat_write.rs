@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_fence::{
-    Denied, DenyReason, Fence, FenceLog, LiveMembershipSource, Membership, MembershipFuture, MembershipSource, Mri,
-    PartialReason, Roster, Scope, Target, WriteKind, WritePermit,
+    Denied, DenyReason, Fence, FenceLog, FetchFailure, LiveMembershipSource, Membership, MembershipFuture,
+    MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind, WritePermit,
 };
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, OUTSIDER,
@@ -453,6 +453,33 @@ fn what_isnt_a_messages_text_is_refused() {
     assert_eq!(MessageText::plain(&"x".repeat(MAX_CONTENT)), Err(ComposeError::TooLong));
 }
 
+/// A reply quoting a message whose preview is `levels` paragraphs deep.
+fn reply_previewing(levels: usize) -> Result<MessageText, ComposeError> {
+    let mut preview = run("deep");
+    for _ in 0..levels {
+        preview = Node::Paragraph(vec![preview]);
+    }
+    let quote = Quote {
+        message_id: Some("1760000010000".to_owned()),
+        sender: Some(LAB_A.to_owned()),
+        sender_name: Some("Lab A".to_owned()),
+        time: Some("1760000010000".to_owned()),
+        body: vec![preview],
+    };
+    MessageText::new(rich(vec![Node::Quote(quote)]), [])
+}
+
+#[test]
+fn a_replys_preview_is_held_to_the_same_depth_as_the_rest() {
+    // the preview is sent as its plain text, but kept as given: too deep a preview could be stored and not read back
+    for levels in [MAX_DEPTH, 128] {
+        assert_eq!(reply_previewing(levels), Err(ComposeError::TooDeep), "{levels} deep");
+    }
+    let deepest = reply_previewing(MAX_DEPTH - 1).unwrap();
+    let stored = serde_json::to_string(&deepest).unwrap();
+    assert_eq!(serde_json::from_str::<MessageText>(&stored).unwrap(), deepest);
+}
+
 #[test]
 fn text_is_escaped_so_no_markup_comes_from_it() {
     let text = plain("<script>alert(1)</script> & \"<b>\"");
@@ -516,22 +543,41 @@ fn a_stored_text_is_checked_again_when_read() {
 
 // --- the bodies sent, as captured ---
 
-/// The token the tests hand the transport, renewed when they say so; `None` is signed out.
-struct Token(Mutex<Option<String>>);
+/// The token the tests hand the transport, renewed when they say so; `None` is signed out. A refused token is
+/// renewed to the one set with [`Token::renew_when_refused`], if any (else the same token comes back), and the
+/// refusals it was told of are counted.
+#[derive(Default)]
+struct Token {
+    current: Mutex<Option<String>>,
+    when_refused: Mutex<Option<String>>,
+    refused: Mutex<Vec<String>>,
+}
 
 impl Token {
     fn new(token: Option<String>) -> Self {
-        Self(Mutex::new(token))
+        Self {
+            current: Mutex::new(token),
+            ..Self::default()
+        }
     }
 
     fn renew(&self, token: &str) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(token.to_owned());
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(token.to_owned());
+    }
+
+    fn renew_when_refused(&self, token: &str) {
+        *self.when_refused.lock().unwrap_or_else(PoisonError::into_inner) = Some(token.to_owned());
+    }
+
+    /// The tokens it was told were refused, in order.
+    fn refused(&self) -> Vec<String> {
+        self.refused.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 }
 
 impl Credentials for Token {
     fn bearer(&self, _audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
-        let token = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let token = self.current.lock().unwrap_or_else(PoisonError::into_inner).clone();
         future::ready(token.map(Secret::new).ok_or(TokenError::NotSignedIn {
             account: "lab-a".to_owned(),
         }))
@@ -540,8 +586,15 @@ impl Credentials for Token {
     fn bearer_rejected(
         &self,
         audience: &str,
-        _rejected: &Secret,
+        rejected: &Secret,
     ) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        self.refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(rejected.expose().to_owned());
+        if let Some(renewed) = self.when_refused.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            self.renew(&renewed);
+        }
         self.bearer(audience)
     }
 }
@@ -820,6 +873,16 @@ impl Lab {
         Ok(write.deliver(&*self.transport, permit).await.unwrap())
     }
 
+    /// How many member reads (`GET`s) reached the mock.
+    async fn reads_received(&self) -> usize {
+        self.mock
+            .received_requests()
+            .await
+            .iter()
+            .filter(|request| request.method.as_str() == "GET")
+            .count()
+    }
+
     /// How many writes (anything but a `GET`) reached the mock.
     async fn writes_received(&self) -> usize {
         self.mock
@@ -963,14 +1026,14 @@ async fn the_member_read_takes_the_transports_token_as_it_is_now() -> TestResult
     let typing = || ChatWrite::Typing(Typing::new(AB_CHAT));
     assert_eq!(lab.write(typing()).await?.status(), 201);
 
-    // the service takes only a new token from now on: the transport still has the old one, so the read is refused
-    // and the write denied …
+    // the service takes only a new token from now on: the transport still has the old one, and its session gives the
+    // same one again, so the read is refused twice and the write denied …
     let renewed = "a-renewed-made-up-token-for-lab-a";
     assert!(lab.mock.set_token(LAB_A, renewed));
     let denied = lab.write(typing()).await.unwrap_err();
-    assert!(
-        matches!(denied.reason(), DenyReason::Partial(PartialReason::FetchFailed(_))),
-        "{denied:?}"
+    assert_eq!(
+        denied.reason(),
+        &DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Status(401)))
     );
     // … until the session renews it: the next read asks the transport again and takes the new one
     lab.token.renew(renewed);
@@ -978,5 +1041,41 @@ async fn the_member_read_takes_the_transports_token_as_it_is_now() -> TestResult
 
     assert_eq!(lab.writes_received().await, 2);
     assert_eq!(lab.log.verdicts(), ["allow", "deny", "allow"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_member_read_renews_the_token_and_reads_once_more() -> TestResult {
+    let lab = Lab::start().await?;
+    let first = lab.mock.token(LAB_A).ok_or("no a")?;
+    let typing = || ChatWrite::Typing(Typing::new(AB_CHAT));
+
+    // the service refuses a's token before it expires (revoked): the read tells the session, which renews it, and the
+    // read sent once more with the new token lets the write through
+    let renewed = "a-renewed-made-up-token-for-lab-a";
+    assert!(lab.mock.set_token(LAB_A, renewed));
+    lab.token.renew_when_refused(renewed);
+    assert_eq!(lab.write(typing()).await?.status(), 201);
+    assert_eq!(
+        lab.token.refused(),
+        std::slice::from_ref(&first),
+        "the refused token, told once"
+    );
+    assert_eq!(lab.reads_received().await, 2, "the refused read and one more");
+
+    // refused again, and the renewal is refused too: no third read, the write denied and never sent
+    let revoked = "a-revoked-made-up-token-for-lab-a";
+    lab.token.renew_when_refused(revoked);
+    assert!(lab.mock.set_token(LAB_A, "a-later-made-up-token-for-lab-a"));
+    let denied = lab.write(typing()).await.unwrap_err();
+    assert_eq!(
+        denied.reason(),
+        &DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Status(401)))
+    );
+    assert_eq!(lab.token.refused(), [first, renewed.to_owned()]);
+    assert_eq!(lab.reads_received().await, 4, "two reads for the denied check, no more");
+
+    assert_eq!(lab.writes_received().await, 1);
+    assert_eq!(lab.log.verdicts(), ["allow", "deny"]);
     Ok(())
 }

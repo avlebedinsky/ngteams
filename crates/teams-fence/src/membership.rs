@@ -55,6 +55,9 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// The suffix of a 1:1 chat's conversation id.
 const ONE_TO_ONE_SUFFIX: &str = "@unq.gbl.spaces";
 
+/// A read the chat service refused the credential of (HTTP 401).
+const REFUSED: PartialReason = PartialReason::FetchFailed(FetchFailure::Status(401));
+
 /// Where the chat service is, as a validated base: never a caller-chosen path, port or query.
 #[derive(Clone, PartialEq, Eq)]
 enum ChatBase {
@@ -211,6 +214,13 @@ impl ChatCredential {
         })
     }
 
+    /// The token, for the [`CredentialSource`] that gave it to tell its session which token the chat service refused
+    /// ([`CredentialSource::credential_rejected`]). Never logged or shown: `Debug` redacts it.
+    #[must_use]
+    pub fn expose_token(&self) -> &str {
+        &self.token
+    }
+
     /// The header the live read sends the token in, in the page's form: its name and value.
     fn header(&self) -> (&'static str, Zeroizing<String>) {
         match self.scheme {
@@ -242,11 +252,22 @@ pub type CredentialFuture<'a> = Pin<Box<dyn Future<Output = Option<ChatCredentia
 /// its session has it now, and the chat base its region gives ([`ChatCredential::bearer`]). `None` when there is no
 /// token (signed out, a failed renewal): the read is then [`PartialReason::NoCredential`] and the write denied.
 ///
+/// When the chat service refuses a credential it gave (a 401: a token revoked before it expires), the read asks it
+/// once for a renewed one ([`Self::credential_rejected`]) and reads once more with it; a second refusal, or no renewed
+/// credential, leaves the read [`PartialReason::FetchFailed`] and the write denied. So one check reads at most twice.
+///
 /// Any type may implement it: a credential decides only which token the read is sent with, never where it goes (the
 /// base is checked as [`ChatCredential::bearer`] checks it) or what the answer must hold.
 pub trait CredentialSource: Send + Sync {
     /// The credential to read with now.
     fn credential(&self) -> CredentialFuture<'_>;
+
+    /// A renewed credential after the chat service refused `rejected` (one this source gave), or `None` when there is
+    /// none to give. By default there is none, and the read stays refused.
+    fn credential_rejected<'a>(&'a self, rejected: &'a ChatCredential) -> CredentialFuture<'a> {
+        let _ = rejected;
+        Box::pin(async { None })
+    }
 }
 
 /// What a live source reads with.
@@ -344,10 +365,10 @@ impl LiveMembershipSource {
     }
 
     /// The credential to read with now: the one set, or the source's answer.
-    async fn credential(&self) -> Option<ChatCredential> {
-        match self.current() {
+    async fn credential(current: &Credential) -> Option<ChatCredential> {
+        match current {
             Credential::None => None,
-            Credential::Fixed(credential) => Some(credential),
+            Credential::Fixed(credential) => Some(credential.clone()),
             Credential::Source(source) => source.credential().await,
         }
     }
@@ -369,13 +390,15 @@ impl LiveMembershipSource {
     }
 
     async fn one_to_one(&self, id: &str, pair: [Mri; 2]) -> Membership {
-        let Some(credential) = self.credential().await else {
+        let current = self.current();
+        let Some(credential) = Self::credential(&current).await else {
             return Membership::Partial(PartialReason::NoCredential);
         };
-        let Some(url) = self.thread_url(&credential.base, id) else {
-            return Membership::Partial(PartialReason::FetchFailed(FetchFailure::Malformed));
+        let body = match self.read_thread(id, &credential).await {
+            Err(REFUSED) => self.read_renewed(id, &current, &credential).await,
+            read => read,
         };
-        let body = match self.fetch(url, &credential).await {
+        let body = match body {
             Ok(body) => body,
             Err(reason) => return Membership::Partial(reason),
         };
@@ -387,6 +410,32 @@ impl LiveMembershipSource {
                 Membership::Partial(PartialReason::FetchFailed(FetchFailure::Malformed))
             }
             membership => membership,
+        }
+    }
+
+    /// The thread `id`'s read with `credential`.
+    async fn read_thread(&self, id: &str, credential: &ChatCredential) -> Result<Vec<u8>, PartialReason> {
+        let url = self
+            .thread_url(&credential.base, id)
+            .ok_or(PartialReason::FetchFailed(FetchFailure::Malformed))?;
+        self.fetch(url, credential).await
+    }
+
+    /// The read once more after the service refused `rejected`, with the renewed credential `current`'s source gives;
+    /// still refused when `current` is a fixed credential (a page's, which can't be renewed here) or the source has
+    /// no renewed one.
+    async fn read_renewed(
+        &self,
+        id: &str,
+        current: &Credential,
+        rejected: &ChatCredential,
+    ) -> Result<Vec<u8>, PartialReason> {
+        let Credential::Source(source) = current else {
+            return Err(REFUSED);
+        };
+        match source.credential_rejected(rejected).await {
+            Some(renewed) => self.read_thread(id, &renewed).await,
+            None => Err(REFUSED),
         }
     }
 
