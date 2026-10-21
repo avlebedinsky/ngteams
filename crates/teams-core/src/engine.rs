@@ -32,9 +32,9 @@
 //!   [`Source::History`]), and each conversation it changed as [`Event::ConversationChanged`]; a message the store
 //!   had already (a delivery the catch-up meets again) is not told twice.
 //! - **Queries**: the conversation list, a page of a conversation's messages, one message, its reactions, a chat's
-//!   members, the unread count and the account's read horizon of a conversation, an outbox row, a conversation's
-//!   rows that aren't sent and the rows earlier runs left, all read from the store on the engine's thread, which owns
-//!   it; older history from the service ([`EngineRequests::load_older`]). A row of an earlier run (or a failed or
+//!   members, the unread count and the account's read horizon of a conversation, whether its whole history is stored,
+//!   an outbox row, a conversation's rows that aren't sent and the rows earlier runs left, all read from the store on
+//!   the engine's thread, which owns it; older history from the service ([`EngineRequests::load_older`]). A row of an earlier run (or a failed or
 //!   denied one) goes out again only by the explicit [`EngineRequests::resend`].
 //! - **Transient writes** ([`EngineRequests::transient`]: typing) go out through the outbox too, but as no row
 //!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
@@ -368,6 +368,7 @@ enum Query {
     UnreadCount(String, Responder<u64>),
     DisplayName(String, Responder<Option<String>>),
     ReadHorizon(String, Responder<Option<ReadHorizon>>),
+    HistoryComplete(String, Responder<Option<bool>>),
     OutboxEntry(i64, Responder<Option<OutboxEntry>>),
     OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
     LeftByEarlierRuns(Responder<Vec<OutboxEntry>>),
@@ -487,6 +488,13 @@ impl EngineRequests {
     pub fn read_horizon(&self, conversation: impl Into<String>) -> Reply<Option<ReadHorizon>> {
         let conversation = conversation.into();
         self.query(|reply| Query::ReadHorizon(conversation, reply))
+    }
+
+    /// Whether the store holds a conversation's whole history (its kept sync state says so); `None` when the
+    /// conversation was never synced, so [`Self::load_older`]'s `None` doesn't yet mean nothing is older.
+    pub fn history_complete(&self, conversation: impl Into<String>) -> Reply<Option<bool>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::HistoryComplete(conversation, reply))
     }
 
     /// An outbox row as it now stands, by its id (a write's reply has it).
@@ -827,6 +835,12 @@ where
             Query::UnreadCount(conversation, reply) => give(reply, store.unread_count(&conversation, self.me())),
             Query::DisplayName(mri, reply) => give(reply, store.display_name(&mri)),
             Query::ReadHorizon(conversation, reply) => give(reply, store.read_horizon(&conversation, self.me())),
+            Query::HistoryComplete(conversation, reply) => give(
+                reply,
+                store
+                    .sync_state(&conversation)
+                    .map(|state| state.map(|state| state.history_complete)),
+            ),
             Query::OutboxEntry(id, reply) => give(reply, store.outbox_entry(id)),
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
             Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),

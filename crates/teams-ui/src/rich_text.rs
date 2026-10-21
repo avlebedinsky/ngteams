@@ -297,8 +297,10 @@ fn tint(color: u32, alpha: f32) -> gpui::Hsla {
     tinted
 }
 
-/// GPUI's highlight for a piece's style.
-fn highlight(style: Style, palette: Palette) -> HighlightStyle {
+/// GPUI's highlight for a piece's style: bold, italic, underline (a link's too), strikethrough, the code background,
+/// the brand colour for a link or a mention, and for the account's own mention bold on a brand tint.
+#[must_use]
+pub fn highlight(style: Style, palette: Palette) -> HighlightStyle {
     let mut highlight = HighlightStyle::default();
     if style.marks.contains(Marks::BOLD) {
         highlight.font_weight = Some(FontWeight::BOLD);
@@ -387,13 +389,19 @@ fn quote_block(id: &SharedString, path: &mut Vec<usize>, quote: &QuoteBlock, pal
         .into_any_element()
 }
 
-fn text_block(id: &SharedString, path: &[usize], block: &TextBlock, palette: Palette) -> AnyElement {
-    let highlights: Vec<(Range<usize>, HighlightStyle)> = block
+/// The highlights a text block is drawn with: each styled piece's range and its [`highlight`].
+#[must_use]
+pub fn highlights(block: &TextBlock, palette: Palette) -> Vec<(Range<usize>, HighlightStyle)> {
+    block
         .pieces
         .iter()
         .filter(|(_, style)| *style != Style::default())
         .map(|(range, style)| (range.clone(), highlight(*style, palette)))
-        .collect();
+        .collect()
+}
+
+fn text_block(id: &SharedString, path: &[usize], block: &TextBlock, palette: Palette) -> AnyElement {
+    let highlights = highlights(block, palette);
     let styled = StyledText::new(block.text.clone()).with_highlights(highlights);
     if block.links.is_empty() {
         return div()

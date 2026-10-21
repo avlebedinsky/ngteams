@@ -56,6 +56,8 @@ pub trait Core: Send + Sync + 'static {
     fn display_name(&self, mri: String) -> Reply<Option<String>>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
+    /// Whether the store holds a conversation's whole history; `None` when it was never synced.
+    fn history_complete(&self, conversation: String) -> Reply<Option<bool>>;
     /// An outbox row as it now stands.
     fn outbox_entry(&self, id: i64) -> Reply<Option<OutboxEntry>>;
     /// A conversation's outbox rows that aren't sent.
@@ -119,6 +121,10 @@ impl Core for EngineRequests {
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
         EngineRequests::read_horizon(self, conversation)
+    }
+
+    fn history_complete(&self, conversation: String) -> Reply<Option<bool>> {
+        EngineRequests::history_complete(self, conversation)
     }
 
     fn outbox_entry(&self, id: i64) -> Reply<Option<OutboxEntry>> {
@@ -207,6 +213,10 @@ impl Core for StoppedCore {
     }
 
     fn read_horizon(&self, _: String) -> Reply<Option<ReadHorizon>> {
+        stopped()
+    }
+
+    fn history_complete(&self, _: String) -> Reply<Option<bool>> {
         stopped()
     }
 

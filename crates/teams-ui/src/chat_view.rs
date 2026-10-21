@@ -6,17 +6,21 @@
 //!   version of it.
 //! - **Older pages** load when fewer than a page of rows ([`PAGE`]) is above the view: the store's next page, and once
 //!   the store has none, the service's next older page ([`Core::load_older`]) read into the store first. The view
-//!   never holds more than the pages it was scrolled through.
+//!   never holds more than the pages it was scrolled through. Nothing older from the service is the chat's beginning
+//!   only when the store says its whole history is stored ([`Core::history_complete`]); a chat never synced is asked
+//!   again once it changes, and after a few older loads that brought nothing the top offers to load again.
 //! - **The list** is a bottom-aligned GPUI `list` that follows the tail while it is at the bottom, so a new message
-//!   scrolls in; scrolled up, it stays where it is and a "Jump to newest" pill takes it back. Rows are laid out only
-//!   as they come into view.
+//!   scrolls in; scrolled up, it stays where it is and a "Jump to newest" pill takes it back; a selection moved with
+//!   the keyboard stops following. Rows are laid out only as they come into view. When the rows change, the list is
+//!   told only which rows were added, removed or changed, and the message at the top of the view keeps its place:
+//!   rows added above it (an older page) or below it never move it.
 //! - **Rows**: a day separator before a new day; a "New messages" divider before the first message from someone else
-//!   after the account's read horizon as it stood when the chat opened ([`Core::read_horizon`]); a sender's messages
-//!   within 5 minutes of each other grouped under one name and time. A message shows its rich text through our own
-//!   renderer ([`crate::rich_text`], cached per message id and version), "Edited" once edited, "This message was
-//!   deleted" once deleted, its reactions with their counts (the account's own marked), and a thread's event as a
-//!   line of its own. A message type this build doesn't show is a placeholder that names no content; `Control/…`
-//!   messages (typing) are signals, never shown.
+//!   after the account's read horizon as it stood when the chat opened ([`Core::read_horizon`]), as the store counts
+//!   unread; a sender's messages within 5 minutes of each other grouped under one name and time. A message shows its
+//!   rich text through our own renderer ([`crate::rich_text`], parsed and laid out once per message id and version),
+//!   "Edited" once edited, "This message was deleted" once deleted, its reactions with their counts (the account's own
+//!   marked), and a thread's event as a line of its own. A message type this build doesn't show is a placeholder
+//!   that names no content; `Control/…` messages (typing) are signals, never shown.
 //! - **Typing**: who is typing now ([`crate::Chats::typing`]), under the messages; it goes off with their end of
 //!   typing, their message, or [`crate::models::TYPING_TIMEOUT`] after their last signal.
 //! - **Actions** on a message, under the pointer or selected with the keyboard (Up and Down, once the list has the
@@ -32,14 +36,14 @@ use std::sync::Arc;
 use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone};
 use gpui::{
     AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, FocusHandle, FollowMode, Global,
-    InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, actions, div,
-    list, px, relative, rgb,
+    InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState, ParentElement as _, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
+    actions, div, list, px, relative, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Sizable as _, Size};
 use teams_core::EngineError;
-use teams_proto::chat::{MessageType, RichText, parse_html, thread_activity};
+use teams_proto::chat::{MessageType, RichText, ThreadActivity, parse_html, thread_activity};
 use teams_store::{Message, PageCursor, Reaction};
 
 use crate::bridge::Core;
@@ -154,6 +158,34 @@ pub enum History {
     Complete,
     /// The service's older page couldn't be read.
     Failed,
+    /// The conversation was never synced, so nothing older can be read yet: asked again once the chat changes.
+    Unsynced,
+    /// The last [`MAX_FRUITLESS`] older loads brought nothing: asked again only on demand ([`ChatView::load_older`]).
+    Stalled,
+}
+
+impl History {
+    /// The top row's text.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::More => "Loading older messages…",
+            Self::Complete => "This is the beginning of the chat",
+            Self::Failed => "Older messages couldn't be loaded",
+            Self::Unsynced => "Older messages aren't synced yet",
+            Self::Stalled => "No older messages came",
+        }
+    }
+
+    /// The top row's button, which asks for older messages again: none while a load may run or at the beginning.
+    #[must_use]
+    pub fn again(self) -> Option<&'static str> {
+        match self {
+            Self::More | Self::Complete => None,
+            Self::Failed => Some("Try again"),
+            Self::Unsynced | Self::Stalled => Some("Load older"),
+        }
+    }
 }
 
 /// A message's rendered rich text, compared by identity: the cache hands out one per message id and version.
@@ -210,8 +242,17 @@ pub struct MessageItem {
     pub header: bool,
     pub arrival_time: i64,
     pub body: Body,
+    /// Its `messagetype`: whether the store counts it unread ([`counts_unread`]), whether or not this build shows it.
+    pub message_type: String,
     pub edited: bool,
     pub reactions: Vec<ReactionCount>,
+}
+
+/// Whether a message of `message_type` counts unread, as [`teams_store::Store::unread_count`] counts it: `Text` and
+/// every `RichText…` type (a card too).
+#[must_use]
+pub fn counts_unread(message_type: &str) -> bool {
+    message_type == MessageType::Text.as_str() || message_type.starts_with("RichText")
 }
 
 impl MessageItem {
@@ -281,9 +322,12 @@ pub fn arrange<Tz: TimeZone>(messages: Vec<MessageItem>, history: History, horiz
             day = today;
             items.extend(today.map(Item::Day));
         }
-        // what the store counts unread: someone else's message with text, after the horizon
-        let unread =
-            !item.own && matches!(item.body, Body::Text(_)) && horizon.is_some_and(|at| item.arrival_time > at);
+        // what the store counts unread: someone else's text message of any `RichText…` type, not deleted, after the
+        // horizon; without a horizon the store counts every one, but nothing marks where reading stopped: no divider
+        let unread = !item.own
+            && counts_unread(&item.message_type)
+            && item.body != Body::Deleted
+            && horizon.is_some_and(|at| item.arrival_time > at);
         let divider = !placed && unread;
         if divider {
             placed = true;
@@ -369,7 +413,8 @@ struct Loaded {
     next: Option<PageCursor>,
 }
 
-/// The reactions of the messages whose version the view doesn't hold yet.
+/// The reactions of the messages whose version the view doesn't hold yet; a deleted message has none (the store drops
+/// them with it), so none is read for it and any held before are replaced.
 async fn new_reactions(
     core: &dyn Core,
     conversation: &str,
@@ -378,13 +423,16 @@ async fn new_reactions(
 ) -> HashMap<String, (i64, Vec<Reaction>)> {
     let mut read = HashMap::new();
     for message in messages {
-        if held.get(&message.id) == Some(&message.version) || message.delete_time.is_some() {
+        if held.get(&message.id) == Some(&message.version) {
             continue;
         }
-        let reactions = core
-            .reactions(conversation.to_owned(), message.id.clone())
-            .await
-            .unwrap_or_default();
+        let reactions = if message.delete_time.is_some() {
+            Vec::new()
+        } else {
+            core.reactions(conversation.to_owned(), message.id.clone())
+                .await
+                .unwrap_or_default()
+        };
         read.insert(message.id.clone(), (message.version, reactions));
     }
     read
@@ -418,8 +466,12 @@ pub struct ChatView {
     names: HashMap<String, Option<String>>,
     /// Rendered rich text per message id, with the version it was rendered from.
     rendered: HashMap<String, (i64, Arc<Rendered>)>,
+    /// A thread event's parsed content per message id, with the version it was parsed from.
+    activities: HashMap<String, (i64, Option<Arc<ThreadActivity>>)>,
     /// How many times rich text was laid out.
     layouts: u64,
+    /// How many times a message's content was parsed (its HTML, or a thread event's XML).
+    parses: u64,
     items: Vec<Item>,
     list: ListState,
     loading: Option<Task<()>>,
@@ -428,8 +480,7 @@ pub struct ChatView {
     /// Loads that ended, and of those the older pages.
     loads: u64,
     older_loads: u64,
-    /// Older loads in a row that brought no message: past [`MAX_FRUITLESS`], rows near the top stop asking for more
-    /// until the view is asked again ([`ChatView::load_older`]).
+    /// Older loads in a row that brought no message: at [`MAX_FRUITLESS`] the history is [`History::Stalled`].
     fruitless: u32,
     /// The models' revision of the chat the view last read at.
     seen: u64,
@@ -484,7 +535,9 @@ impl ChatView {
             horizon: None,
             names: HashMap::new(),
             rendered: HashMap::new(),
+            activities: HashMap::new(),
             layouts: 0,
+            parses: 0,
             items: Vec::new(),
             list,
             loading: None,
@@ -553,6 +606,12 @@ impl ChatView {
     #[must_use]
     pub fn layouts(&self) -> u64 {
         self.layouts
+    }
+
+    /// How many times a message's content was parsed (once per message id and version).
+    #[must_use]
+    pub fn parses(&self) -> u64 {
+        self.parses
     }
 
     /// The rows laid out in the last frame.
@@ -642,19 +701,20 @@ impl ChatView {
         }
     }
 
-    /// Asks for the next older page (once the running load ends), even after loads that brought nothing or one that
-    /// failed.
+    /// Asks for the next older page (once the running load ends), even after loads that brought nothing, one that
+    /// failed, or one that found the chat never synced.
     pub fn load_older(&mut self, cx: &mut Context<Self>) {
         self.fruitless = 0;
-        if self.history == History::Failed {
+        if self.history != History::Complete && self.history != History::More {
             self.history = History::More;
+            self.rebuild(cx);
         }
         self.want_older(cx);
     }
 
-    /// Asks for the next older page while there may be one and the last few loads brought something.
+    /// Asks for the next older page while there may be one.
     fn want_older(&mut self, cx: &mut Context<Self>) {
-        if self.history == History::More && self.fruitless < MAX_FRUITLESS && !self.older_due {
+        if self.history == History::More && !self.older_due {
             self.older_due = true;
             self.kick(cx);
         }
@@ -720,6 +780,10 @@ impl ChatView {
         if let Some(history) = read.history {
             self.history = history;
         }
+        if load == Load::Window && self.history == History::Unsynced {
+            // the chat changed: a sync may have run since
+            self.history = History::More;
+        }
         let Some(loaded) = read.loaded else { return };
         self.reactions.extend(loaded.reactions);
         let mut messages = loaded.messages;
@@ -747,6 +811,9 @@ impl ChatView {
             Load::Older => {
                 self.next = loaded.next;
                 self.fruitless = if messages.is_empty() { self.fruitless + 1 } else { 0 };
+                if self.fruitless >= MAX_FRUITLESS && self.history == History::More {
+                    self.history = History::Stalled;
+                }
                 messages.extend(std::mem::take(&mut self.messages));
                 self.messages = messages;
             }
@@ -754,26 +821,28 @@ impl ChatView {
         let held: HashSet<&str> = self.messages.iter().map(|message| message.id.as_str()).collect();
         self.reactions.retain(|id, _| held.contains(id.as_str()));
         self.rendered.retain(|id, _| held.contains(id.as_str()));
+        self.activities.retain(|id, _| held.contains(id.as_str()));
     }
 
     /// Asks the store for the names of the people the rows name and the store's messages didn't (senders without a
     /// name, events' members, who is typing).
     fn want_names(&mut self, cx: &mut Context<Self>) {
         let mut wanted: Vec<String> = Vec::new();
-        for message in &self.messages {
+        let messages = std::mem::take(&mut self.messages);
+        for message in &messages {
             if message.sender_name.as_deref().is_none_or(|name| name.trim().is_empty())
                 && let Some(sender) = &message.sender
             {
                 wanted.push(sender.clone());
             }
-            if let Some(activity) = (message.message_type == MessageType::AddMember.as_str())
-                .then(|| thread_activity(&message.content))
-                .flatten()
+            if message.message_type == MessageType::AddMember.as_str()
+                && let Some(activity) = self.activity(message)
             {
-                wanted.extend(activity.initiator);
-                wanted.extend(activity.targets);
+                wanted.extend(activity.initiator.iter().cloned());
+                wanted.extend(activity.targets.iter().cloned());
             }
         }
+        self.messages = messages;
         let typing: Vec<String> = self
             .models
             .chats
@@ -846,19 +915,45 @@ impl ChatView {
         self.names.get(mri).cloned().flatten().unwrap_or_else(|| mri.to_owned())
     }
 
-    /// A message's rich text, laid out once per id and version.
-    fn rendered(&mut self, message: &Message, text: &RichText) -> Arc<Rendered> {
+    /// A text message's rich text, parsed and laid out once per id and version: the cache is asked before anything
+    /// is parsed.
+    fn rendered(&mut self, message: &Message) -> Arc<Rendered> {
         if let Some((version, rendered)) = self.rendered.get(&message.id)
             && *version == message.version
         {
             return Arc::clone(rendered);
         }
+        let text = self.parse(message);
         self.layouts += 1;
         let mentions = Mentions::of(message.properties.as_deref(), self.core.me());
-        let rendered = Arc::new(rich_text::layout(text, &mentions));
+        let rendered = Arc::new(rich_text::layout(&text, &mentions));
         self.rendered
             .insert(message.id.clone(), (message.version, Arc::clone(&rendered)));
         rendered
+    }
+
+    /// A text message's content as rich text (counted in [`Self::parses`]).
+    fn parse(&mut self, message: &Message) -> RichText {
+        self.parses += 1;
+        if message.message_type == MessageType::RichTextHtml.as_str() {
+            parse_html(&message.content)
+        } else {
+            RichText::plain(&message.content)
+        }
+    }
+
+    /// A thread event's content, parsed once per id and version (counted in [`Self::parses`]).
+    fn activity(&mut self, message: &Message) -> Option<Arc<ThreadActivity>> {
+        if let Some((version, activity)) = self.activities.get(&message.id)
+            && *version == message.version
+        {
+            return activity.clone();
+        }
+        self.parses += 1;
+        let activity = thread_activity(&message.content).map(Arc::new);
+        self.activities
+            .insert(message.id.clone(), (message.version, activity.clone()));
+        activity
     }
 
     /// What a message shows.
@@ -867,23 +962,23 @@ impl ChatView {
             return Body::Deleted;
         }
         match MessageType::from(message.message_type.clone()) {
-            MessageType::RichTextHtml => {
-                Body::Text(RenderedText(self.rendered(message, &parse_html(&message.content))))
+            MessageType::RichTextHtml | MessageType::Text => Body::Text(RenderedText(self.rendered(message))),
+            MessageType::AddMember => {
+                let activity = self.activity(message);
+                Body::Event(self.event_text(activity.as_deref()).into())
             }
-            MessageType::Text => Body::Text(RenderedText(self.rendered(message, &RichText::plain(&message.content)))),
-            MessageType::AddMember => Body::Event(self.event_text(message).into()),
             other => Body::Unsupported(other.as_str().to_owned()),
         }
     }
 
     /// A thread event's line: who added whom.
-    fn event_text(&self, message: &Message) -> String {
-        let Some(activity) = thread_activity(&message.content) else {
+    fn event_text(&self, activity: Option<&ThreadActivity>) -> String {
+        let Some(activity) = activity else {
             return "Members changed".to_owned();
         };
         let targets: Vec<String> = activity.targets.iter().map(|mri| self.name_of(mri)).collect();
-        match activity.initiator {
-            Some(initiator) => format!("{} added {}", self.name_of(&initiator), targets.join(", ")),
+        match &activity.initiator {
+            Some(initiator) => format!("{} added {}", self.name_of(initiator), targets.join(", ")),
             None => format!("Added {}", targets.join(", ")),
         }
     }
@@ -904,6 +999,7 @@ impl ChatView {
         let reactions = self
             .reactions
             .get(&message.id)
+            .filter(|_| body != Body::Deleted)
             .map(|(_, reactions)| count_reactions(reactions, &me))
             .unwrap_or_default();
         Some(MessageItem {
@@ -914,6 +1010,7 @@ impl ChatView {
             sender_name: sender_name.into(),
             header: true,
             arrival_time: message.arrival_time,
+            message_type: message.message_type.clone(),
             edited: message.edit_time.is_some() && !matches!(body, Body::Deleted),
             body,
             reactions,
@@ -926,7 +1023,11 @@ impl ChatView {
         let rows: Vec<MessageItem> = messages.iter().filter_map(|message| self.item(message)).collect();
         self.messages = messages;
         let items = arrange(rows, self.history, self.horizon, &Local);
+        let anchor = Anchor::of(&self.list, &self.items);
         splice(&self.list, &self.items, &items);
+        if let Some(anchor) = anchor {
+            anchor.restore(&self.list, &items);
+        }
         self.items = items;
         if let Some(selected) = &self.selected
             && !self.message_items().any(|item| &item.id == selected)
@@ -976,6 +1077,8 @@ impl ChatView {
             .iter()
             .position(|item| matches!(item, Item::Message(message) if message.id == ids[at]))
         {
+            // a selection moved off the newest stops following the tail, or the next frame would scroll it away
+            self.list.pause_following_tail();
             self.list.scroll_to_reveal_item(index);
         }
     }
@@ -1131,10 +1234,15 @@ async fn older(
         next
     } else {
         if core.load_older(conversation.to_owned()).await?.is_none() {
+            // nothing to read: the beginning only once the store says the whole history is stored
+            let history = match core.history_complete(conversation.to_owned()).await? {
+                Some(true) => History::Complete,
+                Some(false) | None => History::Unsynced,
+            };
             return Ok(Read {
                 loaded: None,
                 horizon: Horizon::NotRead,
-                history: Some(History::Complete),
+                history: Some(history),
             });
         }
         let Some((arrival_time, id)) = oldest else {
@@ -1157,7 +1265,9 @@ async fn older(
 }
 
 /// A row's identity in the list, for telling which rows changed.
-fn key(item: &Item) -> (u8, String) {
+type Key = (u8, String);
+
+fn key(item: &Item) -> Key {
     match item {
         Item::Top(_) => (0, String::new()),
         Item::Day(day) => (1, day.to_string()),
@@ -1166,29 +1276,116 @@ fn key(item: &Item) -> (u8, String) {
     }
 }
 
-/// Tells `list` how `old` became `new`: the rows between the unchanged start and end are replaced, so rows added
-/// above or below keep the scroll where it is; a row changed in place is measured again.
+/// Tells `list` how `old` became `new`, row by row: rows only in `old` are removed and rows only in `new` added where
+/// they stand, and a row in both that changed is measured again. Every other row keeps its place and its measured
+/// height. The rows in both keep their order (the messages' order); should they not, the rest is replaced.
 fn splice(list: &ListState, old: &[Item], new: &[Item]) {
-    let same = old.iter().zip(new).take_while(|(old, new)| old == new).count();
-    let max_tail = old.len().min(new.len()) - same;
-    let tail = old
-        .iter()
-        .rev()
-        .zip(new.iter().rev())
-        .take(max_tail)
-        .take_while(|(old, new)| old == new)
-        .count();
-    let old_middle = same..old.len() - tail;
-    let new_middle = same..new.len() - tail;
-    if old_middle.is_empty() && new_middle.is_empty() {
-        return;
+    let old_keys: Vec<Key> = old.iter().map(key).collect();
+    let new_keys: Vec<Key> = new.iter().map(key).collect();
+    let in_old: HashSet<&Key> = old_keys.iter().collect();
+    let in_new: HashSet<&Key> = new_keys.iter().collect();
+    // `at_new` is where `old[at_old]` stands in the list: the rows above it are told already
+    let (mut at_old, mut at_new) = (0, 0);
+    while at_old < old.len() || at_new < new.len() {
+        // a run of rows gone and a run of rows come, replaced together
+        let gone = old_keys[at_old..]
+            .iter()
+            .take_while(|key| !in_new.contains(key))
+            .count();
+        let came = new_keys[at_new..]
+            .iter()
+            .take_while(|key| !in_old.contains(key))
+            .count();
+        if gone + came > 0 {
+            list.splice(at_new..at_new + gone, came);
+            at_old += gone;
+            at_new += came;
+            continue;
+        }
+        if at_old == old.len() || at_new == new.len() || old_keys[at_old] != new_keys[at_new] {
+            list.splice(at_new..at_new + (old.len() - at_old), new.len() - at_new);
+            return;
+        }
+        // a run of the same rows: those that changed are measured again
+        let run = old_keys[at_old..]
+            .iter()
+            .zip(&new_keys[at_new..])
+            .take_while(|(old, new)| old == new)
+            .count();
+        remeasure_changed(list, &old[at_old..at_old + run], &new[at_new..at_new + run], at_new);
+        at_old += run;
+        at_new += run;
     }
-    let old_keys: Vec<(u8, String)> = old[old_middle.clone()].iter().map(key).collect();
-    let new_keys: Vec<(u8, String)> = new[new_middle.clone()].iter().map(key).collect();
-    if old_keys == new_keys {
-        list.remeasure_items(old_middle);
-    } else {
-        list.splice(old_middle, new_middle.len());
+}
+
+/// Measures again the rows of `old` that changed in `new` (the same rows, standing in the list from `at`), a run of
+/// them at a time.
+fn remeasure_changed(list: &ListState, old: &[Item], new: &[Item], at: usize) {
+    let mut changed: Option<usize> = None;
+    for (offset, (old, new)) in old.iter().zip(new).enumerate() {
+        match (old != new, changed) {
+            (true, None) => changed = Some(offset),
+            (false, Some(from)) => {
+                list.remeasure_items(at + from..at + offset);
+                changed = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = changed {
+        list.remeasure_items(at + from..at + old.len());
+    }
+}
+
+/// Where the view is read from, kept across a change of the rows by the rows' identity, never their index: the first
+/// message row at or below the list's top, and the rows above it in the view (the top, a day, the divider).
+struct Anchor {
+    message: Key,
+    /// The rows from the list's top row down to the message row (none when the message row is the top row).
+    lead: Vec<Key>,
+    /// How far into the list's top row the view starts.
+    offset: Pixels,
+}
+
+impl Anchor {
+    /// Where `list`, showing `items`, is; `None` while it follows the tail (a new row scrolls in) or shows no message.
+    fn of(list: &ListState, items: &[Item]) -> Option<Self> {
+        if list.is_following_tail() {
+            return None;
+        }
+        let top = list.logical_scroll_top();
+        let (at, message) = items
+            .iter()
+            .enumerate()
+            .skip(top.item_ix)
+            .find(|(_, item)| matches!(item, Item::Message(_)))?;
+        Some(Self {
+            message: key(message),
+            lead: items[top.item_ix..at].iter().map(key).collect(),
+            offset: top.offset_in_item,
+        })
+    }
+
+    /// Scrolls `list`, now showing `items`, back to the anchor: the same rows at the top, from the same offset. When
+    /// the rows above the message row changed (an older page came in below the top row), the message row is put at
+    /// the top, so what was read stays in view and the new rows are above it.
+    fn restore(self, list: &ListState, items: &[Item]) {
+        let Some(at) = items.iter().position(|item| key(item) == self.message) else {
+            return;
+        };
+        let lead = at
+            .checked_sub(self.lead.len())
+            .filter(|&from| items[from..at].iter().map(key).eq(self.lead.iter().cloned()));
+        list.scroll_to(match lead {
+            Some(from) => ListOffset {
+                item_ix: from,
+                offset_in_item: self.offset,
+            },
+            None => ListOffset {
+                item_ix: at,
+                offset_in_item: px(0.0),
+            },
+        });
     }
 }
 
@@ -1203,21 +1400,18 @@ fn centered_line(text: impl Into<SharedString>, palette: Palette) -> gpui::Div {
         .child(text.into())
 }
 
-/// The top row: how far the history is loaded; after a failure, a button to try again.
+/// The top row: how far the history is loaded; when no load will run by itself, a button to load again.
 fn top_row(history: History, palette: Palette, cx: &mut Context<ChatView>) -> AnyElement {
-    let text = match history {
-        History::More => "Loading older messages…",
-        History::Complete => "This is the beginning of the chat",
-        History::Failed => "Older messages couldn't be loaded",
-    };
-    let again = (history == History::Failed).then(|| {
-        Button::new("load-older-again")
-            .label("Try again")
-            .ghost()
-            .with_size(Size::XSmall)
-            .on_click(cx.listener(|this, _, _, cx| this.load_older(cx)))
+    let again = history.again().map(|label| {
+        div().debug_selector(|| "load-older".to_owned()).child(
+            Button::new("load-older-again")
+                .label(label)
+                .ghost()
+                .with_size(Size::XSmall)
+                .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))),
+        )
     });
-    centered_line(text, palette)
+    centered_line(history.label(), palette)
         .gap_2()
         .items_center()
         .debug_selector(|| "history-top".to_owned())

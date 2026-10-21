@@ -1,7 +1,7 @@
 //! Stand-ins for the engine the view tests run on: a fake event source the test feeds, and a fake core that records
 //! every request and answers from its own state. Every id here is made up.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -52,6 +52,9 @@ pub struct FakeCore {
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
     /// newest first); once none is left it answers `None`. A conversation not named answers `None` at once.
     pub older: Mutex<HashMap<String, Vec<Vec<Message>>>>,
+    /// Conversations never synced: `history_complete` answers `None` for them; for any other, whether `older` has
+    /// no page left.
+    pub unsynced: Mutex<HashSet<String>>,
     /// The `limit` of each `messages` read, in order.
     pub limits: Mutex<Vec<usize>>,
 }
@@ -70,6 +73,7 @@ impl Default for FakeCore {
             reactions: Mutex::default(),
             horizons: Mutex::default(),
             older: Mutex::default(),
+            unsynced: Mutex::default(),
             limits: Mutex::default(),
         }
     }
@@ -209,6 +213,15 @@ impl Core for FakeCore {
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
         self.answer("read_horizon", || locked(&self.horizons).get(&conversation).cloned())
+    }
+
+    fn history_complete(&self, conversation: String) -> Reply<Option<bool>> {
+        self.answer("history_complete", || {
+            if locked(&self.unsynced).contains(&conversation) {
+                return None;
+            }
+            Some(locked(&self.older).get(&conversation).is_none_or(Vec::is_empty))
+        })
     }
 
     fn outbox_entry(&self, _id: i64) -> Reply<Option<OutboxEntry>> {

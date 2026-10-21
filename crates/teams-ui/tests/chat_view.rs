@@ -19,15 +19,15 @@ use std::sync::Arc;
 use chrono::{FixedOffset, NaiveDate};
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{
-    AppContext as _, Entity, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
-    point, px, size,
+    AppContext as _, Entity, ListOffset, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
+    VisualTestContext, point, px, size,
 };
 use teams_core::{Event, MessageChange, Source};
 use teams_store::{Applied, Message, Reaction, ReadHorizon};
 use teams_ui::ViewTrace;
 use teams_ui::chat_view::{
-    Body, ChatView, ChatViewEvent, GROUP_MS, History, Item, MessageAction, MessageItem, PAGE, ReactionCount,
-    RenderedText, arrange, count_reactions, day_label, reaction_label,
+    Body, ChatView, ChatViewEvent, GROUP_MS, History, Item, MAX_FRUITLESS, MessageAction, MessageItem, PAGE,
+    ReactionCount, RenderedText, arrange, count_reactions, day_label, reaction_label,
 };
 use teams_ui::models::TYPING_TIMEOUT;
 use teams_ui::rich_text::Rendered;
@@ -268,6 +268,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         header: true,
         arrival_time: at,
         body: Body::Text(RenderedText(Arc::new(Rendered::default()))),
+        message_type: "RichText/Html".to_owned(),
         edited: false,
         reactions: Vec::new(),
     }
@@ -292,6 +293,7 @@ fn a_sender_s_messages_group_within_five_minutes_and_days_are_separated() {
     let utc = FixedOffset::east_opt(0).unwrap();
     let mut event = row("e", LAB_B, NOON + 30 * MINUTE);
     event.body = Body::Event("added".into());
+    event.message_type = "ThreadActivity/AddMember".to_owned();
     let rows = vec![
         row("1", LAB_B, NOON),
         row("2", LAB_B, NOON + MINUTE),
@@ -335,6 +337,29 @@ fn a_sender_s_messages_group_within_five_minutes_and_days_are_separated() {
     assert_eq!(
         day_label(NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(), today),
         "Wednesday, 31 December 2025"
+    );
+}
+
+#[test]
+fn the_divider_counts_what_the_store_counts_unread_a_card_too_never_a_deleted_one() {
+    let utc = FixedOffset::east_opt(0).unwrap();
+    let mut card = row("2", LAB_B, NOON + MINUTE);
+    card.message_type = "RichText/Media_Card".to_owned();
+    card.body = Body::Unsupported("RichText/Media_Card".to_owned());
+    let mut gone = row("3", LAB_B, NOON + 2 * MINUTE);
+    gone.body = Body::Deleted;
+    let rows = vec![row("1", LAB_B, NOON), card, gone, row("4", LAB_B, NOON + 3 * MINUTE)];
+    let items = arrange(rows.clone(), History::More, Some(NOON), &utc);
+    assert_eq!(
+        shape(&items),
+        ["top", "day", "+1", "new", "+2", "3", "4"],
+        "a card the view doesn't show counts unread"
+    );
+    let items = arrange(rows, History::More, Some(NOON + MINUTE), &utc);
+    assert_eq!(
+        shape(&items),
+        ["top", "day", "+1", "2", "3", "new", "+4"],
+        "a deleted message doesn't"
     );
 }
 
@@ -547,7 +572,12 @@ fn a_long_chat_scrolls_without_loading_everything_at_once() {
     let limits = rig.core.limits.lock().unwrap().clone();
     assert!(limits.len() >= 1_000 / PAGE, "{} reads", limits.len());
     assert!(limits.iter().all(|limit| *limit == PAGE), "{limits:?}");
-    // on to the top: rows above are measured as they come, so a wheel step moves the list a screen or so
+    on_to_the_top_each_message_parsed_once(&rig, &view, cx);
+}
+
+/// On to the top of the 1 000-message chat: rows above are measured as they come, so a wheel step moves the list a
+/// screen or so. Every load rebuilt the rows, yet each message was parsed and laid out once, and a new one adds one.
+fn on_to_the_top_each_message_parsed_once(rig: &Rig, view: &Entity<ChatView>, cx: &mut VisualTestContext) {
     let mut more = 0;
     while cx.debug_bounds("message-1").is_none() {
         more += 1;
@@ -556,6 +586,186 @@ fn a_long_chat_scrolls_without_loading_everything_at_once() {
     }
     assert_eq!(cx.update(|_, cx| view.read(cx).history()), History::Complete);
     assert!(cx.debug_bounds("message-1").is_some(), "the oldest is shown at the top");
+    let counted = |cx: &mut VisualTestContext| cx.update(|_, cx| (view.read(cx).parses(), view.read(cx).layouts()));
+    assert_eq!(counted(cx), (1_000, 1_000));
+    arrive(rig, cx, &message("1001", LAB_B, "<p>one more</p>", NOON + MINUTE));
+    assert_eq!(cx.update(|_, cx| view.read(cx).held()), 1_001);
+    assert_eq!(counted(cx), (1_001, 1_001));
+}
+
+/// The test selector of the message `id`'s row (selectors live as long as the test).
+fn row_of(id: &str) -> &'static str {
+    Box::leak(format!("message-{id}").into_boxed_str())
+}
+
+/// The first message row at or below the list's top, by id.
+fn read_from(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> String {
+    cx.update(|_, cx| {
+        let view = view.read(cx);
+        let top = view.list_state().logical_scroll_top();
+        view.items()[top.item_ix..].iter().find_map(|item| match item {
+            Item::Message(message) => Some(message.id.clone()),
+            _ => None,
+        })
+    })
+    .expect("a message at the list's top")
+}
+
+#[test]
+fn an_edit_above_the_view_and_a_new_message_below_it_leave_the_view_where_it_is() {
+    let rig = rig_with(many(100));
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    scroll_up(cx, 1_000.0);
+    let oldest = ids(&view, cx)[0].clone();
+    let read = read_from(&view, cx);
+    assert_ne!(read, oldest);
+    let before = cx.debug_bounds(row_of(&read)).expect("the message read is drawn");
+    // one change edits the oldest message held and brings a new one
+    {
+        let mut messages = rig.core.messages.lock().unwrap();
+        let stored = messages.get_mut(AB).unwrap();
+        let edited = stored.iter_mut().find(|message| message.id == oldest).unwrap();
+        edited.version = 2;
+        edited.content = "<p>edited, and longer than it was before</p>".to_owned();
+        edited.edit_time = Some(NOON);
+        stored.push(message("101", LAB_B, "<p>meanwhile</p>", NOON + MINUTE));
+    }
+    rig.send(Event::ConversationChanged {
+        conversation: AB.to_owned(),
+    });
+    draw(cx);
+    assert!(items(&view, cx).iter().any(|item| item.id == oldest && item.edited));
+    assert_eq!(ids(&view, cx).last().map(String::as_str), Some("101"));
+    let after = cx.debug_bounds(row_of(&read)).expect("the message read is still drawn");
+    assert_eq!(after.origin, before.origin, "the view didn't move");
+    assert!(cx.update(|_, cx| view.read(cx).scrolled_up()));
+}
+
+#[test]
+fn an_older_page_landing_while_the_list_sits_at_its_top_keeps_what_was_read_in_view() {
+    let rig = rig_with(many(1_000));
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    let held = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).held());
+    let oldest = ids(&view, cx)[0].clone();
+    let opened = held(cx);
+    // the list sits at its very top (a fling got there before the next older page landed): the page lands now
+    cx.update(|_, cx| {
+        view.read(cx).list_state().scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.0),
+        });
+    });
+    draw(cx);
+    let settled = held(cx);
+    assert!(settled > opened, "an older page landed");
+    assert!(settled < 1_000, "the whole chat loaded");
+    for _ in 0..5 {
+        draw(cx);
+    }
+    assert_eq!(held(cx), settled, "no older page loads without scrolling on");
+    assert!(
+        cx.debug_bounds(row_of(&oldest)).is_some(),
+        "the message at the top before the page landed is still in view"
+    );
+    assert_eq!(read_from(&view, cx), oldest);
+}
+
+#[test]
+fn a_chat_never_synced_isn_t_its_beginning_and_loads_older_once_it_is_synced() {
+    let all = many(70);
+    let rig = rig_with(all[60..].to_vec());
+    rig.core.unsynced.lock().unwrap().insert(AB.to_owned());
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    let history = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).history());
+    assert_eq!(history(cx), History::Unsynced);
+    assert!(cx.debug_bounds("load-older").is_some(), "the top offers to load again");
+    assert_eq!(ids(&view, cx).len(), 10);
+
+    // the catch-up syncs it, keeping where the service's older history starts
+    rig.core.unsynced.lock().unwrap().clear();
+    let mut first: Vec<Message> = all[20..60].to_vec();
+    first.reverse();
+    let mut second: Vec<Message> = all[..20].to_vec();
+    second.reverse();
+    rig.core
+        .older
+        .lock()
+        .unwrap()
+        .insert(AB.to_owned(), vec![first, second]);
+    rig.send(Event::ConversationChanged {
+        conversation: AB.to_owned(),
+    });
+    for _ in 0..3 {
+        draw(cx);
+    }
+    let expected: Vec<String> = (1..=70).map(|n| n.to_string()).collect();
+    assert_eq!(ids(&view, cx), expected);
+    assert_eq!(history(cx), History::Complete);
+}
+
+#[test]
+fn older_loads_that_bring_nothing_stall_until_asked_again() {
+    let fruitless = usize::try_from(MAX_FRUITLESS).unwrap();
+    let rig = rig_with(many(10));
+    // pages the store keeps nothing of, two more than the view asks for by itself
+    rig.core
+        .older
+        .lock()
+        .unwrap()
+        .insert(AB.to_owned(), vec![Vec::new(); fruitless + 2]);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    draw(cx);
+    let history = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).history());
+    let older_loads = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).loads().1);
+    assert_eq!(history(cx), History::Stalled);
+    assert_eq!(older_loads(cx), u64::from(MAX_FRUITLESS));
+    draw(cx);
+    assert_eq!(
+        older_loads(cx),
+        u64::from(MAX_FRUITLESS),
+        "nothing asks again by itself"
+    );
+    // the top's button asks again: the two pages left bring nothing, then the service has none
+    let again = cx.debug_bounds("load-older").expect("the top offers to load again");
+    cx.simulate_click(again.center(), Modifiers::none());
+    for _ in 0..3 {
+        draw(cx);
+    }
+    assert_eq!(history(cx), History::Complete);
+    assert_eq!(older_loads(cx), u64::from(MAX_FRUITLESS) + 3);
+}
+
+#[test]
+fn a_deleted_message_shows_no_reactions() {
+    let rig = rig_with(many(2));
+    rig.core
+        .reactions
+        .lock()
+        .unwrap()
+        .insert("2".to_owned(), vec![reaction("like", LAB_A, NOON)]);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    assert_eq!(items(&view, cx)[1].reactions.len(), 1);
+    assert!(cx.debug_bounds("reaction-like").is_some());
+    {
+        let mut messages = rig.core.messages.lock().unwrap();
+        let stored = messages
+            .get_mut(AB)
+            .unwrap()
+            .iter_mut()
+            .find(|message| message.id == "2")
+            .unwrap();
+        stored.version = 2;
+        stored.content.clear();
+        stored.delete_time = Some(NOON + MINUTE);
+    }
+    rig.send(Event::ConversationChanged {
+        conversation: AB.to_owned(),
+    });
+    draw(cx);
+    let shown = items(&view, cx);
+    assert_eq!(shown[1].body, Body::Deleted);
+    assert!(shown[1].reactions.is_empty(), "{:?}", shown[1].reactions);
+    assert!(cx.debug_bounds("reaction-like").is_none());
 }
 
 #[test]
@@ -597,6 +807,19 @@ fn typing_shows_who_is_typing_and_clears_by_its_end_a_timeout_or_their_message()
     cx.executor().advance_clock(TYPING_TIMEOUT / 2);
     draw(cx);
     assert_eq!(typing(cx), None);
+
+    // a reaction on one of their messages is no message of theirs: it stays
+    signal(&rig, LAB_B, true);
+    rig.send(Event::Message {
+        conversation: AB.to_owned(),
+        id: "1".to_owned(),
+        change: MessageChange::Reaction,
+        applied: Applied::Updated,
+        message: Some(Box::new(message("1", LAB_B, "<p>number 1</p>", NOON - MINUTE))),
+        source: Source::Delivery,
+    });
+    draw(cx);
+    assert!(typing(cx).is_some(), "a reaction doesn't end their typing");
 
     // their message ends it
     signal(&rig, LAB_B, true);
@@ -693,6 +916,29 @@ fn hover_and_keyboard_actions_offer_edit_and_delete_on_the_account_s_own_only() 
     );
     cx.simulate_keystrokes("escape");
     assert_eq!(cx.update(|_, cx| view.read(cx).selected().map(str::to_owned)), None);
+}
+
+#[test]
+fn a_selection_moved_up_with_the_keyboard_stays_in_view() {
+    let rig = rig_with(many(100));
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    cx.update(|window, cx| view.read(cx).focus_handle().clone().focus(window, cx));
+    for _ in 0..30 {
+        cx.simulate_keystrokes("up");
+        draw(cx);
+    }
+    let selected = cx.update(|_, cx| view.read(cx).selected().map(str::to_owned));
+    assert_eq!(selected.as_deref(), Some("71"));
+    assert!(
+        cx.update(|_, cx| view.read(cx).scrolled_up()),
+        "the list no longer follows the newest"
+    );
+    let list = cx.debug_bounds("chat-messages").unwrap();
+    let row = cx.debug_bounds("message-71").expect("the selected message is drawn");
+    assert!(
+        row.top() >= list.top() - px(1.0) && row.bottom() <= list.bottom() + px(1.0),
+        "the selected message is in view: {row:?} in {list:?}"
+    );
 }
 
 #[test]

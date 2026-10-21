@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, AsyncApp, Entity, SharedString};
-use teams_core::{Event, Source};
+use teams_core::{Event, MessageChange, Source};
 use teams_store::{Message, OutboxEntry};
 
 /// How long someone is shown typing after their last typing signal, unless they stop (`typing: false`) or a message
@@ -192,10 +192,12 @@ impl Models {
             Event::Message {
                 conversation,
                 message: Some(message),
+                change: MessageChange::New,
                 source: Source::Delivery,
                 ..
             } => {
-                // a delivered message of theirs ends their typing
+                // a new message of theirs, delivered, ends their typing; a reaction, an edit or a delete on one of
+                // their messages doesn't (anyone may react, and it isn't the message they were typing)
                 if let Some(from) = &message.sender {
                     self.stop_typing(&conversation, from, None, cx);
                 }

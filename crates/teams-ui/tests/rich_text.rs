@@ -9,12 +9,13 @@
 use std::sync::Arc;
 
 use gpui::{
-    Context, IntoElement, Modifiers, ParentElement as _, Render, SharedString, Styled as _, TestAppContext, Window,
-    div, point, px,
+    Context, FontStyle, FontWeight, HighlightStyle, IntoElement, Modifiers, ParentElement as _, Render, SharedString,
+    Styled as _, TestAppContext, Window, div, point, px,
 };
 use teams_proto::chat::{Marks, parse_html};
 use teams_ui::rich_text::{
-    self, Block, IMAGE_PLACEHOLDER, LinkRange, Mentioned, Mentions, QuoteBlock, Rendered, Style, TextBlock, opens,
+    self, Block, IMAGE_PLACEHOLDER, LinkRange, Mentioned, Mentions, QuoteBlock, Rendered, Style, TextBlock, highlight,
+    opens,
 };
 use teams_ui::theme::LIGHT_PALETTE;
 
@@ -279,4 +280,70 @@ fn a_click_beside_a_link_opens_nothing() {
         Modifiers::none(),
     );
     assert_eq!(cx.opened_url(), None);
+}
+
+/// The highlight a piece styled `style` is drawn with, in the light palette.
+fn drawn_as(style: Style) -> HighlightStyle {
+    highlight(style, LIGHT_PALETTE)
+}
+
+fn marked(marks: Marks) -> HighlightStyle {
+    drawn_as(Style {
+        marks,
+        ..Style::default()
+    })
+}
+
+fn mentioned(whom: Mentioned) -> HighlightStyle {
+    drawn_as(Style {
+        mention: Some(whom),
+        ..Style::default()
+    })
+}
+
+#[test]
+fn each_mark_a_link_and_an_image_are_drawn_with_a_highlight_of_their_own() {
+    assert_eq!(drawn_as(Style::default()), HighlightStyle::default());
+    assert_eq!(marked(Marks::BOLD).font_weight, Some(FontWeight::BOLD));
+    assert_eq!(marked(Marks::ITALIC).font_style, Some(FontStyle::Italic));
+    assert!(marked(Marks::UNDERLINE).underline.is_some());
+    assert!(marked(Marks::STRIKE).strikethrough.is_some());
+    assert!(marked(Marks::CODE).background_color.is_some());
+    let link = drawn_as(Style {
+        link: true,
+        ..Style::default()
+    });
+    assert!(link.underline.is_some() && link.color.is_some());
+    let image = drawn_as(Style {
+        image: true,
+        ..Style::default()
+    });
+    assert_eq!(image.font_style, Some(FontStyle::Italic));
+}
+
+#[test]
+fn a_mention_is_drawn_in_the_brand_colour_the_account_s_own_bold_on_a_tint() {
+    let (me, other) = (mentioned(Mentioned::Me), mentioned(Mentioned::Other));
+    assert!(other.color.is_some());
+    assert_eq!(me.color, other.color, "both in the brand colour");
+    assert_eq!((other.font_weight, other.background_color), (None, None));
+    assert_eq!(me.font_weight, Some(FontWeight::BOLD), "the account's own is bold");
+    assert!(me.background_color.is_some(), "on a tint of its own");
+
+    // a block is drawn with its pieces' highlights
+    let content =
+        "<p>a <b>bold</b> <span itemscope itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Lab A</span></p>";
+    let properties = format!("{{\"mentions\":[{{\"itemid\":\"0\",\"mri\":\"{ME}\",\"mentionType\":\"person\"}}]}}");
+    let rendered = rich_text::layout(&parse_html(content), &Mentions::of(Some(&properties), ME));
+    let block = text_block(&rendered, 0);
+    let drawn = rich_text::highlights(block, LIGHT_PALETTE);
+    let of = |text: &str| {
+        drawn
+            .iter()
+            .find(|(range, _)| &block.text[range.clone()] == text)
+            .map(|(_, highlight)| *highlight)
+    };
+    assert_eq!(of("bold"), Some(marked(Marks::BOLD)));
+    assert_eq!(of("Lab A"), Some(me));
+    assert_eq!(drawn.len(), 2, "unstyled text has no highlight: {drawn:?}");
 }

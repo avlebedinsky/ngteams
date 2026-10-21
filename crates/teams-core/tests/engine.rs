@@ -1143,6 +1143,24 @@ async fn without_a_push_channel_the_engine_syncs_on_demand_and_refuses_what_the_
 }
 
 #[tokio::test]
+async fn whether_the_whole_history_is_stored_tells_a_chat_never_synced_from_its_beginning() {
+    let lab = Lab::start().await;
+    let b = native(&lab, LAB_B, QUIET);
+    // never synced: nothing older can be read, and that isn't the chat's beginning
+    assert!(b.handle.load_older(AB_CHAT).await.unwrap().is_none());
+    assert_eq!(b.handle.history_complete(AB_CHAT).await.unwrap(), None);
+
+    b.handle.sync().await.unwrap();
+    let mut pages = 0;
+    while b.handle.load_older(AB_CHAT).await.unwrap().is_some() {
+        pages += 1;
+        assert!(pages < 20, "older pages never ran out");
+    }
+    assert_eq!(b.handle.history_complete(AB_CHAT).await.unwrap(), Some(true));
+    b.shutdown();
+}
+
+#[tokio::test]
 async fn a_write_whose_check_cant_sync_is_answered_as_the_row_that_waits() {
     let lab = Lab::start().await;
     let mut a = native(
