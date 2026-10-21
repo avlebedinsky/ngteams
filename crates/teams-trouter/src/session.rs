@@ -17,7 +17,7 @@
 //!   disconnect stops the client.
 //! - **Token renewal**: the socket is reconnected with a new token before the old one runs out
 //!   ([`Options::renew_lead`] before its expiry, checked against the clock every [`Options::renew_check`], so a jump
-//!   of the wall clock counts too), and as soon as the session announces a newer `ic3` token.
+//!   of the wall clock counts too), and as soon as the session announces another `ic3` token than the one held.
 //! - **Registration**: on every `trouter.connected`, the messaging stack's registration of the endpoint's push URL
 //!   ([`crate::registration`]).
 //! - **Deliveries** become [`PushEvent::Delivery`] ([`crate::events`]) and are **never answered**; an incoming call's
@@ -876,7 +876,8 @@ impl Link {
         Some(self.reconnect_for_renewal().await)
     }
 
-    /// Reconnects when the session announces a newer `ic3` token than the one held.
+    /// Reconnects when the session announces another `ic3` token than the one held: the session's token is compared
+    /// with the held one (never printed), since a replacement may expire no later than the token it replaced.
     async fn on_renewal<T, K>(
         &mut self,
         renewal: Result<Renewal, broadcast::error::RecvError>,
@@ -886,23 +887,23 @@ impl Link {
         T: Transport + Send + 'static,
         K: TrouterCredentials + 'static,
     {
-        let newer = match renewal {
-            Ok(Renewal::AccessToken { resource, expires_at }) => {
-                resource == IC3_AUDIENCE && expires_at > self.token.expires_at
-            }
+        let ask = match renewal {
+            Ok(Renewal::AccessToken { resource, .. }) => resource == IC3_AUDIENCE,
             Ok(Renewal::Skypetoken { .. }) => false,
             // missed some: the session says whether its token is another one now
-            Err(broadcast::error::RecvError::Lagged(_)) => run
-                .trouter
-                .credentials
-                .ic3()
-                .await
-                .is_ok_and(|current| current.token.expose() != self.token.token.expose()),
+            Err(broadcast::error::RecvError::Lagged(_)) => true,
             Err(broadcast::error::RecvError::Closed) => {
                 run.renewals_open = false;
                 false
             }
         };
+        let newer = ask
+            && run
+                .trouter
+                .credentials
+                .ic3()
+                .await
+                .is_ok_and(|current| current.token.expose() != self.token.token.expose());
         if !newer {
             return None;
         }

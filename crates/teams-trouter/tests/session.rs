@@ -1121,6 +1121,23 @@ async fn a_renewal_before_the_services_hello_sends_nothing_on_that_socket() {
 }
 
 #[tokio::test]
+async fn a_renewed_token_that_expires_no_later_still_means_a_reconnect() {
+    let lab = Lab::start().await;
+    let mut push = lab.client().spawn();
+    connected(&mut push).await;
+    let held = lab.tokens.current();
+    let renewed = "mock-ic3-token-renewed-b-4";
+    lab.mock.set_token(LAB_B, renewed);
+    let earlier = held.expires_at.checked_sub(Duration::from_secs(60)).unwrap();
+    lab.tokens.renew(renewed, earlier);
+    assert!(matches!(down(&mut push).await, Down::Renewal));
+    connected(&mut push).await;
+    assert_eq!(authorization(&lab.trouter.sockets()[1]), format!("Bearer {renewed}"));
+    push.stop().await;
+    sent_only_logged_own_frames(&lab).await;
+}
+
+#[tokio::test]
 async fn a_stop_while_the_socket_opens_ends_the_client_at_once() {
     let lab = Lab::start().await;
     // a port that takes the TCP connection and never answers the WebSocket handshake

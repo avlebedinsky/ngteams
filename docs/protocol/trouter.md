@@ -86,7 +86,7 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
   never a shortcut past it. `skypetoken-deprecated` stops the client.
 - **Renewal**: an open socket is never authenticated again, so the client reconnects with a new token 5 minutes
   (the session's refresh margin) before the held one expires, checking the expiry against the wall clock every 30 s,
-  and at once when the session announces a newer `ic3` token. A renewal before
+  and at once when the session announces another `ic3` token (told by its value, not its expiry). A renewal before
   the service's `1::` sends nothing on that socket.
 
 ## Connect and the regional move
