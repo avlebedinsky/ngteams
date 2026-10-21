@@ -6,7 +6,9 @@
 //!   hour of their expiry, three connects in a row have failed (any connect that ended before its `trouter.connected`
 //!   but for a renewal) or the service disconnected twice for a `dup` within 10 s.
 //! - **Authenticate** in the first frame, at once after the service's `1::` ([`Authenticate`]: the session's `ic3`
-//!   token and the cached reconnect parameters). The socket is never authenticated again.
+//!   token and the cached reconnect parameters). The socket is never authenticated again. The token is asked of the
+//!   session again at the `1::`, never the one held since the connect began: a session signed out while the socket
+//!   opened stops the client with nothing sent, and one renewed meanwhile authenticates with its new token.
 //! - **Keep-alive**: a [`Ping`] every [`Options::ping_interval`] once connected; a pong missing for
 //!   [`Options::pong_timeout`] means a reconnect.
 //! - **Reconnect** after the socket closes, the service disconnects or a pong is missing: at once for a renewal, a
@@ -617,10 +619,7 @@ impl Link {
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut renew_check = tokio::time::interval_at(start + options.renew_check, options.renew_check);
         renew_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let renew = token
-            .expires_at
-            .checked_sub(options.renew_lead)
-            .is_some_and(|due| due > now);
+        let renew = renewable(&token, options.renew_lead, now);
         Self {
             sink,
             read,
@@ -744,11 +743,7 @@ impl Link {
         K: TrouterCredentials + 'static,
     {
         match frames::decode(text) {
-            Ok(Incoming::Connect) if !self.authenticated => {
-                self.authenticated = true;
-                let authenticate = Authenticate::new(&self.token.token, self.params.clone());
-                self.send(&authenticate).await.err()
-            }
+            Ok(Incoming::Connect) if !self.authenticated => self.authenticate(run).await,
             Ok(Incoming::Event(event)) => {
                 self.on_event(&event, run);
                 None
@@ -773,6 +768,32 @@ impl Link {
                 None
             }
         }
+    }
+
+    /// The socket's first frame, with the token the session holds now (asked again: the connect's may be stale by
+    /// the `1::`). A session that has none any more (signed out) stops the client and any other failure ends the
+    /// connection, nothing sent either way; a stop while it is asked ends it at once.
+    async fn authenticate<T, K>(&mut self, run: &mut Run<T, K>) -> Option<End>
+    where
+        T: Transport + Send + 'static,
+        K: TrouterCredentials + 'static,
+    {
+        let asked = tokio::select! {
+            biased;
+            _ = &mut run.stop => return Some(End::Stop(Stop::Requested)),
+            asked = run.trouter.credentials.ic3() => asked,
+        };
+        let token = match run.token(asked) {
+            Ok(token) => token,
+            Err(end) => return Some(end),
+        };
+        if token.token.expose() != self.token.token.expose() {
+            self.renew = renewable(&token, self.renew_lead, run.trouter.clock.now());
+            self.token = token;
+        }
+        self.authenticated = true;
+        let authenticate = Authenticate::new(&self.token.token, self.params.clone());
+        self.send(&authenticate).await.err()
     }
 
     fn on_event<T, K>(&mut self, event: &Event, run: &mut Run<T, K>)
@@ -929,6 +950,11 @@ impl Link {
             _ => End::Again(Down::Renewal, Wait::None),
         }
     }
+}
+
+/// Whether `token`'s expiry is far enough off at `now` to renew it `lead` before it runs out.
+fn renewable(token: &AccessToken, lead: Duration, now: SystemTime) -> bool {
+    token.expires_at.checked_sub(lead).is_some_and(|due| due > now)
 }
 
 /// An instant no wait reaches (a guarded `select!` branch still needs one).

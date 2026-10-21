@@ -2,8 +2,9 @@
 //! connect, authenticate as the first frame, register the messaging endpoint, keep-alives, deliveries that are never
 //! answered (an incoming call's included), a dropped socket and the regional reconnect with its replay, the service's
 //! disconnects, a regional host given up, token renewal (a fake clock, the real session over a mock Entra, before the
-//! service's `1::`), a throttled token service, the stop (also while a socket opens), no token in any log record, and
-//! that every frame the socket sent is a reviewed own frame logged to `fence.log` before it went out.
+//! service's `1::`), a session signed out before the service's `1::`, a throttled token service, the stop (also while
+//! a socket opens), no token in any log record, and that every frame the socket sent is a reviewed own frame logged
+//! to `fence.log` before it went out.
 //!
 //! Every id and token here is the mocks' made-up one.
 
@@ -118,6 +119,8 @@ struct FakeTokens {
     asked: AtomicUsize,
     /// Each ask is answered as the token service's throttling with `Retry-After: 0`.
     throttled: AtomicBool,
+    /// Each ask is answered `NotSignedIn`, as a signed-out session answers.
+    signed_out: AtomicBool,
 }
 
 #[cfg(test)]
@@ -132,6 +135,7 @@ impl FakeTokens {
             renewals: broadcast::channel(16).0,
             asked: AtomicUsize::new(0),
             throttled: AtomicBool::new(false),
+            signed_out: AtomicBool::new(false),
         })
     }
 
@@ -185,6 +189,11 @@ impl FakeTokens {
 impl TrouterCredentials for FakeTokens {
     fn ic3(&self) -> impl Future<Output = Result<AccessToken, TokenError>> + Send {
         self.asked.fetch_add(1, Ordering::SeqCst);
+        if self.signed_out.load(Ordering::SeqCst) {
+            return future::ready(Err(TokenError::NotSignedIn {
+                account: "lab-b".to_owned(),
+            }));
+        }
         if self.throttled.load(Ordering::SeqCst) {
             return future::ready(Err(TokenError::Throttled {
                 retry_after: Some(Duration::ZERO),
@@ -1118,6 +1127,30 @@ async fn a_renewal_before_the_services_hello_sends_nothing_on_that_socket() {
     assert!(sockets[0].frames.is_empty(), "{:?}", sockets[0].frames);
     assert_eq!(lab.log.frames()[0]["own"], "trouter_authenticate");
     assert_eq!(authorization(&sockets[1]), format!("Bearer {renewed}"));
+}
+
+#[tokio::test]
+async fn a_session_signed_out_before_the_services_hello_sends_nothing_and_stops_the_client() {
+    let lab = Lab::start().await;
+    lab.trouter.delay_hello_once(Duration::from_secs(1));
+    let mut push = lab.client().spawn();
+    sockets_until(&lab.trouter, |sockets| sockets.len() == 1).await;
+    // the connect took its token already; the session signs out while the socket waits for the service's `1::`
+    lab.tokens.signed_out.store(true, Ordering::SeqCst);
+    let stopped = next(&mut push, |event| match event {
+        PushEvent::Stopped(stop) => Some(stop),
+        _ => None,
+    })
+    .await;
+    assert_eq!(stopped, Stop::SignedOut);
+    let sockets = lab.trouter.sockets();
+    assert_eq!(sockets.len(), 1, "no reconnect after the sign-out");
+    assert!(sockets[0].frames.is_empty(), "{:?}", sockets[0].frames);
+    assert!(
+        lab.log.frames().is_empty(),
+        "no user.authenticate with the token held from before"
+    );
+    push.stop().await;
 }
 
 #[tokio::test]

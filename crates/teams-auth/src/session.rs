@@ -248,6 +248,8 @@ impl<S: SecretStore> Session<S> {
         let ticket = self.entra_backoff.ticket();
         let slot = self.slot(resource);
         let mut cached = slot.lock().await;
+        // a caller that waited for the slot while another call signed the session out gets no token, a cached one too
+        self.check_signed_in()?;
         if let Some(token) = cached.as_ref().filter(|token| self.fresh(token.expires_at)) {
             return Ok(token.clone());
         }
@@ -264,6 +266,8 @@ impl<S: SecretStore> Session<S> {
         let ticket = self.entra_backoff.ticket();
         let slot = self.slot(resource);
         let mut cached = slot.lock().await;
+        // a caller that waited for the slot while another call signed the session out gets no token, a cached one too
+        self.check_signed_in()?;
         match cached.as_ref() {
             Some(token) if token.token.expose() == rejected.expose() => *cached = None,
             Some(token) if self.fresh(token.expires_at) => return Ok(token.clone()),
@@ -283,6 +287,7 @@ impl<S: SecretStore> Session<S> {
         self.check_signed_in()?;
         let tickets = self.tickets();
         let mut slot = self.skypetoken.lock().await;
+        self.check_signed_in()?;
         self.load_stored_skypetoken(&mut slot).await?;
         if let Some(skypetoken) = self.usable(&slot) {
             return Ok(skypetoken.clone());
@@ -301,6 +306,7 @@ impl<S: SecretStore> Session<S> {
         self.check_signed_in()?;
         let tickets = self.tickets();
         let mut slot = self.skypetoken.lock().await;
+        self.check_signed_in()?;
         self.load_stored_skypetoken(&mut slot).await?;
         if let Some(skypetoken) = self
             .usable(&slot)

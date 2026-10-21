@@ -6,7 +6,7 @@
 
 use std::future::{self, Future};
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use teams_proto::{
     ProbeOwnState, Read, SendMessage, Service, StartCall, Transport,
 };
 use wiremock::matchers::{body_json, body_partial_json, header, method, path, query_param};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const LAB_A: &str = "8:orgid:lab-a";
 const LAB_B: &str = "8:orgid:lab-b";
@@ -61,15 +61,19 @@ struct FakeTokens {
     generation: AtomicUsize,
     audiences: Mutex<Vec<String>>,
     rejected: Mutex<Vec<String>>,
-    signed_out: bool,
+    signed_out: AtomicBool,
 }
 
 impl FakeTokens {
     fn signed_out() -> Self {
-        Self {
-            signed_out: true,
-            ..Self::default()
-        }
+        let tokens = Self::default();
+        tokens.sign_out();
+        tokens
+    }
+
+    /// Signs the session out: every later ask answers `NotSignedIn`, as a signed-out `Session` does.
+    fn sign_out(&self) {
+        self.signed_out.store(true, Ordering::SeqCst);
     }
 
     fn rejected(&self) -> Vec<String> {
@@ -81,7 +85,7 @@ impl FakeTokens {
     }
 
     fn current(&self, audience: &str) -> Result<Secret, TokenError> {
-        if self.signed_out {
+        if self.signed_out.load(Ordering::SeqCst) {
             return Err(TokenError::NotSignedIn {
                 account: "lab-a".to_owned(),
             });
@@ -644,6 +648,64 @@ async fn a_throttled_read_waits_its_retry_after_and_is_sent_once_more() {
 
         assert_eq!(answer.status(), 200, "after {status}");
         assert!(setup.tokens.rejected().is_empty());
+    }
+}
+
+/// Answers `status` (with `Retry-After: 0`) and signs `tokens` out, as a session signed out while the transport waits.
+struct ThrottleThenSignOut {
+    status: u16,
+    tokens: Arc<FakeTokens>,
+}
+
+impl Respond for ThrottleThenSignOut {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.tokens.sign_out();
+        ResponseTemplate::new(self.status).insert_header("Retry-After", "0")
+    }
+}
+
+#[tokio::test]
+async fn a_session_signed_out_during_the_throttling_wait_sends_nothing_more() {
+    for status in [429, 503] {
+        let setup = setup().await;
+        Mock::given(method("GET"))
+            .respond_with(ThrottleThenSignOut {
+                status,
+                tokens: Arc::clone(&setup.tokens),
+            })
+            .expect(1)
+            .mount(&setup.server)
+            .await;
+        let probe_setup = setup_with(FakeTokens::default()).await;
+        Mock::given(method("POST"))
+            .respond_with(ThrottleThenSignOut {
+                status,
+                tokens: Arc::clone(&probe_setup.tokens),
+            })
+            .expect(1)
+            .mount(&probe_setup.server)
+            .await;
+
+        let read = setup.transport.read(&conversations()).await.unwrap_err();
+        let own = probe_setup.transport.own_state(&probe()).await.unwrap_err();
+
+        assert!(matches!(read, HttpError::Credentials(_)), "after {status}: {read:?}");
+        assert!(matches!(own, HttpError::Credentials(_)), "after {status}: {own:?}");
+        assert_eq!(
+            setup.server.received_requests().await.unwrap().len(),
+            1,
+            "after {status}"
+        );
+        assert_eq!(
+            probe_setup.server.received_requests().await.unwrap().len(),
+            1,
+            "after {status}"
+        );
+        assert_eq!(
+            probe_setup.log.lines().len(),
+            1,
+            "the retry isn't logged either, after {status}"
+        );
     }
 }
 

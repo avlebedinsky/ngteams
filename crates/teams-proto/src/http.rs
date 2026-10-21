@@ -24,9 +24,10 @@
 //! - **Retries** (the transport's part of the plan's retry table), for reads and own-state requests: a 401 makes the
 //!   session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's maximum,
 //!   [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is the
-//!   only retry. Any other answer that isn't a success is [`HttpError::Status`]. A write is never sent again here:
-//!   its answer comes back whatever the status, for the outbox to decide, and after a 401 the session refreshes the
-//!   refused token for the outbox's next attempt.
+//!   only retry. The retry after a wait asks the session for its token again, never sends the one held before it: a
+//!   session signed out during the wait answers its error, and nothing is sent. Any other answer that isn't a success
+//!   is [`HttpError::Status`]. A write is never sent again here: its answer comes back whatever the status, for the
+//!   outbox to decide, and after a 401 the session refreshes the refused token for the outbox's next attempt.
 //! - **Tests** reach a mock only through [`HttpTransport::with_mock_origin`] (`test-support`): plain `http` to a
 //!   loopback origin, the URL built and checked as above first.
 //!
@@ -351,6 +352,8 @@ impl<C: Credentials> HttpTransport<C> {
             (429 | 503, ..) => {
                 let wait = first.retry_after().unwrap_or(DEFAULT_RETRY_WAIT);
                 tokio::time::sleep(wait.min(self.max_retry_wait)).await;
+                // the session may have signed out (or renewed) during the wait: the retry takes what it holds now
+                token = self.token(outgoing.service).await?;
                 true
             }
             _ => false,

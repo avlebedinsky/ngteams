@@ -564,9 +564,9 @@ impl LiveMembershipSource {
         let Some(credential) = Self::credential(&current).await else {
             return Membership::Partial(PartialReason::NoCredential);
         };
-        let bodies = match self.read_pair(id, &credential).await {
+        let bodies = match self.read_pair(id, &current, &credential).await {
             Err(REFUSED) => match Self::renewed(&current, &credential).await {
-                Some(renewed) => self.read_pair(id, &renewed).await,
+                Some(renewed) => self.read_pair(id, &current, &renewed).await,
                 None => Err(REFUSED),
             },
             read => read,
@@ -584,11 +584,22 @@ impl LiveMembershipSource {
         }
     }
 
-    /// A group chat's thread read, then its member list, both with `credential`; a refusal of either is [`REFUSED`],
-    /// so that both are read again with a renewed credential.
-    async fn read_pair(&self, id: &str, credential: &ChatCredential) -> Result<(Vec<u8>, Vec<u8>), PartialReason> {
+    /// A group chat's thread read with `credential`, then its member list with the credential `current` gives after
+    /// it: a source is asked again, since the session may have signed out (or renewed) while the thread was read, and
+    /// none any more is [`PartialReason::NoCredential`] with the member list never sent. A refusal of either read is
+    /// [`REFUSED`], so that both are read again with a renewed credential.
+    async fn read_pair(
+        &self,
+        id: &str,
+        current: &Credential,
+        credential: &ChatCredential,
+    ) -> Result<(Vec<u8>, Vec<u8>), PartialReason> {
         let thread = self.read_thread(id, credential, ThreadRead::Thread).await?;
-        let members = self.read_thread(id, credential, ThreadRead::Members).await?;
+        let after = match current {
+            Credential::Source(_) => Self::credential(current).await.ok_or(PartialReason::NoCredential)?,
+            Credential::None | Credential::Fixed(_) => credential.clone(),
+        };
+        let members = self.read_thread(id, &after, ThreadRead::Members).await?;
         Ok((thread, members))
     }
 

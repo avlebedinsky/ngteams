@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use teams_fence::{
     parse_group,
 };
 use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -479,6 +479,79 @@ async fn a_refusal_of_either_read_renews_the_token_once_and_reads_both_again_wit
             ("members".to_owned(), format!("Bearer {renewed}")),
         ],
         "both reads again, with the renewed token"
+    );
+    Ok(())
+}
+
+/// A native client's credential source whose session signs out while the thread is read: [`TOKEN`] until then, then
+/// none.
+#[derive(Default)]
+struct SignsOut {
+    signed_out: AtomicBool,
+    asked: AtomicUsize,
+}
+
+impl CredentialSource for SignsOut {
+    fn credential(&self) -> CredentialFuture<'_> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        let signed_out = self.signed_out.load(Ordering::SeqCst);
+        Box::pin(async move { (!signed_out).then(|| ChatCredential::bearer(BASE, TOKEN)).flatten() })
+    }
+}
+
+/// Answers the thread read with `thread`, signing the source out as it does.
+struct ThreadThenSignOut {
+    thread: Value,
+    tokens: Arc<SignsOut>,
+}
+
+impl Respond for ThreadThenSignOut {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.tokens.signed_out.store(true, Ordering::SeqCst);
+        ResponseTemplate::new(200).set_body_json(&self.thread)
+    }
+}
+
+#[tokio::test]
+async fn a_session_signed_out_during_the_thread_read_sends_no_member_list_read() -> TestResult {
+    let lab = Lab::new(Some(&group_id(GROUP)))?;
+    let server = MockServer::start().await;
+    let (thread, members) = bodies()?;
+    let tokens = Arc::new(SignsOut::default());
+    Mock::given(method("GET"))
+        .and(path(format!("/api/chatsvc/emea/v1/threads/{}", group_id(GROUP))))
+        .respond_with(ThreadThenSignOut {
+            thread,
+            tokens: Arc::clone(&tokens),
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/chatsvc/emea/v1/threads/{}/members",
+            group_id(GROUP)
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&members))
+        .mount(&server)
+        .await;
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?.with_lab(&lab.config);
+    source.set_credential_source(tokens.clone());
+
+    assert_eq!(
+        source.members(&group_chat()).await,
+        partial(PartialReason::NoCredential)
+    );
+    assert_eq!(
+        tokens.asked.load(Ordering::SeqCst),
+        2,
+        "asked again before the member list"
+    );
+    let sent = requests(&server).await;
+    assert_eq!(
+        sent.len(),
+        1,
+        "only the thread read went out: {:?}",
+        sent.iter().map(|r| r.url.path()).collect::<Vec<_>>()
     );
     Ok(())
 }
