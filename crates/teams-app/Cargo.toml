@@ -1,0 +1,30 @@
+[package]
+name = "teams-app"
+description = "The lab's GPUI app for one lab account, and its credential broker (`teams-app secrets`), which serves the account's own Secret Service items to the sandboxed app on a socket pair"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+# the broker's socket: whether the descriptor it is handed is open, before it is taken over
+libc.workspace = true
+# the broker's socket: a Unix stream socket, made close-on-exec once taken over
+rustix = { workspace = true, features = ["net"] }
+# the broker's protocol, its server loop and the Secret Service store
+teams-auth.workspace = true
+# lab.toml: the account an alias names (its UPN), and the lab's keyring application
+teams-fence.workspace = true
+thiserror.workspace = true
+# the broker's runtime: its socket, the Secret Service connected on the first request
+tokio = { workspace = true, features = ["net", "rt", "sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt"] }
+# the broker run as a process: its environment cleared, only its socket passed through
+ui-sandbox.workspace = true
+
+[lints]
+workspace = true

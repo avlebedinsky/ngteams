@@ -5,6 +5,7 @@ members = [
     "crates/fence-seal",
     "crates/fixture-guard",
     "crates/proto-lab",
+    "crates/teams-app",
     "crates/teams-auth",
     "crates/teams-core",
     "crates/teams-fence",

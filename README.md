@@ -24,12 +24,13 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 |---|---|
 | `crates/teams-fence` | the write fence: a write is allowed only when every participant of its target, read fresh, is a lab account or an approved service; the lab config (`lab.toml`, `chats.toml`), `fence.log` (appends locked across processes), the membership sources (`FailClosed`; `LiveMembershipSource`: 1:1 chats, and the lab's recorded group chat when both member reads agree on exactly a, b and c), the native client's credential for them (`CredentialSource`) |
 | `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, send a request outside the native request policy, send a Trouter frame that isn't a reviewed own frame, or reach a mock origin; a lab binary has its membership sources |
-| `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`); the `Session`: an access token per audience refreshed before it expires, the skypetoken renewed after its Entra token, throttling shared by waiting callers, renewal notifications |
+| `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`), the credential broker (`broker`: one account's secrets served on a socket, and the `BrokerSecretStore` a sandboxed process uses); the `Session`: an access token per audience refreshed before it expires, the skypetoken renewed after its Entra token, throttling shared by waiting callers, renewal notifications |
 | `crates/teams-proto` | Teams' internal API and the native HTTP transport. Three request classes only: reads (`GET`), a sealed own-state list logged to `fence.log` before it is sent (one entry: the messaging stack's endpoint registration), and sealed writes sent only as `Authorized<_>` with a `WritePermit` for their exact target (`SendMessage`, `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`, `ReadReceipt`, `Typing`, `CreateChat`; `StartCall`/`AddToCall` have no route yet). The chat model (`chat`: conversations, messages, versions, reactions, mentions, quotes, a sanitized rich-text tree, paging and sync links) and `MessageText`, which builds a message's markup and its mentioned MRIs from one value. The Trouter frame policy: a `FrameSink` that sends only the reviewed `OwnFrame`s, each logged first. A fixed host allowlist, `https` only, no proxy, no redirects, no hidden retries |
 | `crates/teams-store` | the account's SQLite store (`rusqlite`, bundled, WAL, `0600`): conversations, members, messages by version (edits, soft deletes), reactions per user, read horizons, sync state, the outbox; migrations; each open is a run, and a row of another open run is never taken over |
 | `crates/teams-trouter` | the native push channel: socket.io 0.9 over WSS to the Trouter hosts only, `user.authenticate` first, keep-alives, the registrar registration of the messaging stack, reconnects with backoff and on token renewal, deliveries turned into typed chat events and never answered (an incoming call included) |
 | `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out) |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; clients reach it through the `test-support` mock origins |
+| `crates/teams-app` | the lab's GPUI app for one lab account (from M2 Task 6), and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and checks each fixture's `_synthetic` marker |
@@ -222,6 +223,21 @@ flock ~/.local/share/teams-lab/live.lock timeout --signal=INT --kill-after=60 15
   env TEAMS_HEADLESS_BIN=$PWD/target/lab/debug/teams-headless PROTO_LAB_LIVE=1 \
   cargo test -p teams-headless --features live --test chat_live -- --nocapture
 ```
+
+## `teams-app secrets`
+
+The credential broker for a lab app in the UI sandbox, whose session bus is the sandbox's own: started outside the
+sandbox, with the user's bus, by whoever starts the app, on one end of a socket pair whose other end the app gets.
+
+```sh
+teams-app secrets --lab a --fd 3   # serves a's own teams-lab items on descriptor 3 until the socket closes
+```
+
+It serves `get`, `put` and `delete` of the account's own items, by audience, and answers any other account or
+application "refused" without reaching a store; a malformed or oversized frame closes the socket. It connects the
+Secret Service only on the first request it serves, opens no window, prints nothing on stdout, notes on stderr only
+the requests it refused or failed (operation, account, audience; never a value), and exits when the socket closes (0
+when the peer closed it between requests). The starter keeps no copy of the broker's end.
 
 ## Captures and fixtures
 

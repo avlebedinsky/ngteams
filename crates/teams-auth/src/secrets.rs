@@ -1,7 +1,8 @@
 //! Secret storage for refresh tokens and skypetokens, one secret per account and audience.
 //!
 //! [`KeyringSecretStore`] keeps them in the Secret Service (gnome-keyring) through `oo7`; [`MemorySecretStore`] is the
-//! in-memory backend for tests. A [`Secret`] never shows its value in `Debug` and has no `Display`: the only way to the
+//! in-memory backend for tests; a sandboxed process reaches one account's items through the credential broker
+//! ([`crate::broker::BrokerSecretStore`]). A [`Secret`] never shows its value in `Debug` and has no `Display`: the only way to the
 //! value is [`Secret::expose`], so a token can't reach a log by accident.
 
 use std::collections::BTreeMap;
@@ -74,6 +75,9 @@ pub enum SecretError {
     Keyring(Box<oo7::Error>),
     #[error("the stored secret is not UTF-8")]
     NotUtf8,
+    /// The credential broker's store ([`crate::broker::BrokerSecretStore`]) didn't do it.
+    #[error(transparent)]
+    Broker(#[from] crate::broker::BrokerError),
 }
 
 impl From<oo7::Error> for SecretError {

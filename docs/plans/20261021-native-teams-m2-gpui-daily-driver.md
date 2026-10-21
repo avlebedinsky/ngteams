@@ -450,14 +450,39 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
   Task 6), tests
 - Modify: `Cargo.toml` (member), `crates/teams-auth/src/secrets.rs` (if `BrokerSecretStore` lives there)
 
-- [ ] tests first: `teams-app secrets --lab <alias>` serves `get`, `put` and `delete` of that account's own
+- [x] tests first: `teams-app secrets --lab <alias>` serves `get`, `put` and `delete` of that account's own
       `teams-lab` keys on a socket pair and refuses any other account or application name; a framed protocol with a
       size cap; a malformed or oversized frame closes the socket
-- [ ] tests first: the app's `BrokerSecretStore` over it passes `Session`'s renewal tests (a renewal's new tokens
+- [x] tests first: the app's `BrokerSecretStore` over it passes `Session`'s renewal tests (a renewal's new tokens
       stored through it); offline tests serve a `MemorySecretStore`
-- [ ] no value in either side's output, log or `Debug` (only the key's account and audience); the broker opens no
+- [x] no value in either side's output, log or `Debug` (only the key's account and audience); the broker opens no
       window and no desktop client and exits when the socket closes (tests)
-- [ ] `[lints] workspace = true`; `cargo test -p teams-app -p teams-auth` and the gate pass
+- [x] `[lints] workspace = true`; `cargo test -p teams-app -p teams-auth` and the gate pass
+- Done (2026-10-21), where it differs from the lines above:
+  - The protocol, its server loop (`serve`) and `BrokerSecretStore` live in `teams-auth`'s new `broker` module, not in
+    `secrets.rs` (which gains only `SecretError::Broker`), so `Session`'s tests run on it inside `teams-auth`.
+    `teams-app` (a lib beside `main.rs`: `cli`, `secrets`) is the subcommand: it takes over the socket, reads the
+    alias's UPN from `lab.toml` and serves `teams-lab` for it.
+  - The command line is `teams-app secrets --lab <alias> --fd <n>`: the socket's descriptor is named, 3 or above,
+    checked open and a Unix stream socket before it is taken over, and made close-on-exec.
+  - The wire: a 4-byte big-endian length and 1 to 64 KiB; a request is an operation byte and length-prefixed UTF-8
+    fields (application, account, audience, the secret for `put`), nothing after; an answer a status byte (done,
+    found, missing, refused, failed) and the secret or the store's error. A request names its application, so a
+    lab broker refuses a `teams-personal` client. The account matches exactly; an empty audience is refused.
+    Frames carrying a secret are zeroed on drop.
+  - The client does blocking reads and writes on tokio's blocking pool, one exchange at a time, so it works from any
+    runtime (the engine's own) and a Secret Service unlock prompt holds up no runtime thread. After a socket error or
+    a malformed answer it drops the connection and every later call fails (`BrokerError::Closed`).
+  - The broker connects the Secret Service on the first request it serves (`LazyKeyring`), so a broker that only
+    refuses or only sees its socket close never reaches the bus; that is how the process tests run the real binary
+    (cleared environment, only its socket passed, canary bus, Wayland and niri sockets that must stay unreached)
+    without a keyring. It notes on stderr only refused or failed requests.
+  - It runs in any build, `cargo test`'s included: it reaches no fence, transport or mock origin, so the
+    `test-support` refusal is the app's (Task 6), not the broker's.
+  - `Session`'s tests moved to `tests/session/cases.rs`, loaded twice (`tests/session/{in_memory,
+    through_the_broker}.rs`, one `#[expect(clippy::duplicate_mod)]`): all 26 run on a `MemorySecretStore` and through
+    the broker, and the renewal tests also check the rotated refresh token and the renewed skypetoken in the store
+    behind the broker.
 
 ### Task 5: The engine grows what the UI needs
 **Files:**

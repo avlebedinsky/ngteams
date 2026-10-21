@@ -6312,6 +6312,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "teams-app"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "rustix",
+ "teams-auth",
+ "teams-fence",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "ui-sandbox",
+]
+
+[[package]]
 name = "teams-auth"
 version = "0.1.0"
 dependencies = [
