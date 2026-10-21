@@ -1,15 +1,13 @@
 //! A lab account's native client, as the binary builds it: the fence from [`Fence::open_lab`] (the roster from
 //! `lab.toml`, the lab's `fence.log`), the tokens from the Secret Service (`teams-lab`, [`LabPaths::KEYRING_APPLICATION`],
 //! as `proto-lab auth` stored them) through the account's [`Session`], the chat base from the region record
-//! `proto-lab auth` saved ([`LabPaths::region_file`]), the 1:1 chats' members read live ([`LiveMembershipSource`]),
-//! and the store at [`LabPaths::store_file`]. Nothing here reads or prints a token: the session asks the Secret
-//! Service for one only when a request needs it.
+//! `proto-lab auth` saved ([`LabPaths::region_file`], read by [`Region::load`]), the 1:1 chats' members read live
+//! ([`LiveMembershipSource`]), and the store at [`LabPaths::store_file`]. Nothing here reads or prints a token: the
+//! session asks the Secret Service for one only when a request needs it.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde_json::Value;
-use teams_auth::authz::{AuthzClient, AuthzError, Region};
+use teams_auth::authz::{AuthzClient, AuthzError, CHAT_BASE_GTM, Region, RegionFileError};
 use teams_auth::secrets::{KeyringSecretStore, SecretError};
 use teams_auth::session::Session;
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
@@ -23,10 +21,6 @@ use teams_trouter::Trouter;
 
 use crate::chat::LabNames;
 
-/// The GTM the chat base comes from, as the web client takes it (`useChatServiceAfd`); the session falls back to
-/// `chatService` when the region lacks it.
-pub const CHAT_BASE_GTM: &str = "chatServiceAfd";
-
 /// Why the lab's client couldn't be set up.
 #[derive(Debug, thiserror::Error)]
 pub enum LabError {
@@ -38,14 +32,8 @@ pub enum LabError {
     Fence(#[from] OpenError),
     #[error("lab.toml has no MRI for {0} yet (run `proto-lab login {0}`)")]
     NoMri(Alias),
-    #[error("can't read the region record {} (run `proto-lab auth {alias}`): {source}", path.display())]
-    Region {
-        alias: Alias,
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("{} isn't a region record (run `proto-lab auth`)", .0.display())]
-    BadRegion(PathBuf),
+    #[error("{source} (run `proto-lab auth {alias}`)")]
+    Region { alias: Alias, source: RegionFileError },
     #[error("the region has neither a chatServiceAfd nor a chatService GTM")]
     NoChatBase,
     #[error("the chat transport can't be built: {0}")]
@@ -113,7 +101,10 @@ impl Lab {
     pub async fn start_engine(&self, push: bool) -> Result<EngineHandle, LabError> {
         let account = self.config.account(self.alias);
         let mri = account.mri.clone().ok_or(LabError::NoMri(self.alias))?;
-        let region = read_region(self.alias, &self.paths().region_file(self.alias))?;
+        let region = Region::load(&self.paths().region_file(self.alias)).map_err(|source| LabError::Region {
+            alias: self.alias,
+            source,
+        })?;
         let fence = Arc::new(Fence::open_lab()?);
         let store = self.open_store()?;
         let secrets = KeyringSecretStore::new(LabPaths::KEYRING_APPLICATION).await?;
@@ -158,21 +149,4 @@ impl Lab {
 #[must_use]
 pub fn display_name(upn: &str) -> &str {
     upn.split_once('@').map_or(upn, |(local, _)| local)
-}
-
-/// The region `proto-lab auth` saved for the account.
-///
-/// # Errors
-/// [`LabError::Region`] when the file can't be read, [`LabError::BadRegion`] when it isn't a region record.
-pub fn read_region(alias: Alias, path: &Path) -> Result<Region, LabError> {
-    let text = std::fs::read_to_string(path).map_err(|source| LabError::Region {
-        alias,
-        path: path.to_owned(),
-        source,
-    })?;
-    serde_json::from_str::<Value>(&text)
-        .ok()
-        .as_ref()
-        .and_then(Region::from_json)
-        .ok_or_else(|| LabError::BadRegion(path.to_owned()))
 }

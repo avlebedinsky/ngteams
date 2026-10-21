@@ -10,7 +10,7 @@ use teams_store::{OutboxEntry, OutboxState, Store, StoreError};
 use teams_trouter::Stop;
 
 use crate::chat::LabNames;
-use crate::print::{conversation_line, event_json, event_line, message_line, now_ms, write_lines};
+use crate::print::{conversation_line, event_json, event_line, json_line, message_line, now_ms, visible, write_lines};
 
 /// Why a command failed.
 #[derive(Debug, thiserror::Error)]
@@ -62,7 +62,7 @@ pub fn show(
 }
 
 /// A catch-up, and its summary: `caught_up conversations=<n> inserted=<n> updated=<n> failed=<n>`, then one
-/// `failed <conversation> <error>` line per conversation it couldn't sync.
+/// `failed <conversation> <error>` line per conversation it couldn't sync ([`visible`]).
 ///
 /// # Errors
 /// The catch-up's error, or when the output can't be written.
@@ -77,7 +77,11 @@ pub async fn sync(handle: &EngineHandle, out: &mut impl Write) -> Result<CatchUp
         report.failed.len()
     )?;
     for failed in &report.failed {
-        writeln!(out, "failed {} {}", failed.conversation, failed.error)?;
+        writeln!(
+            out,
+            "{}",
+            visible(&format!("failed {} {}", failed.conversation, failed.error))
+        )?;
     }
     Ok(report)
 }
@@ -152,7 +156,7 @@ pub enum WatchEnd {
 }
 
 /// Prints each event as it is received, with its receive time: one JSON object per line with `json`
-/// ([`event_json`]), else a line of text ([`event_line`]); each line flushed at once. Runs until `stop` is ready, the
+/// ([`event_json`], as [`json_line`] writes it), else a line of text ([`event_line`]); each line flushed at once. Runs until `stop` is ready, the
 /// push channel stops for good, or the engine stops.
 ///
 /// # Errors
@@ -174,7 +178,7 @@ pub async fn watch(
                     return Ok(WatchEnd::EngineStopped);
                 };
                 let line = if json {
-                    event_json(&event, received, names).to_string()
+                    json_line(&event_json(&event, received, names))
                 } else {
                     event_line(&event, received, names)
                 };

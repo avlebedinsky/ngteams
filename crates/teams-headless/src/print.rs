@@ -1,6 +1,10 @@
 //! What the commands print: stored conversations and messages, a write's outcome, and the engine's events (as text,
 //! or one JSON object per line for `watch --json`). Times are milliseconds since the Unix epoch. Nothing printed
-//! carries a token: the engine's events and errors carry none.
+//! carries a token: the engine's events and errors carry none. What the service sent (a message's text, a topic, an
+//! MRI, an error) reaches the terminal only through [`visible`] or [`json_line`], so no control character in it acts on
+//! the terminal.
+
+use std::fmt::Write as _;
 
 use serde_json::{Value, json};
 use teams_core::{Cause, Event, MessageChange};
@@ -17,6 +21,53 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Whether a character would act on a terminal, or reorder the text after it, if printed as it is: the C0 controls
+/// (a line break and a tab too), DEL, the C1 controls, and the bidirectional formatting characters (the marks, the
+/// embeddings and overrides, the isolates).
+#[must_use]
+pub fn is_terminal_control(character: char) -> bool {
+    // `is_control` is the Cc category: U+0000–U+001F and U+007F–U+009F
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// `text` as a line of output shows it: every [terminal control](is_terminal_control) as its escape (`\u{1b}`), the
+/// rest as it is.
+#[must_use]
+pub fn visible(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    for character in text.chars() {
+        if is_terminal_control(character) {
+            shown.extend(character.escape_unicode());
+        } else {
+            shown.push(character);
+        }
+    }
+    shown
+}
+
+/// A JSON value on one line, with every [terminal control](is_terminal_control) in its strings as a JSON escape
+/// (`\u001b`): serde escapes the C0 controls, this the rest. The same JSON value, never a raw control.
+#[must_use]
+pub fn json_line(value: &Value) -> String {
+    let text = value.to_string();
+    let mut line = String::with_capacity(text.len());
+    for character in text.chars() {
+        // outside a string JSON has only ASCII punctuation, digits, letters and spaces, so every such character is
+        // inside one, where an escape stands for it
+        if is_terminal_control(character) {
+            // every terminal control is in the Basic Multilingual Plane: one `\uXXXX`; a write to a String can't fail
+            let _ = write!(line, "\\u{:04x}", u32::from(character));
+        } else {
+            line.push(character);
+        }
+    }
+    line
 }
 
 /// The text a reader sees of a message: rich text read as plain text, plain text as it is, nothing once deleted, and
@@ -37,7 +88,7 @@ pub fn message_text(message: &Message) -> String {
     }
 }
 
-/// One stored conversation: `<last activity> <kind> <id> <topic, or its members>`.
+/// One stored conversation: `<last activity> <kind> <id> <topic, or its members>`, [`visible`].
 #[must_use]
 pub fn conversation_line(conversation: &Conversation, members: &[Member], names: &LabNames) -> String {
     let activity = conversation
@@ -51,11 +102,15 @@ pub fn conversation_line(conversation: &Conversation, members: &[Member], names:
             format!("with {}", shown.join(", "))
         }
     };
-    format!("{activity} {} {} {about}", conversation.kind.as_str(), conversation.id)
+    visible(&format!(
+        "{activity} {} {} {about}",
+        conversation.kind.as_str(),
+        conversation.id
+    ))
 }
 
 /// One stored message: `<arrival> <id> <sender>[ (edited)][ (deleted)][: <text>][ [<key>: <users>; …]]`, the
-/// text's line breaks as ` / `.
+/// text's line breaks as ` / `, the rest [`visible`].
 #[must_use]
 pub fn message_line(message: &Message, reactions: &[Reaction], names: &LabNames) -> String {
     let sender = message
@@ -79,7 +134,7 @@ pub fn message_line(message: &Message, reactions: &[Reaction], names: &LabNames)
         line.push_str(&reaction_summary(reactions, names));
         line.push(']');
     }
-    line
+    visible(&line)
 }
 
 /// `<key>: <user>, <user>; <key>: …`, each key once, in the order first set.
@@ -100,7 +155,7 @@ fn reaction_summary(reactions: &[Reaction], names: &LabNames) -> String {
 
 /// What a write prints: its start time, the message's `OriginalArrivalTime` for a post (`arrival`: the stored
 /// message's, which the service gave it), and the id it acted on (a post's new message), each on a line of its own,
-/// then the row's state, and its error when it didn't go through.
+/// then the row's state, and its error when it didn't go through; each line [`visible`].
 #[must_use]
 pub fn write_lines(started_ms: i64, row: &OutboxEntry, arrival: Option<i64>, post: bool) -> Vec<String> {
     let mut lines = vec![format!("start_ms {started_ms}")];
@@ -116,7 +171,7 @@ pub fn write_lines(started_ms: i64, row: &OutboxEntry, arrival: Option<i64>, pos
     if let Some(error) = row.last_error.as_ref().filter(|_| row.state != OutboxState::Sent) {
         lines.push(format!("error {error}"));
     }
-    lines
+    lines.iter().map(|line| visible(line)).collect()
 }
 
 fn cause(cause: Cause) -> &'static str {
@@ -237,7 +292,7 @@ fn with_message(mut value: Value, message: Option<&Message>, names: &LabNames) -
     value
 }
 
-/// One event as a line of text: `<received> <event> <its fields as key=value>`.
+/// One event as a line of text: `<received> <event> <its fields as key=value>`, each value as [`json_line`] writes it.
 #[must_use]
 pub fn event_line(event: &Event, received_ms: i64, names: &LabNames) -> String {
     let fields = event_fields(event, names);
@@ -252,7 +307,7 @@ pub fn event_line(event: &Event, received_ms: i64, names: &LabNames) -> String {
             line.push(' ');
             line.push_str(&key);
             line.push('=');
-            line.push_str(&value.to_string());
+            line.push_str(&json_line(&value));
         }
     }
     line

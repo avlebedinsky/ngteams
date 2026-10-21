@@ -11,6 +11,7 @@ use teams_headless::chat;
 use teams_headless::cli::{Cli, Command};
 use teams_headless::commands::{self, WatchEnd};
 use teams_headless::lab::Lab;
+use teams_headless::print::visible;
 use teams_proto::chat::MessageText;
 use teams_store::OutboxState;
 use teams_trouter::Stop;
@@ -41,7 +42,8 @@ fn main() -> ExitCode {
     match runtime.block_on(run(cli)) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("teams-headless: {error}");
+            // an error can carry what the service sent (a conversation id, its message)
+            eprintln!("teams-headless: {}", visible(&error.to_string()));
             ExitCode::FAILURE
         }
     }

@@ -940,7 +940,8 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
         flock ~/.local/share/teams-lab/live.lock sh -c '
           timeout --signal=INT --kill-after=60 300 target/debug/teams-headless b watch --json \
             > "$0/b-watch.jsonl" 2> "$0/b-watch.err" & WATCH=$!
-          timeout 120 sh -c "until grep -q caught_up $0/b-watch.jsonl; do sleep 1; done"
+          timeout 120 sh -c "until grep -q registered.:true $0/b-watch.jsonl \
+            && grep -q caught_up $0/b-watch.jsonl; do sleep 1; done"
           timeout --signal=INT --kill-after=60 180 target/debug/teams-headless a send b "M1 Task 19 live: a to b" \
             > "$0/a-send.txt" 2> "$0/a-send.err"
           sleep 10; kill -TERM "$WATCH"; wait

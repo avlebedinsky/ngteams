@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use teams_fence::{
     ChatCredential, CredentialFuture, CredentialSource, DenyReason, Fence, FenceLog, FetchFailure,
     LiveMembershipSource, MAX_BODY, Membership, MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind,
-    chat_service_path, is_group_chat_id, one_to_one_pair, parse_thread,
+    chat_service_path, is_group_chat_id, one_to_one_id, one_to_one_pair, parse_thread,
 };
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -298,6 +298,36 @@ fn parse_thread_finds_pagination_truncation_and_bad_shapes() -> TestResult {
     assert_eq!(with(&|body| body["members"][0]["id"] = json!(7)), malformed());
     assert_eq!(parse_thread(&id, &json!([1, 2])), malformed());
     Ok(())
+}
+
+#[test]
+fn a_one_to_one_chat_id_is_built_from_its_two_members_and_read_back_to_them() {
+    let (a, b) = (
+        format!("8:orgid:{GUID_A}"),
+        format!("8:orgid:{}", GUID_B.to_ascii_uppercase()),
+    );
+    // the object ids sorted and lowercased, whichever account comes first
+    for (first, second) in [(&a, &b), (&b, &a)] {
+        let id = one_to_one_id(first, second);
+        assert_eq!(id, Some(chat_id()), "{first} {second}");
+        assert_eq!(
+            one_to_one_pair(&id.unwrap_or_default()),
+            Some([mri(GUID_A), mri(GUID_B)])
+        );
+    }
+    let same_in_another_case = format!("8:orgid:{}", GUID_A.to_ascii_uppercase());
+    for (first, second) in [
+        (a.as_str(), a.as_str()),
+        (a.as_str(), same_in_another_case.as_str()),
+        (a.as_str(), ""),
+        ("28:a-bot", b.as_str()),
+        ("8:orgid:not-a-guid", b.as_str()),
+        // 36 characters of hex digits and dashes, but not a GUID's groups
+        ("8:orgid:----00000000000000000000000000000000", b.as_str()),
+        (GUID_A, b.as_str()),
+    ] {
+        assert_eq!(one_to_one_id(first, second), None, "{first} {second}");
+    }
 }
 
 #[test]

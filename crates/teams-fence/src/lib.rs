@@ -33,7 +33,8 @@ pub use log::{
 };
 pub use membership::{
     AFD_HOSTS, ChatCredential, CredentialFuture, CredentialSource, FETCH_TIMEOUT, LiveMembershipSource,
-    LiveSourceError, MAX_BODY, REGIONAL_SUFFIX, chat_service_path, is_group_chat_id, one_to_one_pair, parse_thread,
+    LiveSourceError, MAX_BODY, REGIONAL_SUFFIX, chat_service_path, is_group_chat_id, one_to_one_id, one_to_one_pair,
+    parse_thread,
 };
 pub use target::{Mri, Scope, Target, WriteKind};
 

@@ -12,6 +12,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::StatusCode;
@@ -36,6 +38,10 @@ const ERROR_CODE_LIMIT: usize = 100;
 /// (`chatServiceAfd` → `chatService`), and the image service, which has the middle tier's base
 /// (`docs/protocol/auth.md`).
 const GTM_FALLBACKS: [(&str, &str); 2] = [("chatServiceAfd", "chatService"), ("mtImageService", "middleTier")];
+
+/// The GTM the chat service's base comes from, as the web client takes it (`useChatServiceAfd`); [`Region::base`]
+/// falls back to `chatService` when the region lacks it.
+pub const CHAT_BASE_GTM: &str = "chatServiceAfd";
 
 /// Where `account`'s skypetoken lives in a [`SecretStore`].
 #[must_use]
@@ -97,6 +103,23 @@ impl Region {
         })
     }
 
+    /// Reads back a region record a lab saved ([`Self::to_json`]'s keys, and any others beside them).
+    ///
+    /// # Errors
+    /// [`RegionFileError::Read`] when the file can't be read, [`RegionFileError::NotARecord`] when it isn't a region
+    /// record.
+    pub fn load(path: &Path) -> Result<Self, RegionFileError> {
+        let text = std::fs::read_to_string(path).map_err(|source| RegionFileError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+        serde_json::from_str::<Value>(&text)
+            .ok()
+            .as_ref()
+            .and_then(Self::from_json)
+            .ok_or_else(|| RegionFileError::NotARecord(path.to_owned()))
+    }
+
     /// The base URL of one regional service, such as `chatServiceAfd` or `middleTier`, as returned.
     #[must_use]
     pub fn endpoint(&self, service: &str) -> Option<&str> {
@@ -119,6 +142,15 @@ impl Region {
             .map(str::trim)
             .find(|base| !base.is_empty())
     }
+}
+
+/// Why a saved region can't be read back ([`Region::load`]).
+#[derive(Debug, thiserror::Error)]
+pub enum RegionFileError {
+    #[error("can't read the region record {}: {source}", path.display())]
+    Read { path: PathBuf, source: io::Error },
+    #[error("{} isn't a region record", .0.display())]
+    NotARecord(PathBuf),
 }
 
 /// A skypetoken and what came with it. `Debug` shows no token.

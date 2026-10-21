@@ -1,6 +1,7 @@
 //! Which chat a command means, and the lab accounts' names for the MRIs it prints.
 
 use teams_fence::lab::{Alias, LabConfig};
+use teams_fence::one_to_one_id;
 
 /// The lab accounts' MRIs, from `lab.toml` (each known after the account's first login).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -89,19 +90,4 @@ pub fn resolve(arg: &str, me: Alias, names: &LabNames, abc: Option<&str>) -> Res
         return Ok(arg.to_owned());
     }
     Err(ChatError::NotAChat(arg.to_owned()))
-}
-
-/// The 1:1 chat id of two work accounts, as the web client builds it: `19:<oid>_<oid>@unq.gbl.spaces`, the two object
-/// ids (lowercase) sorted. `None` unless both MRIs are `8:orgid:<oid>` of two different accounts.
-#[must_use]
-pub fn one_to_one_id(mri_a: &str, mri_b: &str) -> Option<String> {
-    let oid = |mri: &str| {
-        let oid = mri.strip_prefix("8:orgid:")?.to_ascii_lowercase();
-        let shaped = oid.len() == 36 && oid.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
-        shaped.then_some(oid)
-    };
-    let mut oids = [oid(mri_a)?, oid(mri_b)?];
-    oids.sort();
-    let [first, second] = oids;
-    (first != second).then(|| format!("19:{first}_{second}@unq.gbl.spaces"))
 }

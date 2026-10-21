@@ -528,6 +528,21 @@ pub fn one_to_one_pair(id: &str) -> Option<[Mri; 2]> {
     Some([mri(first), mri(second)])
 }
 
+/// The 1:1 chat id of two work accounts, as the web client builds it: `19:<oid>_<oid>@unq.gbl.spaces`, the two object
+/// ids (lowercase) sorted; [`one_to_one_pair`] reads it back. `None` unless both MRIs are `8:orgid:<oid>` (a GUID) of
+/// two different accounts.
+#[must_use]
+pub fn one_to_one_id(mri_a: &str, mri_b: &str) -> Option<String> {
+    let oid = |mri: &str| {
+        let oid = mri.strip_prefix("8:orgid:")?;
+        is_guid(oid).then(|| oid.to_ascii_lowercase())
+    };
+    let mut oids = [oid(mri_a)?, oid(mri_b)?];
+    oids.sort();
+    let [first, second] = oids;
+    (first != second).then(|| format!("19:{first}_{second}{ONE_TO_ONE_SUFFIX}"))
+}
+
 /// The suffix of a group (or meeting) chat's conversation id.
 const GROUP_SUFFIX: &str = "@thread.v2";
 
