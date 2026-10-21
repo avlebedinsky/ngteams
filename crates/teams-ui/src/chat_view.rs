@@ -46,7 +46,8 @@
 //!   account's read horizon moves to the newest message from someone else that is after it, [`READ_DEBOUNCE`] after
 //!   the view settles, one at a time.
 //! - **Opened at a message** ([`ChatView::reveal`], a search's hit, M2 Task 15): the view reads the store back to the
-//!   message, scrolls to it and selects it; the list stops following the newest.
+//!   message, scrolls to it and selects it; the list stops following the newest. Until the message is shown no read
+//!   receipt goes, and one already waiting is dropped.
 //!
 //! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds;
 //! `chat-view revealed`: the message opened at; `typing shown`/`cleared`; `outbox shown`: the rows shown and their
@@ -1703,11 +1704,15 @@ impl ChatView {
     }
 
     /// The newest message a read receipt would move the account's horizon to now, with its arrival time, if one is
-    /// due: the setting on, the chat shown, the window active, the list at the newest message, and someone else's
-    /// message after the horizon that the store counts unread (and that carries the `clientmessageid` a receipt names).
+    /// due: the setting on, the chat shown, the window active, the list at the newest message and not on its way to a
+    /// message it opens at ([`ChatView::reveal`]: until that load ends the list only seems to follow the newest), and
+    /// someone else's message after the horizon that the store counts unread (and that carries the `clientmessageid` a
+    /// receipt names).
     fn receipt_target(&self, cx: &App) -> Option<(String, i64)> {
         let wanted = self.shown == Visibility::Shown
             && self.active == Activation::Active
+            && self.reveal.is_none()
+            && self.revealing.is_none()
             && self.list.is_following_tail()
             && self.settings.read(cx).settings().send_read_receipts;
         if !wanted {

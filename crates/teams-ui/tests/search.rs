@@ -17,10 +17,10 @@ use std::sync::Arc;
 
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
-use teams_core::Event;
+use teams_core::{Action, Event};
 use teams_store::search::{MATCH_END, MATCH_START};
 use teams_store::{Conversation, ConversationKind, Member, Message};
-use teams_ui::chat_view::{ChatView, PAGE};
+use teams_ui::chat_view::{ChatView, PAGE, READ_DEBOUNCE};
 use teams_ui::search::{MAX_HITS, MIN_QUERY, YOU, searchable, split_snippet};
 use teams_ui::settings::Settings;
 use teams_ui::shell::{Main, Shell};
@@ -398,6 +398,65 @@ fn a_hit_in_the_chat_already_open_scrolls_its_view_to_the_message() {
     draw(cx);
     opened_at(&shell, cx, AB, OLD);
     assert_eq!(chat_view(&shell, cx), before, "the same view");
+}
+
+/// The read receipts asked for, by message id.
+fn receipts(rig: &Rig) -> Vec<String> {
+    rig.core
+        .actions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Read { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_hit_s_chat_sends_no_read_receipt_for_the_newest_while_it_reads_back_to_the_hit() {
+    let rig = seeded();
+    // b's messages carry the `clientmessageid` a receipt names, none of them read: the newest would be due
+    for message in rig.core.messages.lock().unwrap().get_mut(AB).unwrap() {
+        if message.sender.as_deref() == Some(LAB_B) {
+            message.client_message_id = Some(format!("1{}", message.id));
+        }
+    }
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    // the newest page's load is answered, the load reading back to the hit held (the engine busy elsewhere)
+    *rig.core.unsettled_before_hold.lock().unwrap() = 1;
+    *rig.core.hold_unsettled.lock().unwrap() = true;
+    cx.simulate_keystrokes("ctrl-shift-f");
+    cx.simulate_input("zeppelin plan");
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(
+        rig.core.held_unsettled.lock().unwrap().len(),
+        1,
+        "the reveal's load waits"
+    );
+    for _ in 0..3 {
+        cx.executor().advance_clock(READ_DEBOUNCE);
+        draw(cx);
+    }
+    assert!(receipts(&rig).is_empty(), "none before the hit is shown");
+
+    *rig.core.hold_unsettled.lock().unwrap() = false;
+    let held: Vec<_> = rig.core.held_unsettled.lock().unwrap().drain(..).collect();
+    for answer in held {
+        answer.send(Ok(Vec::new()));
+    }
+    draw(cx);
+    opened_at(&shell, cx, AB, OLD);
+    cx.executor().advance_clock(READ_DEBOUNCE);
+    draw(cx);
+    assert!(receipts(&rig).is_empty(), "nor once the list stays at the hit");
+    let view = chat_view(&shell, cx);
+    assert_eq!(cx.update(|_, cx| view.read(cx).receipts()), 0);
 }
 
 #[test]

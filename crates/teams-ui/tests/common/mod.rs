@@ -81,6 +81,8 @@ pub struct FakeCore {
     /// in `held_unsettled`, never sent.
     pub hold_unsettled: Mutex<bool>,
     pub held_unsettled: Mutex<Vec<Answer<Vec<OutboxEntry>>>>,
+    /// While `hold_unsettled` is set, how many `outbox_unsettled` are still answered before the hold applies.
+    pub unsettled_before_hold: Mutex<usize>,
     /// The rows earlier runs left.
     pub earlier: Mutex<Vec<OutboxEntry>>,
     /// Every search asked for, its query, in order.
@@ -113,6 +115,7 @@ impl Default for FakeCore {
             unsettled: Mutex::default(),
             hold_unsettled: Mutex::new(false),
             held_unsettled: Mutex::default(),
+            unsettled_before_hold: Mutex::new(0),
             earlier: Mutex::default(),
             searches: Mutex::default(),
         }
@@ -345,7 +348,7 @@ impl Core for FakeCore {
     }
 
     fn outbox_unsettled(&self, conversation: String) -> Reply<Vec<OutboxEntry>> {
-        if !*locked(&self.stopped) && *locked(&self.hold_unsettled) {
+        if !*locked(&self.stopped) && *locked(&self.hold_unsettled) && !counted_down(&self.unsettled_before_hold) {
             locked(&self.asked).push("outbox_unsettled");
             let (answer, reply) = Reply::later();
             locked(&self.held_unsettled).push(answer);
@@ -396,6 +399,14 @@ impl Core for FakeCore {
             hits
         })
     }
+}
+
+/// Whether `count` was above zero, taking one off it.
+fn counted_down(count: &Mutex<usize>) -> bool {
+    let mut count = locked(count);
+    let was = *count > 0;
+    *count = count.saturating_sub(1);
+    was
 }
 
 /// `content` with its first match of `term` (lower case; ASCII content) between the store's match marks.
