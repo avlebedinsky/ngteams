@@ -536,6 +536,8 @@ pub struct SessionOptions {
     pub live_members: bool,
     /// Record the run as a capture of this scenario (`captures/<scenario>/<ts>/` in the lab's data dir).
     pub capture: Option<String>,
+    /// Whether the capture keeps request bodies; `login` keeps none ([`Capture::without_request_bodies`]).
+    pub capture_request_bodies: bool,
     pub display: Display,
     /// The browser's camera and microphone: the system's (and a prompt), or Chrome's fake devices, the microphone
     /// playing a WAV file (`echo-call`).
@@ -553,6 +555,7 @@ impl SessionOptions {
             frames: FrameClassifier::seeded(),
             live_members: false,
             capture: None,
+            capture_request_bodies: true,
             display: Display::Headless,
             media: Media::System,
             user_agent: None,
@@ -652,6 +655,11 @@ impl LabSession {
         let armed = match &recorder {
             Some(recorder) => {
                 let capture = Capture::new(Arc::clone(recorder), RtcHooks::default());
+                let capture = if options.capture_request_bodies {
+                    capture
+                } else {
+                    capture.without_request_bodies()
+                };
                 ArmedBrowser::arm_capturing(browser, http, ws, &ArmOptions::default(), capture).await?
             }
             None => ArmedBrowser::arm(browser, http, ws, &ArmOptions::default()).await?,

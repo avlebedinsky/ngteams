@@ -362,15 +362,20 @@ ui-sandbox (tests and lab runs only: weston + nested niri, private D-Bus, virtua
   `crates/proto-lab/src/commands/login.rs` (records a capture), `docs/protocol/endpoints.md`
 - Delete or shrink: `docs/backlog/seeded-own-rules-ignore-the-query.md`
 
-- [ ] tests first: the Entra token endpoint is own-state only with one of the two query key sets the captures show
+- [x] tests first: the Entra token endpoint is own-state only with one of the two query key sets the captures show
       (`client-request-id` alone, or with `brk_client_id`, `brk_redirect_uri` and `client_id`), each key once; authz
       only with no query; any other key set or a repeated key is `Unknown`
-- [ ] `login` records its run like a scenario (fail-closed, under `captures/login/<ts>/`), so the sign-in form's
+- [x] `login` records its run like a scenario (fail-closed, under `captures/login/<ts>/`), so the sign-in form's
       queries can be reviewed; until a capture shows them, the sign-in form keeps its path match and the backlog item
       keeps that part (tightening it blind could break `login`, which runs only when a session has expired). Task
       24's guard reuses these exact shapes
-- [ ] live: `proto-lab run load --headless` and `proto-lab status a b c` still pass (every token post still own-state)
-- [ ] `cargo test -p proto-lab` and the gate pass; the backlog item deleted or cut to the sign-in form
+- [x] live: `proto-lab run load --headless` and `proto-lab status a b c` still pass (every token post still own-state)
+- [x] `cargo test -p proto-lab` and the gate pass; the backlog item deleted or cut to the sign-in form
+- Done (2026-10-21): beyond the key sets, each value is held to its captured form too (CLAUDE.md: "every query
+  parameter and its value"): the request id a lower-case GUID (`Core-` and a GUID only in the lone form), the broker's
+  client ids exact, the redirect URI one of the two Teams origins'. `login`'s capture keeps no request body (the
+  sign-in form's posts carry the password; `Capture::without_request_bodies`). Live: `status a b c` all ok and `run
+  load` ok, every token post `entra_token`; `login` wasn't run (no session had expired), so no `captures/login/` yet.
 
 ### Task 2: An unreadable own entry in an ordinary catch-up
 **Files:**

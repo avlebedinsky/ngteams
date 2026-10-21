@@ -1,26 +1,24 @@
 ---
 worth: yes
-where: crates/proto-lab/src/classify.rs:108
+where: crates/proto-lab/src/classify.rs (SIGN_IN, QueryRule::Any)
 added: 2026-10-21
 ---
-# the seeded own-state rules let a request out whatever its query
+# the sign-in form's own-state rules let a request out whatever its query
 
-`OwnRule` matches the method, the exact origin and the path segment by segment, and `UrlPattern::matches` never looks
-at the query (the module docs say so: "The query plays no part"). So the Entra token endpoint (`/*/oauth2/v2.0/token`),
-the four authz endpoints and `login`'s sign-in form (`/*/GetCredentialType`, `/*/login`, `/kmsi`, `/*/kmsi`) are
-`Own` with any query at all, including parameters no capture showed. The hard rules want an allowance to match the
-exact captured shape, query included.
+M2 Task 1 gave every seeded own-state rule the query its captures show (`QueryRule`): the Entra token endpoint takes
+only its two captured parameter sets (the request id alone, or with the broker's three parameters), each parameter
+once and in its captured value forms, and the authz endpoints take no query; anything else is `Unknown`. One part is
+left: `login`'s sign-in form (`/*/GetCredentialType`, `/*/login`, `/kmsi`, `/*/kmsi`, `OwnKind::EntraSignIn`) still
+takes any query (`QueryRule::Any`), because no capture has shown its queries yet. The hard rules want an allowance to
+match the exact captured shape, query included.
 
-What the local captures show (2026-10-21, every scenario): the token endpoint always has a query, either
-`client-request-id` alone or `brk_client_id`, `brk_redirect_uri`, `client-request-id` and `client_id`; the authz
-exchange never has one. The sign-in form isn't in any capture (`login` records none), so its query shapes are unknown.
+`login` now records its run under `captures/login/<ts>/` (fail-closed, with no request body: the form's posts carry
+the password), so the next time a lab session expires and `login` runs, its capture shows the form's queries.
 
-Suggested fix: give each seeded rule the query keys its capture showed (none for authz, the two key sets above for the
-token endpoint) and make any other key set, or a repeated key, `Unknown`; capture `login` under the fence first to
-review the sign-in form's queries. `Classifier::with_own` (the tests' local stand-ins) and the fence_http tests that
-use it go along.
+Suggested fix: after a `login` run, read its capture's sign-in form requests (method, path, query keys and value
+forms), give each `SIGN_IN` rule that query set (`QueryRule::OneOf`) in place of `QueryRule::Any`, with tests that any
+other key set or a repeated key is `Unknown`. Task 24's sign-in window guard reuses these shapes. Not done blind:
+`login` runs only when a session has expired, and a rule narrowed without a capture could break it then.
 
-Found by the revmux review of M1 Task 14 (round 2, `docs/plans/20261020-native-teams-m1-headless-chat-core.md`),
-looking for other own-state rules with the path-only gap of the registration allowance. Not fixed then: it changes the
-M0 rule machinery every scenario and `login` depend on, and the sign-in form needs a capture first. The calling and
-messaging stacks' own-state (`crates/proto-lab/src/calling.rs`) and the call start now require no query.
+Found by the revmux review of M1 Task 14 (round 2, `docs/plans/completed/20261020-native-teams-m1-headless-chat-core.md`);
+cut to the sign-in form by M2 Task 1.

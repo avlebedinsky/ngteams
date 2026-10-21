@@ -153,6 +153,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         frames: FrameClassifier::seeded(),
         live_members: true,
         capture: Some(ScenarioName::AbChatFull.as_str().to_owned()),
+        capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,

@@ -276,6 +276,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
         frames: frames(activity),
         live_members: true,
         capture: Some(name.as_str().to_owned()),
+        capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,

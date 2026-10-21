@@ -184,6 +184,7 @@ fn session_options(options: RunOptions) -> SessionOptions {
         frames: FrameClassifier::seeded(),
         live_members: true,
         capture: Some(ScenarioName::AbcChat.as_str().to_owned()),
+        capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,

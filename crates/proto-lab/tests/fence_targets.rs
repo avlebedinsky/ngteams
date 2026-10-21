@@ -17,7 +17,7 @@ use std::time::Duration;
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::cdp::SessionId;
-use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, chat_service_path};
+use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, QueryRule, ValueRule, chat_service_path};
 use proto_lab::fence_http::{DenyCause, ForcedDeny, HttpFence, PausedRequest, Verdict};
 use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
 use proto_lab::scenario::dsl::{Driver, RequestPattern, SeenRequest, Selector};
@@ -587,7 +587,10 @@ async fn a_forced_deny_comes_before_classification_and_is_logged() -> TestResult
     let dir = tempfile::tempdir()?;
     let log_path = dir.path().join("fence.log");
     let fence = Arc::new(Fence::new(Roster::default(), FenceLog::open(&log_path)?));
-    let own = Classifier::seeded().with_own(OwnRule::new(OwnKind::Authz, "POST", "http://127.0.0.1:9", "/api/send"));
+    let own = Classifier::seeded().with_own(
+        OwnRule::new(OwnKind::Authz, "POST", "http://127.0.0.1:9", "/api/send")
+            .with_query(QueryRule::OneOf(&[&[("x", ValueRule::Exact(&["1"]))]])),
+    );
     let http = HttpFence::new(own, fence, Arc::new(FailClosed));
     let send = |body: &str| PausedRequest {
         request_id: "r".to_owned(),

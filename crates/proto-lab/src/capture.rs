@@ -34,6 +34,9 @@
 //!   `resume_sent`, `held`, `close`, `containment` and `verdict` `breach` or `contained`), plus its `session`,
 //!   `target_id` and `error`.
 //!
+//! A capture made [`Capture::without_request_bodies`] (`proto-lab login`'s) has no request body anywhere: no
+//! `request_body` entries, and no `postData` or `postDataEntries` in a request event or a denied request's verdict.
+//!
 //! The directory is made `0700` and the file `0600`.
 
 use std::collections::HashMap;
@@ -297,6 +300,8 @@ pub struct Capture {
     hooks: RtcHooks,
     /// The resource type of each response not yet loaded, by (session, request id).
     pending: Mutex<HashMap<(Option<SessionId>, String), String>>,
+    /// Whether request bodies are recorded ([`Capture::without_request_bodies`]).
+    request_bodies: bool,
 }
 
 impl Capture {
@@ -306,7 +311,17 @@ impl Capture {
             recorder,
             hooks,
             pending: Mutex::new(HashMap::new()),
+            request_bodies: true,
         }
+    }
+
+    /// The same capture, recording no request body: a request's `postData` and `postDataEntries` are taken out of its
+    /// `Network.requestWillBeSent` and of a denied request's verdict, and no `request_body` is fetched. `proto-lab
+    /// login` records this way: its sign-in form's posts carry the account's password.
+    #[must_use]
+    pub fn without_request_bodies(mut self) -> Self {
+        self.request_bodies = false;
+        self
     }
 
     #[must_use]
@@ -348,11 +363,15 @@ impl Capture {
     }
 
     fn record_cdp(&self, event: &Event) {
+        let mut params = event.params.clone();
+        if !self.request_bodies && event.method == "Network.requestWillBeSent" {
+            strip_body(&mut params["request"]);
+        }
         self.recorder.record(json!({
             "type": "cdp",
             "session": session(event),
             "method": event.method,
-            "params": event.params,
+            "params": params,
         }));
     }
 
@@ -365,7 +384,7 @@ impl Capture {
         match event.method.as_str() {
             "Network.requestWillBeSent" => {
                 let request = &params["request"];
-                if request["hasPostData"] == true && request.get("postData").is_none() {
+                if self.request_bodies && request["hasPostData"] == true && request.get("postData").is_none() {
                     self.fetch(cdp, event, id, "Network.getRequestPostData", "request_body");
                 }
             }
@@ -428,6 +447,9 @@ impl Capture {
         set_verdict(&mut entry, verdict);
         if matches!(verdict, Verdict::Deny(_)) {
             entry["request"] = request.clone();
+            if !self.request_bodies {
+                strip_body(&mut entry["request"]);
+            }
         }
         self.recorder.record(entry);
     }
@@ -474,6 +496,15 @@ impl Capture {
         }
         set_verdict(&mut entry, verdict);
         self.recorder.record(entry);
+    }
+}
+
+/// Takes a CDP `Request`'s body out (`postData`, `postDataEntries`); `hasPostData` stays, so the capture still says
+/// there was one.
+fn strip_body(request: &mut Value) {
+    if let Some(request) = request.as_object_mut() {
+        request.remove("postData");
+        request.remove("postDataEntries");
     }
 }
 

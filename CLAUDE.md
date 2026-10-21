@@ -220,7 +220,9 @@ What the code does and why. A change that undoes one of these needs a new reason
 - Classifiers are chosen per run: `seeded` (status, load, auth), `sign_in` (login only), `mapped` (ab-chat,
   ab-chat-full, ab-image, abc-chat), `messaging` (ab-trouter: the messaging stack's registration and the Trouter
   session frames), `calling` (echo-call, a superset of `mapped`). Own-state is added only after a review, in the exact
-  shape a capture showed, its query included; the seeded rules still ignore the query, a known gap
+  shape a capture showed, its query included (`OwnRule` takes no query unless given its `QueryRule`). The seeded
+  rules match their captured queries; only `login`'s sign-in form still takes any query, a known gap until a `login`
+  capture (`captures/login/`, recorded without request bodies) shows its queries
   (`docs/backlog/seeded-own-rules-ignore-the-query.md`).
 - After native runs the web client opens a chat at its "last read" mark (a native read receipt moves the stored
   horizon but not that mark), so a scenario waiting for a new message clicks "Jump to newest" or the "New messages"

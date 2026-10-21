@@ -312,6 +312,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         frames: FrameClassifier::calling(),
         live_members: true,
         capture: Some(ScenarioName::EchoCall.as_str().to_owned()),
+        capture_request_bodies: true,
         display: options.display,
         media: Media::Fake { audio: Some(tone) },
         user_agent: Some(USER_AGENT.to_owned()),

@@ -16,11 +16,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use proto_lab::accounts::{AccountsError, AccountsFile};
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
-use proto_lab::browser::{Browser, LaunchOptions};
+use proto_lab::browser::{Browser, Display, LaunchOptions};
 use proto_lab::cdp::{Event, SessionId};
 use proto_lab::classify::{Classification, Classifier, OwnKind};
 use proto_lab::commands::login::{
-    Action, Clicks, Progress, SignInProbe, SignInStop, StatusFile, next_action, perform, probe,
+    Action, Clicks, LOGIN_CAPTURE, Progress, SignInProbe, SignInStop, StatusFile, next_action, perform, probe,
+    session_options,
 };
 use proto_lab::commands::status::{AccountStatus, account_status};
 use proto_lab::config::Alias;
@@ -764,6 +765,21 @@ fn an_mri_needs_an_object_id_shaped_like_a_guid() {
 // --- what login lets through ---
 
 #[test]
+fn login_records_its_run_fail_closed_and_without_request_bodies() {
+    let options = session_options();
+    assert_eq!(options.capture.as_deref(), Some(LOGIN_CAPTURE));
+    assert_eq!(LOGIN_CAPTURE, "login");
+    assert!(
+        !options.capture_request_bodies,
+        "the sign-in form's posts carry the password"
+    );
+    assert!(!options.live_members, "fail-closed");
+    assert_eq!(options.classifier, Classifier::sign_in());
+    assert_eq!(options.frames, FrameClassifier::seeded());
+    assert_eq!(options.display, Display::Headless);
+}
+
+#[test]
 fn login_lets_entras_sign_in_form_through_and_nothing_more() {
     let sign_in = Classifier::sign_in();
     for url in [
@@ -786,7 +802,7 @@ fn login_lets_entras_sign_in_form_through_and_nothing_more() {
         );
     }
     // the seeded own-state list is still there
-    let token = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+    let token = "https://login.microsoftonline.com/common/oauth2/v2.0/token?client-request-id=0a1b2c3d-4e5f-4061-8293-a4b5c6d7e8f9";
     assert_eq!(
         sign_in.classify("POST", token, None),
         Classification::Own(OwnKind::EntraToken)

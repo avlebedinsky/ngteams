@@ -21,7 +21,7 @@ use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TargetKind}
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::capture::{Capture, CaptureError, EVENTS_FILE, RTC_BINDING, Recorder, RtcHooks, capture_dir_name};
 use proto_lab::cdp::{Cdp, SessionId};
-use proto_lab::classify::{Classifier, OwnKind};
+use proto_lab::classify::{Classifier, OwnKind, OwnRule};
 use proto_lab::fence_http::HttpFence;
 use proto_lab::fence_ws::{FrameClassifier, FrameRule, GuardScript, WsFence};
 use serde_json::{Value, json};
@@ -146,7 +146,8 @@ fn pages_and_iframes_get_the_hooks_after_the_guard_and_before_they_run() {
 
 // --- live runs ---
 
-const PAGES: [(&str, &str, &str); 4] = [
+const PAGES: [(&str, &str, &str); 5] = [
+    ("blank.html", include_str!("fixtures/pages/blank.html"), "text/html"),
     ("capture.html", include_str!("fixtures/pages/capture.html"), "text/html"),
     ("rtc.html", include_str!("fixtures/pages/rtc.html"), "text/html"),
     ("data.json", r#"{"hello":"lab"}"#, "application/json"),
@@ -225,7 +226,7 @@ async fn navigate(cdp: &Cdp, tab: &ArmedTarget, url: &str) -> TestResult {
 }
 
 /// One recorded run, armed on a throwaway profile; `echo` (when given) stands in for an own-state socket for
-/// `allow:` frames.
+/// `allow:` frames, and a `POST` to the pages' `/own` is own-state.
 struct Run {
     armed: ArmedBrowser,
     recorder: Arc<Recorder>,
@@ -233,7 +234,23 @@ struct Run {
     _dirs: tempfile::TempDir,
 }
 
-async fn start_run(pages: &MockServer, echo: Option<&str>, stats: Duration) -> TestResult<Option<Run>> {
+/// How a recorded run records: the WebRTC hooks' stats interval, and whether request bodies are kept.
+#[derive(Clone, Copy)]
+struct Recording {
+    stats: Duration,
+    request_bodies: bool,
+}
+
+impl Recording {
+    fn with_bodies(stats: Duration) -> Self {
+        Self {
+            stats,
+            request_bodies: true,
+        }
+    }
+}
+
+async fn start_run(pages: &MockServer, echo: Option<&str>, recording: Recording) -> TestResult<Option<Run>> {
     let Some(chrome) = common::chrome_or_skip() else {
         return Ok(None);
     };
@@ -243,14 +260,20 @@ async fn start_run(pages: &MockServer, echo: Option<&str>, stats: Duration) -> T
         Roster::new([], []),
         FenceLog::open(&dirs.path().join("fence.log"))?,
     ));
-    let http = HttpFence::new(Classifier::seeded(), Arc::clone(&fence), Arc::new(FailClosed));
+    let own = Classifier::seeded().with_own(OwnRule::new(OwnKind::Authz, "POST", &pages.uri(), "/own"));
+    let http = HttpFence::new(own, Arc::clone(&fence), Arc::new(FailClosed));
     let mut frames = FrameClassifier::seeded();
     if let Some(origin) = echo {
         frames = frames.with_own(FrameRule::new(OwnKind::Authz, origin, "/*", "allow:"));
     }
     let ws = WsFence::new(frames, fence, Arc::new(FailClosed), GuardScript::generate()?);
     let recorder = Arc::new(Recorder::create(&dirs.path().join("captures"), "test")?);
-    let capture = Capture::new(Arc::clone(&recorder), RtcHooks::new(stats));
+    let capture = Capture::new(Arc::clone(&recorder), RtcHooks::new(recording.stats));
+    let capture = if recording.request_bodies {
+        capture
+    } else {
+        capture.without_request_bodies()
+    };
     let options = ArmOptions {
         service_worker_origins: vec![pages.uri()],
     };
@@ -265,11 +288,11 @@ async fn start_run(pages: &MockServer, echo: Option<&str>, stats: Duration) -> T
 }
 
 /// Runs `body` on a recorded run, then closes the browser whatever `body` returned. Without Chrome it does nothing.
-async fn with_run<F>(pages: &MockServer, echo: Option<&str>, stats: Duration, body: F) -> TestResult
+async fn with_run<F>(pages: &MockServer, echo: Option<&str>, recording: Recording, body: F) -> TestResult
 where
     F: AsyncFnOnce(&Run) -> TestResult,
 {
-    let Some(run) = start_run(pages, echo, stats).await? else {
+    let Some(run) = start_run(pages, echo, recording).await? else {
         return Ok(());
     };
     let outcome = tokio::time::timeout(Duration::from_secs(90), body(&run)).await;
@@ -312,30 +335,35 @@ fn has_body(entries: &[Value], path: &str) -> bool {
 async fn a_recorded_run_holds_the_network_the_frames_the_bodies_and_every_verdict() {
     let pages = serve_pages().await;
     let (echo, received) = echo_server().await.unwrap();
-    with_run(&pages, Some(&echo), Duration::from_secs(1), async |run| {
-        let cdp = run.armed.cdp();
-        let url = format!("{}/pages/capture.html?ws={echo}", pages.uri());
-        navigate(cdp, &run.page, &url).await?;
-        let expression = "results.get && results.post && results.echo.length === 2 ? results : null";
-        let results = evaluate_until(cdp, &run.page.session, expression).await?;
-        assert_eq!(results["get"], "lab");
-        assert_eq!(
-            results["post"], "error TypeError",
-            "the page sees the deny as a network error"
-        );
-        assert_eq!(results["echo"], json!(["allow:1", "allow:2"]));
-        let file = run.recorder.events_file();
-        let entries = entries_until(&file, |entries| has_body(entries, "/pages/data.json")).await?;
-        check_recorded_run(&entries)?;
-        assert_eq!(
-            *received.lock().unwrap_or_else(PoisonError::into_inner),
-            ["allow:1", "allow:2"]
-        );
-        // the run fails on the denied request and frame, as any run with a deny does
-        let failed = run.armed.verdict().unwrap_err();
-        assert_eq!((failed.denials.len(), failed.frame_denials.len()), (1, 1), "{failed:?}");
-        Ok(())
-    })
+    with_run(
+        &pages,
+        Some(&echo),
+        Recording::with_bodies(Duration::from_secs(1)),
+        async |run| {
+            let cdp = run.armed.cdp();
+            let url = format!("{}/pages/capture.html?ws={echo}", pages.uri());
+            navigate(cdp, &run.page, &url).await?;
+            let expression = "results.get && results.post && results.echo.length === 2 ? results : null";
+            let results = evaluate_until(cdp, &run.page.session, expression).await?;
+            assert_eq!(results["get"], "lab");
+            assert_eq!(
+                results["post"], "error TypeError",
+                "the page sees the deny as a network error"
+            );
+            assert_eq!(results["echo"], json!(["allow:1", "allow:2"]));
+            let file = run.recorder.events_file();
+            let entries = entries_until(&file, |entries| has_body(entries, "/pages/data.json")).await?;
+            check_recorded_run(&entries)?;
+            assert_eq!(
+                *received.lock().unwrap_or_else(PoisonError::into_inner),
+                ["allow:1", "allow:2"]
+            );
+            // the run fails on the denied request and frame, as any run with a deny does
+            let failed = run.armed.verdict().unwrap_err();
+            assert_eq!((failed.denials.len(), failed.frame_denials.len()), (1, 1), "{failed:?}");
+            Ok(())
+        },
+    )
     .await
     .unwrap();
     let posted = pages.received_requests().await.unwrap_or_default();
@@ -343,6 +371,81 @@ async fn a_recorded_run_holds_the_network_the_frames_the_bodies_and_every_verdic
         posted.iter().all(|request| request.method.as_str() == "GET"),
         "a denied POST got out"
     );
+}
+
+/// Posts from the page: a string and a `Blob` to the own-state `/own` (Chrome leaves a `Blob` out of its request
+/// event, so the capture would fetch it), and a short one to `/sink`, which the fence denies.
+const POSTS: &str = r"(async () => {
+  const post = (path, body) => fetch(path, { method: 'POST', body }).then((r) => r.status, (e) => 'error ' + e.name);
+  return {
+    short: await post('/own', 'lab-secret-short'),
+    blob: await post('/own', new Blob(['lab-secret-blob'.repeat(20000)])),
+    denied: await post('/sink', 'lab-secret-denied'),
+  };
+})()";
+
+#[tokio::test]
+async fn a_capture_without_request_bodies_keeps_the_requests_and_none_of_their_bodies() {
+    let pages = serve_pages().await;
+    let recording = Recording {
+        stats: Duration::from_secs(1),
+        request_bodies: false,
+    };
+    with_run(&pages, None, recording, async |run| {
+        let cdp = run.armed.cdp();
+        navigate(cdp, &run.page, &format!("{}/pages/blank.html", pages.uri())).await?;
+        let results = evaluate(cdp, &run.page.session, POSTS).await?;
+        assert_eq!(results, json!({"short": 200, "blob": 200, "denied": "error TypeError"}));
+        let file = run.recorder.events_file();
+        // both own posts have their answers, so whatever their requests would have fetched was asked for before
+        let entries = entries_until(&file, |entries| {
+            let answered = cdp_events(entries, "Network.responseReceived");
+            let posts = posts_to(entries, "/own");
+            let answered = posts
+                .iter()
+                .filter(|id| answered.iter().any(|entry| entry["params"]["requestId"] == id.as_str()))
+                .count();
+            answered == 2 && of_type(entries, "verdict").any(|entry| entry["verdict"] == "deny")
+        })
+        .await?;
+        let posts: Vec<&Value> = cdp_events(&entries, "Network.requestWillBeSent")
+            .into_iter()
+            .filter(|entry| entry["params"]["request"]["method"] == "POST")
+            .collect();
+        assert_eq!(posts.len(), 3, "every post is recorded: {posts:?}");
+        assert!(
+            posts
+                .iter()
+                .all(|entry| entry["params"]["request"]["hasPostData"] == true),
+            "and says it had a body"
+        );
+        let denied: Vec<&Value> = of_type(&entries, "verdict")
+            .filter(|entry| entry["verdict"] == "deny")
+            .collect();
+        assert_eq!(denied.len(), 1, "{denied:?}");
+        assert_eq!(denied[0]["request"]["method"], "POST");
+        assert_eq!(of_type(&entries, "request_body").count(), 0);
+        // nothing of any body, in any form, anywhere in the file
+        let raw = std::fs::read_to_string(&file)?;
+        for needle in ["lab-secret", "\"postData\"", "postDataEntries", "bGFiLXNlY3JldC"] {
+            assert!(!raw.contains(needle), "{needle} is in the capture");
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// The `Network` request ids of the `POST`s to `path`.
+fn posts_to(entries: &[Value], path: &str) -> Vec<String> {
+    cdp_events(entries, "Network.requestWillBeSent")
+        .into_iter()
+        .filter(|entry| {
+            let request = &entry["params"]["request"];
+            request["method"] == "POST" && request["url"].as_str().is_some_and(|url| url.ends_with(path))
+        })
+        .filter_map(|entry| entry["params"]["requestId"].as_str().map(str::to_owned))
+        .collect()
 }
 
 fn check_recorded_run(entries: &[Value]) -> TestResult {
@@ -467,24 +570,29 @@ fn connected_stats(reports: &[(u64, String, Value)], pc: u64) -> bool {
 #[tokio::test]
 async fn the_rtc_hooks_record_a_loopback_call_from_its_first_line() {
     let pages = serve_pages().await;
-    with_run(&pages, None, Duration::from_millis(200), async |run| {
-        let cdp = run.armed.cdp();
-        navigate(cdp, &run.page, &format!("{}/pages/rtc.html", pages.uri())).await?;
-        let outcome = evaluate_until(cdp, &run.page.session, "window.outcome || null").await?;
-        assert_eq!(outcome, "open");
-        assert_eq!(evaluate(cdp, &run.page.session, "bindingVisible").await?, "undefined");
-        assert_eq!(evaluate(cdp, &run.page.session, "constructorKept").await?, true);
-        let file = run.recorder.events_file();
-        entries_until(&file, |entries| connected_stats(&rtc_reports(entries), 1)).await?;
-        assert_eq!(evaluate(cdp, &run.page.session, "closeAll()").await?, "closed");
-        let entries = entries_until(&file, |entries| {
-            let reports = rtc_reports(entries);
-            !reported(&reports, 1, "close").is_empty() && !reported(&reports, 2, "close").is_empty()
-        })
-        .await?;
-        check_rtc_reports(&entries, &run.page.session);
-        Ok(())
-    })
+    with_run(
+        &pages,
+        None,
+        Recording::with_bodies(Duration::from_millis(200)),
+        async |run| {
+            let cdp = run.armed.cdp();
+            navigate(cdp, &run.page, &format!("{}/pages/rtc.html", pages.uri())).await?;
+            let outcome = evaluate_until(cdp, &run.page.session, "window.outcome || null").await?;
+            assert_eq!(outcome, "open");
+            assert_eq!(evaluate(cdp, &run.page.session, "bindingVisible").await?, "undefined");
+            assert_eq!(evaluate(cdp, &run.page.session, "constructorKept").await?, true);
+            let file = run.recorder.events_file();
+            entries_until(&file, |entries| connected_stats(&rtc_reports(entries), 1)).await?;
+            assert_eq!(evaluate(cdp, &run.page.session, "closeAll()").await?, "closed");
+            let entries = entries_until(&file, |entries| {
+                let reports = rtc_reports(entries);
+                !reported(&reports, 1, "close").is_empty() && !reported(&reports, 2, "close").is_empty()
+            })
+            .await?;
+            check_rtc_reports(&entries, &run.page.session);
+            Ok(())
+        },
+    )
     .await
     .unwrap();
 }

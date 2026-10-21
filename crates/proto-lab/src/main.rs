@@ -44,7 +44,7 @@ enum Command {
         command: BundlesCommand,
     },
     /// Sign a lab account into the Teams web client in its profile, headless, under the armed fence, and record its MRI
-    /// in lab.toml.
+    /// in lab.toml. The run is captured under captures/login/, without request bodies.
     Login {
         /// The lab account: a, b or c.
         alias: Alias,
@@ -274,6 +274,9 @@ async fn run_login(alias: Alias, timeout: u64) -> Result<(), Box<dyn std::error:
     };
     println!("{alias}: {how}, {teams}; {mri}");
     eprintln!("{alias}: {} (fail-closed: expected)", report.fence.summary());
+    if let Some(capture) = &report.capture {
+        eprintln!("{alias}: captured to {}", capture.display());
+    }
     match report.refused {
         None => Ok(()),
         Some(_) => Err(format!("{alias}: Teams refused the account").into()),
