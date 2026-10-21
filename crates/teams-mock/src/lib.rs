@@ -11,10 +11,11 @@
 //!
 //! ```text
 //! let mock = ChatServiceMock::start().await?;
+//! let trouter = mock.start_trouter()?; // its push channel, at trouter.origin() (M1 Task 16)
 //! let token = mock.token(LAB_A).ok_or("no account")?; // a's `ic3` token, for the client's credentials
 //! let transport = HttpTransport::with_mock_origin(credentials, fence, CHAT_BASE, &mock.origin())?;
 //! // … a sends to AB_CHAT through the fence …
-//! let events = mock.take_events(LAB_B); // what b would be told (Task 16 delivers it over Trouter)
+//! let events = mock.take_events(LAB_B); // what b would be told, while no socket of b's takes it
 //! ```
 //!
 //! **The world** it starts with ([`ChatServiceMock::start`]): the lab accounts a, b and c and one outsider, x; the a–b
@@ -34,6 +35,10 @@
 //!   the state every later read shows and queues a [`ChatEvent`] for each **other** member of the chat
 //!   ([`ChatServiceMock::take_events`]); the writer gets none.
 //!
+//! **Trouter** ([`ChatServiceMock::start_trouter`], `trouter.rs`): connect, authenticate, `trouter.connected`, pings,
+//! the deliveries of the queued events and their replay on connect, from the synthetic `tests/fixtures/trouter/`
+//! fixtures; the registrar's `POST /registrar/prod/V2/registrations` is served on this origin.
+//!
 //! **Headers** (M1 Task 3, `docs/protocol/auth.md`): every request must carry `Authorization: Bearer <token>` with a
 //! token the mock handed out ([`ChatServiceMock::token`]), plus `X-MS-Migration: True` and `BehaviorOverride:
 //! redirectAs404`, the web client's set the native transport sends. One exception: the thread read
@@ -52,6 +57,7 @@
 mod chatsvc;
 mod fixtures;
 mod reads;
+mod trouter;
 mod world;
 mod writes;
 
@@ -62,6 +68,7 @@ use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request};
 
 pub use fixtures::FixtureError;
+pub use trouter::{REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
 
 /// The region of the mock's chat base.
 pub const REGION: &str = "amer";
@@ -98,8 +105,9 @@ pub const CHANNEL: &str = "19:channel0001@thread.tacv2";
 /// a's notifications stream: read-only.
 pub const NOTIFICATIONS: &str = "48:notifications";
 
-/// What a write did, queued for each other member of its chat. The wire form a client is told it in (a Trouter
-/// delivery) waits for M1 Task 14's capture; Task 16 delivers these over the mock's Trouter.
+/// What a write did, queued for each other member of its chat, until the mock's Trouter ([`TrouterMock`]) delivers it
+/// to one of the member's registered endpoints (a message, typing, an edit, a delete, a reaction; read receipts and
+/// chat creation stay queued: no capture showed their delivery to another member).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatEvent {
     /// The chat it happened in.
@@ -169,6 +177,16 @@ impl ChatServiceMock {
     /// Replaces `mri`'s token: from now on the old one gets a 401. `false` when `mri` isn't one of its accounts.
     pub fn set_token(&self, mri: &str, token: impl Into<String>) -> bool {
         self.lock().set_token(mri, token.into())
+    }
+
+    /// Starts the mock's Trouter over this mock's world, on a free loopback port of its own: it delivers the events
+    /// queued here to the sockets of registered endpoints (see [`TrouterMock`]), and the registrar it needs is served
+    /// on this mock's own origin.
+    ///
+    /// # Errors
+    /// When no port can be bound, or an embedded Trouter fixture doesn't have the shape the mock reads.
+    pub fn start_trouter(&self) -> std::io::Result<TrouterMock> {
+        TrouterMock::start(Arc::clone(&self.state))
     }
 
     /// Takes the events queued for `mri` so far, oldest first; the queue is empty afterwards.

@@ -18,7 +18,8 @@
 //! - **Credentials** come from the account's [`Session`] ([`Credentials`]), per service: the chat service takes
 //!   `Authorization: Bearer <ic3>` with `X-MS-Migration: True` and `BehaviorOverride: redirectAs404` (the web client's
 //!   set, which the service took with our own non-CAE token, M1 Task 3); the registrar the same token with
-//!   `X-MS-Migration: True` (the web client's registration in the echo-call capture of 2026-10-20); Trouter's HTTP
+//!   `X-MS-Migration: True` and `X-Ms-Test-User: False` (the messaging stack's registration in the ab-trouter
+//!   captures of 2026-10-20; the calling stack's in the echo-call capture had no `X-Ms-Test-User`); Trouter's HTTP
 //!   side none (its probe carried none).
 //! - **Retries** (the transport's part of the plan's retry table), for reads and own-state requests: a 401 makes the
 //!   session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's maximum,
@@ -506,7 +507,7 @@ fn audience(service: Service) -> Option<&'static str> {
 fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] {
     match service {
         Service::ChatService => &[("x-ms-migration", "True"), ("behavioroverride", "redirectAs404")],
-        Service::Registrar => &[("x-ms-migration", "True")],
+        Service::Registrar => &[("x-ms-migration", "True"), ("x-ms-test-user", "False")],
         Service::Trouter => &[],
     }
 }

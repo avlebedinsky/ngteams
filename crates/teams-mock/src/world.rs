@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use crate::fixtures::{FixtureError, Fixtures, object};
 use crate::{
@@ -76,6 +77,10 @@ pub(crate) struct State {
     pub(crate) conversations: Vec<Conversation>,
     /// Events queued per member, by MRI.
     pub(crate) events: BTreeMap<String, Vec<ChatEvent>>,
+    /// The endpoints registered with the registrar (the mock's Trouter delivers only to those).
+    pub(crate) registrations: Vec<crate::trouter::Registration>,
+    /// Counts the changes the mock's Trouter acts on (a queued event, a registration), so its sockets wake up.
+    pub(crate) changes: watch::Sender<u64>,
     clock: u64,
     groups_made: u64,
 }
@@ -103,6 +108,8 @@ impl State {
             accounts,
             conversations,
             events: BTreeMap::new(),
+            registrations: Vec::new(),
+            changes: watch::Sender::new(0),
             clock: CLOCK_START,
             groups_made: 0,
         })
@@ -163,6 +170,12 @@ impl State {
                 resource: resource.clone(),
             });
         }
+        self.changed();
+    }
+
+    /// Wakes the mock's Trouter sockets up.
+    pub(crate) fn changed(&self) {
+        self.changes.send_modify(|count| *count += 1);
     }
 }
 

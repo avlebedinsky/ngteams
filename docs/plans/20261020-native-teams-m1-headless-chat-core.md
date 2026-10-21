@@ -792,28 +792,63 @@ teams-fence (roster, fence.log, live membership)      teams-mock (chat service +
 - Create: `crates/teams-trouter/{Cargo.toml,src/lib.rs,src/frames.rs,src/session.rs,src/registration.rs}`,
   `crates/teams-trouter/tests/{frames.rs,session.rs}`, `crates/teams-mock/src/trouter.rs`,
   `crates/fence-seal/tests/ui/trouter_mock_origin.rs` (+ `.stderr`)
+  (➕ `crates/teams-trouter/src/{events.rs,socket.rs,credentials.rs}`)
 - Modify: `Cargo.toml` (member, workspace deps), `crates/teams-mock/{src/lib.rs,tests/mock.rs}`,
   `crates/fence-seal/Cargo.toml` (`teams-trouter`, without `test-support`)
+  (➕ `crates/teams-proto/src/{own.rs,http.rs,lib.rs}` and `tests/http.rs`: the registration is a sealed own-state
+  entry, so it lives in `teams-proto`, and the registrar gets the messaging stack's `X-Ms-Test-User: False`;
+  `crates/teams-mock/{Cargo.toml,src/world.rs,src/chatsvc.rs}`; `crates/fence-seal/tests/ui/{proto_own_state,
+  proto_raw_request}.stderr` (rustc now names the one own-state entry); `tests/fixtures/trouter/deliveries.json` (an
+  eighth delivery, the account's own read horizon); `docs/protocol/trouter.md`)
 
-- [ ] the mock's Trouter endpoint, from the Task 14 fixtures: connect, authenticate, `trouter.connected`, ping,
+- [x] the mock's Trouter endpoint, from the Task 14 fixtures: connect, authenticate, `trouter.connected`, ping,
       deliveries of the chat service mock's queued events
-- [ ] `[lints] workspace = true`, listed in `members`; a `test-support` feature (`["teams-proto/test-support"]`) and
+      (`ChatServiceMock::start_trouter` → `TrouterMock`, its own loopback server: `1::`, `user.authenticate` checked
+      (late → `timeout`, other headers or token → `unauthorized`), `trouter.connected` from `session.json` on a made-up
+      regional host, the message-loss report on a reconnect, pongs, deliveries in `deliveries.json`'s shape only once
+      a registration names the endpoint, the delivered events stored and replayed on every later connect (`mstore`);
+      read receipts and chat creation stay queued (no capture of their delivery to another member); the registrar
+      `POST /registrar/prod/V2/registrations` on the chat mock's origin (202 for the messaging stack's body, 400 else,
+      401 without the token); test hooks: socket records, drop, disconnect with a reason, an incoming call. The HTTP
+      mock's API and answers are unchanged)
+- [x] `[lints] workspace = true`, listed in `members`; a `test-support` feature (`["teams-proto/test-support"]`) and
       only under it a mock origin (`ws` on loopback); a `fence-seal` case proves a normal build can't set it
-- [ ] tests first: socket.io 0.9 frame codec on the Task 14 fixtures; authenticate as the first frame; acknowledged
+      (`Trouter::with_mock_origin`; `fence-seal/tests/ui/trouter_mock_origin.rs`)
+- [x] tests first: socket.io 0.9 frame codec on the Task 14 fixtures; authenticate as the first frame; acknowledged
       keep-alives; reconnect with backoff and the service's reconnect parameters; a delivery for an incoming call is
       **ignored, never answered** (the M0 echo-call policy), and so is every other delivery unless Task 15 built
       responses
-- [ ] every outgoing frame goes through the Task 15 policy and is logged to `fence.log` first; the socket has no other
+      (Task 15 built none: every delivery is unanswered. `tests/frames.rs`: every session frame, `trouter.connected`,
+      the loss report, all eight deliveries, the host allowlist. `tests/session.rs`: the first frame is
+      `user.authenticate` with the token and no `connectparams`, the connect query, pings answered, a missing pong →
+      reconnect, a dropped socket → regional reconnect with the `connectparams`, the same endpoint, the loss report
+      acknowledged after `caught_up`, the stored replay; `unauthorized` → a new token, `dup` twice → a backoff, a
+      refused connect → growing backoff; an incoming call `Ignored`, never answered)
+- [x] every outgoing frame goes through the Task 15 policy and is logged to `fence.log` first; the socket has no other
       way to send; `user.activity` only if Task 14 reviewed it
-- [ ] the registrar registration (messaging stack only) and its renewal as `OwnState` requests (Task 5), the `ic3`
+      (the write half goes into the `FrameSink` at once, wrapped in the crate-private `SocketWriter`; every session test
+      checks that each frame the mock got is a reviewed own frame with its `fence.log` entry, in order; a source test
+      checks no other module touches a sink; an unloggable frame isn't sent and stops the client. No `user.activity`:
+      Task 14 didn't review it)
+- [x] the registrar registration (messaging stack only) and its renewal as `OwnState` requests (Task 5), the `ic3`
       token from the session
-- [ ] token renewal: on the session's renewal notification the socket re-authenticates or reconnects (as Task 14
+      (`teams_proto::EndpointRegistration`, the captured body, `TeamsCDLWebWorker_2.6`; on every `trouter.connected`,
+      again 30 s before its 3600 s end, 123 s after a failure; tested: shape and log order in `teams-proto`, retry and
+      renewal on a flaky registrar, registration on the mock)
+- [x] token renewal: on the session's renewal notification the socket re-authenticates or reconnects (as Task 14
       showed) before the old token expires; tested with a fake clock on the mock
-- [ ] deliveries → typed chat events (new message, edit, delete, reaction, read horizon, thread update); unknown ones
+      (reconnects, as Task 14 showed: 5 min before expiry by the clock, checked every 30 s, and at once on the session's
+      announcement of a newer `ic3` token; tested with a fake clock on fake tokens and on the real `Session` over a mock
+      Entra)
+- [x] deliveries → typed chat events (new message, edit, delete, reaction, read horizon, thread update); unknown ones
       kept as `Unknown` and logged by kind only
-- [ ] tests on `teams-mock`: connect, register, receive a delivery, send no answer (or, if built, answer only a
+      (`ChatEvent::{Message, Typing, MessageUpdate{Edit|Delete|Reaction|Other}, ReadHorizon, ConversationUpdate,
+      Unknown}`, told apart as runs 12–13's captures showed, `trouter.md`)
+- [x] tests on `teams-mock`: connect, register, receive a delivery, send no answer (or, if built, answer only a
       reviewed one on a lab-only chat), survive a dropped socket
-- [ ] `cargo test -p teams-trouter -p teams-mock -p fence-seal` and the gate pass
+- [x] `cargo test -p teams-trouter -p teams-mock -p fence-seal` and the gate pass (parallel run: crate-scoped gate;
+      workspace gate after merge; `teams-proto`, `fixture-guard` and `proto-lab`'s `calling` tests too, for the
+      own-state entry and the fixture)
 
 ### Task 17: Catch-up sync in `teams-core`
 **Files:**

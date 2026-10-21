@@ -273,6 +273,7 @@ async fn the_registrar_gets_the_token_and_the_migration_flag_and_trouter_no_cred
     assert_eq!(to_registrar.url.path(), "/registrar/prod/V2/registrations");
     assert_eq!(header_of(to_registrar, "authorization"), Some(bearer(0).as_str()));
     assert_eq!(header_of(to_registrar, "x-ms-migration"), Some("True"));
+    assert_eq!(header_of(to_registrar, "x-ms-test-user"), Some("False"));
     assert_eq!(header_of(to_registrar, "behavioroverride"), None);
     assert_eq!(to_trouter.url.path(), "/");
     assert_eq!(to_trouter.url.query(), Some("check=1"));
@@ -448,6 +449,81 @@ async fn an_own_state_request_is_logged_before_it_is_sent() {
         })],
         "the URL as built and checked (not the mock's), without its query"
     );
+}
+
+const REGISTRATIONS: &str = include_str!("../../../tests/fixtures/trouter/registration.json");
+const EPID: &str = "00000000-0000-4000-8000-0000000000e1";
+const PUSH_URL: &str = "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/";
+
+#[tokio::test]
+async fn the_messaging_registration_is_posted_in_its_captured_shape_and_logged_first() {
+    let setup = setup().await;
+    let fixture: Value = serde_json::from_str(REGISTRATIONS).unwrap();
+    let mut want = fixture["cases"][0]["body"].clone();
+    want["registrationId"] = json!(EPID);
+    want["clientDescription"]["platformUIVersion"] = json!(teams_proto::CLIENT_BUILD);
+    let log = setup.log.clone();
+    Mock::given(method("POST"))
+        .and(path("/registrar/prod/V2/registrations"))
+        .and(header("authorization", bearer(0).as_str()))
+        .and(header("x-ms-migration", "True"))
+        .and(header("x-ms-test-user", "False"))
+        .and(body_json(&want))
+        .respond_with(move |_: &Request| {
+            let logged = log.lines().iter().any(|line| line["own"] == "endpoint_registration");
+            ResponseTemplate::new(if logged { 202 } else { 500 })
+        })
+        .expect(1)
+        .mount(&setup.server)
+        .await;
+    let registration = teams_proto::EndpointRegistration::messaging(EPID, PUSH_URL).unwrap();
+
+    let answer = Client::new(setup.transport).own_state(&registration).await.unwrap();
+
+    assert_eq!(answer.status(), 202);
+    assert_eq!(setup.log.lines().len(), 1);
+    assert_eq!(
+        setup.log.lines()[0]["url"],
+        "https://teams.microsoft.com/registrar/prod/V2/registrations"
+    );
+    assert_eq!(
+        fixture["cases"][0]["body"]["clientDescription"]["appId"],
+        teams_proto::MESSAGING_APP_ID
+    );
+}
+
+#[test]
+fn a_registration_names_only_a_guid_endpoint_and_a_trouter_push_url() {
+    use teams_proto::EndpointRegistration;
+    assert!(EndpointRegistration::messaging(EPID, PUSH_URL).is_some());
+    assert!(
+        EndpointRegistration::messaging(EPID, "https://pub-ent-zz-01-f.trouter.teams.microsoft.com/v4/f/Abc123/")
+            .is_some()
+    );
+    for epid in [
+        "",
+        "not-a-guid",
+        "00000000-0000-4000-8000-0000000000E1",
+        "00000000000040008000000000000e1",
+    ] {
+        assert!(EndpointRegistration::messaging(epid, PUSH_URL).is_none(), "{epid}");
+    }
+    for url in [
+        "http://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/",
+        "https://trouter.teams.microsoft.com/v4/f/SyntheticEndpoint00000A/",
+        "https://evil.example.test/v4/f/SyntheticEndpoint00000A/",
+        "https://x.trouter.teams.microsoft.com.example.test/v4/f/SyntheticEndpoint00000A/",
+        "https://x.trouter.teams.microsoft.com/v4/f/SyntheticEndpoint00000A",
+        "https://x.trouter.teams.microsoft.com/v4/f//",
+        "https://x.trouter.teams.microsoft.com/v4/f/a/b/",
+        "https://x.trouter.teams.microsoft.com/v4/f/abc/?q=1",
+        "https://x.trouter.teams.microsoft.com/v4/f/abc/#f",
+        "https://user@x.trouter.teams.microsoft.com/v4/f/abc/",
+        "https://X.trouter.teams.microsoft.com/v4/f/abc/",
+        "https://x.trouter.teams.microsoft.com/v4/c/abc/",
+    ] {
+        assert!(EndpointRegistration::messaging(EPID, url).is_none(), "{url}");
+    }
 }
 
 #[tokio::test]

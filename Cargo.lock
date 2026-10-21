@@ -1901,6 +1901,7 @@ dependencies = [
  "serde_json",
  "teams-fence",
  "teams-proto",
+ "teams-trouter",
  "trybuild",
 ]
 
@@ -6369,6 +6370,7 @@ dependencies = [
 name = "teams-mock"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "percent-encoding",
  "reqwest",
  "serde_json",
@@ -6376,6 +6378,7 @@ dependencies = [
  "teams-fence",
  "teams-proto",
  "tokio",
+ "tokio-tungstenite",
  "toml 1.1.8+spec-1.1.0",
  "wiremock",
 ]
@@ -6409,6 +6412,30 @@ dependencies = [
  "rusqlite",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "teams-trouter"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "getrandom 0.4.3",
+ "log",
+ "percent-encoding",
+ "reqwest",
+ "rustls-platform-verifier",
+ "serde_json",
+ "teams-auth",
+ "teams-fence",
+ "teams-mock",
+ "teams-proto",
+ "teams-trouter",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "url",
+ "wiremock",
 ]
 
 [[package]]

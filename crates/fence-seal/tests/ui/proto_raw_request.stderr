@@ -25,6 +25,11 @@ help: the trait `OwnState` is not implemented for `RawPost`
    |
  6 | struct RawPost;
    | ^^^^^^^^^^^^^^
+help: the trait `OwnState` is implemented for `EndpointRegistration`
+  --> $WORKSPACE/crates/teams-proto/src/own.rs
+   |
+   | impl OwnState for EndpointRegistration {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `own_state`
   --> $WORKSPACE/crates/teams-proto/src/client.rs
    |
