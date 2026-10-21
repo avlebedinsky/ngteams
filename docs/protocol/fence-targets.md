@@ -346,6 +346,35 @@ Not on the list, and denied: Substrate's search (`POST substrate.office.com/sear
 list other people of the tenant (never allowed under the user's rule of 2026-10-21), and bot invokes, whose body hands the account's Entra
 token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
 
+### The native client's reads by POST
+
+The native client has a list of its own (M2 Task 11, CLAUDE.md's "fourth list"): `teams-proto`'s sealed `PostRead`,
+whose only entry so far is `ShortProfileLookup` (`short_profile`, the same request as the browser's entry above, in
+the captured query). It goes out only this way:
+
+- `Fence::check_post_read(kind, names)` decides on the entry's kind and its exact, ordered MRIs: denied when they are
+  none, when one is named twice, or when any is not a lab account of the roster (an approved service participant
+  included, `Fence::lab_accounts_only`). The decision goes to `fence.log` as `{"event": "post_read_decision",
+  "post_read": <kind>, "names": <count>, "verdict": …, "reason": …}`, never with the MRIs, and a `PostReadPermit` is
+  made only once it is logged. The permit isn't `Clone` and has no constructor (`fence-seal`'s cases).
+- `AuthorizedPostRead::new(request, permit)` pairs them only when the permit is for that entry and exactly its MRIs,
+  in that order; the transport takes nothing else.
+- The transport builds the request (the middle tier's base, the entry's path and query, `Accept: application/json`,
+  `Content-Type: application/json;charset=UTF-8`, `x-ms-client-request-type: 0`, `x-ms-client-type: cdlworker`,
+  `x-ms-migration: True`, an empty `x-ms-object-id`, `x-ms-test-user: False`, the body a JSON list of the MRIs) and
+  reads it back against the entry's captured shape before anything else: the path exactly, every query pair once and
+  nothing else, every header but the token once with its pinned value and nothing else (no cookie, no
+  `x-ms-client-caller`, no correlation ids), the body a non-empty list of strings naming exactly the permit's MRIs.
+  Anything else is `HttpError::Unknown`: no token is asked for, nothing is logged or sent.
+- Then the `api.spaces.skype.com` token, the request logged as the browser's are (`"post_read": <kind>`, the URL
+  without its query; not sent when that fails), and one send: a read by `POST` is never retried under its permit. A
+  401 makes the session refresh the refused token for a later lookup under a new permit.
+- `ShortProfileLookup::read_answer` reads the answer (`{"type": …, "value": [profile, …]}`) and drops it whole if any
+  profile is of an MRI the lookup didn't ask for.
+
+Not yet on the native list: `users/fetch` (Task 12 decides whether names need it) and presence's `getpresence`
+(Task 17).
+
 ## How a run uses it
 
 - `load`, `status` and `login` stay fail-closed: the seeded classifier maps no write, and the membership source is

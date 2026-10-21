@@ -31,7 +31,8 @@ use teams_headless::lab::display_name;
 use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
 use teams_proto::chat::MessageText;
 use teams_proto::{
-    Author, Authorized, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState, Read, Response, Transport,
+    Author, Authorized, AuthorizedPostRead, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState,
+    PostRead, Read, Response, Transport,
 };
 use teams_store::{OutboxState, Store};
 use teams_trouter::{Options, Trouter, TrouterCredentials};
@@ -363,6 +364,13 @@ impl Transport for ThrottledOnce {
 
     fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
         self.inner.own_state(request)
+    }
+
+    fn post_read<R: PostRead + Send>(
+        &self,
+        read: AuthorizedPostRead<R>,
+    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.post_read(read)
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {

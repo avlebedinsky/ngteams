@@ -9,6 +9,9 @@
 //! ([`RequestRecord`]), the targets it couldn't arm ([`ArmingRecord`]) and the native client's own WebSocket frames
 //! ([`FrameRecord`]).
 //!
+//! A native read by `POST` (`teams-proto`'s sealed `PostRead` list) is decided by [`Fence::check_post_read`]: a
+//! [`PostReadPermit`] for its exact list of MRIs when every one is a lab account, none twice, the decision logged.
+//!
 //! Nothing outside this crate can bend a decision: a lab binary builds its fence only with [`Fence::open_lab`] (the
 //! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed, so its sources are
 //! the ones this crate defines: [`FailClosed`], which denies every write whose scope has to be fetched, and
@@ -22,6 +25,7 @@ mod decision;
 pub mod lab;
 mod log;
 mod membership;
+mod post_read;
 mod target;
 
 pub use decision::{
@@ -36,6 +40,7 @@ pub use membership::{
     LiveSourceError, MAX_BODY, REGIONAL_SUFFIX, chat_service_path, is_group_chat_id, one_to_one_id, one_to_one_pair,
     parse_group, parse_thread,
 };
+pub use post_read::{PostReadDenied, PostReadDenyReason, PostReadPermit};
 pub use target::{Mri, Scope, Target, WriteKind};
 
 /// Whether this build has the `test-support` feature, which lets any code build a fence over any roster and log and

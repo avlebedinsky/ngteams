@@ -33,6 +33,14 @@
 //!  "own":"trouter_ping"}
 //! ```
 //!
+//! The fence's decision on a native read by `POST` (`Fence::check_post_read`) is logged as it is made: the entry's
+//! kind, how many MRIs it names (never the MRIs), the verdict and, for a deny, the reason. The native transport then
+//! logs the request itself as a [`RequestRecord`] with [`RequestOutcome::PostRead`] right before it sends it:
+//!
+//! ```json
+//! {"ts_ms":1760000000000,"verdict":"allow","event":"post_read_decision","post_read":"short_profile","names":2}
+//! ```
+//!
 //! So is a target the browser fence couldn't arm ([`ArmingRecord`]): its type, the step that failed and how, whether
 //! its resume had been sent, whether it attached held (`waitingForDebugger`), what closing it gave and how it was
 //! contained, with the verdict `breach` when it may have run unguarded and `contained` when it can't have. No target
@@ -65,6 +73,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::decision::DenyReason;
+use crate::post_read::PostReadDenyReason;
 use crate::target::{Scope, Target, WriteKind};
 
 /// The outcome of one decision.
@@ -87,6 +96,19 @@ struct Entry<'a> {
     message: Option<String>,
 }
 
+#[derive(Serialize)]
+struct PostReadDecisionEntry {
+    ts_ms: u64,
+    verdict: &'static str,
+    event: &'static str,
+    post_read: &'static str,
+    names: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<PostReadDenyReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
 /// The channel a browser request went over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,8 +122,9 @@ pub enum Channel {
 pub enum RequestOutcome {
     /// An own-state request on the reviewed list (its kind's name), let through.
     Own(&'static str),
-    /// A read sent as a `POST`, on the browser fence's reviewed list (its kind's name), whose body names only lab
-    /// accounts ([`crate::Fence::lab_accounts_only`]): let through. Not own-state and not a write.
+    /// A read sent as a `POST`, on the browser fence's reviewed list or the native client's sealed `PostRead` list (its
+    /// kind's name), whose body names only lab accounts ([`crate::Fence::lab_accounts_only`]): let through. Not
+    /// own-state and not a write.
     PostRead(&'static str),
     /// Nothing classifies it: denied.
     Unclassified,
@@ -349,6 +372,25 @@ impl FenceLog {
             message: reason.map(|reason| reason.to_string()),
         };
         self.append(&entry)
+    }
+
+    /// Appends the fence's decision on one read by `POST` (`kind`, naming `names` MRIs; `None` allows) as a single line,
+    /// and flushes it. Once an append has failed, every later one fails too.
+    pub(crate) fn record_post_read(
+        &self,
+        kind: &'static str,
+        names: usize,
+        verdict: Option<PostReadDenyReason>,
+    ) -> io::Result<()> {
+        self.append(&PostReadDecisionEntry {
+            ts_ms: now_ms(),
+            verdict: if verdict.is_some() { "deny" } else { "allow" },
+            event: "post_read_decision",
+            post_read: kind,
+            names,
+            reason: verdict,
+            message: verdict.map(|reason| reason.to_string()),
+        })
     }
 
     /// Appends one browser request decided without a membership check, as a single line, and flushes it. Once an

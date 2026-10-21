@@ -1,0 +1,29 @@
+error[E0433]: cannot find `ProbePostRead` in `teams_proto`
+  --> tests/ui/proto_post_read_unpermitted.rs:10:26
+   |
+10 |     let _ = teams_proto::ProbePostRead::new(lookup);
+   |                          ^^^^^^^^^^^^^ could not find `ProbePostRead` in `teams_proto`
+   |
+note: found an item that was configured out
+  --> $WORKSPACE/crates/teams-proto/src/lib.rs
+   |
+   | #[cfg(feature = "test-support")]
+   |       ------------------------ the item is gated behind the `test-support` feature
+   | pub use post_read::ProbePostRead;
+   |                    ^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+ --> tests/ui/proto_post_read_unpermitted.rs:9:33
+  |
+9 |     let _ = transport.post_read(lookup.clone());
+  |                       --------- ^^^^^^^^^^^^^^ expected `AuthorizedPostRead<_>`, found `ShortProfileLookup`
+  |                       |
+  |                       arguments to this method are incorrect
+  |
+  = note: expected struct `AuthorizedPostRead<_>`
+             found struct `ShortProfileLookup`
+note: method defined here
+ --> $WORKSPACE/crates/teams-proto/src/client.rs
+  |
+  |     fn post_read<R: PostRead + Send>(
+  |        ^^^^^^^^^

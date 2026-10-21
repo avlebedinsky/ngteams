@@ -773,26 +773,39 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
   `post_read.rs`, `crates/teams-fence/src/*` (the decision), `crates/fence-seal/tests/ui/*`,
   `docs/protocol/endpoints.md`, `docs/protocol/fence-targets.md`
 
-- [ ] CLAUDE.md first, in the words of the user's decision of 2026-10-21: "The native client sends only what its
+- [x] CLAUDE.md first, in the words of the user's decision of 2026-10-21: "The native client sends only what its
       sealed policy allows" gains a fourth list, `teams-proto`'s sealed `PostRead`, for requests that change nothing:
       each entry added only after a review in its exact captured shape (host, method, path, every query parameter
       and its value, the headers that change what it does, the body schema); every MRI it names checked when the
       fence decides (`Fence::lab_accounts_only` in a lab build), any other id `Unknown`; its captured answer holds
       only the accounts asked for; logged to `fence.log` before it is sent and not sent if it can't be logged; no
       token to a third party; never a search or a suggestion list
-- [ ] tests first: a `PostRead` request goes out only with a `PostReadPermit` the fence gives for its exact MRI list;
+- [x] tests first: a `PostRead` request goes out only with a `PostReadPermit` the fence gives for its exact MRI list;
       a body field, a query parameter or a header value the entry doesn't name makes it `Unknown`; a non-lab MRI, an
       approved service or a duplicate makes the lab fence deny it; the `fence.log` line comes first; the transport
       sends it only to its entry's host
-- [ ] tests first: the middle tier as a new `Service` (host from the `middleTier` GTM, the
+- [x] tests first: the middle tier as a new `Service` (host from the `middleTier` GTM, the
       `/api/mt/part/<partition>/beta/users/…` path check, the `api.spaces.skype.com` audience, the captured fixed
       header values as `crates/proto-lab/src/post_read.rs` reads them), on the transport's host allowlist
-- [ ] its first entry: `users/fetchShortProfile` in the captured `?isMailAddress=false&…` shape (the browser fence's
+- [x] its first entry: `users/fetchShortProfile` in the captured `?isMailAddress=false&…` shape (the browser fence's
       `short_profile` read by `POST` is the reference), with a wiremock test of its captured answer (synthetic
       fixture)
-- [ ] a `fence-seal` trybuild case: nothing outside `teams-proto`/`teams-fence` can mint a `PostReadPermit` or a
+- [x] a `fence-seal` trybuild case: nothing outside `teams-proto`/`teams-fence` can mint a `PostReadPermit` or a
       `PostRead` entry
-- [ ] `cargo test -p teams-proto -p teams-fence -p fence-seal -p fixture-guard` and the gate pass
+- [x] `cargo test -p teams-proto -p teams-fence -p fence-seal -p fixture-guard` and the gate pass
+- Done (2026-10-21): CLAUDE.md gains the rule as a bullet of its own after the native-policy rule (that rule names
+  the `PostRead` list; its "Both lists grow" became "The own-state and frame lists grow", same meaning). The API,
+  settled with Codex: `Fence::check_post_read(kind, names)` → a `PostReadPermit` (kind + the exact ordered MRIs;
+  empty, duplicate, non-lab or service MRIs denied; the decision logged as `post_read_decision` with a count, never
+  the MRIs, and the permit made only once logged); `AuthorizedPostRead::new` pairs a sealed `PostRead` entry with it;
+  `Transport` gains a fourth method, `post_read` (the seven test fakes delegate). The transport reads the request it
+  is about to send back against the entry's captured shape (path, every query pair, every header but the token, the
+  body naming exactly the permit's MRIs) before it asks for a token: anything else is `HttpError::Unknown`, proven
+  through a `test-support` `ProbePostRead`. One send per permit, never retried (a 401 refreshes the token for a later
+  permit); the send logged as `post_read` first. `Service::MiddleTier` comes from `HttpTransport::with_middle_tier`
+  (`new`'s callers unchanged). `ShortProfileLookup::read_answer` drops an answer naming any MRI not asked for. The
+  fixture `tests/fixtures/mt/short-profile.json` comes from a reference copy exported from ab-chat-full's capture of
+  2026-10-20 (`reference/chat/short-profile-a.jsonl`), the first with the lookups allowed.
 
 ### Task 12: Names and pictures
 **Files:**

@@ -32,11 +32,13 @@ reviewed**, and keeps that until a note describes it.
   - `forced deny`: a scenario's `ForcedDeny` (its probe, `ab-image`'s media writes), denied before classification.
   A frame on a socket is judged by `FrameClassifier` the same way (`own-state trouter_session` or `Unknown`).
 - **Native** is what the native client does with it (`crates/teams-proto`, `crates/teams-auth`): `Read`, `OwnState`,
+  `PostRead <kind>` (an entry of the sealed read-by-`POST` list, sent only as `AuthorizedPostRead` with the permit
+  `Fence::check_post_read` gave for its exact MRIs, in its captured shape, logged to `fence.log` first, once; M2 T11),
   `Authorized<Mutating>` (a sealed write sent only with its permit), `OwnFrame` (a sealed frame logged to `fence.log`
   first), `teams-auth` (its own HTTP client, not the transport), `teams-trouter` (the push socket, its own WSS
   connection to the Trouter hosts only, sending nothing but `OwnFrame`s through its `FrameSink`), or **not on the
-  allowlist** (the transport reaches only the chat service, the registrar and Trouter's HTTP side, so it can't send it
-  at all). The transport's own-state list (`OwnState`) has one entry, the messaging stack's `EndpointRegistration`.
+  allowlist** (the transport reaches only the chat service, the registrar, Trouter's HTTP side and, once given the
+  account's middle-tier base, the middle tier's `beta/users/…`, so it can't send it at all). The transport's own-state list (`OwnState`) has one entry, the messaging stack's `EndpointRegistration`.
   The native push channel (Task 16) first ran live in Task 19 (`teams-headless watch`), then in Task 21's acceptance
   runs.
 - **Notes · task**: the note that describes it, and the task that captured, mapped or built it (M0 or M1 task number).
@@ -138,11 +140,14 @@ seen only in answers (`chatService` GTM, `Location` headers); the fence and the 
 ## Middle tier and apps (`https://<teams origin>/api/mt/part/<partition>/`, `…/api/apps/part/<partition>/`)
 
 `<partition>` is a region, `-` and a number (`amer-03` for the lab). Every `POST` here is a lookup the web client
-sends as a `POST`; every `GET` passes as a read.
+sends as a `POST`; every `GET` passes as a read. The native transport reaches the middle tier as `Service::MiddleTier`
+(M2 T11) only once given the account's base from the GTM `middleTier` (`HttpTransport::with_middle_tier`: an AFD
+host, `/api/mt/part/<partition>` exactly), and only under `beta/users/`: a `Read` there is a `GET`, and the only
+`POST` is a `PostRead` entry.
 
 | Method | Path | What it does | Browser fence | Native | Notes · task | Evidence |
 |---|---|---|---|---|---|---|
-| `POST` | `beta/users/fetchShortProfile` `?isMailAddress=false&enableGuest&skypeTeamsInfo&canBeSmtpAddress&includeIBBarredUsers&includeDisabledAccounts` | short profiles of a list of MRIs | read-by-POST `short_profile` when every MRI is a lab account; otherwise expected deny: short profiles beyond the lab | not on the allowlist | [fence-targets.md](fence-targets.md#reads-by-post) · M0 T11, M1 T7 | seen (`ab-chat`, `ab-chat-full`, `ab-trouter`, `abc-chat`, `echo-call`) |
+| `POST` | `beta/users/fetchShortProfile` `?isMailAddress=false&enableGuest&skypeTeamsInfo&canBeSmtpAddress&includeIBBarredUsers&includeDisabledAccounts` | short profiles of a list of MRIs | read-by-POST `short_profile` when every MRI is a lab account; otherwise expected deny: short profiles beyond the lab | `PostRead short_profile` (`ShortProfileLookup`, the captured query and pinned headers, the `api.spaces.skype.com` token), only with a permit for lab accounts; its answer read only when it names nobody but the MRIs asked (`read_answer`) | [fence-targets.md](fence-targets.md#reads-by-post) · M0 T11, M1 T7, M2 T11 | seen (`ab-chat`, `ab-chat-full`, `ab-trouter`, `abc-chat`, `echo-call`); native on the mock only |
 | `POST` | `beta/users/fetchShortProfile` `?isMailAddress=true` | the same lookup by address | expected deny: short profiles beyond the lab | not on the allowlist | [fence-targets.md](fence-targets.md#how-a-run-uses-it) · M0 T11 | seen (`ab-chat`) |
 | `POST` | `beta/users/fetch` `?<the lookup query>` | full profiles of a list of MRIs | read-by-POST `user_fetch` (lab accounts only); otherwise expected deny: user fetch beyond the lab | not on the allowlist | [fence-targets.md](fence-targets.md#reads-by-post) · M1 T7 | seen (`ab-chat`, `ab-chat-full`, `ab-trouter`, `abc-chat`) |
 | `POST` | `beta/users/useraggregatesettings` | the account's setting groups (the calling policy among them) | own-state `settings_read` in `Classifier::calling` (reviewed shape); elsewhere expected deny: aggregate settings | not on the allowlist | [calling-echo.md](calling-echo.md#what-has-to-be-up-before-a-call) · M0 T18 | seen (all writing scenarios) |
