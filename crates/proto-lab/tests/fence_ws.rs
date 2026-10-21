@@ -8,6 +8,8 @@
 //! found.
 
 mod common;
+#[path = "common/page.rs"]
+mod page;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -707,7 +709,8 @@ impl EchoServer {
     }
 }
 
-/// Waits until a page shows the document at `path`, fully loaded (the `about:blank` before it is `complete` too).
+/// Waits until a tab created on a URL (not [`navigate`]d) shows the document at `path`, fully loaded (the `about:blank`
+/// before it is `complete` too).
 async fn loaded(cdp: &Cdp, session: &SessionId, path: &str) -> TestResult {
     let expression = format!("location.pathname === '{path}' && document.readyState === 'complete' || null");
     evaluate_until(cdp, session, &expression).await?;
@@ -757,30 +760,14 @@ async fn evaluate_in(cdp: &Cdp, session: &SessionId, expression: &str, context: 
     Ok(result["result"]["value"].clone())
 }
 
-/// Polls `expression` until it gives something other than `null`.
+/// [`page::evaluate_until`], for up to [`STEP`].
 async fn evaluate_until(cdp: &Cdp, session: &SessionId, expression: &str) -> TestResult<Value> {
-    let poll = async {
-        loop {
-            let value = evaluate_in(cdp, session, expression, None).await?;
-            if !value.is_null() {
-                return Ok(value);
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-    tokio::time::timeout(STEP, poll)
-        .await
-        .map_err(|_| format!("{expression} stayed null for {STEP:?}"))?
+    page::evaluate_until(cdp, session, expression, STEP).await
 }
 
-async fn navigate(cdp: &Cdp, page: &ArmedTarget, url: &str) -> TestResult {
-    let navigated = cdp
-        .call(Some(&page.session), "Page.navigate", json!({ "url": url }))
-        .await?;
-    if let Some(error) = navigated.get("errorText") {
-        return Err(format!("navigating to {url}: {error}").into());
-    }
-    Ok(())
+/// [`page::navigate`]s the tab and waits up to [`STEP`] for the page to load.
+async fn navigate(cdp: &Cdp, tab: &ArmedTarget, url: &str) -> TestResult {
+    page::navigate(cdp, &tab.session, url, STEP).await
 }
 
 /// One armed run on a throwaway profile, with an own rule standing in for the echo server.
@@ -1211,7 +1198,6 @@ async fn a_frame_that_gets_past_the_guard_is_caught_by_the_audit_and_fails_the_r
         let cdp = run.armed.cdp();
         let page = run.armed.open_page(STEP).await?;
         navigate(cdp, &page, &format!("{}/pages/blank.html", pages.uri())).await?;
-        loaded(cdp, &page.session, "/pages/blank.html").await?;
         let tree = cdp.call(Some(&page.session), "Page.getFrameTree", Value::Null).await?;
         let world = json!({"frameId": tree["frameTree"]["frame"]["id"], "worldName": "bypass"});
         let created = cdp.call(Some(&page.session), "Page.createIsolatedWorld", world).await?;
@@ -1331,7 +1317,6 @@ async fn a_window_the_page_opens_lends_it_no_unguarded_send() {
         let cdp = run.armed.cdp();
         let page = run.armed.open_page(STEP).await?;
         navigate(cdp, &page, &format!("{}/pages/blank.html", pages.uri())).await?;
-        loaded(cdp, &page.session, "/pages/blank.html").await?;
         let script = CROSS_REALM.replace("BASE", &format!("'{}'", echo.origin));
         assert_eq!(evaluate_in(cdp, &page.session, &script, None).await?, "open");
         for (name, attempt) in OTHER_WINDOWS {

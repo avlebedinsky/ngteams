@@ -8,6 +8,8 @@
 //! appears here. The forced-deny test runs a throwaway armed browser on a local page.
 
 mod common;
+#[path = "common/page.rs"]
+mod page;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -694,7 +696,7 @@ async fn forced_deny_run(armed: &ArmedBrowser, server: &MockServer) -> TestResul
             .labelled("probe-7"),
     );
 
-    send_from_page(&mut driver, server, "probe-7").await?;
+    send_from_page(armed, &page, &mut driver, server, "probe-7").await?;
     let denied = driver
         .wait_for_failed_request("the probe fails", &posts, Duration::from_secs(10))
         .await?;
@@ -706,7 +708,7 @@ async fn forced_deny_run(armed: &ArmedBrowser, server: &MockServer) -> TestResul
 
     // the same post without the probe goes out
     armed.clear_forced();
-    send_from_page(&mut driver, server, "plain").await?;
+    send_from_page(armed, &page, &mut driver, server, "plain").await?;
     let sent = driver
         .wait_for_request("the plain post", &posts, Duration::from_secs(10))
         .await?;
@@ -741,35 +743,25 @@ async fn wait_for_send(server: &MockServer) -> TestResult {
     Err("the plain post never reached the server".into())
 }
 
-/// Opens the send page with `text` and presses its button.
-async fn send_from_page(driver: &mut Driver, server: &MockServer, text: &str) -> TestResult {
-    driver
-        .navigate("open the send page", &format!("{}/send?text={text}", server.uri()))
-        .await?;
-    driver
-        .wait_for_tid("the send button", "send", Duration::from_secs(10))
-        .await?;
+/// Opens the send page with `text` and, once it has loaded (its button does nothing before its script has run),
+/// presses its button.
+async fn send_from_page(
+    armed: &ArmedBrowser,
+    page: &SessionId,
+    driver: &mut Driver,
+    server: &MockServer,
+    text: &str,
+) -> TestResult {
+    let url = format!("{}/send?text={text}", server.uri());
+    page::navigate(armed.cdp(), page, &url, Duration::from_secs(10)).await?;
     driver.click("send", Selector::Tid("send")).await?;
     Ok(())
 }
 
-/// What the send page recorded, once it has recorded anything.
+/// What the send page recorded, once it has recorded anything (within 10 s).
 async fn page_results(armed: &ArmedBrowser, page: &SessionId) -> TestResult<Value> {
-    loop {
-        let value = armed
-            .cdp()
-            .call(
-                Some(page),
-                "Runtime.evaluate",
-                json!({"expression": "window.lab.results", "returnByValue": true}),
-            )
-            .await?;
-        let results = value["result"]["value"].clone();
-        if results.as_array().is_some_and(|results| !results.is_empty()) {
-            return Ok(results);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let expression = "window.lab.results.length > 0 ? window.lab.results : null";
+    page::evaluate_until(armed.cdp(), page, expression, Duration::from_secs(10)).await
 }
 
 async fn server_got_send(server: &MockServer) -> bool {

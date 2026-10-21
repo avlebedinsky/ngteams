@@ -6,6 +6,8 @@
 //! is found.
 
 mod common;
+#[path = "common/page.rs"]
+mod page;
 #[path = "common/process.rs"]
 mod process;
 
@@ -16,6 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
+use page::evaluate;
 use proto_lab::arming::{
     ArmError, ArmOptions, ArmedBrowser, ArmedTarget, STEP_TIMEOUT, Step, TEAMS_ORIGINS, TargetKind,
 };
@@ -1636,39 +1639,14 @@ async fn received(server: &MockServer, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-async fn evaluate(cdp: &Cdp, session: &SessionId, expression: &str) -> TestResult<Value> {
-    let params = json!({"expression": expression, "returnByValue": true, "awaitPromise": true});
-    let result = cdp.call(Some(session), "Runtime.evaluate", params).await?;
-    if let Some(exception) = result.get("exceptionDetails") {
-        return Err(format!("{expression} threw: {exception}").into());
-    }
-    Ok(result["result"]["value"].clone())
-}
-
-/// Polls `expression` until it gives something other than `null`.
+/// [`page::evaluate_until`], for up to [`STEP`].
 async fn evaluate_until(cdp: &Cdp, session: &SessionId, expression: &str) -> TestResult<Value> {
-    let poll = async {
-        loop {
-            let value = evaluate(cdp, session, expression).await?;
-            if !value.is_null() {
-                return Ok(value);
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-    tokio::time::timeout(STEP, poll)
-        .await
-        .map_err(|_| format!("{expression} stayed null for {STEP:?}"))?
+    page::evaluate_until(cdp, session, expression, STEP).await
 }
 
-async fn navigate(cdp: &Cdp, page: &ArmedTarget, url: &str) -> TestResult {
-    let navigated = cdp
-        .call(Some(&page.session), "Page.navigate", json!({ "url": url }))
-        .await?;
-    if let Some(error) = navigated.get("errorText") {
-        return Err(format!("navigating to {url}: {error}").into());
-    }
-    Ok(())
+/// [`page::navigate`]s the tab and waits up to [`STEP`] for the page to load.
+async fn navigate(cdp: &Cdp, tab: &ArmedTarget, url: &str) -> TestResult {
+    page::navigate(cdp, &tab.session, url, STEP).await
 }
 
 /// Waits until `wanted` holds for the run's denials.

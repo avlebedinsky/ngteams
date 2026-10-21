@@ -3,6 +3,8 @@
 //! with an error naming its step. Also what a scenario expects of the fence (`DenyPolicy`) and `ab-chat`'s helpers.
 
 mod common;
+#[path = "common/page.rs"]
+mod page;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,8 +97,8 @@ async fn serve(page: &'static str) -> MockServer {
     server
 }
 
-/// Runs `body` with a driver on a tab of an armed throwaway browser, opened on the page; closes the browser after.
-/// Without Chrome it does nothing.
+/// Runs `body` with a driver on a tab of an armed throwaway browser, opened on the page and loaded; closes the browser
+/// after. Without Chrome it does nothing.
 async fn with_page<F>(body: F) -> TestResult
 where
     F: AsyncFnOnce(&mut Run) -> TestResult,
@@ -133,15 +135,16 @@ where
     };
     let armed = ArmedBrowser::arm(browser, http, ws, &options).await?;
     let page = armed.open_page(Duration::from_secs(15)).await?.session;
-    let driver = Driver::new(armed.cdp().clone(), page, armed.watch());
+    let driver = Driver::new(armed.cdp().clone(), page.clone(), armed.watch());
     let mut run = Run {
         armed,
         driver,
         server,
         _dir: dir,
     };
+    // a test acts on the page at once: once it has loaded, its elements and their handlers are there
     let url = format!("{}/page", run.server.uri());
-    run.driver.navigate("open the page", &url).await?;
+    page::navigate(run.armed.cdp(), &page, &url, Duration::from_secs(15)).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(60), body(&mut run)).await;
     run.armed.close(Duration::from_secs(10)).await?;
     outcome.map_err(|_| "the run took over 60 s")?

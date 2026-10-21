@@ -7,6 +7,8 @@
 //! found.
 
 mod common;
+#[path = "common/page.rs"]
+mod page;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -14,6 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt as _, StreamExt as _};
+use page::evaluate;
 use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TargetKind};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::capture::{Capture, CaptureError, EVENTS_FILE, RTC_BINDING, Recorder, RtcHooks, capture_dir_name};
@@ -195,31 +198,6 @@ async fn echo(stream: tokio::net::TcpStream, recorded: Arc<Mutex<Vec<String>>>) 
     }
 }
 
-async fn evaluate(cdp: &Cdp, session: &SessionId, expression: &str) -> TestResult<Value> {
-    let params = json!({"expression": expression, "returnByValue": true, "awaitPromise": true});
-    let result = cdp.call(Some(session), "Runtime.evaluate", params).await?;
-    if let Some(exception) = result.get("exceptionDetails") {
-        return Err(format!("{expression} threw: {exception}").into());
-    }
-    Ok(result["result"]["value"].clone())
-}
-
-/// Polls `expression` until it gives something other than `null`.
-async fn evaluate_until(cdp: &Cdp, session: &SessionId, expression: &str) -> TestResult<Value> {
-    let poll = async {
-        loop {
-            let value = evaluate(cdp, session, expression).await?;
-            if !value.is_null() {
-                return Ok(value);
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-    tokio::time::timeout(STEP, poll)
-        .await
-        .map_err(|_| format!("{expression} stayed null for {STEP:?}"))?
-}
-
 /// Polls the capture until `wanted` holds for its entries, and gives them.
 async fn entries_until(file: &Path, wanted: impl Fn(&[Value]) -> bool) -> TestResult<Vec<Value>> {
     let poll = async {
@@ -236,14 +214,14 @@ async fn entries_until(file: &Path, wanted: impl Fn(&[Value]) -> bool) -> TestRe
         .map_err(|_| format!("the capture never got what the test waits for within {STEP:?}"))?
 }
 
-async fn navigate(cdp: &Cdp, page: &ArmedTarget, url: &str) -> TestResult {
-    let navigated = cdp
-        .call(Some(&page.session), "Page.navigate", json!({ "url": url }))
-        .await?;
-    if let Some(error) = navigated.get("errorText") {
-        return Err(format!("navigating to {url}: {error}").into());
-    }
-    Ok(())
+/// [`page::evaluate_until`], for up to [`STEP`].
+async fn evaluate_until(cdp: &Cdp, session: &SessionId, expression: &str) -> TestResult<Value> {
+    page::evaluate_until(cdp, session, expression, STEP).await
+}
+
+/// [`page::navigate`]s the tab and waits up to [`STEP`] for the page to load.
+async fn navigate(cdp: &Cdp, tab: &ArmedTarget, url: &str) -> TestResult {
+    page::navigate(cdp, &tab.session, url, STEP).await
 }
 
 /// One recorded run, armed on a throwaway profile; `echo` (when given) stands in for an own-state socket for
