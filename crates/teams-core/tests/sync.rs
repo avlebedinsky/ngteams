@@ -29,9 +29,10 @@ use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C,
     NOTIFICATIONS,
 };
-use teams_proto::chat;
+use teams_proto::chat::{self, MessageText};
 use teams_proto::{
-    Authorized, Client, Credentials, Failure, HttpError, HttpTransport, Mutating, OwnState, Read, Response, Transport,
+    Author, Authorized, Client, Credentials, Failure, HttpError, HttpTransport, Mutating, OwnState, Read, Response,
+    Transport,
 };
 use teams_store::{Applied, Conversation, ConversationKind, Member, Message, OutboxEntry, OutboxState, Store};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -124,14 +125,19 @@ fn transport(origin: &str, token: &str) -> HttpTransport<MockToken> {
 
 /// The outbox of the account `me` (the one place that builds one).
 fn outbox(transport: Flaky, me: &str) -> Outbox<Flaky> {
-    Outbox::new(Arc::new(transport), lab_fence(), Arc::new(LabMembers), Mri::new(me))
+    Outbox::new(
+        Arc::new(transport),
+        lab_fence(),
+        Arc::new(LabMembers),
+        Author::new(Mri::new(me), "Lab account"),
+    )
 }
 
 /// A message post as a command (the one place that builds one).
 fn send(conversation: &str, text: &str) -> Command {
     Command::Send {
         conversation: conversation.to_owned(),
-        content: format!("<p>{text}</p>"),
+        text: MessageText::plain(text).unwrap(),
     }
 }
 

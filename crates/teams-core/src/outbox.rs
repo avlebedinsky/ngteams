@@ -357,7 +357,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     ///
     /// [`OutboxError::Store`] when the store fails.
     pub fn match_arrival(&self, store: &mut Store, arrival: &Arrival<'_>) -> Result<Option<OutboxEntry>, OutboxError> {
-        let mine = arrival.sender == Some(self.me.as_str());
+        let mine = arrival.sender == Some(self.me.mri().as_str());
         let Some(client_message_id) = arrival.client_message_id.filter(|_| mine) else {
             return Ok(None);
         };
