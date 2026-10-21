@@ -21,8 +21,8 @@ use teams_core::EngineError;
 use teams_core::lab::LabError;
 use teams_core::{EngineHandle, Event};
 use teams_fence::lab::Alias;
-use teams_ui::window::{self, LAB_APP_ID};
-use teams_ui::{Bridge, Core, EventSource, Models, Root, ViewTrace};
+use teams_ui::window::{self, KitRoot, LAB_APP_ID};
+use teams_ui::{Bridge, Core, EventSource, Models, ViewTrace};
 use tokio::sync::watch;
 
 /// What the app starts with.
@@ -95,7 +95,7 @@ pub struct LaunchFailed {
 ///
 /// # Errors
 /// The window can't be opened: the bridge is shut down then, and [`LaunchFailed::stopped`] ends once it is.
-pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<Root>, Entity<Bridge>), LaunchFailed> {
+pub fn launch(cx: &mut App, launch: Launch) -> Result<(WindowHandle<KitRoot>, Entity<Bridge>), LaunchFailed> {
     let Launch {
         alias,
         engine,

@@ -10,7 +10,8 @@
 //!   through a query; the models say when to ask again.
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
 //!   caller hands in, read by the live test.
-//! - [`view`]: the window's root view; [`window`] opens it.
+//! - [`view`]: the window's root view; [`window`] opens it inside the kit's root, which applies the theme to the
+//!   window (its font size as the rem size, its font family and colours) and hosts the kit's dialogs and tooltips.
 //! - [`theme`]: the UI kit's (`gpui-component`) theme in Teams-like colours and compact sizes, light and dark
 //!   following the window's appearance.
 //!

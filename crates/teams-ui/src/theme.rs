@@ -16,7 +16,9 @@ pub const LIGHT: &str = "Teams Light";
 /// The dark theme's name.
 pub const DARK: &str = "Teams Dark";
 
-/// The base font size, px: compact, as Teams' own (the kit's default is 16).
+/// The base font size, px: compact, as Teams' own (the kit's default is 16). It reaches a window as its rem size
+/// only through the kit's root ([`crate::window::KitRoot`]), which sets it each time the window draws; the other
+/// values here (radius, colours, shadow) the kit's widgets read from the theme as they draw.
 pub const FONT_SIZE: f32 = 14.0;
 /// The corner radius of general elements, px.
 pub const RADIUS: usize = 4;

@@ -301,10 +301,56 @@ fn the_app_s_window_sets_the_kit_up_and_follows_its_appearance(cx: &mut TestAppC
             )
         })
         .expect("the window opens");
-    assert!(window.read_with(cx, |root, _| root.follows_appearance()).expect("open"));
+    let root = cx
+        .read(|cx| teams_ui::window::content(window, cx))
+        .expect("our view inside the kit's root");
+    assert!(cx.read(|cx| root.read(cx).follows_appearance()));
     cx.read(|cx| {
         assert_eq!(Theme::global(cx).light_theme.name.as_ref(), LIGHT);
         assert_eq!(theme::mode(cx), ThemeMode::Light);
     });
     assert_eq!(teams_ui::view::BACKGROUND, LIGHT_PALETTE.background);
+}
+
+/// The app's window, opened and drawn: its rem size, which every `rems` size and the default text size follow.
+fn rem_size<V: Render>(window: gpui::WindowHandle<V>, cx: &mut TestAppContext) -> gpui::Pixels {
+    cx.run_until_parked();
+    window
+        .update(cx, |_, window, _| {
+            window.refresh();
+        })
+        .expect("open");
+    cx.run_until_parked();
+    window.update(cx, |_, window, _| window.rem_size()).expect("open")
+}
+
+#[gpui::test]
+fn the_app_s_window_draws_at_the_theme_s_font_size(cx: &mut TestAppContext) {
+    // GPUI starts every window at 16 px: the kit's root sets the theme's size on the window as it draws, and our
+    // root view alone, with the theme set up, stays at GPUI's
+    cx.update(theme::init);
+    let models = cx.update(teams_ui::Models::new);
+    let bare = cx.add_window(|_, cx| teams_ui::Root::new(models, std::sync::Arc::new(teams_ui::ViewTrace::off()), cx));
+    assert_eq!(rem_size(bare, cx), px(16.0));
+
+    let models = cx.update(teams_ui::Models::new);
+    let window = cx
+        .update(|cx| {
+            teams_ui::window::open(
+                cx,
+                teams_ui::window::LAB_APP_ID,
+                "lab a".into(),
+                models,
+                std::sync::Arc::new(teams_ui::ViewTrace::off()),
+            )
+        })
+        .expect("the window opens");
+    assert_eq!(rem_size(window, cx), px(FONT_SIZE));
+
+    cx.update(|cx| theme::apply(WindowAppearance::Dark, cx));
+    assert_eq!(rem_size(window, cx), px(FONT_SIZE), "compact in the dark theme too");
+
+    // a font size changed in the theme reaches the drawn window, not only the kit's global
+    cx.update(|cx| Theme::global_mut(cx).font_size = px(FONT_SIZE + 2.0));
+    assert_eq!(rem_size(window, cx), px(FONT_SIZE + 2.0));
 }

@@ -5,8 +5,8 @@
 //!
 //! - `window`: lab account a's engine on the mock chat service and its Trouter (`teams-mock`, through the
 //!   `test-support` mock origins, a test roster and log), handed to the app as `teams-app` hands its own
-//!   ([`teams_app::app::launch`]). The parent waits for the window, reads the view trace (the window opened, the push
-//!   channel connected), screenshots the window (its background fills it; the shot is kept under
+//!   ([`teams_app::app::launch`]). The parent waits for the window, checks its rem size is the theme's font size,
+//!   reads the view trace (the window opened, the push channel connected), screenshots the window (its background fills it; the shot is kept under
 //!   `target/ui-shots/`), closes it through niri, and checks that the app quit and its engine's thread was joined (the
 //!   account's engine lock is free).
 //! - `http`: a window with an `img()` of an `https` URL on a loopback listener the child holds. GPUI's HTTP client is
@@ -183,6 +183,16 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
     drop(writer);
     let mut running = Running::new(child)?;
     let mut trace = TraceReader::start(reader);
+    let rem = running
+        .line_where(STARTUP, |line| line.starts_with("rem-size "))
+        .map_err(|error| running.fail(&format!("no rem-size line: {error:?}")))?;
+    // the theme's compact font size reached the window drawn on the real platform (GPUI's own default is 16 px)
+    let compact = format!("rem-size {}", teams_ui::theme::FONT_SIZE);
+    if rem != compact {
+        return Err(running.fail(&format!(
+            "the window's rem size isn't the theme's: {rem}, not {compact}"
+        )));
+    }
     running
         .line_where(STARTUP, |line| line == "ready")
         .map_err(|error| running.fail(&format!("no ready line: {error:?}")))?;
@@ -388,7 +398,10 @@ fn child_window() -> SandboxResult {
         match launched {
             Ok((window, _)) => {
                 let _ = window.update(cx, |_, window, _| {
-                    after_frames(window, READY_FRAMES, |_, _| say("ready"));
+                    after_frames(window, READY_FRAMES, |window, _| {
+                        say(&format!("rem-size {}", window.rem_size().as_f32()));
+                        say("ready");
+                    });
                 });
             }
             Err(failed) => {
