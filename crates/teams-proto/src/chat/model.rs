@@ -479,11 +479,24 @@ impl Message {
         json_list(self.properties.get("qtdMsgs"))
     }
 
-    /// `properties.files`, a JSON string of a list: received files. Only `"[]"` was ever seen, so the entries are kept
-    /// as they come (parsed, never fetched).
+    /// `properties.files`, a JSON string of a list: received files. Only an empty list was ever captured (M2 Task 23's
+    /// `ab-file` sent no file: `docs/protocol/chat.md`), so only an empty list is known; a list with an entry is kept
+    /// as it came ([`Field::Unknown`]), never read as a file (and never fetched).
     #[must_use]
     pub fn files(&self) -> Field<Vec<Value>> {
-        json_list(self.properties.get("files"))
+        empty_list(self.properties.get("files"))
+    }
+
+    /// What the message carries beside its text that no capture showed ([`unshown_parts`]): received files, cards and
+    /// AMS objects (`amsreferences` with an entry), each kept as it came. Empty for a message every captured message
+    /// was like.
+    #[must_use]
+    pub fn unshown(&self) -> Vec<Unshown> {
+        let mut parts = unshown_parts(&self.properties);
+        if let Some(references) = self.ams_references.as_ref().filter(|references| !references.is_empty()) {
+            parts.push(Unshown::AmsReferences(Value::Array(references.clone())));
+        }
+        parts
     }
 
     /// The content as rich text: parsed HTML for `RichText/Html`, the text as it came for `Text`; `None` for other
@@ -831,6 +844,73 @@ fn number(value: &Value) -> Option<u64> {
         Value::Number(number) => number.as_u64(),
         Value::String(text) if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) => text.parse().ok(),
         _ => None,
+    }
+}
+
+/// A part of a message no capture showed, kept as it came: what [`Message::unshown`] and [`unshown_parts`] find. A
+/// view shows that the message has content it can't show, never a guess at it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unshown {
+    /// `properties.files` with an entry, or in a form that isn't a list (only `"[]"` was captured: a sent file's
+    /// message never went out in M2 Task 23's `ab-file`, every write of the file denied).
+    Files(Value),
+    /// `properties.cards` with an entry, or in a form that isn't a list (only `"[]"` was captured; a card comes from a
+    /// bot or a connector, none in the lab).
+    Cards(Value),
+    /// `amsreferences` with an entry (only `[]` was captured: an image's message never went out in M1 Task 20's
+    /// `ab-image`).
+    AmsReferences(Value),
+}
+
+impl Unshown {
+    /// The name of the part, for a trace: `files`, `cards`, `amsreferences`.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Files(_) => "files",
+            Self::Cards(_) => "cards",
+            Self::AmsReferences(_) => "amsreferences",
+        }
+    }
+}
+
+/// What a message's `properties` (`properties`, as the message carried them or the store keeps them) hold that no
+/// capture showed: `files` or `cards` other than an empty list (a JSON string of one, as captured, or a list), each
+/// kept as it came. A missing one is nothing to show.
+#[must_use]
+pub fn unshown_parts(properties: &Map<String, Value>) -> Vec<Unshown> {
+    let unknown = |key: &str| match empty_list(properties.get(key)) {
+        Field::Unknown(raw) => Some(raw),
+        Field::Absent | Field::Known(_) => None,
+    };
+    let mut parts = Vec::new();
+    if let Some(raw) = unknown("files") {
+        parts.push(Unshown::Files(raw));
+    }
+    if let Some(raw) = unknown("cards") {
+        parts.push(Unshown::Cards(raw));
+    }
+    parts
+}
+
+/// The web client's origin, where a message this build can't show in full is read ([`web_chat_link`]).
+pub const WEB_CLIENT: &str = "https://teams.microsoft.com";
+
+/// The web client's link that opens the conversation `conversation`: `<WEB_CLIENT>/l/chat/<id>/0`, the id
+/// percent-encoded as one segment: the deep link `abc-chat` opens the lab's existing group chat by
+/// (`docs/protocol/endpoints.md`). Opened in the browser, never fetched.
+#[must_use]
+pub fn web_chat_link(conversation: &str) -> String {
+    let id = percent_encoding::utf8_percent_encode(conversation, percent_encoding::NON_ALPHANUMERIC);
+    format!("{WEB_CLIENT}/l/chat/{id}/0")
+}
+
+/// A list property only ever captured empty, as a list or a JSON string of one: an empty list is known, anything else
+/// (a list with an entry, another form) is kept as it came.
+fn empty_list(value: Option<&Value>) -> Field<Vec<Value>> {
+    match json_list::<Value>(value) {
+        Field::Known(list) if !list.is_empty() => Field::Unknown(value.cloned().unwrap_or(Value::Null)),
+        other => other,
     }
 }
 

@@ -1,7 +1,8 @@
 # The chat service: conversations, messages and what happens to them
 
 Status: 2026-10-21, M1 Task 7; images (sending, denied) 2026-10-21, M1 Task 20; the shapes the UI needs (every quick
-reaction, typing, lines and links, a group mention) 2026-10-21, M2 Task 10. Written from what the lab saw, in our
+reaction, typing, lines and links, a group mention) 2026-10-21, M2 Task 10; files (sending, denied) and received
+attachments 2026-10-22, M2 Task 23. Written from what the lab saw, in our
 own words, plus the web bundle where nothing was captured (marked so). The chat service's base, credential, ids, member
 reads and the fence's mapping of writes are in [fence-targets.md](fence-targets.md); its token in [auth.md](auth.md).
 
@@ -27,6 +28,9 @@ Sources (all outside the repository, under the lab's data dir; fixtures are writ
   `…171041Z` for a, `…165601Z`, `…170308Z` and `…171041Z-2` for b, read locally, nothing exported): a set and took back
   each quick reaction, typed while b's open chat recorded its typing indicator, sent a message of three lines with a
   link, and mentioned b in the lab's group chat ([The shapes the UI needs](#the-shapes-the-ui-needs-chat-shapes)).
+- **ab-file**: `proto-lab run ab-file` of 2026-10-22 (M2 Task 23; accounts a and b, the a–b chat, captures
+  `captures/ab-file/20261022T013754Z`, `…015634Z`, `…020205Z` and `…021606Z` for a, read locally, nothing exported):
+  a tried to send a made-up text file with every write of it denied ([Files](#files-sending-denied-ab-file)).
 - **bundle**: the web client `26260.1717.5229.7049`, for what no run showed.
 
 Every path below is relative to the chat service base (`…/api/chatsvc/<region>/`), and every id in a path is
@@ -109,8 +113,12 @@ every profile lookup; the account's display name since the lookups of lab accoun
   of objects (`messageId` a number, plus `message` null, `validationResult` `Valid`, `sharedRefId`, `replyChainId`) and
   `hasValidMsgReferences` true. A 1:1 chat has no reply chains: a quote is all a "reply" is.
 - **Mentions** (fixture `mention.json`): [below](#mentions-mention).
-- **Received attachments**: not seen; every message had `amsreferences` `[]` and `files` `"[]"`. Sending images is
-  deferred out of M1 ([Images](#images-sending-denied-ab-image)), so no message with one has been read either.
+- **Received attachments**: not seen; every message had `amsreferences` `[]` and `files` and `cards` `"[]"`. Sending
+  images is deferred out of M1 ([Images](#images-sending-denied-ab-image)) and a file never left the web client
+  ([Files](#files-sending-denied-ab-file)), so no message with one has been read either. The native client keeps a
+  list with an entry as it came (`teams_proto::chat::Unshown`; `Message::files` is `Field::Unknown`) and shows the
+  message's text with a line saying it has content that can't be shown here and a button that opens the chat in the
+  web client (`l/chat/<chat>/0`), never a guess at it (M2 Task 23).
 
 ## A message as sent (ab-chat-full, a)
 
@@ -153,6 +161,41 @@ registry of what it permitted (which the fence must not stand in) or an authorit
 readers, which no capture has shown, and which `forward` could change between the read and the upload. Every answer past
 the creation is uncaptured too. The fence maps none of it: AMS objects are `Unknown` and denied
 ([fence-targets.md](fence-targets.md)).
+
+## Files: sending, denied (ab-file)
+
+What the web client does to send a file, with every write of it force-denied by the scenario (M2 Task 23): writes to
+the file services (SharePoint and OneDrive hosts, their media hosts, Graph), to AMS objects, and any `POST` or `PUT`
+whose body names a lab file (the file's name and the caption both carry the marker). a typed a caption, then handed
+the compose box of the a–b chat a made-up text file.
+
+- **A drop or a paste of the file attaches nothing.** The editor takes a pasted image
+  ([Images](#images-sending-denied-ab-image)), but a `text/plain` file dropped on it or pasted into it showed no
+  attachment. Pressing Enter then (the first run, whose attachment test took the typed caption for the file) posted
+  the caption alone, `properties.files` `"[]"`, tried five times within the minute watched, denied each time; the
+  client kept it as being sent and, after a reload, a deleted it from its actions without a request (it had no id on
+  the service).
+- **The attach button asks the account's own file storage first.** The compose box's controls are "Insert link",
+  "More options", "Discard", "Show Formatting options", "Emoji, GIFs and Stickers", "Attach files", "Actions and
+  apps" and "Send". "Attach files", clicked with the page's file pickers made to hand the file over without a dialog,
+  opened no menu and asked for no file; the page said "Sorry, you need OneDrive to share files. See your admin about
+  getting a license." Before that the client had asked `POST <middle tier>/beta/me/files/availability` (no body, the
+  `api.spaces.skype.com` token, `x-ms-client-caller: IsFluidSiteProvisioned`), which it sends on every load and the
+  fence denies (unmapped, "files availability" on the reviewed expected-deny list). Its answer was never seen, so
+  whether the lab accounts have a OneDrive at all is open: the notice may be the client's reading of the denied check.
+- **Nothing of a file went out**: no write to SharePoint, OneDrive, Graph or an AMS object, and no message post with
+  a file. The plain message before it (no marker) was sent and b showed it; b never showed the file's name (the
+  first run; the later ones stopped at the notice).
+- **Bundle only** (never seen): a chat file is uploaded into the account's own OneDrive, folder "Microsoft Teams
+  Chat Files" (`…/drive/root:/<folder>/<name>:/createUploadSession` on Graph or SharePoint's `_api/v2.0`, or a quick
+  upload), shared with the chat's members (`shareDriveItem`), and named in the message's `properties.files` (a JSON
+  string of a list; an entry has `fileName`, `fileInfo` with `fileUrl` and `shareUrl`, `@type`
+  `http://schema.skype.com/File`, `objectUrl`, `itemid`, `title`, `version`).
+
+Why sending stays out, and what would settle it, in order (`docs/backlog/file-sending.md`): the storage check as a
+reviewed read by `POST` of the account's own state, then the upload into the account's own drive, then the share,
+which names its readers and so could be judged by `Fence::check` (every recipient a lab account, a "specific people"
+link only), then the post. The fence maps none of it.
 
 ## Mentions (mention)
 

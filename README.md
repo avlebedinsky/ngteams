@@ -181,6 +181,9 @@ the run.
   deletes; b reads and reacts.
 - `ab-image`: a pastes a made-up image into the a–b chat with every write to the media service force-denied, to
   capture what sending an image sends (sending stays deferred: `docs/backlog/ams-image-sending.md`).
+- `ab-file`: a drops a made-up text file on the a–b chat's compose box with every write of it force-denied (the file
+  services, AMS objects, and any write naming a lab file), to capture what sending a file sends
+  (`docs/backlog/file-sending.md`).
 - `abc-chat`: with no group chat recorded, a creates the a–b–c chat (its first message force-denied) and records it
   in `chats.toml`, once; after that a messages it and b and c must show it, under the group-chat rule in
   [CLAUDE.md](CLAUDE.md).
