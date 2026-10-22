@@ -10,7 +10,9 @@ use teams_store::{OutboxEntry, OutboxState, Store, StoreError};
 use teams_trouter::Stop;
 
 use crate::chat::LabNames;
-use crate::print::{conversation_line, event_json, event_line, json_line, message_line, now_ms, visible, write_lines};
+use crate::print::{
+    availability_word, conversation_line, event_json, event_line, json_line, message_line, now_ms, visible, write_lines,
+};
 
 /// Why a command failed.
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +25,39 @@ pub enum CommandError {
     Output(#[from] io::Error),
     #[error("the engine stopped before the write settled")]
     Stopped,
+}
+
+/// The presence of `whom` (MRIs), read once through the engine (M2 Task 17): each asked about, then their
+/// `Event::Presence`s waited for until each was told or `wait` is over, then one `presence <who> <availability>` line
+/// each as the engine has it then ([`availability_word`]: `Unknown` when the read failed, gave nothing for them, or
+/// isn't one this build may send). Reads only: UPS's presence read is a read by `POST` under the fence's permit.
+///
+/// # Errors
+/// The engine's refusal, or when the output can't be written.
+pub async fn presence(
+    handle: &mut EngineHandle,
+    whom: &[String],
+    wait: Duration,
+    names: &LabNames,
+    out: &mut impl Write,
+) -> Result<(), CommandError> {
+    for mri in whom {
+        handle.presence(mri.clone()).await?;
+    }
+    let mut untold: Vec<&String> = whom.iter().collect();
+    let deadline = tokio::time::Instant::now() + wait;
+    while !untold.is_empty() {
+        match tokio::time::timeout_at(deadline, handle.next_event()).await {
+            Ok(Some(Event::Presence { mri, .. })) => untold.retain(|asked| **asked != mri),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    for mri in whom {
+        let availability = handle.presence(mri.clone()).await?;
+        writeln!(out, "presence {} {}", names.show(mri), availability_word(&availability))?;
+    }
+    Ok(())
 }
 
 /// The stored conversations, the latest activity first, one per line ([`conversation_line`]).

@@ -1,8 +1,9 @@
 //! The browser fence's reviewed reads by `POST` (`proto_lab::post_read`): the middle tier's profile lookups the mention
-//! picker needs, allowed only in their captured shape and only when every MRI they name is a lab account.
+//! picker needs and UPS's presence read, allowed only in their captured shape and only when every MRI they name is a lab
+//! account.
 //!
-//! The allowed shapes are the synthetic fixture `tests/fixtures/mt/profile-lookups.json`; every variant here is made
-//! from it by changing one thing. Made-up GUIDs fill in its placeholders; no real MRI or token appears here.
+//! The allowed shapes are the synthetic fixtures `tests/fixtures/mt/profile-lookups.json` and
+//! `tests/fixtures/ups/getpresence-requests.json`; every variant here is made from them by changing one thing. Made-up GUIDs fill in its placeholders; no real MRI or token appears here.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +23,7 @@ const GUID_X: &str = "00000000-0000-4000-8000-0000000000ff";
 const ECHO: &str = "28:00000000-0000-4000-8000-0000000000ec";
 const TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJ1cG4iOiJwbGFudGVkIn0.cGxhbnRlZC1zaWduYXR1cmU";
 const LOOKUPS: &str = include_str!("../../../tests/fixtures/mt/profile-lookups.json");
+const PRESENCE: &str = include_str!("../../../tests/fixtures/ups/getpresence-requests.json");
 
 fn fill(text: &str) -> String {
     text.replace("<guid:a>", GUID_A)
@@ -48,7 +50,11 @@ struct Lookup {
 
 impl Lookup {
     fn url(&self) -> String {
-        format!("{}{}?{}", self.origin, self.path, self.query)
+        if self.query.is_empty() {
+            format!("{}{}", self.origin, self.path)
+        } else {
+            format!("{}{}?{}", self.origin, self.path, self.query)
+        }
     }
 
     fn body_bytes(&self) -> Vec<u8> {
@@ -65,10 +71,17 @@ impl Lookup {
         classifier.classify_with_headers(&self.method, &self.url(), &paused.headers, Some(&self.body_bytes()))
     }
 
+    /// The MRIs the body names: a lookup's strings, a presence read's `mri`s.
     fn names(&self) -> Vec<Mri> {
         self.body
             .as_array()
-            .map(|names| names.iter().filter_map(Value::as_str).map(Mri::new).collect())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().or_else(|| name["mri"].as_str()))
+                    .map(Mri::new)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -103,8 +116,18 @@ fn paused_event(
     PausedRequest::from_params(&params)
 }
 
+/// The profile lookups of their fixture.
 fn lookups() -> TestResult<Vec<Lookup>> {
-    let fixture: Value = serde_json::from_str(&fill(LOOKUPS))?;
+    load(LOOKUPS)
+}
+
+/// The presence reads of their fixture.
+fn presence_reads() -> TestResult<Vec<Lookup>> {
+    load(PRESENCE)
+}
+
+fn load(fixture: &str) -> TestResult<Vec<Lookup>> {
+    let fixture: Value = serde_json::from_str(&fill(fixture))?;
     let query = fixture["query"].as_str().ok_or("no query")?;
     let headers: Vec<(String, String)> = fixture["headers"]
         .as_object()
@@ -117,6 +140,7 @@ fn lookups() -> TestResult<Vec<Lookup>> {
         let kind = match lookup["kind"].as_str() {
             Some("short_profile") => PostReadKind::ShortProfile,
             Some("user_fetch") => PostReadKind::UserFetch,
+            Some("presence") => PostReadKind::Presence,
             other => return Err(format!("an unknown kind {other:?}").into()),
         };
         let text = |key: &str| lookup[key].as_str().map(str::to_owned).ok_or(format!("no {key}"));
@@ -145,13 +169,22 @@ fn lookups() -> TestResult<Vec<Lookup>> {
 
 /// Each lookup of the fixture with one thing changed, and what was changed.
 fn variants(change: impl Fn(&mut Lookup) -> String) -> TestResult<Vec<(String, Lookup)>> {
-    Ok(lookups()?
+    Ok(changed(lookups()?, change))
+}
+
+/// Each presence read of the fixture with one thing changed, and what was changed.
+fn presence_variants(change: impl Fn(&mut Lookup) -> String) -> TestResult<Vec<(String, Lookup)>> {
+    Ok(changed(presence_reads()?, change))
+}
+
+fn changed(requests: Vec<Lookup>, change: impl Fn(&mut Lookup) -> String) -> Vec<(String, Lookup)> {
+    requests
         .into_iter()
         .map(|mut lookup| {
             let what = change(&mut lookup);
             (format!("{}: {what}", lookup.name), lookup)
         })
-        .collect())
+        .collect()
 }
 
 fn assert_unknown(classifier: &Classifier, variants: &[(String, Lookup)]) {
@@ -184,7 +217,7 @@ fn each_listed_lookup_is_a_post_read_naming_its_mris() -> TestResult {
 
 #[test]
 fn every_entry_of_the_list_says_why() {
-    assert_eq!(POST_READS.len(), 2);
+    assert_eq!(POST_READS.len(), 3);
     for entry in POST_READS {
         assert!(entry.reason.len() > 40, "{:?}", entry.kind);
     }
@@ -711,6 +744,352 @@ async fn a_lookup_naming_anyone_but_lab_accounts_is_denied() -> TestResult {
     assert_eq!(lab.http.denials().len(), denied);
     let entries = log_entries(&lab.log_path)?;
     assert_eq!(entries.len(), denied);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["verdict"] == "deny" && entry["reason"] == "unclassified"),
+        "{entries:?}"
+    );
+    Ok(())
+}
+
+// UPS's presence read (M2 Task 17)
+
+fn assert_presence_unknown_after(changes: &[(&str, Change)]) -> TestResult {
+    for &(what, change) in changes {
+        assert_unknown(
+            &Classifier::mapped(),
+            &presence_variants(|read| {
+                change(&mut read.headers);
+                what.to_owned()
+            })?,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn each_listed_presence_read_is_a_post_read_naming_its_mris() -> TestResult {
+    let reads = presence_reads()?;
+    assert_eq!(reads.len(), 4);
+    for read in &reads {
+        for classifier in [Classifier::mapped(), Classifier::calling(), Classifier::messaging()] {
+            assert_eq!(read.classify(&classifier), read.allowed(), "{}", read.name);
+        }
+        for classifier in [Classifier::seeded(), Classifier::sign_in()] {
+            assert_eq!(read.classify(&classifier), Classification::Unknown, "{}", read.name);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn other_presence_paths_and_methods_are_unknown() -> TestResult {
+    let paths = [
+        "/ups/noam/v1/presence/getpresence",
+        "/ups/noam/v1/presence/getpresence//",
+        "/ups/noam/v1/presence/getPresence/",
+        "/ups/noam/v1/presence/getpresence/x/",
+        "/ups/noam/v1/presence/getpresences/",
+        "/ups/noam/v2/presence/getpresence/",
+        "/ups/NOAM/v1/presence/getpresence/",
+        "/ups/no-am/v1/presence/getpresence/",
+        "/ups//v1/presence/getpresence/",
+        "/ups/v1/presence/getpresence/",
+        "/ups/noam/noam/v1/presence/getpresence/",
+        "/ups/no%61m/v1/presence/getpresence/",
+        "/ups/noam/v1/presence/%67etpresence/",
+        "/ups/noam/v1/me/endpoints/",
+        "/ups/noam/v1/pubsub/subscriptions/00000000-0000-4000-8000-0000000000e0",
+        "/ups/noam/v1/me/forceavailability/",
+        "/api/mt/part/amer-01/beta/users/getpresence",
+    ];
+    for path in paths {
+        assert_unknown(
+            &Classifier::mapped(),
+            &presence_variants(|read| {
+                read.path = path.to_owned();
+                path.to_owned()
+            })?,
+        );
+    }
+    for method in ["PUT", "PATCH", "DELETE", "PROPFIND"] {
+        assert_unknown(
+            &Classifier::mapped(),
+            &presence_variants(|read| {
+                read.method = method.to_owned();
+                method.to_owned()
+            })?,
+        );
+    }
+    for origin in [
+        "https://teams.microsoft.com.example.net",
+        "http://teams.microsoft.com",
+        "https://teams.live.com",
+        "https://presence.teams.microsoft.com",
+    ] {
+        assert_unknown(
+            &Classifier::mapped(),
+            &presence_variants(|read| {
+                read.origin = origin.to_owned();
+                origin.to_owned()
+            })?,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_presence_read_with_any_query_is_unknown() -> TestResult {
+    for query in ["x=1", "source=ups", "mri=8:orgid:x"] {
+        assert_unknown(
+            &Classifier::mapped(),
+            &presence_variants(|read| {
+                read.query = query.to_owned();
+                format!("query {query:?}")
+            })?,
+        );
+    }
+    // an empty query (a bare `?`) is a query the captures never showed
+    for read in presence_reads()? {
+        let url = format!("{}?", read.url());
+        let headers = read.paused()?.headers;
+        let classified = Classifier::mapped().classify_with_headers("POST", &url, &headers, Some(&read.body_bytes()));
+        assert_eq!(classified, Classification::Unknown, "{}", read.name);
+    }
+    Ok(())
+}
+
+#[test]
+fn presence_headers_other_than_the_captured_ones_are_unknown() -> TestResult {
+    assert_presence_unknown_after(&[
+        ("the client's endpoint id", |headers| {
+            headers.push((
+                "x-ms-endpoint-id".to_owned(),
+                "00000000-0000-4000-8000-0000000000e0".to_owned(),
+            ));
+        }),
+        ("a lookup's flag", |headers| {
+            headers.push(("x-ms-migration".to_owned(), "True".to_owned()));
+        }),
+        ("another origin", |headers| {
+            set(headers, "Origin", "https://example.com");
+        }),
+        ("no content type", |headers| {
+            headers.retain(|(name, _)| name != "content-type");
+        }),
+        ("the lookups' content type", |headers| {
+            set(headers, "content-type", "application/json;charset=UTF-8");
+        }),
+        ("another behaviour override", |headers| {
+            set(headers, "behavioroverride", "redirect");
+        }),
+        ("another client type", |headers| {
+            set(headers, "x-ms-client-type", "web");
+        }),
+        ("another client user agent", |headers| {
+            set(headers, "x-ms-client-user-agent", "Teams-V1-Web");
+        }),
+        ("an object id", |headers| {
+            set(headers, "x-ms-object-id", GUID_B);
+        }),
+        ("a caller with an object id", |headers| {
+            set(headers, "x-ms-client-caller", &format!("presence-sync:{GUID_X}"));
+        }),
+        ("behavioroverride twice", |headers| {
+            headers.push(("BehaviorOverride".to_owned(), "redirectAs404".to_owned()));
+        }),
+        ("a method override", |headers| {
+            headers.push(("X-HTTP-Method-Override".to_owned(), "PUT".to_owned()));
+        }),
+    ])?;
+    // the captures' longest caller, and the headers whose values are free, pass
+    let passing: [(&str, Change); 3] = [
+        ("a caller of 103 bytes", |headers| {
+            set(
+                headers,
+                "x-ms-client-caller",
+                "presence-update-event-batch-worker-resolver:subscribe:ComponentsComposeMessagePresenceBatchSubscription",
+            );
+        }),
+        ("no behaviour override", |headers| {
+            headers.retain(|(name, _)| name != "behavioroverride");
+        }),
+        ("another correlation id", |headers| {
+            set(headers, "x-ms-correlation-id", "another-made-up-id");
+        }),
+    ];
+    for (what, change) in passing {
+        for (variant, read) in presence_variants(|read| {
+            change(&mut read.headers);
+            what.to_owned()
+        })? {
+            assert_eq!(read.classify(&Classifier::mapped()), read.allowed(), "{variant}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_presence_body_other_than_a_list_of_asks_is_unknown() -> TestResult {
+    let mri = lab_mri(GUID_B);
+    let bodies = [
+        json!([]),
+        json!([mri]),
+        json!({"mri": mri}),
+        json!([{"mri": mri, "source": "unified"}]),
+        json!([{"mri": mri, "source": null}]),
+        json!([{"mri": mri, "source": "UPS"}]),
+        json!([{"mri": mri, "endpointId": "00000000-0000-4000-8000-0000000000e0"}]),
+        json!([{"MRI": mri}]),
+        json!([{"Mri": mri}]),
+        json!([{"mri": 7}]),
+        json!([{"mri": [mri]}]),
+        json!([{}]),
+        json!([{"mri": mri}, {"mri": mri}]),
+        json!([{"mri": mri}, {"mri": mri, "source": "ups"}]),
+        json!([{"mri": mri}, mri]),
+        json!([{"mri": mri}, null]),
+    ];
+    for body in &bodies {
+        assert_unknown(
+            &Classifier::mapped(),
+            &presence_variants(|read| {
+                read.body = body.clone();
+                format!("body {body}")
+            })?,
+        );
+    }
+    for read in presence_reads()? {
+        let url = read.url();
+        let headers = read.paused()?.headers;
+        let classifier = Classifier::mapped();
+        let classify = |body| classifier.classify_with_headers("POST", &url, &headers, body);
+        let raw: [&[u8]; 5] = [
+            b"",
+            b"[",
+            br#"[{"mri":"8:orgid:x","MRI":"8:orgid:y"}]"#,
+            br#"[{"mri":"8:orgid:x"}] [{"mri":"8:orgid:y"}]"#,
+            b"not json",
+        ];
+        for raw in raw {
+            assert_eq!(classify(Some(raw)), Classification::Unknown, "{}", read.name);
+        }
+        assert_eq!(classify(None), Classification::Unknown, "{}", read.name);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_lookup_in_a_presence_reads_shape_or_the_other_way_round_is_unknown() -> TestResult {
+    let lookup = lookups()?.remove(0);
+    let presence = presence_reads()?.remove(0);
+    let crossed = [
+        // a lookup's headers, query and body on the presence path
+        Lookup {
+            path: presence.path.clone(),
+            ..lookup.clone()
+        },
+        // a presence read's headers and body on a lookup's path
+        Lookup {
+            path: lookup.path.clone(),
+            ..presence.clone()
+        },
+        // a presence read with a lookup's body
+        Lookup {
+            body: lookup.body.clone(),
+            ..presence.clone()
+        },
+        // a presence read with a lookup's headers
+        Lookup {
+            headers: lookup.headers.clone(),
+            ..presence
+        },
+    ];
+    for request in crossed {
+        assert_eq!(
+            request.classify(&Classifier::mapped()),
+            Classification::Unknown,
+            "{request:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_paused_presence_read_keeps_no_credential() -> TestResult {
+    for read in presence_reads()? {
+        let mut with_token = read.clone();
+        set(&mut with_token.headers, "authorization", &format!("Bearer {TOKEN}"));
+        set(&mut with_token.headers, "Cookie", &format!("authtoken={TOKEN}"));
+        let paused = with_token.paused()?;
+        for (name, value) in &paused.headers {
+            let read_value = HEADER_VALUES_READ.contains(&name.to_ascii_lowercase().as_str());
+            assert_eq!(value.is_some(), read_value, "{}: {name}", read.name);
+        }
+        assert!(!format!("{paused:?}").contains(TOKEN), "{}", read.name);
+        assert_eq!(
+            with_token.classify(&Classifier::mapped()),
+            read.allowed(),
+            "{}",
+            read.name
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_presence_read_of_lab_accounts_passes_logged_as_a_post_read() -> TestResult {
+    let lab = lab()?;
+    let reads = presence_reads()?;
+    for read in &reads {
+        assert_eq!(lab.http.decide(&read.paused()?).await, Verdict::Allow, "{}", read.name);
+    }
+    assert!(lab.http.denials().is_empty());
+    let entries = log_entries(&lab.log_path)?;
+    assert_eq!(entries.len(), reads.len());
+    for (entry, read) in entries.iter().zip(&reads) {
+        assert_eq!(entry["verdict"], "allow");
+        assert_eq!(entry["method"], "POST");
+        assert_eq!(entry["post_read"], "presence");
+        assert_eq!(entry["url"], format!("{}{}", read.origin, read.path));
+        assert!(entry.get("own").is_none(), "not own-state: {entry}");
+        assert!(entry.get("kind").is_none(), "not a write: {entry}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_presence_read_naming_anyone_but_lab_accounts_is_denied() -> TestResult {
+    let lab = lab()?;
+    let ask = |mri: String| json!({"mri": mri});
+    let bodies = [
+        json!([ask(lab_mri(GUID_X))]),
+        json!([ask(lab_mri(GUID_A)), ask(lab_mri(GUID_X))]),
+        json!([ask(ECHO.to_owned())]),
+        json!([ask(lab_mri(GUID_B)), ask(ECHO.to_owned())]),
+        json!([ask(lab_mri(GUID_A).to_uppercase())]),
+        json!([ask(format!("28:{GUID_A}"))]),
+        json!([{"mri": lab_mri(GUID_X), "source": "ups"}]),
+    ];
+    let mut denied = 0;
+    for read in presence_reads()? {
+        for body in &bodies {
+            let read = Lookup {
+                body: body.clone(),
+                ..read.clone()
+            };
+            assert_eq!(
+                lab.http.decide(&read.paused()?).await,
+                Verdict::Deny(DenyCause::Unclassified),
+                "{}: {body}",
+                read.name
+            );
+            denied += 1;
+        }
+    }
+    assert_eq!(lab.http.denials().len(), denied);
+    let entries = log_entries(&lab.log_path)?;
     assert!(
         entries
             .iter()

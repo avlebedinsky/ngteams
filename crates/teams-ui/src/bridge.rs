@@ -19,7 +19,7 @@ use futures_util::FutureExt as _;
 use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
-use teams_core::{Action, EngineHandle, EngineRequests, Event, Person, Reply, Transient, TransientSent};
+use teams_core::{Action, Availability, EngineHandle, EngineRequests, Event, Person, Reply, Transient, TransientSent};
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
 };
@@ -57,6 +57,10 @@ pub trait Core: Send + Sync + 'static {
     /// Someone's name and picture as the engine has them; a lookup starts in the background when its stored ones
     /// are missing or old, and its change comes as `Event::Profile`.
     fn person(&self, mri: String) -> Reply<Person>;
+    /// Someone's presence as last read; from then on the engine reads it (for those this build may read), and each
+    /// change comes as `Event::Presence`. The engine watches at most `teams_core::MAX_WATCHED` people: past it the one
+    /// asked about longest ago is dropped and told unknown, so a view asks again whenever it shows its people anew.
+    fn presence(&self, mri: String) -> Reply<Availability>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -131,6 +135,10 @@ impl Core for EngineRequests {
 
     fn person(&self, mri: String) -> Reply<Person> {
         EngineRequests::person(self, mri)
+    }
+
+    fn presence(&self, mri: String) -> Reply<Availability> {
+        EngineRequests::presence(self, mri)
     }
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
@@ -239,6 +247,10 @@ impl Core for StoppedCore {
     }
 
     fn person(&self, _: String) -> Reply<Person> {
+        stopped()
+    }
+
+    fn presence(&self, _: String) -> Reply<Availability> {
         stopped()
     }
 

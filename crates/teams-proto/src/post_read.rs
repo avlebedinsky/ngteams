@@ -4,8 +4,8 @@
 //! The list is the set of types implementing [`PostRead`], and the trait is sealed, so only this crate adds to it.
 //! Each entry is added only after a review, in its exact captured shape: its [`Service`] (and so its host), the
 //! method (`POST`), the path, every query parameter and its value, the headers that change what it does, and the
-//! body schema (a non-empty JSON list of MRIs). It names the MRIs it asks about ([`PostRead::names`]), and it goes out
-//! only inside an [`AuthorizedPostRead`], next to the [`PostReadPermit`] `Fence::check_post_read` gave for exactly
+//! body schema (a non-empty JSON list naming MRIs). It names the MRIs it asks about ([`PostRead::names`]), and it goes
+//! out only inside an [`AuthorizedPostRead`], next to the [`PostReadPermit`] `Fence::check_post_read` gave for exactly
 //! that entry and that ordered list (in a lab build: every one a lab account, none twice).
 //!
 //! The transport then reads the request it is about to send back against the entry's captured shape (the URL's
@@ -20,6 +20,9 @@
 //! The entries:
 //! - [`ShortProfileLookup`]: the middle tier's `users/fetchShortProfile` by MRI, in the query the web client always
 //!   sent (`isMailAddress=false&…`), the browser fence's `short_profile` (`crates/proto-lab/src/post_read.rs`).
+//! - [`PresenceRead`]: UPS's `v1/presence/getpresence/` by MRI (M2 Task 17), the browser fence's `presence`: its
+//!   answers in the first run that let it through (ab-chat of 2026-10-22, 14 reads) each named only the accounts asked
+//!   for.
 
 use std::fmt;
 
@@ -61,14 +64,24 @@ mod sealed {
         }
     }
 
-    #[cfg(feature = "test-support")]
-    impl Sealed for super::ProbePostRead {
+    impl Sealed for super::PresenceRead {
         fn shape(&self) -> &'static Shape {
-            &super::SHORT_PROFILE
+            &super::PRESENCE
         }
 
         fn wire(&self) -> PostReadWire {
-            let mut wire = PostReadWire::lookup(&super::SHORT_PROFILE, &self.lookup.names);
+            PostReadWire::lookup(&super::PRESENCE, &self.names)
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    impl Sealed for super::ProbePostRead {
+        fn shape(&self) -> &'static Shape {
+            self.shape
+        }
+
+        fn wire(&self) -> PostReadWire {
+            let mut wire = PostReadWire::lookup(self.shape, &self.names);
             for (name, value) in &self.query {
                 wire.endpoint = wire.endpoint.with_query(name.clone(), value.clone());
             }
@@ -82,14 +95,57 @@ mod sealed {
 }
 
 /// An entry's shape as the capture showed it: the service, the path under its base, the query (each pair once,
-/// nothing else, in any order) and the headers it is sent with besides the token (each once, exactly these values,
-/// all of them). Its body is always a non-empty JSON list of MRIs. Only this crate makes or reads one.
+/// nothing else, in any order), the headers it is sent with besides the token (each once, exactly these values, all
+/// of them) and its body's schema. Only this crate makes or reads one.
 #[derive(Debug)]
 pub struct Shape {
     service: Service,
     path: &'static [&'static str],
     query: &'static [(&'static str, &'static str)],
     headers: &'static [(&'static str, &'static str)],
+    body: Body,
+}
+
+/// The schema of an entry's body, which names the MRIs it asks about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Body {
+    /// A non-empty JSON list of MRIs: `["8:orgid:…", …]` (the profile lookups).
+    Mris,
+    /// A non-empty JSON list of `{"mri": "8:orgid:…"}` objects, the key exactly so and nothing else beside it (the
+    /// presence read; the web client's own `"source": "ups"` beside the account's own MRI isn't sent).
+    MriObjects,
+}
+
+impl Body {
+    /// The body naming `names`, in that order.
+    fn of(self, names: &[Mri]) -> Value {
+        let item = |mri: &Mri| match self {
+            Self::Mris => Value::from(mri.as_str()),
+            Self::MriObjects => serde_json::json!({ "mri": mri.as_str() }),
+        };
+        Value::Array(names.iter().map(item).collect())
+    }
+
+    /// The MRIs `body` names when it is of this schema and nothing else (one JSON value, nothing after it); `None`
+    /// otherwise, or when it names nobody.
+    fn read(self, body: &[u8]) -> Option<Vec<Mri>> {
+        let names: Vec<String> = match self {
+            Self::Mris => serde_json::from_slice(body).ok()?,
+            Self::MriObjects => serde_json::from_slice::<Vec<MriObject>>(body)
+                .ok()?
+                .into_iter()
+                .map(|object| object.mri)
+                .collect(),
+        };
+        (!names.is_empty()).then(|| names.into_iter().map(Mri::new).collect())
+    }
+}
+
+/// One item of a [`Body::MriObjects`] list, read strictly: `mri` and no other key.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MriObject {
+    mri: String,
 }
 
 /// A read by `POST` as the transport sends it: its endpoint (the path and the query), the headers the entry adds to
@@ -113,7 +169,7 @@ impl PostReadWire {
         Self {
             endpoint,
             headers: Vec::new(),
-            body: Value::Array(names.iter().map(|mri| Value::from(mri.as_str())).collect()),
+            body: shape.body.of(names),
         }
     }
 
@@ -137,7 +193,7 @@ impl Shape {
 
     /// The MRIs a request names, when the request is exactly this shape: `path` is the shape's, `query` its pairs
     /// (each once, nothing else, in any order), `headers` (by lower-cased name, the token left out) its headers (each
-    /// once, exactly their values, all of them), and `body` a non-empty JSON list of strings and nothing else.
+    /// once, exactly their values, all of them), and `body` of the shape's schema, naming someone, and nothing else.
     /// `None` for anything else: the request is unknown.
     pub(crate) fn read_back(
         &self,
@@ -148,7 +204,7 @@ impl Shape {
     ) -> Option<Vec<Mri>> {
         let same_path = path.iter().map(String::as_str).eq(self.path.iter().copied());
         (same_path && same_pairs(query, self.query) && same_pairs(headers, self.headers))
-            .then(|| mri_list(body))
+            .then(|| self.body.read(body))
             .flatten()
     }
 }
@@ -163,12 +219,6 @@ fn same_pairs(pairs: &[(String, String)], wanted: &[(&str, &str)]) -> bool {
     pairs.sort_unstable();
     wanted.sort_unstable();
     pairs == wanted
-}
-
-/// A body that is a non-empty JSON list of strings and nothing else (one JSON value, nothing after it).
-fn mri_list(body: &[u8]) -> Option<Vec<Mri>> {
-    let names: Vec<String> = serde_json::from_slice(body).ok()?;
-    (!names.is_empty()).then(|| names.into_iter().map(Mri::new).collect())
 }
 
 /// A read by `POST` together with the permit for it. The only way to make one is [`AuthorizedPostRead::new`], which
@@ -261,6 +311,33 @@ static SHORT_PROFILE: Shape = Shape {
     path: &["beta", "users", "fetchShortProfile"],
     query: LOOKUP_QUERY,
     headers: LOOKUP_HEADERS,
+    body: Body::Mris,
+};
+
+/// The presence read's path under the presence base (the transport adds the trailing slash).
+pub(crate) const PRESENCE_PATH: &[&str] = &["v1", "presence", "getpresence"];
+
+/// The headers a presence read goes out with besides its token: `Accept` (the transport asks every service for
+/// JSON), the body's `Content-Type`, and the values every captured presence read carried for those that could change
+/// what it does or name someone (5461 reads in the captures of 2026-10-19 to 2026-10-21, the browser fence's
+/// `PRESENCE_HEADER_VALUES`). `x-ms-object-id` is sent empty, as it always was. No `x-ms-endpoint-id` (it would name
+/// the client's endpoint), nothing that names the client's components or the session, and no cookie.
+const PRESENCE_HEADERS: &[(&str, &str)] = &[
+    ("accept", "application/json"),
+    ("content-type", "application/json"),
+    ("behavioroverride", "redirectAs404"),
+    ("x-ms-client-type", "cdlworker"),
+    ("x-ms-client-user-agent", "Teams-V2-Web"),
+    ("x-ms-object-id", ""),
+];
+
+/// `v1/presence/getpresence/` (see [`PresenceRead`]).
+static PRESENCE: Shape = Shape {
+    service: Service::Presence,
+    path: PRESENCE_PATH,
+    query: &[],
+    headers: PRESENCE_HEADERS,
+    body: Body::MriObjects,
 };
 
 /// `POST <middle tier>/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&
@@ -394,13 +471,103 @@ pub enum AnswerError {
     Unasked { count: usize },
 }
 
-/// A profile lookup with something added that its entry doesn't name (a query pair, a header, another body): the
-/// transport's tests need one to show it sends no request off its entry's captured shape. Tests only
-/// (`test-support`), which a lab binary refuses to run with.
+/// `POST <presence base>/v1/presence/getpresence/` with a JSON list of `{"mri": …}`: the presence of exactly those
+/// accounts. Reviewed from the web client's reads the browser fence let through for lab accounts (ab-chat of
+/// 2026-10-22, M2 Task 17: 14 reads of a, b and c, each answered 200 with the presence of the accounts asked for and
+/// nobody else); the browser fence's `presence`. Its answer is read with [`PresenceRead::read_answer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresenceRead {
+    names: Vec<Mri>,
+}
+
+impl PresenceRead {
+    /// The read of `names`' presence, in that order; `None` when it names nobody. Whether it may go out is the fence's
+    /// decision ([`teams_fence::Fence::check_post_read`] with [`PostRead::KIND`] and [`PostRead::names`]).
+    #[must_use]
+    pub fn new(names: impl IntoIterator<Item = Mri>) -> Option<Self> {
+        let names: Vec<Mri> = names.into_iter().collect();
+        (!names.is_empty()).then_some(Self { names })
+    }
+
+    /// The presence the answer `body` gives, each of an MRI this read asked for. An item whose `status` isn't the
+    /// captured success (`20000`), or that has no `presence`, gives no availability or activity: never guessed.
+    ///
+    /// # Errors
+    /// [`AnswerError::Malformed`] unless the body is a JSON list of objects, each with an `mri`, as every captured
+    /// answer was; [`AnswerError::Unasked`] when any item is of an MRI the read didn't ask for (the answer is dropped
+    /// whole: an entry's answer names only the accounts asked for).
+    pub fn read_answer(&self, body: &[u8]) -> Result<Vec<UserPresence>, AnswerError> {
+        let answer: Vec<RawUserPresence> = serde_json::from_slice(body).map_err(|_| AnswerError::Malformed)?;
+        let unasked = answer.iter().filter(|item| !self.names.contains(&item.mri)).count();
+        if unasked > 0 {
+            return Err(AnswerError::Unasked { count: unasked });
+        }
+        Ok(answer.into_iter().map(UserPresence::from).collect())
+    }
+}
+
+impl PostRead for PresenceRead {
+    const KIND: &'static str = "presence";
+
+    fn names(&self) -> &[Mri] {
+        &self.names
+    }
+}
+
+/// The per-item `status` every captured answer's items carried: the account's presence was read.
+const PRESENCE_READ: i64 = 20_000;
+
+/// One item of UPS's answer, as captured: `{"mri", "presence": {"availability", "activity", …}, "status", …}` (also
+/// `etag`, `etagMatch`, and `presence`'s `sourceNetwork`, `calendarData`, `capabilities`, `lastActiveTime`, which
+/// aren't read).
+#[derive(Deserialize)]
+struct RawUserPresence {
+    #[serde(deserialize_with = "mri")]
+    mri: Mri,
+    #[serde(default)]
+    presence: Option<RawPresence>,
+    #[serde(default)]
+    status: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct RawPresence {
+    #[serde(default)]
+    availability: Option<String>,
+    #[serde(default)]
+    activity: Option<String>,
+}
+
+/// One account's presence as UPS gave it: its availability (`Offline`, `Available`, …) and activity, each a word as
+/// given; `None` when the answer gave none for them, or gave its item a status other than the captured success.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserPresence {
+    pub mri: Mri,
+    pub availability: Option<String>,
+    pub activity: Option<String>,
+}
+
+impl From<RawUserPresence> for UserPresence {
+    fn from(raw: RawUserPresence) -> Self {
+        let presence = raw.presence.filter(|_| raw.status == Some(PRESENCE_READ));
+        let (availability, activity) =
+            presence.map_or((None, None), |presence| (presence.availability, presence.activity));
+        Self {
+            mri: raw.mri,
+            availability,
+            activity,
+        }
+    }
+}
+
+/// A profile lookup or a presence read with something added that its entry doesn't name (a query pair, a header,
+/// another body): the transport's tests need one to show it sends no request off its entry's captured shape. Tests
+/// only (`test-support`), which a lab binary refuses to run with.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Debug)]
 pub struct ProbePostRead {
-    lookup: ShortProfileLookup,
+    shape: &'static Shape,
+    names: Vec<Mri>,
     query: Vec<(String, String)>,
     headers: Vec<(String, String)>,
     body: Option<Value>,
@@ -411,8 +578,19 @@ impl ProbePostRead {
     /// `lookup` as it is, until something is added.
     #[must_use]
     pub fn new(lookup: ShortProfileLookup) -> Self {
+        Self::of(&SHORT_PROFILE, lookup.names)
+    }
+
+    /// `read` as it is, until something is added.
+    #[must_use]
+    pub fn presence(read: PresenceRead) -> Self {
+        Self::of(&PRESENCE, read.names)
+    }
+
+    fn of(shape: &'static Shape, names: Vec<Mri>) -> Self {
         Self {
-            lookup,
+            shape,
+            names,
             query: Vec::new(),
             headers: Vec::new(),
             body: None,
@@ -446,6 +624,6 @@ impl PostRead for ProbePostRead {
     const KIND: &'static str = "test_probe";
 
     fn names(&self) -> &[Mri] {
-        self.lookup.names()
+        &self.names
     }
 }

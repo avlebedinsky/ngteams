@@ -8,7 +8,7 @@
 //!   this crate adds to it: the messaging stack's [`EndpointRegistration`]) and logged to `fence.log` before it is
 //!   sent;
 //! - a [`PostRead`]: the reviewed list of requests sent as a `POST` that change nothing (the middle tier's profile
-//!   lookups), sealed. Each is sent only inside an [`AuthorizedPostRead`] with the
+//!   lookups, UPS's presence read), sealed. Each is sent only inside an [`AuthorizedPostRead`] with the
 //!   [`PostReadPermit`](teams_fence::PostReadPermit) `Fence::check_post_read` gave for its exact MRIs (in a lab build,
 //!   lab accounts only), only in its entry's captured shape, logged to `fence.log` before it is sent, and once;
 //! - a write: a request others could notice implements [`Mutating`] and names its one target. [`Client::write`] takes
@@ -48,8 +48,8 @@ pub use frame::{
 };
 pub use http::{
     BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, Failure, GRAPH_AUDIENCE, GRAPH_HOST,
-    HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, REQUEST_TIMEOUT, Refusal,
-    TROUTER_HOST,
+    HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE,
+    REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
 };
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
@@ -59,7 +59,10 @@ pub use own::{
 };
 #[cfg(feature = "test-support")]
 pub use post_read::ProbePostRead;
-pub use post_read::{AnswerError, AuthorizedPostRead, PostRead, PostReadMismatch, ShortProfile, ShortProfileLookup};
+pub use post_read::{
+    AnswerError, AuthorizedPostRead, PostRead, PostReadMismatch, PresenceRead, ShortProfile, ShortProfileLookup,
+    UserPresence,
+};
 pub use read::{
     CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT,
     GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team, TeamsAnswer, object_id,

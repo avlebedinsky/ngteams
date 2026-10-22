@@ -4,8 +4,8 @@
 //! credential broker's socket for the sandboxed app), the chat base from the region record `proto-lab auth` saved
 //! ([`LabPaths::region_file`], read by [`Region::load`]), the 1:1 chats' and the lab group chat's members read live
 //! ([`LiveMembershipSource::for_fence`], its credential the chat transport's), the store at [`LabPaths::store_file`],
-//! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's) and CSA's from the
-//! GTM `chatSvcAggAfd` (the teams read's), the lab
+//! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's), CSA's from the
+//! GTM `chatSvcAggAfd` (the teams read's) and UPS's from the GTM `presenceUPS` (the presence read's), the lab
 //! accounts' names as lab.toml has them ([`known_names`]), and the push channel ([`Trouter`]) when asked for.
 //!
 //! Nothing here reads or prints a token, and nothing is sent while the engine is built: the session asks its store for
@@ -95,6 +95,7 @@ pub fn start<S: SecretStore + 'static>(
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
     let reads = with_csa(reads, session.service_base(CSA_GTM).as_deref())?;
+    let reads = with_presence(reads, session.service_base(PRESENCE_GTM).as_deref())?;
     let client = Arc::new(Client::new(reads));
     let push = if push {
         Some(Push::new(Trouter::new(
@@ -152,6 +153,26 @@ fn with_csa<C: Credentials>(reads: HttpTransport<C>, csa: Option<&str>) -> Resul
         Some(base) if HttpTransport::<C>::accepts_csa_base(base) => reads.with_csa(base),
         Some(_) => {
             log::warn!("the region's chatSvcAggAfd base isn't of the form the transport accepts: no teams read");
+            Ok(reads)
+        }
+        None => Ok(reads),
+    }
+}
+
+/// The GTM UPS's base comes from (the presence read's).
+pub const PRESENCE_GTM: &str = "presenceUPS";
+
+/// The reads' transport with UPS's base (the presence read's) when the region has one the transport accepts. Without
+/// one, or with one of another form (logged, without its value), the presence read is refused and everyone's presence
+/// stays unknown: an optional read never stops the engine.
+fn with_presence<C: Credentials>(
+    reads: HttpTransport<C>,
+    presence: Option<&str>,
+) -> Result<HttpTransport<C>, BuildError> {
+    match presence {
+        Some(base) if HttpTransport::<C>::accepts_presence_base(base) => reads.with_presence(base),
+        Some(_) => {
+            log::warn!("the region's presenceUPS base isn't of the form the transport accepts: no presence read");
             Ok(reads)
         }
         None => Ok(reads),
@@ -228,6 +249,26 @@ mod tests {
             "not a url",
         ] {
             assert!(!reads(Some(other)).unwrap().has_middle_tier(), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_presence_base_of_another_form_leaves_the_reads_without_the_presence_read_and_the_rest_kept() {
+        let middle_tier = Some("https://teams.microsoft.com/api/mt/part/amer-03");
+        let given = with_presence(
+            reads(middle_tier).unwrap(),
+            Some("https://teams.microsoft.com/ups/noam"),
+        )
+        .unwrap();
+        assert!(given.has_presence() && given.has_middle_tier());
+        assert!(!with_presence(reads(None).unwrap(), None).unwrap().has_presence());
+        for other in [
+            "https://presence.teams.microsoft.com",
+            "https://teams.microsoft.com/ups/NOAM",
+            "not a url",
+        ] {
+            let kept = with_presence(reads(middle_tier).unwrap(), Some(other)).unwrap();
+            assert!(!kept.has_presence() && kept.has_middle_tier(), "{other}");
         }
     }
 

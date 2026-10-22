@@ -1072,17 +1072,44 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
   `crates/teams-proto/src/{endpoint.rs,post_read.rs}`, `crates/teams-core/src/*`, `crates/teams-ui/src/*`,
   `docs/protocol/endpoints.md`, `docs/protocol/auth.md`, `docs/protocol/trouter.md`
 
-- [ ] tests first: the browser fence lets UPS's `POST v1/presence/getpresence/` out as a read by `POST` only in its
+- [x] tests first: the browser fence lets UPS's `POST v1/presence/getpresence/` out as a read by `POST` only in its
       captured request shape and only when every MRI it names is a lab account
-- [ ] live: the first allowed run (an `ab-chat` run) is judged by its request naming only lab MRIs; its answer is
+- [x] live: the first allowed run (an `ab-chat` run) is judged by its request naming only lab MRIs; its answer is
       captured and reviewed right after, before anything native: it must name nobody but the accounts asked for (if
       it does, the allowance is taken back and this task stops with a ⚠️); answer `auth.md` question 4 (the presence
       token's audience, and whether ours is accepted)
-- [ ] tests first: presence (UPS) as a new `Service` (host from its GTM, its audience per question 4) and the native
+- [x] tests first: presence (UPS) as a new `Service` (host from its GTM, its audience per question 4) and the native
       `PostRead` entry for `getpresence`, polled at a bounded interval for the lab accounts in view (no pubsub
       subscription: it changes service state, so it is no read; a backlog item if polling proves not enough)
-- [ ] presence dots in the chat list, the chat view's header and the mention picker; "unknown" when a read fails
-- [ ] `cargo test -p proto-lab -p teams-proto -p teams-core -p teams-ui -p fence-seal` and the gate pass
+- [x] presence dots in the chat list, the chat view's header and the mention picker; "unknown" when a read fails
+- [x] `cargo test -p proto-lab -p teams-proto -p teams-core -p teams-ui -p fence-seal` and the gate pass
+- Done (2026-10-23), where it differs from the lines above:
+  - The browser entry (`post_read::PostReadKind::Presence`, `fence.log` `presence`) is the shape of the 5461 captured
+    reads: either Teams origin, `/ups/<geo>/v1/presence/getpresence/` with its trailing slash, no query at all, only
+    the captured headers (pinned: `Content-Type: application/json`, `behavioroverride: redirectAs404`,
+    `x-ms-client-type: cdlworker`, `x-ms-client-user-agent: Teams-V2-Web`, an empty `x-ms-object-id`), a body of
+    `{"mri"}` objects with at most `"source": "ups"`, no MRI twice. A read carrying `x-ms-endpoint-id` (2065 of the
+    5461: the client's endpoint, an id the fence has no check for) stays `Unknown`. Fixture
+    `tests/fixtures/ups/getpresence-requests.json`; the `presence reads` expected-deny class stays for the rest.
+  - Live: `proto-lab run ab-chat --headless` (exit 0, ok) let 14 reads through, each naming only a, b or c (1–3
+    MRIs), none with `x-ms-endpoint-id`, none denied; every answer was 200 and named only the MRIs asked (one item per
+    MRI: `mri`, `presence` with `availability`/`activity` `Offline`, `etag`, `status` `20000`). The answer fixture
+    `tests/fixtures/ups/getpresence-answer.json` comes from the reference copy `reference/presence/getpresence-ab-chat.jsonl`
+    (exported from that capture's presence events only). `auth.md` question 4 answered: the audience is
+    `https://presence.teams.microsoft.com/`, and our non-CAE token is taken (`teams-headless a presence`, under the
+    live lock: two reads, b and c `Offline`, two `post_read` `presence` lines in `fence.log`).
+  - Native: `Service::Presence` (base only from the GTM `presenceUPS` via `HttpTransport::with_presence`; a `Read`
+    or own-state request to it refused), `teams-proto`'s `PresenceRead` (the body `[{"mri"}]` only, never `source`;
+    the answer dropped whole if it names anyone not asked; an item's words read only with `status` `20000`).
+    `teams-core`'s `presence.rs`: `EngineRequests::presence(mri)` answers the last read at once and watches the
+    person for the run (at most 20, the one asked longest ago dropped); every minute (`EngineOptions::presence_poll`;
+    at once for someone newly watched) one read of the watched people `Fence::lab_accounts_only` admits, under the
+    fence's permit; a throttled read waits its `Retry-After`; each change told as `Event::Presence`; a failed read
+    makes everyone it asked about `Availability::Unknown`. Not stored. A `teams-headless <alias> presence` command
+    (not in the Files list) reads the other lab accounts' once, for the live check.
+  - UI: `teams-ui`'s `presence.rs` (the `Presences` model the bridge fills from `Event::Presence`, the dot, a hollow
+    ring for unknown); the chat list's 1:1 rows (on the avatar), the chat's header (the shell's, a 1:1 chat only) and
+    the mention picker. `Core::presence` is asked as the rows and the picker's members are read.
 
 ### Task 18: Own presence (1/3): the rule and the research
 **Files:**

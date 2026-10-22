@@ -241,13 +241,16 @@ teams-headless a delete b <message>       # one of a's messages, deleted
 teams-headless a react b <message> like [--remove]
 teams-headless b read a <message>         # b's read horizon in the a–b chat moved up to that message (a read receipt)
 teams-headless b watch [--json]           # every event of the push channel with its receive time, until SIGINT/SIGTERM
+teams-headless a presence [--wait 30]     # b's and c's presence, read from UPS (a read by POST, lab accounts only)
 ```
 
 A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat
 recorded in `chats.toml`), or a conversation id. Each write first catches up (its summary on stderr), then waits up to
 `--wait` seconds (120) for a write that has to wait out a `Retry-After`; it exits non-zero unless the write went
 through. `watch` answers no delivery and no call; it exits 0 on SIGINT or SIGTERM, non-zero when the push channel
-stopped on its own. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on stderr (Trouter's packets and
+stopped on its own. `presence` reads only, under the fence's permit for the exact MRIs it names; it waits up to
+`--wait` seconds (30) for each account's presence to be told, then prints one `presence <alias> <availability>` line
+per account, `Unknown` for one not told in time or whose read failed. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on stderr (Trouter's packets and
 deliveries by kind and size, never a payload); nothing else is logged.
 
 The live acceptance test (M1 Task 21, `tests/chat_live.rs`) only spawns a normally built binary and reads its output

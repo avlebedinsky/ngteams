@@ -35,6 +35,13 @@ pub enum Service {
     /// (`api/v3/teams/users/me` with the web client's query, [`crate::CsaTeams`]); the transport refuses any other
     /// endpoint on it, and any request on it that isn't a read.
     Csa,
+    /// UPS, the presence service, at the account's presence base, the region's GTM `presenceUPS`
+    /// (`https://<AFD host>/ups/<geo>`, the geo lowercase letters: `noam`), which a transport reaches only once it was
+    /// given one (`HttpTransport::with_presence`), with the account's token for
+    /// `https://presence.teams.microsoft.com/` (M2 Task 17). Only the sealed `PostRead` list's presence read goes here
+    /// (`v1/presence/getpresence/`, [`crate::PresenceRead`]), sent with the trailing slash every captured UPS path had;
+    /// the transport refuses any other endpoint on it, and any request on it that isn't that read by `POST`.
+    Presence,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use teams_core::{Cause, Event, MessageChange, Source, Transient, TransientSent};
+use teams_core::{Availability, Cause, Event, MessageChange, Source, Transient, TransientSent};
 use teams_proto::chat;
 use teams_store::{Applied, Conversation, Member, Message, OutboxEntry, OutboxState, Reaction};
 use teams_trouter::RegistrationReport;
@@ -269,8 +269,23 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         // whose profile changed, never their name
         Event::Profile { mri } => json!({"event": "profile", "who": names.show(mri)}),
         Event::Teams => json!({"event": "teams"}),
+        Event::Presence { mri, availability } => json!({
+            "event": "presence",
+            "who": names.show(mri),
+            "availability": availability_word(availability),
+        }),
         Event::Failed { during, error } => json!({"event": "failed", "during": during, "error": error.to_string()}),
         Event::Indexed { messages } => json!({"event": "indexed", "messages": messages}),
+    }
+}
+
+/// An availability as printed: its name (`Available`, `Offline`, …), `Unknown`, or a word this build doesn't name as
+/// UPS gave it ([`visible`]).
+#[must_use]
+pub fn availability_word(availability: &Availability) -> String {
+    match availability {
+        Availability::Other(word) => visible(word),
+        named => format!("{named:?}"),
     }
 }
 

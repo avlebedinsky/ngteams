@@ -667,6 +667,7 @@ impl ChatView {
             core: Arc::clone(&core),
             settings: settings.clone(),
             trace: Arc::clone(&trace),
+            presence: models.presence.clone(),
         };
         let compose_of = conversation.clone();
         let compose = cx.new(|cx| Compose::new(compose_parts, compose_of, window, cx));

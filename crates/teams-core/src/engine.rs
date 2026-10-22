@@ -40,6 +40,9 @@
 //! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
 //!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
 //!   profile lookup under the fence's permit); each change stored is told as [`Event::Profile`].
+//! - **Others' presence** (M2 Task 17, [`EngineRequests::presence`]): the availability of the people the views asked
+//!   about, read from UPS by polling ([`crate::presence`]: [`EngineOptions::presence_poll`], under the fence's permit,
+//!   never stored); each change told as [`Event::Presence`].
 //! - **Search** ([`EngineRequests::search`]): the store's own index of the messages' plain text ([`crate::search`]),
 //!   never the service's search. Each message is indexed as it is stored; the messages stored before are indexed by a
 //!   backfill that runs from the engine's start, a batch at a time ([`EngineOptions::index_batch`]) between the
@@ -96,6 +99,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
+use crate::presence::{Availability, PRESENCE_POLL, Polled, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
 use crate::search::{Backfill, INDEX_BATCH, Step};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
@@ -117,6 +121,8 @@ pub struct EngineOptions {
     /// How long after a read of the teams that failed a view's asking reads them again, at the soonest
     /// ([`crate::teams`]): [`TEAMS_RETRY`].
     pub teams_retry: Duration,
+    /// How often the watched people's presence is read ([`crate::presence`]): [`PRESENCE_POLL`].
+    pub presence_poll: Duration,
 }
 
 impl Default for EngineOptions {
@@ -127,6 +133,7 @@ impl Default for EngineOptions {
             profile_retry: PROFILE_RETRY,
             index_batch: INDEX_BATCH,
             teams_retry: TEAMS_RETRY,
+            presence_poll: PRESENCE_POLL,
         }
     }
 }
@@ -302,6 +309,9 @@ pub enum Event {
     /// Someone's stored name or picture changed (a lookup in the background stored it): a view that shows them asks
     /// for them again ([`EngineRequests::person`]).
     Profile { mri: String },
+    /// Someone's presence, as a read in the background now gave it ([`crate::presence`]): told only when it changed;
+    /// [`Availability::Unknown`] too when they were dropped from the watch to make room for someone asked about later.
+    Presence { mri: String, availability: Availability },
     /// The stored teams changed (a read in the background stored a list that differs): a view that shows them asks
     /// for them again ([`EngineRequests::teams`]).
     Teams,
@@ -412,6 +422,7 @@ enum Request {
     LoadOlder(String, Responder<Option<Synced>>),
     SyncConversation(String, Responder<Synced>),
     Person(String, Responder<Person>),
+    Presence(String, Responder<Availability>),
     Teams(Responder<Option<Vec<Team>>>),
     Query(Query),
     Shutdown,
@@ -594,6 +605,16 @@ impl EngineRequests {
     pub fn person(&self, mri: impl Into<String>) -> Reply<Person> {
         let mri = mri.into();
         self.ask(|reply| Request::Person(mri, reply))
+    }
+
+    /// Someone's presence as last read ([`Availability::Unknown`] before the first read); from now on they are watched,
+    /// and each change of their presence comes as [`Event::Presence`] ([`crate::presence`]: read from UPS every
+    /// [`EngineOptions::presence_poll`], only those the fence lets a read name). At most
+    /// [`MAX_WATCHED`](crate::MAX_WATCHED) people are watched: past it the one asked about longest ago is dropped and
+    /// told as [`Availability::Unknown`], so a view asks again about the people it shows whenever it shows them anew.
+    pub fn presence(&self, mri: impl Into<String>) -> Reply<Availability> {
+        let mri = mri.into();
+        self.ask(|reply| Request::Presence(mri, reply))
     }
 
     /// The account's own stored read horizon in a conversation.
@@ -785,6 +806,7 @@ struct Core<C, T> {
     catch_up: CatchUp<C, T>,
     profiles: Profiles<C>,
     teams: Teams<C>,
+    presences: Presences<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -814,6 +836,11 @@ where
             parts.options.profile_retry,
         );
         let teams = Teams::new(Arc::clone(&parts.client), parts.options.teams_retry);
+        let presences = Presences::new(
+            Arc::clone(&parts.client),
+            Arc::clone(outbox.fence()),
+            parts.options.presence_poll,
+        );
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
         Self {
             store: parts.store,
@@ -821,6 +848,7 @@ where
             catch_up,
             profiles,
             teams,
+            presences,
             events,
             options: parts.options,
             push: parts.push,
@@ -847,7 +875,8 @@ where
                     None => push = None,
                 },
                 _ = tick.tick() => self.on_tick().await,
-                done = background(&mut self.profiles, &mut self.teams), if self.profiles.busy() || self.teams.busy() => {
+                done = background(&mut self.profiles, &mut self.teams, &mut self.presences),
+                    if self.profiles.busy() || self.teams.busy() || self.presences.busy() => {
                     self.on_background(done);
                 }
                 // ready once the runtime's other tasks had their turn (the push channel's, on this current-thread
@@ -990,6 +1019,17 @@ where
                 let person = self.profiles.person(&self.store, &mri);
                 let _ = reply.send(person.map_err(EngineError::from));
             }
+            Request::Presence(mri, reply) => {
+                let (availability, dropped) = self.presences.presence(&mri);
+                let _ = reply.send(Ok(availability));
+                // someone the watch dropped to make room: no read refreshes what a view was told of them
+                if let Some(mri) = dropped {
+                    self.emit(Event::Presence {
+                        mri,
+                        availability: Availability::Unknown,
+                    });
+                }
+            }
             Request::Teams(reply) => {
                 let teams = self.teams.teams(&self.store);
                 let _ = reply.send(teams.map_err(EngineError::from));
@@ -1009,11 +1049,20 @@ where
         }
     }
 
-    /// A read in the background is over: a person's lookup or the teams'.
+    /// A read in the background is over: a person's lookup, the teams' or the presence read.
     fn on_background(&mut self, done: Background) {
         match done {
             Background::Looked(looked) => self.on_looked(looked),
             Background::Teams(read) => self.on_teams(read),
+            Background::Presence(polled) => self.on_presence(polled),
+        }
+    }
+
+    /// A presence read is over (`None`: none ran): each change it brought told.
+    fn on_presence(&mut self, polled: Option<Polled>) {
+        let Some(polled) = polled else { return };
+        for (mri, availability) in self.presences.settle(polled) {
+            self.emit(Event::Presence { mri, availability });
         }
     }
 
@@ -1296,6 +1345,8 @@ where
         }
         // profile lookups that failed on the way, their wait over
         self.profiles.retry_due();
+        // the watched people's presence, when a read is due
+        self.presences.poll_due();
     }
 
     // --- catch-up ---
@@ -1501,13 +1552,20 @@ fn original(message: &Message) -> Result<Sent, EngineError> {
 enum Background {
     Looked(Option<crate::profiles::Looked>),
     Teams(Option<Result<Vec<Team>, TeamsReadError>>),
+    Presence(Option<Polled>),
 }
 
-/// The next read in the background to be over, a person's lookup or the teams'; never while neither runs.
-async fn background<C: Credentials + 'static>(profiles: &mut Profiles<C>, teams: &mut Teams<C>) -> Background {
+/// The next read in the background to be over, a person's lookup, the teams' or the presence read; never while none
+/// runs.
+async fn background<C: Credentials + 'static>(
+    profiles: &mut Profiles<C>,
+    teams: &mut Teams<C>,
+    presences: &mut Presences<C>,
+) -> Background {
     tokio::select! {
         looked = profiles.next(), if profiles.busy() => Background::Looked(looked),
         read = teams.next(), if teams.busy() => Background::Teams(read),
+        polled = presences.next(), if presences.busy() => Background::Presence(polled),
         else => pending().await,
     }
 }

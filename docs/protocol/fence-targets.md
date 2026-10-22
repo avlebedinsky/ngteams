@@ -289,7 +289,8 @@ Rules that keep the mapping fail-closed:
   services. A run that calls (`Classifier::calling`, Task 18) maps only a call's start, as a new call of its caller and
   callees; every write on an existing call and any answer stay unknown ([calling-echo.md](calling-echo.md)). The middle tier (`/api/mt/…`, `/api/apps/…`) and CSA (`chatsvcagg`) mutating requests aren't
   mapped either; live they were all lookups sent as `POST` (below), denied as `Unknown`, but for the two profile
-  lookups on the read-by-`POST` list when they name only lab accounts ([below](#reads-by-post)).
+  lookups on the read-by-`POST` list when they name only lab accounts ([below](#reads-by-post)); UPS's presence read
+  (`/ups/…/getpresence/`) is on that list too (M2 Task 17).
 
 ## Reads by POST
 
@@ -305,8 +306,9 @@ only by `Fence::check`.
 |---|---|---|
 | `short_profile` | `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetchShortProfile?<the lookup query>` | a non-empty JSON list of MRIs |
 | `user_fetch` | `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetch?<the lookup query>` | a non-empty JSON list of MRIs |
+| `presence` | `POST https://<teams origin>/ups/<geo>/v1/presence/getpresence/` (M2 Task 17) | a non-empty JSON list of `{"mri": …}`, each with at most `"source": "ups"` beside it, no MRI twice |
 
-An entry matches only all of it:
+A profile lookup matches only all of it (the presence read's own shape [below](#the-presence-read)):
 
 - `POST`, on `https://teams.microsoft.com` or `https://teams.cloud.microsoft` exactly (no port, no user info), the
   partition a lowercase region, `-` and a number (`amer-03`), the path's last segment exactly;
@@ -342,6 +344,31 @@ with its `mri`, `objectId`, `displayName`, `givenName`, `surname`, `email`, `use
 `tenantName`, `isShortProfile`, and for `users/fetch` also `alias`, `mail`, `smtpAddresses`, `sipProxyAddress`,
 `phones`, `accountEnabled`, `skypeTeamsInfo`, `featureSettings` and such; no other account's id or address.
 
+### The presence read
+
+UPS's `getpresence` (M2 Task 17) matches only all of it, from the 5461 presence reads of the captures of
+2026-10-19 to 2026-10-21 (all denied then):
+
+- `POST` on either Teams origin exactly, the path `/ups/<geo>/v1/presence/getpresence/` with its trailing slash, the
+  geo lowercase letters (`noam`), and no query at all (not even an empty one);
+- only the headers those reads carried (`Accept`, `Cookie`, `Origin`, `Referer`, `User-Agent`, `authorization`,
+  `behavioroverride`, `content-type`, `x-ms-client-caller`, `x-ms-client-type`, `x-ms-client-user-agent`,
+  `x-ms-client-version`, `x-ms-correlation-id`, `x-ms-object-id`, `x-ms-request-id`, `x-ms-session-id`), none
+  twice, `Content-Type` there; pinned when there: `Content-Type` `application/json`, `behavioroverride`
+  `redirectAs404`, `x-ms-client-type` `cdlworker`, `x-ms-client-user-agent` `Teams-V2-Web`, `x-ms-object-id` empty;
+  `Origin` the request's own, `x-ms-client-caller` a component's name as for the lookups; the rest free.
+  `x-ms-endpoint-id` (on 2065 of them) names the client's own endpoint, an id the fence has no check for: a read
+  carrying it is `Unknown` (the other 3396 didn't carry it);
+- a body read strictly that is a non-empty list of objects, each `{"mri": <string>}` or `{"mri": <string>, "source":
+  "ups"}` (the keys exactly so; the client's own MRI came with `source`), no MRI twice;
+- and every MRI a lab account at that moment (`Fence::lab_accounts_only`).
+
+The first run that let it through (`ab-chat` of 2026-10-22) sent 14 of them, each naming only a, b or c, none
+carrying `x-ms-endpoint-id`; every answer was 200 and named only the accounts asked for: a list of one item per MRI
+(`mri`, `presence` with `sourceNetwork` (`Self` for the account's own, `SameEnterprise` for another), `calendarData`
+(`isOutOfOffice`), `capabilities`, `availability`, `activity`, `lastActiveTime`, and `source` when asked with it),
+`etagMatch`, `etag`, and the item's `status` `20000`) ([trouter.md](trouter.md#others-presence)).
+
 Not on the list, and denied: Substrate's search (`POST substrate.office.com/search/api/v1/suggestions`), whose answers
 list other people of the tenant (never allowed under the user's rule of 2026-10-21), and bot invokes, whose body hands the account's Entra
 token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
@@ -349,8 +376,8 @@ token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
 ### The native client's reads by POST
 
 The native client has a list of its own (M2 Task 11, CLAUDE.md's "fourth list"): `teams-proto`'s sealed `PostRead`,
-whose only entry so far is `ShortProfileLookup` (`short_profile`, the same request as the browser's entry above, in
-the captured query). It goes out only this way:
+with two entries: `ShortProfileLookup` (`short_profile`, the same request as the browser's entry above, in the
+captured query) and `PresenceRead` (`presence`, M2 Task 17, UPS's read above). They go out only this way:
 
 - `Fence::check_post_read(kind, names)` decides on the entry's kind and its exact, ordered MRIs: denied when they are
   none, when one is named twice, or when any is not a lab account of the roster (an approved service participant
@@ -371,9 +398,17 @@ the captured query). It goes out only this way:
   401 makes the session refresh the refused token for a later lookup under a new permit.
 - `ShortProfileLookup::read_answer` reads the answer (`{"type": …, "value": [profile, …]}`, both keys required as
   every captured answer has them) and drops it whole if any profile is of an MRI the lookup didn't ask for.
+- `PresenceRead` goes to UPS (`Service::Presence`, the base from the GTM `presenceUPS` only:
+  `HttpTransport::with_presence`, an AFD host and `/ups/<geo>` exactly) at `v1/presence/getpresence/` with its
+  trailing slash and no query, with `Accept: application/json`, `Content-Type: application/json`, `behavioroverride:
+  redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent: Teams-V2-Web` and an empty
+  `x-ms-object-id` (no `x-ms-endpoint-id`, no cookie, no caller or correlation ids), the body `[{"mri": …}, …]`
+  (never the web client's `source`), and the `https://presence.teams.microsoft.com/` token; read back the same way.
+  UPS takes nothing else from the native transport: a `Read` or an own-state request to it is refused.
+  `PresenceRead::read_answer` drops the answer whole if any item is of an MRI not asked for, and reads an item's
+  `availability` and `activity` only when its `status` is the captured `20000`.
 
-Not yet on the native list: `users/fetch` (Task 12 decides whether names need it) and presence's `getpresence`
-(Task 17).
+Not on the native list: `users/fetch` (names come from Graph and `short_profile`).
 
 ## How a run uses it
 
@@ -382,7 +417,8 @@ Not yet on the native list: `users/fetch` (Task 12 decides whether names need it
 - `ab-chat` uses `Classifier::mapped` with `LiveMembershipSource`. The browser fence hands the source the account's
   chat service token from the page's own chat service requests (`HttpFence::with_credentials`: `HttpFence::handle`
   takes it from the raw `Fetch.requestPaused` event's headers). A `PausedRequest` keeps every header's name, and the
-  value only of those the read-by-`POST` list reads (`Content-Type`, `Origin` and the pinned `x-ms-*` ones), never a
+  value only of those the read-by-`POST` list reads (`Content-Type`, `Origin`, `behavioroverride` and the pinned
+  `x-ms-*` ones), never a
   token or a cookie; the write mapping reads none. The event itself, headers included, has already been handed
   to the run's event watchers (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b 1:1 chat passes only when the read
   confirms its two members are lab accounts.
