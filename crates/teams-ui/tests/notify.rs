@@ -99,6 +99,7 @@ impl Notifying {
             });
             cx.subscribe(&notifier, move |_, event, _| match event {
                 NotifierEvent::Open(id) => recorded.lock().unwrap().push(id.clone()),
+                NotifierEvent::OpenChannel(id) => recorded.lock().unwrap().push(format!("channel {id}")),
             })
             .detach();
             notifier
@@ -318,6 +319,13 @@ fn channels_notify_only_mentions_and_own_streams_never() {
         (shown[0].conversation.as_str(), shown[0].kind),
         (CHANNEL, NoticeKind::Mention)
     );
+    // activated, it opens the channel read-only, never as a chat
+    let id = n.rig.cx.read(|cx| n.notifier.read(cx).shown())[0].0;
+    n.rig
+        .cx
+        .update(|cx| n.notifier.update(cx, |notifier, cx| notifier.activated(id, cx)));
+    n.rig.cx.run_until_parked();
+    assert_eq!(*n.opened.lock().unwrap(), [format!("channel {CHANNEL}")]);
 }
 
 /// `millis` milliseconds after the epoch.

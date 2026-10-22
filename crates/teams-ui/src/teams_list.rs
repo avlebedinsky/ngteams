@@ -140,9 +140,10 @@ impl TeamsList {
         }
     }
 
-    /// Opens the channel `id`, when the list shows it: highlighted, and told to the shell.
-    pub fn open(&mut self, id: &str, cx: &mut Context<Self>) {
-        let chosen = self.teams.iter().flatten().find_map(|team| {
+    /// The channel `id` with its names, when the list shows it.
+    #[must_use]
+    pub fn chosen(&self, id: &str) -> Option<ChannelChosen> {
+        self.teams.iter().flatten().find_map(|team| {
             team.channels
                 .iter()
                 .find(|channel| channel.id == id)
@@ -151,8 +152,12 @@ impl TeamsList {
                     name: channel.name.clone().into(),
                     team: team.name.clone().into(),
                 })
-        });
-        if let Some(chosen) = chosen {
+        })
+    }
+
+    /// Opens the channel `id`, when the list shows it: highlighted, and told to the shell.
+    pub fn open(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(chosen) = self.chosen(id) {
             self.select(Some(chosen.id.clone()), cx);
             cx.emit(TeamsListEvent::Opened(chosen));
         }

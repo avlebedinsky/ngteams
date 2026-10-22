@@ -22,14 +22,14 @@ use std::sync::Arc;
 use futures_util::StreamExt as _;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, Task, WeakEntity,
-    WindowHandle, WindowId,
+    Window, WindowHandle, WindowId,
 };
 use tokio::sync::mpsc;
 use zbus::Connection;
 
 use crate::bus::{self, BusError};
 use crate::notify::{BusNotifications, Notifier, NotifierEvent};
-use crate::shell::{Main, ShellParts};
+use crate::shell::{Main, Shell, ShellParts};
 use crate::trace::TraceLine;
 use crate::tray::{BusTray, Hosted, Tray, TrayEvent};
 use crate::view::Root;
@@ -110,6 +110,7 @@ impl Desktop {
         });
         let opening = cx.subscribe(&notifier, |this: &mut Self, _, event, cx| match event {
             NotifierEvent::Open(id) => this.open_chat(id.clone(), cx),
+            NotifierEvent::OpenChannel(id) => this.open_channel(id.clone(), cx),
         });
         let tray = cx.new(|cx| {
             Tray::new(
@@ -200,6 +201,16 @@ impl Desktop {
 
     /// Opens chat `id` in the window, shown first ([`Desktop::show`]).
     pub fn open_chat(&mut self, id: String, cx: &mut Context<Self>) {
+        self.in_shell(cx, |shell, window, cx| shell.open_chat(id, window, cx));
+    }
+
+    /// Opens team channel `id` in the window, read-only, shown first ([`Desktop::show`]).
+    pub fn open_channel(&mut self, id: String, cx: &mut Context<Self>) {
+        self.in_shell(cx, |shell, window, cx| shell.open_channel_id(id, window, cx));
+    }
+
+    /// Shows the window and does `then` in its shell.
+    fn in_shell(&mut self, cx: &mut Context<Self>, then: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>)) {
         self.show(cx);
         let Some(window) = self.window else { return };
         let _ = window.update(cx, |kit, window, cx| {
@@ -209,7 +220,7 @@ impl Desktop {
             let Some(shell) = root.read(cx).shell().cloned() else {
                 return;
             };
-            shell.update(cx, |shell, cx| shell.open_chat(id, window, cx));
+            shell.update(cx, |shell, cx| then(shell, window, cx));
         });
     }
 

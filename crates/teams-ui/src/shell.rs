@@ -110,7 +110,7 @@ pub struct Shell {
     main: Main,
     panes: Entity<ResizableState>,
     focus: FocusHandle,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl Shell {
@@ -133,6 +133,14 @@ impl Shell {
         let teams = cx.new(|cx| TeamsList::new(teams_core, teams_models, teams_trace, cx));
         let channel_opened = cx.subscribe_in(&teams, window, |this: &mut Self, _, event, window, cx| match event {
             TeamsListEvent::Opened(chosen) => this.open_channel(chosen.clone(), window, cx),
+        });
+        // a channel kept as the selected chat (by a build that opened one in a chat view) opens as a channel once the
+        // list knows it
+        let kept_channel = cx.observe_in(&teams, window, |this: &mut Self, teams, window, cx| {
+            let Main::Chat(id) = &this.main else { return };
+            if let Some(chosen) = teams.read(cx).chosen(id) {
+                this.open_channel(chosen, window, cx);
+            }
         });
         let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx));
         let focus = cx.focus_handle();
@@ -169,7 +177,7 @@ impl Shell {
             main: selected.map_or(Main::Nothing, Main::Chat),
             panes: cx.new(|_| ResizableState::default()),
             focus,
-            _subscriptions: [opened, channel_opened],
+            _subscriptions: [opened, channel_opened, kept_channel],
         }
     }
 
@@ -185,8 +193,20 @@ impl Shell {
         self.channel.as_ref().map(|(view, _)| view)
     }
 
+    /// Opens team channel `id` read-only ([`Shell::open_channel`]), named as the Teams list names it, or as
+    /// "Channel" when the list doesn't show it (the teams not read yet, or unreadable).
+    pub fn open_channel_id(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = self.teams.read(cx).chosen(&id).unwrap_or(ChannelChosen {
+            id,
+            name: SharedString::default(),
+            team: SharedString::default(),
+        });
+        self.open_channel(chosen, window, cx);
+    }
+
     /// Opens a team's channel in the conversation pane, read-only; the chat it hides is kept (its draft stays) but
-    /// isn't shown, so no read receipt goes for it. The switcher and the search close.
+    /// isn't shown, so no read receipt goes for it. A channel is never kept as the selected chat. The switcher and the
+    /// search close.
     pub fn open_channel(&mut self, chosen: ChannelChosen, window: &mut Window, cx: &mut Context<Self>) {
         self.trace
             .record(&TraceLine::new("channel", "opened").conversation(&chosen.id));
@@ -196,7 +216,10 @@ impl Shell {
             .is_some_and(|(view, _)| view.read(cx).channel() == chosen.id);
         if shown {
             // opened again: synced again (an earlier sync may have failed, and no catch-up reads a channel)
-            if let Some((view, _)) = &self.channel {
+            if let Some((view, kept)) = &mut self.channel {
+                if !chosen.team.is_empty() {
+                    *kept = chosen.clone();
+                }
                 view.update(cx, ChannelView::sync);
             }
         } else {
@@ -207,6 +230,20 @@ impl Shell {
         }
         self.teams
             .update(cx, |teams, cx| teams.select(Some(chosen.id.clone()), cx));
+        // a chat view of the channel itself (kept as the selected chat by an earlier build) is dropped, and the channel
+        // isn't the selected chat any more
+        if self
+            .chat
+            .as_ref()
+            .is_some_and(|chat| chat.read(cx).conversation() == chosen.id)
+        {
+            self.chat = None;
+        }
+        if self.settings.read(cx).settings().selected_chat.as_deref() == Some(chosen.id.as_str()) {
+            self.settings.update(cx, |settings, cx| {
+                settings.change(|settings| settings.selected_chat = None, cx);
+            });
+        }
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.set_shown(false, cx));
         }
@@ -263,8 +300,13 @@ impl Shell {
         self.chat.as_ref()
     }
 
-    /// Opens a chat in the conversation pane and keeps it as the selected chat; the switcher closes.
+    /// Opens a chat in the conversation pane and keeps it as the selected chat; the switcher closes. A team's channel
+    /// the Teams list shows opens read-only instead ([`Shell::open_channel`]), never in a chat view.
     pub fn open_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chosen) = self.teams.read(cx).chosen(&id) {
+            self.open_channel(chosen, window, cx);
+            return;
+        }
         self.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
         let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
         if shown != Some(true) {
@@ -294,6 +336,9 @@ impl Shell {
     /// selects it ([`ChatView::reveal`]).
     pub fn open_message(&mut self, target: HitTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.open_chat(target.conversation.clone(), window, cx);
+        if self.main != Main::Chat(target.conversation.clone()) {
+            return;
+        }
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.reveal(target.arrival_time, target.message, cx));
         }
@@ -492,7 +537,13 @@ impl Shell {
                     .filter(|(view, _)| view.read(cx).channel() == id.as_str());
                 let title = shown.map_or_else(
                     || SharedString::from("Channel"),
-                    |(_, chosen)| format!("{} › {}", chosen.team, chosen.name).into(),
+                    |(_, chosen)| {
+                        if chosen.team.is_empty() {
+                            SharedString::from("Channel")
+                        } else {
+                            format!("{} › {}", chosen.team, chosen.name).into()
+                        }
+                    },
                 );
                 pane.child(pane_header(title, palette).debug_selector(|| "channel-header".to_owned()))
                     .child(div().flex_1().min_h_0().children(shown.map(|(view, _)| view.clone())))

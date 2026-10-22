@@ -392,6 +392,70 @@ fn a_failed_teams_read_says_the_teams_can_t_be_read_until_one_is_read() {
     assert!(bounds(cx, "channel-row-0").is_some());
 }
 
+/// What the window shows of the channel: the channel view and no chat view, no composer, the channel not kept as the
+/// selected chat.
+fn assert_shown_as_a_channel(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) {
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(id.to_owned())
+    );
+    assert!(bounds(cx, "channel-view").is_some());
+    assert!(bounds(cx, "compose").is_none(), "a composer is drawn");
+    assert!(
+        cx.update(|_, cx| shell.read(cx).chat().is_none()),
+        "a chat view of it is kept"
+    );
+    let selected = cx.update(|_, cx| shell.read(cx).settings().read(cx).settings().selected_chat.clone());
+    assert_eq!(selected, None);
+}
+
+#[test]
+fn a_channel_opened_as_a_chat_opens_read_only_in_the_channel_view() {
+    // a channel mention's notification opens its conversation through the shell's chat path
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    shell.update_in(cx, |shell, window, cx| shell.open_chat(TEAM.to_owned(), window, cx));
+    assert_shown_as_a_channel(&shell, TEAM, cx);
+    assert_eq!(*rig.core.synced.lock().unwrap(), [TEAM]);
+    assert_read_only(&rig, cx);
+}
+
+#[test]
+fn a_channel_the_list_doesn_t_show_opens_read_only_under_a_plain_header() {
+    let rig = rig();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open_channel_id(CHANNEL.to_owned(), window, cx);
+    });
+    assert_shown_as_a_channel(&shell, CHANNEL, cx);
+    assert!(bounds(cx, "channel-header").is_some());
+    assert_read_only(&rig, cx);
+}
+
+#[test]
+fn a_channel_kept_as_the_selected_chat_opens_as_a_channel_once_the_list_knows_it() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let parts = ShellParts {
+        core: rig.cx.read(|cx| rig.bridge.read(cx).core()),
+        models: rig.models.clone(),
+        settings: rig.cx.update(|cx| {
+            cx.new(|_| {
+                SettingsModel::in_memory(Settings {
+                    selected_chat: Some(TEAM.to_owned()),
+                    ..Settings::default()
+                })
+            })
+        }),
+        trace: Arc::new(ViewTrace::off()),
+    };
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
+    cx.run_until_parked();
+    assert_shown_as_a_channel(&shell, TEAM, cx);
+}
+
 #[test]
 fn once_the_engine_stopped_the_teams_shown_stay() {
     let rig = rig();

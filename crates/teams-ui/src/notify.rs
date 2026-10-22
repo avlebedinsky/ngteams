@@ -23,7 +23,8 @@
 //! when the next message comes. Whether a chat is shown in a focused window is asked again just before its
 //! notifications are shown, and a chat opened or read while its messages were being looked at shows none of them.
 //!
-//! **Activating one** (its body, the `default` action) opens its chat: [`NotifierEvent::Open`], which the
+//! **Activating one** (its body, the `default` action) opens its chat: [`NotifierEvent::Open`], or for a team's
+//! channel (the stored conversation's kind when it was shown) [`NotifierEvent::OpenChannel`], read-only, which the
 //! [`Desktop`](crate::desktop::Desktop) acts on.
 //!
 //! **The path.** GPUI's own system notifications reach the bus, but can't replace or close a notification (their tag
@@ -35,7 +36,7 @@
 //! the message's first line) goes only to that bus, never to the view trace, which records the conversation id and
 //! the kind.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -114,6 +115,8 @@ pub trait NotificationServer: Send + Sync + 'static {
 pub enum NotifierEvent {
     /// A notification was activated: open its chat.
     Open(String),
+    /// A notification of a team's channel was activated: open the channel, read-only (never in a chat view).
+    OpenChannel(String),
 }
 
 /// The chat shown in a focused window, if one is: no notification is shown for it.
@@ -174,6 +177,8 @@ pub struct Notifier {
     shown: HashMap<String, ChatNotices>,
     /// Every notification shown, by the server's id: its chat.
     ids: HashMap<u32, String>,
+    /// The conversations shown that were stored as a team's channel.
+    channels: HashSet<String>,
     /// How many times a chat's notifications were forgotten (closed, its count started again), and per chat that
     /// count when it last was.
     forgets: u64,
@@ -229,6 +234,7 @@ impl Notifier {
             gathering: false,
             shown: HashMap::new(),
             ids: HashMap::new(),
+            channels: HashSet::new(),
             forgets: 0,
             forgotten: HashMap::new(),
             _feed: feed,
@@ -282,7 +288,11 @@ impl Notifier {
         };
         self.trace
             .record(&TraceLine::new("notification", "opened").conversation(&conversation));
-        cx.emit(NotifierEvent::Open(conversation.clone()));
+        cx.emit(if self.channels.contains(&conversation) {
+            NotifierEvent::OpenChannel(conversation.clone())
+        } else {
+            NotifierEvent::Open(conversation.clone())
+        });
         self.forget(&conversation, cx);
     }
 
@@ -447,7 +457,14 @@ async fn process(this: &WeakEntity<Notifier>, batch: Batch, cx: &mut AsyncApp) {
         }
         let (chat, notices) = describe(&*core, &conversation, stored, chosen).await;
         // asked again after the reads above, right before what is shown is read (nothing waits in between)
-        let due = this.update(cx, |this, cx| still_due(this, &conversation, taken, cx));
+        let channel = stored.is_some_and(|stored| stored.kind == ConversationKind::Channel);
+        let due = this.update(cx, |this, cx| {
+            let due = still_due(this, &conversation, taken, cx);
+            if due && channel {
+                this.channels.insert(conversation.clone());
+            }
+            due
+        });
         if due.is_ok_and(|due| due) {
             show(this, &*server, &conversation, &chat, notices, cx).await;
         }
