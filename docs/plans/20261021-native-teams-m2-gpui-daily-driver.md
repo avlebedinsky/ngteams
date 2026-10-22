@@ -1366,7 +1366,7 @@ task replaces that with one logger of our own. `teams-headless`'s `TEAMS_HEADLES
 **Files:**
 - Create: `docs/personal-build.md`
 
-- [ ] write down the personal build from the direction of 2026-10-21 (Decisions above): the `teams` binary and its
+- [x] write down the personal build from the direction of 2026-10-21 (Decisions above): the `teams` binary and its
       data (keyring name `teams-personal`, `~/.local/share/teams/`, no broker, no sandbox); its fence (every write a
       sealed type sent only as `Authorized<_>`, from an explicit action in the UI or a setting the user turned on, the
       target a conversation the account is a member of by a fresh member read, logged locally; the outbox's rules
@@ -1375,16 +1375,25 @@ task replaces that with one logger of our own. `teams-headless`'s `TEAMS_HEADLES
       provider or multi-factor prompts the lab never showed); what the lab can't show and what the personal build
       does without it (channel writes, new chats, server search: not in M2); the first run's checklist and
       Conditional Access (`auth.md` question 6)
-- [ ] what "agents never build a personal build" means once the code exists: the gate compiles and mock-tests it
+- [x] what "agents never build a personal build" means once the code exists: the gate compiles and mock-tests it
       (allowed); producing a release or installed personal binary, or running one against the tenant, is not
-- [ ] how lab and personal binaries are kept apart: each refuses the other's data dir and keyring name, both refuse
+- [x] how lab and personal binaries are kept apart: each refuses the other's data dir and keyring name, both refuse
       `test-support`; the personal fence lives in `teams-fence` (permits are sealed there) behind a feature only the
       `teams` crate enables, with a manifest test over `cargo metadata -p teams-app` that it is absent and `teams-app`
       refusing to run when feature unification brings it in, as it refuses `test-support`
-- [ ] the CLAUDE.md text it needs, as a proposal in the doc (the hard rules name the lab today)
-- [ ] ⚠️ stop here for the user's decision. No code that loosens the fence for a personal build is written before it;
-      on approval, CLAUDE.md gets the approved text, and Task 27 follows it
-- [ ] `cargo test -p fixture-guard` passes
+- [x] the CLAUDE.md text it needs, as a proposal in the doc (the hard rules name the lab today)
+- [x] ⚠️ stop here for the user's decision. No code that loosens the fence for a personal build is written before it;
+      on approval, CLAUDE.md gets the approved text, and Task 27 follows it (blocked: awaiting the user's decision —
+      docs/backlog/personal-build-rules-await-the-users-decision.md; no fence-loosening code written)
+- [x] `cargo test -p fixture-guard` passes
+- Done (2026-10-22): `docs/personal-build.md`, a proposal; CLAUDE.md unchanged. Where it goes past the lines above:
+  the personal fence's question is membership (a fresh read listing the account), not a complete roster; a member
+  form no capture showed, a meeting chat and a `48:` stream leave the write denied; the sign-in window gets a
+  `--personal` mode whose egress proxy becomes a host gate (Entra's sign-in hosts and the identity provider's hosts
+  the user names), the guard's two redirect gaps accepted for the user's own sign-in only if the user approves; and
+  "agents never build a personal build" is read as no runnable (non-`test-support`) `teams` binary in any profile,
+  debug included, since a debug build reaches the tenant as well as a release one. Each is listed for the user's
+  decision in the doc's last section and in the backlog item.
 
 ### Task 27: The personal build
 **Files:**
