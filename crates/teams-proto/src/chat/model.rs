@@ -896,12 +896,14 @@ pub fn unshown_parts(properties: &Map<String, Value>) -> Vec<Unshown> {
 /// The web client's origin, where a message this build can't show in full is read ([`web_chat_link`]).
 pub const WEB_CLIENT: &str = "https://teams.microsoft.com";
 
-/// The web client's link that opens the conversation `conversation`: `<WEB_CLIENT>/l/chat/<id>/0`, the id
-/// percent-encoded as one segment: the deep link `abc-chat` opens the lab's existing group chat by
+/// The web client's link that opens the conversation `conversation`: `<WEB_CLIENT>/l/chat/<id>/0`, the id encoded as
+/// one segment exactly as `abc-chat`'s `chat_link_by_id` encodes it (`application/x-www-form-urlencoded`: letters,
+/// digits and `*-._` kept, every other byte escaped, `:`, `@` and `/` included) and, like it, without the `?tenantId`
+/// the captured form carries: the deep link `abc-chat` opens the lab's existing group chat by
 /// (`docs/protocol/endpoints.md`). Opened in the browser, never fetched.
 #[must_use]
 pub fn web_chat_link(conversation: &str) -> String {
-    let id = percent_encoding::utf8_percent_encode(conversation, percent_encoding::NON_ALPHANUMERIC);
+    let id: String = url::form_urlencoded::byte_serialize(conversation.as_bytes()).collect();
     format!("{WEB_CLIENT}/l/chat/{id}/0")
 }
 

@@ -31,7 +31,7 @@ use teams_proto::chat::{MessageType, RichText, parse_html, thread_activity};
 use teams_store::Message;
 
 use crate::bridge::Core;
-use crate::chat_view::{DELETED, UNSUPPORTED};
+use crate::chat_view::{DELETED, UNSHOWN_CONTENT, UNSUPPORTED, unshown_of};
 use crate::models::Models;
 use crate::people::Shown;
 use crate::rich_text::{self, Mentions, Rendered};
@@ -113,6 +113,9 @@ pub struct Item {
     pub arrival_time: i64,
     pub edited: bool,
     pub body: Body,
+    /// A text that carries a part no capture showed (`chat_view::unshown_of`: a received file, a card): shown with
+    /// [`UNSHOWN_CONTENT`] under it, never a guess at the part. No web button: no channel deep link was captured.
+    pub unshown: bool,
 }
 
 /// What one load read from the store.
@@ -299,12 +302,15 @@ impl ChannelView {
 
     /// A message as shown.
     fn item(&mut self, message: &Message, people: &HashMap<String, Shown>) -> Item {
+        let body = self.body(message, people);
+        let unshown = matches!(body, Body::Text(_)) && unshown_of(message).any();
         Item {
             id: message.id.clone(),
             sender_name: sender_name(message, people, self.core.me()),
             arrival_time: message.arrival_time,
             edited: message.edit_time.is_some() && message.delete_time.is_none(),
-            body: self.body(message, people),
+            body,
+            unshown,
         }
     }
 
@@ -344,8 +350,14 @@ impl ChannelView {
             .threads
             .iter()
             .flat_map(|thread| {
-                let post = thread.post.iter().map(|post| (post.id.clone(), "post"));
-                let replies = thread.replies.iter().map(|reply| (reply.id.clone(), "reply"));
+                let post = thread.post.iter().map(|post| {
+                    let kind = if post.unshown { "unshown-post" } else { "post" };
+                    (post.id.clone(), kind)
+                });
+                let replies = thread.replies.iter().map(|reply| {
+                    let kind = if reply.unshown { "unshown-reply" } else { "reply" };
+                    (reply.id.clone(), kind)
+                });
                 post.chain(replies)
             })
             .collect();
@@ -511,6 +523,13 @@ fn message_view(item: &Item, palette: Palette) -> AnyElement {
         Body::Event(text) => muted(text.clone()),
         Body::Unsupported => muted(UNSUPPORTED.into()),
     };
+    let unshown = item.unshown.then(|| {
+        let id = item.id.clone();
+        div()
+            .debug_selector(move || format!("channel-unshown-{id}"))
+            .text_xs()
+            .child(muted(UNSHOWN_CONTENT.into()))
+    });
     let id = item.id.clone();
     div()
         .debug_selector(move || format!("channel-message-{id}"))
@@ -519,6 +538,7 @@ fn message_view(item: &Item, palette: Palette) -> AnyElement {
         .gap_1()
         .child(header)
         .child(body)
+        .children(unshown)
         .into_any_element()
 }
 

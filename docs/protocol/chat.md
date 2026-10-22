@@ -118,7 +118,9 @@ every profile lookup; the account's display name since the lookups of lab accoun
   ([Files](#files-sending-denied-ab-file)), so no message with one has been read either. The native client keeps a
   list with an entry as it came (`teams_proto::chat::Unshown`; `Message::files` is `Field::Unknown`) and shows the
   message's text with a line saying it has content that can't be shown here and a button that opens the chat in the
-  web client (`l/chat/<chat>/0`), never a guess at it (M2 Task 23).
+  web client (`l/chat/<chat>/0`, the id encoded as `abc-chat` encodes it), never a guess at it (M2 Task 23). A message
+  of a type the chat view doesn't show gets the same button under its placeholder. The read-only channel view shows
+  the line without the button: no channel deep link has been captured.
 
 ## A message as sent (ab-chat-full, a)
 

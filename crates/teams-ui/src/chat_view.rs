@@ -118,7 +118,8 @@ pub const DELETED: &str = "This message was deleted";
 pub const UNSUPPORTED: &str = "This message can't be shown here";
 /// What a message shows under its text when it carries a part no capture showed (a received file, a card).
 pub const UNSHOWN_CONTENT: &str = "This message has content that can't be shown here";
-/// The button beside [`UNSHOWN_CONTENT`]: it opens the chat in the web client (`teams_proto::chat::web_chat_link`).
+/// The button beside [`UNSHOWN_CONTENT`] and [`UNSUPPORTED`] in a chat: it opens the chat in the web client
+/// (`teams_proto::chat::web_chat_link`). The channel view shows neither with it: no channel deep link was captured.
 pub const OPEN_ON_THE_WEB: &str = "Open in Teams on the web";
 /// The divider at the read horizon.
 pub const NEW_MESSAGES: &str = "New messages";
@@ -2513,7 +2514,13 @@ fn bubble(item: &MessageItem, conversation: &str, highlighted: bool, palette: Pa
     let content = match &item.body {
         Body::Text(text) => rich_text::render(&id, &text.0, palette),
         Body::Deleted => muted(DELETED, palette),
-        Body::Unsupported(_) => muted(UNSUPPORTED, palette),
+        Body::Unsupported(_) => web_line(
+            &format!("unsupported-{}", item.id),
+            UNSUPPORTED,
+            &item.id,
+            conversation,
+            palette,
+        ),
         Body::Event(_) => div().into_any_element(),
     };
     div()
@@ -2523,19 +2530,27 @@ fn bubble(item: &MessageItem, conversation: &str, highlighted: bool, palette: Pa
         .rounded_md()
         .bg(rgb(background))
         .child(content)
-        .children(
-            item.unshown
-                .any()
-                .then(|| unshown_line(&item.id, conversation, palette)),
-        )
+        .children(item.unshown.any().then(|| {
+            div()
+                .text_xs()
+                .child(web_line(
+                    &format!("unshown-{}", item.id),
+                    UNSHOWN_CONTENT,
+                    &item.id,
+                    conversation,
+                    palette,
+                ))
+                .into_any_element()
+        }))
         .into_any_element()
 }
 
-/// Under a message's text, for a part no capture showed: [`UNSHOWN_CONTENT`] and [`OPEN_ON_THE_WEB`], which opens the
-/// chat in the web client through GPUI's `open_url` (the portal or `xdg-open`; the sandbox's no-op opener in tests).
-fn unshown_line(id: &str, conversation: &str, palette: Palette) -> AnyElement {
+/// `note` (the line under a message's text for a part no capture showed, [`UNSHOWN_CONTENT`], or a type's
+/// placeholder, [`UNSUPPORTED`]) and [`OPEN_ON_THE_WEB`], which opens the chat in the web client through GPUI's
+/// `open_url` (the portal or `xdg-open`; the sandbox's no-op opener in tests). Never for a deleted message.
+fn web_line(selector: &str, note: &'static str, id: &str, conversation: &str, palette: Palette) -> AnyElement {
     let link = web_chat_link(conversation);
-    let selector = format!("unshown-{id}");
+    let selector = selector.to_owned();
     let open = format!("open-on-the-web-{id}");
     let button = Button::new(SharedString::from(open.clone()))
         .label(OPEN_ON_THE_WEB)
@@ -2548,8 +2563,7 @@ fn unshown_line(id: &str, conversation: &str, palette: Palette) -> AnyElement {
         .flex_wrap()
         .items_center()
         .gap_1()
-        .text_xs()
-        .child(muted(UNSHOWN_CONTENT, palette))
+        .child(muted(note, palette))
         .child(div().debug_selector(move || open).child(button))
         .into_any_element()
 }

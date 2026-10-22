@@ -55,7 +55,8 @@ No message with a file has ever been read in the lab: every message had `propert
 shows one, `teams-proto` keeps a list with an entry as it came (`Message::files` is `Field::Unknown`,
 `teams_proto::chat::Unshown`; `properties.cards` and `amsreferences` with an entry likewise), and the app shows such a
 message's text with "This message has content that can't be shown here" and an "Open in Teams on the web" button
-(`web_chat_link`: the chat in the web client, through `open_url`), never a guess at the file. **The file card waits
+(`web_chat_link`: the chat in the web client, through `open_url`), never a guess at the file; a channel post shows
+the line without the button (no channel deep link has been captured). **The file card waits
 here**: once a capture shows a file message (from step 4, or b's read of it), write synthetic fixtures of every form
 the capture shows, read the entry into a typed file (name, size, type, link), show it as a card and open its link
 through `open_url`; the file's content is never fetched by the app.

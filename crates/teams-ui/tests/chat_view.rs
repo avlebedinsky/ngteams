@@ -860,6 +860,49 @@ fn a_file_or_card_no_capture_showed_is_said_never_guessed_and_opens_the_chat_on_
 }
 
 #[test]
+fn a_message_of_a_type_not_shown_opens_the_chat_on_the_web_and_a_deleted_one_doesnt() {
+    let mut card = with_properties("301", NOON, r#"{"cards":[{"made":"up"}]}"#);
+    card.message_type = "RichText/Media_Card".to_owned();
+    let mut plain = message("302", LAB_B, "", NOON + MINUTE);
+    plain.message_type = "RichText/Media_Made_Up".to_owned();
+    let mut gone = with_properties(
+        "303",
+        NOON + 2 * MINUTE,
+        r#"{"files":"[{\"fileName\":\"made-up.txt\"}]"}"#,
+    );
+    gone.delete_time = Some(NOON + 3 * MINUTE);
+    let rig = rig_with(vec![card, plain, gone]);
+    let (trace, written) = trace();
+    let (view, cx) = chat_window(&rig, trace);
+    let unshown: Vec<bool> = items(&view, cx).into_iter().map(|item| item.unshown.any()).collect();
+    assert_eq!(unshown, [false, false, false]);
+    // the type's placeholder with the button; a deleted message says so, with neither line nor button
+    for selector in [
+        "unsupported-301",
+        "open-on-the-web-301",
+        "unsupported-302",
+        "open-on-the-web-302",
+    ] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    for selector in ["unsupported-303", "unshown-303", "open-on-the-web-303"] {
+        assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+    }
+    let line = written
+        .lines()
+        .into_iter()
+        .rfind(|line| line["view"] == "chat-view")
+        .expect("a chat-view line");
+    assert_eq!(
+        line["kinds"],
+        serde_json::json!(["unsupported", "unsupported", "deleted"])
+    );
+    let open = cx.debug_bounds("open-on-the-web-301").expect("the button is drawn");
+    cx.simulate_click(open.center(), Modifiers::none());
+    assert_eq!(cx.opened_url(), Some(web_chat_link(AB)));
+}
+
+#[test]
 fn a_deleted_message_shows_no_reactions() {
     let rig = rig_with(many(2));
     rig.core

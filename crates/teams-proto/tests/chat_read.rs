@@ -579,9 +579,15 @@ fn a_file_card_or_ams_object_no_capture_showed_is_kept_as_it_came_never_read_as_
     // where it is read in full: the web client, at the chat, its id one encoded segment
     assert_eq!(
         web_chat_link("19:a_b@unq.gbl.spaces"),
-        "https://teams.microsoft.com/l/chat/19%3Aa%5Fb%40unq%2Egbl%2Espaces/0"
+        "https://teams.microsoft.com/l/chat/19%3Aa_b%40unq.gbl.spaces/0"
     );
-    assert!(web_chat_link("19:x/../y?z#w").starts_with(&format!("{WEB_CLIENT}/l/chat/19%3Ax%2F%2E%2E%2Fy%3Fz%23w/")));
+    // as `abc-chat` encodes it: a 1:1 chat's object ids keep their `-`
+    assert_eq!(
+        web_chat_link("19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces"),
+        "https://teams.microsoft.com/l/chat/19%3A00000000-0000-4000-8000-00000000000a_\
+         00000000-0000-4000-8000-00000000000b%40unq.gbl.spaces/0"
+    );
+    assert!(web_chat_link("19:x/../y?z#w").starts_with(&format!("{WEB_CLIENT}/l/chat/19%3Ax%2F..%2Fy%3Fz%23w/")));
     Ok(())
 }
 
