@@ -35,6 +35,7 @@ use super::probe::{
     read, response_headers,
 };
 use super::profile_probe::{json_type, plain_content_type};
+use super::teams_probe::shown_key;
 use crate::config::{Alias, LabConfig};
 use crate::scenario::ab_chat::one_to_one_id;
 
@@ -264,8 +265,8 @@ impl ObjectProbe {
 }
 
 /// The outline of a JSON answer: one line per key path, `path: type`, a scalar's value as far as it may be shown
-/// ([`shown`]), a list's length; a key named for what it is when `known` knows it, as it is when it is a plain name,
-/// `?` otherwise. At most [`OUTLINE_DEPTH`] levels, [`OUTLINE_ITEMS`] entries of a list and [`OUTLINE_LINES`] lines.
+/// ([`shown`]), a list's length; a key named for what it is when `known` knows it, as it is when `probe teams` would
+/// show it (no run of four digits or of hex with a digit, short), `?` otherwise. At most [`OUTLINE_DEPTH`] levels, [`OUTLINE_ITEMS`] entries of a list and [`OUTLINE_LINES`] lines.
 #[must_use]
 pub fn outline(value: &Value, known: &Known) -> Vec<String> {
     let mut lines = Vec::new();
@@ -286,7 +287,7 @@ fn walk(value: &Value, path: &str, depth: usize, known: &Known, lines: &mut Vec<
                 return;
             }
             for (key, value) in object {
-                let key = known.name(key).map_or_else(|| plain_key(key).to_owned(), str::to_owned);
+                let key = known.name(key).map_or_else(|| shown_key(key).to_owned(), str::to_owned);
                 walk(value, &format!("{path}.{key}"), depth + 1, known, lines);
             }
         }
@@ -317,17 +318,6 @@ fn shown(value: &Value, known: &Known) -> String {
     }
 }
 
-/// A key that may be shown: letters, digits, `@`, `.`, `_`, `-` and `$`, short; `?` otherwise (a key that might be a
-/// value, an id or an address).
-fn plain_key(key: &str) -> &str {
-    let plain = (1..=64).contains(&key.len())
-        && key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'_' | b'-' | b'$'))
-        && !has_hex_run(key);
-    if plain { key } else { "?" }
-}
-
 /// A string value that may be shown: 1 to 32 bytes of ASCII letters, `/`, `-`, `_`, `.` and `:` with no digit, so
 /// it can't carry an id, a time or a token (`read`, `pish/image`, `Inline`).
 #[must_use]
@@ -336,11 +326,4 @@ pub fn is_plain_word(text: &str) -> bool {
         && text
             .bytes()
             .all(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b':'))
-}
-
-/// Whether `text` holds a run of 8 hex digits (a GUID's first group, an object id's tail).
-fn has_hex_run(text: &str) -> bool {
-    text.as_bytes()
-        .windows(8)
-        .any(|run| run.iter().all(u8::is_ascii_hexdigit))
 }

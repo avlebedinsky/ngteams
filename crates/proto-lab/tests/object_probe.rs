@@ -1,8 +1,10 @@
 //! `proto-lab probe object`: our own `ic3` token from the stored refresh token, then only `GET`s of one media service
 //! object, and a report of statuses, header names and the answer's outline, where lab ids are named for what they are
 //! and no other value is shown. Against wiremock: Entra on one mock server, the async gateway on another, reached
-//! through the `test-support` mock origin. Every value here is made up, the answer's shape too (no capture has shown
-//! it yet).
+//! through the `test-support` mock origin. Every value here is made up. The live answer (eight metadata keys, no
+//! reader; a 403 to an account the object wasn't shared with) is recorded in `docs/protocol/chat.md` ("The object
+//! created once"); the mock's answer is not that shape but a made-up reader listing, kept to show that the outline
+//! names lab ids for what they are and hides every other value.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -80,7 +82,7 @@ async fn entra(token: &str) -> MockServer {
     server
 }
 
-/// A made-up object answer: who may read it, its views, and values that must not be shown.
+/// A made-up object answer, not the live one's shape: who may read it, its views, and values that must not be shown.
 fn answer() -> Value {
     json!({
         "id": OBJECT,
@@ -90,6 +92,7 @@ fn answer() -> Value {
         "filename": BODY_MARKER,
         "size": 1234,
         "expiry": 1_800_000_000,
+        "2026-10-22": "made-up",
         "views": [{"name": "imgo", "ready": true}],
     })
 }
@@ -163,6 +166,7 @@ async fn the_object_probe_reads_the_object_by_get_only_and_names_only_lab_ids() 
         "$.size: number",
         "$.views[0].ready: bool true",
         "$.filename: string of 18 char(s)",
+        "$.?: string",
         "aud https://ic3.teams.office.com",
         "content-type application/json",
     ] {
@@ -247,6 +251,27 @@ fn an_outline_stops_at_its_limits() {
     assert!(lines.len() <= 10, "{lines:?}");
     let long = json!((0..500).map(|at| json!({ "n": at })).collect::<Vec<_>>());
     let lines = outline(&long, &Known::default());
-    assert!(lines.len() <= 201, "{}", lines.len());
+    assert_eq!(lines.len(), 1 + 20 * 2, "only the first 20 items: {lines:?}");
     assert!(lines[0].contains("500 item(s)"));
+    // 20 items of 20 keys each: 1 + 20 × 21 = 421 lines within the item and depth caps, cut at 200
+    let item: serde_json::Map<String, Value> = (0..20).map(|at| (format!("key{at}"), json!(at))).collect();
+    let wide = json!(vec![Value::Object(item); 20]);
+    let lines = outline(&wide, &Known::default());
+    assert_eq!(lines.len(), 201, "{lines:?}");
+    assert_eq!(lines.last().map(String::as_str), Some("… 221 more line(s)"));
+}
+
+#[test]
+fn an_outline_hides_a_key_that_may_carry_a_date_or_an_id() {
+    let value = json!({"2026-10-22": 1, "id1234": 2, "deadbeef": 3, "x0a1b2c3d": 4, "views": 5});
+    let lines = outline(&value, &Known::default());
+    for hidden in ["2026", "id1234", "0a1b2c3d"] {
+        assert!(
+            lines.iter().all(|line| !line.contains(hidden)),
+            "{hidden} shown: {lines:?}"
+        );
+    }
+    for shown in ["$.deadbeef: number", "$.views: number"] {
+        assert!(lines.iter().any(|line| line == shown), "{shown} missing: {lines:?}");
+    }
 }
