@@ -1266,6 +1266,70 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
     scenario), and every end tears the view's web process and window down. The window has its Wayland app id
     (`APP_ID`, as GTK's program name), and the answer channel has a test of its own (`tests/answer_channel.rs`).
 
+### Task 24a: The app's diagnostic log
+Added on 2026-10-22 at the user's request. M2 must end with an app the user uses daily (Overview), and debugging it
+needs a log. The user decided on 2026-10-22: comprehensive logging, and at `debug` full requests and responses, for
+faster movement in early development. Today the app installs no logger (Technical Details, Task 7's audit); this
+task replaces that with one logger of our own. `teams-headless`'s `TEAMS_HEADLESS_LOG` stays as it is.
+
+**Files:**
+- Create: `crates/teams-log/{Cargo.toml,src/lib.rs,src/redact.rs,src/file.rs,src/diagnostics.rs}`, tests
+- Modify: `CLAUDE.md`, `README.md`, `Cargo.toml` (members), `crates/teams-proto/src/http.rs`,
+  `crates/teams-trouter/src/{socket.rs,session.rs}`, `crates/teams-auth/src/session.rs`,
+  `crates/teams-core/src/{engine.rs,outbox.rs,outbox/transient.rs,sync.rs}`, `crates/teams-store/src/schema.rs`,
+  `crates/teams-fence/src/lab.rs` (the log's directory), `crates/teams-ui/src/{settings.rs,settings_view.rs,bridge.rs}`,
+  `crates/teams-ui/tests/reach.rs`, `crates/teams-app/src/{main.rs,app.rs}`
+
+- [ ] CLAUDE.md first: amend the M1 pattern "No log line carries a payload": at `debug` the app's own diagnostic log
+      carries full HTTP requests and responses (method, URL with its query, headers, bodies) and every Trouter frame
+      both ways, by the user's decision of 2026-10-22; `info` stays payload-free. The hard rule "Tokens never reach
+      logs" is unchanged: credentials are redacted by the logger itself (`Authorization`, `Cookie`/`Set-Cookie`, the
+      skypetoken and every other token header, the token fields of sign-in and renewal answers, Trouter's
+      `user.authenticate`), never left to call sites. A lab run's debug log is lab data like a capture (never in the
+      repo, never sanitized into it); the personal build's is the user's data, which agents never read
+- [ ] tests first: `teams-log`, a small crate of our own (`log` only, no `tracing` subscriber), installed once by
+      `teams-app` (and by `teams`, Task 27) before the engine starts: a file under the account's data dir (the lab's
+      `<data_dir>/logs/<alias>/teams-app.log`, `LabPaths::app_log_dir`), `0600` in a `0700` dir, rotated by size
+      (8 MiB, 4 older files kept, each `0600`); written from a thread of its own through a bounded channel, so GPUI's
+      foreground never waits on the file (dropped lines are counted and the count logged); a log that can't be opened
+      is shown once in the UI and the app runs without it. Level: `info` by default, the settings file's `log_level`
+      (`error`, `warn`, `info`, `debug`; changed live from the settings view), `TEAMS_APP_LOG` overriding it; `trace`
+      is taken as `debug`
+- [ ] tests first: only our own crates' records (`teams_…` targets) reach the file, as `teams-headless`'s log does: a
+      third-party `log` line and a kit `tracing` event (forwarded to `log`, no subscriber) at any level never do; `log`
+      stays capped at `debug` at compile time (`teams-trouter`'s `max_level_debug`; a test that
+      `log::STATIC_MAX_LEVEL` is `Debug`), so `tungstenite`'s `trace!` doesn't exist in the binary: our transport and
+      socket log requests and frames themselves, and the logger redacts them. `reach.rs` changes from "no logger" to
+      "only this logger": `set_logger`, `set_boxed_logger`, `set_global_default`, `tracing_subscriber` stay refused
+      everywhere but `teams-log`, and the app crates call only its `install`
+- [ ] tests first, `info`: engine actions and their outcomes (kind, conversation and message ids); the transport's
+      requests (method, host, path without query, status, latency, the retry decision); Trouter connects, drops (with
+      reason), reconnects and catch-ups (counts, conversations changed); outbox rows' state changes (row id, attempt,
+      `clientmessageid`, the fence's decision, so a line links to its `fence.log` entry); session renewals (audience,
+      expiry, outcome, as the hard rule allows) and signing out; store migrations (from and to); the UI's failures (a
+      failed `Reply`, a view's error, by kind); a panic hook that writes the panic (redacted), its location, thread and
+      a forced backtrace, flushes, then calls the previous hook. No body, query, header value, message text or display
+      name at `info`: an offline run on `teams-mock` sends, receives, edits and renames with marker text and marker
+      names and real-shaped tokens, and a grep of the file finds none of them
+- [ ] tests first, `debug` adds: every request and response in full (method, URL with its query, headers, bodies;
+      a binary body, a picture or an image, by content type and size only) and every Trouter frame both ways. Redaction
+      lives in `teams-log`: the transport and the socket hand it typed records (`teams_log::wire`) whose formatting
+      redacts by header name (`Authorization`, `Cookie`, `Set-Cookie`, `X-Skypetoken`, `Authentication`, any name
+      holding `token`), by JSON field (`access_token`, `refresh_token`, `id_token`, `skypetoken`, `token`), by form or
+      query field of `teams-auth`'s requests and redirects (`code`, `code_verifier`, `refresh_token`) and
+      `user.authenticate`'s arguments; then every line, any record's, passes a last pattern pass (JWT-shaped strings,
+      `skypetoken=…`, `Bearer …`). Tests put real-shaped tokens in each of those places (a JWT, a skypetoken, a refresh
+      token, a cookie, an authorization code, a `user.authenticate` frame) and in a panic message, and grep the
+      rotated files for every one; a line the redactor can't parse is redacted whole, never written raw
+- [ ] tests first: a "copy diagnostics" action (the settings view and the command palette) puts on the clipboard the
+      app's version and build profile, the log's level, the current log's last lines (capped), and the account's
+      recent `fence.log` lines; when it includes any `debug` line it says so first, plainly ("contains full requests
+      and responses: not safe to paste"), in the text and in the view
+- [ ] README: where the log lives, its levels, `TEAMS_APP_LOG`, rotation, "copy diagnostics", and that a debug log
+      holds message text and must not be shared
+- [ ] `cargo test -p teams-log -p teams-proto -p teams-trouter -p teams-auth -p teams-core -p teams-store -p teams-ui
+      -p teams-app` and the gate pass
+
 ### Task 25: Verify the lab acceptance
 **Files:**
 - Create: `crates/teams-app/tests/ui_live.rs` (`required-features = ["live"]`), `docs/m2-acceptance.md`
@@ -1342,8 +1406,8 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 ### Task 28: [Final] Update documentation
 - [ ] README.md: the M2 crates, `teams-app`, `teams`, the UI sandbox, the live UI test, the UI kit and its licence
 - [ ] CLAUDE.md: the patterns M2 settled (the UI sandbox, the bridge, the engine lock, the outbox's transient kind,
-      the credential broker, the view trace, the UI kit's audit, `PostRead`, own presence, the personal build's rules
-      as approved)
+      the credential broker, the view trace, the UI kit's audit, `PostRead`, own presence, the diagnostic log and its
+      redaction, the personal build's rules as approved)
 - [ ] `docs/protocol/endpoints.md` checked against every endpoint M2 touched
 - [ ] write the M3 plan (calls), informed by M2; the calendar in the roadmap
 - [ ] move this plan to `docs/plans/completed/`
