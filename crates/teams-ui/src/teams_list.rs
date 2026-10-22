@@ -3,7 +3,10 @@
 //!
 //! - **From the store only.** The list asks the engine for the stored teams ([`Core::teams`]) when it opens and again
 //!   each time the models say they changed ([`crate::Chats::teams_at`]: `Event::Teams`); the engine reads them from
-//!   CSA in the background when they are missing or old. Before a read settled them it says so ("Loading teams…").
+//!   CSA in the background when they are missing or old. Before a read settled them it says so ("Loading teams…"),
+//!   or, when the last read told failed ([`crate::Chats::teams_failed_at`]: `Event::Failed` during
+//!   [`teams_core::READING_TEAMS`]), that the teams can't be read; the engine tries again when the list asks after
+//!   its retry wait (the rail chosen again).
 //! - **Read-only.** A channel clicked is told as [`TeamsListEvent::Opened`]; the shell shows its posts in a
 //!   [`crate::ChannelView`], which offers no composer.
 //!
@@ -13,9 +16,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div,
-    px, rgb,
+    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    WeakEntity, Window, div, px, rgb,
 };
 use teams_core::EngineError;
 use teams_store::Team;
@@ -31,6 +34,8 @@ pub const CHANNEL_HEIGHT: f32 = 32.0;
 pub const LOADING: &str = "Loading teams…";
 /// What the list says when the account is in no team.
 pub const NO_TEAMS: &str = "No teams to show";
+/// What the list says when no teams are stored and the last read of them failed.
+pub const UNREADABLE: &str = "Teams can't be read right now";
 
 /// What the Teams list tells the shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +62,8 @@ pub struct TeamsList {
     selected: Option<String>,
     /// The models' teams revision the last load started at.
     read_at: u64,
+    /// The models' last failed teams read the list has shown.
+    failed_seen: u64,
     loading: Option<Task<()>>,
     /// A change came while a load ran: another follows it.
     dirty: bool,
@@ -71,8 +78,15 @@ impl TeamsList {
     /// The list over the store, loaded at once.
     pub fn new(core: Arc<dyn Core>, models: Models, trace: Arc<ViewTrace>, cx: &mut Context<Self>) -> Self {
         let observing = cx.observe(&models.chats, |this: &mut Self, chats, cx| {
-            if chats.read(cx).teams_at() != this.read_at {
+            let (teams_at, failed_at) = {
+                let chats = chats.read(cx);
+                (chats.teams_at(), chats.teams_failed_at())
+            };
+            if teams_at != this.read_at {
                 this.reload(cx);
+            } else if failed_at != this.failed_seen {
+                this.failed_seen = failed_at;
+                cx.notify();
             }
         });
         let mut list = Self {
@@ -82,6 +96,7 @@ impl TeamsList {
             teams: None,
             selected: None,
             read_at: 0,
+            failed_seen: 0,
             loading: None,
             dirty: false,
             loads: 0,
@@ -96,6 +111,13 @@ impl TeamsList {
     #[must_use]
     pub fn teams(&self) -> Option<&[Team]> {
         self.teams.as_deref()
+    }
+
+    /// Whether the list says the teams can't be read: none are stored, and the last read told failed.
+    #[must_use]
+    pub fn unreadable(&self, cx: &App) -> bool {
+        let chats = self.models.chats.read(cx);
+        self.teams.is_none() && chats.teams_failed_at() > chats.teams_at()
     }
 
     /// The channel highlighted.
@@ -256,7 +278,9 @@ impl Render for TeamsList {
                 .text_color(rgb(palette.muted_foreground))
                 .child(text)
         };
+        let unreadable = self.unreadable(cx);
         let body = match &self.teams {
+            None if unreadable => note(UNREADABLE).into_any_element(),
             None => note(LOADING).into_any_element(),
             Some(teams) if teams.is_empty() => note(NO_TEAMS).into_any_element(),
             Some(_) => div()

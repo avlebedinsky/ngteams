@@ -165,7 +165,7 @@ fn a_teams_answer_is_read_only_in_its_probed_shape() {
     for body in [&b"[]"[..], b"{}", b"{\"teams\": {}}", b"not json"] {
         assert_eq!(CsaTeams::read_answer(body), Err(CsaAnswerError::Malformed));
     }
-    let answer = json!({"teams": [
+    let answer = json!({"metadata": {"isPartialData": false}, "teams": [
         {"id": TEAM, "displayName": "A", "channels": [
             {"id": TEAM, "displayName": "General"},
             {"id": CHANNEL},
@@ -181,6 +181,39 @@ fn a_teams_answer_is_read_only_in_its_probed_shape() {
     let general: Vec<bool> = read.teams[0].channels.iter().map(|channel| channel.general).collect();
     // a channel is general by its id or by a boolean `isGeneral`, never by a string
     assert_eq!(general, [true, false]);
+}
+
+#[test]
+fn a_teams_answer_that_doesn_t_say_it_is_whole_is_refused() {
+    let teams = json!([{"id": TEAM, "displayName": "A", "channels": [{"id": TEAM, "displayName": "General"}]}]);
+    let whole = json!({"teams": teams, "metadata": {"isPartialData": false, "hasMoreChats": true}});
+    assert_eq!(
+        CsaTeams::read_answer(whole.to_string().as_bytes()).unwrap().teams.len(),
+        1
+    );
+    // partial (as a cold boot might answer) or not saying: never taken for the whole list the store replaces its own
+    // with
+    for metadata in [
+        json!({"isPartialData": true}),
+        json!({"isPartialData": "false"}),
+        json!({"isPartialData": 0}),
+        json!({"isPartialData": null}),
+        json!({}),
+        json!(null),
+        json!([]),
+    ] {
+        let answer = json!({"teams": teams, "metadata": metadata});
+        assert_eq!(
+            CsaTeams::read_answer(answer.to_string().as_bytes()),
+            Err(CsaAnswerError::Malformed),
+            "{metadata}"
+        );
+    }
+    let bare = json!({"teams": teams});
+    assert_eq!(
+        CsaTeams::read_answer(bare.to_string().as_bytes()),
+        Err(CsaAnswerError::Malformed)
+    );
 }
 
 #[tokio::test]

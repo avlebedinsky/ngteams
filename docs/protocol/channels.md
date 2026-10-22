@@ -91,8 +91,12 @@ A channel is a conversation of the chat service, read with the same reads as a c
   refuses any other CSA endpoint or query (the update read, the posts read, discover, pins, …) and anything but a
   `GET` before it asks for a token. Of the answer it reads only the teams: a team's and a channel's `id`,
   `displayName`, `isDeleted` (left out), `isArchived` (a team's) and `isGeneral` (or the channel whose id is the
-  team's); an entry without a string id and name is left out; the general channel first. `chats`, `users`,
-  `conversationFolders` and the rest aren't read: the chat list stays the chat service's.
+  team's); an entry without a string id and name is left out; the general channel first. The answer is taken only
+  when `metadata.isPartialData` is `false`, as in every captured answer: one that says it is partial, or doesn't say
+  (no `metadata`, no flag, a flag that isn't a boolean), is refused as malformed, since the store replaces its list
+  with what a read gives; the stored list and its read time stay, and the read is tried again after the engine's
+  retry wait. `chats`, `users`, `conversationFolders` and the rest aren't read: the chat list stays the chat
+  service's.
   `teams-core` reads it in the background when a view asks and the stored list is missing or older than an hour
   (`TEAMS_MAX_AGE`), keeps it in the store whole and tells a change as `Event::Teams`.
 - **A channel's posts**: the chat service's message reads, as a chat's (`ChatReads::messages` and its links), on demand
@@ -106,9 +110,12 @@ A channel is a conversation of the chat service, read with the same reads as a c
 
 ## No channel write
 
-Nothing the native client sends can post, reply, react, mark read or type in a channel: `teams-proto` has no sealed
-write for a channel (`WriteKind::ChannelPost` is mapped nowhere), the views offer no composer or message action there,
-and a chat write aimed at a channel would be denied by the fence besides (its member read admits only a 1:1 chat and
-the lab's recorded group chat; a channel's members are never read complete, and its thread read listed one member). The web client's channel writes stay unmapped and denied in the browser
-fence ([endpoints.md](endpoints.md#writes)). They need a team of the lab accounts only before they can be mapped and
-tested (`docs/backlog/channel-writes-need-a-lab-only-team.md`); the personal build stays read-only until then.
+Nothing the native client sends can post, reply, react, mark read or type in a channel. What keeps it so is the fence,
+not a missing type: the engine takes a chat write (`Action::Send`, `Action::Read`, …) for any conversation id, a
+channel's too, as a sealed chat write (`PostMessage`, a read receipt) aimed at the channel, and the fence denies it,
+since its member read admits only a 1:1 chat and the lab's recorded group chat (a channel's members are never read
+complete, and its thread read listed one member); `teams-core`'s `nothing_is_written_to_a_channel` holds it. No write
+is mapped to `WriteKind::ChannelPost`, and the views offer no composer or message action in a channel. The web
+client's channel writes stay unmapped and denied in the browser fence ([endpoints.md](endpoints.md#writes)). They need
+a team of the lab accounts only before they can be mapped and tested
+(`docs/backlog/channel-writes-need-a-lab-only-team.md`); the personal build stays read-only until then.

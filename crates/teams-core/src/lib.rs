@@ -47,4 +47,4 @@ pub use sync::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, Gaps, MAX_PAGES, StoredMessage,
     Synced,
 };
-pub use teams::{TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
+pub use teams::{READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};

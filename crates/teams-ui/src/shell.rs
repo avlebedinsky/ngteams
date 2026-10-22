@@ -194,7 +194,12 @@ impl Shell {
             .channel
             .as_ref()
             .is_some_and(|(view, _)| view.read(cx).channel() == chosen.id);
-        if !shown {
+        if shown {
+            // opened again: synced again (an earlier sync may have failed, and no catch-up reads a channel)
+            if let Some((view, _)) = &self.channel {
+                view.update(cx, ChannelView::sync);
+            }
+        } else {
             let (core, models, trace) = (Arc::clone(&self.core), self.models.clone(), Arc::clone(&self.trace));
             let id = chosen.id.clone();
             let view = cx.new(|cx| ChannelView::new(core, models, trace, id, cx));

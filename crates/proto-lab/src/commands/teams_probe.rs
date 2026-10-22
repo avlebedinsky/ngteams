@@ -17,8 +17,8 @@
 //! 4. The report ([`TeamsProbe::lines`]) shows per read its status, its header names, the answer's `Content-Type` and
 //!    size, its JSON shape (every key path with the JSON types seen there, arrays' elements merged: [`shape_lines`])
 //!    and counts; besides, the values of two protocol enums when they are plain words (a thread's `threadType`, a
-//!    message's `messagetype`), and the Graph token's claims (aud, exp, scopes, tenant). Never a token, a name, a
-//!    text or an id: a key that might be one is shown as `?`.
+//!    message's `messagetype`), and the chatsvcagg and ic3 tokens' claims (aud, exp, scopes, tenant). Never a token, a
+//!    name, a text or an id: a key that might be one is shown as `?`.
 //!
 //! A test reaches a local mock instead of the services only through [`Origin::Mock`], which a build without
 //! `teams-fence`'s `test-support` feature refuses (and the `proto-lab` binary refuses to run in such a build).
@@ -140,11 +140,11 @@ impl fmt::Debug for TeamsProbe {
 /// <region>` exactly, the region lowercase letters.
 ///
 /// # Errors
-/// [`ProbeError::NoChatBase`] without one, [`ProbeError::NotAChatBase`] for any other form.
+/// [`ProbeError::NoCsaBase`] without one, [`ProbeError::NotACsaBase`] for any other form.
 pub fn csa_base(region: &Region) -> Result<String, ProbeError> {
-    let trimmed = region.base(CSA_GTM).ok_or(ProbeError::NoChatBase)?;
+    let trimmed = region.base(CSA_GTM).ok_or(ProbeError::NoCsaBase)?;
     let base = trimmed.strip_suffix('/').unwrap_or(trimmed);
-    let refused = || ProbeError::NotAChatBase(base.to_owned());
+    let refused = || ProbeError::NotACsaBase(base.to_owned());
     let url = Url::parse(base).map_err(|_| refused())?;
     let segments: Vec<&str> = url.path_segments().map(Iterator::collect).unwrap_or_default();
     let plain = url.scheme() == "https"

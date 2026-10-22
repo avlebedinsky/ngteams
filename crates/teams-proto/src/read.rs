@@ -255,10 +255,24 @@ impl CsaTeams {
     /// channel (`isGeneral` `true`, or the channel whose id is the team's) comes first, the others in the answer's
     /// order.
     ///
+    /// The answer must say it is whole: `metadata.isPartialData` exactly `false`, as every captured answer had it. A
+    /// partial answer leaves teams out, and the store replaces its list with what a read gives, so one that says it is
+    /// partial, or doesn't say (no `metadata`, no flag, a flag that isn't a boolean), is refused rather than taken for
+    /// complete.
+    ///
     /// # Errors
-    /// [`CsaAnswerError::Malformed`] unless the body is a JSON object with a `teams` array.
+    /// [`CsaAnswerError::Malformed`] unless the body is a JSON object with a `teams` array and `metadata.isPartialData`
+    /// `false`.
     pub fn read_answer(body: &[u8]) -> Result<TeamsAnswer, CsaAnswerError> {
         let answer: Value = serde_json::from_slice(body).map_err(|_| CsaAnswerError::Malformed)?;
+        let whole = answer
+            .get("metadata")
+            .and_then(|metadata| metadata.get("isPartialData"))
+            .and_then(Value::as_bool)
+            == Some(false);
+        if !whole {
+            return Err(CsaAnswerError::Malformed);
+        }
         let entries = answer
             .get("teams")
             .and_then(Value::as_array)
@@ -343,8 +357,8 @@ impl fmt::Debug for Channel {
 /// Why a CSA answer wasn't read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CsaAnswerError {
-    /// Not the probed answer's shape.
-    #[error("not a CSA teams answer of the probed shape")]
+    /// Not the probed answer's shape, or an answer that doesn't say it is whole (`metadata.isPartialData` `false`).
+    #[error("not a whole CSA teams answer of the probed shape")]
     Malformed,
 }
 

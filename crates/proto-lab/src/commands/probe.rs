@@ -151,6 +151,10 @@ pub enum ProbeError {
     NoChatBase,
     #[error("the chat base from the GTMs isn't a chat service base: {0:?}")]
     NotAChatBase(String),
+    #[error("the region has no chatSvcAggAfd GTM (CSA's base)")]
+    NoCsaBase,
+    #[error("the chatSvcAggAfd GTM isn't a CSA base (https://<AFD host>/api/csa/<region>): {0:?}")]
+    NotACsaBase(String),
     #[error("a mock origin is for tests only (a build with teams-fence's test-support feature)")]
     MockOrigin,
     #[error("the ic3 token: {0}")]

@@ -267,12 +267,44 @@ async fn a_csa_base_off_the_afd_hosts_is_refused_before_anything_is_sent() -> Te
         )
         .await;
         assert!(
-            matches!(outcome, Err(ProbeError::NotAChatBase(_))),
+            matches!(outcome, Err(ProbeError::NotACsaBase(_))),
             "{base}: {outcome:?}"
         );
         assert!(entra.received_requests().await.ok_or("no recording")?.is_empty());
         assert!(services.received_requests().await.ok_or("no recording")?.is_empty());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_region_without_a_csa_base_is_reported_as_such_before_anything_is_sent() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let mut gtms = gtms();
+    gtms.as_object_mut().ok_or("not an object")?.remove("chatSvcAggAfd");
+    let config = lab(dir.path(), &gtms)?;
+    let entra = entra(&token(CSA_RESOURCE), &token(IC3_RESOURCE)).await;
+    let services = services().await;
+    let tokens = TokenClient::new(EntraConfig::teams_native().with_authority(entra.uri()))?;
+    let outcome = probe_teams(
+        &store().await?,
+        &tokens,
+        &config,
+        Alias::A,
+        &Origin::Mock(services.uri()),
+    )
+    .await;
+    let Err(error) = outcome else {
+        return Err("the probe ran without a CSA base".into());
+    };
+    assert!(matches!(error, ProbeError::NoCsaBase), "{error:?}");
+    // the chat base is fine: the report names CSA's GTM, not the chat service's
+    let shown = error.to_string();
+    assert!(
+        shown.contains("chatSvcAggAfd") && !shown.contains("chatService"),
+        "{shown}"
+    );
+    assert!(entra.received_requests().await.ok_or("no recording")?.is_empty());
+    assert!(services.received_requests().await.ok_or("no recording")?.is_empty());
     Ok(())
 }
 

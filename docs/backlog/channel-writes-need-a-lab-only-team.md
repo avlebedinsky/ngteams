@@ -8,8 +8,10 @@ added: 2026-10-22
 M2 Task 16 made teams and channels read-only in both builds, as the user decided on 2026-10-21: the Teams rail lists
 the account's teams and their channels (CSA's teams read), and a channel's posts and reply chains are shown from the
 chat service, with no composer and no message action. Nothing the native client sends can post, reply, react, mark
-read or type in a channel: `teams-proto` has no sealed write for one (`WriteKind::ChannelPost` is mapped nowhere), and
-the browser fence leaves the web client's channel writes `Unknown` and denied (`docs/protocol/endpoints.md`).
+read or type in a channel: a chat write the engine takes for a channel's id (a post, a read receipt) is denied by the
+fence, which never reads a channel's members complete (`teams-core`'s `nothing_is_written_to_a_channel`); no write is
+mapped to `WriteKind::ChannelPost`; and the browser fence leaves the web client's channel writes `Unknown` and denied
+(`docs/protocol/endpoints.md`).
 
 Why they can't be mapped now: a channel write is seen by every member of its team, and the lab accounts' teams are
 the tenant's, shared with people outside the lab (the M2 plan's premise; Task 16's probe found two teams and no team

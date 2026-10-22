@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
 
 use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, SharedString};
-use teams_core::{Event, MessageChange, Source};
+use teams_core::{Event, MessageChange, READING_TEAMS, Source};
 use teams_store::{Applied, Message, OutboxEntry};
 
 /// How long someone is shown typing after their last typing signal, unless they stop (`typing: false`) or a message
@@ -92,6 +92,8 @@ pub struct Chats {
     outbox: BTreeMap<i64, OutboxEntry>,
     /// The revision of the stored teams' last change (`Event::Teams`).
     teams: u64,
+    /// The revision of the last failed read of the teams (`Event::Failed` during [`READING_TEAMS`]).
+    teams_failed: u64,
 }
 
 impl Chats {
@@ -99,6 +101,13 @@ impl Chats {
     #[must_use]
     pub fn teams_at(&self) -> u64 {
         self.teams
+    }
+
+    /// The revision of the last failed read of the teams; 0 while none failed. Later than [`Chats::teams_at`]: the
+    /// last read told failed.
+    #[must_use]
+    pub fn teams_failed_at(&self) -> u64 {
+        self.teams_failed
     }
 
     /// The revision of the last change in any conversation.
@@ -339,7 +348,15 @@ impl Models {
         });
     }
 
+    /// Something failed: the status says what last did, and a failed read of the teams is told to the Teams list.
     fn failed(&self, during: &'static str, cx: &mut App) {
+        if during == READING_TEAMS {
+            self.chats.update(cx, |chats, cx| {
+                chats.revision += 1;
+                chats.teams_failed = chats.revision;
+                cx.notify();
+            });
+        }
         self.status.update(cx, |status, cx| {
             status.last_failure = Some(during);
             cx.notify();

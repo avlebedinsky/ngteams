@@ -145,8 +145,8 @@ pub const MIDDLE_TIER_GTM: &str = "middleTier";
 pub const CSA_GTM: &str = "chatSvcAggAfd";
 
 /// The reads' transport with CSA's base (the teams read's) when the region has one the transport accepts. Without
-/// one, or with one of another form (logged, without its value), the teams read is refused and the Teams list stays
-/// empty: an optional read never stops the engine.
+/// one, or with one of another form (logged, without its value), every teams read is refused (told as a failed read
+/// of the teams, and the Teams list says the teams can't be read): an optional read never stops the engine.
 fn with_csa<C: Credentials>(reads: HttpTransport<C>, csa: Option<&str>) -> Result<HttpTransport<C>, BuildError> {
     match csa {
         Some(base) if HttpTransport::<C>::accepts_csa_base(base) => reads.with_csa(base),

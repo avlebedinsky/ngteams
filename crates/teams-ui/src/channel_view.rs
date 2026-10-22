@@ -1,10 +1,12 @@
 //! A team channel's posts and their reply chains (M2 Task 16), read-only: no composer, no message action, no read
-//! receipt. Nothing in this view writes, and the engine has no write a channel could take.
+//! receipt. Nothing in this view writes; a chat write aimed at a channel is denied by the fence (a channel's members
+//! are never read complete), and no write is mapped to `WriteKind::ChannelPost`.
 //!
-//! - **From the store only.** The view asks the engine to sync the channel when it opens
-//!   ([`Core::sync_conversation`]: a channel other than a team's general one is in no conversation list, so no
-//!   catch-up reads it), then reads the store's newest messages ([`PAGE`] at first, a page more for each "Load older
-//!   posts") and the post each belongs to ([`Core::reply_roots`]), again each time the models say the channel changed.
+//! - **From the store only.** The view asks the engine to sync the channel each time it is opened
+//!   ([`Core::sync_conversation`], [`ChannelView::sync`]: a channel other than a team's general one is in no
+//!   conversation list, so no catch-up reads it, and a sync that failed is tried again only so), then reads the store's newest messages ([`PAGE`] at first, a page more for each "Load older
+//!   posts") and the post each belongs to ([`Core::reply_roots`]), again each time the models say the channel changed
+//!   or someone it shows was named anew ([`crate::Chats::named_at`]: a profile read in the background).
 //!   Older history comes from the service when the store has no more ([`Core::load_older`]), until the store says the
 //!   whole history is stored ([`Core::history_complete`]).
 //! - **Threads** ([`arrange_threads`]): each post with its replies under it, the oldest post first; a message whose
@@ -139,6 +141,10 @@ pub struct ChannelView {
     rendered: HashMap<String, (i64, Arc<Rendered>)>,
     /// The channel's change the last load started at.
     read_at: u64,
+    /// The models' revision the last load started at: a person shown named after it is read again.
+    people_at: u64,
+    /// The people the last load named (senders, and those a member event names).
+    people: Vec<String>,
     loading: Option<Task<()>>,
     dirty: bool,
     loads: u64,
@@ -162,19 +168,14 @@ impl ChannelView {
         cx: &mut Context<Self>,
     ) -> Self {
         let observing = cx.observe(&models.chats, |this: &mut Self, chats, cx| {
-            if chats.read(cx).changed_at(&this.channel) != this.read_at {
+            let due = {
+                let chats = chats.read(cx);
+                chats.changed_at(&this.channel) != this.read_at
+                    || this.people.iter().any(|mri| chats.named_at(mri) > this.people_at)
+            };
+            if due {
                 this.reload(cx);
             }
-        });
-        let sync = Arc::clone(&core);
-        let synced = channel.clone();
-        let syncing = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            // what it stores comes as the models' change too; a failed sync leaves what the store holds shown
-            let _ = sync.sync_conversation(synced).await;
-            let _ = this.update(cx, |view, cx| {
-                view.syncing = None;
-                view.reload(cx);
-            });
         });
         let mut view = Self {
             core,
@@ -187,18 +188,38 @@ impl ChannelView {
             history_complete: None,
             rendered: HashMap::new(),
             read_at: 0,
+            people_at: 0,
+            people: Vec::new(),
             loading: None,
             dirty: false,
             loads: 0,
-            syncing: Some(syncing),
+            syncing: None,
             older: None,
             scroll: ScrollHandle::new(),
             placed: false,
             traced: None,
             _observing: observing,
         };
+        view.sync(cx);
         view.reload(cx);
         view
+    }
+
+    /// Asks the engine to sync the channel from the service, unless a sync it asked for still runs; the store is read
+    /// again once it is over. Each opening of the channel asks it, the view's first and any later one.
+    pub fn sync(&mut self, cx: &mut Context<Self>) {
+        if self.syncing.is_some() {
+            return;
+        }
+        let (core, channel) = (Arc::clone(&self.core), self.channel.clone());
+        self.syncing = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            // what it stores comes as the models' change too; a failed sync leaves what the store holds shown
+            let _ = core.sync_conversation(channel).await;
+            let _ = this.update(cx, |view, cx| {
+                view.syncing = None;
+                view.reload(cx);
+            });
+        }));
     }
 
     #[must_use]
@@ -237,7 +258,8 @@ impl ChannelView {
             return;
         }
         self.dirty = false;
-        self.read_at = self.models.chats.read(cx).changed_at(&self.channel);
+        let chats = self.models.chats.read(cx);
+        (self.read_at, self.people_at) = (chats.changed_at(&self.channel), chats.revision());
         let (core, channel, limit) = (Arc::clone(&self.core), self.channel.clone(), self.limit);
         self.loading = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let read = read(&*core, &channel, limit).await;
@@ -272,6 +294,7 @@ impl ChannelView {
         if let Some(read) = read {
             self.more_stored = read.more_stored;
             self.history_complete = read.history_complete;
+            self.people = read.people.keys().cloned().collect();
             let threads = arrange_threads(read.messages, &read.roots);
             self.threads = threads
                 .into_iter()

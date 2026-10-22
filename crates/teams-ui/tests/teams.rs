@@ -14,12 +14,12 @@ use std::sync::Arc;
 
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
-use teams_core::Event;
+use teams_core::{EngineError, Event, NameFrom, Person, READING_TEAMS};
 use teams_store::{Message, Team, TeamChannel};
 use teams_ui::channel_view::{EARLIER_POST, READ_ONLY, arrange_threads};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, RailItem, Shell, ShellParts};
-use teams_ui::teams_list::LOADING;
+use teams_ui::teams_list::{LOADING, UNREADABLE};
 use teams_ui::{ChannelView, TeamsList, ViewTrace};
 
 const TEAM: &str = "19:channel0001@thread.tacv2";
@@ -312,6 +312,84 @@ fn a_channel_shown_reads_again_when_it_changes() {
 
     click(cx, "rail-chats");
     assert_eq!(cx.update(|_, cx| shell.read(cx).rail()), RailItem::Chats);
+}
+
+#[test]
+fn a_channel_opened_again_is_synced_again() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "rail-teams");
+    click(cx, "channel-row-1");
+    let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    // its first sync is over (and found nothing): opened again, the same view asks again
+    click(cx, "channel-row-1");
+    let again: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    assert_eq!(view, again, "the view is kept");
+    assert_eq!(*rig.core.synced.lock().unwrap(), [CHANNEL, CHANNEL]);
+}
+
+#[test]
+fn a_channel_shows_a_profile_read_after_it_was_shown() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (messages, roots) = channel_store();
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "rail-teams");
+    click(cx, "channel-row-1");
+    let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    let post_sender = |cx: &mut VisualTestContext| -> String {
+        cx.update(|_, cx| {
+            let threads = view.read(cx).threads().to_vec();
+            threads[0].post.as_ref().expect("the post").sender_name.to_string()
+        })
+    };
+    assert_eq!(post_sender(cx), "Carried Name", "no profile yet");
+    // b's profile is read in the background: the channel's own messages didn't change, the name shown does
+    rig.core.people.lock().unwrap().insert(
+        LAB_B.to_owned(),
+        Person {
+            mri: LAB_B.to_owned(),
+            name: Some("Profile Bee".to_owned()),
+            from: Some(NameFrom::Graph),
+            picture: None,
+        },
+    );
+    rig.send(Event::Profile { mri: LAB_B.to_owned() });
+    cx.run_until_parked();
+    assert_eq!(post_sender(cx), "Profile Bee");
+}
+
+#[test]
+fn a_failed_teams_read_says_the_teams_can_t_be_read_until_one_is_read() {
+    let rig = rig();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "rail-teams");
+    let list = teams_of(&shell, cx);
+    assert!(!cx.update(|_, cx| list.read(cx).unreadable(cx)), "{LOADING}");
+    // a read of another kind failing says nothing of the teams
+    rig.send(Event::Failed {
+        during: "syncing a conversation",
+        error: EngineError::NotAChat,
+    });
+    cx.run_until_parked();
+    assert!(!cx.update(|_, cx| list.read(cx).unreadable(cx)));
+    rig.send(Event::Failed {
+        during: READING_TEAMS,
+        error: EngineError::NotAChat,
+    });
+    assert!(bounds(cx, "teams-note").is_some(), "{UNREADABLE}");
+    assert!(cx.update(|_, cx| list.read(cx).unreadable(cx)));
+
+    // a later read settles them
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    rig.send(Event::Teams);
+    cx.run_until_parked();
+    assert!(!cx.update(|_, cx| list.read(cx).unreadable(cx)));
+    assert!(bounds(cx, "teams-note").is_none());
+    assert!(bounds(cx, "channel-row-0").is_some());
 }
 
 #[test]

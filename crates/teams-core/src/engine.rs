@@ -99,7 +99,7 @@ use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
 use crate::search::{Backfill, INDEX_BATCH, Step};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
-use crate::teams::{TEAMS_RETRY, Teams, TeamsReadError};
+use crate::teams::{READING_TEAMS, TEAMS_RETRY, Teams, TeamsReadError};
 
 /// How the engine paces itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1023,7 +1023,7 @@ where
         match self.teams.store(&mut self.store, read) {
             Ok(Ok(true)) => self.emit(Event::Teams),
             Ok(Ok(false)) => {}
-            Ok(Err(error)) => self.failed("reading the teams", error),
+            Ok(Err(error)) => self.failed(READING_TEAMS, error),
             Err(error) => self.failed("storing the teams", error),
         }
     }

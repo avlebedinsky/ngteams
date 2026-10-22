@@ -8,8 +8,9 @@
 //!   than [`TEAMS_MAX_AGE`], unless one is under way or one failed less than the engine's
 //!   [`EngineOptions::teams_retry`](crate::EngineOptions::teams_retry) ago. Its result is stored whole; a list that
 //!   changed is told as [`Event::Teams`](crate::Event::Teams).
-//! - **No write**: a channel has no sealed write type (`teams-proto`), so nothing the native client sends can post,
-//!   reply or react there; the fence would deny one besides (a channel's members are never read complete).
+//! - **No write**: nothing here writes, and a chat write the engine takes for a channel's id (a post, a read receipt:
+//!   sealed chat writes aimed at the channel) is denied by the fence, which never reads a channel's members complete.
+//!   No write is mapped to `WriteKind::ChannelPost`. The fence, not a missing write type, keeps channels unwritten.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +25,10 @@ pub const TEAMS_MAX_AGE: Duration = Duration::from_hours(1);
 
 /// How long after a read that failed the teams are read again, at the soonest: five minutes.
 pub const TEAMS_RETRY: Duration = Duration::from_mins(5);
+
+/// What a failed read of the teams is told as (`Event::Failed`'s `during`): the Teams list says the teams can't be
+/// read while none was ever stored.
+pub const READING_TEAMS: &str = "reading the teams";
 
 /// Why the teams couldn't be read.
 #[derive(Debug, thiserror::Error)]
