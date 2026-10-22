@@ -26,10 +26,13 @@ pub enum WriteKind {
     ChatCreate,
     ChannelPost,
     BotReply,
+    /// Creating a media service (AMS) object a conversation may read: an image to be sent in it. Its scope is that
+    /// conversation, so its readers are judged as the conversation's members.
+    MediaObject,
 }
 
 impl WriteKind {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Message,
         Self::Edit,
         Self::Delete,
@@ -44,6 +47,7 @@ impl WriteKind {
         Self::ChatCreate,
         Self::ChannelPost,
         Self::BotReply,
+        Self::MediaObject,
     ];
 
     /// The name used in `fence.log`.
@@ -64,6 +68,7 @@ impl WriteKind {
             Self::ChatCreate => "chat_create",
             Self::ChannelPost => "channel_post",
             Self::BotReply => "bot_reply",
+            Self::MediaObject => "media_object",
         }
     }
 

@@ -16,6 +16,7 @@ use proto_lab::commands::auth::{self, AuthOptions, KEYRING_APPLICATION};
 use proto_lab::commands::chrome::{self, ChromeBuild, Installed};
 use proto_lab::commands::export;
 use proto_lab::commands::login::{self, LoginOptions};
+use proto_lab::commands::object_probe;
 use proto_lab::commands::probe;
 use proto_lab::commands::profile_probe;
 use proto_lab::commands::status::{self, AccountStatus};
@@ -172,6 +173,20 @@ enum ProbeCommand {
         /// The lab account whose tokens read: a, b or c.
         alias: Alias,
     },
+    /// What the async gateway answers about one media service object to the account's own `ic3` token: refreshes it
+    /// from the stored refresh token and reads the object (`v1/objects/<id>/`) with and without `X-MS-Migration`.
+    /// Prints statuses, header names and the answer's outline (key paths, types, lab ids named for what they are, plain
+    /// words) only. GETs only.
+    Object {
+        /// The lab account whose token reads: a, b or c.
+        alias: Alias,
+        /// The object's id, as `ab-image-object` notes it.
+        id: String,
+        /// Also write the answers as a sanitized local reference copy under the lab's reference/ dir, such as
+        /// `ams/object-a` (never inside a git work tree).
+        #[arg(long)]
+        save: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -236,6 +251,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Probe {
             command: ProbeCommand::Teams { alias },
         } => run_probe_teams(alias).await,
+        Command::Probe {
+            command: ProbeCommand::Object { alias, id, save },
+        } => run_probe_object(alias, &id, save.as_deref()).await,
         Command::Auth {
             alias,
             timeout,
@@ -432,6 +450,40 @@ async fn run_probe_teams(alias: Alias) -> Result<(), Box<dyn std::error::Error>>
     for line in report.lines(std::time::SystemTime::now()) {
         println!("{line}");
     }
+    Ok(())
+}
+
+async fn run_probe_object(alias: Alias, id: &str, save: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let config = LabConfig::load(&LabLocations::from_env()?)?;
+    let reference_dir = export::reference_dir(config.paths().data_dir());
+    // a bad `--save` name or destination fails here, before the refresh and the reads go out
+    if let Some(name) = save {
+        export::check_destination(&reference_dir, name)?;
+    }
+    let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
+    let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
+    let report = object_probe::probe_object(&store, &tokens, &config, alias, id, &probe::Origin::ChatService).await?;
+    for line in report.lines(std::time::SystemTime::now()) {
+        println!("{line}");
+    }
+    let Some(name) = save else {
+        return Ok(());
+    };
+    let exported = export::export_events(
+        &report.reference_events(),
+        name,
+        &reference_dir,
+        &Identities::from_lab(&config),
+        export::Checks::Warn,
+    )?;
+    for line in exported.warnings.summary() {
+        eprintln!("warning: {line}");
+    }
+    println!(
+        "{alias}: wrote a sanitized reference copy of {} read(s) to {}; it stays outside the repository",
+        exported.events,
+        exported.path.display()
+    );
     Ok(())
 }
 

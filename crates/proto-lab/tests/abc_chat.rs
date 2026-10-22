@@ -271,6 +271,10 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
             [probe_rules(Some(&probe))?, ab_image::media_rules()?].concat(),
             ab_image::policy(ab)?,
         ),
+        ScenarioName::AbImageObject => (
+            [probe_rules(Some(&probe))?, ab_image::media_rules_creating()?].concat(),
+            ab_image::policy(ab)?,
+        ),
         ScenarioName::AbcChat => (forced_denies(nonce), policy(Some(GROUP))?),
         ScenarioName::ChatShapes => (forced_denies(nonce), chat_shapes::policy(ab, Some(GROUP))?),
         ScenarioName::EchoCall => (echo_call::forced_rules()?, echo_call::policy()),

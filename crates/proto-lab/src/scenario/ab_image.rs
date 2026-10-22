@@ -30,6 +30,17 @@
 //!
 //! Nothing the media service would hold is sent: every write to it is denied. The run fails (as any run) on a breach
 //! or a deny it doesn't expect, and when the client never tries to create the object.
+//!
+//! **`ab-image-object`** ([`ObjectMode::CreatedOnce`], M2 Task 21, `docs/backlog/ams-image-sending.md` step 1) runs
+//! the same steps with one change: the object's creation is mapped in its exact captured shape for the a–b chat alone
+//! ([`Classifier::with_media_object_creation`], [`crate::media`]) and let out once, judged by the fence as a write to
+//! that chat (its members read live, both lab accounts). The forced deny of media writes spares the first creation
+//! sent after the image is in a's compose box, just before Enter ([`ForcedDeny::sparing_first`],
+//! [`ForcedDeny::start_sparing`]), and denies every other one (an earlier run's image tried again on load among them),
+//! the content's upload, any forward and every other media write as before ([`media_rules_creating`]). In step 4 the run waits for the creation's answer (a 2xx, or the
+//! run fails) and then for the upload's deny, which names the object; it notes the object's id, for a read-only
+//! `proto-lab probe object` of it. The image stays unsent (its content never goes out), and step 5 deletes it from a's
+//! chat as before.
 
 use std::io::Write as _;
 use std::time::Duration;
@@ -42,6 +53,7 @@ use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::{Denial, DenyCause, ForcedDeny};
 use crate::fence_ws::FrameClassifier;
+use crate::media::CREATION_URL;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
@@ -67,6 +79,48 @@ pub const MEDIA_OBJECT: &str = r"(?i)/v[0-9]+/objects(/|\?|$)";
 
 /// The methods [`deny_media_writes`] denies on [`MEDIA_OBJECT`]: every one but a read.
 pub const MEDIA_METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "DELETE"];
+
+/// What a run does with the image's media object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectMode {
+    /// `ab-image`: every write to the media service denied.
+    Denied,
+    /// `ab-image-object`: the object's creation for the a–b chat let out once, judged by the fence; every other media
+    /// write denied.
+    CreatedOnce,
+}
+
+impl ObjectMode {
+    /// The scenario that runs in this mode.
+    #[must_use]
+    pub fn scenario(self) -> ScenarioName {
+        match self {
+            Self::Denied => ScenarioName::AbImage,
+            Self::CreatedOnce => ScenarioName::AbImageObject,
+        }
+    }
+
+    /// The forced denies of media writes a run in this mode makes ([`media_rules`], [`media_rules_creating`]).
+    ///
+    /// # Errors
+    /// Never: the patterns are fixed.
+    pub fn rules(self) -> Result<Vec<ForcedDeny>, regex::Error> {
+        match self {
+            Self::Denied => media_rules(),
+            Self::CreatedOnce => media_rules_creating(),
+        }
+    }
+
+    /// The classifier a run in this mode uses: the write mapping, and for [`ObjectMode::CreatedOnce`] the object's
+    /// creation for `chat_id` (the a–b chat; without one, nothing more is mapped).
+    #[must_use]
+    pub fn classifier(self, chat_id: Option<&str>) -> Classifier {
+        match (self, chat_id) {
+            (Self::CreatedOnce, Some(chat)) => Classifier::mapped().with_media_object_creation(chat),
+            _ => Classifier::mapped(),
+        }
+    }
+}
 
 /// How long the client gets to try to create the image's object once the image is in the compose box or sent.
 pub const MEDIA_WAIT: Duration = Duration::from_secs(60);
@@ -126,15 +180,18 @@ impl Texts {
 }
 
 /// Forces a deny ([`ForcedDeny`], labelled [`MEDIA_WRITE`]) on every [`MEDIA_METHODS`] request of `session` whose URL
-/// names an AMS object ([`MEDIA_OBJECT`]), whatever its host and body.
+/// names an AMS object ([`MEDIA_OBJECT`]), whatever its host and body; in [`ObjectMode::CreatedOnce`] the first
+/// creation sent once sparing has started is spared ([`media_rules_creating`], [`ForcedDeny::start_sparing`] on a rule
+/// of those it gives back).
 ///
 /// # Errors
 /// Never: the pattern is fixed.
-pub fn deny_media_writes(session: &LabSession) -> Result<(), ScenarioError> {
-    for rule in media_rules().map_err(|error| setup(error.to_string()))? {
-        session.force_deny(rule);
+pub fn deny_media_writes(session: &LabSession, mode: ObjectMode) -> Result<Vec<ForcedDeny>, ScenarioError> {
+    let rules = mode.rules().map_err(|error| setup(error.to_string()))?;
+    for rule in &rules {
+        session.force_deny(rule.clone());
     }
-    Ok(())
+    Ok(rules)
 }
 
 /// The rules [`deny_media_writes`] forces.
@@ -146,6 +203,35 @@ pub fn media_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
         .iter()
         .map(|method| Ok(ForcedDeny::new(method, MEDIA_OBJECT)?.labelled(MEDIA_WRITE)))
         .collect()
+}
+
+/// [`media_rules`], with the `POST` rule sparing the first object creation to [`CREATION_URL`]
+/// ([`ForcedDeny::sparing_first`]): that one goes on to the classifier, which maps it only in its captured shape for the
+/// a–b chat ([`ObjectMode::classifier`]); every later creation, the upload, a forward and every other write to an
+/// object stays forced-denied.
+///
+/// # Errors
+/// Never: the pattern is fixed.
+pub fn media_rules_creating() -> Result<Vec<ForcedDeny>, regex::Error> {
+    MEDIA_METHODS
+        .iter()
+        .map(|method| {
+            let rule = ForcedDeny::new(method, MEDIA_OBJECT)?.labelled(MEDIA_WRITE);
+            Ok(if *method == "POST" {
+                rule.sparing_first(CREATION_URL)
+            } else {
+                rule
+            })
+        })
+        .collect()
+}
+
+/// The id of the object a media write's URL names (`…/v1/objects/<id>/…`), when it names one.
+#[must_use]
+pub fn object_id(url: &str) -> Option<&str> {
+    let (_, rest) = url.split_once("/v1/objects/")?;
+    let id = rest.split(['/', '?', '#']).next()?;
+    (!id.is_empty()).then_some(id)
 }
 
 /// The denies a run of this scenario expects: [`EXPECTED_FORCED`] and the reviewed list; with the a–b chat's id, any
@@ -256,12 +342,26 @@ pub fn compose_has_image() -> String {
 /// # Errors
 /// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    run_as(paths, options, ObjectMode::Denied).await
+}
+
+/// Runs `ab-image-object` (see the module docs).
+///
+/// # Errors
+/// As [`run`].
+pub async fn run_creating(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    run_as(paths, options, ObjectMode::CreatedOnce).await
+}
+
+async fn run_as(paths: &LabPaths, options: RunOptions, mode: ObjectMode) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
+    let mri = |alias| config.account(alias).mri.clone().unwrap_or_default();
+    let chat_id = one_to_one_id(&mri(Alias::A), &mri(Alias::B));
     let session_options = SessionOptions {
-        classifier: Classifier::mapped(),
+        classifier: mode.classifier(chat_id.as_deref()),
         frames: FrameClassifier::seeded(),
         live_members: true,
-        capture: Some(ScenarioName::AbImage.as_str().to_owned()),
+        capture: Some(mode.scenario().as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
@@ -276,16 +376,16 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             return Err(error.into());
         }
     };
-    let mut report = ScenarioReport::new(ScenarioName::AbImage);
+    let mut report = ScenarioReport::new(mode.scenario());
     let nonce = nonce();
     // before a's page loads: the client sends an earlier run's unsent probe, or image, again as soon as it can
-    for denied in [deny_probes(&a, Some(&probe_text(&nonce))), deny_media_writes(&a)] {
-        if let Err(error) = denied {
-            report.failures.push(error.to_string());
-        }
+    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
+        report.failures.push(error.to_string());
     }
-    let mri = |alias| config.account(alias).mri.clone().unwrap_or_default();
-    let chat_id = one_to_one_id(&mri(Alias::A), &mri(Alias::B));
+    let media_rules = deny_media_writes(&a, mode).unwrap_or_else(|error| {
+        report.failures.push(error.to_string());
+        Vec::new()
+    });
     let policy = policy(chat_id.as_deref()).unwrap_or_else(|error| {
         report
             .failures
@@ -298,6 +398,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         texts: Texts::new(&nonce),
         probe: probe_text(&nonce),
         options,
+        mode,
+        media_rules,
     };
     if let Err(error) = image.run(chat_id.as_deref(), &mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
@@ -323,6 +425,9 @@ struct Image {
     texts: Texts,
     probe: String,
     options: RunOptions,
+    mode: ObjectMode,
+    /// The media rules forced on a's fence: in [`ObjectMode::CreatedOnce`] the creation's spare starts on them.
+    media_rules: Vec<ForcedDeny>,
 }
 
 impl Image {
@@ -386,7 +491,14 @@ impl Image {
         report
             .notes
             .push(format!("a: {early} media write(s) denied before Enter"));
+        if self.mode == ObjectMode::CreatedOnce {
+            // only this run's image: an earlier run's that the client tried again on load stayed denied
+            self.media_rules.iter().for_each(ForcedDeny::start_sparing);
+        }
         drive.press_enter("a sends the image").await?;
+        if self.mode == ObjectMode::CreatedOnce {
+            created(drive, report).await?;
+        }
         let Some(first) = wait_media_write(a, before, MEDIA_WAIT).await else {
             return Err(setup(format!(
                 "the client tried no media write within {}s of the image",
@@ -396,6 +508,12 @@ impl Image {
         report
             .notes
             .push(format!("a: first media write denied: {} {}", first.method, first.url));
+        if self.mode == ObjectMode::CreatedOnce {
+            report.notes.push(match object_id(&first.url) {
+                Some(id) => format!("a: the object created: {id} (read it with `proto-lab probe object a {id}`)"),
+                None => "a: the first media write denied names no object".to_owned(),
+            });
+        }
         tokio::time::sleep(SETTLE).await;
         for denial in &media_writes(a)[before..] {
             report
@@ -500,6 +618,30 @@ impl Image {
         let caption = drive.shows_text("b shows the caption", &self.texts.caption).await?;
         report.notes.push(format!("b: shows the caption: {caption}"));
         Ok(())
+    }
+}
+
+/// Waits for the object creation's answer (`ab-image-object`): the fence let it out once and it was answered with a
+/// 2xx; anything else fails the run.
+///
+/// # Errors
+/// When no creation is answered within [`MEDIA_WAIT`], or it failed or got another status.
+async fn created(drive: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+    let creation = RequestPattern::new(Some("POST"), &format!("^{}$", regex::escape(CREATION_URL)))
+        .map_err(|error| setup(error.to_string()))?;
+    let seen = drive
+        .wait_for_answer("a creates the image's object", &creation, MEDIA_WAIT)
+        .await?;
+    match (seen.status, &seen.failed) {
+        (Some(status), _) if (200..300).contains(&status) => {
+            report.notes.push(format!(
+                "a: the object's creation was let out by the fence and answered {status}"
+            ));
+            Ok(())
+        }
+        (status, failed) => Err(setup(format!(
+            "the object's creation wasn't answered with a 2xx: status {status:?}, failure {failed:?}"
+        ))),
     }
 }
 

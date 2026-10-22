@@ -32,6 +32,7 @@
 //! `Origin` and some of the client's `x-ms-*` flags), never a token or a cookie. The raw event, headers included, has
 //! been handed to the run's event watchers and offered to the capture recorder before that.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use regex::Regex;
@@ -55,8 +56,9 @@ pub struct PausedRequest {
     pub method: String,
     pub url: String,
     /// The request's headers as the event lists them, each once: every header's name, with its value only when the
-    /// read-by-`POST` list reads it ([`crate::post_read::HEADER_VALUES_READ`]) and it is a string; so no credential
-    /// (`authorization`, `Cookie`) is held here, and `Debug` prints none.
+    /// read-by-`POST` list or the media object mapping reads it ([`crate::post_read::HEADER_VALUES_READ`],
+    /// [`crate::media::HEADER_VALUES_READ`]) and it is a string; so no credential (`authorization`, `Cookie`) is held
+    /// here, and `Debug` prints none.
     pub headers: Vec<(String, Option<String>)>,
     /// The body as `postData` carries it. Missing when the request has none, or when Chrome didn't inline it.
     pub body: Option<Vec<u8>>,
@@ -85,6 +87,7 @@ impl PausedRequest {
                         .map(|(name, value)| {
                             let read = crate::post_read::HEADER_VALUES_READ
                                 .iter()
+                                .chain(&crate::media::HEADER_VALUES_READ)
                                 .any(|read| read.eq_ignore_ascii_case(name));
                             let value = value.as_str().filter(|_| read).map(str::to_owned);
                             (name.clone(), value)
@@ -156,13 +159,45 @@ impl Denial {
 
 /// A deny a run asks for on purpose: every request with this method, a URL the pattern finds a match in, and (when
 /// given) a body holding the text, is denied before it is classified. When several match a request, the first one the
-/// run forced is the one its [`Denial`] names.
+/// run forced is the one its [`Denial`] names. A rule can spare one request ([`ForcedDeny::sparing_first`]).
 #[derive(Clone, Debug)]
 pub struct ForcedDeny {
     method: String,
     url: Regex,
     body_contains: Option<String>,
     label: Option<String>,
+    spare: Option<Spare>,
+}
+
+/// The one request a [`ForcedDeny`] lets go on to be classified: the first one to exactly this URL, by its `Network` id,
+/// once sparing has started ([`ForcedDeny::start_sparing`]).
+#[derive(Clone, Debug)]
+struct Spare {
+    url: String,
+    /// Whether a request may be spared yet; shared by the rule's clones.
+    started: Arc<AtomicBool>,
+    /// The spared request's `Network` id, once there is one; shared by the rule's clones.
+    spared: Arc<Mutex<Option<String>>>,
+}
+
+impl Spare {
+    /// Whether `request` is the spared one: once sparing has started, the first to [`Spare::url`] with a `Network` id
+    /// becomes it, and is it again when it pauses on the other session (the page's and the browser's pause of one
+    /// request share their id).
+    fn spares(&self, request: &PausedRequest) -> bool {
+        let Some(id) = request.network_id.as_deref().filter(|_| request.url == self.url) else {
+            return false;
+        };
+        let mut spared = self.spared.lock().unwrap_or_else(PoisonError::into_inner);
+        match spared.as_deref() {
+            Some(first) => first == id,
+            None if self.started.load(Ordering::SeqCst) => {
+                *spared = Some(id.to_owned());
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl ForcedDeny {
@@ -176,7 +211,39 @@ impl ForcedDeny {
             url: Regex::new(url_pattern)?,
             body_contains: None,
             label: None,
+            spare: None,
         })
+    }
+
+    /// The same rule, sparing one request once sparing has started ([`ForcedDeny::start_sparing`]): the first one it
+    /// then matches whose URL is exactly `url` and that has a `Network` id is not denied, on either session it pauses
+    /// on, and goes on to be classified; every other one it matches is denied, one to `url` before the start or after
+    /// the spared one too. A request without a `Network` id is never spared. What a run uses to let one write out,
+    /// once, and judged by the fence (`ab-image-object`'s object creation, started just before the image is sent, so an
+    /// earlier run's image the client tries again on load is never the one).
+    #[must_use]
+    pub fn sparing_first(mut self, url: &str) -> Self {
+        self.spare = Some(Spare {
+            url: url.to_owned(),
+            started: Arc::new(AtomicBool::new(false)),
+            spared: Arc::new(Mutex::new(None)),
+        });
+        self
+    }
+
+    /// Lets this rule, and every clone of it, spare its one request from now on ([`ForcedDeny::sparing_first`]); for a
+    /// rule that spares nothing it does nothing.
+    pub fn start_sparing(&self) {
+        if let Some(spare) = &self.spare {
+            spare.started.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The `Network` id of the request this rule spared ([`ForcedDeny::sparing_first`]), once it spared one.
+    #[must_use]
+    pub fn spared(&self) -> Option<String> {
+        let spare = self.spare.as_ref()?;
+        spare.spared.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Names the rule: a request it denies is kept with this label ([`Denial::label`]), so a run can tell its own
@@ -200,7 +267,8 @@ impl ForcedDeny {
         self
     }
 
-    /// Whether it denies `request`. A body Chrome didn't inline doesn't hold the text.
+    /// Whether it denies `request`. A body Chrome didn't inline doesn't hold the text. A rule that spares one request
+    /// ([`ForcedDeny::sparing_first`]) takes the first that is to be spared as asked here.
     #[must_use]
     pub fn matches(&self, request: &PausedRequest) -> bool {
         let body_matches = self.body_contains.as_ref().is_none_or(|text| {
@@ -209,7 +277,9 @@ impl ForcedDeny {
                 .as_deref()
                 .is_some_and(|body| String::from_utf8_lossy(body).contains(text.as_str()))
         });
-        self.method.eq_ignore_ascii_case(&request.method) && self.url.is_match(&request.url) && body_matches
+        let matches =
+            self.method.eq_ignore_ascii_case(&request.method) && self.url.is_match(&request.url) && body_matches;
+        matches && !self.spare.as_ref().is_some_and(|spare| spare.spares(request))
     }
 }
 

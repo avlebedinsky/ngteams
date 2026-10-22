@@ -65,6 +65,9 @@ pub enum ScenarioName {
     /// Account a sends a made-up image in the a–b chat with every write to the media service denied, after the same
     /// enforcement test; recorded.
     AbImage,
+    /// As `ab-image`, with the image's media object created once for the a–b chat, judged by the fence, and every
+    /// other media write denied; recorded (M2 Task 21).
+    AbImageObject,
     /// Account a creates the a–b–c group chat (once); later runs: a messages it, b and c show it, after the same
     /// enforcement test.
     AbcChat,
@@ -88,6 +91,7 @@ impl ScenarioName {
             Self::AbChat => "ab-chat",
             Self::AbChatFull => "ab-chat-full",
             Self::AbImage => "ab-image",
+            Self::AbImageObject => "ab-image-object",
             Self::AbcChat => "abc-chat",
             Self::AbTrouter => "ab-trouter",
             Self::AbTrouterQuiet => "ab-trouter-quiet",
@@ -293,6 +297,7 @@ pub async fn run(
         ScenarioName::AbChat => ab_chat::run(paths, options).await,
         ScenarioName::AbChatFull => ab_chat_full::run(paths, options).await,
         ScenarioName::AbImage => ab_image::run(paths, options).await,
+        ScenarioName::AbImageObject => ab_image::run_creating(paths, options).await,
         ScenarioName::AbcChat => abc_chat::run(paths, options).await,
         ScenarioName::AbTrouter => ab_trouter::run(paths, options, ab_trouter::Activity::Reported).await,
         ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,

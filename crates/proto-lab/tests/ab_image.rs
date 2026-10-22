@@ -3,10 +3,11 @@
 
 use std::io::Read as _;
 
-use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
+use proto_lab::classify::Classification;
+use proto_lab::fence_http::{Denial, DenyCause, ForcedDeny, PausedRequest};
 use proto_lab::scenario::ScenarioName;
 use proto_lab::scenario::ab_chat::{EARLIER_RUN_PROBE, THIS_RUN_PROBE};
-use proto_lab::scenario::ab_image::{self, MEDIA_WRITE, Texts, media_rules, test_png};
+use proto_lab::scenario::ab_image::{self, MEDIA_WRITE, ObjectMode, Texts, media_rules, object_id, test_png};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -149,4 +150,102 @@ fn the_texts_are_this_runs_and_apart() {
     assert!(!texts.caption.contains(&texts.plain) && !texts.plain.contains(&texts.caption));
     assert_eq!(std::path::Path::new(&texts.file_name).extension(), Some("png".as_ref()));
     assert_eq!(ScenarioName::AbImage.as_str(), "ab-image");
+}
+
+const CREATION: &str = "https://us-prod.asyncgw.teams.microsoft.com/v1/objects/";
+
+fn paused(method: &str, url: &str, network_id: Option<&str>) -> PausedRequest {
+    PausedRequest {
+        network_id: network_id.map(str::to_owned),
+        ..request(method, url)
+    }
+}
+
+#[test]
+fn ab_image_object_spares_the_first_creation_once_and_denies_every_other_media_write() -> TestResult {
+    let rules = ab_image::media_rules_creating()?;
+    assert!(rules.iter().all(|rule| rule.label() == Some(MEDIA_WRITE)));
+    let denied = |request: &PausedRequest| rules.iter().any(|rule| rule.matches(request));
+    // before any creation: the upload, a forward, other hosts and a creation without a Network id are denied
+    for (method, url) in [
+        (
+            "PUT",
+            "https://us-prod.asyncgw.teams.microsoft.com/v1/objects/0-wus-d1-0000/content/imgpsh",
+        ),
+        (
+            "POST",
+            "https://us-prod.asyncgw.teams.microsoft.com/v1/objects/0-wus-d1-0000/forward",
+        ),
+        (
+            "DELETE",
+            "https://us-prod.asyncgw.teams.microsoft.com/v1/objects/0-wus-d1-0000",
+        ),
+        ("POST", "https://us-api.asm.skype.com/v1/objects/"),
+        ("POST", "https://teams.microsoft.com/asm/amer/v1/objects/"),
+        ("POST", "https://us-prod.asyncgw.teams.microsoft.com/v1/objects/?x=1"),
+    ] {
+        assert!(denied(&paused(method, url, Some("9.9"))), "{method} {url}");
+    }
+    assert!(denied(&paused("POST", CREATION, None)), "no Network id: never spared");
+    // before sparing starts (an earlier run's image tried again on load) a creation is denied
+    assert!(denied(&paused("POST", CREATION, Some("1.0"))));
+    assert!(rules.iter().all(|rule| rule.spared().is_none()));
+    for rule in &rules {
+        rule.start_sparing();
+    }
+    // the first creation since is spared on both of its pauses; the next one is denied
+    assert!(!denied(&paused("POST", CREATION, Some("1.1"))));
+    assert!(!denied(&paused("POST", CREATION, Some("1.1"))), "its other pause");
+    assert!(denied(&paused("POST", CREATION, Some("1.2"))));
+    let spared: Vec<String> = rules.iter().filter_map(ForcedDeny::spared).collect();
+    assert_eq!(spared, ["1.1"]);
+    // ab-image itself spares nothing
+    let plain = media_rules()?;
+    assert!(
+        plain
+            .iter()
+            .any(|rule| rule.matches(&paused("POST", CREATION, Some("1.1"))))
+    );
+    Ok(())
+}
+
+#[test]
+fn the_modes_name_their_scenario_and_classifier() {
+    assert_eq!(ObjectMode::Denied.scenario(), ScenarioName::AbImage);
+    assert_eq!(ObjectMode::CreatedOnce.scenario(), ScenarioName::AbImageObject);
+    assert_eq!(ScenarioName::AbImageObject.as_str(), "ab-image-object");
+    let headers: Vec<(String, Option<String>)> = [
+        ("content-type", Some("application/json")),
+        ("x-ams-post-sharing-mode", Some("Inline")),
+        ("x-ms-migration", Some("True")),
+        ("x-ms-test-user", Some("False")),
+        ("authorization", None),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value.map(str::to_owned)))
+    .collect();
+    let body = format!(
+        r#"{{"type":"pish/image","permissions":{{"{CHAT}":["read"]}},"sharingMode":"Inline","filename":"MicrosoftTeams-image.png"}}"#
+    );
+    let classify = |mode: ObjectMode, chat: Option<&str>| {
+        mode.classifier(chat)
+            .classify_with_headers("POST", CREATION, &headers, Some(body.as_bytes()))
+    };
+    assert!(matches!(
+        classify(ObjectMode::CreatedOnce, Some(CHAT)),
+        Classification::Write(_)
+    ));
+    assert_eq!(classify(ObjectMode::CreatedOnce, None), Classification::Unknown);
+    assert_eq!(classify(ObjectMode::Denied, Some(CHAT)), Classification::Unknown);
+}
+
+#[test]
+fn the_object_is_read_from_the_denied_uploads_url() {
+    assert_eq!(
+        object_id("https://us-prod.asyncgw.teams.microsoft.com/v1/objects/0-wus-d1-0000/content/imgpsh"),
+        Some("0-wus-d1-0000")
+    );
+    assert_eq!(object_id("https://x/v1/objects/0-wus-d1-0000"), Some("0-wus-d1-0000"));
+    assert_eq!(object_id(CREATION), None);
+    assert_eq!(object_id("https://x/v1/other/0-wus-d1-0000"), None);
 }
