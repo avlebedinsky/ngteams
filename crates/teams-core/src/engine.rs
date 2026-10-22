@@ -309,7 +309,8 @@ pub enum Event {
     /// Someone's stored name or picture changed (a lookup in the background stored it): a view that shows them asks
     /// for them again ([`EngineRequests::person`]).
     Profile { mri: String },
-    /// Someone's presence, as a read in the background now gave it ([`crate::presence`]): told only when it changed.
+    /// Someone's presence, as a read in the background now gave it ([`crate::presence`]): told only when it changed;
+    /// [`Availability::Unknown`] too when they were dropped from the watch to make room for someone asked about later.
     Presence { mri: String, availability: Availability },
     /// The stored teams changed (a read in the background stored a list that differs): a view that shows them asks
     /// for them again ([`EngineRequests::teams`]).
@@ -606,9 +607,11 @@ impl EngineRequests {
         self.ask(|reply| Request::Person(mri, reply))
     }
 
-    /// Someone's presence as last read ([`Availability::Unknown`] before the first read); from now on they are watched
-    /// for the run, and each change of their presence comes as [`Event::Presence`] ([`crate::presence`]: read from UPS
-    /// every [`EngineOptions::presence_poll`], for those the fence lets a read name).
+    /// Someone's presence as last read ([`Availability::Unknown`] before the first read); from now on they are watched,
+    /// and each change of their presence comes as [`Event::Presence`] ([`crate::presence`]: read from UPS every
+    /// [`EngineOptions::presence_poll`], only those the fence lets a read name). At most
+    /// [`MAX_WATCHED`](crate::MAX_WATCHED) people are watched: past it the one asked about longest ago is dropped and
+    /// told as [`Availability::Unknown`], so a view asks again about the people it shows whenever it shows them anew.
     pub fn presence(&self, mri: impl Into<String>) -> Reply<Availability> {
         let mri = mri.into();
         self.ask(|reply| Request::Presence(mri, reply))
@@ -1017,7 +1020,15 @@ where
                 let _ = reply.send(person.map_err(EngineError::from));
             }
             Request::Presence(mri, reply) => {
-                let _ = reply.send(Ok(self.presences.presence(&mri)));
+                let (availability, dropped) = self.presences.presence(&mri);
+                let _ = reply.send(Ok(availability));
+                // someone the watch dropped to make room: no read refreshes what a view was told of them
+                if let Some(mri) = dropped {
+                    self.emit(Event::Presence {
+                        mri,
+                        availability: Availability::Unknown,
+                    });
+                }
             }
             Request::Teams(reply) => {
                 let teams = self.teams.teams(&self.store);

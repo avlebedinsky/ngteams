@@ -2,7 +2,8 @@
 //! mock origin): a person a view asked about is read at once and then every poll, in one read of everyone watched the
 //! fence lets a read name (lab accounts only, under its permit, logged to `fence.log` before it is sent); each change
 //! told once as `Event::Presence`; someone outside the lab never read and unknown; a failed read making everyone it
-//! asked about unknown; a throttled read waiting its `Retry-After`; and nothing read without the presence base.
+//! asked about unknown; a throttled read waiting its `Retry-After`, whoever is asked about meanwhile; the watch's cap
+//! dropping the one asked about longest ago, told as unknown; and nothing read without the presence base.
 //!
 //! Tokens and ids here are made up; the answers follow the synthetic fixture `tests/fixtures/ups/getpresence-answer.json`.
 
@@ -129,12 +130,15 @@ struct Rig {
 /// An engine of lab account a (the lab: a, b and c), its reads on `server`, polling presence every `poll`; its reads'
 /// transport given the presence base only when `presence`.
 fn rig(server: MockServer, poll: Duration, presence: bool) -> Rig {
+    rig_of(server, poll, presence, vec![mri(GUID_B), mri(GUID_C)])
+}
+
+/// [`rig`], the lab a and `others`.
+fn rig_of(server: MockServer, poll: Duration, presence: bool, others: Vec<String>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let log = SharedLog::default();
-    let fence = Arc::new(Fence::new(
-        Roster::new([mri(GUID_A), mri(GUID_B), mri(GUID_C)].map(Mri::new), []),
-        FenceLog::from_writer(log.clone()),
-    ));
+    let lab = std::iter::once(mri(GUID_A)).chain(others).map(Mri::new);
+    let fence = Arc::new(Fence::new(Roster::new(lab, []), FenceLog::from_writer(log.clone())));
     let tokens = Arc::new(FakeTokens);
     let transport =
         || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
@@ -387,6 +391,89 @@ async fn a_throttled_read_waits_its_retry_after() {
     }
     assert_eq!(rig.presences_within(Duration::from_secs(1)).await, Vec::new());
     assert_eq!(rig.reads().await.len(), 1);
+    rig.handle.shutdown();
+}
+
+#[tokio::test]
+async fn someone_new_asked_about_while_throttled_brings_no_read_before_the_retry_after() {
+    let server = MockServer::start().await;
+    let answered = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&answered);
+    Mock::given(method("POST"))
+        .and(path(GET_PRESENCE))
+        .respond_with(move |request: &Request| {
+            // the first read answered, every later one throttled for five minutes
+            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                answer_all(request, "Available")
+            } else {
+                ResponseTemplate::new(429).insert_header("Retry-After", "300")
+            }
+        })
+        .mount(&server)
+        .await;
+    let mut rig = rig(server, Duration::from_millis(100), true);
+
+    rig.handle.presence(mri(GUID_B)).await.unwrap();
+    assert_eq!(rig.next_presence().await, (mri(GUID_B), Availability::Available));
+    // the throttled read: b unknown again, its Retry-After kept
+    assert_eq!(rig.next_presence().await, (mri(GUID_B), Availability::Unknown));
+    assert_eq!(rig.reads().await.len(), 2);
+
+    // someone new inside the wait (a lab account, and an outsider): no read goes out
+    rig.handle.presence(mri(GUID_C)).await.unwrap();
+    rig.handle.presence(mri(GUID_OUT)).await.unwrap();
+    assert_eq!(rig.presences_within(Duration::from_secs(1)).await, Vec::new());
+    assert_eq!(rig.reads().await.len(), 2, "no read inside the Retry-After");
+    rig.handle.shutdown();
+}
+
+#[tokio::test]
+async fn past_the_cap_the_one_asked_about_longest_ago_is_dropped_and_told_unknown() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(GET_PRESENCE))
+        .respond_with(|request: &Request| answer_all(request, "Offline"))
+        .mount(&server)
+        .await;
+    // the lab a and 40 more lab accounts
+    let lab: Vec<String> = (1..=40_u32)
+        .map(|n| mri(&format!("{n:08x}-0000-4000-8000-000000000001")))
+        .collect();
+    let mut rig = rig_of(server, Duration::from_hours(1), true, lab.clone());
+    let first = &lab[0];
+    let told_first =
+        |told: Vec<(String, Availability)>| told.into_iter().filter(|(mri, _)| mri == first).collect::<Vec<_>>();
+
+    rig.handle.presence(first.clone()).await.unwrap();
+    assert_eq!(rig.next_presence().await, (first.clone(), Availability::Offline));
+
+    // 19 more fill the watch; asked about again, the first is the latest asked, so the next two drop others
+    for other in &lab[1..20] {
+        rig.handle.presence(other.clone()).await.unwrap();
+    }
+    rig.handle.presence(first.clone()).await.unwrap();
+    for other in &lab[20..22] {
+        rig.handle.presence(other.clone()).await.unwrap();
+    }
+    // outsiders take no place in the watch
+    for n in 0..30_u32 {
+        let outsider = mri(&format!("{n:08x}-0000-4000-8000-0000000000ff"));
+        assert_eq!(rig.handle.presence(outsider).await.unwrap(), Availability::Unknown);
+    }
+    // a drop is told as the ask that made it is answered: none of the first
+    assert_eq!(
+        told_first(rig.presences_within(Duration::from_millis(300)).await),
+        Vec::new()
+    );
+
+    // 18 more: the first is now the one asked about longest ago, and dropped
+    for other in &lab[22..] {
+        rig.handle.presence(other.clone()).await.unwrap();
+    }
+    assert_eq!(
+        told_first(rig.presences_within(Duration::from_millis(300)).await),
+        [(first.clone(), Availability::Unknown)]
+    );
     rig.handle.shutdown();
 }
 

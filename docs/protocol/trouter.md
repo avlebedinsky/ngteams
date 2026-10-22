@@ -315,8 +315,10 @@ v1/presence/getpresence/`, a read the web client sends as a `POST`.
   `source`), with the captured header values and its own non-CAE presence token, which UPS took
   (`teams-headless a presence`, 2026-10-23: two reads, `Offline` for b and c; [auth.md](auth.md#open-questions)
   question 4). The engine polls it every minute for the people the views asked about, in one read of those the fence
-  lets a read name (`teams-core` `presence.rs`); the views show a dot, "unknown" before the first read and after a
-  failed one.
+  lets a read name (`teams-core` `presence.rs`): at most 20 watched, the one asked about longest ago dropped (and told
+  unknown); someone newly asked about brings the read forward, never within 10 s of the last; a 429 or 503 holds every
+  read until its `Retry-After`, counted from the answer, is over. The views show a dot, "unknown" before the first read,
+  after a failed one and for someone no longer watched.
 - **No subscription**: the web client also subscribes its endpoint to others' presence (`POST
   v1/pubsub/subscriptions/<epid>`), which changes UPS's state, so it is no read and stays denied; the native client's
   presence is only as fresh as its last poll. If a minute proves too stale, that is a backlog item, not a subscription

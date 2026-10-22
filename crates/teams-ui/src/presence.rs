@@ -5,8 +5,12 @@
 //!   the engine read them from then on), and draws what the [`Presences`] model holds: the engine's
 //!   `Event::Presence`s as the bridge applied them. A person no event told about yet is
 //!   [`Availability::Unknown`](teams_core::Availability::Unknown).
+//! - **Within the engine's watch** ([`teams_core::MAX_WATCHED`] people, the one asked about longest ago dropped and
+//!   told unknown): a view asks again each time it shows its people anew, and the views together ask about no more
+//!   than it holds: the chat list its top [`LIST_WATCHED`](crate::chat_list::LIST_WATCHED) 1:1 chats' other members,
+//!   the header its chat's, the mention picker the [`PICKER_MAX`](crate::compose::PICKER_MAX) people it offers.
 //! - **Unknown** is drawn as a hollow ring: before the first read, for someone this build can't read (in the lab,
-//!   anyone but the lab accounts), and when a read failed. A word UPS gave that this build doesn't name is drawn the
+//!   anyone but the lab accounts), when a read failed, and for someone no longer watched. A word UPS gave that this build doesn't name is drawn the
 //!   same way, its word as the dot's label.
 
 use std::collections::HashMap;

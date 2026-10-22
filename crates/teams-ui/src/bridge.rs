@@ -58,7 +58,8 @@ pub trait Core: Send + Sync + 'static {
     /// are missing or old, and its change comes as `Event::Profile`.
     fn person(&self, mri: String) -> Reply<Person>;
     /// Someone's presence as last read; from then on the engine reads it (for those this build may read), and each
-    /// change comes as `Event::Presence`.
+    /// change comes as `Event::Presence`. The engine watches at most `teams_core::MAX_WATCHED` people: past it the one
+    /// asked about longest ago is dropped and told unknown, so a view asks again whenever it shows its people anew.
     fn presence(&self, mri: String) -> Reply<Availability>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;

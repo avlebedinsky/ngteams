@@ -43,7 +43,7 @@ pub use outbox::{
     MAX_TRANSIENT_WAIT, Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient, TransientSent,
     UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id,
 };
-pub use presence::{Availability, MAX_WATCHED, PRESENCE_POLL};
+pub use presence::{Availability, MAX_WATCHED, PRESENCE_MIN_GAP, PRESENCE_POLL};
 pub use profiles::{MAX_LOOKUPS, NameFrom, PROFILE_MAX_AGE, PROFILE_RETRY, Person};
 pub use search::{Backfill, INDEX_BATCH, search_text};
 pub use sync::{

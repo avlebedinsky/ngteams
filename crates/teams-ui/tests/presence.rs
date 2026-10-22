@@ -2,7 +2,8 @@
 //! asked about the people the views show (a 1:1 chat's other member in the chat list, the chat's members in the
 //! mention picker), and each `Event::Presence` the bridge applies is drawn as a dot on the chat list's avatar, in the
 //! chat's header and beside each person the picker offers; "unknown" (a hollow ring) before the first and after a
-//! failed read; a group chat's row shows none. Every id and name is made up.
+//! failed read; a group chat's row shows none; the list asking about its top chats' people only, within the engine's
+//! watch. Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -17,6 +18,7 @@ use common::{FakeCore, LAB_A, LAB_B, Rig, Written};
 use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
 use teams_core::{Availability, Event};
 use teams_store::{Conversation, ConversationKind, Member, Message};
+use teams_ui::chat_list::LIST_WATCHED;
 use teams_ui::chat_view::ChatView;
 use teams_ui::presence::{fill, label};
 use teams_ui::settings::Settings;
@@ -145,7 +147,8 @@ fn a_one_to_one_chat_shows_its_other_members_presence_in_the_list_and_the_header
     let (shell, cx) = shell_window(&rig);
 
     // the engine was asked about b, the a–b chat's other member, and nobody else (a group's row shows none)
-    assert_eq!(*rig.core.presence_asked.lock().unwrap(), [LAB_B]);
+    let asked = rig.core.presence_asked.lock().unwrap().clone();
+    assert!(!asked.is_empty() && asked.iter().all(|mri| mri == LAB_B), "{asked:?}");
     assert_eq!(
         rows_presence(&shell, cx),
         [(AB.to_owned(), Some(Availability::Unknown)), (TRIO.to_owned(), None)]
@@ -175,6 +178,56 @@ fn a_one_to_one_chat_shows_its_other_members_presence_in_the_list_and_the_header
     draw(cx);
     assert_eq!(rows_presence(&shell, cx)[0].1, Some(Availability::Unknown));
     assert!(cx.debug_bounds("presence-busy").is_none());
+}
+
+/// The other member of the made-up 1:1 chat `n`.
+fn partner(n: usize) -> String {
+    format!("8:orgid:00000000-0000-4000-8000-0000000001{n:02x}")
+}
+
+/// The made-up 1:1 chat `n`, a's with [`partner`]`(n)`.
+fn one_to_one(n: usize) -> String {
+    format!("19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-0000000001{n:02x}@unq.gbl.spaces")
+}
+
+#[test]
+fn the_list_asks_about_its_top_chats_people_within_the_watch_the_top_and_the_open_ones_last() {
+    let rig = Rig::start();
+    rig.cx.update(teams_ui::window::init);
+    let count = LIST_WATCHED + 4;
+    {
+        let mut conversations = rig.core.conversations.lock().unwrap();
+        let mut members = rig.core.members.lock().unwrap();
+        for n in 0..count {
+            let last = 10_000 - i64::try_from(n).unwrap();
+            conversations.push(chat(&one_to_one(n), ConversationKind::OneToOne, None, last));
+            members.insert(
+                one_to_one(n),
+                vec![Member::new(LAB_A, None), Member::new(&partner(n), None)],
+            );
+        }
+    }
+    // the lowest chat open: its header shows its other member
+    let settings = Settings {
+        selected_chat: Some(one_to_one(count - 1)),
+        ..Settings::default()
+    };
+    let parts = parts::parts(&rig, settings, Arc::new(ViewTrace::off()));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    draw(cx);
+
+    let asked = rig.core.presence_asked.lock().unwrap().clone();
+    let top: Vec<String> = (0..LIST_WATCHED).map(partner).collect();
+    let open = partner(count - 1);
+    // the top chats' people and the open chat's, never the rows between
+    assert!(asked.iter().all(|mri| top.contains(mri) || *mri == open), "{asked:?}");
+    // the last load's asks: the top ones from the lowest, so the top row's is the latest of them, then the open one's
+    let expected: Vec<String> = top.iter().rev().cloned().chain([open]).collect();
+    assert!(asked.len() >= expected.len(), "{asked:?}");
+    assert_eq!(asked[asked.len() - expected.len()..], expected);
+    assert_eq!(header_presence(&shell, cx), Some(Availability::Unknown));
 }
 
 #[test]

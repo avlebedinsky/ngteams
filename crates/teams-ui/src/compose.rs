@@ -8,8 +8,8 @@
 //!   in `links`, which isn't built here); a mention is an atomic token of the kit's text area naming its MRI,
 //!   completed after `@` from the chat's members ([`Core::members`], their names from [`Core::person`]) and only from
 //!   them: a mention is never read from typed text, only by the MRI the picker put in its token; the picker shows each
-//!   member's presence dot (M2 Task 17: the engine is asked about them as they are read). `teams-proto`'s
-//!   [`MessageText`] renders the HTML, the mentions and the reply's quote from that one value. A send the engine
+//!   member's presence dot (M2 Task 17: the engine is asked about the people offered each time they are shown).
+//!   `teams-proto`'s [`MessageText`] renders the HTML, the mentions and the reply's quote from that one value. A send the engine
 //!   refuses before it makes a row gives the box its draft back.
 //! - **Keys**: Enter sends (the kit's text area hands a plain Enter on, and the box takes it as the send, or the
 //!   platform would type it as a line break: M2 Task 7), Shift-Enter breaks the line; with the mention picker open, Up
@@ -493,7 +493,6 @@ async fn read_candidates(core: Arc<dyn Core>, conversation: String) -> Vec<Candi
         if member.mri == me || !member.mri.starts_with("8:orgid:") {
             continue;
         }
-        presence::watch(core.as_ref(), [&member.mri]);
         let name = core
             .person(member.mri.clone())
             .await
@@ -856,6 +855,9 @@ impl Compose {
         if !loading && matches.is_empty() {
             return self.close_picker(cx);
         }
+        // the people offered, at most `PICKER_MAX`: asked about each time they are shown (the chat list's budget,
+        // `LIST_WATCHED`, leaves them room in the engine's watch)
+        presence::watch(self.core.as_ref(), matches.iter().map(|candidate| &candidate.mri));
         let selected = self
             .picker
             .as_ref()

@@ -6,15 +6,20 @@
 //!   every one a lab account) and only once the reads' transport has the presence base (the GTM `presenceUPS`). No
 //!   pubsub subscription: subscribing changes UPS's state, so it is no read (the web client's other way to hear of a
 //!   change); the views' presence is as fresh as the last poll.
-//! - **Who**: the people the views asked about ([`EngineRequests::presence`](crate::EngineRequests::presence)): a view
-//!   asks for someone it shows, and from then on they are watched for the run; at most [`MAX_WATCHED`], the one asked
-//!   about longest ago dropped first. Of them, only those the fence would let a read name are read (a lab build: the
-//!   lab accounts, [`teams_fence::Fence::lab_accounts_only`]), in one read; anyone else stays
-//!   [`Availability::Unknown`], and the fence is never asked about them.
+//! - **Who**: the people the views asked about ([`EngineRequests::presence`](crate::EngineRequests::presence)) whom
+//!   the fence would let a read name (a lab build: the lab accounts, [`teams_fence::Fence::lab_accounts_only`]): a
+//!   view asks for someone it shows, and from then on they are watched, at most [`MAX_WATCHED`] at once. Asking again
+//!   about someone watched makes them the latest asked; a new one past the cap drops the one asked about longest ago,
+//!   whose presence is then told as [`Availability::Unknown`] (when a view was told another), so no view keeps showing
+//!   a value no read refreshes: a view asks again about the people it shows each time it shows them anew. Anyone the
+//!   fence wouldn't let a read name is answered [`Availability::Unknown`] and never watched, and the fence is never
+//!   asked about them. Everyone watched is read in one read.
 //! - **When**: every [`PRESENCE_POLL`] (the engine's
-//!   [`EngineOptions::presence_poll`](crate::EngineOptions::presence_poll)), from the engine's tick, one read at a time;
-//!   at once (on the next tick) when a view asks about someone not watched yet. A throttled read (429, 503) waits its
-//!   `Retry-After` when that is longer than the poll.
+//!   [`EngineOptions::presence_poll`](crate::EngineOptions::presence_poll)), from the engine's tick, one read at a time.
+//!   A view asking about someone not watched yet brings the next read forward to the next tick, but never sooner than
+//!   [`PRESENCE_MIN_GAP`] after the last read started, so the reads never follow the views' rebuilds. A throttled read
+//!   (429, 503) waits its `Retry-After`, counted from its answer: no read goes out before it is over, whoever is asked
+//!   about meanwhile.
 //! - **What is shown**: an availability as UPS gave it ([`Availability`]); [`Availability::Unknown`] before the first
 //!   read, for someone the answer left out or gave no presence for, and for everyone a read asked about when it failed
 //!   (the network, a status, an answer of another shape or naming anyone not asked for). Each change is told as
@@ -37,6 +42,10 @@ pub const PRESENCE_POLL: Duration = Duration::from_mins(1);
 
 /// The most people watched at once (and so named by one read).
 pub const MAX_WATCHED: usize = 20;
+
+/// The soonest a read brought forward by someone newly watched follows the last read's start: however often the
+/// views ask about someone new, at most one read in this time beyond the poll.
+pub const PRESENCE_MIN_GAP: Duration = Duration::from_secs(10);
 
 /// Someone's availability as UPS gave it. Only `Offline` was captured so far (ab-chat of 2026-10-22, every lab
 /// account then); the other words are UPS's documented availability values. A word no capture or document showed is
@@ -87,19 +96,77 @@ pub(crate) struct Polled {
     read: Result<HashMap<String, Availability>, Option<Duration>>,
 }
 
+/// When the next read may go out (see the module docs): the poll, a throttled read's wait and the reads brought
+/// forward, against the engine's clock (`now` given by the caller).
+#[derive(Debug)]
+struct Schedule {
+    poll: Duration,
+    /// The next read, at the soonest.
+    next: Instant,
+    /// When the last read started (`None`: none yet).
+    started: Option<Instant>,
+    /// No read before this: a throttled read's `Retry-After`, counted from its answer.
+    throttled_until: Option<Instant>,
+}
+
+impl Schedule {
+    fn new(poll: Duration, now: Instant) -> Self {
+        Self {
+            poll,
+            next: now,
+            started: None,
+            throttled_until: None,
+        }
+    }
+
+    /// Whether a read may start at `now`.
+    fn due(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+
+    /// A read started at `now`: the next one a poll later.
+    fn started(&mut self, now: Instant) {
+        self.started = Some(now);
+        self.next = now + self.poll;
+    }
+
+    /// No read could start at `now` (nobody watched, or nothing to read with): the next try a poll later.
+    fn skipped(&mut self, now: Instant) {
+        self.next = now + self.poll;
+    }
+
+    /// Someone was newly watched at `now`: the next read as soon as it may go, never before a throttled read's wait is
+    /// over nor sooner than [`PRESENCE_MIN_GAP`] after the last read started.
+    fn bring_forward(&mut self, now: Instant) {
+        let mut soonest = now;
+        if let Some(started) = self.started {
+            soonest = soonest.max(started + PRESENCE_MIN_GAP);
+        }
+        if let Some(until) = self.throttled_until {
+            soonest = soonest.max(until);
+        }
+        self.next = self.next.min(soonest);
+    }
+
+    /// A read was answered at `now` with a throttle (429, 503) asking to wait `wait`: no read before it is over.
+    fn throttled(&mut self, now: Instant, wait: Duration) {
+        let until = now + wait;
+        self.throttled_until = Some(self.throttled_until.map_or(until, |earlier| earlier.max(until)));
+        self.next = self.next.max(until);
+    }
+}
+
 /// The presence polling: who is watched, what each was last read as, and the read under way.
 pub(crate) struct Presences<C> {
     client: Arc<Client<HttpTransport<C>>>,
     fence: Arc<Fence>,
-    /// Watched, the one asked about longest ago first.
+    /// Watched, the one asked about longest ago first; only people the fence would let a read name.
     watched: VecDeque<String>,
     known: HashMap<String, Availability>,
     running: JoinSet<Polled>,
     /// Who the running read asks about.
     asking: Vec<String>,
-    /// The next read, at the soonest.
-    next_poll: Instant,
-    poll: Duration,
+    schedule: Schedule,
 }
 
 impl<C: Credentials + 'static> Presences<C> {
@@ -111,50 +178,49 @@ impl<C: Credentials + 'static> Presences<C> {
             known: HashMap::new(),
             running: JoinSet::new(),
             asking: Vec::new(),
-            next_poll: Instant::now(),
-            poll,
+            schedule: Schedule::new(poll, Instant::now()),
         }
     }
 
-    /// `mri`'s availability as last read; from now on they are watched (see the module docs). Someone not watched
-    /// before is read on the next tick.
-    pub(crate) fn presence(&mut self, mri: &str) -> Availability {
+    /// `mri`'s availability as last read; from now on they are watched, when the fence would let a read name them
+    /// (see the module docs). Someone newly watched brings the next read forward. The second value is whom the watch
+    /// dropped to make room, when a view was told a presence of theirs: now [`Availability::Unknown`], to be told.
+    pub(crate) fn presence(&mut self, mri: &str) -> (Availability, Option<String>) {
+        let mut dropped = None;
         if let Some(at) = self.watched.iter().position(|watched| watched == mri) {
             if let Some(moved) = self.watched.remove(at) {
                 self.watched.push_back(moved);
             }
-        } else {
+        } else if self.fence.lab_accounts_only(&[Mri::new(mri)]) {
             self.watched.push_back(mri.to_owned());
             if self.watched.len() > MAX_WATCHED
-                && let Some(dropped) = self.watched.pop_front()
+                && let Some(gone) = self.watched.pop_front()
+                && self.known.remove(&gone).is_some_and(|was| was != Availability::Unknown)
             {
-                self.known.remove(&dropped);
+                dropped = Some(gone);
             }
-            self.next_poll = Instant::now();
+            self.schedule.bring_forward(Instant::now());
+        } else {
+            return (Availability::Unknown, None);
         }
-        self.known.get(mri).cloned().unwrap_or(Availability::Unknown)
+        let availability = self.known.get(mri).cloned().unwrap_or(Availability::Unknown);
+        (availability, dropped)
     }
 
-    /// Starts a read when one is due (from the engine's tick): none runs, the poll's wait is over, and someone watched
-    /// may be named by one.
+    /// Starts a read when one is due (from the engine's tick): none runs, the schedule allows it, and someone is
+    /// watched.
     pub(crate) fn poll_due(&mut self) {
-        if !self.running.is_empty() || Instant::now() < self.next_poll {
+        let now = Instant::now();
+        if !self.running.is_empty() || !self.schedule.due(now) {
             return;
         }
-        self.next_poll = Instant::now() + self.poll;
         // without the presence base the read can't go out: the fence isn't asked for a permit nobody would use
-        if !self.client.transport().has_presence() {
+        if !self.client.transport().has_presence() || self.watched.is_empty() {
+            self.schedule.skipped(now);
             return;
         }
-        let asked: Vec<String> = self
-            .watched
-            .iter()
-            .filter(|mri| self.fence.lab_accounts_only(&[Mri::new(mri.as_str())]))
-            .cloned()
-            .collect();
-        if asked.is_empty() {
-            return;
-        }
+        self.schedule.started(now);
+        let asked: Vec<String> = self.watched.iter().cloned().collect();
         let (client, fence) = (Arc::clone(&self.client), Arc::clone(&self.fence));
         self.asking.clone_from(&asked);
         self.running.spawn(read(client, fence, asked));
@@ -178,8 +244,8 @@ impl<C: Credentials + 'static> Presences<C> {
         let read = match polled.read {
             Ok(read) => Some(read),
             Err(wait) => {
-                if let Some(wait) = wait.filter(|wait| *wait > self.poll) {
-                    self.next_poll = Instant::now() + wait;
+                if let Some(wait) = wait {
+                    self.schedule.throttled(Instant::now(), wait);
                 }
                 None
             }
@@ -246,5 +312,86 @@ async fn read<C: Credentials>(client: Arc<Client<HttpTransport<C>>>, fence: Arc<
             log::debug!("the presence answer wasn't read: {error}");
             failed(asked, None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const POLL: Duration = Duration::from_mins(1);
+
+    fn at(start: Instant, secs: u64) -> Instant {
+        start + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn the_first_read_goes_at_once_and_then_every_poll() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(POLL, start);
+        assert!(schedule.due(start));
+        schedule.started(start);
+        assert!(!schedule.due(at(start, 59)));
+        assert!(schedule.due(at(start, 60)));
+    }
+
+    #[test]
+    fn someone_newly_watched_brings_the_read_forward_but_not_within_the_gap_of_the_last() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(POLL, start);
+        schedule.started(start);
+        // asked about 2 s after the read started: the next read waits for the gap, not the poll
+        schedule.bring_forward(at(start, 2));
+        assert!(!schedule.due(at(start, 9)));
+        assert!(schedule.due(at(start, 10)));
+        // asked about long after the gap: at once
+        let mut schedule = Schedule::new(POLL, start);
+        schedule.started(start);
+        schedule.bring_forward(at(start, 30));
+        assert!(schedule.due(at(start, 30)));
+        // a poll shorter than the gap isn't pushed back by it
+        let mut schedule = Schedule::new(Duration::from_secs(3), start);
+        schedule.started(start);
+        schedule.bring_forward(at(start, 1));
+        assert!(schedule.due(at(start, 3)));
+    }
+
+    #[test]
+    fn a_throttled_read_waits_its_retry_after_whoever_is_asked_about_meanwhile() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(POLL, start);
+        schedule.started(start);
+        // answered 429 at 1 s, Retry-After 300 s
+        schedule.throttled(at(start, 1), Duration::from_secs(300));
+        schedule.bring_forward(at(start, 20));
+        schedule.bring_forward(at(start, 200));
+        assert!(!schedule.due(at(start, 300)));
+        assert!(schedule.due(at(start, 301)));
+    }
+
+    #[test]
+    fn a_retry_after_shorter_than_the_poll_counts_from_the_answer() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(POLL, start);
+        schedule.started(start);
+        // answered 429 at 20 s, Retry-After 50 s: not at the poll (60 s), at 70 s
+        schedule.throttled(at(start, 20), Duration::from_secs(50));
+        assert!(!schedule.due(at(start, 60)));
+        assert!(!schedule.due(at(start, 69)));
+        assert!(schedule.due(at(start, 70)));
+    }
+
+    #[test]
+    fn a_retry_after_over_before_the_poll_leaves_the_poll_and_the_gap() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(POLL, start);
+        schedule.started(start);
+        schedule.throttled(at(start, 1), Duration::from_secs(5));
+        assert!(!schedule.due(at(start, 59)));
+        assert!(schedule.due(at(start, 60)));
+        // someone asked about once the wait is over: the gap still holds
+        schedule.bring_forward(at(start, 7));
+        assert!(!schedule.due(at(start, 9)));
+        assert!(schedule.due(at(start, 10)));
     }
 }

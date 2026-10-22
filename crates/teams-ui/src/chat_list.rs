@@ -13,9 +13,11 @@
 //!   profile's, else their newest message's, else one the binary knew), else their MRI; a group or meeting chat by its
 //!   topic, else its other members' names (or MRIs). The avatar shows a 1:1 chat's other member's picture, else the
 //!   initials of a name, else nothing.
-//! - **Presence** (M2 Task 17): a 1:1 chat's avatar carries its other member's presence dot ([`crate::presence`]); the
-//!   engine is asked about them as the row is built, and the list draws what the presence model holds, again on each
-//!   change of it.
+//! - **Presence** (M2 Task 17): a 1:1 chat's avatar carries its other member's presence dot ([`crate::presence`]).
+//!   After each load the engine is asked about the other members of the top [`LIST_WATCHED`] 1:1 chats, the lowest
+//!   first so the top ones are the latest asked, then the selected chat's (its header's), again when the selection
+//!   changes; the list draws what the presence model holds, again on each change of it. A row below them shows
+//!   unknown unless another view asked about its person.
 //! - **Unread** is the store's count after the account's read horizon (`unread_count`).
 //!
 //! A row clicked is told as [`ChatListEvent::Opened`]; the shell shows it. The switcher tells the shell itself
@@ -34,11 +36,12 @@ use gpui::{
 };
 use gpui_component::Size;
 use gpui_component::avatar::Avatar;
-use teams_core::Availability;
+use teams_core::{Availability, MAX_WATCHED};
 use teams_proto::chat::parse_html;
 use teams_store::{Conversation, ConversationKind, Member, Message};
 
 use crate::bridge::Core;
+use crate::compose::PICKER_MAX;
 use crate::models::Models;
 use crate::people::{self, Picture, Shown};
 use crate::presence;
@@ -58,6 +61,10 @@ pub const NAMED_MEMBERS: usize = 4;
 pub const ROW_HEIGHT: f32 = 56.0;
 /// What a deleted message's preview says.
 pub const DELETED: &str = "This message was deleted";
+/// How many of the top 1:1 chats' other members the list asks the engine about: with the open chat's (the header's)
+/// and the mention picker's [`PICKER_MAX`], never more than the engine watches ([`MAX_WATCHED`]), so the list's own
+/// asks never drop the people it shows from the watch.
+pub const LIST_WATCHED: usize = MAX_WATCHED - PICKER_MAX - 1;
 
 /// What kind of chat a row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,7 +322,6 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         partner,
         people,
     } = name_of(core, conversation, &members).await;
-    presence::watch(core, &partner);
     let row = ChatRow {
         kind: RowKind::of(&conversation.kind),
         name,
@@ -455,8 +461,30 @@ impl ChatList {
     pub fn select(&mut self, id: Option<String>, cx: &mut Context<Self>) {
         if self.selected != id {
             self.selected = id;
+            self.watch_shown();
             cx.notify();
         }
+    }
+
+    /// Asks the engine about the people the list shows a presence for (see the module docs): the other members of the
+    /// top [`LIST_WATCHED`] 1:1 chats, the lowest first, then the selected chat's, so the watch keeps the top ones and
+    /// the header's longest.
+    fn watch_shown(&self) {
+        let mut partners: Vec<&String> = Vec::new();
+        for partner in self.rows.iter().filter_map(|row| row.partner.as_ref()) {
+            if partners.len() == LIST_WATCHED {
+                break;
+            }
+            if !partners.contains(&partner) {
+                partners.push(partner);
+            }
+        }
+        let selected = self
+            .selected
+            .as_deref()
+            .and_then(|id| self.row(id))
+            .and_then(|row| row.partner.as_ref());
+        presence::watch(self.core.as_ref(), partners.into_iter().rev().chain(selected));
     }
 
     /// Opens a chat: highlighted, and told to the shell.
@@ -525,6 +553,7 @@ impl ChatList {
             self.cache.retain(|id, _| rows.iter().any(|row| &row.id == id));
             self.rows = rows;
             self.trace_rows();
+            self.watch_shown();
         }
         cx.notify();
         if self.dirty {
