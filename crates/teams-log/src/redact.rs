@@ -1,16 +1,18 @@
 //! Redaction: what the log never writes, taken out by the logger itself, never left to a call site.
 //!
 //! - **By name**: a header whose name is a credential's ([`secret_field`]: `Authorization`, `Cookie`, `Set-Cookie`,
-//!   `X-Skypetoken`, `Authentication`, any name holding `token`); a JSON field of the same names (`access_token`,
-//!   `refresh_token`, `id_token`, `skypetoken`, `token`, …), at any depth; a form or query field of those names and
-//!   of sign-in's (`code`, `code_verifier`, `client_secret`, …: [`secret_param`]); the arguments of Trouter's
-//!   `user.authenticate`.
+//!   `X-Skypetoken`, `Authentication`, any name holding `token`, `secret`, `password`, `signature` or `credential`);
+//!   a JSON, form or query field of those names (`access_token`, `refresh_token`, `id_token`, `skypeToken`, `token`,
+//!   Trouter's `connectparams` `sig`, the registrar's `aesKey`, …) and of sign-in's (`code`, `code_verifier`,
+//!   `client_secret`, …: [`secret_param`]), JSON's at any depth; the arguments of Trouter's `user.authenticate`; a
+//!   URL's query and fragment wherever one is written (a request's, a header's value, a string in JSON).
 //! - **What can't be read is redacted whole**: a body that says it is JSON and isn't, a frame whose data isn't JSON,
 //!   are never written raw ([`UNREADABLE`]). A binary body (a picture) is written as its type and size only.
 //! - **The last pass** ([`line`]): every line, any record's, has its JWT-shaped strings, `skypetoken=…` and
 //!   `Bearer …` values, and long opaque runs (a refresh token, an authorization code) replaced, whatever put them
 //!   there (a panic message, an error's text).
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use serde_json::Value;
@@ -25,17 +27,27 @@ pub const UNREADABLE: &str = "[unreadable, redacted whole]";
 /// client logs (an MRI, a chat id, a message id), shorter than a refresh token or an authorization code.
 pub const OPAQUE_RUN: usize = 100;
 
-/// Header and JSON field names that always hold a credential, besides any name holding `token`.
-const SECRET_NAMES: [&str; 6] = [
+/// Header, JSON and form field names that always hold a credential, besides any name holding one of
+/// [`SECRET_WORDS`]: the bearer and cookie headers, Trouter's `connectparams` signature (`sig`, valid for days: a
+/// reconnect's credential), the registrar's push encryption key (`aesKey`), a SAS link's `sig`, a meeting's
+/// `passcode`.
+const SECRET_NAMES: [&str; 8] = [
     "authorization",
     "proxy-authorization",
     "cookie",
     "set-cookie",
     "authentication",
-    "password",
+    "sig",
+    "aeskey",
+    "passcode",
 ];
 
-/// Form and query field names of sign-in and renewal that hold a credential, besides [`SECRET_NAMES`].
+/// Words a credential's name holds, wherever in the name (`X-Skypetoken`, `skypeToken`, `refresh_token`,
+/// `client_secret`, `password`, `x-ms-signature`).
+const SECRET_WORDS: [&str; 5] = ["token", "secret", "password", "signature", "credential"];
+
+/// Field names of sign-in and renewal that hold a credential, besides [`SECRET_NAMES`]: the authorization code, the
+/// PKCE verifier, a client's secret or assertion.
 const SECRET_PARAMS: [&str; 5] = [
     "code",
     "code_verifier",
@@ -44,25 +56,33 @@ const SECRET_PARAMS: [&str; 5] = [
     "assertion",
 ];
 
-/// Whether a header or JSON field named `name` holds a credential: one of [`SECRET_NAMES`] or any name holding
-/// `token`, in any case (`X-Skypetoken`, `skypeToken`, `refresh_token`).
+/// Whether a header named `name` holds a credential: one of [`SECRET_NAMES`] or a name holding one of
+/// [`SECRET_WORDS`], in any case.
 #[must_use]
 pub fn secret_field(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
-    name.contains("token") || SECRET_NAMES.contains(&name.as_str())
+    SECRET_WORDS.iter().any(|word| name.contains(word)) || SECRET_NAMES.contains(&name.as_str())
 }
 
-/// Whether a form or query field named `name` holds a credential: [`secret_field`]'s names and sign-in's own
-/// ([`SECRET_PARAMS`]: the authorization code, the PKCE verifier, …).
+/// Whether a JSON, form or query field named `name` holds a credential: [`secret_field`]'s names and sign-in's own
+/// ([`SECRET_PARAMS`]: the authorization code, the PKCE verifier, …). A JSON error's `code` is redacted with them:
+/// over-redaction, never under.
 #[must_use]
 pub fn secret_param(name: &str) -> bool {
     secret_field(name) || SECRET_PARAMS.contains(&name.trim().to_ascii_lowercase().as_str())
 }
 
-/// A header's value as the log writes it: [`REDACTED`] for a credential's header.
+/// A header's value as the log writes it: [`REDACTED`] for a credential's header; a value with a query or a fragment
+/// (a `Location`, a link) with its credential fields redacted ([`url`]).
 #[must_use]
-pub fn header_value<'a>(name: &str, value: &'a str) -> &'a str {
-    if secret_field(name) { REDACTED } else { value }
+pub fn header_value<'a>(name: &str, value: &'a str) -> Cow<'a, str> {
+    if secret_field(name) {
+        Cow::Borrowed(REDACTED)
+    } else if value.contains(['?', '#']) {
+        Cow::Owned(url(value))
+    } else {
+        Cow::Borrowed(value)
+    }
 }
 
 /// A URL as the log writes it: its query's and fragment's credential fields ([`secret_param`]) redacted, the rest as
@@ -124,8 +144,10 @@ fn percent_decoded(name: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Redacts a JSON value in place: every field named as a credential ([`secret_field`]), at any depth, and the
-/// arguments of a `user.authenticate` event (`{"name": "user.authenticate", "args": …}`).
+/// Redacts a JSON value in place: every field named as a credential ([`secret_param`]: the token, cookie, secret and
+/// signature names and sign-in's), at any depth, the arguments of a `user.authenticate` event (`{"name":
+/// "user.authenticate", "args": …}`), and the credential fields of a URL's query or fragment in any string (sign-in's
+/// redirect, `{"redirect": "…?code=…"}`; [`url`]).
 pub fn json(value: &mut Value) {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
@@ -136,7 +158,7 @@ pub fn json(value: &mut Value) {
                     .and_then(Value::as_str)
                     .is_some_and(|name| name == "user.authenticate");
                 for (name, field) in fields.iter_mut() {
-                    if secret_field(name) || (authenticate && name == "args") {
+                    if secret_param(name) || (authenticate && name == "args") {
                         *field = Value::String(REDACTED.to_owned());
                     } else {
                         pending.push(field);
@@ -144,6 +166,7 @@ pub fn json(value: &mut Value) {
                 }
             }
             Value::Array(items) => pending.extend(items.iter_mut()),
+            Value::String(text) if text.contains("://") && text.contains(['?', '#']) => *text = url(text),
             Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => {}
         }
     }
@@ -260,7 +283,8 @@ fn opaque(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'+' | b'=')
 }
 
-/// Whether `rest` (a run of [`opaque`] bytes) is JWT-shaped: `eyJ`, then three dot-separated parts.
+/// Whether `run` (a run of [`opaque`] bytes) is JWT-shaped: `eyJ`, at least two non-empty dot-separated parts, 20
+/// characters or more.
 fn jwt_shaped(run: &str) -> bool {
     run.starts_with("eyJ") && run.split('.').filter(|part| !part.is_empty()).count() >= 2 && run.len() >= 20
 }

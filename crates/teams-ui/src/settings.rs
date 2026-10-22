@@ -22,7 +22,7 @@ use std::ops::RangeInclusive;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use gpui::{ClipboardItem, Context};
+use gpui::{AppContext as _, AsyncApp, ClipboardItem, Context, Task, WeakEntity};
 pub use teams_log::Level as LogLevel;
 use teams_log::diagnostics::{Report, Source as DiagnosticsSource};
 use toml::{Table, Value};
@@ -438,6 +438,8 @@ pub struct SettingsModel {
     held: bool,
     diagnostics: Option<DiagnosticsSource>,
     copied: Option<Copied>,
+    /// The "copy diagnostics" being collected.
+    copying: Option<Task<()>>,
 }
 
 impl SettingsModel {
@@ -455,6 +457,7 @@ impl SettingsModel {
             held,
             diagnostics: None,
             copied: None,
+            copying: None,
         }
     }
 
@@ -468,6 +471,7 @@ impl SettingsModel {
             held: false,
             diagnostics: None,
             copied: None,
+            copying: None,
         }
     }
 
@@ -482,28 +486,44 @@ impl SettingsModel {
         self
     }
 
-    /// The "copy diagnostics" text as it would be copied now (see `teams_log::diagnostics`).
-    #[must_use]
-    pub fn diagnostics(&self) -> Report {
+    /// Where the "copy diagnostics" text comes from, and the level it names when no log is installed.
+    fn diagnostics_source(&self) -> (DiagnosticsSource, LogLevel) {
         let source = self.diagnostics.clone().unwrap_or_else(|| DiagnosticsSource {
             app: format!("teams {}", env!("CARGO_PKG_VERSION")),
             log_file: None,
             log_problem: None,
             fence_log: None,
         });
-        source.collect(self.settings.log_level)
+        (source, self.settings.log_level)
+    }
+
+    /// The "copy diagnostics" text as it would be copied now (see `teams_log::diagnostics`). It waits for the log's
+    /// writer and reads the files: never on GPUI's foreground ([`SettingsModel::copy_diagnostics`] collects it on a
+    /// background task).
+    #[must_use]
+    pub fn diagnostics(&self) -> Report {
+        let (source, setting) = self.diagnostics_source();
+        source.collect(setting)
     }
 
     /// Puts the "copy diagnostics" text on the clipboard and keeps what it was for the settings view to tell
-    /// ([`SettingsModel::copied`]).
-    pub fn copy_diagnostics(&mut self, cx: &mut Context<Self>) -> Report {
-        let report = self.diagnostics();
-        cx.write_to_clipboard(ClipboardItem::new_string(report.text.clone()));
-        self.copied = Some(Copied {
-            has_debug: report.has_debug,
-        });
-        cx.notify();
-        report
+    /// ([`SettingsModel::copied`]). The text is collected on a background task (the flush of the log's writer, up to
+    /// `teams_log::file::FLUSH_WAIT`, and the files' reads never hold the window); the clipboard is written once it is
+    /// ready. A copy asked while one is collected takes its place.
+    pub fn copy_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let (source, setting) = self.diagnostics_source();
+        let collecting = cx.background_spawn(async move { source.collect(setting) });
+        self.copying = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let report = collecting.await;
+            let _ = this.update(cx, |model, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(report.text));
+                model.copied = Some(Copied {
+                    has_debug: report.has_debug,
+                });
+                model.copying = None;
+                cx.notify();
+            });
+        }));
     }
 
     /// What the last "copy diagnostics" copied; `None` before one.

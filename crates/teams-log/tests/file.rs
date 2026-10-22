@@ -116,6 +116,85 @@ fn the_file_is_rotated_by_size_and_the_oldest_dropped() {
     }
 }
 
+/// A sink rotating every two 50-byte lines, two older files kept, with lines `0..4` written: `.1` holds 0 and 1, the
+/// file 2 and 3.
+fn rotated_sink(dir: &Path) -> Sink {
+    let sink = Sink::open(
+        dir,
+        "teams-app.log",
+        Rotation {
+            max_bytes: 100,
+            keep: 2,
+        },
+    )
+    .unwrap();
+    for number in 0..4 {
+        sink.push(format!("{number:0>49}"));
+    }
+    assert!(sink.flush());
+    sink
+}
+
+fn lines(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| line.trim_start_matches('0').to_owned())
+        .collect()
+}
+
+#[test]
+fn a_rotation_that_can_t_make_its_new_file_moves_nothing_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = rotated_sink(dir.path());
+    let file = |name: &str| dir.path().join(name);
+    // the new file can't be made (a directory where it goes, as a full disk or no descriptors would fail it)
+    fs::create_dir(file("teams-app.log.new")).unwrap();
+    fs::write(file("teams-app.log.new/keep"), "").unwrap();
+    for number in 4..10 {
+        sink.push(format!("{number:0>49}"));
+    }
+    assert!(sink.flush());
+    assert_eq!(lines(&file("teams-app.log.1")), ["", "1"], "the archive stays");
+    assert!(!file("teams-app.log.2").exists(), "nothing shifted over it");
+    assert_eq!(
+        lines(&file("teams-app.log")),
+        ["2", "3", "4", "5", "6", "7", "8", "9"],
+        "the writer kept its file under its name"
+    );
+    // once it can be made again, the rotation goes on as before
+    fs::remove_dir_all(file("teams-app.log.new")).unwrap();
+    sink.push(format!("{:0>49}", "a"));
+    assert!(sink.flush());
+    assert_eq!(lines(&file("teams-app.log")), ["a"]);
+    assert_eq!(lines(&file("teams-app.log.1")).len(), 8);
+    assert_eq!(lines(&file("teams-app.log.2")), ["", "1"]);
+    assert!(!file("teams-app.log.new").exists());
+    assert_eq!(mode(&file("teams-app.log")), FILE_MODE);
+}
+
+#[test]
+fn a_file_taken_away_is_made_again_without_moving_the_older_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = rotated_sink(dir.path());
+    let file = |name: &str| dir.path().join(name);
+    fs::remove_file(file("teams-app.log")).unwrap();
+    sink.push(format!("{:0>49}", 4));
+    assert!(sink.flush());
+    assert_eq!(lines(&file("teams-app.log.1")), ["", "1"], "the archive stays");
+    assert!(!file("teams-app.log.2").exists(), "nothing shifted over it");
+    assert_eq!(lines(&file("teams-app.log")), ["4"], "made again");
+    assert_eq!(mode(&file("teams-app.log")), FILE_MODE);
+    // and rotated as before
+    for number in 5..7 {
+        sink.push(format!("{number:0>49}"));
+    }
+    assert!(sink.flush());
+    assert_eq!(lines(&file("teams-app.log")), ["6"]);
+    assert_eq!(lines(&file("teams-app.log.1")), ["4", "5"]);
+    assert_eq!(lines(&file("teams-app.log.2")), ["", "1"]);
+}
+
 #[test]
 fn the_default_rotation_is_8_mib_and_4_older_files() {
     assert_eq!(

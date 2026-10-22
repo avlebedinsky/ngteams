@@ -2,7 +2,7 @@
 //! message ids, outbox rows by id, state and `clientmessageid`; never a message's text, a name or a body. A message
 //! event is at `info` when the push channel brought it, at `debug` when a read did (a catch-up stores many).
 
-use log::Level;
+use log::{Level, LevelFilter};
 
 use super::{Action, Event, Source};
 
@@ -37,8 +37,28 @@ pub(super) fn action(action: &Action) -> String {
     }
 }
 
-/// An event's level and line.
-pub(super) fn event(event: &Event) -> (Level, String) {
+/// An event's level and line, when a log at `max` writes it: the line is formatted only then, and each event is
+/// judged at its own level (a failure is logged at `warn` too, a message only at `info` or `debug`).
+pub(super) fn logged(event: &Event, max: LevelFilter) -> Option<(Level, String)> {
+    let level = level(event);
+    (level <= max).then(|| (level, line(event)))
+}
+
+/// An event's level: `warn` for a failure, `debug` for what a read stores in bulk and for typing, `info` otherwise.
+fn level(event: &Event) -> Level {
+    match event {
+        Event::Message { source, .. } => match source {
+            Source::Delivery | Source::Replay => Level::Info,
+            Source::CatchUp | Source::History => Level::Debug,
+        },
+        Event::Typing { .. } => Level::Debug,
+        Event::Failed { .. } | Event::CatchUpFailed { .. } => Level::Warn,
+        _ => Level::Info,
+    }
+}
+
+/// An event's line.
+fn line(event: &Event) -> String {
     match event {
         Event::Message {
             conversation,
@@ -47,29 +67,17 @@ pub(super) fn event(event: &Event) -> (Level, String) {
             applied,
             source,
             ..
-        } => {
-            let level = match source {
-                Source::Delivery | Source::Replay => Level::Info,
-                Source::CatchUp | Source::History => Level::Debug,
-            };
-            (
-                level,
-                format!("message {id} in {conversation}: {change:?}, {applied:?}, from {source:?}"),
-            )
-        }
+        } => format!("message {id} in {conversation}: {change:?}, {applied:?}, from {source:?}"),
         Event::Typing {
             conversation, typing, ..
-        } => (Level::Debug, format!("typing {typing} in {conversation}")),
-        Event::Queued(row) | Event::Outbox(row) => (
-            Level::Info,
-            format!(
-                "outbox row {} ({:?}, clientmessageid {}): {:?}",
-                row.id, row.kind, row.client_message_id, row.state
-            ),
+        } => format!("typing {typing} in {conversation}"),
+        Event::Queued(row) | Event::Outbox(row) => format!(
+            "outbox row {} ({:?}, clientmessageid {}): {:?}",
+            row.id, row.kind, row.client_message_id, row.state
         ),
-        Event::Failed { during, error } => (Level::Warn, format!("failed {during}: {error}")),
-        Event::CatchUpFailed { cause, error } => (Level::Warn, format!("catch-up ({cause:?}) failed: {error}")),
-        other => (Level::Info, plain(other)),
+        Event::Failed { during, error } => format!("failed {during}: {error}"),
+        Event::CatchUpFailed { cause, error } => format!("catch-up ({cause:?}) failed: {error}"),
+        other => plain(other),
     }
 }
 
@@ -98,5 +106,40 @@ fn plain(event: &Event) -> String {
         | Event::Outbox(_)
         | Event::Failed { .. }
         | Event::CatchUpFailed { .. } => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use log::{Level, LevelFilter};
+
+    use super::super::{EngineError, Event};
+    use super::logged;
+
+    fn failed() -> Event {
+        Event::Failed {
+            during: "indexing stored messages for search",
+            error: EngineError::Deleted {
+                message: "1700000000000".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_failure_is_logged_at_warn_and_an_info_event_isn_t() {
+        let (level, line) = logged(&failed(), LevelFilter::Warn).expect("a warning at warn");
+        assert_eq!(level, Level::Warn);
+        assert!(line.starts_with("failed indexing stored messages for search"), "{line}");
+        assert!(logged(&Event::Teams, LevelFilter::Warn).is_none());
+        assert_eq!(
+            logged(&Event::Teams, LevelFilter::Info).map(|(level, _)| level),
+            Some(Level::Info)
+        );
+    }
+
+    #[test]
+    fn nothing_is_logged_below_the_event_s_level() {
+        assert!(logged(&failed(), LevelFilter::Error).is_none());
+        assert!(logged(&failed(), LevelFilter::Off).is_none());
     }
 }

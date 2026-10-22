@@ -296,12 +296,14 @@ fence's decision, renewals, migrations, failures, a panic with its backtrace; no
 text or name) and `debug` (every request and response in full, method, URL with its query, headers and bodies, and
 every Trouter frame both ways). The level is the settings' `log_level`, changed live in the settings view;
 `TEAMS_APP_LOG=<level>` overrides it for the run (`trace` is taken as `debug`). The logger redacts every credential
-itself (the `Authorization`, cookie and token headers, token fields, sign-in's codes, `user.authenticate`, then any
+itself (the `Authorization`, cookie and token headers, token, secret and signature fields, sign-in's codes,
+`user.authenticate`, Trouter's `connectparams` signature, URLs inside JSON by their query, then any
 JWT-shaped string, `skypetoken=` or `Bearer ` value on any line). A log that can't be opened is printed and shown in
 the settings view, and the app runs without it. "Copy diagnostics" (the settings view, or "Copy diagnostics" in the
-Ctrl+K palette) puts the app's version and build profile, the level, the log's last 200 lines and the last 40
-`fence.log` lines on the clipboard. **A debug log holds message text, names and whole answers of the service: never
-share it.** When the copied text holds any `debug` line it starts with "contains full requests and responses: not safe
+Ctrl+K palette) puts the app's version and build profile, the level, the log's last 200 lines (at most 128 KiB of
+them, the newest kept; a newest line longer than that keeps its start, one over 1 MiB is left out and said so) and
+the last 40 `fence.log` lines on the clipboard; the text is collected off the window's thread. **A debug log holds
+message text, names and whole answers of the service: never share it.** When the copied text holds any `debug` line it starts with "contains full requests and responses: not safe
 to paste", and the settings view says so too. A lab run's debug log is lab data like a capture: it never goes into the
 repo, not even sanitized.
 

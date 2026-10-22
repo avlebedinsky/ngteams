@@ -137,19 +137,41 @@ pub fn is_debug(line: &str) -> bool {
     line.split_whitespace().nth(1) == Some("DEBUG")
 }
 
-/// The latest `lines` that fit in `bytes`.
+/// The latest `lines` that fit in `bytes`; the newest is always kept, its start cut to fit when it alone doesn't
+/// (its time, level and target are what the text and [`is_debug`] read first).
 fn capped(lines: io::Result<Vec<String>>, bytes: usize) -> io::Result<Vec<String>> {
     let mut lines = lines?;
     let mut total: usize = lines.iter().map(|line| line.len() + 1).sum();
     let mut first = 0;
-    while total > bytes && first < lines.len() {
+    while total > bytes && first + 1 < lines.len() {
         total -= lines[first].len() + 1;
         first += 1;
     }
-    Ok(lines.split_off(first))
+    let mut kept = lines.split_off(first);
+    if let [newest] = kept.as_mut_slice()
+        && newest.len() + 1 > bytes
+    {
+        cut(newest, bytes);
+    }
+    Ok(kept)
 }
 
-/// The last `count` whole lines of the file at `path` (read from its last [`TAIL_BYTES`]); none for a missing file.
+/// The room [`cut`] leaves for its note.
+const CUT_NOTE: usize = 64;
+
+/// `line` cut to about `bytes` (at a char boundary), with a note of how much was left out.
+fn cut(line: &mut String, bytes: usize) {
+    let mut end = bytes.saturating_sub(CUT_NOTE).min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let left_out = line.len() - end;
+    line.truncate(end);
+    let _ = write!(line, " … [{left_out} more bytes cut]");
+}
+
+/// The last `count` whole lines of the file at `path` (read from its last [`TAIL_BYTES`]); none for a missing file,
+/// a note in their place when the newest line alone is longer than that.
 fn last_lines(path: &Path, count: usize) -> io::Result<Vec<String>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -166,6 +188,13 @@ fn last_lines(path: &Path, count: usize) -> io::Result<Vec<String>> {
     if start > 0 && !lines.is_empty() {
         // the first line read began before the part read
         lines.remove(0);
+        if lines.is_empty() {
+            // the newest line alone is longer than the part read: said, never written from its middle
+            return Ok(vec![format!(
+                "[the newest line is longer than {} KiB: left out]",
+                TAIL_BYTES / 1024
+            )]);
+        }
     }
     let skip = lines.len().saturating_sub(count);
     Ok(lines[skip..].iter().map(|line| (*line).to_owned()).collect())

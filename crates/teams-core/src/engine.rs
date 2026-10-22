@@ -920,8 +920,8 @@ where
     }
 
     fn emit(&self, event: Event) {
-        if log::log_enabled!(log::Level::Info) {
-            let (level, line) = described::event(&event);
+        // each event judged at its own level: a failure's warning is logged at `warn` too
+        if let Some((level, line)) = described::logged(&event, log::max_level()) {
             log::log!(level, "{line}");
         }
         // an owner that dropped its handle takes no more events

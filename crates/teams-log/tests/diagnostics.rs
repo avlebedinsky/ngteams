@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::fs;
 
 use teams_log::Level;
-use teams_log::diagnostics::{LevelState, MAX_FENCE_LINES, MAX_LOG_LINES, Source, WARNING, build_profile, is_debug};
+use teams_log::diagnostics::{
+    LevelState, MAX_FENCE_LINES, MAX_LOG_BYTES, MAX_LOG_LINES, Source, WARNING, build_profile, is_debug,
+};
 
 fn source(dir: &tempfile::TempDir, log: &str, fence: &str) -> Source {
     let log_file = dir.path().join("teams-app.log");
@@ -100,6 +102,57 @@ fn a_debug_line_makes_the_text_say_first_that_it_isn_t_safe_to_paste() {
     assert!(report.text.contains("log level: debug (set by TEAMS_APP_LOG)"));
     assert!(is_debug("2026-10-22T08:00:00.000Z DEBUG teams_proto::http: x"));
     assert!(!is_debug("2026-10-22T08:00:00.000Z INFO  teams_proto::http: DEBUG"));
+}
+
+#[test]
+fn a_newest_line_longer_than_the_cap_is_kept_cut_from_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    // words, not one opaque run the last pass would take as a token
+    let body = "word ".repeat(MAX_LOG_BYTES / 2);
+    let log = format!(
+        "{}2026-10-22T08:00:00.000Z DEBUG teams_wire::http: response GET https://example.invalid/ -> 200 {body}\n",
+        lines(3, "INFO ", "row")
+    );
+    let source = source(&dir, &log, "");
+    let report = source.collect_with(LevelState {
+        level: Level::Debug,
+        overridden: false,
+    });
+    let text = &report.text;
+    assert!(report.has_debug, "the line's level is still read");
+    assert!(text.starts_with("WARNING: "), "{}", &text[..text.len().min(400)]);
+    assert!(
+        text.contains("== the log: the last 1 line(s) =="),
+        "{}",
+        &text[..text.len().min(400)]
+    );
+    assert!(
+        text.contains("DEBUG teams_wire::http: response GET https://example.invalid/ -> 200 word word"),
+        "{}",
+        &text[..text.len().min(400)]
+    );
+    assert!(text.contains("more bytes cut]\n"));
+    assert!(!text.contains("row 2"), "the older lines don't fit");
+    assert!(text.len() < MAX_LOG_BYTES + 4096, "{}", text.len());
+
+    // one longer than the part of the file read is said, never written from its middle
+    let huge = format!(
+        "2026-10-22T08:00:00.000Z DEBUG teams_wire::http: {}\n",
+        "y".repeat(1_100_000)
+    );
+    let source = self::source(&dir, &format!("{}{huge}", lines(3, "INFO ", "row")), "");
+    let report = source.collect_with(LevelState {
+        level: Level::Debug,
+        overridden: false,
+    });
+    assert!(
+        report
+            .text
+            .contains("== the log: the last 1 line(s) ==\n[the newest line is longer than 1024 KiB: left out]\n"),
+        "{}",
+        report.text
+    );
+    assert!(!report.text.contains("yyy"));
 }
 
 #[test]

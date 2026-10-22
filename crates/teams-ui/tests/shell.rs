@@ -720,6 +720,32 @@ fn the_settings_view_copies_the_diagnostics_and_says_when_they_aren_t_safe_to_pa
 }
 
 #[test]
+fn the_diagnostics_are_collected_off_the_foreground_and_copied_once_ready() {
+    let rig = seeded();
+    let dir = tempfile::tempdir().unwrap();
+    let model = SettingsModel::in_memory(Settings::default()).with_diagnostics(diagnostics_in(&dir, INFO_LINE));
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".to_owned()));
+    // the foreground's own turn only asks: the flush and the reads run on a background task
+    cx.update(|_, cx| {
+        let settings = shell.read(cx).settings().clone();
+        settings.update(cx, SettingsModel::copy_diagnostics);
+        assert_eq!(
+            settings.read(cx).copied(),
+            None,
+            "nothing copied within the click's turn"
+        );
+    });
+    assert_eq!(clipboard(cx), "before");
+    cx.run_until_parked();
+    assert!(clipboard(cx).contains("action: send to a chat"), "{}", clipboard(cx));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).settings().read(cx).copied()),
+        Some(Copied { has_debug: false })
+    );
+}
+
+#[test]
 fn the_palette_s_copy_diagnostics_copies_them_and_shows_the_settings() {
     let rig = seeded();
     let dir = tempfile::tempdir().unwrap();

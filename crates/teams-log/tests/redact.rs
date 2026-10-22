@@ -49,6 +49,27 @@ fn code_verifier(seed: &str) -> String {
     format!("{seed}{}", "vErIfIeR-_".repeat(5)).chars().take(43).collect()
 }
 
+/// Trouter's `connectparams` signature and a SAS link's `sig`: a base64 HMAC-SHA256, 44 characters with `/`, `+` and
+/// a closing `=`, far shorter than the last pass's opaque run and not JWT-shaped, so only its name catches it.
+fn signature(seed: &str) -> String {
+    let text: String = format!("{seed}q7/Zk+Lm3N9pR2tV/wY4bC+6dF8hJ0aS2eG5iK7oU1xW3")
+        .chars()
+        .take(43)
+        .collect();
+    format!("{text}=")
+}
+
+/// A `trouter.connected` event as the service sends it, its reconnect parameters signed with `sig`.
+fn trouter_connected(sig: &str) -> String {
+    format!(
+        r#"5:::{{"name":"trouter.connected","args":[{{"id":"00000000-0000-4000-8000-0000000000e1","ccid":"e1",
+"url":"https://pub-ent-euno-01-f.trouter.teams.microsoft.com:3443/v4/f/AbC-dE_1/","ttl":"604800",
+"connectparams":{{"issuer":"prod-2","scae":"1","sig":"{sig}","sr":"AbC-dE_1","sp":"pub-ent-euno-01",
+"se":"1793300000000","st":"1792700000000"}},"reconnectUrl":"wss://pub-ent-euno-01-t.trouter.teams.microsoft.com:443/v4/c"}}]}}"#
+    )
+    .replace('\n', "")
+}
+
 fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
         .iter()
@@ -66,6 +87,10 @@ fn credential_headers_are_redacted_by_name_and_the_rest_kept() {
         "X-Skypetoken",
         "Authentication",
         "X-Ms-Some-Token-Header",
+        "X-Ms-Signature",
+        "X-Client-Secret",
+        "X-Credential",
+        "sig",
     ] {
         assert!(redact::secret_field(name), "{name}");
         assert_eq!(redact::header_value(name, "value"), REDACTED);
@@ -135,6 +160,78 @@ fn user_authenticate_s_arguments_are_redacted_whole() {
     let other = format!(r#"5:::{{"name":"trouter.connected","args":[{{"id":"e1","skypetoken":"{token}"}}]}}"#);
     let shown = redact::frame(&other);
     assert!(!shown.contains(&token) && shown.contains(r#""id":"e1""#), "{shown}");
+}
+
+#[test]
+fn trouter_connected_s_signature_is_redacted_and_its_other_parameters_kept() {
+    let sig = signature("s");
+    let shown = Frame {
+        direction: Direction::Received,
+        text: &trouter_connected(&sig),
+    }
+    .to_string();
+    assert!(!shown.contains(&sig), "{shown}");
+    let data: serde_json::Value = serde_json::from_str(shown.strip_prefix("frame received 5:::").unwrap()).unwrap();
+    let params = &data["args"][0]["connectparams"];
+    assert_eq!(params["sig"], REDACTED, "{shown}");
+    assert_eq!(params["sr"], "AbC-dE_1");
+    assert_eq!(params["se"], "1793300000000");
+    assert_eq!(params["issuer"], "prod-2");
+    assert_eq!(
+        data["args"][0]["reconnectUrl"],
+        "wss://pub-ent-euno-01-t.trouter.teams.microsoft.com:443/v4/c"
+    );
+    // the same parameters sent back in `user.authenticate`: all its arguments go
+    let authenticate = format!(
+        r#"5:::{{"name":"user.authenticate","args":[{{"headers":{{}},"connectparams":{{"sig":"{sig}","sr":"AbC-dE_1"}}}}]}}"#
+    );
+    assert!(!redact::frame(&authenticate).contains(&sig));
+}
+
+#[test]
+fn a_signed_link_s_sig_is_redacted_in_a_query_a_header_and_json() {
+    let sig = signature("l");
+    let link = format!(
+        "https://example.blob.core.windows.net/c/f.png?sv=2024-01-01&se=2026-10-30&sp=r&sig={}",
+        sig.replace('/', "%2F").replace('+', "%2B").replace('=', "%3D")
+    );
+    let shown = redact::url(&link);
+    assert!(shown.ends_with(&format!("&sp=r&sig={REDACTED}")), "{shown}");
+    assert_eq!(redact::header_value("Location", &link), redact::url(&link));
+    assert_eq!(redact::header_value("Accept", "text/html; q=0.9"), "text/html; q=0.9");
+    let body = format!(r#"{{"links":[{{"href":"{link}"}}],"signature":"{sig}"}}"#);
+    let shown = redact::body(Some("application/json"), body.as_bytes());
+    assert!(!shown.contains(&sig) && !shown.contains("sig=%"), "{shown}");
+    assert!(
+        shown.contains("sv=2024-01-01&se=2026-10-30&sp=r&sig=[redacted]"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn sign_in_s_names_and_redirect_are_redacted_in_json() {
+    let (code, verifier) = (authorization_code("j"), code_verifier("k"));
+    let secret = signature("c");
+    let body = format!(
+        r#"{{"code":"{code}","code_verifier":"{verifier}","client_secret":"{secret}","client_assertion":"{secret}",
+            "password":"{secret}","clientDescription":{{"appId":"TeamsCDLWebWorker","aesKey":"{secret}"}}}}"#
+    );
+    let shown = redact::body(Some("application/json"), body.as_bytes());
+    for value in [&code, &verifier, &secret] {
+        assert!(!shown.contains(value.as_str()), "{shown}");
+    }
+    assert!(shown.contains(r#""appId":"TeamsCDLWebWorker""#), "{shown}");
+    // the sign-in window's answer: the URL Entra redirected to, its code in the query
+    let short_code = "0.AXEA-shortcode_1";
+    let answer = format!(
+        r#"{{"redirect":"https://login.microsoftonline.com/common/oauth2/nativeclient?code={short_code}&state=s1&session_state=x"}}"#
+    );
+    let shown = redact::body(None, answer.as_bytes());
+    assert!(!shown.contains(short_code), "{shown}");
+    assert!(shown.contains("nativeclient?code=[redacted]&state=s1"), "{shown}");
+    // a string that isn't a URL is left as it is
+    let text = r#"{"content":"a question? yes # and code=1"}"#;
+    assert_eq!(redact::body(Some("application/json"), text.as_bytes()), text);
 }
 
 #[test]
@@ -218,6 +315,7 @@ struct Secrets {
     code: String,
     verifier: String,
     cookie: String,
+    sig: String,
 }
 
 impl Secrets {
@@ -229,10 +327,11 @@ impl Secrets {
             code: authorization_code("w"),
             verifier: code_verifier("v"),
             cookie: cookie("c"),
+            sig: signature("g"),
         }
     }
 
-    fn all(&self) -> [&str; 6] {
+    fn all(&self) -> [&str; 7] {
         [
             &self.bearer,
             &self.skypetoken,
@@ -240,12 +339,14 @@ impl Secrets {
             &self.code,
             &self.verifier,
             &self.cookie,
+            &self.sig,
         ]
     }
 }
 
 /// A token grant with every credential in its place (its header, its cookie, its form, its query, its answer's
-/// fields and cookie), `user.authenticate`, and a line of no record type, at `debug`.
+/// fields, cookie and `Location`), `user.authenticate`, `trouter.connected` with its signature, and a line of no record
+/// type, at `debug`.
 fn write_exchange(log: &FileLog, secrets: &Secrets) {
     let auth_header = format!("Bearer {}", secrets.bearer);
     let cookie_header = format!("skypetoken_asm={0}; other={0}", secrets.cookie);
@@ -275,7 +376,15 @@ fn write_exchange(log: &FileLog, secrets: &Secrets) {
         r#"{{"access_token":"{0}","refresh_token":"{1}","id_token":"{0}"}}"#,
         secrets.bearer, secrets.refresh
     );
-    let answer_headers = headers(&[("content-type", "application/json"), ("set-cookie", &cookie_header)]);
+    let location = format!(
+        "https://login.microsoftonline.com/common/oauth2/nativeclient?code={}&state=s1",
+        secrets.code
+    );
+    let answer_headers = headers(&[
+        ("content-type", "application/json"),
+        ("set-cookie", &cookie_header),
+        ("location", &location),
+    ]);
     let response = Response {
         method: "POST",
         url: &url,
@@ -294,6 +403,12 @@ fn write_exchange(log: &FileLog, secrets: &Secrets) {
         text: &authenticate,
     };
     debug_record(log, "teams_trouter::socket", format_args!("{frame}"));
+    let connected = trouter_connected(&secrets.sig);
+    let frame = Frame {
+        direction: Direction::Received,
+        text: &connected,
+    };
+    debug_record(log, "teams_wire::trouter", format_args!("{frame}"));
     // a line no record type formats: the last pass alone
     debug_record(
         log,
@@ -338,4 +453,9 @@ fn no_credential_reaches_any_rotated_file() {
     // the rest of the requests is there
     assert!(files.iter().any(|(_, text)| text.contains("grant_type=refresh_token")));
     assert!(files.iter().any(|(_, text)| text.contains("frame sent 5:::")));
+    assert!(
+        files
+            .iter()
+            .any(|(_, text)| text.contains("frame received 5:::") && text.contains(r#""sr":"AbC-dE_1""#))
+    );
 }

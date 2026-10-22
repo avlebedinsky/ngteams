@@ -187,9 +187,10 @@ What the code does and why. A change that undoes one of these needs a new reason
   responses (method, URL with its query, headers, bodies) and every Trouter frame both ways; at `info` it stays
   payload-free. The hard rule "Tokens never reach logs" is unchanged: credentials are redacted by the logger itself
   (`Authorization`, `Cookie`/`Set-Cookie`, the skypetoken and every other token header, the token fields of sign-in
-  and renewal answers, Trouter's `user.authenticate`), never left to call sites. A lab run's debug log is lab data like
-  a capture (never in the repo, never sanitized into it); the personal build's is the user's data, which agents never
-  read.
+  and renewal answers, sign-in's code and verifier wherever they are written, Trouter's `user.authenticate` and the
+  `connectparams` signature (`sig`) of `trouter.connected`), never left to call sites. A lab run's debug log is lab
+  data like a capture (never in the repo, never sanitized into it); the personal build's is the user's data, which
+  agents never read.
 - **The store** (`teams-store`): one SQLite file per account (`0600`, its dir `0700`), WAL, migrations by
   `user_version`, each in an `IMMEDIATE` transaction; a released migration is never edited, a new one is added. A new
   file is made and switched to WAL under `<store>-runs/open.lock`: SQLite answers two connections switching at once

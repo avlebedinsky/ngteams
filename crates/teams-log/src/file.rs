@@ -265,31 +265,65 @@ impl Writer {
 
     /// `<name>` becomes `<name>.1`, each older one moves up, the one past [`Rotation::keep`] is dropped, and a new
     /// file is started.
+    ///
+    /// The new file is made first (as `<name>.new`), so a failure to make it (no descriptors, no inodes) moves
+    /// nothing; one that fails later puts `<name>` back where it can. `<name>` gone (taken away from outside) is made
+    /// again without moving the older ones, so a rotation that keeps failing never shifts the archives over and over.
     fn rotate(&mut self) -> io::Result<()> {
-        let numbered = |number: usize| {
+        let suffixed = |suffix: &str| {
             let mut name = self.path.as_os_str().to_owned();
-            name.push(format!(".{number}"));
+            name.push(suffix);
             PathBuf::from(name)
         };
-        if self.rotation.keep == 0 {
-            fs::remove_file(&self.path)?;
+        let fresh = suffixed(".new");
+        let file = new_private(&fresh)?;
+        let gone = matches!(fs::symlink_metadata(&self.path), Err(error) if error.kind() == io::ErrorKind::NotFound);
+        let moved = if gone || self.rotation.keep == 0 {
+            // started again in its place, nothing older moved (none kept: the old file dropped as the new one takes
+            // its name)
+            fs::rename(&fresh, &self.path)
         } else {
-            for number in (1..self.rotation.keep).rev() {
-                match fs::rename(numbered(number), numbered(number + 1)) {
-                    Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-                    _ => {}
-                }
-            }
-            fs::rename(&self.path, numbered(1))?;
+            self.shift(&fresh, suffixed)
+        };
+        if let Err(error) = moved {
+            let _ = fs::remove_file(&fresh);
+            return Err(error);
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(FILE_MODE)
-            .open(&self.path)?;
-        file.set_permissions(Permissions::from_mode(FILE_MODE))?;
         self.file = file;
         self.size = 0;
         Ok(())
     }
+
+    /// Moves the older files up (the one past [`Rotation::keep`] dropped), `<name>` to `<name>.1` and `fresh` to
+    /// `<name>`; `<name>.1` goes back to `<name>` when that last step fails.
+    fn shift(&self, fresh: &Path, suffixed: impl Fn(&str) -> PathBuf) -> io::Result<()> {
+        let numbered = |number: usize| suffixed(&format!(".{number}"));
+        for number in (1..self.rotation.keep).rev() {
+            match fs::rename(numbered(number), numbered(number + 1)) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+        }
+        fs::rename(&self.path, numbered(1))?;
+        fs::rename(fresh, &self.path).inspect_err(|_| {
+            // the writer keeps its file: under its own name again
+            let _ = fs::rename(numbered(1), &self.path);
+        })
+    }
+}
+
+/// A new, empty, private file at `path` for appending (one left there by a rotation that stopped half way is
+/// replaced).
+fn new_private(path: &Path) -> io::Result<File> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let file = OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .mode(FILE_MODE)
+        .open(path)?;
+    file.set_permissions(Permissions::from_mode(FILE_MODE))?;
+    Ok(file)
 }
