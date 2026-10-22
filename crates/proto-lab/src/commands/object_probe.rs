@@ -1,6 +1,8 @@
 //! `proto-lab probe object <alias> <id> [--save <name>]`: what the async gateway answers about one media service
 //! (AMS) object to the account's own `ic3` token. Read-only (M2 Task 21, `docs/backlog/ams-image-sending.md`): does
-//! the object's read list who may read it, and completely?
+//! the object's read list who may read it, and completely? It doesn't: the object M2 Task 21 created once for the a–b
+//! chat answered its creator and the chat's other member with eight keys of metadata, none naming a reader, and c with
+//! a 403 (`docs/protocol/chat.md`, "Images"). The probe stays for a revisit of the backlog item.
 //!
 //! 1. The id must be one path segment of the form the media service gives ([`is_object_id`]); a bad one fails before
 //!    anything is asked. The account's `ic3` access token is refreshed from its stored refresh token

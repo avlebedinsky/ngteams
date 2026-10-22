@@ -180,7 +180,7 @@ enum ProbeCommand {
     Object {
         /// The lab account whose token reads: a, b or c.
         alias: Alias,
-        /// The object's id, as `ab-image-object` notes it.
+        /// The object's id, as its creation answered it (`{"id": …}`).
         id: String,
         /// Also write the answers as a sanitized local reference copy under the lab's reference/ dir, such as
         /// `ams/object-a` (never inside a git work tree).

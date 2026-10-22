@@ -207,7 +207,6 @@ async fn write_kinds_are_distinct_and_named() {
         "chat_create",
         "channel_post",
         "bot_reply",
-        "media_object",
     ] {
         assert!(names.contains(name), "missing write kind {name}");
     }

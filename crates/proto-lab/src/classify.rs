@@ -21,8 +21,7 @@
 //! [`Classification::Unknown`]. A run that chats over the push channel adds the messaging stack's endpoint
 //! registration ([`Classifier::messaging`]); a run that calls, the calling stack's own-state and its call start
 //! ([`Classifier::calling`]). Any method other than the three reading ones counts as mutating, including ones the
-//! classifier has never heard of. One experiment adds the media service's object creation for one conversation, in its
-//! exact captured shape ([`Classifier::with_media_object_creation`], [`crate::media`]); nothing else maps it.
+//! classifier has never heard of.
 //!
 //! An own-state rule matches the method, the exact origin (scheme, host and port), the path segment by segment (a `*`
 //! segment stands for exactly one non-empty segment, an Entra tenant) and the query ([`QueryRule`]): the seeded rules
@@ -306,8 +305,6 @@ pub struct Classifier {
     messaging: bool,
     /// The participant the web client's test call is for: the echo service `lab.toml` approves.
     test_call_callee: Option<Mri>,
-    /// The one conversation an AMS object may be created for ([`Classifier::with_media_object_creation`]).
-    media_object_chat: Option<String>,
 }
 
 impl Classifier {
@@ -335,7 +332,6 @@ impl Classifier {
             calling: false,
             messaging: false,
             test_call_callee: None,
-            media_object_chat: None,
         }
     }
 
@@ -379,17 +375,6 @@ impl Classifier {
     #[must_use]
     pub fn with_test_call_callee(mut self, callee: Mri) -> Self {
         self.test_call_callee = Some(callee);
-        self
-    }
-
-    /// The same classifier, also mapping the media service's object creation for the conversation `chat` alone, in its
-    /// exact captured shape ([`crate::media::object_creation`]), to a [`WriteKind::MediaObject`] on that conversation
-    /// the fence judges. Only `ab-image-object` uses it (M2 Task 21), with the a–b chat: the object's content and any
-    /// later reader stay unmapped and denied. An id that isn't a chat's (`19:…@unq.gbl.spaces` or `19:…@thread.v2`) maps
-    /// nothing.
-    #[must_use]
-    pub fn with_media_object_creation(mut self, chat: &str) -> Self {
-        self.media_object_chat = chat_scope(chat).map(|_| chat.to_owned());
         self
     }
 
@@ -455,11 +440,6 @@ impl Classifier {
             if let Some(target) = crate::calling::call_start(&method, &url, body, self.test_call_callee.as_ref()) {
                 return Classification::Write(target);
             }
-        }
-        if let Some(chat) = &self.media_object_chat
-            && let Some(target) = crate::media::object_creation(&method, &url, headers, body, chat)
-        {
-            return Classification::Write(target);
         }
         if !self.writes {
             return Classification::Unknown;

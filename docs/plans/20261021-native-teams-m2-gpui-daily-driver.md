@@ -1129,30 +1129,36 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 - Modify: as `docs/backlog/ams-image-sending.md` lists (`crates/proto-lab/src/classify.rs`), `docs/protocol/chat.md`,
   `docs/protocol/endpoints.md`, the backlog item
 
-- [ ] the backlog item's step 1: tests first for a reviewed one-time mapping of exactly the captured object creation
+- [x] the backlog item's step 1: tests first for a reviewed one-time mapping of exactly the captured object creation
       (the async gateway host only, the captured headers and body, one `permissions` key that is the a–b chat),
       judged by `Fence::check`, uploads and forwards still denied (tests that they are)
-- [ ] live: the object created once, then a read-only `GET` of it: does it list its readers, completely? Decide with
+- [x] live: the object created once, then a read-only `GET` of it: does it list its readers, completely? Decide with
       Codex whether that read is authoritative; recorded in `chat.md` and the backlog item; a breached run as
       CLAUDE.md says
-- [ ] if it isn't: images stay deferred, shown as a placeholder with an "open in Teams on the web" link (tests), Task 22
+- [x] if it isn't: images stay deferred, shown as a placeholder with an "open in Teams on the web" link (tests), Task 22
       is skipped, and the backlog item records what this task learned
-- [ ] `cargo test -p proto-lab -p teams-ui` and the gate pass
+- [x] `cargo test -p proto-lab -p teams-ui` and the gate pass
+- Done 2026-10-22: the creation was mapped once (`ab-image-object`, judged by `Fence::check` for the a–b chat, let
+  out once per run, uploads and forwards force-denied) and created live twice (the first run breached by a system
+  suspend 15 s after the creation, the second clean); `proto-lab probe object` read it: 200 to a and b, 403 to c,
+  eight keys of metadata and no reader. Not authoritative (decided with Codex): images stay deferred, Task 22
+  skipped, the mapping removed again in the same task (kept in its first commit), the read-only probe kept, an image
+  shown as a placeholder with a link to its message in Teams on the web (`docs/protocol/chat.md`, the backlog item).
 
 ### Task 22: Images (2/2): send and show (only if Task 21 found the read authoritative)
 **Files:**
 - Modify: `crates/proto-lab/src/classify.rs`, `crates/teams-proto/src/{endpoint.rs,http.rs,own.rs,write/*,chat/*}`,
   `crates/teams-core/src/*`, `crates/teams-ui/src/*`, `docs/protocol/{chat.md,endpoints.md}`
 
-- [ ] tests first: the upload judged by a fresh read of the object's readers (all lab accounts), the forward race
+- [x] (skipped: Task 21 found the read not authoritative) tests first: the upload judged by a fresh read of the object's readers (all lab accounts), the forward race
       assessed and recorded; the captured upload answer and message post mapped
-- [ ] tests first: a native `SendImage` (object, upload, post), each step fenced; pasting an image into compose sends
+- [x] (skipped: Task 21 found the read not authoritative) tests first: a native `SendImage` (object, upload, post), each step fenced; pasting an image into compose sends
       it
-- [ ] tests first: viewing: the media service's token exchange (`/v1/skypetokenauth`) reviewed as own-state in its
+- [x] (skipped: Task 21 found the read not authoritative) tests first: viewing: the media service's token exchange (`/v1/skypetokenauth`) reviewed as own-state in its
       captured shape; images fetched by `GET` from the async gateway only; thumbnail inline, full size on click; the
       bytes reach the view only from the engine
-- [ ] live: a sends an image to b natively; b's app shows it
-- [ ] `cargo test -p proto-lab -p teams-proto -p teams-core -p teams-ui -p fence-seal` and the gate pass
+- [x] (skipped: Task 21 found the read not authoritative) live: a sends an image to b natively; b's app shows it
+- [x] (skipped: Task 21 found the read not authoritative) `cargo test -p proto-lab -p teams-proto -p teams-core -p teams-ui -p fence-seal` and the gate pass
 
 ### Task 23: Received files
 **Files:**
