@@ -20,6 +20,8 @@
 //!   chat's members) into a message, Enter sends, replies and edits, typing; every write through the engine.
 //! - [`search`]: local search (Ctrl+Shift+F, and the switcher's messages) over the messages the store holds, never the
 //!   service's search; a hit opens its chat at the message.
+//! - [`teams_list`]: the Teams rail's list, the account's teams and their channels (M2 Task 16); [`channel_view`] a
+//!   channel's posts with their reply chains, read-only: no composer, and no write a channel could take.
 //! - [`settings`]: the settings and their file (`0600` in a `0700` directory; defaults for what can't be read);
 //!   [`settings_view`] changes them.
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
@@ -37,10 +39,11 @@
 //! one (nothing here hands GPUI another), so an image URL loads nothing. Pictures reach a view only as bytes from
 //! the engine ([`people`]).
 //!
-//! M2 Tasks 6–15 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+//! M2 Tasks 6–16 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod bridge;
 pub mod bus;
+pub mod channel_view;
 pub mod chat_list;
 pub mod chat_view;
 pub mod compose;
@@ -55,6 +58,7 @@ pub mod settings;
 pub mod settings_view;
 pub mod shell;
 pub mod switcher;
+pub mod teams_list;
 pub mod theme;
 pub mod trace;
 pub mod tray;
@@ -62,6 +66,7 @@ pub mod view;
 pub mod window;
 
 pub use bridge::{Bridge, Core, EventSource, StoppedCore};
+pub use channel_view::ChannelView;
 pub use chat_list::{ChatList, ChatListEvent, ChatRow};
 pub use chat_view::{ChatView, ChatViewEvent, MessageAction};
 pub use compose::{Compose, ComposeEvent, ComposeParts};
@@ -73,6 +78,7 @@ pub use search::{Hit, HitTarget, Search, SearchEvent};
 pub use settings::{Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};
 pub use switcher::Switcher;
+pub use teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
 pub use trace::{TraceId, TraceLine, ViewTrace};
 pub use tray::{Tray, TrayEvent, TrayIcon};
 pub use view::Root;

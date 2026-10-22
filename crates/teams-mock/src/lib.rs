@@ -22,7 +22,8 @@
 //! 1:1 chat holding the messages of `messages.json` (an add-member event, plain, edited, quoted and deleted
 //! messages); an empty a–c chat (`conversations.json`); an empty a–x chat with the outsider; the a–b–c group chat of
 //! `thread-group.json`; and, in a's list only, a team channel and a's notifications stream (`conversations.json`),
-//! both read-only. The ids are the constants below, made up (never a real tenant's).
+//! both read-only; the team's other channel, read-only, in nobody's list, holding the posts and replies of
+//! `channel-messages.json` (M2 Task 16). The ids are the constants below, made up (never a real tenant's).
 //!
 //! **What it serves** (paths under [`CHAT_BASE`]):
 //! - reads: the conversation list (`GET v1/users/ME/conversations`, and the sync link it hands out, which names the
@@ -34,6 +35,10 @@
 //!   …/conversations/<id>/properties?name=consumptionhorizon`) and chat creation (`POST v1/threads`). Each changes
 //!   the state every later read shows and queues a [`ChatEvent`] for each **other** member of the chat
 //!   ([`ChatServiceMock::take_events`]); the writer gets none.
+//!
+//! **CSA** (`csa.rs`, M2 Task 16): its one read the native client sends, the account's teams and their channels (`GET
+//! /api/csa/<region>/api/v3/teams/users/me` with the web client's query), from `tests/fixtures/csa/teams.json`, under
+//! the CSA base `https://teams.microsoft.com/api/csa/amer`, taking the account's token alone.
 //!
 //! **Trouter** ([`ChatServiceMock::start_trouter`], `trouter.rs`): connect, authenticate, `trouter.connected`, pings,
 //! the deliveries of the queued events and their replay on connect, from the synthetic `tests/fixtures/trouter/`
@@ -55,6 +60,7 @@
 //! and its own capabilities aren't known, so they aren't made up.
 
 mod chatsvc;
+mod csa;
 mod fixtures;
 mod reads;
 mod trouter;
@@ -77,6 +83,10 @@ pub const REGION: &str = "amer";
 /// The chat base a client is built with (`chatServiceAfd` as the region's GTMs give it); its requests go to
 /// [`ChatServiceMock::origin`] with this base's path.
 pub const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
+
+/// The CSA base a client is given (`chatSvcAggAfd` as the region's GTMs give it); its requests go to
+/// [`ChatServiceMock::origin`] with this base's path.
+pub const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/amer";
 
 /// The regional host the service names new resources on in a 201's `Location` (`docs/protocol/fence-targets.md`).
 pub const REGIONAL_HOST: &str = "https://amer.ng.msg.teams.microsoft.com";
@@ -120,8 +130,12 @@ pub fn lab_toml(data_dir: &std::path::Path) -> String {
     format!("data_dir = {:?}\n{accounts}", data_dir.display().to_string())
 }
 
-/// A team channel in a's list: read-only.
+/// A team channel in a's list: read-only. It is the team's id and its general channel's (`csa/teams.json`).
 pub const CHANNEL: &str = "19:channel0001@thread.tacv2";
+/// The team's other channel (`csa/teams.json`, and the team's `topics` in `conversations.json`): a, b and c are its
+/// members, it holds the posts and replies of `channel-messages.json`, it is in nobody's conversation list (the chat
+/// service lists a team's general channel only), and its thread is a `topic`. Read-only.
+pub const TEAM_CHANNEL: &str = "19:channel0002@thread.tacv2";
 /// a's notifications stream: read-only.
 pub const NOTIFICATIONS: &str = "48:notifications";
 

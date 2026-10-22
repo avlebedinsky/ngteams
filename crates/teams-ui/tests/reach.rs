@@ -455,3 +455,28 @@ fn the_search_is_the_store_s_and_never_the_service_s() {
     let services = fs::read_to_string(workspace_root().join("crates/teams-proto/src/endpoint.rs")).expect("UTF-8");
     assert!(!services.to_lowercase().contains("substrate"), "no Service for it");
 }
+
+/// Teams and channels are read-only (M2 Task 16): no write type of the native client targets a channel post's kind
+/// (`teams-proto` maps none: a channel write needs a team of the lab accounts only first, the backlog's
+/// `channel-writes-need-a-lab-only-team.md`), and the views that show teams and channels hold no write, no composer and
+/// no transient: nothing there can post, reply, react, mark read or type.
+#[test]
+fn no_channel_write_exists_and_the_teams_views_write_nothing() {
+    let proto = workspace_root().join("crates/teams-proto/src");
+    let mut read = 0;
+    for (path, text) in sources(&proto) {
+        read += 1;
+        assert!(
+            !text.contains("WriteKind::ChannelPost"),
+            "{} maps a channel write",
+            path.display()
+        );
+    }
+    assert!(read >= 10, "teams-proto's sources were read ({read} files)");
+    for view in ["teams_list.rs", "channel_view.rs"] {
+        let text = fs::read_to_string(workspace_root().join("crates/teams-ui/src").join(view)).expect("UTF-8");
+        for writes in [".write(", ".resend(", ".transient(", "Action::", "Compose", "compose::"] {
+            assert!(!text.contains(writes), "{view} names {writes}");
+        }
+    }
+}

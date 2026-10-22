@@ -79,7 +79,7 @@ fn chat_in_focus(window: WindowHandle<KitRoot>, cx: &mut App) -> Option<String> 
             let root = kit.view().clone().downcast::<Root>().ok()?;
             let shell = root.read(cx).shell()?.clone();
             match shell.read(cx).main() {
-                Main::Chat(id) => Some(id.clone()),
+                Main::Chat(id) | Main::Channel(id) => Some(id.clone()),
                 Main::Nothing | Main::Settings => None,
             }
         })

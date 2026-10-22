@@ -16,6 +16,8 @@
 //!   and kept in the store.
 //! - [`search`]: local search: each message's plain text handed to the store's index as it is stored, and the
 //!   messages stored before indexed by a backfill in batches.
+//! - [`teams`]: the account's teams and their channels, read from CSA in the background and kept in the store;
+//!   read-only, as a channel's posts are.
 //! - [`lab`]: a lab account's engine, assembled as every lab binary builds it (its session over the secret store the
 //!   binary hands in).
 //!
@@ -28,6 +30,7 @@ pub mod outbox;
 pub mod profiles;
 pub mod search;
 pub mod sync;
+pub mod teams;
 
 pub use engine::{
     Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, Parts, Push,
@@ -44,3 +47,4 @@ pub use sync::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, Gaps, MAX_PAGES, StoredMessage,
     Synced,
 };
+pub use teams::{TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};

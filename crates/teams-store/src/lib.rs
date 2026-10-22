@@ -10,6 +10,8 @@
 //!   rows of runs that have ended (each open run holds a lock of its own, `runs`); one engine per account holds the
 //!   engine lock ([`Store::engine_lock`]);
 //! - [`search`]: local search over the messages' plain text (FTS5), the text the core hands in (M2 Task 15);
+//! - [`teams`]: the account's teams and their channels as CSA last listed them, and each stored channel message's
+//!   post (M2 Task 16);
 //! - [`schema`]: the migrations, applied in order on open.
 //!
 //! Every versioned write is an upsert that never lets an older version overwrite a newer one, so a Trouter delivery
@@ -27,6 +29,7 @@ mod runs;
 pub mod schema;
 pub mod search;
 pub mod state;
+pub mod teams;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -41,6 +44,7 @@ pub use profiles::{NameSource, PictureState, Profile, StoredPicture};
 pub use schema::SCHEMA_VERSION;
 pub use search::{IndexCursor, IndexText, SearchHit};
 pub use state::{ReadHorizon, SyncState};
+pub use teams::{Team, TeamChannel};
 
 /// How long a write waits for another connection's lock (a second process on the same account) before it fails.
 /// Every transaction takes the write lock when it begins (`BEGIN IMMEDIATE`), so one that reads before it writes

@@ -11,7 +11,7 @@ use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{Action, Answer, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
-    ReadHorizon, SearchHit,
+    ReadHorizon, SearchHit, Team,
 };
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
@@ -87,6 +87,12 @@ pub struct FakeCore {
     pub earlier: Mutex<Vec<OutboxEntry>>,
     /// Every search asked for, its query, in order.
     pub searches: Mutex<Vec<String>>,
+    /// The account's teams as the store has them; `None` before a read settled them.
+    pub teams: Mutex<Option<Vec<Team>>>,
+    /// Per channel, the post each stored message belongs to.
+    pub roots: Mutex<HashMap<String, Vec<(String, String)>>>,
+    /// Every conversation a sync was asked for, in order.
+    pub synced: Mutex<Vec<String>>,
 }
 
 impl Default for FakeCore {
@@ -118,6 +124,9 @@ impl Default for FakeCore {
             unsettled_before_hold: Mutex::new(0),
             earlier: Mutex::default(),
             searches: Mutex::default(),
+            teams: Mutex::default(),
+            roots: Mutex::default(),
+            synced: Mutex::default(),
         }
     }
 }
@@ -397,6 +406,21 @@ impl Core for FakeCore {
             });
             hits.truncate(limit);
             hits
+        })
+    }
+
+    fn teams(&self) -> Reply<Option<Vec<Team>>> {
+        self.answer("teams", || locked(&self.teams).clone())
+    }
+
+    fn sync_conversation(&self, conversation: String) -> Reply<Synced> {
+        locked(&self.synced).push(conversation);
+        self.answer("sync_conversation", Synced::default)
+    }
+
+    fn reply_roots(&self, conversation: String) -> Reply<Vec<(String, String)>> {
+        self.answer("reply_roots", || {
+            locked(&self.roots).get(&conversation).cloned().unwrap_or_default()
         })
     }
 }

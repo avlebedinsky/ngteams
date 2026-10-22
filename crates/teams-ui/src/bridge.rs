@@ -21,7 +21,7 @@ use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{Action, EngineHandle, EngineRequests, Event, Person, Reply, Transient, TransientSent};
 use teams_store::{
-    Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit,
+    Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
 };
 use tokio::sync::oneshot;
 
@@ -71,6 +71,13 @@ pub trait Core: Send + Sync + 'static {
     /// newest first: the store's own index, never the service's search. The other conversations' messages are left
     /// out before the hits are counted.
     fn search(&self, query: String, within: Vec<String>, limit: usize) -> Reply<Vec<SearchHit>>;
+    /// The account's teams with their channels, from the store (`None` before a read settled them); a read starts in
+    /// the background when they are missing or old, and a change comes as `Event::Teams` (M2 Task 16).
+    fn teams(&self) -> Reply<Option<Vec<Team>>>;
+    /// Syncs one conversation's messages from the service now: how a channel's posts are read.
+    fn sync_conversation(&self, conversation: String) -> Reply<Synced>;
+    /// The post each stored message of a channel belongs to, as (message id, post id).
+    fn reply_roots(&self, conversation: String) -> Reply<Vec<(String, String)>>;
 }
 
 impl Core for EngineRequests {
@@ -148,6 +155,18 @@ impl Core for EngineRequests {
 
     fn search(&self, query: String, within: Vec<String>, limit: usize) -> Reply<Vec<SearchHit>> {
         EngineRequests::search_in(self, query, within, limit)
+    }
+
+    fn teams(&self) -> Reply<Option<Vec<Team>>> {
+        EngineRequests::teams(self)
+    }
+
+    fn sync_conversation(&self, conversation: String) -> Reply<Synced> {
+        EngineRequests::sync_conversation(self, conversation)
+    }
+
+    fn reply_roots(&self, conversation: String) -> Reply<Vec<(String, String)>> {
+        EngineRequests::reply_roots(self, conversation)
     }
 }
 
@@ -244,6 +263,18 @@ impl Core for StoppedCore {
     }
 
     fn search(&self, _: String, _: Vec<String>, _: usize) -> Reply<Vec<SearchHit>> {
+        stopped()
+    }
+
+    fn teams(&self) -> Reply<Option<Vec<Team>>> {
+        stopped()
+    }
+
+    fn sync_conversation(&self, _: String) -> Reply<Synced> {
+        stopped()
+    }
+
+    fn reply_roots(&self, _: String) -> Reply<Vec<(String, String)>> {
         stopped()
     }
 }

@@ -4,7 +4,8 @@
 //! credential broker's socket for the sandboxed app), the chat base from the region record `proto-lab auth` saved
 //! ([`LabPaths::region_file`], read by [`Region::load`]), the 1:1 chats' and the lab group chat's members read live
 //! ([`LiveMembershipSource::for_fence`], its credential the chat transport's), the store at [`LabPaths::store_file`],
-//! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's), the lab
+//! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's) and CSA's from the
+//! GTM `chatSvcAggAfd` (the teams read's), the lab
 //! accounts' names as lab.toml has them ([`known_names`]), and the push channel ([`Trouter`]) when asked for.
 //!
 //! Nothing here reads or prints a token, and nothing is sent while the engine is built: the session asks its store for
@@ -93,6 +94,7 @@ pub fn start<S: SecretStore + 'static>(
         || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base),
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
+    let reads = with_csa(reads, session.service_base(CSA_GTM).as_deref())?;
     let client = Arc::new(Client::new(reads));
     let push = if push {
         Some(Push::new(Trouter::new(
@@ -138,6 +140,23 @@ fn with_middle_tier<C: Credentials>(
 
 /// The GTM the middle tier's base comes from (the profile lookup's).
 pub const MIDDLE_TIER_GTM: &str = "middleTier";
+
+/// The GTM CSA's base comes from (the teams read's).
+pub const CSA_GTM: &str = "chatSvcAggAfd";
+
+/// The reads' transport with CSA's base (the teams read's) when the region has one the transport accepts. Without
+/// one, or with one of another form (logged, without its value), the teams read is refused and the Teams list stays
+/// empty: an optional read never stops the engine.
+fn with_csa<C: Credentials>(reads: HttpTransport<C>, csa: Option<&str>) -> Result<HttpTransport<C>, BuildError> {
+    match csa {
+        Some(base) if HttpTransport::<C>::accepts_csa_base(base) => reads.with_csa(base),
+        Some(_) => {
+            log::warn!("the region's chatSvcAggAfd base isn't of the form the transport accepts: no teams read");
+            Ok(reads)
+        }
+        None => Ok(reads),
+    }
+}
 
 /// The lab accounts' names as lab.toml has them ([`display_name`]), by MRI: the last a person's name comes from.
 #[must_use]
@@ -209,6 +228,26 @@ mod tests {
             "not a url",
         ] {
             assert!(!reads(Some(other)).unwrap().has_middle_tier(), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_csa_base_of_another_form_leaves_the_reads_without_the_teams_read_and_the_middle_tier_kept() {
+        let middle_tier = Some("https://teams.microsoft.com/api/mt/part/amer-03");
+        let given = with_csa(
+            reads(middle_tier).unwrap(),
+            Some("https://teams.microsoft.com/api/csa/amer"),
+        )
+        .unwrap();
+        assert!(given.has_csa() && given.has_middle_tier());
+        assert!(!with_csa(reads(None).unwrap(), None).unwrap().has_csa());
+        for other in [
+            "https://chatsvcagg.teams.microsoft.com/api/csa/amer",
+            "https://teams.microsoft.com/api/csa/AMER",
+            "not a url",
+        ] {
+            let kept = with_csa(reads(middle_tier).unwrap(), Some(other)).unwrap();
+            assert!(!kept.has_csa() && kept.has_middle_tier(), "{other}");
         }
     }
 }

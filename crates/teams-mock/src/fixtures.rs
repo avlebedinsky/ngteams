@@ -1,5 +1,6 @@
 //! The synthetic chat fixtures the mock is built from, embedded at compile time, with their placeholders filled in
-//! with the mock's made-up ids. Only `tests/fixtures/chatsvc/` is read: no capture, no reference copy.
+//! with the mock's made-up ids. Only `tests/fixtures/chatsvc/` and `tests/fixtures/csa/` are read: no capture, no
+//! reference copy.
 
 use std::fmt;
 
@@ -8,8 +9,13 @@ use wiremock::ResponseTemplate;
 
 use crate::{ABC_CHAT, LAB_A, LAB_B, LAB_C, REGION, TENANT};
 
-/// Every fixture the mock reads, by its file name under `tests/fixtures/chatsvc/`.
-pub(crate) const SOURCES: [(&str, &str); 9] = [
+/// Every fixture the mock reads, by its file name under `tests/fixtures/chatsvc/` (CSA's under `csa/`).
+pub(crate) const SOURCES: [(&str, &str); 11] = [
+    (
+        "channel-messages.json",
+        include_str!("../../../tests/fixtures/chatsvc/channel-messages.json"),
+    ),
+    ("csa/teams.json", include_str!("../../../tests/fixtures/csa/teams.json")),
     (
         "conversations.json",
         include_str!("../../../tests/fixtures/chatsvc/conversations.json"),
@@ -117,6 +123,10 @@ pub(crate) struct Fixtures {
     pub(crate) entries: Vec<Value>,
     /// The a–b chat's messages (`messages.json`: the sync read's and the read around a time's), oldest first.
     pub(crate) ab_messages: Vec<Value>,
+    /// The team channel's messages (`channel-messages.json`), oldest first.
+    pub(crate) channel_messages: Vec<Value>,
+    /// CSA's teams read (`csa/teams.json`): the answer's body.
+    pub(crate) teams: Value,
     /// A thread read (`thread-group.json`).
     pub(crate) thread: Value,
     /// A member list (`thread-group-members.json`).
@@ -152,9 +162,16 @@ impl Fixtures {
             ab_messages.extend(page.iter().cloned());
         }
         ab_messages.sort_by_key(|message| message["sequenceId"].as_u64());
+        let mut channel_messages = body("channel-messages.json")?["messages"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| FixtureError("channel-messages.json: no messages".to_owned()))?;
+        channel_messages.sort_by_key(|message| message["sequenceId"].as_u64());
         Ok(Self {
             entries,
             ab_messages,
+            channel_messages,
+            teams: body("csa/teams.json")?,
             thread: body("thread-group.json")?,
             members: body("thread-group-members.json")?,
             filtered: Answer::of(&parsed("thread-group-filtered.json")?, "thread-group-filtered.json")?,

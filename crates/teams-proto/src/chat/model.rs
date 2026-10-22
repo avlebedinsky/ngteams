@@ -213,7 +213,8 @@ pub enum ConversationKind {
     OneToOne,
     /// `threadType` `chat` with a group chat's id (`19:<id>@thread.v2`, not a meeting's).
     Group,
-    /// `threadType` `space`: a team, read as its general channel (its other channels in `topics`). Read-only.
+    /// `threadType` `space`: a team, read as its general channel (its other channels in `topics`); or `topic`: one of
+    /// its other channels (M2 Task 16's probe read a standard channel's thread with that type). Read-only.
     Channel,
     /// `threadType` `streamofnotifications`: the account's activity feed (`48:notifications`). Read-only.
     Notifications,
@@ -229,7 +230,7 @@ impl ConversationKind {
         match thread_type {
             Some("chat") if one_to_one_pair(id).is_some() => Self::OneToOne,
             Some("chat") if is_group_chat_id(id) => Self::Group,
-            Some("space") => Self::Channel,
+            Some("space" | "topic") => Self::Channel,
             Some("streamofnotifications") => Self::Notifications,
             other => Self::Unknown(other.unwrap_or_default().to_owned()),
         }
@@ -408,6 +409,20 @@ impl Message {
         let from = self.from.as_deref()?;
         let (_, last) = from.rsplit_once("/contacts/")?;
         (!last.is_empty() && !last.contains('/')).then_some(last)
+    }
+
+    /// The post a channel's message belongs to (its reply chain's root): the `;messageid=<post>` its `conversationLink`
+    /// ends with (`…/conversations/<channel>;messageid=<post>`), when the link names `conversation` and the post is an
+    /// id of digits. M2 Task 16's probe saw every message of a channel's page carry one: a post names itself, a reply
+    /// its post. `None` for anything else (a chat's message, whose link names the chat alone).
+    #[must_use]
+    pub fn reply_root(&self, conversation: &str) -> Option<String> {
+        let link = self.extra.get("conversationLink")?.as_str()?;
+        let (_, last) = link.rsplit_once("/conversations/")?;
+        let last = percent_encoding::percent_decode_str(last).decode_utf8().ok()?;
+        let (channel, post) = last.split_once(";messageid=")?;
+        let digits = !post.is_empty() && post.bytes().all(|byte| byte.is_ascii_digit());
+        (channel == conversation && digits).then(|| post.to_owned())
     }
 
     /// `originalarrivaltime` in ms since the epoch.

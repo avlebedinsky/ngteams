@@ -145,6 +145,9 @@ fn handle(state: &mut State, request: &Request) -> ResponseTemplate {
     if let Some(answer) = crate::trouter::registrar(state, request) {
         return answer;
     }
+    if let Some(answer) = crate::csa::teams(state, request) {
+        return answer;
+    }
     let route = chat_path(request).and_then(|path| Route::of(request.method.as_str(), &path));
     let thread_read = matches!(route, Some(Route::Thread { .. }));
     let Some(caller) = authenticate(state, request, thread_read) else {

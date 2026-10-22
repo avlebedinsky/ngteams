@@ -45,6 +45,12 @@
 //!   backfill that runs from the engine's start, a batch at a time ([`EngineOptions::index_batch`]) between the
 //!   loop's other work and the runtime's other tasks, told as [`Event::Indexed`] once it is over. A search in some
 //!   conversations only ([`EngineRequests::search_in`]) leaves the others out before it counts the hits.
+//! - **Teams and channels** (M2 Task 16, read-only): the account's teams with their channels
+//!   ([`EngineRequests::teams`]), from the store, read from CSA in the background when the stored list is missing or
+//!   old ([`crate::teams`]), each change of the list told as [`Event::Teams`]; a channel's posts and replies synced
+//!   on demand like any conversation's ([`EngineRequests::sync_conversation`]: a channel other than a team's general
+//!   one is in no conversation list, so no catch-up reaches it), and the post each stored channel message belongs to
+//!   ([`EngineRequests::reply_roots`]). Nothing is written there: a channel has no write type.
 //! - **Transient writes** ([`EngineRequests::transient`]: typing) go out through the outbox too, but as no row
 //!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
 //!   once and briefly ([`crate::MAX_TRANSIENT_WAIT`]), and a message post to its conversation drops it (told as
@@ -80,7 +86,7 @@ use teams_proto::chat::{self, MessageText};
 use teams_proto::{Client, Credentials, HttpError, HttpTransport, Transport};
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
-    ReadHorizon, SearchHit, Store, StoreError,
+    ReadHorizon, SearchHit, Store, StoreError, Team,
 };
 use teams_trouter::{
     Change, ChatEvent, Delivery, Down, MessageLoss, PushEvent, RegistrationReport, Stop, Trouter, TrouterCredentials,
@@ -93,6 +99,7 @@ use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
 use crate::search::{Backfill, INDEX_BATCH, Step};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
+use crate::teams::{TEAMS_RETRY, Teams, TeamsReadError};
 
 /// How the engine paces itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +114,9 @@ pub struct EngineOptions {
     pub profile_retry: Duration,
     /// How many stored messages one step of the search backfill indexes at most ([`crate::search`]): [`INDEX_BATCH`].
     pub index_batch: usize,
+    /// How long after a read of the teams that failed a view's asking reads them again, at the soonest
+    /// ([`crate::teams`]): [`TEAMS_RETRY`].
+    pub teams_retry: Duration,
 }
 
 impl Default for EngineOptions {
@@ -116,6 +126,7 @@ impl Default for EngineOptions {
             catch_up_retry: Duration::from_secs(30),
             profile_retry: PROFILE_RETRY,
             index_batch: INDEX_BATCH,
+            teams_retry: TEAMS_RETRY,
         }
     }
 }
@@ -217,7 +228,8 @@ pub enum Source {
     /// A delivery the service had made before and made again (`mstore`).
     Replay,
     /// A read that brought the store up to date with the service: a catch-up, the sync after a write or after a
-    /// delivery's new conversation, the outbox's check.
+    /// delivery's new conversation, the outbox's check, a conversation's sync asked for
+    /// ([`EngineRequests::sync_conversation`]: a channel opened).
     CatchUp,
     /// Older history, read on [`EngineRequests::load_older`].
     History,
@@ -290,6 +302,9 @@ pub enum Event {
     /// Someone's stored name or picture changed (a lookup in the background stored it): a view that shows them asks
     /// for them again ([`EngineRequests::person`]).
     Profile { mri: String },
+    /// The stored teams changed (a read in the background stored a list that differs): a view that shows them asks
+    /// for them again ([`EngineRequests::teams`]).
+    Teams,
     /// Something the engine did on its own failed: what, and why.
     Failed { during: &'static str, error: EngineError },
     /// The search backfill is over: every message the store held when the engine started (or that a run before left
@@ -307,6 +322,8 @@ pub enum EngineError {
     Outbox(#[from] OutboxError),
     #[error(transparent)]
     CatchUp(#[from] CatchUpError),
+    #[error("the teams can't be read: {0}")]
+    Teams(#[from] TeamsReadError),
     #[error("no message {message} in conversation {conversation} in the store")]
     UnknownMessage { conversation: String, message: String },
     #[error("message {message} isn't the account's own, so it can't be {action}")]
@@ -393,7 +410,9 @@ enum Request {
     Transient(Transient, Responder<TransientSent>),
     Sync(Responder<CatchUpReport>),
     LoadOlder(String, Responder<Option<Synced>>),
+    SyncConversation(String, Responder<Synced>),
     Person(String, Responder<Person>),
+    Teams(Responder<Option<Vec<Team>>>),
     Query(Query),
     Shutdown,
 }
@@ -425,6 +444,7 @@ enum Query {
     OutboxEntry(i64, Responder<Option<OutboxEntry>>),
     OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
     LeftByEarlierRuns(Responder<Vec<OutboxEntry>>),
+    ReplyRoots(String, Responder<Vec<(String, String)>>),
     Search {
         query: String,
         /// The conversations to look in; every one when `None`.
@@ -482,6 +502,30 @@ impl EngineRequests {
     pub fn load_older(&self, conversation: impl Into<String>) -> Reply<Option<Synced>> {
         let conversation = conversation.into();
         self.ask(|reply| Request::LoadOlder(conversation, reply))
+    }
+
+    /// Syncs one conversation's messages from the service now ([`CatchUp::sync_messages`]: its newest page the first
+    /// time, what changed since afterwards; one the store doesn't know is read as a thread first). What it stored comes
+    /// as [`Event::Message`] ([`Source::CatchUp`]). For a channel other than a team's general one, which no
+    /// conversation list (and so no catch-up) brings, this is the only way its posts are read.
+    pub fn sync_conversation(&self, conversation: impl Into<String>) -> Reply<Synced> {
+        let conversation = conversation.into();
+        self.ask(|reply| Request::SyncConversation(conversation, reply))
+    }
+
+    /// The account's teams with their channels, from the store; `None` before a read of them settled. A read from
+    /// CSA starts in the background when the stored list is missing or old, and a change it stores comes as
+    /// [`Event::Teams`] ([`crate::teams`]).
+    pub fn teams(&self) -> Reply<Option<Vec<Team>>> {
+        self.ask(Request::Teams)
+    }
+
+    /// The post each stored message of a channel belongs to, as (message id, post id) in no set order: a post's is
+    /// its own id; a message stored without one recorded (a chat's, or a channel's read before posts were kept) has
+    /// none.
+    pub fn reply_roots(&self, conversation: impl Into<String>) -> Reply<Vec<(String, String)>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::ReplyRoots(conversation, reply))
     }
 
     /// Up to `limit` stored conversations, the latest activity first.
@@ -740,6 +784,7 @@ struct Core<C, T> {
     outbox: Arc<Outbox<T>>,
     catch_up: CatchUp<C, T>,
     profiles: Profiles<C>,
+    teams: Teams<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -768,12 +813,14 @@ where
             parts.known_names,
             parts.options.profile_retry,
         );
+        let teams = Teams::new(Arc::clone(&parts.client), parts.options.teams_retry);
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
         Self {
             store: parts.store,
             outbox,
             catch_up,
             profiles,
+            teams,
             events,
             options: parts.options,
             push: parts.push,
@@ -800,7 +847,9 @@ where
                     None => push = None,
                 },
                 _ = tick.tick() => self.on_tick().await,
-                looked = self.profiles.next(), if self.profiles.busy() => self.on_looked(looked),
+                done = background(&mut self.profiles, &mut self.teams), if self.profiles.busy() || self.teams.busy() => {
+                    self.on_background(done);
+                }
                 // ready once the runtime's other tasks had their turn (the push channel's, on this current-thread
                 // runtime: an always-ready branch would never let them run until the backfill is over), and
                 // `select!` picks among the ready branches at random, so a request or an event waits at most for one
@@ -933,9 +982,17 @@ where
                 self.arrived(&[]);
                 let _ = reply.send(older.map_err(EngineError::from));
             }
+            Request::SyncConversation(conversation, reply) => {
+                let synced = self.catch_up.sync_messages(&mut self.store, &conversation).await;
+                let _ = reply.send(synced.map_err(EngineError::from));
+            }
             Request::Person(mri, reply) => {
                 let person = self.profiles.person(&self.store, &mri);
                 let _ = reply.send(person.map_err(EngineError::from));
+            }
+            Request::Teams(reply) => {
+                let teams = self.teams.teams(&self.store);
+                let _ = reply.send(teams.map_err(EngineError::from));
             }
             Request::Query(query) => self.answer(query),
             Request::Shutdown => {}
@@ -949,6 +1006,25 @@ where
             Ok(Some(profile)) => self.emit(Event::Profile { mri: profile.mri }),
             Ok(None) => {}
             Err(error) => self.failed("storing a profile", error),
+        }
+    }
+
+    /// A read in the background is over: a person's lookup or the teams'.
+    fn on_background(&mut self, done: Background) {
+        match done {
+            Background::Looked(looked) => self.on_looked(looked),
+            Background::Teams(read) => self.on_teams(read),
+        }
+    }
+
+    /// A read of the teams is over (`None`: none ran): stored, and told when the list changed; a failure is told.
+    fn on_teams(&mut self, read: Option<Result<Vec<Team>, TeamsReadError>>) {
+        let Some(read) = read else { return };
+        match self.teams.store(&mut self.store, read) {
+            Ok(Ok(true)) => self.emit(Event::Teams),
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => self.failed("reading the teams", error),
+            Err(error) => self.failed("storing the teams", error),
         }
     }
 
@@ -989,6 +1065,7 @@ where
             Query::OutboxEntry(id, reply) => give(reply, store.outbox_entry(id)),
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
             Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
+            Query::ReplyRoots(conversation, reply) => give(reply, store.reply_roots(&conversation)),
             Query::Search {
                 query,
                 within,
@@ -1418,6 +1495,21 @@ fn original(message: &Message) -> Result<Sent, EngineError> {
         compose_time_ms: message.compose_time.ok_or_else(|| unknown("compose time"))?,
         arrival_time_ms: message.arrival_time,
     })
+}
+
+/// A read in the background that is over.
+enum Background {
+    Looked(Option<crate::profiles::Looked>),
+    Teams(Option<Result<Vec<Team>, TeamsReadError>>),
+}
+
+/// The next read in the background to be over, a person's lookup or the teams'; never while neither runs.
+async fn background<C: Credentials + 'static>(profiles: &mut Profiles<C>, teams: &mut Teams<C>) -> Background {
+    tokio::select! {
+        looked = profiles.next(), if profiles.busy() => Background::Looked(looked),
+        read = teams.next(), if teams.busy() => Background::Teams(read),
+        else => pending().await,
+    }
 }
 
 /// The push channel's next event; never, without one.

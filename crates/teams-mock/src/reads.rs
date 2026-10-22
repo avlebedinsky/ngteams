@@ -31,7 +31,9 @@ pub(crate) fn conversations(state: &State, call: &Call<'_>, owner: &str) -> Resp
     let entries: Vec<Value> = state
         .conversations
         .iter()
-        .filter(|conversation| conversation.is_member(&call.caller) && conversation.version > since)
+        .filter(|conversation| {
+            conversation.listed && conversation.is_member(&call.caller) && conversation.version > since
+        })
         .map(|conversation| list_entry(conversation, &call.caller))
         .collect();
     let sync = format!(
@@ -213,6 +215,12 @@ pub(crate) fn thread_body(state: &State, conversation: &Conversation) -> Value {
     let unique = &conversation.entry["threadProperties"]["uniquerosterthread"];
     if conversation.kind == Kind::OneToOne && !unique.is_null() {
         properties.insert("uniquerosterthread".to_owned(), unique.clone());
+    }
+    // a channel's thread is of its own type (`space` for a team's general channel, `topic` for another, as M2 Task
+    // 16's probe read them), not a chat's
+    let thread_type = &conversation.entry["threadProperties"]["threadType"];
+    if conversation.kind == Kind::ReadOnly && thread_type.is_string() {
+        properties.insert("threadType".to_owned(), thread_type.clone());
     }
     thread
 }

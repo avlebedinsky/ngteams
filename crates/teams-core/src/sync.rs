@@ -580,7 +580,12 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             return Ok(None);
         };
         let reactions = reaction_set(message);
-        Ok(Some(self.outbox.receive(store, &row, reactions.as_deref())?))
+        let received = self.outbox.receive(store, &row, reactions.as_deref())?;
+        // a channel's message names its post (M2 Task 16): kept beside it, whatever version the store took
+        if let Some(root) = message.reply_root(conversation) {
+            store.set_reply_root(conversation, &message.id, &root)?;
+        }
+        Ok(Some(received))
     }
 
     /// The first read of a conversation's messages: its newest page, with the page's `backwardLink` kept for older

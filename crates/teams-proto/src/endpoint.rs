@@ -28,6 +28,13 @@ pub enum Service {
     /// (`users/<object id>/photos/96x96/$value`, [`crate::GraphPicture`]); the transport refuses any other endpoint
     /// on it, and any request on it that isn't a read.
     Graph,
+    /// The chat service aggregator (CSA) at the account's CSA base, the region's GTM `chatSvcAggAfd`
+    /// (`https://<AFD host>/api/csa/<region>`), which a transport reaches only once it was given one
+    /// (`HttpTransport::with_csa`), with the account's token for `https://chatsvcagg.teams.microsoft.com` (M2 Task 16).
+    /// Reads only (`GET`), and only the one `proto-lab probe teams` read live: the account's teams and their channels
+    /// (`api/v3/teams/users/me` with the web client's query, [`crate::CsaTeams`]); the transport refuses any other
+    /// endpoint on it, and any request on it that isn't a read.
+    Csa,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

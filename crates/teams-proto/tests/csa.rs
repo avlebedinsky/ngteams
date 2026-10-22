@@ -1,0 +1,323 @@
+//! CSA's read of the account's teams and channels (M2 Task 16) on wiremock, through the `test-support` mock origin: a
+//! `GET` of `api/v3/teams/users/me` with the web client's query on the CSA base the transport was given, with the
+//! account's `chatsvcagg` token and nothing else, in the shape `proto-lab probe teams` read live (the synthetic
+//! fixture `tests/fixtures/csa/teams.json`); any other CSA endpoint or query, a CSA read on a transport without a CSA
+//! base, and any request to CSA that isn't a read, are refused before anything is sent. And what a channel's posts
+//! are read with: a channel's thread type and a message's reply chain.
+//!
+//! Tokens and ids here are placeholders, never real ones.
+
+// test code throughout (its helpers unwrap like the tests do)
+#![cfg(test)]
+
+use std::future::{self, Future};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use serde_json::{Value, json};
+use teams_auth::secrets::Secret;
+use teams_auth::token::TokenError;
+use teams_fence::{Fence, FenceLog, Mri, Roster};
+use teams_proto::chat::{ConversationKind, Message};
+use teams_proto::{
+    BuildError, CSA_AUDIENCE, Client, Credentials, CsaAnswerError, CsaTeams, Endpoint, HttpError, HttpTransport,
+    ProbeOwnState, Read, Refusal, Service,
+};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
+const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/amer";
+const TEAMS_PATH: &str = "/api/csa/amer/api/v3/teams/users/me";
+const FIXTURE: &str = include_str!("../../../tests/fixtures/csa/teams.json");
+const TEAM: &str = "19:channel0001@thread.tacv2";
+const CHANNEL: &str = "19:channel0002@thread.tacv2";
+
+/// The fixture's response body, its placeholders filled in.
+fn fixture() -> Value {
+    let text = FIXTURE
+        .replace("<region>", "amer")
+        .replace("<guid:a>", "0000000a-0000-4000-8000-00000000000a")
+        .replace("<guid:tenant>", "00000000-0000-4000-8000-0000000000ff")
+        .replace("<guid:group>", "00000000-0000-4000-8000-000000000002")
+        .replace("<token:1>", "made-up-sync-token");
+    serde_json::from_str(&text).unwrap()
+}
+
+/// Hands out placeholder tokens and records the audiences asked for.
+#[derive(Default)]
+struct FakeTokens {
+    audiences: Mutex<Vec<String>>,
+}
+
+impl FakeTokens {
+    fn audiences(&self) -> Vec<String> {
+        self.audiences.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn current(&self, audience: &str) -> Secret {
+        self.audiences
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(audience.to_owned());
+        Secret::new("placeholder-csa-token")
+    }
+}
+
+impl Credentials for FakeTokens {
+    fn bearer(&self, audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        future::ready(Ok(self.current(audience)))
+    }
+
+    fn bearer_rejected(&self, audience: &str, _: &Secret) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        future::ready(Ok(self.current(audience)))
+    }
+}
+
+/// A client on the mock, with the CSA base when `csa`.
+async fn setup(csa: bool) -> (MockServer, Arc<FakeTokens>, Client<HttpTransport<FakeTokens>>) {
+    let server = MockServer::start().await;
+    let tokens = Arc::new(FakeTokens::default());
+    let fence = Arc::new(Fence::new(
+        Roster::new([Mri::new("8:orgid:0000000a-0000-4000-8000-00000000000a")], []),
+        FenceLog::from_writer(std::io::sink()),
+    ));
+    let mut transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), fence, CHAT_BASE, &server.uri()).unwrap();
+    if csa {
+        transport = transport.with_csa(CSA_BASE).unwrap();
+    }
+    (server, tokens, Client::new(transport))
+}
+
+#[tokio::test]
+async fn the_teams_read_is_a_get_of_its_probed_shape_with_the_csa_token_and_its_teams_are_read() {
+    let (server, tokens, client) = setup(true).await;
+    let fixture = fixture();
+    Mock::given(method("GET"))
+        .and(path(TEAMS_PATH))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(fixture["response"]["body"].to_string(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let answer = client.read(&CsaTeams).await.unwrap();
+    let read = CsaTeams::read_answer(answer.body()).unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method.as_str(), "GET");
+    assert!(request.body.is_empty());
+    assert_eq!(request.url.path(), TEAMS_PATH);
+    assert_eq!(
+        request.url.query(),
+        fixture["request"]["query"].as_str(),
+        "the web client's query, exactly"
+    );
+    let mut names: Vec<&str> = request.headers.keys().map(wiremock::http::HeaderName::as_str).collect();
+    names.sort_unstable();
+    assert!(
+        names.contains(&"accept") && names.contains(&"authorization"),
+        "{names:?}"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with("x-ms-") || *name == "behavioroverride"),
+        "{names:?}"
+    );
+    assert_eq!(
+        request.headers.get("authorization").unwrap().to_str().unwrap(),
+        "Bearer placeholder-csa-token"
+    );
+    assert_eq!(tokens.audiences(), [CSA_AUDIENCE]);
+
+    // the deleted team and the deleted channel left out; the general channel first
+    assert_eq!(read.skipped, 0);
+    let teams: Vec<(&str, &str, bool)> = read
+        .teams
+        .iter()
+        .map(|team| (team.id.as_str(), team.name.as_str(), team.archived))
+        .collect();
+    assert_eq!(
+        teams,
+        [
+            (TEAM, "A made-up team", false),
+            ("19:channel0004@thread.tacv2", "A made-up archived team", true)
+        ]
+    );
+    let channels: Vec<(&str, &str, bool)> = read.teams[0]
+        .channels
+        .iter()
+        .map(|channel| (channel.id.as_str(), channel.name.as_str(), channel.general))
+        .collect();
+    assert_eq!(
+        channels,
+        [(TEAM, "General", true), (CHANNEL, "A made-up channel", false)]
+    );
+    assert_eq!(read.teams[1].channels.len(), 1);
+    assert!(read.teams[1].channels[0].general);
+    let shown = format!("{read:?}");
+    assert!(!shown.contains("made-up team") && !shown.contains("General"), "{shown}");
+}
+
+#[test]
+fn a_teams_answer_is_read_only_in_its_probed_shape() {
+    for body in [&b"[]"[..], b"{}", b"{\"teams\": {}}", b"not json"] {
+        assert_eq!(CsaTeams::read_answer(body), Err(CsaAnswerError::Malformed));
+    }
+    let answer = json!({"teams": [
+        {"id": TEAM, "displayName": "A", "channels": [
+            {"id": TEAM, "displayName": "General"},
+            {"id": CHANNEL},
+            {"displayName": "no id"},
+            {"id": "19:x@thread.tacv2", "displayName": "B", "isGeneral": "true"},
+        ]},
+        {"id": "19:y@thread.tacv2"},
+        {"id": 7, "displayName": "C"},
+    ]});
+    let read = CsaTeams::read_answer(answer.to_string().as_bytes()).unwrap();
+    assert_eq!(read.skipped, 4);
+    assert_eq!(read.teams.len(), 1);
+    let general: Vec<bool> = read.teams[0].channels.iter().map(|channel| channel.general).collect();
+    // a channel is general by its id or by a boolean `isGeneral`, never by a string
+    assert_eq!(general, [true, false]);
+}
+
+#[tokio::test]
+async fn a_csa_read_without_a_csa_base_is_refused_before_anything_is_sent() {
+    let (server, tokens, client) = setup(false).await;
+    assert!(!client.transport().has_csa());
+    match client.read(&CsaTeams).await {
+        Err(HttpError::Refused(Refusal::NoCsa)) => {}
+        other => panic!("{other:?}"),
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(tokens.audiences().is_empty());
+}
+
+/// A read of CSA in a shape the probe didn't show: any type may implement `Read`, so the transport's path check is
+/// what refuses it.
+struct OtherCsaRead(Endpoint);
+
+impl Read for OtherCsaRead {
+    fn service(&self) -> Service {
+        Service::Csa
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        self.0.clone()
+    }
+}
+
+/// `api/v3/teams/users/me` with the web client's query, but for `change` applied to its pairs.
+fn teams_endpoint(change: impl FnOnce(&mut Vec<(String, String)>)) -> Endpoint {
+    let mut query: Vec<(String, String)> = CsaTeams.endpoint().query().to_vec();
+    change(&mut query);
+    query.into_iter().fold(
+        Endpoint::new(["api", "v3", "teams", "users", "me"]),
+        |endpoint, (name, value)| endpoint.with_query(name, value),
+    )
+}
+
+#[tokio::test]
+async fn any_other_csa_endpoint_or_query_is_refused_before_anything_is_sent() {
+    let (server, tokens, client) = setup(true).await;
+    let others = [
+        // what the web client reads besides, unreviewed
+        Endpoint::new(["api", "v3", "teams", "users", "me", "updates"]),
+        Endpoint::new(["api", "v1", "teams", "users", "me", "pinnedChannels"]),
+        Endpoint::new(["api", "v1", "containers", CHANNEL, "posts"]).with_query("pageSize", "20"),
+        Endpoint::new(["api", "v1", "teams", "users", "me", "discover"]),
+        // the teams read with no query, another value, a pair more, a pair less, the pairs reordered
+        Endpoint::new(["api", "v3", "teams", "users", "me"]),
+        teams_endpoint(|query| query[0].1 = "true".to_owned()),
+        teams_endpoint(|query| query.push(("continuationToken".to_owned(), "x".to_owned()))),
+        teams_endpoint(|query| {
+            query.pop();
+        }),
+        teams_endpoint(|query| query.reverse()),
+        Endpoint::new(["api", "v3", "teams", "users", "..", "me"]),
+    ];
+    for endpoint in others {
+        let shown = format!("{endpoint:?}");
+        match client.read(&OtherCsaRead(endpoint)).await {
+            Err(HttpError::Refused(Refusal::CsaPath | Refusal::Segment)) => {}
+            other => panic!("{shown}: {other:?}"),
+        }
+    }
+    let post = ProbeOwnState::new(Service::Csa, CsaTeams.endpoint(), Some(json!({})));
+    match client.own_state(&post).await {
+        Err(HttpError::Refused(Refusal::CsaReadOnly)) => {}
+        other => panic!("{other:?}"),
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(tokens.audiences().is_empty(), "no token is asked for a refused request");
+}
+
+#[test]
+fn only_a_csa_base_of_the_gtm_form_is_taken() {
+    assert!(HttpTransport::<FakeTokens>::accepts_csa_base(CSA_BASE));
+    assert!(HttpTransport::<FakeTokens>::accepts_csa_base(
+        "https://teams.cloud.microsoft/api/csa/emea/"
+    ));
+    for base in [
+        "https://chatsvcagg.teams.microsoft.com/api/csa/amer",
+        "http://teams.microsoft.com/api/csa/amer",
+        "https://teams.microsoft.com:8443/api/csa/amer",
+        "https://teams.microsoft.com/api/csa/AMER",
+        "https://teams.microsoft.com/api/csa/amer/api",
+        "https://teams.microsoft.com/api/chatsvc/amer",
+        "https://teams.microsoft.com/api/csa/amer?x=1",
+        " https://teams.microsoft.com/api/csa/amer",
+        "https://user@teams.microsoft.com/api/csa/amer",
+    ] {
+        assert!(!HttpTransport::<FakeTokens>::accepts_csa_base(base), "{base}");
+    }
+    let fence = Arc::new(Fence::new(Roster::new([], []), FenceLog::from_writer(std::io::sink())));
+    let transport = HttpTransport::new(Arc::new(FakeTokens::default()), fence, CHAT_BASE).unwrap();
+    assert!(matches!(
+        transport.with_csa("https://elsewhere.example/api/csa/amer"),
+        Err(BuildError::CsaBase)
+    ));
+}
+
+/// A channel message as the probe saw one: a `conversationLink` ending in `;messageid=<post>`.
+fn channel_message(id: &str, link: &str) -> Message {
+    serde_json::from_value(json!({
+        "id": id,
+        "type": "Message",
+        "messagetype": "RichText/Html",
+        "conversationid": CHANNEL,
+        "conversationLink": link,
+        "version": "1",
+        "content": "<p>made up</p>",
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_channel_message_names_its_post_and_a_channel_thread_is_a_channel() {
+    let link = |rest: &str| format!("{CHAT_BASE}/v1/users/ME/conversations/{rest}");
+    let post = channel_message("1700000000001", &link(&format!("{CHANNEL};messageid=1700000000001")));
+    assert_eq!(post.reply_root(CHANNEL).as_deref(), Some("1700000000001"));
+    let reply = channel_message("1700000000002", &link(&format!("{CHANNEL};messageid=1700000000001")));
+    assert_eq!(reply.reply_root(CHANNEL).as_deref(), Some("1700000000001"));
+    // percent-encoded as one segment
+    let encoded = channel_message(
+        "1700000000003",
+        &link("19%3Achannel0002%40thread.tacv2%3Bmessageid%3D1700000000001"),
+    );
+    assert_eq!(encoded.reply_root(CHANNEL).as_deref(), Some("1700000000001"));
+    for other in [
+        link(CHANNEL),
+        link(&format!("{TEAM};messageid=1700000000001")),
+        link(&format!("{CHANNEL};messageid=")),
+        link(&format!("{CHANNEL};messageid=17x")),
+        "not a link".to_owned(),
+    ] {
+        assert_eq!(channel_message("1", &other).reply_root(CHANNEL), None, "{other}");
+    }
+    assert_eq!(ConversationKind::of(CHANNEL, Some("topic")), ConversationKind::Channel);
+    assert_eq!(ConversationKind::of(TEAM, Some("space")), ConversationKind::Channel);
+    assert!(ConversationKind::of(CHANNEL, Some("topic")).is_read_only());
+}

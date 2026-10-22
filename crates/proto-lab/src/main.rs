@@ -19,6 +19,7 @@ use proto_lab::commands::login::{self, LoginOptions};
 use proto_lab::commands::probe;
 use proto_lab::commands::profile_probe;
 use proto_lab::commands::status::{self, AccountStatus};
+use proto_lab::commands::teams_probe;
 use proto_lab::commands::thread_probe;
 use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_service_mri};
 use proto_lab::sanitize::Identities;
@@ -163,6 +164,14 @@ enum ProbeCommand {
         /// The lab account whose token reads: a, b or c.
         alias: Alias,
     },
+    /// Whether CSA gives the account's teams and channels to its own `chatsvcagg` token, and how the chat service
+    /// gives a channel's posts and reply chains: refreshes the `chatsvcagg` and `ic3` tokens from the stored refresh
+    /// token, reads CSA's teams, the conversation list, and up to two channels of the first team (thread, newest
+    /// messages, one post's reply chain). Prints statuses, key names, types, sizes and counts only. GETs only.
+    Teams {
+        /// The lab account whose tokens read: a, b or c.
+        alias: Alias,
+    },
 }
 
 #[derive(Subcommand)]
@@ -224,6 +233,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Probe {
             command: ProbeCommand::Profile { alias },
         } => run_probe_profile(alias).await,
+        Command::Probe {
+            command: ProbeCommand::Teams { alias },
+        } => run_probe_teams(alias).await,
         Command::Auth {
             alias,
             timeout,
@@ -406,6 +418,17 @@ async fn run_probe_profile(alias: Alias) -> Result<(), Box<dyn std::error::Error
     let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
     let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
     let report = profile_probe::probe_profile(&store, &tokens, &config, alias, &probe::Origin::ChatService).await?;
+    for line in report.lines(std::time::SystemTime::now()) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+async fn run_probe_teams(alias: Alias) -> Result<(), Box<dyn std::error::Error>> {
+    let config = LabConfig::load(&LabLocations::from_env()?)?;
+    let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
+    let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
+    let report = teams_probe::probe_teams(&store, &tokens, &config, alias, &probe::Origin::ChatService).await?;
     for line in report.lines(std::time::SystemTime::now()) {
         println!("{line}");
     }

@@ -20,7 +20,7 @@ use teams_fence::{
 };
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, CHAT_BASE, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B,
-    LAB_C, NOTIFICATIONS, OUTSIDER, REGIONAL_HOST, TENANT,
+    LAB_C, NOTIFICATIONS, OUTSIDER, REGIONAL_HOST, TEAM_CHANNEL, TENANT,
 };
 use teams_proto::chat::MessageText;
 use teams_proto::{Author, Client, Credentials, Endpoint, HttpTransport, Read, SendMessage, Service};
@@ -29,6 +29,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/chatsvc");
 const TROUTER_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/trouter");
+const CSA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/csa");
 
 fn oid(mri: &str) -> &str {
     mri.trim_start_matches("8:orgid:")
@@ -1256,6 +1257,84 @@ fn the_mock_is_never_a_normal_dependency_of_any_crate() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn csa_gives_the_teams_of_its_fixture_to_the_read_in_its_probed_shape_only() -> TestResult {
+    let lab = Lab::start().await?;
+    let query = "isPrefetch=false&enableMembershipSummary=true&supportsAdditionalSystemGeneratedFolders=true\
+                 &supportsSliceItems=true&enableEngageCommunities=false";
+    let url = |path: &str, query: &str| format!("{}/api/csa/amer/{path}?{query}", lab.mock.origin());
+    let token = format!("Bearer {}", lab.mock.token(LAB_B).ok_or("no such account")?);
+    let headers = [("Authorization", token.as_str())];
+    let answer = lab
+        .send_raw(Method::GET, &url("api/v3/teams/users/me", query), &headers, None)
+        .await?;
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    let teams = answer.json()?;
+    let recorded = serde_json::from_str::<Value>(
+        &std::fs::read_to_string(Path::new(CSA_FIXTURES).join("teams.json"))?
+            .replace("<guid:a>", oid(LAB_A))
+            .replace("<guid:tenant>", TENANT)
+            .replace("<guid:group>", "00000000-0000-4000-8000-000000000002")
+            .replace("<token:1>", "mock-fixture-1"),
+    )?;
+    assert_eq!(teams, recorded["response"]["body"]);
+    let channels: Vec<&str> = teams["teams"][0]["channels"]
+        .as_array()
+        .ok_or("no channels")?
+        .iter()
+        .filter_map(|channel| channel["id"].as_str())
+        .collect();
+    assert!(channels.contains(&CHANNEL) && channels.contains(&TEAM_CHANNEL));
+
+    // another query, another path, another method, no token: nothing
+    for (method, path, query, status) in [
+        (Method::GET, "api/v3/teams/users/me", "isPrefetch=true", 404),
+        (Method::GET, "api/v3/teams/users/me/updates", query, 404),
+        (Method::POST, "api/v3/teams/users/me", query, 404),
+    ] {
+        let answer = lab.send_raw(method.clone(), &url(path, query), &headers, None).await?;
+        assert_eq!(answer.status, status, "{method} {path}?{query}");
+    }
+    let bare = lab
+        .send_raw(Method::GET, &url("api/v3/teams/users/me", query), &[], None)
+        .await?;
+    assert_eq!(bare.status, 401);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_teams_other_channel_is_read_by_its_id_and_listed_for_nobody() -> TestResult {
+    let lab = Lab::start().await?;
+    for who in [LAB_A, LAB_B, LAB_C] {
+        assert!(!ids(&lab.list(who).await?).iter().any(|id| id == TEAM_CHANNEL), "{who}");
+    }
+    let page = lab
+        .get(
+            LAB_B,
+            &format!(
+                "users/ME/conversations/{}/messages?view=msnp24Equivalent%7CsupportsMessageProperties&pageSize=200",
+                segment(TEAM_CHANNEL)
+            ),
+        )
+        .await?;
+    let recorded = fixture("channel-messages.json")?;
+    assert_eq!(page["messages"], recorded["response"]["body"]["messages"]);
+    let thread = lab.get(LAB_A, &format!("threads/{}", segment(TEAM_CHANNEL))).await?;
+    assert_eq!(thread["properties"]["threadType"], "topic");
+    // read-only: a post is refused
+    let post = lab
+        .send(
+            LAB_A,
+            Method::POST,
+            &format!("users/ME/conversations/{}/messages", segment(TEAM_CHANNEL)),
+            Some(&json!({"content": "<p>no</p>", "messagetype": "RichText/Html", "contenttype": "Text"})),
+        )
+        .await?;
+    assert_eq!(post.status, 403);
+    assert_eq!(lab.mock.post_as(LAB_B, TEAM_CHANNEL, "<p>no</p>"), None);
+    Ok(())
+}
+
 #[test]
 fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1276,14 +1355,15 @@ fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
             for include in source.split("include_str!(\"").skip(1) {
                 assert!(
                     include.starts_with("../../../tests/fixtures/chatsvc/")
-                        || include.starts_with("../../../tests/fixtures/trouter/"),
+                        || include.starts_with("../../../tests/fixtures/trouter/")
+                        || include.starts_with("../../../tests/fixtures/csa/"),
                     "{}: {include:.60}",
                     path.display()
                 );
             }
         }
     }
-    for dir in [FIXTURES, TROUTER_FIXTURES] {
+    for dir in [FIXTURES, TROUTER_FIXTURES, CSA_FIXTURES] {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             let text = std::fs::read_to_string(&path)?;

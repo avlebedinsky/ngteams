@@ -13,8 +13,11 @@
 //!   (`https://go.trouter.teams.microsoft.com/`), and, once the transport was given the account's middle-tier base
 //!   ([`HttpTransport::with_middle_tier`], the GTM `middleTier`: `https://<AFD host>/api/mt/part/<partition>`), that
 //!   base's `beta/users/…` endpoints; and Microsoft Graph's two reads (`https://graph.microsoft.com/v1.0/users/
-//!   <object id>?$select=id,displayName` and `…/users/<object id>/photos/96x96/$value`, `GET` only, M2 Task 12). An
-//!   endpoint with an empty, `.` or `..` segment is refused, and so is
+//!   <object id>?$select=id,displayName` and `…/users/<object id>/photos/96x96/$value`, `GET` only, M2 Task 12); and,
+//!   once the transport was given the account's CSA base ([`HttpTransport::with_csa`], the GTM `chatSvcAggAfd`:
+//!   `https://<AFD host>/api/csa/<region>`), CSA's one read of the account's teams and channels (`api/v3/teams/users/
+//!   me` with the web client's query exactly, `GET` only, M2 Task 16). An endpoint with an empty, `.` or `..` segment
+//!   is refused, and so is
 //!   any URL whose decoded path isn't exactly the base's plus the endpoint's segments. Entra and authz aren't on it
 //!   (they stay in `teams-auth`'s own clients, the reviewed exception), and neither is AMS.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
@@ -30,7 +33,8 @@
 //!   every captured profile lookup carried (`x-ms-migration: True`, `x-ms-test-user: False`, `x-ms-client-type:
 //!   cdlworker`, `x-ms-client-request-type: 0`, an empty `x-ms-object-id`) and its body as
 //!   `application/json;charset=UTF-8`; Graph the account's `https://graph.microsoft.com` token and nothing else (the
-//!   probe's form).
+//!   probe's form); CSA the account's `https://chatsvcagg.teams.microsoft.com` token and nothing else (the probe's
+//!   form).
 //! - **Retries** (the transport's part of the plan's retry table), for reads and own-state requests: a 401 makes the
 //!   session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's maximum,
 //!   [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is the
@@ -69,7 +73,7 @@ use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Service};
 use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead};
-use crate::read::{GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT, Read, is_guid};
+use crate::read::{CSA_TEAMS_PATH, CSA_TEAMS_QUERY, GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT, Read, is_guid};
 use crate::write::{Authorized, Mutating};
 
 /// The Entra audience of the token the chat service and the registrar take.
@@ -80,6 +84,9 @@ pub const MIDDLE_TIER_AUDIENCE: &str = SPACES_RESOURCE;
 
 /// The Entra audience of the token Microsoft Graph takes.
 pub const GRAPH_AUDIENCE: &str = "https://graph.microsoft.com";
+
+/// The Entra audience of the token CSA takes.
+pub const CSA_AUDIENCE: &str = "https://chatsvcagg.teams.microsoft.com";
 
 /// Microsoft Graph's host.
 pub const GRAPH_HOST: &str = "graph.microsoft.com";
@@ -178,6 +185,15 @@ pub enum Refusal {
     /// A request to Graph that isn't a read: Graph is reached by `GET` only.
     #[error("a request to Graph that isn't a read")]
     GraphReadOnly,
+    /// A CSA request on a transport that wasn't given the account's CSA base.
+    #[error("no CSA base")]
+    NoCsa,
+    /// A CSA endpoint that isn't the probed teams read ([`Service::Csa`]).
+    #[error("a CSA endpoint that isn't the probed teams read")]
+    CsaPath,
+    /// A request to CSA that isn't a read: CSA is reached by `GET` only.
+    #[error("a request to CSA that isn't a read")]
+    CsaReadOnly,
     /// The URL built isn't on the host allowlist, or its path isn't exactly the base's and the endpoint's.
     #[error("the URL isn't on the transport's allowlist")]
     NotAllowed,
@@ -207,6 +223,9 @@ pub enum BuildError {
     /// Not a middle-tier base the transport accepts (see [`HttpTransport::with_middle_tier`]).
     #[error("not a middle-tier base the transport accepts")]
     MiddleTierBase,
+    /// Not a CSA base the transport accepts (see [`HttpTransport::with_csa`]).
+    #[error("not a CSA base the transport accepts")]
+    CsaBase,
     /// Not a loopback `http` origin with a port.
     #[error("not a loopback http origin")]
     MockOrigin,
@@ -226,6 +245,8 @@ pub struct HttpTransport<C> {
     registrar_host: &'static str,
     /// The middle-tier base (`https://<AFD host>/api/mt/part/<partition>`, no trailing slash), once given.
     middle_tier: Option<Url>,
+    /// The CSA base (`https://<AFD host>/api/csa/<region>`, no trailing slash), once given.
+    csa: Option<Url>,
     max_retry_wait: Duration,
     /// Tests only: every request goes to this origin instead, with the path and query it was built and checked with.
     /// Only [`HttpTransport::with_mock_origin`] (`test-support`) sets it; without that feature it is always `None`.
@@ -238,6 +259,7 @@ impl<C> fmt::Debug for HttpTransport<C> {
             .field("chat_base", &self.chat_base.as_str())
             .field("registrar_host", &self.registrar_host)
             .field("middle_tier", &self.middle_tier.as_ref().map(Url::as_str))
+            .field("csa", &self.csa.as_ref().map(Url::as_str))
             .field("max_retry_wait", &self.max_retry_wait)
             .finish_non_exhaustive()
     }
@@ -306,6 +328,7 @@ impl<C: Credentials> HttpTransport<C> {
             chat_base,
             registrar_host,
             middle_tier: None,
+            csa: None,
             max_retry_wait: MAX_RETRY_WAIT,
             mock_origin: None,
         })
@@ -321,6 +344,31 @@ impl<C: Credentials> HttpTransport<C> {
     pub fn with_middle_tier(mut self, base: &str) -> Result<Self, BuildError> {
         self.middle_tier = Some(parse_middle_tier_base(base).ok_or(BuildError::MiddleTierBase)?);
         Ok(self)
+    }
+
+    /// The transport with the account's CSA base, the region's GTM `chatSvcAggAfd` (trimmed): `https`, an AFD host
+    /// ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path `/api/csa/<region>` exactly (the region
+    /// lowercase letters: `amer`), one trailing slash allowed, no query or fragment. Without it, every CSA request is
+    /// refused ([`Refusal::NoCsa`]).
+    ///
+    /// # Errors
+    /// [`BuildError::CsaBase`] for any other base ([`Self::accepts_csa_base`]).
+    pub fn with_csa(mut self, base: &str) -> Result<Self, BuildError> {
+        self.csa = Some(parse_csa_base(base).ok_or(BuildError::CsaBase)?);
+        Ok(self)
+    }
+
+    /// Whether [`Self::with_csa`] takes `base`.
+    #[must_use]
+    pub fn accepts_csa_base(base: &str) -> bool {
+        parse_csa_base(base).is_some()
+    }
+
+    /// Whether the transport was given the account's CSA base ([`Self::with_csa`]): without one, every CSA request is
+    /// refused.
+    #[must_use]
+    pub fn has_csa(&self) -> bool {
+        self.csa.is_some()
     }
 
     /// Another cap on the wait before a throttled read or own-state request is sent again.
@@ -369,6 +417,8 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Graph => {
                 Url::parse(&format!("https://{GRAPH_HOST}/v1.0")).map_err(|_| refused(Refusal::NotAllowed))?
             }
+            Service::Csa if !is_csa_endpoint(endpoint) => return Err(refused(Refusal::CsaPath)),
+            Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa))?,
         };
         url.path_segments_mut()
             .map_err(|()| refused(Refusal::NotAllowed))?
@@ -377,7 +427,11 @@ impl<C: Credentials> HttpTransport<C> {
         if !endpoint.query().is_empty() {
             url.query_pairs_mut().extend_pairs(endpoint.query());
         }
-        if allowed(service, &url, endpoint, self.middle_tier.as_ref()) {
+        let bases = Bases {
+            middle_tier: self.middle_tier.as_ref(),
+            csa: self.csa.as_ref(),
+        };
+        if allowed(service, &url, endpoint, bases) {
             Ok(url)
         } else {
             Err(refused(Refusal::NotAllowed))
@@ -507,8 +561,8 @@ impl<C: Credentials> HttpTransport<C> {
         let shape = read.shape();
         let wire = read.wire();
         let service = shape.service();
-        if service == Service::Graph {
-            return Err(HttpError::Refused(Refusal::GraphReadOnly));
+        if let Some(refusal) = read_only(service) {
+            return Err(HttpError::Refused(refusal));
         }
         let url = self.url_for(service, wire.endpoint())?;
         let mut headers = plain_headers(service, true);
@@ -574,8 +628,8 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let endpoint = request.endpoint();
         let body = request.body();
         async move {
-            if service == Service::Graph {
-                return Err(HttpError::Refused(Refusal::GraphReadOnly));
+            if let Some(refusal) = read_only(service) {
+                return Err(HttpError::Refused(refusal));
             }
             let url = self.url_for(service, &endpoint)?;
             let outgoing = Outgoing {
@@ -647,7 +701,17 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::ChatService | Service::Registrar => Some(IC3_AUDIENCE),
         Service::MiddleTier => Some(MIDDLE_TIER_AUDIENCE),
         Service::Graph => Some(GRAPH_AUDIENCE),
+        Service::Csa => Some(CSA_AUDIENCE),
         Service::Trouter => None,
+    }
+}
+
+/// The refusal of anything but a read to `service`, when it is reached by `GET` only (Graph, CSA).
+fn read_only(service: Service) -> Option<Refusal> {
+    match service {
+        Service::Graph => Some(Refusal::GraphReadOnly),
+        Service::Csa => Some(Refusal::CsaReadOnly),
+        Service::ChatService | Service::Registrar | Service::Trouter | Service::MiddleTier => None,
     }
 }
 
@@ -656,7 +720,9 @@ fn audience(service: Service) -> Option<&'static str> {
 fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
     let content_type = match service {
         Service::MiddleTier => "application/json;charset=UTF-8",
-        Service::ChatService | Service::Registrar | Service::Trouter | Service::Graph => "application/json",
+        Service::ChatService | Service::Registrar | Service::Trouter | Service::Graph | Service::Csa => {
+            "application/json"
+        }
     };
     let mut headers = vec![(ACCEPT.as_str().to_owned(), "application/json".to_owned())];
     if body {
@@ -682,14 +748,22 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
             ("x-ms-object-id", ""),
             ("x-ms-test-user", "False"),
         ],
-        Service::Trouter | Service::Graph => &[],
+        Service::Trouter | Service::Graph | Service::Csa => &[],
     }
+}
+
+/// The bases a transport was given.
+#[derive(Clone, Copy)]
+struct Bases<'a> {
+    middle_tier: Option<&'a Url>,
+    csa: Option<&'a Url>,
 }
 
 /// Whether `url`, built for `endpoint` on `service`, is on the allowlist: `https`, no user info, port or fragment, an
 /// allowed host, and a decoded path that is exactly the service's base path and the endpoint's segments (the middle
-/// tier's: the base the transport was given, `middle_tier`, and an endpoint under `beta/users/`).
-fn allowed(service: Service, url: &Url, endpoint: &Endpoint, middle_tier: Option<&Url>) -> bool {
+/// tier's: the base the transport was given and an endpoint under `beta/users/`; CSA's: the base it was given and the
+/// teams read with its query exactly).
+fn allowed(service: Service, url: &Url, endpoint: &Endpoint, bases: Bases<'_>) -> bool {
     let plain = url.scheme() == "https"
         && url.username().is_empty()
         && url.password().is_none()
@@ -709,7 +783,12 @@ fn allowed(service: Service, url: &Url, endpoint: &Endpoint, middle_tier: Option
             Service::Trouter => {
                 url.host_str() == Some(TROUTER_HOST) && decoded_path(url).is_some_and(|path| path == segments)
             }
-            Service::MiddleTier => middle_tier.is_some_and(|base| on_middle_tier(base, url, endpoint)),
+            Service::MiddleTier => bases
+                .middle_tier
+                .is_some_and(|base| on_middle_tier(base, url, endpoint)),
+            Service::Csa => bases.csa.is_some_and(|base| {
+                is_csa_endpoint(endpoint) && on_base(base, url, endpoint) && query_is(url, endpoint.query())
+            }),
             Service::Graph => {
                 url.host_str() == Some(GRAPH_HOST)
                     && is_graph_endpoint(endpoint)
@@ -754,13 +833,52 @@ fn is_graph_endpoint(endpoint: &Endpoint) -> bool {
 /// Whether `url` is `endpoint` (under `beta/users/`) on the middle-tier `base`, and nothing else: its host and its
 /// decoded path the base's plus the endpoint's segments.
 fn on_middle_tier(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
+    is_middle_tier_endpoint(endpoint) && on_base(base, url, endpoint)
+}
+
+/// Whether `url` is on `base`'s host, its decoded path exactly the base's plus `endpoint`'s segments.
+fn on_base(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
     let segments = endpoint.segments();
     let base_path = decoded_path(base).unwrap_or_default();
     url.host_str() == base.host_str()
-        && is_middle_tier_endpoint(endpoint)
         && decoded_path(url).is_some_and(|path| {
             path.len() == base_path.len() + segments.len() && path.starts_with(&base_path) && path.ends_with(segments)
         })
+}
+
+/// CSA's one probed read ([`Service::Csa`]): `api/v3/teams/users/me` with [`CSA_TEAMS_QUERY`] exactly, in order.
+fn is_csa_endpoint(endpoint: &Endpoint) -> bool {
+    endpoint.segments().iter().map(String::as_str).eq(CSA_TEAMS_PATH)
+        && endpoint
+            .query()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .eq(CSA_TEAMS_QUERY)
+}
+
+/// The CSA base, if `base` is one [`HttpTransport::with_csa`] accepts.
+fn parse_csa_base(base: &str) -> Option<Url> {
+    if base.contains(['?', '#']) || base.trim() != base {
+        return None;
+    }
+    let base = base.strip_suffix('/').unwrap_or(base);
+    let url = Url::parse(base).ok()?;
+    let plain = url.scheme() == "https"
+        && url.host_str().is_some_and(|host| AFD_HOSTS.contains(&host))
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        // the base as it was given, not one the parser normalized
+        && url.as_str() == base;
+    let path = decoded_path(&url)?;
+    let region = matches!(
+        path.as_slice(),
+        [api, csa, region] if api == "api"
+            && csa == "csa"
+            && !region.is_empty()
+            && region.bytes().all(|byte| byte.is_ascii_lowercase())
+    );
+    (plain && region).then_some(url)
 }
 
 /// A middle-tier endpoint under `beta/users/`, with at least one segment after it.

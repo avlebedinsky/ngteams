@@ -234,7 +234,7 @@ fn body_line(answer: &Answer) -> String {
 }
 
 /// A media type without its parameters, when it is `type/subtype` of plain characters; `?` otherwise.
-fn plain_content_type(value: &str) -> &str {
+pub(crate) fn plain_content_type(value: &str) -> &str {
     let media = value.split(';').next().unwrap_or_default().trim();
     let plain = !media.is_empty()
         && media.len() <= 64
@@ -260,7 +260,7 @@ fn plain_code(code: &str) -> &str {
     if plain { code } else { "?" }
 }
 
-fn json_type(value: &Value) -> &'static str {
+pub(crate) fn json_type(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "bool",

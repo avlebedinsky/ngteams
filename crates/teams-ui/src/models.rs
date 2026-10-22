@@ -90,9 +90,17 @@ pub struct Chats {
     typing_stamp: u64,
     /// The outbox rows as last told, by id.
     outbox: BTreeMap<i64, OutboxEntry>,
+    /// The revision of the stored teams' last change (`Event::Teams`).
+    teams: u64,
 }
 
 impl Chats {
+    /// The revision of the stored teams' last change; 0 while none was told.
+    #[must_use]
+    pub fn teams_at(&self) -> u64 {
+        self.teams
+    }
+
     /// The revision of the last change in any conversation.
     #[must_use]
     pub fn revision(&self) -> u64 {
@@ -263,6 +271,11 @@ impl Models {
             Event::Queued(entry) | Event::Outbox(entry) => self.outbox(entry, cx),
             Event::Profile { mri } => self.chats.update(cx, |chats, cx| {
                 chats.renamed(&mri);
+                cx.notify();
+            }),
+            Event::Teams => self.chats.update(cx, |chats, cx| {
+                chats.revision += 1;
+                chats.teams = chats.revision;
                 cx.notify();
             }),
             // how the push channel's registration went, a waiting transient's send, the search backfill over: nothing a

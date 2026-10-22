@@ -1026,15 +1026,45 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 - Modify: `crates/teams-proto/src/{endpoint.rs,http.rs,read.rs}` (CSA's team reads, `GET` only),
   `crates/teams-mock/src/*` (a team, its channels), `crates/teams-ui/src/*`, `docs/protocol/endpoints.md`
 
-- [ ] a read-only probe first: CSA's `GET api/v3/teams/users/me` (teams and channels) with our `chatsvcagg` token, and
+- [x] a read-only probe first: CSA's `GET api/v3/teams/users/me` (teams and channels) with our `chatsvcagg` token, and
       a channel's messages through the chat service's conversation reads; shapes into `channels.md`, synthetic
       fixtures
-- [ ] tests first: CSA as a new `Service` (its host, the `chatsvcagg` audience, its path check), `GET` only
-- [ ] tests first: the Teams rail lists teams with their channels; a channel's posts and reply chains shown read-only;
+- [x] tests first: CSA as a new `Service` (its host, the `chatsvcagg` audience, its path check), `GET` only
+- [x] tests first: the Teams rail lists teams with their channels; a channel's posts and reply chains shown read-only;
       no composer for a channel, and no channel write exists natively (no sealed type for it)
-- [ ] the backlog item: channel writes need a team of the lab accounts only (a write the tenant's directory shows,
+- [x] the backlog item: channel writes need a team of the lab accounts only (a write the tenant's directory shows,
       the user's decision) before they can be mapped and tested; the personal build stays read-only until then
-- [ ] `cargo test -p teams-proto -p teams-mock -p teams-ui -p fixture-guard` and the gate pass
+- [x] `cargo test -p teams-proto -p teams-mock -p teams-ui -p fixture-guard` and the gate pass
+- Done (2026-10-22), where it differs from the lines above:
+  - The probe (`proto-lab probe teams <alias>`, `crates/proto-lab/src/commands/teams_probe.rs`) ran live once as a
+    (GETs only, under the live lock): CSA took our `chatsvcagg` token with `Accept` alone (200, about 32 KB: 2 teams,
+    10 channels, each general channel's id the team's); the chat service's list held only the 2 general channels; a
+    channel's thread is `space` (general) or **`topic`** (another); a channel's page holds posts and replies together,
+    every message's `conversationLink` ending `;messageid=<post>`; one post's chain read (`<channel>;messageid=<post>`)
+    answered too but isn't used. It prints key paths with types, counts and two protocol enums' plain values, never a
+    name, text or id. Shapes in `channels.md`; fixtures `tests/fixtures/csa/teams.json` and
+    `tests/fixtures/chatsvc/channel-messages.json`.
+  - `Service::Csa`: the base only from `HttpTransport::with_csa` (the GTM `chatSvcAggAfd`, an AFD host,
+    `/api/csa/<region>`; `lab.rs` gives it when the region's is of that form), one endpoint (`api/v3/teams/users/me`
+    with the web client's query exactly, in order: `CsaTeams`), `GET` only (`own_state`/`post_read` refuse it), the
+    `chatsvcagg` token and `Accept` only. `ConversationKind::of` takes `topic` as a channel; `Message::reply_root`
+    reads a channel message's post from its `conversationLink`.
+  - The store (migration `0009_teams`): `teams`/`team_channels` replaced whole by each read, `teams_read`, and
+    `reply_roots` (a stored channel message's post, kept as the core stores it); the migration drops the channels'
+    sync states so their messages stored before get their posts on the next read. The core: `teams.rs` reads CSA in
+    the background when a view asks and the list is missing or an hour old (`Event::Teams` on a change, a failed read
+    waits `EngineOptions::teams_retry`), `EngineRequests::{teams, sync_conversation, reply_roots}`; a channel other
+    than a team's general one is in no conversation list, so the channel view syncs it on open.
+  - The UI: `teams_list.rs` (the rail's list, "Loading teams…" until a read settled it) and `channel_view.rs` (threads:
+    each post with its replies, the oldest first; replies whose post isn't held under "Replies to an earlier post";
+    "Load older posts"; no composer, no action, no read receipt; `Main::Channel`, the header "<team> › <channel>"). The
+    trace gained `teams-list shown`, `channel opened` and `channel-view shown` (ids and kinds only). `reach.rs`'s
+    `no_channel_write_exists_and_the_teams_views_write_nothing` checks no `ChannelPost` mapping in `teams-proto` and
+    no write call in the two views; `teams-core/tests/teams.rs` shows a post and a read receipt to a channel denied by
+    the fence with nothing but reads reaching the mock.
+  - The mock gained CSA's read (`csa.rs`) and the team's other channel (`TEAM_CHANNEL`, unlisted, `topic`). The
+    native CSA read ran only on the mock; the app's first live run is Task 25's. The sandbox window test isn't
+    extended.
 
 ### Task 17: Others' presence
 **Files:**

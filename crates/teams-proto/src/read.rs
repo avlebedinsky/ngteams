@@ -5,10 +5,16 @@
 //! (`docs/protocol/graph.md`). Graph is our own reach, not the web client's (it names people through the middle
 //! tier's profile lookups, `crate::ShortProfileLookup`), so the probe's answers are the reviewed shape; the transport
 //! takes no other Graph endpoint ([`Service::Graph`]).
+//!
+//! And CSA's read of the account's teams and their channels (M2 Task 16): [`CsaTeams`], in the shape the web client
+//! sent it and `proto-lab probe teams` read live with our own `chatsvcagg` token (`docs/protocol/channels.md`); the
+//! transport takes no other CSA endpoint ([`Service::Csa`]). A channel's posts are read from the chat service like a
+//! chat's messages.
 
 use std::fmt;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::client::Response;
 use crate::endpoint::{Endpoint, Service};
@@ -223,4 +229,170 @@ pub enum GraphAnswerError {
     /// A picture over [`MAX_PICTURE`] bytes.
     #[error("a picture over {MAX_PICTURE} bytes")]
     TooLarge,
+}
+
+/// The query of CSA's teams read, pair by pair in order: the web client's in every capture of the full read
+/// (`ab-chat`, `abc-chat`, `load`), the one `proto-lab probe teams` read live (M2 Task 16).
+pub const CSA_TEAMS_QUERY: [(&str, &str); 5] = [
+    ("isPrefetch", "false"),
+    ("enableMembershipSummary", "true"),
+    ("supportsAdditionalSystemGeneratedFolders", "true"),
+    ("supportsSliceItems", "true"),
+    ("enableEngageCommunities", "false"),
+];
+
+/// The path of CSA's teams read under the CSA base.
+pub const CSA_TEAMS_PATH: [&str; 5] = ["api", "v3", "teams", "users", "me"];
+
+/// `GET <CSA base>/api/v3/teams/users/me?`[`CSA_TEAMS_QUERY`]: the account's teams with their channels (and its chats,
+/// which the native client reads from the chat service instead). Its answer is read with [`CsaTeams::read_answer`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CsaTeams;
+
+impl CsaTeams {
+    /// The teams the answer `body` gives, each with its channels: a team or a channel marked deleted is left out, and
+    /// so is one without a string `id` and `displayName` (counted in [`TeamsAnswer::skipped`]). A team's general
+    /// channel (`isGeneral` `true`, or the channel whose id is the team's) comes first, the others in the answer's
+    /// order.
+    ///
+    /// # Errors
+    /// [`CsaAnswerError::Malformed`] unless the body is a JSON object with a `teams` array.
+    pub fn read_answer(body: &[u8]) -> Result<TeamsAnswer, CsaAnswerError> {
+        let answer: Value = serde_json::from_slice(body).map_err(|_| CsaAnswerError::Malformed)?;
+        let entries = answer
+            .get("teams")
+            .and_then(Value::as_array)
+            .ok_or(CsaAnswerError::Malformed)?;
+        let mut read = TeamsAnswer::default();
+        for entry in entries {
+            match named(entry) {
+                Named::Deleted => {}
+                Named::Unreadable => read.skipped += 1,
+                Named::Kept(id, name) => {
+                    let team = team(entry, id, name, &mut read.skipped);
+                    read.teams.push(team);
+                }
+            }
+        }
+        Ok(read)
+    }
+}
+
+impl Read for CsaTeams {
+    fn service(&self) -> Service {
+        Service::Csa
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        CSA_TEAMS_QUERY
+            .iter()
+            .fold(Endpoint::new(CSA_TEAMS_PATH), |endpoint, (name, value)| {
+                endpoint.with_query(*name, *value)
+            })
+    }
+}
+
+/// What CSA's teams read gave.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TeamsAnswer {
+    pub teams: Vec<Team>,
+    /// Teams and channels left out because they had no string `id` or `displayName`.
+    pub skipped: usize,
+}
+
+/// A team the account is a member of. `Debug` leaves the names out.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Team {
+    /// Its id: its general channel's (`19:…@thread.tacv2`).
+    pub id: String,
+    pub name: String,
+    /// Archived: read-only for everyone.
+    pub archived: bool,
+    /// Its channels, the general one first.
+    pub channels: Vec<Channel>,
+}
+
+impl fmt::Debug for Team {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Team")
+            .field("id", &self.id)
+            .field("archived", &self.archived)
+            .field("channels", &self.channels)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A team's channel: a conversation of the chat service, read like a chat. `Debug` leaves the name out.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+    /// The team's general channel.
+    pub general: bool,
+}
+
+impl fmt::Debug for Channel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Channel")
+            .field("id", &self.id)
+            .field("general", &self.general)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a CSA answer wasn't read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CsaAnswerError {
+    /// Not the probed answer's shape.
+    #[error("not a CSA teams answer of the probed shape")]
+    Malformed,
+}
+
+/// How a team or a channel entry reads.
+enum Named<'a> {
+    Kept(&'a str, &'a str),
+    Deleted,
+    Unreadable,
+}
+
+/// An entry's id and name, unless it is marked deleted (`isDeleted` `true`) or has no string `id` and `displayName`.
+fn named(entry: &Value) -> Named<'_> {
+    if flag(entry, "isDeleted") {
+        return Named::Deleted;
+    }
+    let text = |key| entry.get(key).and_then(Value::as_str);
+    match (text("id"), text("displayName")) {
+        (Some(id), Some(name)) if !id.is_empty() => Named::Kept(id, name),
+        _ => Named::Unreadable,
+    }
+}
+
+/// Whether an entry's boolean `key` is `true`; anything else (absent, another type) is `false`.
+fn flag(entry: &Value, key: &str) -> bool {
+    entry.get(key).and_then(Value::as_bool) == Some(true)
+}
+
+/// A team entry read, its unreadable channels counted in `skipped`.
+fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
+    let mut channels = Vec::new();
+    let listed = entry.get("channels").and_then(Value::as_array);
+    for channel in listed.into_iter().flatten() {
+        match named(channel) {
+            Named::Deleted => {}
+            Named::Unreadable => *skipped += 1,
+            Named::Kept(channel_id, channel_name) => channels.push(Channel {
+                id: channel_id.to_owned(),
+                name: channel_name.to_owned(),
+                general: flag(channel, "isGeneral") || channel_id == id,
+            }),
+        }
+    }
+    // the general channel first, the others in the answer's order
+    channels.sort_by_key(|channel| !channel.general);
+    Team {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        archived: flag(entry, "isArchived"),
+        channels,
+    }
 }
