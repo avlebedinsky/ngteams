@@ -1,0 +1,96 @@
+{
+  "_synthetic": "Made up, in the shape of UPS's answers to the web client's presence reads that the ab-chat capture of 2026-10-22 shows (M2 Task 17, the first run that let them through; read locally from a sanitized reference copy): a JSON list with one item per account asked for, each its mri, its presence (sourceNetwork Self for the account's own and SameEnterprise for another, calendarData, capabilities, availability, activity, lastActiveTime, and source beside the account's own when the read gave it), etagMatch, etag and the item's status 20000; served as application/json. Every account showed Offline then. <guid:a>, <guid:b>, <guid:c> are lab accounts' object ids; tests fill them in.",
+  "content_type": "application/json",
+  "cases": [
+    {
+      "name": "the chat partner",
+      "asked": [{"mri": "8:orgid:<guid:b>"}],
+      "answer": [
+        {
+          "mri": "8:orgid:<guid:b>",
+          "presence": {
+            "sourceNetwork": "SameEnterprise",
+            "calendarData": {"isOutOfOffice": false},
+            "capabilities": [],
+            "availability": "Offline",
+            "activity": "Offline",
+            "lastActiveTime": "0001-01-01T00:00:00Z"
+          },
+          "etagMatch": false,
+          "etag": "made-up-tag",
+          "status": 20000
+        }
+      ]
+    },
+    {
+      "name": "the account's own, from UPS",
+      "asked": [{"mri": "8:orgid:<guid:a>", "source": "ups"}],
+      "answer": [
+        {
+          "mri": "8:orgid:<guid:a>",
+          "source": "ups",
+          "presence": {
+            "sourceNetwork": "Self",
+            "calendarData": {"isOutOfOffice": false},
+            "capabilities": [],
+            "availability": "Offline",
+            "activity": "Offline",
+            "lastActiveTime": "0001-01-01T00:00:00Z",
+            "source": "ups"
+          },
+          "etagMatch": false,
+          "etag": "made-up-tag",
+          "status": 20000
+        }
+      ]
+    },
+    {
+      "name": "the group chat's three",
+      "asked": [{"mri": "8:orgid:<guid:a>"}, {"mri": "8:orgid:<guid:b>"}, {"mri": "8:orgid:<guid:c>"}],
+      "answer": [
+        {
+          "mri": "8:orgid:<guid:a>",
+          "presence": {
+            "sourceNetwork": "Self",
+            "calendarData": {"isOutOfOffice": false},
+            "capabilities": [],
+            "availability": "Offline",
+            "activity": "Offline",
+            "lastActiveTime": "0001-01-01T00:00:00Z"
+          },
+          "etagMatch": false,
+          "etag": "made-up-tag",
+          "status": 20000
+        },
+        {
+          "mri": "8:orgid:<guid:b>",
+          "presence": {
+            "sourceNetwork": "SameEnterprise",
+            "calendarData": {"isOutOfOffice": false},
+            "capabilities": [],
+            "availability": "Offline",
+            "activity": "Offline",
+            "lastActiveTime": "0001-01-01T00:00:00Z"
+          },
+          "etagMatch": false,
+          "etag": "made-up-tag",
+          "status": 20000
+        },
+        {
+          "mri": "8:orgid:<guid:c>",
+          "presence": {
+            "sourceNetwork": "SameEnterprise",
+            "calendarData": {"isOutOfOffice": false},
+            "capabilities": [],
+            "availability": "Offline",
+            "activity": "Offline",
+            "lastActiveTime": "0001-01-01T00:00:00Z"
+          },
+          "etagMatch": false,
+          "etag": "made-up-tag",
+          "status": 20000
+        }
+      ]
+    }
+  ]
+}

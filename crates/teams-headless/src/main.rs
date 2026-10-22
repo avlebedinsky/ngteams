@@ -95,6 +95,7 @@ async fn run(cli: Cli) -> Outcome {
             finish(handle, synced.map(|synced| synced.map(|_| ExitCode::SUCCESS)))
         }
         Command::Watch { json } => watch(&lab, json, &mut signals, &mut out).await,
+        Command::Presence { wait } => presence(&lab, Duration::from_secs(wait), &mut signals, &mut out).await,
         command => {
             let (action, wait) = write_action(&lab, command)?;
             let mut handle = lab.start_engine(false).await?;
@@ -105,6 +106,21 @@ async fn run(cli: Cli) -> Outcome {
             finish(handle, written)
         }
     }
+}
+
+/// The other lab accounts' presence, read once through the engine ([`commands::presence`]).
+async fn presence(lab: &Lab, wait: Duration, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let whom: Vec<String> = teams_fence::lab::Alias::ALL
+        .into_iter()
+        .filter(|alias| *alias != lab.alias)
+        .filter_map(|alias| lab.names.mri(alias).map(str::to_owned))
+        .collect();
+    let mut handle = lab.start_engine(false).await?;
+    let read = tokio::select! {
+        read = commands::presence(&mut handle, &whom, wait, &lab.names, out) => Some(read),
+        () = signals.next() => None,
+    };
+    finish(handle, read.map(|read| read.map(|()| ExitCode::SUCCESS)))
 }
 
 /// The conversation a command's chat argument names for the lab account.
@@ -172,7 +188,11 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
             },
             wait,
         ),
-        Command::Sync | Command::List { .. } | Command::Show { .. } | Command::Watch { .. } => {
+        Command::Sync
+        | Command::List { .. }
+        | Command::Show { .. }
+        | Command::Watch { .. }
+        | Command::Presence { .. } => {
             return Err("not a write".into());
         }
     };

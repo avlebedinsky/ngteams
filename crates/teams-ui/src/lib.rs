@@ -11,7 +11,8 @@
 //! - [`shell`]: the window's three panes: the rail (Chat, Teams, Settings), the list pane, resizable, and the
 //!   conversation pane; Ctrl+K opens the [`switcher`] (the chat switcher, fuzzy over the chats' names).
 //! - [`chat_list`]: the chats by last activity, from the store, kept up to date by the models' changes.
-//! - [`people`]: people as the views show them, a name and a picture from the engine (M2 Task 12).
+//! - [`people`]: people as the views show them, a name and a picture from the engine (M2 Task 12); [`presence`] their
+//!   presence, a dot in the chat list, the chat's header and the mention picker (M2 Task 17).
 //! - [`chat_view`]: a chat's messages, the newest at the bottom, paged from the store (and the service's older
 //!   history), grouped by sender, with day separators, the "New messages" divider, typing and the messages' actions;
 //!   [`rich_text`] is our own renderer of a message's sanitized rich text (never an HTML or markdown view); the
@@ -39,7 +40,7 @@
 //! one (nothing here hands GPUI another), so an image URL loads nothing. Pictures reach a view only as bytes from
 //! the engine ([`people`]).
 //!
-//! M2 Tasks 6–16 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+//! M2 Tasks 6–17 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod bridge;
 pub mod bus;
@@ -51,6 +52,7 @@ pub mod desktop;
 pub mod models;
 pub mod notify;
 pub mod people;
+pub mod presence;
 pub mod rich_text;
 pub mod search;
 pub mod sending;
@@ -74,6 +76,7 @@ pub use desktop::{Desktop, DesktopEvent, DesktopParts};
 pub use models::{Account, Chats, Engine, Feed, FeedEvent, Link, Models, Status};
 pub use notify::{Notice, NoticeKind, NotificationServer, Notifier, NotifierEvent};
 pub use people::Shown;
+pub use presence::Presences;
 pub use search::{Hit, HitTarget, Search, SearchEvent};
 pub use settings::{Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};

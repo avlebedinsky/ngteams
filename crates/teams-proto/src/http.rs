@@ -16,8 +16,10 @@
 //!   <object id>?$select=id,displayName` and `…/users/<object id>/photos/96x96/$value`, `GET` only, M2 Task 12); and,
 //!   once the transport was given the account's CSA base ([`HttpTransport::with_csa`], the GTM `chatSvcAggAfd`:
 //!   `https://<AFD host>/api/csa/<region>`), CSA's one read of the account's teams and channels (`api/v3/teams/users/
-//!   me` with the web client's query exactly, `GET` only, M2 Task 16). An endpoint with an empty, `.` or `..` segment
-//!   is refused, and so is
+//!   me` with the web client's query exactly, `GET` only, M2 Task 16); and, once the transport was given the account's
+//!   presence base ([`HttpTransport::with_presence`], the GTM `presenceUPS`: `https://<AFD host>/ups/<geo>`), UPS's
+//!   presence read (`v1/presence/getpresence/` with its trailing slash, no query, by `POST` under the sealed `PostRead`
+//!   list only, M2 Task 17). An endpoint with an empty, `.` or `..` segment is refused, and so is
 //!   any URL whose decoded path isn't exactly the base's plus the endpoint's segments. Entra and authz aren't on it
 //!   (they stay in `teams-auth`'s own clients, the reviewed exception), and neither is AMS.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
@@ -34,7 +36,9 @@
 //!   cdlworker`, `x-ms-client-request-type: 0`, an empty `x-ms-object-id`) and its body as
 //!   `application/json;charset=UTF-8`; Graph the account's `https://graph.microsoft.com` token and nothing else (the
 //!   probe's form); CSA the account's `https://chatsvcagg.teams.microsoft.com` token and nothing else (the probe's
-//!   form).
+//!   form); UPS the account's `https://presence.teams.microsoft.com/` token with the values every captured presence
+//!   read carried (`behavioroverride: redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent:
+//!   Teams-V2-Web`, an empty `x-ms-object-id`) and its body as `application/json`.
 //! - **Retries** (the transport's part of the plan's retry table), for reads and own-state requests: a 401 makes the
 //!   session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's maximum,
 //!   [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is the
@@ -72,7 +76,7 @@ use url::Url;
 use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Service};
 use crate::own::OwnState;
-use crate::post_read::{AuthorizedPostRead, PostRead};
+use crate::post_read::{AuthorizedPostRead, PRESENCE_PATH, PostRead};
 use crate::read::{CSA_TEAMS_PATH, CSA_TEAMS_QUERY, GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT, Read, is_guid};
 use crate::write::{Authorized, Mutating};
 
@@ -87,6 +91,10 @@ pub const GRAPH_AUDIENCE: &str = "https://graph.microsoft.com";
 
 /// The Entra audience of the token CSA takes.
 pub const CSA_AUDIENCE: &str = "https://chatsvcagg.teams.microsoft.com";
+
+/// The Entra audience of the token UPS (presence) takes: the presence origin with its slash, as the web client asks for
+/// it (`docs/protocol/auth.md`, question 4).
+pub const PRESENCE_AUDIENCE: &str = "https://presence.teams.microsoft.com/";
 
 /// Microsoft Graph's host.
 pub const GRAPH_HOST: &str = "graph.microsoft.com";
@@ -194,6 +202,15 @@ pub enum Refusal {
     /// A request to CSA that isn't a read: CSA is reached by `GET` only.
     #[error("a request to CSA that isn't a read")]
     CsaReadOnly,
+    /// A presence request on a transport that wasn't given the account's presence base.
+    #[error("no presence base")]
+    NoPresence,
+    /// A presence endpoint that isn't the presence read ([`Service::Presence`]).
+    #[error("a presence endpoint that isn't the presence read")]
+    PresencePath,
+    /// A request to UPS that isn't the presence read by `POST`: nothing else goes there.
+    #[error("a request to UPS that isn't the presence read by POST")]
+    PresenceReadByPostOnly,
     /// The URL built isn't on the host allowlist, or its path isn't exactly the base's and the endpoint's.
     #[error("the URL isn't on the transport's allowlist")]
     NotAllowed,
@@ -226,6 +243,9 @@ pub enum BuildError {
     /// Not a CSA base the transport accepts (see [`HttpTransport::with_csa`]).
     #[error("not a CSA base the transport accepts")]
     CsaBase,
+    /// Not a presence base the transport accepts (see [`HttpTransport::with_presence`]).
+    #[error("not a presence base the transport accepts")]
+    PresenceBase,
     /// Not a loopback `http` origin with a port.
     #[error("not a loopback http origin")]
     MockOrigin,
@@ -247,6 +267,8 @@ pub struct HttpTransport<C> {
     middle_tier: Option<Url>,
     /// The CSA base (`https://<AFD host>/api/csa/<region>`, no trailing slash), once given.
     csa: Option<Url>,
+    /// The presence base (`https://<AFD host>/ups/<geo>`, no trailing slash), once given.
+    presence: Option<Url>,
     max_retry_wait: Duration,
     /// Tests only: every request goes to this origin instead, with the path and query it was built and checked with.
     /// Only [`HttpTransport::with_mock_origin`] (`test-support`) sets it; without that feature it is always `None`.
@@ -260,6 +282,7 @@ impl<C> fmt::Debug for HttpTransport<C> {
             .field("registrar_host", &self.registrar_host)
             .field("middle_tier", &self.middle_tier.as_ref().map(Url::as_str))
             .field("csa", &self.csa.as_ref().map(Url::as_str))
+            .field("presence", &self.presence.as_ref().map(Url::as_str))
             .field("max_retry_wait", &self.max_retry_wait)
             .finish_non_exhaustive()
     }
@@ -329,6 +352,7 @@ impl<C: Credentials> HttpTransport<C> {
             registrar_host,
             middle_tier: None,
             csa: None,
+            presence: None,
             max_retry_wait: MAX_RETRY_WAIT,
             mock_origin: None,
         })
@@ -369,6 +393,31 @@ impl<C: Credentials> HttpTransport<C> {
     #[must_use]
     pub fn has_csa(&self) -> bool {
         self.csa.is_some()
+    }
+
+    /// The transport with the account's presence base, the region's GTM `presenceUPS` (trimmed): `https`, an AFD host
+    /// ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path `/ups/<geo>` exactly (the geo lowercase
+    /// letters: `noam`), one trailing slash allowed, no query or fragment. Without it, every presence request is
+    /// refused ([`Refusal::NoPresence`]).
+    ///
+    /// # Errors
+    /// [`BuildError::PresenceBase`] for any other base ([`Self::accepts_presence_base`]).
+    pub fn with_presence(mut self, base: &str) -> Result<Self, BuildError> {
+        self.presence = Some(parse_presence_base(base).ok_or(BuildError::PresenceBase)?);
+        Ok(self)
+    }
+
+    /// Whether [`Self::with_presence`] takes `base`.
+    #[must_use]
+    pub fn accepts_presence_base(base: &str) -> bool {
+        parse_presence_base(base).is_some()
+    }
+
+    /// Whether the transport was given the account's presence base ([`Self::with_presence`]): without one, every
+    /// presence request is refused.
+    #[must_use]
+    pub fn has_presence(&self) -> bool {
+        self.presence.is_some()
     }
 
     /// Another cap on the wait before a throttled read or own-state request is sent again.
@@ -419,17 +468,24 @@ impl<C: Credentials> HttpTransport<C> {
             }
             Service::Csa if !is_csa_endpoint(endpoint) => return Err(refused(Refusal::CsaPath)),
             Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa))?,
+            Service::Presence if !is_presence_endpoint(endpoint) => return Err(refused(Refusal::PresencePath)),
+            Service::Presence => self.presence.clone().ok_or(refused(Refusal::NoPresence))?,
         };
-        url.path_segments_mut()
-            .map_err(|()| refused(Refusal::NotAllowed))?
-            .pop_if_empty()
-            .extend(endpoint.segments());
+        {
+            let mut segments = url.path_segments_mut().map_err(|()| refused(Refusal::NotAllowed))?;
+            segments.pop_if_empty().extend(endpoint.segments());
+            if service == Service::Presence {
+                // UPS's paths end in a slash, as every captured one did
+                segments.push("");
+            }
+        }
         if !endpoint.query().is_empty() {
             url.query_pairs_mut().extend_pairs(endpoint.query());
         }
         let bases = Bases {
             middle_tier: self.middle_tier.as_ref(),
             csa: self.csa.as_ref(),
+            presence: self.presence.as_ref(),
         };
         if allowed(service, &url, endpoint, bases) {
             Ok(url)
@@ -611,6 +667,9 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let service = request.service();
         let endpoint = request.endpoint();
         async move {
+            if service == Service::Presence {
+                return Err(HttpError::Refused(Refusal::PresenceReadByPostOnly));
+            }
             let url = self.url_for(service, &endpoint)?;
             let outgoing = Outgoing {
                 method: reqwest::Method::GET,
@@ -630,6 +689,9 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         async move {
             if let Some(refusal) = read_only(service) {
                 return Err(HttpError::Refused(refusal));
+            }
+            if service == Service::Presence {
+                return Err(HttpError::Refused(Refusal::PresenceReadByPostOnly));
             }
             let url = self.url_for(service, &endpoint)?;
             let outgoing = Outgoing {
@@ -702,16 +764,18 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::MiddleTier => Some(MIDDLE_TIER_AUDIENCE),
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
+        Service::Presence => Some(PRESENCE_AUDIENCE),
         Service::Trouter => None,
     }
 }
 
-/// The refusal of anything but a read to `service`, when it is reached by `GET` only (Graph, CSA).
+/// The refusal of anything but a read to `service`, when it is reached by `GET` only (Graph, CSA). UPS is reached by
+/// its read by `POST` only, which `read` and `own_state` refuse on their own.
 fn read_only(service: Service) -> Option<Refusal> {
     match service {
         Service::Graph => Some(Refusal::GraphReadOnly),
         Service::Csa => Some(Refusal::CsaReadOnly),
-        Service::ChatService | Service::Registrar | Service::Trouter | Service::MiddleTier => None,
+        Service::ChatService | Service::Registrar | Service::Trouter | Service::MiddleTier | Service::Presence => None,
     }
 }
 
@@ -720,9 +784,12 @@ fn read_only(service: Service) -> Option<Refusal> {
 fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
     let content_type = match service {
         Service::MiddleTier => "application/json;charset=UTF-8",
-        Service::ChatService | Service::Registrar | Service::Trouter | Service::Graph | Service::Csa => {
-            "application/json"
-        }
+        Service::ChatService
+        | Service::Registrar
+        | Service::Trouter
+        | Service::Graph
+        | Service::Csa
+        | Service::Presence => "application/json",
     };
     let mut headers = vec![(ACCEPT.as_str().to_owned(), "application/json".to_owned())];
     if body {
@@ -748,6 +815,13 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
             ("x-ms-object-id", ""),
             ("x-ms-test-user", "False"),
         ],
+        // the values every captured presence read carried (the browser fence's `PRESENCE_HEADER_VALUES`)
+        Service::Presence => &[
+            ("behavioroverride", "redirectAs404"),
+            ("x-ms-client-type", "cdlworker"),
+            ("x-ms-client-user-agent", "Teams-V2-Web"),
+            ("x-ms-object-id", ""),
+        ],
         Service::Trouter | Service::Graph | Service::Csa => &[],
     }
 }
@@ -757,6 +831,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
 struct Bases<'a> {
     middle_tier: Option<&'a Url>,
     csa: Option<&'a Url>,
+    presence: Option<&'a Url>,
 }
 
 /// Whether `url`, built for `endpoint` on `service`, is on the allowlist: `https`, no user info, port or fragment, an
@@ -789,6 +864,7 @@ fn allowed(service: Service, url: &Url, endpoint: &Endpoint, bases: Bases<'_>) -
             Service::Csa => bases.csa.is_some_and(|base| {
                 is_csa_endpoint(endpoint) && on_base(base, url, endpoint) && query_is(url, endpoint.query())
             }),
+            Service::Presence => bases.presence.is_some_and(|base| on_presence(base, url, endpoint)),
             Service::Graph => {
                 url.host_str() == Some(GRAPH_HOST)
                     && is_graph_endpoint(endpoint)
@@ -844,6 +920,51 @@ fn on_base(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
         && decoded_path(url).is_some_and(|path| {
             path.len() == base_path.len() + segments.len() && path.starts_with(&base_path) && path.ends_with(segments)
         })
+}
+
+/// UPS's presence read ([`Service::Presence`]): `v1/presence/getpresence`, no query.
+fn is_presence_endpoint(endpoint: &Endpoint) -> bool {
+    endpoint
+        .segments()
+        .iter()
+        .map(String::as_str)
+        .eq(PRESENCE_PATH.iter().copied())
+        && endpoint.query().is_empty()
+}
+
+/// Whether `url` is the presence read on the presence `base` and nothing else: the base's host, its decoded path the
+/// base's, the endpoint's segments and the trailing slash (an empty last segment), no query.
+fn on_presence(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
+    let base_path = decoded_path(base).unwrap_or_default();
+    let mut wanted = base_path;
+    wanted.extend(endpoint.segments().iter().cloned());
+    wanted.push(String::new());
+    is_presence_endpoint(endpoint)
+        && url.host_str() == base.host_str()
+        && url.query().is_none()
+        && decoded_path(url).is_some_and(|path| path == wanted)
+}
+
+/// The presence base, if `base` is one [`HttpTransport::with_presence`] accepts.
+fn parse_presence_base(base: &str) -> Option<Url> {
+    if base.contains(['?', '#']) || base.trim() != base {
+        return None;
+    }
+    let base = base.strip_suffix('/').unwrap_or(base);
+    let url = Url::parse(base).ok()?;
+    let plain = url.scheme() == "https"
+        && url.host_str().is_some_and(|host| AFD_HOSTS.contains(&host))
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        // the base as it was given, not one the parser normalized
+        && url.as_str() == base;
+    let path = decoded_path(&url)?;
+    let geo = matches!(
+        path.as_slice(),
+        [ups, geo] if ups == "ups" && !geo.is_empty() && geo.bytes().all(|byte| byte.is_ascii_lowercase())
+    );
+    (plain && geo).then_some(url)
 }
 
 /// CSA's one probed read ([`Service::Csa`]): `api/v3/teams/users/me` with [`CSA_TEAMS_QUERY`] exactly, in order.

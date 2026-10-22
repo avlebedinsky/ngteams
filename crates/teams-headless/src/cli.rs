@@ -101,6 +101,13 @@ pub enum Command {
         #[arg(long, default_value_t = DEFAULT_WAIT_SECS)]
         wait: u64,
     },
+    /// The other lab accounts' presence, read once from UPS (a read by `POST` under the fence's permit, lab accounts
+    /// only); prints `presence <alias> <availability>` per account. Reads only.
+    Presence {
+        /// Seconds to wait for the read.
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+    },
     /// Listens on the push channel (Trouter) until SIGINT or SIGTERM, catching up on every connect; prints each event
     /// as it is received, with its receive time. Answers no delivery and no call.
     Watch {

@@ -11,6 +11,8 @@ use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, SharedString};
 use teams_core::{Event, MessageChange, Source};
 use teams_store::{Applied, Message, OutboxEntry};
 
+use crate::presence::Presences;
+
 /// How long someone is shown typing after their last typing signal, unless they stop (`typing: false`) or a message
 /// of theirs is delivered first. M2 Task 10's capture (`docs/protocol/chat.md`, "The shapes the UI needs
 /// (chat-shapes)"): the web client's indicator went off about 25 s after the last typing delivery, or as soon as the
@@ -215,6 +217,8 @@ pub struct Models {
     pub status: Entity<Status>,
     pub chats: Entity<Chats>,
     pub feed: Entity<Feed>,
+    /// Others' presence as the engine told it (`Event::Presence`).
+    pub presence: Entity<Presences>,
 }
 
 impl Models {
@@ -224,6 +228,7 @@ impl Models {
             status: cx.new(|_| Status::default()),
             chats: cx.new(|_| Chats::default()),
             feed: cx.new(|_| Feed),
+            presence: cx.new(|_| Presences::default()),
         }
     }
 
@@ -272,6 +277,11 @@ impl Models {
             Event::Profile { mri } => self.chats.update(cx, |chats, cx| {
                 chats.renamed(&mri);
                 cx.notify();
+            }),
+            Event::Presence { mri, availability } => self.presence.update(cx, |presence, cx| {
+                if presence.set(mri, availability) {
+                    cx.notify();
+                }
             }),
             Event::Teams => self.chats.update(cx, |chats, cx| {
                 chats.revision += 1;

@@ -214,11 +214,13 @@ host, `/api/mt/part/<partition>` exactly), and only under `beta/users/`: a `Read
 
 ## Presence (`https://<teams origin>/ups/<geo>/`)
 
-`<geo>` is `noam` for the lab (GTM `presenceUPS`).
+`<geo>` is `noam` for the lab (GTM `presenceUPS`). The native transport reaches UPS as `Service::Presence` (M2 T17)
+only once given the account's base from that GTM (`HttpTransport::with_presence`: an AFD host, `/ups/<geo>`
+exactly), and only with its one `PostRead` entry: a `Read` or an own-state request there is refused.
 
 | Method | Path | What it does | Browser fence | Native | Notes · task | Evidence |
 |---|---|---|---|---|---|---|
-| `POST` | `v1/presence/getpresence/` | other people's presence | expected deny: presence reads | not on the allowlist | [auth.md](auth.md#audience--service-table) · M0 T11 | seen (all writing scenarios) |
+| `POST` | `v1/presence/getpresence/` | the presence (availability, activity) of a list of MRIs | read-by-POST `presence` in its captured shape (no query; no `x-ms-endpoint-id`; the pinned `behavioroverride`, `x-ms-client-type`, `x-ms-client-user-agent`, empty `x-ms-object-id`; a body of `{"mri"}` objects, `source: "ups"` allowed) when every MRI is a lab account; otherwise expected deny: presence reads | `PostRead presence` (`PresenceRead`, the trailing slash, the pinned headers, `[{"mri": …}]`, the `https://presence.teams.microsoft.com/` token), only with a permit for lab accounts; its answer read only when it names nobody but the MRIs asked (`read_answer`). The engine polls it every minute for the people the views asked about (`teams-core` `presence.rs`); `teams-headless <alias> presence` reads it once | [fence-targets.md](fence-targets.md#the-presence-read), [trouter.md](trouter.md#others-presence), [auth.md](auth.md#open-questions) · M0 T11, M2 T17 | seen (all writing scenarios); allowed and answered (`ab-chat` of 2026-10-22, 14 reads); native live (M2 T17) |
 | `PUT` | `v1/me/endpoints/` | creates the account's presence endpoint (availability) | expected deny in `ab-trouter` (presence endpoint); denied Unknown elsewhere | not on the allowlist | [trouter.md](trouter.md#useractivity-and-presence) · M1 T14 | seen (`ab-trouter`, `ab-trouter-quiet`, `echo-call`) |
 | `POST` | `v1/pubsub/subscriptions/<epid>` | subscribes the endpoint to others' presence | expected deny in `ab-trouter` (presence subscriptions); denied Unknown elsewhere | not on the allowlist | [trouter.md](trouter.md#useractivity-and-presence) · M1 T14 | seen |
 

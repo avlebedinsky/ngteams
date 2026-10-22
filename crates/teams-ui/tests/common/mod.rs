@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
-use teams_core::{Action, Answer, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
+use teams_core::{Action, Answer, Availability, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
     ReadHorizon, SearchHit, Team,
@@ -93,6 +93,10 @@ pub struct FakeCore {
     pub roots: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// Every conversation a sync was asked for, in order.
     pub synced: Mutex<Vec<String>>,
+    /// Everyone whose presence was asked about, in order.
+    pub presence_asked: Mutex<Vec<String>>,
+    /// Presence as the engine would answer it, by MRI; unknown for anyone else.
+    pub presences: Mutex<HashMap<String, Availability>>,
 }
 
 impl Default for FakeCore {
@@ -127,6 +131,8 @@ impl Default for FakeCore {
             teams: Mutex::default(),
             roots: Mutex::default(),
             synced: Mutex::default(),
+            presence_asked: Mutex::default(),
+            presences: Mutex::default(),
         }
     }
 }
@@ -330,6 +336,16 @@ impl Core for FakeCore {
             return reply;
         }
         self.answer("person", || self.person_now(mri))
+    }
+
+    fn presence(&self, mri: String) -> Reply<Availability> {
+        locked(&self.presence_asked).push(mri.clone());
+        self.answer("presence", || {
+            locked(&self.presences)
+                .get(&mri)
+                .cloned()
+                .unwrap_or(Availability::Unknown)
+        })
     }
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {

@@ -339,7 +339,9 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         hosts: TEAMS,
         method: "POST",
         path: "/ups/*/v1/presence/getpresence/",
-        reason: "other people's presence, read by POST: the scenario shows no presence",
+        reason: "a presence read the read-by-POST list doesn't let through (`crate::post_read`): it names someone who \
+                 isn't a lab account, carries the client's endpoint id or isn't in the captured shape; the scenario \
+                 needs no presence, and the lab accounts' reads pass",
     },
     ExpectedRequest {
         class: "push updates metadata",

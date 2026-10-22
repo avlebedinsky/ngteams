@@ -13,6 +13,9 @@
 //!   profile's, else their newest message's, else one the binary knew), else their MRI; a group or meeting chat by its
 //!   topic, else its other members' names (or MRIs). The avatar shows a 1:1 chat's other member's picture, else the
 //!   initials of a name, else nothing.
+//! - **Presence** (M2 Task 17): a 1:1 chat's avatar carries its other member's presence dot ([`crate::presence`]); the
+//!   engine is asked about them as the row is built, and the list draws what the presence model holds, again on each
+//!   change of it.
 //! - **Unread** is the store's count after the account's read horizon (`unread_count`).
 //!
 //! A row clicked is told as [`ChatListEvent::Opened`]; the shell shows it. The switcher tells the shell itself
@@ -31,12 +34,14 @@ use gpui::{
 };
 use gpui_component::Size;
 use gpui_component::avatar::Avatar;
+use teams_core::Availability;
 use teams_proto::chat::parse_html;
 use teams_store::{Conversation, ConversationKind, Member, Message};
 
 use crate::bridge::Core;
 use crate::models::Models;
 use crate::people::{self, Picture, Shown};
+use crate::presence;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
@@ -105,6 +110,8 @@ pub struct ChatRow {
     pub named: bool,
     /// A 1:1 chat's other member's picture, from the engine.
     pub picture: Option<Picture>,
+    /// A 1:1 chat's other member, whose presence the row shows.
+    pub partner: Option<String>,
     /// The last message's first line.
     pub preview: SharedString,
     /// Milliseconds.
@@ -222,6 +229,8 @@ struct Naming {
     name: SharedString,
     named: bool,
     picture: Option<Picture>,
+    /// A 1:1 chat's other member.
+    partner: Option<String>,
     /// The members whose names the name read (none for a topic).
     people: Vec<String>,
 }
@@ -240,6 +249,7 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
             name: topic.to_owned().into(),
             named: true,
             picture: None,
+            partner: None,
             people: Vec::new(),
         };
     }
@@ -249,6 +259,7 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
             name: "Chat".into(),
             named: false,
             picture: None,
+            partner: None,
             people: Vec::new(),
         };
     }
@@ -265,12 +276,10 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
             all_named = false;
         }
     }
-    // a 1:1 chat shows the other member's picture; a group none of its own
-    let picture = if conversation.kind == ConversationKind::OneToOne && others.len() == 1 {
-        pictures.pop().flatten()
-    } else {
-        None
-    };
+    // a 1:1 chat shows the other member's picture and presence; a group neither of its own
+    let one_to_one = conversation.kind == ConversationKind::OneToOne && others.len() == 1;
+    let picture = if one_to_one { pictures.pop().flatten() } else { None };
+    let partner = one_to_one.then(|| others[0].clone());
     let mut name = shown.join(", ");
     if others.len() > NAMED_MEMBERS {
         name = format!("{name} +{}", others.len() - NAMED_MEMBERS);
@@ -279,6 +288,7 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
         name: name.into(),
         named: all_named,
         picture,
+        partner,
         people: others.into_iter().take(NAMED_MEMBERS).collect(),
     }
 }
@@ -302,13 +312,16 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         name,
         named,
         picture,
+        partner,
         people,
     } = name_of(core, conversation, &members).await;
+    presence::watch(core, &partner);
     let row = ChatRow {
         kind: RowKind::of(&conversation.kind),
         name,
         named,
         picture,
+        partner,
         preview: preview(&page, core.me()),
         last_activity: conversation.last_activity,
         unread,
@@ -361,7 +374,7 @@ pub struct ChatList {
     loads: u64,
     catch_ups: u64,
     traced: Option<Vec<(String, RowKind, u64)>>,
-    _observing: [Subscription; 2],
+    _observing: [Subscription; 3],
 }
 
 impl EventEmitter<ChatListEvent> for ChatList {}
@@ -376,6 +389,8 @@ impl ChatList {
         cx: &mut Context<Self>,
     ) -> Self {
         let chats = cx.observe(&models.chats, |this: &mut Self, _, cx| this.reload(cx));
+        // a presence the engine told: the rows' dots are drawn again from the model
+        let presence = cx.observe(&models.presence, |_: &mut Self, _, cx| cx.notify());
         let status = cx.observe(&models.status, |this: &mut Self, status, cx| {
             let catch_ups = status.read(cx).catch_ups;
             if catch_ups != this.catch_ups {
@@ -401,7 +416,7 @@ impl ChatList {
             loads: 0,
             catch_ups,
             traced: None,
-            _observing: [chats, status],
+            _observing: [chats, status, presence],
         };
         list.reload(cx);
         list
@@ -557,9 +572,35 @@ impl ChatList {
             .bg(rgb(background))
             .hover(move |style| style.bg(rgb(if selected { palette.selected } else { palette.hover })))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), cx)))
-            .child(avatar(row))
+            .child(self.avatar(row, palette, cx))
             .child(row_text(row, palette))
             .into_any_element()
+    }
+
+    /// The row's avatar ([`avatar`]), a 1:1 chat's with its other member's presence dot at its corner.
+    fn avatar(&self, row: &ChatRow, palette: Palette, cx: &App) -> AnyElement {
+        let Some(availability) = self.presence_of(row, cx) else {
+            return avatar(row).into_any_element();
+        };
+        div()
+            .relative()
+            .flex_none()
+            .child(avatar(row))
+            .child(
+                presence::dot(&availability, palette)
+                    .absolute()
+                    .right(px(-1.0))
+                    .bottom(px(-1.0)),
+            )
+            .into_any_element()
+    }
+
+    /// The presence a row shows: its 1:1 chat's other member's, as the presence model holds it; `None` for a row
+    /// that shows none (a group or meeting chat).
+    #[must_use]
+    pub fn presence_of(&self, row: &ChatRow, cx: &App) -> Option<Availability> {
+        let partner = row.partner.as_deref()?;
+        Some(self.models.presence.read(cx).of(partner))
     }
 }
 

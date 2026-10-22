@@ -52,7 +52,7 @@ fn help_names_every_command() {
     assert!(output.status.success(), "{output:?}");
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
-        "sync", "list", "show", "send", "edit", "delete", "react", "read", "watch",
+        "sync", "list", "show", "send", "edit", "delete", "react", "read", "watch", "presence",
     ] {
         assert!(
             help.lines().any(|line| line.trim_start().starts_with(command)),
@@ -713,4 +713,23 @@ async fn a_write_the_store_refuses_fails_and_show_needs_a_known_chat() {
     let unknown = commands::show(&store, "19:unknown@thread.v2", 10, &names(), &mut Vec::new());
     assert!(matches!(unknown, Err(CommandError::Store(_))), "{unknown:?}");
     assert!(Path::new(&lab.store_file(LAB_A)).exists());
+}
+
+#[tokio::test]
+async fn presence_prints_each_account_as_the_engine_has_it_unknown_without_a_read() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+    let mut out = Vec::new();
+
+    // the mock's reads have no presence base: nothing is read, and each stays unknown once the wait is over
+    let whom = [LAB_B.to_owned(), LAB_C.to_owned()];
+    commands::presence(&mut a, &whom, Duration::from_millis(300), &names(), &mut out)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "presence b Unknown\npresence c Unknown\n"
+    );
+    a.shutdown();
 }

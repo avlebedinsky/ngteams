@@ -289,7 +289,38 @@ newly found offline messages are notified is M2's.
   "Available","activityReporting":"Transport","deviceType":"Web"}`, and subscribes to others' presence
   (`POST …/ups/<geo>/v1/pubsub/subscriptions/<epid>`). The fence denied both in every run (they are on the run's
   expected list), and other people's presence reads were denied too, so what makes an account show online (the PUT,
-  the activity, or both) was not tested.
+  the activity, or both) was not tested. Others' presence is read since M2 Task 17 ([below](#others-presence)); the
+  account's own is Tasks 18–20.
+
+## Others' presence
+
+M2 Task 17. Others' presence is read from UPS (GTM `presenceUPS`, `<AFD host>/ups/<geo>`) by `POST
+v1/presence/getpresence/`, a read the web client sends as a `POST`.
+
+- **The request** (5461 of them in the captures of 2026-10-19 to 2026-10-21, all denied then): a JSON list of
+  `{"mri": …}`, up to 8 seen, the account's own sometimes with `"source": "ups"` beside it; no query; the trailing
+  slash; `behavioroverride: redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent: Teams-V2-Web`, an
+  empty `x-ms-object-id`, `Content-Type: application/json`, the client's caller and correlation ids, and on 2065 of
+  them `x-ms-endpoint-id` (the client's endpoint). The client asks with a caller per component
+  (`presence-sync-strategy:onInterval` about every four minutes, 218–258 s apart; others on a subscription event, on
+  Trouter's state, for its own "me" queries). Its token: `https://presence.teams.microsoft.com/`, CAE.
+- **The answer** (`ab-chat` of 2026-10-22, the first run that let lab-only reads through: 14 reads, all 200): one item
+  per MRI asked and no other, each `mri`, `presence` (`sourceNetwork`: `Self` for the account's own, `SameEnterprise`
+  for another; `calendarData.isOutOfOffice`; `capabilities`, empty; `availability`; `activity`; `lastActiveTime`; and
+  `source` when asked with it), `etagMatch`, `etag` and the item's `status`, `20000`. Every lab account was
+  `Offline`/`Offline` then (nothing sets their presence yet), `lastActiveTime` `0001-01-01T00:00:00Z`.
+- **The browser fence** lets it through as the read-by-`POST` entry `presence` only in that shape, without
+  `x-ms-endpoint-id`, and only when every MRI is a lab account ([fence-targets.md](fence-targets.md#the-presence-read)).
+- **The native client** sends it as the sealed `PostRead` entry `PresenceRead`, by MRI alone (`[{"mri": …}]`, never
+  `source`), with the captured header values and its own non-CAE presence token, which UPS took
+  (`teams-headless a presence`, 2026-10-23: two reads, `Offline` for b and c; [auth.md](auth.md#open-questions)
+  question 4). The engine polls it every minute for the people the views asked about, in one read of those the fence
+  lets a read name (`teams-core` `presence.rs`); the views show a dot, "unknown" before the first read and after a
+  failed one.
+- **No subscription**: the web client also subscribes its endpoint to others' presence (`POST
+  v1/pubsub/subscriptions/<epid>`), which changes UPS's state, so it is no read and stays denied; the native client's
+  presence is only as fresh as its last poll. If a minute proves too stale, that is a backlog item, not a subscription
+  under the read rules.
 
 ## Reconnect parameters and backoff (from the bundle)
 

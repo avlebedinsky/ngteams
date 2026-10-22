@@ -29,7 +29,7 @@
 //! service credential: [`HttpFence::handle`] offers every paused request's URL and headers, from the raw event, to
 //! [`ChatCredential::from_request`] before it builds the [`PausedRequest`], which holds every header's name but the
 //! value only of the few the read-by-`POST` list reads ([`crate::post_read::HEADER_VALUES_READ`]: `Content-Type`,
-//! `Origin` and some of the client's `x-ms-*` flags), never a token or a cookie. The raw event, headers included, has
+//! `Origin`, `behavioroverride` and some of the client's `x-ms-*` flags), never a token or a cookie. The raw event, headers included, has
 //! been handed to the run's event watchers and offered to the capture recorder before that.
 
 use std::sync::{Arc, Mutex, PoisonError};

@@ -1,5 +1,5 @@
 //! `teams-headless`: one lab account's native Teams client from the command line, the M1 core (`teams-core`) without a
-//! UI. `teams-headless <alias> sync|list|show|send|edit|delete|react|read|watch`.
+//! UI. `teams-headless <alias> sync|list|show|send|edit|delete|react|read|watch|presence`.
 //!
 //! - The fence is [`teams_fence::Fence::open_lab`]'s: the roster from `lab.toml`, every decision in the lab's
 //!   `fence.log`, which every account's process appends to at once (under the file's lock); every write goes out

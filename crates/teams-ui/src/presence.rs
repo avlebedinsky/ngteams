@@ -1,0 +1,127 @@
+//! Others' presence as the views show it (M2 Task 17): a dot beside a person in the chat list (a 1:1 chat's other
+//! member, on the avatar), the chat's header (its other member) and the mention picker (each member offered).
+//!
+//! - **From the engine only.** A view asks the engine about everyone it shows ([`watch`]: `Core::presence`, which makes
+//!   the engine read them from then on), and draws what the [`Presences`] model holds: the engine's
+//!   `Event::Presence`s as the bridge applied them. A person no event told about yet is
+//!   [`Availability::Unknown`](teams_core::Availability::Unknown).
+//! - **Unknown** is drawn as a hollow ring: before the first read, for someone this build can't read (in the lab,
+//!   anyone but the lab accounts), and when a read failed. A word UPS gave that this build doesn't name is drawn the
+//!   same way, its word as the dot's label.
+
+use std::collections::HashMap;
+
+use gpui::{Div, InteractiveElement as _, ParentElement as _, SharedString, Styled as _, div, px, rgb};
+use teams_core::Availability;
+
+use crate::bridge::Core;
+use crate::theme::Palette;
+
+/// A dot's diameter, px.
+pub const DOT: f32 = 10.0;
+
+/// Available's green.
+const GREEN: u32 = 0x006b_b700;
+/// Busy's and Do not disturb's red.
+const RED: u32 = 0x00c4_314b;
+/// Away's and Be right back's amber.
+const AMBER: u32 = 0x00ff_aa44;
+/// Offline's grey.
+const GREY: u32 = 0x008a_8886;
+
+/// Everyone's presence as the engine last told it ([`Models::presence`](crate::Models::presence)).
+#[derive(Debug, Default)]
+pub struct Presences {
+    known: HashMap<String, Availability>,
+}
+
+impl Presences {
+    /// `mri`'s presence as last told; unknown while none was.
+    #[must_use]
+    pub fn of(&self, mri: &str) -> Availability {
+        self.known.get(mri).cloned().unwrap_or(Availability::Unknown)
+    }
+
+    /// Keeps `mri`'s presence; whether it changed.
+    pub(crate) fn set(&mut self, mri: String, availability: Availability) -> bool {
+        self.known.insert(mri, availability.clone()) != Some(availability)
+    }
+}
+
+/// Asks the engine about everyone in `mris`, so it reads their presence from now on; the answers come as events.
+pub fn watch<'a>(core: &dyn Core, mris: impl IntoIterator<Item = &'a String>) {
+    for mri in mris {
+        // the request goes out as it is made; its answer is the model's to show, as the events tell it
+        drop(core.presence(mri.clone()));
+    }
+}
+
+/// What a dot says, for a tooltip, the trace and the tests.
+#[must_use]
+pub fn label(availability: &Availability) -> SharedString {
+    match availability {
+        Availability::Available => "Available".into(),
+        Availability::AvailableIdle => "Available, idle".into(),
+        Availability::Away => "Away".into(),
+        Availability::BeRightBack => "Be right back".into(),
+        Availability::Busy => "Busy".into(),
+        Availability::BusyIdle => "Busy, idle".into(),
+        Availability::DoNotDisturb => "Do not disturb".into(),
+        Availability::Offline => "Offline".into(),
+        Availability::Other(word) => word.clone().into(),
+        Availability::Unknown => "Unknown".into(),
+    }
+}
+
+/// The dot's fill; `None` for a hollow ring (unknown, or a word this build doesn't name).
+#[must_use]
+pub fn fill(availability: &Availability) -> Option<u32> {
+    match availability {
+        Availability::Available | Availability::AvailableIdle => Some(GREEN),
+        Availability::Busy | Availability::BusyIdle | Availability::DoNotDisturb => Some(RED),
+        Availability::Away | Availability::BeRightBack => Some(AMBER),
+        Availability::Offline => Some(GREY),
+        Availability::Other(_) | Availability::Unknown => None,
+    }
+}
+
+/// The dot of `availability`, its debug selector `presence-<what>` (the label's words joined by `-`, lowercase).
+#[must_use]
+pub fn dot(availability: &Availability, palette: Palette) -> Div {
+    let selector = format!(
+        "presence-{}",
+        label(availability)
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+    );
+    let dot = div()
+        .debug_selector(move || selector.clone())
+        .size(px(DOT))
+        .flex_none()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(palette.background));
+    match fill(availability) {
+        Some(color) => dot.bg(rgb(color)),
+        None => dot
+            .border_color(rgb(palette.muted_foreground))
+            .bg(rgb(palette.background)),
+    }
+}
+
+/// The dot with its label beside it, for the chat's header.
+#[must_use]
+pub fn labelled(availability: &Availability, palette: Palette) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .font_weight(gpui::FontWeight::NORMAL)
+        .text_color(rgb(palette.muted_foreground))
+        .child(dot(availability, palette))
+        .child(label(availability))
+}

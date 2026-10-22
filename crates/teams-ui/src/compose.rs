@@ -7,7 +7,8 @@
 //!   `"[]"`: `lines.json`'s `unlinked_content`), never an anchor (the web client's anchor carries a `HyperLink` entry
 //!   in `links`, which isn't built here); a mention is an atomic token of the kit's text area naming its MRI,
 //!   completed after `@` from the chat's members ([`Core::members`], their names from [`Core::person`]) and only from
-//!   them: a mention is never read from typed text, only by the MRI the picker put in its token. `teams-proto`'s
+//!   them: a mention is never read from typed text, only by the MRI the picker put in its token; the picker shows each
+//!   member's presence dot (M2 Task 17: the engine is asked about them as they are read). `teams-proto`'s
 //!   [`MessageText`] renders the HTML, the mentions and the reply's quote from that one value. A send the engine
 //!   refuses before it makes a row gives the box its draft back.
 //! - **Keys**: Enter sends (the kit's text area hands a plain Enter on, and the box takes it as the send, or the
@@ -42,12 +43,13 @@ use gpui_component::input::{
     TextareaState,
 };
 use gpui_component::{Sizable as _, Size};
-use teams_core::{Action, Transient};
+use teams_core::{Action, Availability, Transient};
 use teams_fence::Mri;
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
 use teams_store::Message;
 
 use crate::bridge::Core;
+use crate::presence::{self, Presences};
 use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -457,6 +459,8 @@ pub struct ComposeParts {
     pub core: Arc<dyn Core>,
     pub settings: Entity<SettingsModel>,
     pub trace: Arc<ViewTrace>,
+    /// Others' presence as the engine told it, for the mention picker's dots.
+    pub presence: Entity<Presences>,
 }
 
 /// The compose box (see the module docs).
@@ -464,6 +468,7 @@ pub struct Compose {
     core: Arc<dyn Core>,
     settings: Entity<SettingsModel>,
     trace: Arc<ViewTrace>,
+    presence: Entity<Presences>,
     conversation: String,
     input: Entity<TextareaState>,
     mode: Mode,
@@ -474,6 +479,7 @@ pub struct Compose {
     /// What the last send couldn't do, shown over the box.
     problem: Option<SharedString>,
     _input_events: Subscription,
+    _presence: Subscription,
 }
 
 impl EventEmitter<ComposeEvent> for Compose {}
@@ -487,6 +493,7 @@ async fn read_candidates(core: Arc<dyn Core>, conversation: String) -> Vec<Candi
         if member.mri == me || !member.mri.starts_with("8:orgid:") {
             continue;
         }
+        presence::watch(core.as_ref(), [&member.mri]);
         let name = core
             .person(member.mri.clone())
             .await
@@ -517,10 +524,17 @@ impl Compose {
                 this.typed(window, cx);
             }
         });
+        // a presence the engine told: an open picker draws its dots again
+        let presence = cx.observe(&parts.presence, |this: &mut Self, _, cx| {
+            if this.picker.is_some() {
+                cx.notify();
+            }
+        });
         Self {
             core: parts.core,
             settings: parts.settings,
             trace: parts.trace,
+            presence: parts.presence,
             conversation,
             input,
             mode: Mode::New,
@@ -529,6 +543,7 @@ impl Compose {
             reading: None,
             problem: None,
             _input_events: input_events,
+            _presence: presence,
         }
     }
 
@@ -547,6 +562,17 @@ impl Compose {
     #[must_use]
     pub fn picker(&self) -> Option<&Picker> {
         self.picker.as_ref()
+    }
+
+    /// The presence the open picker shows beside each person it offers, in its order; empty while it is closed.
+    #[must_use]
+    pub fn picker_presence(&self, cx: &App) -> Vec<(String, Availability)> {
+        let presence = self.presence.read(cx);
+        self.picker
+            .iter()
+            .flat_map(|picker| &picker.matches)
+            .map(|candidate| (candidate.mri.clone(), presence.of(&candidate.mri)))
+            .collect()
     }
 
     /// What the last send couldn't do.
@@ -989,6 +1015,7 @@ impl Compose {
 
     fn picker_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let picker = self.picker.as_ref()?;
+        let presence = self.presence.read(cx);
         let rows = picker.matches.iter().enumerate().map(|(index, candidate)| {
             let chosen = index == picker.selected;
             div()
@@ -997,7 +1024,11 @@ impl Compose {
                 .px_2()
                 .py_1()
                 .rounded_md()
+                .flex()
+                .items_center()
+                .gap_2()
                 .when_chosen(chosen, palette)
+                .child(presence::dot(&presence.of(&candidate.mri), palette))
                 .child(candidate.name.clone())
                 .on_click(cx.listener(move |this, _, window, cx| this.choose(index, window, cx)))
         });

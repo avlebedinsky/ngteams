@@ -1,8 +1,8 @@
 //! The shell: the window's three panes, Teams-like and compact. On the left the rail (Chat, Teams, and Settings at
 //! its foot), then the list pane (the [`ChatList`] for Chat; the [`TeamsList`] of teams and their channels for Teams,
 //! M2 Task 16), resizable by the handle on its right edge, then the conversation pane (the chat opened in a
-//! [`ChatView`] under its name, a channel opened in a [`ChannelView`] under its team's and its own name, read-only, or
-//! the settings).
+//! [`ChatView`] under its name, and a 1:1 chat's other member's presence, M2 Task 17; a channel opened in a
+//! [`ChannelView`] under its team's and its own name, read-only; or the settings).
 //!
 //! The keyboard: Ctrl+K opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
@@ -20,12 +20,14 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ResizableState, h_resizable, resizable_panel};
+use teams_core::Availability;
 
 use crate::bridge::Core;
 use crate::channel_view::ChannelView;
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView};
 use crate::models::Models;
+use crate::presence;
 use crate::search::{HitTarget, Search, SearchEvent};
 use crate::settings::SettingsModel;
 use crate::settings_view::SettingsView;
@@ -110,7 +112,7 @@ pub struct Shell {
     main: Main,
     panes: Entity<ResizableState>,
     focus: FocusHandle,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl Shell {
@@ -135,6 +137,8 @@ impl Shell {
             TeamsListEvent::Opened(chosen) => this.open_channel(chosen.clone(), window, cx),
         });
         let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx));
+        // a presence the engine told: the chat's header draws its dot again
+        let presence = cx.observe(&models.presence, |_: &mut Self, _, cx| cx.notify());
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         if let Some(id) = &selected {
@@ -169,7 +173,7 @@ impl Shell {
             main: selected.map_or(Main::Nothing, Main::Chat),
             panes: cx.new(|_| ResizableState::default()),
             focus,
-            _subscriptions: [opened, channel_opened],
+            _subscriptions: [opened, channel_opened, presence],
         }
     }
 
@@ -292,6 +296,18 @@ impl Shell {
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.reveal(target.arrival_time, target.message, cx));
         }
+    }
+
+    /// The presence the chat's header shows: the chat opened's other member's, when it is a 1:1 chat (the list's row
+    /// for it names them), as the presence model holds it.
+    #[must_use]
+    pub fn header_presence(&self, cx: &App) -> Option<Availability> {
+        let Main::Chat(id) = &self.main else {
+            return None;
+        };
+        let list = self.list.read(cx);
+        let row = list.row(id)?;
+        list.presence_of(row, cx)
     }
 
     /// What a chat view is made of: the shell's own.
@@ -476,7 +492,14 @@ impl Shell {
                     .chat
                     .clone()
                     .filter(|chat| chat.read(cx).conversation() == id.as_str());
-                pane.child(pane_header(name, palette).debug_selector(|| "chat-header".to_owned()))
+                let presence = self.header_presence(cx).map(|availability| {
+                    presence::labelled(&availability, palette).debug_selector(|| "chat-header-presence".to_owned())
+                });
+                let header = pane_header(name, palette)
+                    .gap_2()
+                    .children(presence)
+                    .debug_selector(|| "chat-header".to_owned());
+                pane.child(header)
                     .child(div().flex_1().min_h_0().children(chat))
                     .into_any_element()
             }
