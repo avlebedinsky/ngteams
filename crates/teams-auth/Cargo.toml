@@ -10,6 +10,8 @@ publish.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 httpdate.workspace = true
+# the session's renewals (audience, expiry, outcome) and its signing out, in the app's diagnostic log; never a token
+log.workspace = true
 oo7.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true

@@ -377,6 +377,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     pub async fn catch_up(&self, store: &mut Store) -> Result<CatchUpReport, CatchUpError> {
         let reads = ChatReads::new(&self.client);
         let kept = store.conversation_list_sync_link()?;
+        let first = kept.is_none();
         let mut list = match kept.as_deref() {
             Some(link) => reads.conversations_from(link).await?,
             None => reads.conversations().await?,
@@ -409,6 +410,22 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         }
         if report.failed.is_empty() {
             store.set_conversation_list_sync_link(sync_link.as_deref(), (self.clock)())?;
+        }
+        log::info!(
+            "catch-up: {} conversation(s) listed ({} skipped), {} message(s) new, {} newer, {} failed{}",
+            report.conversations,
+            report.skipped,
+            report.messages.inserted,
+            report.messages.updated,
+            report.failed.len(),
+            if first { " (the first)" } else { "" }
+        );
+        for failed in &report.failed {
+            log::warn!(
+                "catch-up: conversation {} not synced: {}",
+                failed.conversation,
+                failed.error
+            );
         }
         Ok(report)
     }

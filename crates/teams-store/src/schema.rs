@@ -45,5 +45,6 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", found + 1)?;
         tx.commit()?;
+        log::info!("store migrated from schema version {found} to {}", found + 1);
     }
 }

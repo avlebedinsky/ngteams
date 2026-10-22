@@ -1,15 +1,17 @@
 //! The settings view, in the conversation pane: switches for sending typing and read receipts, which messages notify,
-//! the idle time and the account's manual status, and what was wrong with the settings file. Each change goes to the
-//! [`SettingsModel`] (and so to the file) at once.
+//! the idle time, the account's manual status, the diagnostic log's level and "Copy diagnostics", and what was wrong
+//! with the settings file (or the log). Each change goes to the [`SettingsModel`] (and so to the file) at once.
 
 use gpui::{
     AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Window, div, px, rgb,
 };
+use gpui_component::button::Button;
 use gpui_component::radio::Radio;
 use gpui_component::switch::Switch;
+use teams_log::diagnostics::WARNING;
 
-use crate::settings::{ManualStatus, Notifications, Settings, SettingsModel};
+use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel};
 use crate::theme::{self, Palette};
 
 /// The idle times offered, in minutes (the one set is offered too, if it isn't one of these).
@@ -138,6 +140,58 @@ impl SettingsView {
         });
         section("Status").child(div().flex().flex_col().gap_1().children(radios))
     }
+
+    /// The diagnostic log: its level (changed live; `TEAMS_APP_LOG` overrides it, said here), "Copy diagnostics", and
+    /// what the last copy held: said plainly when it has full requests and responses.
+    fn log(&self, settings: &Settings, model: &SettingsModel, palette: Palette) -> impl IntoElement {
+        let radios = LogLevel::ALL.map(|level| {
+            self.radio(
+                "log-level",
+                level.key(),
+                level.label().into(),
+                settings.log_level == level,
+                move |settings| settings.log_level = level,
+            )
+        });
+        let overridden = teams_log::installed()
+            .and_then(teams_log::FileLog::overridden)
+            .map(|level| {
+                div()
+                    .debug_selector(|| "log-level-overridden".to_owned())
+                    .text_sm()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(SharedString::from(format!(
+                        "TEAMS_APP_LOG sets the level to {} for this run",
+                        level.key()
+                    )))
+            });
+        let copy_model = self.model.clone();
+        let copy = div().debug_selector(|| "copy-diagnostics".to_owned()).child(
+            Button::new("copy-diagnostics")
+                .label("Copy diagnostics")
+                .on_click(move |_, _, cx| {
+                    copy_model.update(cx, |model, cx| {
+                        model.copy_diagnostics(cx);
+                    });
+                }),
+        );
+        let copied = model.copied().map(|copied| {
+            let text = if copied.has_debug {
+                format!("Copied. It {WARNING}.")
+            } else {
+                "Copied.".to_owned()
+            };
+            div()
+                .debug_selector(|| "diagnostics-copied".to_owned())
+                .text_sm()
+                .child(SharedString::from(text))
+        });
+        section("Diagnostic log")
+            .child(div().flex().flex_wrap().gap_3().children(radios))
+            .children(overridden)
+            .child(copy)
+            .children(copied)
+    }
 }
 
 /// A titled part of the view.
@@ -171,6 +225,7 @@ impl Render for SettingsView {
         let model = self.model.read(cx);
         let settings = model.settings().clone();
         let problems = problems(model, palette);
+        let log = self.log(&settings, model, palette);
         div()
             .debug_selector(|| "settings".to_owned())
             .size_full()
@@ -185,5 +240,6 @@ impl Render for SettingsView {
             .child(self.notifications(&settings))
             .child(self.idle(&settings))
             .child(self.status(&settings))
+            .child(log)
     }
 }

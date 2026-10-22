@@ -11,6 +11,10 @@
 //! never quits before the engine is joined. The bridge keeps the shutdown going whether or not a caller keeps its
 //! task. From then on every request answers `Stopped`: nothing more goes out. [`Bridge::sign_out`] does the same once
 //! the account's session can't renew its tokens, and shows the account signed out.
+//!
+//! The diagnostic log (M2 Task 24a) has the shutdown, the sign-out and an engine that stopped on its own; a view's
+//! failed request is logged by its kind where its [`Reply`] is read (`teams-core`), and the engine's own failures as
+//! it tells them.
 
 use std::pin::pin;
 use std::sync::Arc;
@@ -380,9 +384,11 @@ impl Bridge {
         // a drain that already ended (the engine stopped on its own) has dropped its receiver
         let _ = stop.send(());
         let models = self.models.clone();
+        log::info!("the engine is shutting down");
         cx.spawn(async move |bridge, cx: &mut AsyncApp| {
             let shutdown = task.await;
             cx.background_spawn(async move { shutdown() }).await;
+            log::info!("the engine is shut down, its thread joined");
             cx.update(|cx| models.engine_stopped(cx));
             // a bridge that is gone has nobody left to ask
             let _ = bridge.update(cx, |bridge, _| bridge.held = Held::Stopped);
@@ -393,6 +399,7 @@ impl Bridge {
     /// The account's session can't renew its tokens: shows it signed out with `hint` and shuts the engine down
     /// ([`Bridge::shutdown`]), so nothing more is sent.
     pub fn sign_out(&mut self, hint: SharedString, cx: &mut Context<Self>) -> Task<()> {
+        log::warn!("the account is signed out: shown, and the engine shut down");
         self.models.signed_out(hint, cx);
         self.shutdown(cx)
     }
@@ -417,6 +424,7 @@ async fn drain<E: EventSource>(
         match next {
             Some(Some(event)) => cx.update(|cx| models.apply(event, cx)),
             Some(None) => {
+                log::warn!("the engine stopped on its own");
                 cx.update(|cx| models.engine_stopped(cx));
                 break;
             }

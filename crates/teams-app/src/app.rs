@@ -14,6 +14,7 @@
 
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,8 @@ use teams_core::EngineError;
 use teams_core::lab::LabError;
 use teams_core::{EngineHandle, Event};
 use teams_fence::lab::Alias;
+use teams_log::diagnostics::Source as DiagnosticsSource;
+use teams_ui::LogLevel;
 use teams_ui::bus::BusError;
 use teams_ui::window::{KitRoot, LAB_APP_ID};
 use teams_ui::{
@@ -49,6 +52,31 @@ pub struct Launch {
     pub settings: SettingsFile,
     /// The session bus the app is given ([`teams_ui::bus::address_from_env`]), for its notifications and tray item.
     pub bus: Result<String, BusError>,
+    /// Where "copy diagnostics" reads from: the diagnostic log [`install_log`] opened (or why it couldn't), the
+    /// account's `fence.log`; `None` for an app without them (a test's).
+    pub diagnostics: Option<DiagnosticsSource>,
+}
+
+/// Installs the account's diagnostic log in `dir` (the lab's `LabPaths::app_log_dir`) at the settings' `setting`
+/// level, `TEAMS_APP_LOG` overriding it, before the engine starts; where "copy diagnostics" reads from, `fence_log`
+/// among it. A log that can't be opened is said once on stderr and in the settings view, and the app runs without it.
+#[must_use]
+pub fn install_log(dir: PathBuf, setting: LogLevel, fence_log: PathBuf) -> DiagnosticsSource {
+    let config = teams_log::Config::from_env(dir, setting);
+    let (log_file, log_problem) = match teams_log::install(&config) {
+        Ok(log) => (Some(log.path().to_owned()), None),
+        Err(error) => {
+            eprintln!("teams-app: {error}");
+            (None, Some(error.to_string()))
+        }
+    };
+    log::info!("teams-app {} starting", env!("CARGO_PKG_VERSION"));
+    DiagnosticsSource {
+        app: format!("teams-app {}", env!("CARGO_PKG_VERSION")),
+        log_file,
+        log_problem,
+        fence_log: Some(fence_log),
+    }
 }
 
 /// The desktop and the bridge, held by the app for its whole life: nothing else holds the desktop once its window is
@@ -134,6 +162,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         trace,
         settings,
         bus,
+        diagnostics,
     } = launch;
     // GPUI would quit on its own as the last window closes (`QuitMode::Default` on Linux), before the engine is shut
     // down, and closing the window keeps the app in the tray: the app quits itself when the desktop asks
@@ -147,9 +176,13 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     if let Some(signed_out) = signed_out {
         watch_sign_out(signed_out, bridge.downgrade(), sign_in_hint(alias), cx);
     }
-    let settings = SettingsModel::load(settings);
+    let mut settings = SettingsModel::load(settings);
     for problem in settings.problems() {
         eprintln!("teams-app: {problem}");
+        log::warn!("{problem}");
+    }
+    if let Some(diagnostics) = diagnostics {
+        settings = settings.with_diagnostics(diagnostics);
     }
     let parts = ShellParts {
         core: bridge.read(cx).core(),
@@ -171,6 +204,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     let window = match desktop.update(cx, Desktop::open_window) {
         Ok(window) => window,
         Err(error) => {
+            log::error!("the window can't be opened: {error:#}");
             return Err(LaunchFailed {
                 error: format!("{error:#}"),
                 stopped: bridge.update(cx, Bridge::shutdown),
@@ -187,6 +221,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     cx.spawn(async move |_: &mut AsyncApp| {
         for problem in connecting.await {
             eprintln!("teams-app: {problem}");
+            log::warn!("{problem}");
         }
     })
     .detach();

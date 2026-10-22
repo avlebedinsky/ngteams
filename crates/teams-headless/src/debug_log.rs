@@ -13,10 +13,12 @@ use crate::print::{now_ms, visible};
 /// The variable that turns the log on: `debug` (or `info`, `warn`, `error`).
 pub const VARIABLE: &str = "TEAMS_HEADLESS_LOG";
 
-/// Whether a record is shown: only our own crates' (`teams_…` targets), at `level` or above.
+/// Whether a record is shown: only our own crates' (`teams_…` targets), at `level` or above, never a full request,
+/// answer or frame (the app's diagnostic log's `teams_wire` records, `teams_log::wire::is_wire`): this log stays by kind
+/// and size.
 #[must_use]
 pub fn shown(metadata: &Metadata<'_>, level: Level) -> bool {
-    metadata.level() <= level && metadata.target().starts_with("teams_")
+    metadata.level() <= level && metadata.target().starts_with("teams_") && !teams_log::wire::is_wire(metadata.target())
 }
 
 /// One log line: `<ms> <level> <target>: <message>`, [`visible`].

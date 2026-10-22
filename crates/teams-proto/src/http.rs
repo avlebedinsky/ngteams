@@ -48,14 +48,17 @@
 //! - **Tests** reach a mock only through [`HttpTransport::with_mock_origin`] (`test-support`): plain `http` to a
 //!   loopback origin, the URL built and checked as above first.
 //!
-//! Nothing here logs a token: the `Authorization` header is marked sensitive, errors carry no token or body, and
-//! [`Response`]'s `Debug` shows the body's length only.
+//! **The log** (`teams-log`, M2 Task 24a): every request at `info` by its method, host and path (never its query),
+//! with its status and latency, or how it failed, and the retry decision; at `debug` the request and its answer in
+//! full, as `teams_log::wire` records whose formatting redacts the credentials (the `Authorization` header among
+//! them): redaction is the logger's, never this module's. Otherwise nothing here shows a token: the `Authorization`
+//! header is marked sensitive, errors carry no token or body, and [`Response`]'s `Debug` shows the body's length only.
 
 use std::fmt;
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use percent_encoding::percent_decode_str;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LOCATION};
@@ -470,13 +473,20 @@ impl<C: Credentials> HttpTransport<C> {
         let first = self.attempt(&outgoing, own, token.as_ref()).await?;
         let retry = match (first.status(), audience(outgoing.service), &token) {
             (401, Some(audience), Some(refused)) => {
+                log::info!("{}: HTTP 401, sent once more with a renewed token", shown(&outgoing));
                 let renewed = self.credentials.bearer_rejected(audience, refused).await;
                 token = Some(renewed.map_err(HttpError::Credentials)?);
                 true
             }
-            (429 | 503, ..) => {
+            (status @ (429 | 503), ..) => {
                 let wait = first.retry_after().unwrap_or(DEFAULT_RETRY_WAIT);
-                tokio::time::sleep(wait.min(self.max_retry_wait)).await;
+                let wait = wait.min(self.max_retry_wait);
+                log::info!(
+                    "{}: HTTP {status}, sent once more after {} ms",
+                    shown(&outgoing),
+                    wait.as_millis()
+                );
+                tokio::time::sleep(wait).await;
                 // the session may have signed out (or renewed) during the wait: the retry takes what it holds now
                 token = self.token(outgoing.service).await?;
                 true
@@ -547,12 +557,46 @@ impl<C: Credentials> HttpTransport<C> {
             value.set_sensitive(true);
             map.insert(AUTHORIZATION, value);
         }
-        let mut request = self.client.request(method, self.destination(url)).headers(map);
+        let full = log::log_enabled!(log::Level::Debug);
+        if full {
+            let headers = header_pairs(&map);
+            let request = teams_log::wire::Request {
+                method: method.as_str(),
+                url: url.as_str(),
+                headers: &headers,
+                body: body.as_deref(),
+            };
+            log::debug!(target: teams_log::wire::HTTP_TARGET, "{request}");
+        }
+        let shown = format!("{method} {}{}", url.host_str().unwrap_or_default(), url.path());
+        let started = Instant::now();
+        let mut request = self.client.request(method.clone(), self.destination(url)).headers(map);
         if let Some(body) = body {
             request = request.body(body);
         }
-        let answer = request.send().await.map_err(|error| failure(&error))?;
-        read_answer(answer).await
+        let answered = match request.send().await {
+            Ok(answer) => read_answer(answer, full).await,
+            Err(error) => Err(failure(&error)),
+        };
+        let elapsed = started.elapsed();
+        match &answered {
+            Ok((answer, headers)) => {
+                log::info!("{shown} -> HTTP {} in {} ms", answer.status(), elapsed.as_millis());
+                if full {
+                    let response = teams_log::wire::Response {
+                        method: method.as_str(),
+                        url: url.as_str(),
+                        status: answer.status(),
+                        headers,
+                        body: answer.body(),
+                        elapsed,
+                    };
+                    log::debug!(target: teams_log::wire::HTTP_TARGET, "{response}");
+                }
+            }
+            Err(error) => log::info!("{shown} failed after {} ms: {error}", elapsed.as_millis()),
+        }
+        answered.map(|(answer, _)| answer)
     }
 
     /// Sends a read by `POST` (see [`Transport::post_read`]): the request built from the entry, read back against the
@@ -947,9 +991,37 @@ fn parse_mock_origin(origin: &str) -> Option<Url> {
     (url.scheme() == "http" && loopback && url.port().is_some() && bare && url.password().is_none()).then_some(url)
 }
 
-/// Reads an answer: its status, `Location`, `Retry-After`, `Content-Type`, and its body up to [`MAX_BODY`].
-async fn read_answer(mut answer: reqwest::Response) -> Result<Response, HttpError> {
+/// A request's description in the log at `info`: its method, host and path, never its query.
+fn shown(outgoing: &Outgoing<'_>) -> String {
+    format!(
+        "{} {}{}",
+        outgoing.method,
+        outgoing.url.host_str().unwrap_or_default(),
+        outgoing.url.path()
+    )
+}
+
+/// Every header of `map` as text, for the log's `debug` records (which redact the credentials'): a value that isn't
+/// text is taken lossily.
+fn header_pairs(map: &HeaderMap) -> Vec<(String, String)> {
+    map.iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Reads an answer: its status, `Location`, `Retry-After`, `Content-Type`, and its body up to [`MAX_BODY`]; with
+/// `all_headers`, every header too, for the log's `debug` record (none otherwise).
+async fn read_answer(
+    mut answer: reqwest::Response,
+    all_headers: bool,
+) -> Result<(Response, Vec<(String, String)>), HttpError> {
     let headers = answer.headers();
+    let kept = if all_headers { header_pairs(headers) } else { Vec::new() };
     let text = |name| {
         headers
             .get(name)
@@ -976,7 +1048,7 @@ async fn read_answer(mut answer: reqwest::Response) -> Result<Response, HttpErro
     if let Some(wait) = wait {
         response = response.with_retry_after(wait);
     }
-    Ok(response)
+    Ok((response, kept))
 }
 
 fn failure(error: &reqwest::Error) -> HttpError {

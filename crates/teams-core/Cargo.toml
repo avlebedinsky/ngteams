@@ -33,6 +33,8 @@ reqwest.workspace = true
 teams-fence = { workspace = true, features = ["test-support"] }
 # the sync tests' chat service, from the synthetic fixtures
 teams-mock.workspace = true
+# the diagnostic log at `info` over an offline run (`tests/diagnostic_log.rs`)
+teams-log.workspace = true
 # the transport reaches wiremock through its mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
 # the engine tests' push channel reaches the Trouter mock through its mock origin

@@ -709,6 +709,7 @@ fn child_window() -> SandboxResult {
                 settings,
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),
+                diagnostics: None,
             },
         );
         match launched {

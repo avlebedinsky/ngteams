@@ -22,7 +22,9 @@ use std::ops::RangeInclusive;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use gpui::Context;
+use gpui::{ClipboardItem, Context};
+pub use teams_log::Level as LogLevel;
+use teams_log::diagnostics::{Report, Source as DiagnosticsSource};
 use toml::{Table, Value};
 
 /// The settings file's mode.
@@ -149,6 +151,8 @@ pub struct Settings {
     /// Minutes without use before the account shows away (Task 20), within [`IDLE_MINUTES`].
     pub idle_minutes: u32,
     pub manual_status: ManualStatus,
+    /// The diagnostic log's level (`teams-log`), changed live; `TEAMS_APP_LOG` overrides it.
+    pub log_level: LogLevel,
 }
 
 impl Default for Settings {
@@ -160,6 +164,7 @@ impl Default for Settings {
             notifications: Notifications::default(),
             idle_minutes: DEFAULT_IDLE_MINUTES,
             manual_status: ManualStatus::default(),
+            log_level: LogLevel::default(),
         }
     }
 }
@@ -172,6 +177,7 @@ pub mod keys {
     pub const NOTIFICATIONS: &str = "notifications";
     pub const IDLE_MINUTES: &str = "idle_minutes";
     pub const MANUAL_STATUS: &str = "manual_status";
+    pub const LOG_LEVEL: &str = "log_level";
 }
 
 /// What went wrong with the settings file: the defaults are used, or the one setting's default.
@@ -185,6 +191,9 @@ pub enum Problem {
     UnknownKey { key: String },
     #[error("the settings can't be saved to {path} ({why}): they hold until the app quits")]
     Unsaved { path: String, why: String },
+    /// The diagnostic log couldn't be opened: the app runs without it.
+    #[error("{why}")]
+    LogUnavailable { why: String },
 }
 
 /// Reads settings from a file's text (see the module docs): every problem found, each one's setting at its default.
@@ -237,6 +246,12 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
                 .and_then(ManualStatus::from_key)
                 .ok_or(bad(keys::MANUAL_STATUS, "not a status this app knows"))?;
         }
+        keys::LOG_LEVEL => {
+            settings.log_level = value
+                .as_str()
+                .and_then(LogLevel::parse)
+                .ok_or(bad(keys::LOG_LEVEL, "not one of error, warn, info, debug"))?;
+        }
         other => {
             return Err(Problem::UnknownKey { key: other.to_owned() });
         }
@@ -274,6 +289,10 @@ pub fn render(settings: &Settings) -> String {
     table.insert(
         keys::MANUAL_STATUS.to_owned(),
         Value::String(settings.manual_status.key().to_owned()),
+    );
+    table.insert(
+        keys::LOG_LEVEL.to_owned(),
+        Value::String(settings.log_level.key().to_owned()),
     );
     table.to_string()
 }
@@ -400,7 +419,16 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
-/// The settings as the views share them: a GPUI entity. A change goes to the file at once ([`SettingsModel::change`]).
+/// What the last "copy diagnostics" put on the clipboard, as the settings view tells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Copied {
+    /// It holds a `debug` line: full requests and responses, not safe to paste.
+    pub has_debug: bool,
+}
+
+/// The settings as the views share them: a GPUI entity. A change goes to the file at once ([`SettingsModel::change`]);
+/// a change of the log's level goes to the log at once too (`teams_log::apply_setting`). It also keeps where the
+/// "copy diagnostics" text comes from ([`SettingsModel::copy_diagnostics`]).
 #[derive(Debug)]
 pub struct SettingsModel {
     settings: Settings,
@@ -408,6 +436,8 @@ pub struct SettingsModel {
     problems: Vec<Problem>,
     /// The file couldn't be read: it is left as it is, and changes hold in memory.
     held: bool,
+    diagnostics: Option<DiagnosticsSource>,
+    copied: Option<Copied>,
 }
 
 impl SettingsModel {
@@ -423,6 +453,8 @@ impl SettingsModel {
             file: Some(file),
             problems,
             held,
+            diagnostics: None,
+            copied: None,
         }
     }
 
@@ -434,7 +466,50 @@ impl SettingsModel {
             file: None,
             problems: Vec::new(),
             held: false,
+            diagnostics: None,
+            copied: None,
         }
+    }
+
+    /// The settings with where "copy diagnostics" reads from; a log that couldn't be opened
+    /// ([`DiagnosticsSource::log_problem`]) is shown as a problem.
+    #[must_use]
+    pub fn with_diagnostics(mut self, source: DiagnosticsSource) -> Self {
+        if let Some(why) = &source.log_problem {
+            self.problems.push(Problem::LogUnavailable { why: why.clone() });
+        }
+        self.diagnostics = Some(source);
+        self
+    }
+
+    /// The "copy diagnostics" text as it would be copied now (see `teams_log::diagnostics`).
+    #[must_use]
+    pub fn diagnostics(&self) -> Report {
+        let source = self.diagnostics.clone().unwrap_or_else(|| DiagnosticsSource {
+            app: format!("teams {}", env!("CARGO_PKG_VERSION")),
+            log_file: None,
+            log_problem: None,
+            fence_log: None,
+        });
+        source.collect(self.settings.log_level)
+    }
+
+    /// Puts the "copy diagnostics" text on the clipboard and keeps what it was for the settings view to tell
+    /// ([`SettingsModel::copied`]).
+    pub fn copy_diagnostics(&mut self, cx: &mut Context<Self>) -> Report {
+        let report = self.diagnostics();
+        cx.write_to_clipboard(ClipboardItem::new_string(report.text.clone()));
+        self.copied = Some(Copied {
+            has_debug: report.has_debug,
+        });
+        cx.notify();
+        report
+    }
+
+    /// What the last "copy diagnostics" copied; `None` before one.
+    #[must_use]
+    pub fn copied(&self) -> Option<Copied> {
+        self.copied
     }
 
     #[must_use]
@@ -462,6 +537,10 @@ impl SettingsModel {
         change(&mut self.settings);
         if self.settings == before {
             return;
+        }
+        if self.settings.log_level != before.log_level {
+            // no log installed (a view test): nothing to tell
+            let _ = teams_log::apply_setting(self.settings.log_level);
         }
         self.problems
             .retain(|problem| !matches!(problem, Problem::Unsaved { .. }));

@@ -138,6 +138,11 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             let tried = match &transient {
                 Transient::Typing { conversation } => self.deliver(Typing::new(conversation.clone())).await,
             };
+            log::info!(
+                "transient {transient:?}{}: {}",
+                if waited { " after its wait" } else { "" },
+                tried.summary()
+            );
             match tried {
                 Tried::Answered(answer) if answer.status() == 401 && !refreshed => refreshed = true,
                 Tried::Answered(answer) => return self.answered(transient, &answer, waited),

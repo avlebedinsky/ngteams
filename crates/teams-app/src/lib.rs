@@ -6,7 +6,10 @@
 //! `LabPaths::store_file`, Trouter), its tokens only through the credential broker's socket (`--secrets-fd`, a
 //! `teams_auth::broker::BrokerSecretStore`; the app never opens the Secret Service itself and has no fallback). It
 //! refuses a `test-support` build and a window anywhere but the UI sandbox ([`guard`]), reports another engine on the
-//! account and exits, writes the view trace to `--trace-fd` ([`trace`]) and prints no token. When the account's
+//! account and exits, writes the view trace to `--trace-fd` ([`trace`]) and prints no token. Before the engine starts
+//! it installs the account's diagnostic log (`teams-log`: `<data_dir>/logs/<alias>/teams-app.log`, the settings'
+//! `log_level`, `TEAMS_APP_LOG` overriding it; [`app::install_log`]); one that can't be opened is said once and the
+//! app runs without it. When the account's
 //! session can't renew its tokens, the window shows it signed out (run `proto-lab auth <alias>`) and the engine is
 //! stopped, so nothing more is sent. Its notifications and its tray item go to the session bus it is given (its
 //! `DBUS_SESSION_BUS_ADDRESS`, the sandbox's private bus) and nowhere else; closing the window keeps the app in the

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, TestAppContext};
 use teams_ui::settings::{
-    DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, ManualStatus, Notifications, Problem, Settings, SettingsFile,
+    DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsFile,
     SettingsModel, parse, render,
 };
 
@@ -35,7 +35,31 @@ fn changed() -> Settings {
         notifications: Notifications::Mentions,
         idle_minutes: 15,
         manual_status: ManualStatus::DoNotDisturb,
+        log_level: LogLevel::Debug,
     }
+}
+
+#[test]
+fn the_log_level_is_info_by_default_and_read_from_the_file() {
+    assert_eq!(Settings::default().log_level, LogLevel::Info);
+    for level in LogLevel::ALL {
+        let settings = Settings {
+            log_level: level,
+            ..Settings::default()
+        };
+        let text = render(&settings);
+        assert!(text.contains(&format!("log_level = \"{}\"", level.key())), "{text}");
+        let (read, problems) = parse(&text).expect("TOML");
+        assert_eq!(read, settings);
+        assert!(problems.is_empty());
+    }
+    // `trace` is `debug`; any other name is reported and the default kept
+    let (read, problems) = parse("log_level = \"trace\"").expect("TOML");
+    assert_eq!(read.log_level, LogLevel::Debug);
+    assert!(problems.is_empty());
+    let (read, problems) = parse("log_level = \"loud\"").expect("TOML");
+    assert_eq!(read.log_level, LogLevel::Info);
+    assert!(matches!(&problems[..], [Problem::BadValue { key: "log_level", .. }]));
 }
 
 #[test]

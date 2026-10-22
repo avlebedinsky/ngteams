@@ -12,6 +12,8 @@ chrono.workspace = true
 # the bridge's drain: the engine's next event or the stop, whichever comes first
 futures-util.workspace = true
 gpui-pre.workspace = true
+# the bridge's shutdown and sign-out in the app's diagnostic log; capped at `debug` at compile time like teams-trouter's
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
 # the UI kit: compose's text area, the theme, the resizable panes, the command palette (the chat switcher), avatars,
 # buttons, switches and radios
 gpui-component.workspace = true
@@ -25,6 +27,8 @@ teams-fence.workspace = true
 teams-proto.workspace = true
 # the rows the engine's queries answer with
 teams-store.workspace = true
+# the diagnostic log's level in the settings (changed live) and the "copy diagnostics" text; never installed here
+teams-log.workspace = true
 # the settings file's problems
 thiserror.workspace = true
 # the bridge's stop signal to its drain task (a runtime-free oneshot)

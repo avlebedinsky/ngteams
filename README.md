@@ -30,6 +30,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-trouter` | the native push channel: socket.io 0.9 over WSS to the Trouter hosts only, `user.authenticate` first, keep-alives, the registrar registration of the messaging stack, reconnects with backoff and on token renewal, deliveries turned into typed chat events and never answered (an incoming call included) |
 | `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out); a lab account's engine assembled as every lab binary builds it (`lab`) |
 | `crates/teams-ui` | the GPUI views and models over the engine: the bridge (it owns the engine, drains its events into the models on GPUI's foreground, shuts it down off it; views reach it only through `Core`), the models, the root view and window, the shell (rail, chat list, conversation pane), the chat view (a conversation's messages from the store, a page at a time), our own rich text renderer (`teams-proto`'s `RichText` drawn with GPUI's text elements, links opened only through `open_url`), the chat switcher (Ctrl+K), the settings and their file, the desktop (the window, the notifications of messages that come and the tray item with the unread total, both over `zbus` on the session bus the app is given and nowhere else; closing the window keeps the app in the tray), the view trace (ids, kinds and times, never text), the theme (the UI kit's, Teams-like and compact, light and dark following the window); no HTTP or socket client, GPUI's HTTP client the null one |
+| `crates/teams-log` | the app's diagnostic log: one file per account (`0600` in a `0700` dir, rotated at 8 MiB, 4 older kept), our own crates' records only, written from a thread of its own; every line redacted by the logger itself (credential headers, token fields, sign-in's codes, Trouter's `user.authenticate`, then JWT-shaped strings, `skypetoken=`, `Bearer `); full requests and frames only at `debug`; the "copy diagnostics" text |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; clients reach it through the `test-support` mock origins |
 | `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
@@ -281,9 +282,29 @@ who is typing. With the message list focused (a click on a message), Up and Down
 `a` (react), `e` (edit, the account's own), Delete (the account's own) and Escape (clear the selection) act on it; the
 same actions show over a message under the pointer. Ctrl+K opens the chat switcher (fuzzy over the chats' names;
 Enter opens, Escape closes). The settings (the selected chat,
-typing, read receipts, notifications, the idle time, the manual status) live in `<data_dir>/ui/<alias>.toml` (`0600`,
+typing, read receipts, notifications, the idle time, the manual status, the log's level) live in `<data_dir>/ui/<alias>.toml` (`0600`,
 its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is
 printed and shown in the settings view.
+
+The diagnostic log (`teams-log`) is installed before the engine starts, at
+`<data_dir>/logs/<alias>/teams-app.log` (`0600`, its directory `0700`); at 8 MiB it is rotated to `teams-app.log.1`
+(and on to `.4`; older files are dropped). It takes only our own crates' lines, never a third-party crate's or the UI
+kit's, and is written from a thread of its own (lines that would make the window wait are dropped and counted).
+Levels: `error`, `warn`, `info` (the default: what happened by kind and id, request lines by method, host, path,
+status and latency, the push channel's connects and drops, catch-ups, outbox rows with their `clientmessageid` and the
+fence's decision, renewals, migrations, failures, a panic with its backtrace; no body, query, header value, message
+text or name) and `debug` (every request and response in full, method, URL with its query, headers and bodies, and
+every Trouter frame both ways). The level is the settings' `log_level`, changed live in the settings view;
+`TEAMS_APP_LOG=<level>` overrides it for the run (`trace` is taken as `debug`). The logger redacts every credential
+itself (the `Authorization`, cookie and token headers, token fields, sign-in's codes, `user.authenticate`, then any
+JWT-shaped string, `skypetoken=` or `Bearer ` value on any line). A log that can't be opened is printed and shown in
+the settings view, and the app runs without it. "Copy diagnostics" (the settings view, or "Copy diagnostics" in the
+Ctrl+K palette) puts the app's version and build profile, the level, the log's last 200 lines and the last 40
+`fence.log` lines on the clipboard. **A debug log holds message text, names and whole answers of the service: never
+share it.** When the copied text holds any `debug` line it starts with "contains full requests and responses: not safe
+to paste", and the settings view says so too. A lab run's debug log is lab data like a capture: it never goes into the
+repo, not even sanitized.
+
 Messages from others notify on the desktop as the "notifications" setting says (all, mentions only, off; a mention is
 marked; in a team's channel only a mention), never for the chat shown in a focused window, the account's own, one
 already stored or older history; a catch-up's (or a replayed delivery the store didn't have) only when it arrived
@@ -373,6 +394,7 @@ fence_ws --test fence_targets --test calling --test post_reads --test expected_d
 | `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests: `crates/proto-lab/tests/auth_live.rs` (a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory) and `crates/teams-headless/tests/chat_live.rs` (M1's acceptance: it only spawns the normally built `teams-headless` and reads its output and `fence.log`); without the feature they aren't built, without the variable they skip |
 | `TEAMS_HEADLESS_BIN=<binary>` | the normally built `teams-headless` that `chat_live` spawns (required: a test build refuses to run) |
 | `TEAMS_HEADLESS_LOG=debug` | `teams-headless` logs our own crates' debug lines on stderr, never a payload or a token |
+| `TEAMS_APP_LOG=<level>` | `teams-app`'s diagnostic log at `error`, `warn`, `info` or `debug` for this run, over the settings' `log_level` (`debug`: full requests, responses and frames, credentials redacted; never share such a log) |
 | `ECHO_CALL_TURN_SERVER`, `ECHO_CALL_TURN_USER`, `ECHO_CALL_TURN_PASSWORD` | also run `spikes/echo-call/tests/relay.rs`'s echo through a real TURN server (coturn on loopback) |
 | `GPUI_BENCH_GPU`, `GPUI_BENCH_SECONDS`, `GPUI_BENCH_UPLOAD`, `GPUI_BENCH_OUT` | the video grid benchmark (below) |
 
