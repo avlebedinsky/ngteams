@@ -212,34 +212,11 @@ fn png_chunk(png: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
 }
 
 /// The page expression that hands the compose box ([`COMPOSE`]) `png` as a file named `file_name`, as a clipboard
-/// paste (`how` `"paste"`) or a drop (`"drop"`) of it: it builds the file in the page and dispatches the event the
-/// editor listens for. It answers `true` once dispatched, `false` without a compose box.
+/// paste (`how` `"paste"`) or a drop (`"drop"`) of it ([`super::ab_file::file_event`] of an `image/png`). It answers
+/// `true` once dispatched, `false` without a compose box.
 #[must_use]
 pub fn image_event(png: &[u8], file_name: &str, how: &str) -> String {
-    use base64::Engine as _;
-    let data = base64::engine::general_purpose::STANDARD.encode(png);
-    let file_name = js_string(file_name);
-    let compose = js_string(COMPOSE_CSS);
-    let how = js_string(how);
-    format!(
-        r#"(() => {{
-  const editor = document.querySelector({compose});
-  if (!editor) return false;
-  editor.focus();
-  const bytes = Uint8Array.from(atob("{data}"), (c) => c.charCodeAt(0));
-  const file = new File([bytes], {file_name}, {{ type: "image/png" }});
-  const transfer = new DataTransfer();
-  transfer.items.add(file);
-  if ({how} === "paste") {{
-    editor.dispatchEvent(new ClipboardEvent("paste", {{ clipboardData: transfer, bubbles: true, cancelable: true }}));
-  }} else {{
-    for (const type of ["dragenter", "dragover", "drop"]) {{
-      editor.dispatchEvent(new DragEvent(type, {{ dataTransfer: transfer, bubbles: true, cancelable: true }}));
-    }}
-  }}
-  return true;
-}})()"#
-    )
+    super::ab_file::file_event(png, file_name, "image/png", how)
 }
 
 /// The page expression: whether the compose box holds an image.

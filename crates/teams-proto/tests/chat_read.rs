@@ -18,8 +18,8 @@ use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
 use teams_proto::chat::{
     ChatReadError, ChatReads, Conversation, ConversationKind, ConversationList, Field, MAX_CONTENT, MAX_DEPTH, Marks,
-    MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText, Thread, link_endpoint,
-    parse_html,
+    MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText, Thread, Unshown, WEB_CLIENT,
+    link_endpoint, parse_html, unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::method;
@@ -533,6 +533,61 @@ fn what_this_build_does_not_know_is_kept_never_a_parse_failure() -> TestResult {
     assert_eq!(odd.edit_time(), Field::Unknown(Value::Null));
     assert_eq!(odd.quotes(), Field::Unknown(json!([{"sender": "no id"}])));
     assert_eq!(odd.files(), Field::Unknown(json!(3)));
+    Ok(())
+}
+
+#[test]
+fn a_file_card_or_ams_object_no_capture_showed_is_kept_as_it_came_never_read_as_one() -> TestResult {
+    // every captured message: the empty lists, as JSON strings, and no AMS object
+    let reply = message(&fixture("reply.json")?["read_back"])?;
+    assert_eq!(reply.files(), Field::Known(Vec::new()));
+    assert_eq!(reply.unshown(), Vec::new());
+    // an entry in either form no capture showed: kept whole, never a file (its fields aren't read)
+    let entry = r#"[{"fileName":"made-up.txt","objectUrl":"https://example.test/x"}]"#;
+    let odd = message(&json!({
+        "id": "18",
+        "version": "18",
+        "messagetype": "RichText/Html",
+        "content": "<p>a made-up caption</p>",
+        "amsreferences": ["0-wus-d1-made-up"],
+        "properties": {"files": entry, "cards": [{"made": "up"}], "links": "[]", "mentions": "[]"}
+    }))?;
+    assert_eq!(odd.files(), Field::Unknown(json!(entry)));
+    assert_eq!(
+        odd.unshown(),
+        [
+            Unshown::Files(json!(entry)),
+            Unshown::Cards(json!([{"made": "up"}])),
+            Unshown::AmsReferences(json!(["0-wus-d1-made-up"])),
+        ]
+    );
+    let names: Vec<&str> = odd.unshown().iter().map(Unshown::name).collect();
+    assert_eq!(names, ["files", "cards", "amsreferences"]);
+    // a form that isn't a list is unshown too; an empty list in either form, or none, is nothing to show
+    let parts =
+        |properties: Value| -> TestResult<Vec<Unshown>> { Ok(unshown_parts(&serde_json::from_value(properties)?)) };
+    assert_eq!(parts(json!({"files": 3}))?, [Unshown::Files(json!(3))]);
+    assert_eq!(
+        parts(json!({"files": "not json"}))?,
+        [Unshown::Files(json!("not json"))]
+    );
+    assert_eq!(parts(json!({"files": null}))?, [Unshown::Files(Value::Null)]);
+    assert_eq!(parts(json!({"files": [], "cards": "[]"}))?, []);
+    assert_eq!(parts(json!({}))?, []);
+    // the rest of the message reads as ever
+    assert!(odd.rich_text().is_some());
+    // where it is read in full: the web client, at the chat, its id one encoded segment
+    assert_eq!(
+        web_chat_link("19:a_b@unq.gbl.spaces"),
+        "https://teams.microsoft.com/l/chat/19%3Aa_b%40unq.gbl.spaces/0"
+    );
+    // as `abc-chat` encodes it: a 1:1 chat's object ids keep their `-`
+    assert_eq!(
+        web_chat_link("19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces"),
+        "https://teams.microsoft.com/l/chat/19%3A00000000-0000-4000-8000-00000000000a_\
+         00000000-0000-4000-8000-00000000000b%40unq.gbl.spaces/0"
+    );
+    assert!(web_chat_link("19:x/../y?z#w").starts_with(&format!("{WEB_CLIENT}/l/chat/19%3Ax%2F..%2Fy%3Fz%23w/")));
     Ok(())
 }
 

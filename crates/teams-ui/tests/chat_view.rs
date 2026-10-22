@@ -29,11 +29,12 @@ use gpui::{
     VisualTestContext, point, px, size,
 };
 use teams_core::{Event, MessageChange, Source};
+use teams_proto::chat::web_chat_link;
 use teams_store::{Applied, Message, Reaction, ReadHorizon};
 use teams_ui::ViewTrace;
 use teams_ui::chat_view::{
     Body, ChatView, ChatViewEvent, GROUP_MS, History, Item, MAX_FRUITLESS, MessageAction, MessageItem, PAGE,
-    ReactionCount, RenderedText, arrange, count_reactions, day_label, reaction_label,
+    ReactionCount, RenderedText, UnshownParts, arrange, count_reactions, day_label, reaction_label,
 };
 use teams_ui::models::TYPING_TIMEOUT;
 use teams_ui::rich_text::Rendered;
@@ -278,6 +279,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         edited: false,
         reactions: Vec::new(),
         outbox: Vec::new(),
+        unshown: UnshownParts::default(),
     }
 }
 
@@ -779,6 +781,125 @@ fn older_loads_that_bring_nothing_stall_until_asked_again() {
     }
     assert_eq!(history(cx), History::Complete);
     assert_eq!(older_loads(cx), u64::from(MAX_FRUITLESS) + 3);
+}
+
+/// A message from b whose `properties` hold `properties` (as the store keeps them: JSON text).
+fn with_properties(id: &str, at: i64, properties: &str) -> Message {
+    let mut message = message(id, LAB_B, "<p>a made-up caption</p>", at);
+    message.properties = Some(properties.to_owned());
+    message
+}
+
+#[test]
+fn a_file_or_card_no_capture_showed_is_said_never_guessed_and_opens_the_chat_on_the_web() {
+    let file = r#"{"files":"[{\"fileName\":\"made-up.txt\"}]","cards":"[]","mentions":"[]"}"#;
+    let rig = rig_with(vec![
+        with_properties(
+            "201",
+            NOON,
+            r#"{"files":"[]","cards":"[]","links":"[]","mentions":"[]"}"#,
+        ),
+        with_properties("202", NOON + MINUTE, file),
+        with_properties("203", NOON + 2 * MINUTE, r#"{"cards":[{"made":"up"}]}"#),
+        with_properties("204", NOON + 3 * MINUTE, "not an object"),
+    ]);
+    let (trace, written) = trace();
+    let (view, cx) = chat_window(&rig, trace);
+    let shown: Vec<(String, UnshownParts)> = items(&view, cx)
+        .into_iter()
+        .map(|item| (item.id, item.unshown))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("201".to_owned(), UnshownParts::default()),
+            (
+                "202".to_owned(),
+                UnshownParts {
+                    files: true,
+                    ..UnshownParts::default()
+                }
+            ),
+            (
+                "203".to_owned(),
+                UnshownParts {
+                    cards: true,
+                    ..UnshownParts::default()
+                }
+            ),
+            (
+                "204".to_owned(),
+                UnshownParts {
+                    unreadable: true,
+                    ..UnshownParts::default()
+                }
+            ),
+        ]
+    );
+    // the text shows as ever, the part only as the line saying it can't be shown: never its name or link
+    assert!(cx.debug_bounds("unshown-201").is_none());
+    for selector in ["unshown-202", "unshown-203", "unshown-204"] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    let text = written.text();
+    assert!(!text.contains("made-up"), "the trace holds the part");
+    let line = written
+        .lines()
+        .into_iter()
+        .rfind(|line| line["view"] == "chat-view")
+        .expect("a chat-view line");
+    assert_eq!(
+        line["kinds"],
+        serde_json::json!(["text", "unshown", "unshown", "unshown"])
+    );
+    // the button opens the chat in the web client, through GPUI's opener (here the test platform's record)
+    let open = cx.debug_bounds("open-on-the-web-202").expect("the button is drawn");
+    cx.simulate_click(open.center(), Modifiers::none());
+    assert_eq!(cx.opened_url(), Some(web_chat_link(AB)));
+    assert!(web_chat_link(AB).starts_with("https://teams.microsoft.com/l/chat/19%3A"));
+}
+
+#[test]
+fn a_message_of_a_type_not_shown_opens_the_chat_on_the_web_and_a_deleted_one_doesnt() {
+    let mut card = with_properties("301", NOON, r#"{"cards":[{"made":"up"}]}"#);
+    card.message_type = "RichText/Media_Card".to_owned();
+    let mut plain = message("302", LAB_B, "", NOON + MINUTE);
+    plain.message_type = "RichText/Media_Made_Up".to_owned();
+    let mut gone = with_properties(
+        "303",
+        NOON + 2 * MINUTE,
+        r#"{"files":"[{\"fileName\":\"made-up.txt\"}]"}"#,
+    );
+    gone.delete_time = Some(NOON + 3 * MINUTE);
+    let rig = rig_with(vec![card, plain, gone]);
+    let (trace, written) = trace();
+    let (view, cx) = chat_window(&rig, trace);
+    let unshown: Vec<bool> = items(&view, cx).into_iter().map(|item| item.unshown.any()).collect();
+    assert_eq!(unshown, [false, false, false]);
+    // the type's placeholder with the button; a deleted message says so, with neither line nor button
+    for selector in [
+        "unsupported-301",
+        "open-on-the-web-301",
+        "unsupported-302",
+        "open-on-the-web-302",
+    ] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    for selector in ["unsupported-303", "unshown-303", "open-on-the-web-303"] {
+        assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+    }
+    let line = written
+        .lines()
+        .into_iter()
+        .rfind(|line| line["view"] == "chat-view")
+        .expect("a chat-view line");
+    assert_eq!(
+        line["kinds"],
+        serde_json::json!(["unsupported", "unsupported", "deleted"])
+    );
+    let open = cx.debug_bounds("open-on-the-web-301").expect("the button is drawn");
+    cx.simulate_click(open.center(), Modifiers::none());
+    assert_eq!(cx.opened_url(), Some(web_chat_link(AB)));
 }
 
 #[test]

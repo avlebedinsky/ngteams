@@ -1241,6 +1241,272 @@ async fn ab_image_hands_the_compose_box_its_test_image_by_paste_or_drop() -> Tes
     .await
 }
 
+/// A compose box that, like the web client's, takes a file dropped on it (or pasted, when `#mode` says `paste`) and
+/// shows it as an attachment beside the box: a chip with the file's name apart from its extension, saying on the page
+/// the file's type and size. A chat message above names a file of another run.
+const FILE_PAGE: &str = r#"<!doctype html><html><body>
+<div data-tid="chat-pane-message"><span>lab-file-n0</span><span>.txt</span></div>
+<div id="out"></div>
+<div id="mode">drop</div>
+<div contenteditable="true" role="textbox" id="compose"></div>
+<div id="attachments"></div>
+<script>
+const compose = document.getElementById('compose');
+function take(files, how) {
+  if (document.getElementById('mode').textContent !== how) return;
+  const file = files[0];
+  document.getElementById('out').textContent = how + ' ' + file.type + ' ' + file.size;
+  const chip = document.createElement('div');
+  chip.setAttribute('title', file.name);
+  const stem = document.createElement('span');
+  stem.textContent = file.name.replace(/\.txt$/, '');
+  const extension = document.createElement('span');
+  extension.textContent = '.txt';
+  chip.append(stem, extension);
+  document.getElementById('attachments').append(chip);
+}
+compose.addEventListener('paste', (event) => { event.preventDefault(); take(event.clipboardData.files, 'paste'); });
+compose.addEventListener('dragover', (event) => event.preventDefault());
+compose.addEventListener('drop', (event) => { event.preventDefault(); take(event.dataTransfer.files, 'drop'); });
+</script></body></html>"#;
+
+#[tokio::test]
+async fn ab_file_hands_the_compose_box_its_file_by_drop_or_paste_and_sees_it_attached() -> TestResult {
+    use proto_lab::scenario::ab_file::{file_event, shows_attachment, test_file};
+    with_html(FILE_PAGE, async |run| {
+        let drive = &mut run.driver;
+        let content = test_file("n1");
+        let short = Duration::from_secs(5);
+        // another run's file in a message isn't this run's attachment
+        let other = drive
+            .wait_until_true(
+                "another run's",
+                &shows_attachment("lab-file-n0.txt"),
+                "an attachment",
+                Duration::from_millis(500),
+            )
+            .await;
+        assert!(matches!(other, Err(StepError::Timeout { .. })), "{other:?}");
+        let attached = shows_attachment("lab-file-n1.txt");
+        // the caption typed in the box names the file's stem, never its whole name: not an attachment
+        drive
+            .wait_until_true(
+                "caption",
+                "(() => { document.getElementById('compose').textContent = 'lab-file-n1 caption'; return true; })()",
+                "typed",
+                short,
+            )
+            .await?;
+        let caption = drive
+            .wait_until_true("only a caption", &attached, "an attachment", Duration::from_millis(500))
+            .await;
+        assert!(matches!(caption, Err(StepError::Timeout { .. })), "{caption:?}");
+        // the page takes drops: a paste does nothing there
+        drive
+            .wait_until_true(
+                "paste",
+                &file_event(&content, "lab-file-n1.txt", "text/plain", "paste"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        let none = drive
+            .wait_until_true("not attached", &attached, "an attachment", Duration::from_millis(500))
+            .await;
+        assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
+        drive
+            .wait_until_true(
+                "drop",
+                &file_event(&content, "lab-file-n1.txt", "text/plain", "drop"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        drive
+            .wait_until_true("attached", &attached, "an attachment", short)
+            .await?;
+        let said = format!("drop text/plain {}", content.len());
+        drive.wait_for_text("dropped", &said, short).await?;
+        // a page that takes pastes
+        drive
+            .wait_until_true(
+                "switch",
+                "(() => { document.getElementById('mode').textContent = 'paste'; return true; })()",
+                "switched",
+                short,
+            )
+            .await?;
+        drive
+            .wait_until_true(
+                "paste",
+                &file_event(&content, "lab-file-n2.txt", "text/plain", "paste"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        drive
+            .wait_until_true("pasted", &shows_attachment("lab-file-n2.txt"), "an attachment", short)
+            .await?;
+        let said = format!("paste text/plain {}", content.len());
+        drive.wait_for_text("pasted", &said, short).await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A compose box whose attach button opens a menu, and whose upload item clicks a hidden file input, as a web client
+/// does; the input's chosen file is shown beside the box with its type and size. A profile button (whose label holds
+/// "file") and a send button stand first, so the attach button has to be told by its label.
+const PICKER_PAGE: &str = r#"<!doctype html><html><body>
+<button aria-label="Your profile, status Unknown">me</button>
+<div id="out"></div>
+<div contenteditable="true" role="textbox" id="compose"></div>
+<button aria-label="Send">send</button>
+<button aria-label="Attach file" id="attach">clip</button>
+<div id="menu"></div>
+<div id="attachments"></div>
+<script>
+document.getElementById('attach').addEventListener('click', () => {
+  const item = document.createElement('div');
+  item.setAttribute('role', 'menuitem');
+  item.textContent = 'Upload from this device';
+  item.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.style.display = 'none';
+    input.addEventListener('change', () => {
+      const file = input.files[0];
+      document.getElementById('out').textContent = 'chosen ' + file.type + ' ' + file.size;
+      document.getElementById('attachments').textContent = file.name;
+    });
+    document.body.append(input);
+    input.click();
+  });
+  document.getElementById('menu').append(item);
+});
+</script></body></html>"#;
+
+#[tokio::test]
+async fn ab_file_hands_the_file_to_the_attach_button_s_picker_without_a_dialog() -> TestResult {
+    use proto_lab::scenario::ab_file::{
+        CLICK_ATTACH, PAGE_NOTICES, PICK_UPLOAD, hand_file_to_pickers, shows_attachment, test_file,
+    };
+    with_html(PICKER_PAGE, async |run| {
+        let drive = &mut run.driver;
+        let content = test_file("n1");
+        let short = Duration::from_secs(5);
+        drive
+            .wait_until_true(
+                "hand",
+                &hand_file_to_pickers(&content, "lab-file-n1.txt", "text/plain"),
+                "installed",
+                short,
+            )
+            .await?;
+        let attach = format!("({CLICK_ATTACH}) === 'Attach file'");
+        drive
+            .wait_until_true("attach", &attach, "the attach button clicked", short)
+            .await?;
+        drive
+            .wait_until_true("upload", PICK_UPLOAD, "an upload item", short)
+            .await?;
+        drive
+            .wait_until_true("attached", &shows_attachment("lab-file-n1.txt"), "an attachment", short)
+            .await?;
+        let said = format!("chosen text/plain {}", content.len());
+        drive.wait_for_text("chosen", &said, short).await?;
+        drive
+            .wait_until_true("handed", "window.__labFileHanded === 1", "one hand-over", short)
+            .await?;
+        // a page with no attach button: nothing clicked
+        drive
+            .wait_until_true(
+                "remove",
+                "(() => { document.getElementById('attach').remove(); return true; })()",
+                "removed",
+                short,
+            )
+            .await?;
+        let none = format!("({CLICK_ATTACH}) === null");
+        drive
+            .wait_until_true("no attach", &none, "nothing clicked", short)
+            .await?;
+        // what the page says in a popup, shown ones only, each on one line
+        drive
+            .wait_until_true(
+                "popups",
+                r"(() => {
+  const hidden = document.createElement('div');
+  hidden.setAttribute('role', 'dialog');
+  hidden.style.display = 'none';
+  hidden.textContent = 'not shown';
+  const shown = document.createElement('div');
+  shown.setAttribute('role', 'dialog');
+  shown.innerHTML = '<p>Sorry, you need a made-up thing</p>\n<p>  to share files</p>';
+  document.body.append(hidden, shown);
+  return true;
+})()",
+                "added",
+                short,
+            )
+            .await?;
+        let said = format!(
+            "JSON.stringify({PAGE_NOTICES}) === JSON.stringify(['Sorry, you need a made-up thing to share files'])"
+        );
+        drive
+            .wait_until_true("notices", &said, "the shown popup's text", short)
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A chat with two messages naming this run's file (the newer by its chip's title only), and messages that must never
+/// be taken for one: another run's file, a message of text, and this run's file name in no message (the compose box's
+/// attachment).
+const FILES_CHAT_PAGE: &str = r#"<!doctype html><html><body>
+<div data-tid="chat-pane-message" id="older"><p>lab-file-n1.txt</p></div>
+<div data-tid="chat-pane-message" id="newer"><div title="lab-file-n1.txt"><svg></svg></div></div>
+<div data-tid="chat-pane-message" id="other"><p>lab-file-n0.txt</p></div>
+<div data-tid="chat-pane-message" id="text"><p>lab file n1 plain</p></div>
+<div id="attachment"><p>lab-file-n1.txt</p></div>
+</body></html>"#;
+
+#[tokio::test]
+async fn ab_file_marks_only_this_run_s_unsent_file() -> TestResult {
+    use proto_lab::scenario::ab_file::mark_unsent_file;
+    let mark = mark_unsent_file("lab-file-n1");
+    with_html(FILES_CHAT_PAGE, async |run| {
+        let drive = &mut run.driver;
+        drive
+            .wait_until_true("mark", &mark, "this run's unsent file", Duration::from_secs(5))
+            .await?;
+        drive
+            .wait_for("marked", Selector::Css("#newer[data-lab-mark]"), Duration::from_secs(1))
+            .await?;
+        drive
+            .wait_until_true("one mark", ONE_MARK, "one marked message", Duration::from_secs(1))
+            .await?;
+        drive
+            .wait_until_true(
+                "remove",
+                "(() => { document.getElementById('newer').remove(); document.getElementById('older').remove(); return true; })()",
+                "removed",
+                Duration::from_secs(5),
+            )
+            .await?;
+        let none = drive
+            .wait_until_true("mark again", &mark, "this run's unsent file", Duration::from_millis(500))
+            .await;
+        assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
+        drive
+            .wait_until_true("no mark", NO_MARK, "no marked message", Duration::from_secs(1))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
 /// A page that asks before it is left, as the web client does while a message is still being sent: once a key has
 /// been pressed in it (a dialog before leaving needs the user to have done something on the page).
 const LEAVING_PAGE: &str = r#"<!doctype html><html><body>

@@ -25,7 +25,7 @@ use gpui::{
     rgb,
 };
 use serde_json::{Value, json};
-use teams_proto::chat::{Field, Marks, Mention, Node, Quote, RichText};
+use teams_proto::chat::{Field, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
 
 use crate::theme::Palette;
 
@@ -36,8 +36,8 @@ pub const IMAGE_PLACEHOLDER: &str = "Image";
 pub const IMAGE_WEB_LINK: &str = "open in Teams on the web";
 
 /// The web client's link to one message of a chat, in the deep-link form Microsoft documents
-/// (`https://teams.microsoft.com/l/message/<chat id>/<message id>?context={"contextType":"chat"}`): where an image the
-/// app doesn't show can be seen. Only for a chat's id (`19:…@unq.gbl.spaces` or `19:…@thread.v2`, of letters, digits,
+/// (`<WEB_CLIENT>/l/message/<chat id>/<message id>?context={"contextType":"chat"}`, the origin shared with
+/// `teams_proto::chat::web_chat_link`, which opens a whole chat): where an image the app doesn't show can be seen. Only for a chat's id (`19:…@unq.gbl.spaces` or `19:…@thread.v2`, of letters, digits,
 /// `-`, `_`, `.`, `:` and `@`) and a message id of digits; `None` for anything else (a channel, a reply chain).
 #[must_use]
 pub fn message_web_link(chat: &str, message: &str) -> Option<String> {
@@ -47,9 +47,8 @@ pub fn message_web_link(chat: &str, message: &str) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'@'));
     let message_shaped = !message.is_empty() && message.bytes().all(|byte| byte.is_ascii_digit());
-    (chat_shaped && message_shaped).then(|| {
-        format!("https://teams.microsoft.com/l/message/{chat}/{message}?context=%7B%22contextType%22%3A%22chat%22%7D")
-    })
+    (chat_shaped && message_shaped)
+        .then(|| format!("{WEB_CLIENT}/l/message/{chat}/{message}?context=%7B%22contextType%22%3A%22chat%22%7D"))
 }
 
 /// How a piece of text is styled.

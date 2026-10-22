@@ -14,7 +14,7 @@ use proto_lab::scenario::abc_chat::{
     forced_denies, group_chat_of_message_post, messaging_blocked, new_chat_link, policy, record_creation,
 };
 use proto_lab::scenario::{DenyPolicy, ScenarioError, ScenarioName, ScenarioReport};
-use proto_lab::scenario::{ab_image, ab_trouter, chat_shapes, echo_call};
+use proto_lab::scenario::{ab_file, ab_image, ab_trouter, chat_shapes, echo_call};
 use regex::Regex;
 use teams_fence::LiveMembershipSource;
 use teams_fence::lab::{LabChats, LabConfig, record_abc_chat};
@@ -270,6 +270,10 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
         ScenarioName::AbImage => (
             [probe_rules(Some(&probe))?, ab_image::media_rules()?].concat(),
             ab_image::policy(ab)?,
+        ),
+        ScenarioName::AbFile => (
+            [probe_rules(Some(&probe))?, ab_file::file_rules()?].concat(),
+            ab_file::policy(ab)?,
         ),
         ScenarioName::AbcChat => (forced_denies(nonce), policy(Some(GROUP))?),
         ScenarioName::ChatShapes => (forced_denies(nonce), chat_shapes::policy(ab, Some(GROUP))?),

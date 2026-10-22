@@ -67,7 +67,9 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError};
-use teams_proto::chat::{MessageType, RichText, ThreadActivity, parse_html, thread_activity};
+use teams_proto::chat::{
+    MessageType, RichText, ThreadActivity, Unshown, parse_html, thread_activity, unshown_parts, web_chat_link,
+};
 use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction};
 
 use crate::bridge::Core;
@@ -114,6 +116,11 @@ pub const TRACED: usize = 50;
 pub const DELETED: &str = "This message was deleted";
 /// What a message of a type this build doesn't show shows.
 pub const UNSUPPORTED: &str = "This message can't be shown here";
+/// What a message shows under its text when it carries a part no capture showed (a received file, a card).
+pub const UNSHOWN_CONTENT: &str = "This message has content that can't be shown here";
+/// The button beside [`UNSHOWN_CONTENT`] and [`UNSUPPORTED`] in a chat: it opens the chat in the web client
+/// (`teams_proto::chat::web_chat_link`). The channel view shows neither with it: no channel deep link was captured.
+pub const OPEN_ON_THE_WEB: &str = "Open in Teams on the web";
 /// The divider at the read horizon.
 pub const NEW_MESSAGES: &str = "New messages";
 /// Older loads in a row that may bring nothing before rows near the top stop asking for more by themselves.
@@ -302,6 +309,52 @@ pub struct MessageItem {
     /// The account's writes on it that aren't sent (an edit, a delete, a reaction) and that no newer write on the same
     /// thing made out of date, as they stand, the oldest first.
     pub outbox: Vec<Note>,
+    /// What it carries beside its text that no capture showed ([`unshown_of`]): a received file, a card. With any, it
+    /// shows [`UNSHOWN_CONTENT`] and a way to open the chat in Teams on the web, never a guess at the part.
+    pub unshown: UnshownParts,
+}
+
+/// The parts of a stored message no capture showed, by kind ([`unshown_of`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UnshownParts {
+    /// `properties.files` other than an empty list: a received file.
+    pub files: bool,
+    /// `properties.cards` other than an empty list.
+    pub cards: bool,
+    /// `properties` that aren't a JSON object, so nothing in them can be told apart.
+    pub unreadable: bool,
+}
+
+impl UnshownParts {
+    /// Whether there is any.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.files || self.cards || self.unreadable
+    }
+}
+
+/// The parts of a stored message that no capture showed (`teams_proto::chat::unshown_parts`: `properties.files` or
+/// `properties.cards` other than an empty list); `properties` that aren't a JSON object are one too, never read as
+/// nothing. None for a message without `properties`. (The store keeps no `amsreferences`: an image shows from the
+/// content's markup, as a placeholder.)
+#[must_use]
+pub fn unshown_of(message: &Message) -> UnshownParts {
+    let Some(text) = message.properties.as_deref() else {
+        return UnshownParts::default();
+    };
+    let Ok(properties) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text) else {
+        return UnshownParts {
+            unreadable: true,
+            ..UnshownParts::default()
+        };
+    };
+    unshown_parts(&properties)
+        .iter()
+        .fold(UnshownParts::default(), |parts, part| match part {
+            Unshown::Files(_) => UnshownParts { files: true, ..parts },
+            Unshown::Cards(_) => UnshownParts { cards: true, ..parts },
+            Unshown::AmsReferences(_) => parts,
+        })
 }
 
 /// A message post of the account's whose message isn't in the store yet: its row as it stands, and its text.
@@ -1496,6 +1549,11 @@ impl ChatView {
         }
         let me = self.core.me().to_owned();
         let body = self.body(message);
+        let unshown = if matches!(body, Body::Text(_)) {
+            unshown_of(message)
+        } else {
+            UnshownParts::default()
+        };
         let (sender_name, named) = self.sender_of(message);
         let picture = message
             .sender
@@ -1522,6 +1580,7 @@ impl ChatView {
             body,
             reactions,
             outbox: notes.get(&message.id).cloned().unwrap_or_default(),
+            unshown,
         })
     }
 
@@ -1762,7 +1821,7 @@ impl ChatView {
     fn trace_items(&mut self) {
         let shown: Vec<(String, &'static str)> = self
             .message_items()
-            .map(|item| (item.id.clone(), if item.edited { "edited" } else { item.body.kind() }))
+            .map(|item| (item.id.clone(), trace_kind(item)))
             .collect();
         let shown: Vec<(String, &'static str)> = shown[shown.len().saturating_sub(TRACED)..].to_vec();
         if self.traced.as_ref() == Some(&shown) {
@@ -1864,7 +1923,7 @@ impl ChatView {
         } else {
             let picker = (self.reacting.as_deref() == Some(item.id.as_str())).then(|| reaction_picker(item, cx));
             row.children(item.header.then(|| header_line(item, palette)))
-                .child(bubble(item, highlighted, palette))
+                .child(bubble(item, &self.conversation, highlighted, palette))
                 .children(footer_line(item, palette, cx))
                 .children(
                     item.outbox
@@ -2434,7 +2493,19 @@ fn header_line(item: &MessageItem, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-fn bubble(item: &MessageItem, highlighted: bool, palette: Palette) -> AnyElement {
+/// A row's kind in the trace: `edited` once edited, `unshown` for a text with a part no capture showed, else its
+/// body's.
+fn trace_kind(item: &MessageItem) -> &'static str {
+    if item.edited {
+        "edited"
+    } else if matches!(item.body, Body::Text(_)) && item.unshown.any() {
+        "unshown"
+    } else {
+        item.body.kind()
+    }
+}
+
+fn bubble(item: &MessageItem, conversation: &str, highlighted: bool, palette: Palette) -> AnyElement {
     let background = match (highlighted, item.own) {
         (true, _) => palette.selection,
         (false, true) => palette.selected,
@@ -2444,7 +2515,13 @@ fn bubble(item: &MessageItem, highlighted: bool, palette: Palette) -> AnyElement
     let content = match &item.body {
         Body::Text(text) => rich_text::render(&id, &text.0, palette),
         Body::Deleted => muted(DELETED, palette),
-        Body::Unsupported(_) => muted(UNSUPPORTED, palette),
+        Body::Unsupported(_) => web_line(
+            &format!("unsupported-{}", item.id),
+            UNSUPPORTED,
+            &item.id,
+            conversation,
+            palette,
+        ),
         Body::Event(_) => div().into_any_element(),
     };
     div()
@@ -2454,6 +2531,41 @@ fn bubble(item: &MessageItem, highlighted: bool, palette: Palette) -> AnyElement
         .rounded_md()
         .bg(rgb(background))
         .child(content)
+        .children(item.unshown.any().then(|| {
+            div()
+                .text_xs()
+                .child(web_line(
+                    &format!("unshown-{}", item.id),
+                    UNSHOWN_CONTENT,
+                    &item.id,
+                    conversation,
+                    palette,
+                ))
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
+/// `note` (the line under a message's text for a part no capture showed, [`UNSHOWN_CONTENT`], or a type's
+/// placeholder, [`UNSUPPORTED`]) and [`OPEN_ON_THE_WEB`], which opens the chat in the web client through GPUI's
+/// `open_url` (the portal or `xdg-open`; the sandbox's no-op opener in tests). Never for a deleted message.
+fn web_line(selector: &str, note: &'static str, id: &str, conversation: &str, palette: Palette) -> AnyElement {
+    let link = web_chat_link(conversation);
+    let selector = selector.to_owned();
+    let open = format!("open-on-the-web-{id}");
+    let button = Button::new(SharedString::from(open.clone()))
+        .label(OPEN_ON_THE_WEB)
+        .ghost()
+        .with_size(Size::XSmall)
+        .on_click(move |_, _, cx| cx.open_url(&link));
+    div()
+        .debug_selector(move || selector)
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .child(muted(note, palette))
+        .child(div().debug_selector(move || open).child(button))
         .into_any_element()
 }
 

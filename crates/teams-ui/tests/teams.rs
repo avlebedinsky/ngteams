@@ -293,6 +293,68 @@ fn assert_channel_traced(written: &Written) {
 }
 
 #[test]
+fn a_post_or_reply_with_a_file_or_card_no_capture_showed_says_so_never_guessed() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (mut messages, roots) = channel_store();
+    for message in &mut messages {
+        message.properties = match message.id.as_str() {
+            POST => Some(r#"{"files":"[{\"fileName\":\"made-up.txt\"}]","cards":"[]"}"#.to_owned()),
+            "1760000300100" => Some(r#"{"cards":[{"made":"up"}]}"#.to_owned()),
+            "1760000400000" => Some(r#"{"files":"[]","cards":"[]","mentions":"[]"}"#.to_owned()),
+            _ => None,
+        };
+    }
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let written = Written::default();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(written.clone())));
+    click(cx, "rail-teams");
+    click(cx, "channel-row-1");
+    let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    let unshown: Vec<bool> = cx.update(|_, cx| {
+        view.read(cx)
+            .threads()
+            .iter()
+            .flat_map(|thread| thread.post.iter().chain(&thread.replies))
+            .map(|item| item.unshown)
+            .collect()
+    });
+    assert_eq!(unshown, [true, true, false, false, false]);
+    // the post's and the reply's text show as ever, each with the line saying a part can't be shown, no web button: no
+    // channel deep link was captured
+    for selector in [
+        format!("channel-unshown-{POST}"),
+        "channel-unshown-1760000300100".to_owned(),
+    ] {
+        assert!(bounds(cx, &selector).is_some(), "{selector}");
+    }
+    for selector in [
+        "channel-unshown-1760000300200",
+        "channel-unshown-1760000400000",
+        "open-on-the-web-1760000300100",
+    ] {
+        assert!(bounds(cx, selector).is_none(), "{selector}");
+    }
+    let shown_text = cx.update(|_, cx| {
+        let post = view.read(cx).threads()[0].post.clone().expect("the post");
+        matches!(post.body, teams_ui::channel_view::Body::Text(_))
+    });
+    assert!(shown_text, "the post's text shows");
+    let shown = written
+        .lines()
+        .into_iter()
+        .rfind(|line| line["view"] == "channel-view" && line["change"] == "shown")
+        .expect("traced");
+    assert_eq!(
+        shown["kinds"],
+        serde_json::json!(["unshown-post", "unshown-reply", "reply", "post", "reply"])
+    );
+    assert!(!written.text().contains("made-up"), "the trace holds the part");
+    assert_read_only(&rig, cx);
+}
+
+#[test]
 fn a_channel_shown_reads_again_when_it_changes() {
     let rig = rig();
     *rig.core.teams.lock().unwrap() = Some(teams());

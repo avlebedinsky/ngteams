@@ -255,7 +255,8 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         hosts: TEAMS,
         method: "POST",
         path: "/api/mt/part/*/beta/me/files/availability",
-        reason: "whether the account's file storage is ready: the scenario sends no file",
+        reason: "whether the account's file storage is ready: no scenario sends a file (`ab-file` meets it and stops: \
+                 the client then says the account needs OneDrive, `docs/backlog/file-sending.md`)",
     },
     ExpectedRequest {
         class: "artifact folder",

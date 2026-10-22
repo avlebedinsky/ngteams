@@ -1165,16 +1165,47 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 - Create: `docs/backlog/file-sending.md`, tests
 - Modify: `docs/protocol/{chat.md,endpoints.md}`, `crates/teams-proto/src/chat/*`, `crates/teams-ui/src/*`
 
-- [ ] capture the web client sending a file in the a–b chat with every write of it denied (as M1 Task 20 did for
+- [x] capture the web client sending a file in the a–b chat with every write of it denied (as M1 Task 20 did for
       images); write up what it sends in `chat.md`; whether the file's sharing can be fenced (its readers are the
       chat's members) goes to `file-sending.md`, with what the capture showed
-- [ ] if the capture shows the message's file shape (a denied post's body): tests first (synthetic fixtures of that
+- [x] if the capture shows the message's file shape (a denied post's body): tests first (synthetic fixtures of that
       shape): a file in a message is parsed (name, size, type, link) and shown as a card; activating it opens its
-      link through `open_url`
-- [ ] otherwise (no post went out, as with images): a message whose content no capture showed is shown as
+      link through `open_url` (not taken: no post with a file went out; the web client stopped before any write of
+      the file, so no file shape was captured and no fixture of one can be written)
+- [x] otherwise (no post went out, as with images): a message whose content no capture showed is shown as
       "unsupported content, open in Teams on the web", never guessed (`Field::Unknown`), and the file card waits in
       `file-sending.md`
-- [ ] `cargo test -p teams-proto -p teams-ui -p fixture-guard` and the gate pass
+- [x] `cargo test -p teams-proto -p teams-ui -p fixture-guard` and the gate pass
+- Done (2026-10-22), where it differs from the lines above:
+  - A new scenario, `proto-lab run ab-file` (`crates/proto-lab/src/scenario/ab_file.rs`, a and b under `ab-chat`'s
+    fence): force-denies every write to the file services (`SharePoint`, `OneDrive`, their media hosts, Graph), every
+    AMS object write (`ab-image`'s rules) and every `POST`/`PUT` whose body names a lab file (the file name and the
+    caption carry `lab-file-`); after the enforcement probe and a plain message, a types a caption and hands the
+    compose box a made-up text file: a drop, a paste, then the "Attach files" button with the page's file pickers made
+    to hand the file over without a dialog. A box that takes no file fails the run before anything is sent, noting
+    the compose controls and what the page says, and the caption is taken out of the box again.
+  - Live, 2026-10-22, each under the live lock, **no breach and no unexpected deny in any**: 01:37Z exit 0 (its
+    attachment test took the typed caption for the file: the drop attached nothing, and the caption alone was posted
+    with `files` `"[]"`, denied five times by the marker rule; reloaded, a deleted the unsent message locally, no
+    request), 01:56Z exit 1 (the attach test clicked the profile button), 02:02Z and 02:16Z exit 1 (the "Attach files"
+    button opened no menu and asked for no file; the page said "Sorry, you need OneDrive to share files. See your
+    admin about getting a license."), 11:09Z exit 1 (a's page didn't load, Chrome's error page: nothing typed or
+    sent), 11:17Z exit 1 (the same notice, read from the page, and the caption taken out of the box again). In none did a write of the file go out: the client's
+    own file storage check, `POST <middle tier>/beta/me/files/availability` (no body), is denied by the fence (on
+    the expected-deny list since M0), and it refuses files after that. Whether the lab accounts have a OneDrive at
+    all is open. Written up in `chat.md` ("Files: sending, denied"); `file-sending.md` (worth: later) lists what would
+    settle sending in order (a read-only drive check, the storage check as a reviewed read by `POST` of the account's
+    own state, the upload into the account's own drive, the share judged by its recipients, the post) and keeps the
+    file card.
+  - Received: `teams-proto`'s `Message::files` is known only as an empty list (an entry makes it `Field::Unknown`
+    with the raw value), and `Message::unshown`/`unshown_parts` name what no capture showed (`properties.files`,
+    `properties.cards`, `amsreferences` with an entry), never read further. The chat view shows such a message's text
+    with "This message has content that can't be shown here" and an "Open in Teams on the web" button that opens the
+    chat (`web_chat_link`: `https://teams.microsoft.com/l/chat/<chat>/0`, `abc-chat`'s deep link form) through
+    `open_url`; `properties` the view can't read count too. The trace names such a row's kind `unshown`. Tests:
+    `teams-proto/tests/chat_read.rs`, `teams-ui/tests/chat_view.rs`, `proto-lab/tests/{ab_file.rs,scenario_dsl.rs}`
+    (the scenario's page expressions on pages of their own), `abc_chat.rs` (`ab-file` force-denies the group chat's
+    first message sent again).
 
 ### Task 24: The sign-in window
 **Files:**
