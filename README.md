@@ -123,6 +123,7 @@ proto-lab status [a b c] [--timeout 120]  # ok / login needed / refused, per acc
 proto-lab auth a [--audiences] [--no-skypetoken] [--timeout 120]   # native sign-in, tokens, skypetoken
 proto-lab probe chat a [--with b] [--save <name>]                  # read-only: does the chat service take our ic3 token
 proto-lab probe thread a [--save <name>]                           # read-only: the group chat's member reads
+proto-lab probe object a <id> [--save <name>]                      # read-only: one AMS object as the account reads it
 proto-lab run <scenario> --headless [--timeout 180]                # a scenario under the armed fence (list below)
 proto-lab export <capture> <name> [--strict]                       # a capture -> a local reference copy
 proto-lab bundles import <msix>           # unpack the web bundle from the Teams MSIX and index it
@@ -150,8 +151,9 @@ also asks for a token for each other Teams audience, `--no-skypetoken` stops aft
 and token claims only, never a token or a body. `probe chat` refreshes the account's `ic3` token and reads one page of
 the conversation list in each header form, then the 1:1 chat's thread the way the fence reads it (M1 Task 3). `probe
 thread` reads the group chat `chats.toml` records: the thread, the batch read, the member list in one page and paged,
-the filtered view, the account's own view, then the fence's read (M1 Task 8). `--save <name>` writes the answers as a
-sanitized reference copy through `export`'s checks, never inside a git work tree.
+the filtered view, the account's own view, then the fence's read (M1 Task 8). `probe object` reads one media service
+object by its id and prints its answer's outline, lab ids named for what they are (M2 Task 21). `--save <name>`
+writes the answers as a sanitized reference copy through `export`'s checks, never inside a git work tree.
 
 **`run`** exits non-zero when the scenario's goal isn't reached, the fence was breached, or the fence denied something
 the scenario doesn't expect. Runs are recorded under `captures/<scenario>/<ts>/`. Without `--headless` the browsers

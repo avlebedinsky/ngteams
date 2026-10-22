@@ -8,7 +8,9 @@
 //!   is a `\n` in the text; marks (bold, italic, underline, strike, code) style their pieces; a mention is highlighted,
 //!   the account's own more strongly (a mention's `itemid` names its entry in `properties.mentions`, whose MRI says
 //!   whom it names; an entry this build can't read names nobody); a link is a clickable range; an image is a
-//!   placeholder (`Image`, with its `alt`), never fetched.
+//!   placeholder (`Image`, with its `alt`), never fetched, followed in a chat's message by a link that opens the
+//!   message in Teams on the web ([`layout_with_web_link`], [`message_web_link`]): sending and showing images stay
+//!   deferred (M2 Task 21, `docs/backlog/ams-image-sending.md`).
 //! - [`render`] draws it: a link opens through GPUI's `open_url` (the portal or `xdg-open`; in tests the test
 //!   platform's record or the UI sandbox's no-op opener), and only an `http`, `https` or `mailto` one (the model
 //!   keeps no other, and the renderer checks again).
@@ -27,8 +29,28 @@ use teams_proto::chat::{Field, Marks, Mention, Node, Quote, RichText};
 
 use crate::theme::Palette;
 
-/// What an image shows until images are fetched (M2 Task 22).
+/// What an image shows: images are never fetched (M2 Task 21 left them deferred).
 pub const IMAGE_PLACEHOLDER: &str = "Image";
+
+/// The text of the link after an image's placeholder ([`layout_with_web_link`]).
+pub const IMAGE_WEB_LINK: &str = "open in Teams on the web";
+
+/// The web client's link to one message of a chat, in the deep-link form Microsoft documents
+/// (`https://teams.microsoft.com/l/message/<chat id>/<message id>?context={"contextType":"chat"}`): where an image the
+/// app doesn't show can be seen. Only for a chat's id (`19:…@unq.gbl.spaces` or `19:…@thread.v2`, of letters, digits,
+/// `-`, `_`, `.`, `:` and `@`) and a message id of digits; `None` for anything else (a channel, a reply chain).
+#[must_use]
+pub fn message_web_link(chat: &str, message: &str) -> Option<String> {
+    let chat_shaped = chat.starts_with("19:")
+        && (chat.ends_with("@unq.gbl.spaces") || chat.ends_with("@thread.v2"))
+        && chat
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'@'));
+    let message_shaped = !message.is_empty() && message.bytes().all(|byte| byte.is_ascii_digit());
+    (chat_shaped && message_shaped).then(|| {
+        format!("https://teams.microsoft.com/l/message/{chat}/{message}?context=%7B%22contextType%22%3A%22chat%22%7D")
+    })
+}
 
 /// How a piece of text is styled.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -186,10 +208,18 @@ fn read_mentions(properties: Option<&str>) -> Vec<Mention> {
     }
 }
 
-/// Lays out `text` (see the module docs).
+/// Lays out `text` (see the module docs); an image is its placeholder alone.
 #[must_use]
 pub fn layout(text: &RichText, mentions: &Mentions) -> Rendered {
+    layout_with_web_link(text, mentions, None)
+}
+
+/// Lays out `text` as [`layout`] does; with `web_link` (the message's [`message_web_link`]), each image of the message
+/// itself (not one a quote shows, nor one inside a link) is followed by a link, [`IMAGE_WEB_LINK`], to `web_link`.
+#[must_use]
+pub fn layout_with_web_link(text: &RichText, mentions: &Mentions, web_link: Option<&str>) -> Rendered {
     let mut builder = Builder::new(mentions);
+    builder.web_link = web_link.filter(|link| opens(link)).map(str::to_owned);
     builder.walk(&text.nodes);
     Rendered {
         blocks: builder.finish(),
@@ -204,6 +234,8 @@ struct Builder<'a> {
     current: TextBlock,
     /// The link the walk is in.
     link: Option<String>,
+    /// Where an image's placeholder links to ([`layout_with_web_link`]).
+    web_link: Option<String>,
 }
 
 impl<'a> Builder<'a> {
@@ -213,6 +245,7 @@ impl<'a> Builder<'a> {
             blocks: Vec::new(),
             current: TextBlock::default(),
             link: None,
+            web_link: None,
         }
     }
 
@@ -279,6 +312,15 @@ impl<'a> Builder<'a> {
                 ..Style::default()
             },
         );
+        // inside a link the placeholder is that link's already
+        if self.link.is_none()
+            && let Some(web_link) = self.web_link.clone()
+        {
+            self.push(" ", Style::default());
+            self.link = Some(web_link);
+            self.push(IMAGE_WEB_LINK, Style::default());
+            self.link = None;
+        }
     }
 
     fn quote(&mut self, quote: &Quote) {

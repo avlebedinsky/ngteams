@@ -4,6 +4,7 @@ pub mod auth;
 pub mod chrome;
 pub mod export;
 pub mod login;
+pub mod object_probe;
 pub mod probe;
 pub mod profile_probe;
 pub mod status;

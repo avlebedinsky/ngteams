@@ -212,6 +212,80 @@ fn an_image_is_a_placeholder_and_never_its_source() {
     assert!(block.links.is_empty(), "an image is no link");
 }
 
+const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+
+#[test]
+fn a_chat_message_links_to_itself_in_teams_on_the_web() {
+    assert_eq!(
+        rich_text::message_web_link(CHAT, "1760000000123").as_deref(),
+        Some(
+            "https://teams.microsoft.com/l/message/19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-\
+             00000000000b@unq.gbl.spaces/1760000000123?context=%7B%22contextType%22%3A%22chat%22%7D"
+        )
+    );
+    assert!(rich_text::message_web_link("19:group0001@thread.v2", "1").is_some());
+    for (chat, message) in [
+        ("19:channel0001@thread.tacv2", "1"),
+        ("19:group0001@thread.v2;messageid=1", "1"),
+        ("19:a b@thread.v2", "1"),
+        ("19:group0001@thread.v2/../x", "1"),
+        ("48:notes", "1"),
+        (CHAT, ""),
+        (CHAT, "12a"),
+        (CHAT, "1?x=2"),
+    ] {
+        assert_eq!(rich_text::message_web_link(chat, message), None, "{chat} {message}");
+    }
+}
+
+#[test]
+fn an_image_of_a_chat_message_is_followed_by_its_link_to_the_web() {
+    let link = rich_text::message_web_link(CHAT, "1760000000123").unwrap();
+    let text = parse_html(
+        "<p>look <img src=\"https://images.example.test/cat.png\" alt=\"a cat\"> \
+         <a href=\"https://example.test/page\"><img src=\"https://images.example.test/in-link.png\"></a></p>\
+         <blockquote><p>quoted <img src=\"https://images.example.test/quoted.png\"></p></blockquote>",
+    );
+    let rendered = rich_text::layout_with_web_link(&text, &Mentions::default(), Some(&link));
+    let block = text_block(&rendered, 0);
+    assert!(
+        block.text.starts_with(&format!(
+            "look [{IMAGE_PLACEHOLDER}: a cat] {}",
+            rich_text::IMAGE_WEB_LINK
+        )),
+        "{}",
+        block.text
+    );
+    assert!(!block.text.contains("example.test"), "the source never shows");
+    // the image's own link, then the anchor around the second image: never a second link inside it
+    let hrefs: Vec<&str> = block.links.iter().map(|link| link.href.as_str()).collect();
+    assert_eq!(hrefs, [link.as_str(), "https://example.test/page"]);
+    assert_eq!(&block.text[block.links[0].range.clone()], rich_text::IMAGE_WEB_LINK);
+    // a quoted image belongs to another message: no link
+    let quoted = rendered
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::Quote(quote) => Some(quote),
+            Block::Text(_) => None,
+        })
+        .unwrap();
+    let Block::Text(inner) = &quoted.blocks[0] else {
+        panic!("quoted text expected");
+    };
+    assert!(inner.links.is_empty(), "{inner:?}");
+    // without a link, or with one the renderer wouldn't open, the placeholder stands alone
+    for web_link in [None, Some("javascript:alert(1)")] {
+        let alone = rich_text::layout_with_web_link(&text, &Mentions::default(), web_link);
+        assert!(!text_block(&alone, 0).text.contains(rich_text::IMAGE_WEB_LINK));
+        assert_eq!(alone, laid_out_text(&text));
+    }
+}
+
+fn laid_out_text(text: &teams_proto::chat::RichText) -> Rendered {
+    rich_text::layout(text, &Mentions::default())
+}
+
 #[test]
 fn nothing_active_or_unknown_reaches_the_layout() {
     let rendered = laid_out(

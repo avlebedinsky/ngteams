@@ -1430,7 +1430,8 @@ impl ChatView {
         let text = self.parse(message);
         self.layouts += 1;
         let mentions = Mentions::of(message.properties.as_deref(), self.core.me());
-        let rendered = Arc::new(rich_text::layout(&text, &mentions));
+        let web_link = rich_text::message_web_link(&message.conversation_id, &message.id);
+        let rendered = Arc::new(rich_text::layout_with_web_link(&text, &mentions, web_link.as_deref()));
         self.rendered
             .insert(message.id.clone(), (message.version, Arc::clone(&rendered)));
         rendered

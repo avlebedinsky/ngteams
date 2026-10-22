@@ -1,7 +1,8 @@
 # The chat service: conversations, messages and what happens to them
 
 Status: 2026-10-21, M1 Task 7; images (sending, denied) 2026-10-21, M1 Task 20; the shapes the UI needs (every quick
-reaction, typing, lines and links, a group mention) 2026-10-21, M2 Task 10. Written from what the lab saw, in our
+reaction, typing, lines and links, a group mention) 2026-10-21, M2 Task 10; an image's object created once and read
+2026-10-22, M2 Task 21. Written from what the lab saw, in our
 own words, plus the web bundle where nothing was captured (marked so). The chat service's base, credential, ids, member
 reads and the fence's mapping of writes are in [fence-targets.md](fence-targets.md); its token in [auth.md](auth.md).
 
@@ -22,6 +23,12 @@ Sources (all outside the repository, under the lab's data dir; fixtures are writ
 - **ab-image**: `proto-lab run ab-image` of 2026-10-21 (M1 Task 20; accounts a and b, the a–b chat, captures
   `captures/ab-image/20261020T225251Z` and `20261021T010819Z` for a, read locally, nothing exported): a pasted a
   made-up image and sent it with every write to an AMS object denied ([Images](#images-sending-denied-ab-image)).
+- **ab-image-object**: two `proto-lab run ab-image-object` runs of 2026-10-22 (M2 Task 21; as ab-image, with the
+  object's creation mapped once for the a–b chat; captures `captures/ab-image-object/20261022T014327Z` for a (breached:
+  cut by a system suspend, see [below](#the-object-created-once-ab-image-object)) and `…/20261022T020426Z` for a (clean),
+  read locally), and `proto-lab probe object` of the first run's object as a, b and c and of the second's as a
+  (reference copies `reference/ams/object-a-run1.jsonl` and `…/object-a-run2.jsonl`; b's and c's reads printed only):
+  the creation's answer and the object's read ([The object created once](#the-object-created-once-ab-image-object)).
 - **chat-shapes**: three `proto-lab run chat-shapes` runs of 2026-10-21 (M2 Task 10; accounts a and b under the
   messaging classifier, so b's push channel was up; captures `captures/chat-shapes/20261021T165600Z`, `…170305Z` and
   `…171041Z` for a, `…165601Z`, `…170308Z` and `…171041Z-2` for b, read locally, nothing exported): a set and took back
@@ -153,6 +160,44 @@ registry of what it permitted (which the fence must not stand in) or an authorit
 readers, which no capture has shown, and which `forward` could change between the read and the upload. Every answer past
 the creation is uncaptured too. The fence maps none of it: AMS objects are `Unknown` and denied
 ([fence-targets.md](fence-targets.md)).
+
+### The object created once (ab-image-object)
+
+M2 Task 21 took the backlog item's first step: the creation mapped in exactly its captured shape (the async gateway,
+the captured headers with `x-ams-post-sharing-mode: Inline`, `X-MS-Migration: True`, `x-ms-test-user: False`,
+`content-type: application/json` pinned, the body above with one `permissions` key, the a–b chat, `["read"]`) to a
+write on that chat judged by `Fence::check` (its members read live: a and b), let out once per run by a forced deny
+that spared the first creation sent after the image was in the compose box; the upload, a forward, every later
+creation and every other media write stayed force-denied. The mapping was the experiment's only (`ab-image-object`)
+and was taken out again in the same task once the read below was in: the code is in the task's first commit, the
+tree has none of it.
+
+- **The creation's answer**: `201` with `{"id": "<object>"}` (the id like `0-eus-d15-<32 hex>`). The fence logged it
+  allowed (`media_object` on the a–b chat, once per pause: the page's and the browser's).
+- **What the client did next**: the upload, `PUT v1/objects/<id>/content/imgpsh` on the same host, no query,
+  `content-type: application/octet-stream`, the `ic3` bearer token, `X-MS-Migration: True` and `x-ms-test-user:
+  False`, the image's bytes as the body (denied); then three more creations within 12 s (denied; the run let only the
+  first out), and no message post: neither the caption nor `amsreferences` went out while the upload failed. After a
+  reload the client tried nothing again within 30 s, but its message actions for the unsent image showed no delete.
+- **The object's read** (`GET v1/objects/<id>/`, `proto-lab probe object`, the same with and without
+  `X-MS-Migration`): as a (its creator) and as b (the a–b chat's other member) `200` with eight keys, `contents` (an
+  empty object: nothing uploaded), `creation_date`, `expiry_date` (25 days after the creation), `filename`
+  (`MicrosoftTeams-image.png`), `geo` (`amer`), `id`, `tenant_id` and `type` (`pish/image`); as c (a lab account the
+  object wasn't shared with) `403` with a problem-details body (`detail`, `instance`, `message`, `status`, `title`,
+  `traceId`). The second run's object answered the same.
+
+**The read is not authoritative** (decided with Codex, transcript `discussions/task-21-ams-object-read/` of the M2
+run): it names no reader at all, no conversation, MRI or permission, so it can't say who may read the object now. The
+200s and the 403 show that the service checks readers, and only for the accounts the lab holds; they can never show
+that nobody else can read it. Even with a complete reader list the race between that read and the upload (a `forward`
+from any client) would need evidence of its own. So images stay deferred: the upload stays unmapped, nothing of AMS is
+on the native allowlist, there is no `SendImage`, and the app shows an image as a placeholder followed by a link to
+its message in Teams on the web. What would reopen it is in `docs/backlog/ams-image-sending.md`.
+
+The first run was **breached**: 15 s after the creation the laptop's lid closed and the machine suspended for eight
+minutes; on resume the fence found its connection to both browsers gone and killed them. `fence.log` has nothing of
+that run after 01:46:05Z and its captures end there too, so nothing shows what, if anything, the browsers sent between
+the resume and the kill. The second run (`…/20261022T020426Z`) came out clean (`ab-image-object: ok`).
 
 ## Mentions (mention)
 

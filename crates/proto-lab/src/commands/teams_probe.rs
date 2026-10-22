@@ -598,8 +598,8 @@ fn collect_shape(value: &Value, path: &str, depth: usize, paths: &mut BTreeMap<S
 }
 
 /// A key that may be shown: letters, digits, `@`, `.`, `_`, `$` and `-`, short, with no run of four digits or of eight
-/// hex digits with a digit among them (an id's); `?` otherwise.
-fn shown_key(key: &str) -> &str {
+/// hex digits with a digit among them (an id's); `?` otherwise. `probe object`'s outline uses it too.
+pub(crate) fn shown_key(key: &str) -> &str {
     let plain = (1..=48).contains(&key.len())
         && key
             .bytes()
