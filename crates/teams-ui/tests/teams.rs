@@ -563,3 +563,51 @@ fn threads_take_their_posts_in_order_with_replies_under_them() {
         ]
     );
 }
+
+#[test]
+fn the_switcher_lists_the_channels_under_the_chats_and_opens_one_read_only() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let written = Written::default();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(written.clone())));
+    cx.simulate_keystrokes("ctrl-k");
+    cx.run_until_parked();
+    let switcher = cx.update(|_, cx| shell.read(cx).switcher().cloned()).expect("open");
+    let names = |cx: &mut VisualTestContext| -> Vec<String> {
+        cx.update(|_, cx| {
+            switcher
+                .read(cx)
+                .channels()
+                .iter()
+                .map(|(_, name)| name.to_string())
+                .collect()
+        })
+    };
+    // every channel at first, each under its team's name, in the list's order
+    assert_eq!(
+        names(cx),
+        [
+            "Made-up Team › General",
+            "Made-up Team › Made-up Channel",
+            "Old Team › General"
+        ]
+    );
+    cx.simulate_input("made chan");
+    cx.run_until_parked();
+    assert_eq!(
+        names(cx).first().map(String::as_str),
+        Some("Made-up Team › Made-up Channel")
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_shown_as_a_channel(&shell, CHANNEL, cx);
+    assert!(cx.update(|_, cx| shell.read(cx).switcher().is_none()), "closed");
+    assert_read_only(&rig, cx);
+    assert!(
+        written
+            .lines()
+            .iter()
+            .any(|line| line["view"] == "channel" && line["change"] == "opened" && line["conversation"] == CHANNEL)
+    );
+    assert!(!written.text().contains("Made-up"), "the trace holds a name");
+}

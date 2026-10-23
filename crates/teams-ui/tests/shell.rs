@@ -775,6 +775,50 @@ fn the_palette_s_copy_diagnostics_copies_them_and_shows_the_settings() {
 }
 
 #[test]
+fn the_palette_sets_the_account_s_status_as_the_account_menu_does() {
+    let rig = seeded();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Settings::default(), trace);
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("set status");
+    cx.run_until_parked();
+    let switcher = cx.update(|_, cx| shell.read(cx).switcher().cloned()).expect("open");
+    assert_eq!(
+        cx.update(|_, cx| switcher.read(cx).commands()),
+        [
+            "Set status: Automatic",
+            "Set status: Available",
+            "Set status: Busy",
+            "Set status: Do not disturb",
+            "Set status: Appear away",
+        ]
+    );
+    cx.simulate_input(" busy");
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| switcher.read(cx).commands()), ["Set status: Busy"]);
+    assert!(cx.update(|_, cx| switcher.read(cx).matches().is_empty()));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(settings_of(&shell, cx).manual_status, ManualStatus::Busy);
+    assert!(cx.update(|_, cx| shell.read(cx).switcher().is_none()), "closed");
+    let chosen: Vec<serde_json::Value> = written
+        .lines()
+        .into_iter()
+        .filter(|line| line["view"] == "status-menu" && line["change"] == "chosen")
+        .map(|line| line["kinds"].clone())
+        .collect();
+    assert_eq!(chosen, [serde_json::json!(["busy"])]);
+
+    // and back to Automatic the same way
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("set status automatic");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(settings_of(&shell, cx).manual_status, ManualStatus::Automatic);
+}
+
+#[test]
 fn a_log_that_couldn_t_be_opened_is_shown_with_the_settings_problems() {
     let model = SettingsModel::in_memory(Settings::default()).with_diagnostics(DiagnosticsSource {
         app: "teams-app 0.1.0".to_owned(),

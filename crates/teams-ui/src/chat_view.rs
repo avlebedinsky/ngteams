@@ -28,7 +28,8 @@
 //! - **Typing**: who is typing now ([`crate::Chats::typing`]), under the messages; it goes off with their end of
 //!   typing, their message, or [`crate::models::TYPING_TIMEOUT`] after their last signal.
 //! - **Actions** on a message, under the pointer or selected with the keyboard (Up and Down, once the list has the
-//!   focus): reply and react, and for the account's own message edit and delete. Each is told as
+//!   focus: Escape in an empty compose box moves it there, and Escape in the list with nothing open or selected moves
+//!   it back): reply and react, and for the account's own message edit and delete. Each is told as
 //!   [`ChatViewEvent::Action`] and carried out (M2 Task 13): a reply and an edit go to the [`Compose`] box under the
 //!   messages; react opens the quick reactions M2 Task 10 captured ([`QUICK_REACTIONS`], keys 1–4), and a reaction
 //!   chip of one of them clicked sets or takes back the account's own (a chip of any other key only shows); react and
@@ -65,6 +66,7 @@ use gpui::{
     actions, div, list, px, relative, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::input::Escape as ComposeEscape;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError};
 use teams_proto::chat::{
@@ -614,7 +616,7 @@ pub struct ChatView {
     hovered: Option<String>,
     selected: Option<String>,
     focus: FocusHandle,
-    traced: Option<Vec<(String, &'static str)>>,
+    traced: Option<Vec<Traced>>,
     typing_traced: bool,
     settings: Entity<SettingsModel>,
     compose: Entity<Compose>,
@@ -1151,14 +1153,26 @@ impl ChatView {
         })
     }
 
-    /// Escape in the list: what is open closes first (the quick reactions, a confirmation), then the selection.
-    fn escape(&mut self, cx: &mut Context<Self>) {
+    /// Escape in the list: what is open closes first (the quick reactions, a confirmation), then the selection, then
+    /// the focus goes back to the compose box.
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.reacting.take().is_some() | self.deleting.take().is_some() | self.resending.take().is_some();
         if open {
             cx.notify();
-        } else {
+        } else if self.selected.is_some() {
             self.select(None, cx);
+        } else {
+            let compose = self.compose.clone();
+            compose.update(cx, |compose, cx| compose.focus(window, cx));
+            cx.notify();
         }
+    }
+
+    /// Escape in an empty compose box, with nothing to cancel there (the box hands it on): the message list takes the
+    /// focus, so Up and Down select a message and its keys act on it.
+    fn focus_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        cx.notify();
     }
 
     /// Asks for the next older page (once the running load ends), even after loads that brought nothing, one that
@@ -1818,20 +1832,38 @@ impl ChatView {
         self.want_receipt(cx);
     }
 
-    /// Traces the rows shown, when they changed.
+    /// Traces the rows shown, when they changed: the newest [`TRACED`] messages with their kinds, and which of them
+    /// carry reactions and which quote another (a reply).
     fn trace_items(&mut self) {
-        let shown: Vec<(String, &'static str)> = self
+        let shown: Vec<Traced> = self
             .message_items()
-            .map(|item| (item.id.clone(), trace_kind(item)))
+            .map(|item| Traced {
+                id: item.id.clone(),
+                kind: trace_kind(item),
+                reacted: !item.reactions.is_empty(),
+                reply: is_reply(item),
+            })
             .collect();
-        let shown: Vec<(String, &'static str)> = shown[shown.len().saturating_sub(TRACED)..].to_vec();
+        let shown: Vec<Traced> = shown[shown.len().saturating_sub(TRACED)..].to_vec();
         if self.traced.as_ref() == Some(&shown) {
             return;
         }
         let line = TraceLine::new("chat-view", "shown")
             .conversation(&self.conversation)
-            .messages(shown.iter().map(|(id, _)| id.as_str()));
-        let line = shown.iter().fold(line, |line, (_, kind)| line.kind(kind));
+            .messages(shown.iter().map(|traced| traced.id.as_str()))
+            .reacted(
+                shown
+                    .iter()
+                    .filter(|traced| traced.reacted)
+                    .map(|traced| traced.id.as_str()),
+            )
+            .replies(
+                shown
+                    .iter()
+                    .filter(|traced| traced.reply)
+                    .map(|traced| traced.id.as_str()),
+            );
+        let line = shown.iter().fold(line, |line, traced| line.kind(traced.kind));
         self.trace.record(&line);
         self.traced = Some(shown);
     }
@@ -1971,7 +2003,7 @@ impl ChatView {
             .label("Cancel")
             .ghost()
             .with_size(Size::XSmall)
-            .on_click(cx.listener(|this, _, _, cx| this.escape(cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.escape(window, cx)));
         Some(
             div()
                 .debug_selector(|| "confirmation".to_owned())
@@ -2496,6 +2528,27 @@ fn header_line(item: &MessageItem, palette: Palette) -> AnyElement {
 
 /// A row's kind in the trace: `edited` once edited, `unshown` for a text with a part no capture showed, else its
 /// body's.
+/// A message as the trace last told it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Traced {
+    id: String,
+    kind: &'static str,
+    reacted: bool,
+    reply: bool,
+}
+
+/// Whether a message's text quotes another message (a reply's quote names the message it quotes).
+fn is_reply(item: &MessageItem) -> bool {
+    match &item.body {
+        Body::Text(text) => text
+            .0
+            .blocks
+            .iter()
+            .any(|block| matches!(block, rich_text::Block::Quote(quote) if quote.message_id.is_some())),
+        _ => false,
+    }
+}
+
 fn trace_kind(item: &MessageItem) -> &'static str {
     if item.edited {
         "edited"
@@ -2679,7 +2732,7 @@ impl Render for ChatView {
             .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
                 this.act_on_selected(MessageAction::Delete, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ClearSelection, _, cx| this.escape(cx)))
+            .on_action(cx.listener(|this, _: &ClearSelection, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &ConfirmDelete, _, cx| this.confirm_delete(cx)))
             .on_action(cx.listener(|this, _: &PickLike, _, cx| this.pick(0, cx)))
             .on_action(cx.listener(|this, _: &PickHeart, _, cx| this.pick(1, cx)))
@@ -2693,6 +2746,8 @@ impl Render for ChatView {
             .children(pill);
         div()
             .debug_selector(|| "chat-view".to_owned())
+            // Escape the compose box handed on (nothing to cancel there): the list takes the focus
+            .on_action(cx.listener(|this, _: &ComposeEscape, window, cx| this.focus_messages(window, cx)))
             .size_full()
             .flex()
             .flex_col()

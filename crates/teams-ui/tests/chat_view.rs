@@ -206,9 +206,69 @@ fn traced_without_text(written: &Written) {
         line["kinds"],
         serde_json::json!(["event", "text", "edited", "deleted", "unsupported"])
     );
-    for secret in ["hello", "there", "mine", "Lab Bee", "card"] {
+    // which of them carry reactions (b's, with three), and none quotes another
+    assert_eq!(line["reacted"], serde_json::json!(["101"]));
+    assert!(line.get("replies").is_none(), "{line}");
+    for secret in ["hello", "there", "mine", "Lab Bee", "card", "heart", "like"] {
         assert!(!text.contains(secret), "the trace holds {secret}");
     }
+}
+
+#[test]
+fn the_trace_names_the_replies_and_a_reaction_as_it_comes() {
+    let original = message("201", LAB_B, "<p>the original</p>", NOON);
+    let reply = message(
+        "202",
+        LAB_A,
+        &format!(
+            "<blockquote itemscope itemtype=\"http://schema.skype.com/Reply\" itemid=\"201\">\
+             <strong itemprop=\"mri\" itemid=\"{LAB_B}\">Lab Bee</strong><span itemprop=\"time\" itemid=\"201\">\
+             </span><p itemprop=\"preview\">the original</p></blockquote><p>my answer</p>"
+        ),
+        NOON + MINUTE,
+    );
+    let quoted = message(
+        "203",
+        LAB_B,
+        "<blockquote><p>plain words</p></blockquote>",
+        NOON + 2 * MINUTE,
+    );
+    let rig = rig_with(vec![original.clone(), reply, quoted]);
+    let written = Written::default();
+    let (_view, cx) = chat_window(&rig, Arc::new(ViewTrace::new(written.clone())));
+    let last = |written: &Written| {
+        written
+            .lines()
+            .into_iter()
+            .rfind(|line| line["view"] == "chat-view" && line["change"] == "shown")
+            .expect("a chat-view line")
+    };
+    let line = last(&written);
+    // a reply's quote names the message it quotes; a plain quote is no reply
+    assert_eq!(line["replies"], serde_json::json!(["202"]));
+    assert!(line.get("reacted").is_none(), "{line}");
+
+    // a reaction stored on the original and told: the trace says it carries one now
+    rig.core
+        .reactions
+        .lock()
+        .unwrap()
+        .insert("201".to_owned(), vec![reaction("like", LAB_A, NOON + 3 * MINUTE)]);
+    let mut changed = original;
+    changed.version = 2;
+    rig.core.messages.lock().unwrap().get_mut(AB).unwrap()[0] = changed.clone();
+    rig.send(Event::Message {
+        conversation: AB.to_owned(),
+        id: changed.id.clone(),
+        change: MessageChange::Reaction,
+        applied: Applied::Updated,
+        message: Some(Box::new(changed)),
+        source: Source::Delivery,
+    });
+    draw(cx);
+    let line = last(&written);
+    assert_eq!(line["reacted"], serde_json::json!(["201"]));
+    assert_eq!(line["replies"], serde_json::json!(["202"]));
 }
 
 #[test]

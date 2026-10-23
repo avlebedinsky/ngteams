@@ -396,13 +396,32 @@ fn act(view: &Entity<ChatView>, cx: &mut VisualTestContext, action: MessageActio
     draw(cx);
 }
 
+/// The trace's changes of `view`, the compose box's `changed` (each edit of what it holds) left out.
 fn trace_changes(written: &Written, view: &str) -> Vec<String> {
     written
         .lines()
         .into_iter()
-        .filter(|line| line["view"] == view)
+        .filter(|line| line["view"] == view && line["change"] != "changed")
         .map(|line| line["change"].as_str().unwrap().to_owned())
         .collect()
+}
+
+#[test]
+fn each_change_of_what_the_box_holds_is_traced_without_its_text() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hi a</p>")]);
+    let (_view, cx, written) = chat_window(&rig, Settings::default());
+    type_text(cx, "s");
+    type_text(cx, "ecret");
+    keys(cx, "backspace");
+    let changed: Vec<serde_json::Value> = written
+        .lines()
+        .into_iter()
+        .filter(|line| line["view"] == "compose" && line["change"] == "changed")
+        .collect();
+    // one per character typed, one for the backspace
+    assert_eq!(changed.len(), 7, "{changed:?}");
+    assert!(changed.iter().all(|line| line["conversation"] == AB));
+    assert!(!written.text().contains("secret") && !written.text().contains("secre"));
 }
 
 #[test]
@@ -506,6 +525,75 @@ fn a_reply_carries_its_quote_and_escape_cancels_it() {
         trace_changes(&written, "compose"),
         ["replying", "cancelled", "replying", "sent"]
     );
+}
+
+/// Whether the message list has the focus, and whether the compose box has it.
+fn focused(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> (bool, bool) {
+    let compose = compose(view, cx);
+    cx.update(|window, cx| {
+        (
+            view.read(cx).focus_handle().is_focused(window),
+            compose.read(cx).focused(window, cx),
+        )
+    })
+}
+
+fn selected(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|_, cx| view.read(cx).selected().map(str::to_owned))
+}
+
+#[test]
+fn escape_moves_the_focus_from_an_empty_box_to_the_list_and_back_so_r_replies_to_a_message() {
+    let theirs = message(NOON, LAB_B, "<p>question?</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    let (view, cx, written) = chat_window(&rig, Settings::default());
+    assert_eq!(focused(&view, cx), (false, true));
+
+    // Escape with nothing to cancel in the box: the list takes the focus; Up selects the newest message, r replies
+    keys(cx, "escape");
+    assert_eq!(focused(&view, cx), (true, false));
+    keys(cx, "up");
+    assert_eq!(selected(&view, cx), Some(theirs.id.clone()));
+    keys(cx, "r");
+    assert!(matches!(mode(&view, cx), Mode::Reply(_)));
+    assert_eq!(focused(&view, cx), (false, true), "the reply is typed in the box");
+    // Escape cancels the reply first, and only then moves the focus
+    keys(cx, "escape");
+    assert_eq!(mode(&view, cx), Mode::New);
+    assert_eq!(focused(&view, cx), (false, true));
+    keys(cx, "escape");
+    assert_eq!(focused(&view, cx), (true, false));
+    assert_eq!(trace_changes(&written, "compose"), ["replying", "cancelled"]);
+}
+
+#[test]
+fn the_keyboard_alone_reacts_and_escape_goes_back_to_the_box_keeping_its_draft() {
+    let theirs = message(NOON, LAB_B, "<p>question?</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    keys(cx, "escape");
+    keys(cx, "down");
+    keys(cx, "a");
+    keys(cx, "1");
+    assert_eq!(
+        actions(&rig),
+        [Action::React {
+            conversation: AB.to_owned(),
+            message_id: theirs.id.clone(),
+            key: "like".to_owned(),
+        }]
+    );
+    // Escape in the list: the selection first, then the focus back to the box
+    keys(cx, "escape");
+    assert_eq!(selected(&view, cx), None);
+    assert_eq!(focused(&view, cx), (true, false));
+    keys(cx, "escape");
+    assert_eq!(focused(&view, cx), (false, true));
+    type_text(cx, "typed");
+    // a box holding text hands Escape on too: the list takes the focus and the draft stays
+    keys(cx, "escape");
+    assert_eq!(focused(&view, cx), (true, false));
+    assert_eq!(typed(&view, cx), "typed");
 }
 
 #[test]

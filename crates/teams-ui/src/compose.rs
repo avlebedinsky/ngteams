@@ -13,8 +13,9 @@
 //!   refuses before it makes a row gives the box its draft back.
 //! - **Keys**: Enter sends (the kit's text area hands a plain Enter on, and the box takes it as the send, or the
 //!   platform would type it as a line break: M2 Task 7), Shift-Enter breaks the line; with the mention picker open, Up
-//!   and Down move in it, Enter or Tab chooses, Escape closes it; Escape cancels a reply or an edit; Up in an empty box
-//!   asks to edit the account's last message ([`ComposeEvent::EditLast`], which the chat view carries out).
+//!   and Down move in it, Enter or Tab chooses, Escape closes it; Escape cancels a reply or an edit, and with nothing
+//!   to cancel is handed on (the chat view moves the focus to its message list); Up in an empty box asks to edit the
+//!   account's last message ([`ComposeEvent::EditLast`], which the chat view carries out).
 //! - **Reply** ([`Compose::reply_to`]): the quoted message's id, sender, sender's name, time and a one-line preview of
 //!   its text, sent as the captured reply's quote (`reply.json`). **Edit** ([`Compose::edit`]): the message's text
 //!   loaded back into the box ([`load`]), its mentions as tokens again by their MRI, its quote kept as it was; Enter
@@ -24,7 +25,8 @@
 //!   doesn't start it over), never while editing, and only with the "send typing" setting on. Nothing is sent when
 //!   typing stops: the web client never sent `Control/ClearTyping`.
 //!
-//! What the box does is traced (`compose sent`, `replying`, `editing`, `cancelled`), never its text.
+//! What the box does is traced (`compose sent`, `replying`, `editing`, `cancelled`, and `changed` each time what it
+//! holds changes), never its text.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -519,6 +521,10 @@ impl Compose {
         });
         let input_events = cx.subscribe_in(&input, window, |this: &mut Self, _, event, window, cx| {
             if matches!(event, InputEvent::Change) {
+                // what the box holds changed: traced without the text, so a test driving the keyboard can tell
+                // when the app has taken in what it typed
+                this.trace
+                    .record(&TraceLine::new("compose", "changed").conversation(&this.conversation));
                 this.refresh_picker(cx);
                 this.typed(window, cx);
             }

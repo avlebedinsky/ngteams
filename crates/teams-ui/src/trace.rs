@@ -116,6 +116,9 @@ pub struct TraceLine<'a> {
     messages: Vec<TraceId<'a>>,
     kinds: Vec<&'static str>,
     unread: Vec<u64>,
+    /// Of the messages, those that carry reactions, and those that quote another (a reply).
+    reacted: Vec<TraceId<'a>>,
+    replies: Vec<TraceId<'a>>,
     refused: usize,
 }
 
@@ -131,6 +134,8 @@ impl<'a> TraceLine<'a> {
             messages: Vec::new(),
             kinds: Vec::new(),
             unread: Vec::new(),
+            reacted: Vec::new(),
+            replies: Vec::new(),
             refused: 0,
         }
     }
@@ -193,6 +198,30 @@ impl<'a> TraceLine<'a> {
         self
     }
 
+    /// The messages that carry reactions, those with an id's shape.
+    #[must_use]
+    pub fn reacted<I: IntoIterator<Item = &'a str>>(mut self, ids: I) -> Self {
+        for id in ids {
+            match TraceId::new(id) {
+                Some(id) => self.reacted.push(id),
+                None => self.refused += 1,
+            }
+        }
+        self
+    }
+
+    /// The messages that quote another (a reply), those with an id's shape.
+    #[must_use]
+    pub fn replies<I: IntoIterator<Item = &'a str>>(mut self, ids: I) -> Self {
+        for id in ids {
+            match TraceId::new(id) {
+                Some(id) => self.replies.push(id),
+                None => self.refused += 1,
+            }
+        }
+        self
+    }
+
     /// A kind (a message's, a row's state, …), named in the code.
     #[must_use]
     pub fn kind(mut self, kind: &'static str) -> Self {
@@ -221,6 +250,12 @@ impl<'a> TraceLine<'a> {
         }
         if !self.unread.is_empty() {
             line.insert("unread".to_owned(), json!(self.unread));
+        }
+        for (key, ids) in [("reacted", &self.reacted), ("replies", &self.replies)] {
+            if !ids.is_empty() {
+                let ids: Vec<&str> = ids.iter().map(TraceId::as_str).collect();
+                line.insert(key.to_owned(), json!(ids));
+            }
         }
         if self.refused > 0 {
             line.insert("refused".to_owned(), json!(self.refused));

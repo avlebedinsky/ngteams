@@ -77,6 +77,23 @@ pub fn label(availability: &Availability) -> SharedString {
     }
 }
 
+/// The trace's name for `availability` (`available`, `busy`, …; `other` for a word this build doesn't name).
+#[must_use]
+pub fn key(availability: &Availability) -> &'static str {
+    match availability {
+        Availability::Available => "available",
+        Availability::AvailableIdle => "available-idle",
+        Availability::Away => "away",
+        Availability::BeRightBack => "be-right-back",
+        Availability::Busy => "busy",
+        Availability::BusyIdle => "busy-idle",
+        Availability::DoNotDisturb => "do-not-disturb",
+        Availability::Offline => "offline",
+        Availability::Other(_) => "other",
+        Availability::Unknown => "unknown",
+    }
+}
+
 /// The dot's fill; `None` for a hollow ring (unknown, or a word this build doesn't name).
 #[must_use]
 pub fn fill(availability: &Availability) -> Option<u32> {

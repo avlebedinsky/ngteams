@@ -13,10 +13,12 @@
 //!
 //! The keyboard: Ctrl+K opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
-//! at its next start. Ctrl+Shift+F opens the [`Search`] of the stored messages the same way (one of the two at a
+//! at its next start; a channel chosen there opens read-only, and a "Set status: …" command chosen there sets the
+//! account's status as the account menu does. Ctrl+Shift+F opens the [`Search`] of the stored messages the same way (one of the two at a
 //! time); a message found there or in the switcher opens its chat at the message ([`ChatView::reveal`]). What the
 //! shell shows is traced (`chat opened`, `channel opened`, `settings opened`, `switcher opened`/`closed`, `search
-//! opened`/`closed`, `status-menu opened`/`closed`/`chosen` with the status's key).
+//! opened`/`closed`, `status-menu opened`/`closed`/`chosen` with the status's key, and `header shown`: the chat's
+//! header's presence and whether its name and avatar came from people's names and a picture, never the name).
 
 use std::sync::Arc;
 
@@ -126,7 +128,19 @@ pub struct Shell {
     own_presence: Option<(Entity<OwnPresence>, Subscription)>,
     /// The account menu is open.
     status_menu: bool,
-    _subscriptions: [Subscription; 5],
+    /// What the chat's header was last traced showing.
+    header_traced: Option<HeaderShown>,
+    _subscriptions: [Subscription; 6],
+}
+
+/// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
+/// whether its name came from people's names (or its topic) and its avatar from a picture. Never the name itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeaderShown {
+    chat: String,
+    presence: &'static str,
+    named: bool,
+    picture: bool,
 }
 
 impl Shell {
@@ -160,7 +174,12 @@ impl Shell {
         });
         let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx));
         // a presence the engine told: the chat's header draws its dot again
-        let presence = cx.observe(&models.presence, |_: &mut Self, _, cx| cx.notify());
+        let presence = cx.observe(&models.presence, |this: &mut Self, _, cx| {
+            this.trace_header(cx);
+            cx.notify();
+        });
+        // the list's rows built again (a name or a picture read): the header shows what its row shows
+        let renamed = cx.observe(&list, |this: &mut Self, _, cx| this.trace_header(cx));
         let typed = Self::keystrokes_are_use(window, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -198,8 +217,41 @@ impl Shell {
             focus,
             own_presence: None,
             status_menu: false,
-            _subscriptions: [opened, channel_opened, kept_channel, presence, typed],
+            header_traced: None,
+            _subscriptions: [opened, channel_opened, kept_channel, presence, typed, renamed],
         }
+    }
+
+    /// Traces what the chat's header shows (`header shown`: the chat; its other member's presence, `none` for a chat
+    /// that isn't 1:1, then `named` or `unnamed`, then `picture` or `no-picture`), when it changed. Nothing while no
+    /// chat is shown, or before the list has its row.
+    fn trace_header(&mut self, cx: &App) {
+        let Main::Chat(id) = &self.main else {
+            return;
+        };
+        let list = self.list.read(cx);
+        let Some(row) = list.row(id) else {
+            return;
+        };
+        let shown = HeaderShown {
+            chat: id.clone(),
+            presence: list
+                .presence_of(row, cx)
+                .map_or("none", |availability| presence::key(&availability)),
+            named: row.named,
+            picture: row.picture.is_some(),
+        };
+        if self.header_traced.as_ref() == Some(&shown) {
+            return;
+        }
+        self.trace.record(
+            &TraceLine::new("header", "shown")
+                .conversation(&shown.chat)
+                .kind(shown.presence)
+                .kind(if shown.named { "named" } else { "unnamed" })
+                .kind(if shown.picture { "picture" } else { "no-picture" }),
+        );
+        self.header_traced = Some(shown);
     }
 
     /// Shows the account's own presence in the account menu, and tells it of the window's use from now on.
@@ -405,6 +457,7 @@ impl Shell {
         });
         self.rail = RailItem::Chats;
         self.main = Main::Chat(id);
+        self.trace_header(cx);
         self.close_switcher(window, cx);
         self.close_search(window, cx);
         // the chat opened takes what is typed next, and is shown (read receipts may go)
@@ -489,14 +542,19 @@ impl Shell {
             return;
         }
         self.close_search(window, cx);
-        let list = self.list.clone();
+        let (list, teams) = (self.list.clone(), self.teams.clone());
         let core = Arc::clone(&self.core);
-        let switcher = cx.new(|cx| Switcher::new(list, core, window, cx));
+        let switcher = cx.new(|cx| Switcher::new(list, teams, core, window, cx));
         let events = cx.subscribe_in(&switcher, window, |this: &mut Self, _, event, window, cx| match event {
             SwitcherEvent::Open(id) => this.open_chat(id.clone(), window, cx),
+            SwitcherEvent::OpenChannel(id) => this.open_channel_id(id.clone(), window, cx),
             SwitcherEvent::OpenMessage(target) => this.open_message(target.clone(), window, cx),
             SwitcherEvent::Dismissed => this.close_switcher(window, cx),
             SwitcherEvent::CopyDiagnostics => this.copy_diagnostics(window, cx),
+            SwitcherEvent::SetStatus(status) => {
+                this.choose_status(*status, cx);
+                this.close_switcher(window, cx);
+            }
         });
         switcher.update(cx, |switcher, cx| switcher.focus(window, cx));
         self.switcher = Some((switcher, events));

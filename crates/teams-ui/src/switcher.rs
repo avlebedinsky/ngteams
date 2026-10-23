@@ -3,8 +3,11 @@
 //! It is the live test's way into a chat: the keyboard, no screen coordinates.
 //!
 //! It reads the chat list's rows (one model for both), so a chat that changes while it is open shows changed. Under
-//! the chats it lists the messages the query finds in the store ([`crate::search`]): one chosen opens its chat at the
-//! message. Last come the app's commands the query matches ([`COMMAND_NAMES`]: "Copy diagnostics").
+//! the chats come the teams' channels the Teams list shows ("<team> › <channel>", matched the same way): one chosen
+//! opens read-only, as from the Teams list. Then the messages the query finds in the store ([`crate::search`]): one
+//! chosen opens its chat at the message. Last come the app's commands the query matches ([`COMMANDS`]: "Copy
+//! diagnostics", and "Set status: …" for each status the account menu offers, so the account's status is set from the
+//! keyboard too).
 
 use std::sync::Arc;
 
@@ -18,6 +21,8 @@ use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use crate::bridge::Core;
 use crate::chat_list::ChatList;
 use crate::search::{self, Hit, HitTarget};
+use crate::settings::ManualStatus;
+use crate::teams_list::TeamsList;
 use crate::theme;
 
 /// The most matches the switcher lists.
@@ -95,36 +100,78 @@ pub fn matches(query: &str, rows: &[(String, SharedString)]) -> Vec<(String, Sha
 pub enum SwitcherEvent {
     /// Open this chat.
     Open(String),
+    /// Open this team's channel, read-only.
+    OpenChannel(String),
     /// Open this chat at this message (a message the query found).
     OpenMessage(HitTarget),
     /// Close the switcher.
     Dismissed,
     /// Put the diagnostics on the clipboard (the "Copy diagnostics" command).
     CopyDiagnostics,
+    /// Set the account's status, as the account menu does (a "Set status: …" command).
+    SetStatus(ManualStatus),
 }
 
-/// The palette's section of the chats; the messages found are the next.
+/// The palette's sections in order (an empty one is hidden, and keeps its number).
 const CHATS: usize = 0;
-/// The palette's section of the messages found.
-const MESSAGES: usize = 1;
-/// The palette's section of the app's commands.
-const COMMANDS: usize = 2;
+const CHANNELS: usize = 1;
+const MESSAGES: usize = 2;
+const COMMAND_SECTION: usize = 3;
 
-/// The commands the palette offers, matched on their names as the chats are.
-pub const COMMAND_NAMES: [&str; 1] = ["Copy diagnostics"];
+/// One of the app's commands the palette offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteCommand {
+    CopyDiagnostics,
+    SetStatus(ManualStatus),
+}
+
+impl PaletteCommand {
+    /// What the palette calls it, and matches the query on.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CopyDiagnostics => "Copy diagnostics",
+            Self::SetStatus(ManualStatus::Automatic) => "Set status: Automatic",
+            Self::SetStatus(ManualStatus::Available) => "Set status: Available",
+            Self::SetStatus(ManualStatus::Busy) => "Set status: Busy",
+            Self::SetStatus(ManualStatus::DoNotDisturb) => "Set status: Do not disturb",
+            Self::SetStatus(ManualStatus::Away) => "Set status: Appear away",
+        }
+    }
+
+    fn event(self) -> SwitcherEvent {
+        match self {
+            Self::CopyDiagnostics => SwitcherEvent::CopyDiagnostics,
+            Self::SetStatus(status) => SwitcherEvent::SetStatus(status),
+        }
+    }
+}
+
+/// The commands the palette offers, in order, matched on their names as the chats are.
+pub const COMMANDS: [PaletteCommand; 6] = [
+    PaletteCommand::CopyDiagnostics,
+    PaletteCommand::SetStatus(ManualStatus::Automatic),
+    PaletteCommand::SetStatus(ManualStatus::Available),
+    PaletteCommand::SetStatus(ManualStatus::Busy),
+    PaletteCommand::SetStatus(ManualStatus::DoNotDisturb),
+    PaletteCommand::SetStatus(ManualStatus::Away),
+];
 
 /// The switcher (see the module docs).
 pub struct Switcher {
     state: Entity<CommandState>,
     list: Entity<ChatList>,
+    teams: Entity<TeamsList>,
     core: Arc<dyn Core>,
     query: String,
     matches: Vec<(String, SharedString)>,
+    /// The channels the query matches, the best first: `(id, "<team> › <channel>")`.
+    channels: Vec<(String, SharedString)>,
     /// The messages the query finds, the newest first.
     hits: Vec<Hit>,
     /// The search for the latest query: a later query drops it.
     searching: Option<Task<()>>,
-    _observing: Subscription,
+    _observing: [Subscription; 2],
     /// Escape, before the palette's own binding (which first clears the query).
     _escape: Subscription,
 }
@@ -132,9 +179,18 @@ pub struct Switcher {
 impl EventEmitter<SwitcherEvent> for Switcher {}
 
 impl Switcher {
-    pub fn new(list: Entity<ChatList>, core: Arc<dyn Core>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        list: Entity<ChatList>,
+        teams: Entity<TeamsList>,
+        core: Arc<dyn Core>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let state = cx.new(|cx| CommandState::new(window, cx));
-        let observing = cx.observe(&list, |this: &mut Self, _, cx| this.refilter(cx));
+        let observing = [
+            cx.observe(&list, |this: &mut Self, _, cx| this.refilter(cx)),
+            cx.observe(&teams, |this: &mut Self, _, cx| this.refilter(cx)),
+        ];
         let this = cx.weak_entity();
         let escape = cx.intercept_keystrokes(move |event, _window, cx| {
             let keystroke = &event.keystroke;
@@ -148,9 +204,11 @@ impl Switcher {
         let mut switcher = Self {
             state,
             list,
+            teams,
             core,
             query: String::new(),
             matches: Vec::new(),
+            channels: Vec::new(),
             hits: Vec::new(),
             searching: None,
             _observing: observing,
@@ -182,12 +240,22 @@ impl Switcher {
         &self.hits
     }
 
-    /// The commands the query matches ([`COMMAND_NAMES`]), listed last.
+    /// The channels listed now, the best match first: `(id, "<team> › <channel>")`.
+    #[must_use]
+    pub fn channels(&self) -> &[(String, SharedString)] {
+        &self.channels
+    }
+
+    /// The names of the commands the query matches ([`COMMANDS`]), listed last.
     #[must_use]
     pub fn commands(&self) -> Vec<&'static str> {
-        COMMAND_NAMES
+        self.matching_commands().into_iter().map(PaletteCommand::name).collect()
+    }
+
+    fn matching_commands(&self) -> Vec<PaletteCommand> {
+        COMMANDS
             .into_iter()
-            .filter(|name| fuzzy_score(&self.query, name).is_some())
+            .filter(|command| fuzzy_score(&self.query, command.name()).is_some())
             .collect()
     }
 
@@ -232,6 +300,19 @@ impl Switcher {
             .map(|row| (row.id.clone(), row.name.clone()))
             .collect();
         self.matches = matches(&self.query, &rows);
+        let channels: Vec<(String, SharedString)> = self
+            .teams
+            .read(cx)
+            .teams()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|team| {
+                team.channels
+                    .iter()
+                    .map(move |channel| (channel.id.clone(), format!("{} › {}", team.name, channel.name).into()))
+            })
+            .collect();
+        self.channels = matches(&self.query, &channels);
         cx.notify();
     }
 
@@ -241,11 +322,15 @@ impl Switcher {
                 .matches
                 .get(index.row)
                 .map(|(id, _)| SwitcherEvent::Open(id.clone())),
+            CHANNELS => self
+                .channels
+                .get(index.row)
+                .map(|(id, _)| SwitcherEvent::OpenChannel(id.clone())),
             MESSAGES => self
                 .hits
                 .get(index.row)
                 .map(|hit| SwitcherEvent::OpenMessage(hit.target.clone())),
-            COMMANDS => self.commands().get(index.row).map(|_| SwitcherEvent::CopyDiagnostics),
+            COMMAND_SECTION => self.matching_commands().get(index.row).map(|command| command.event()),
             _ => None,
         };
         if let Some(event) = event {
@@ -266,8 +351,15 @@ impl Render for Switcher {
         // the sections in order (an empty one is hidden, and keeps its number)
         let command = Command::new(&self.state)
             .filterable(false)
-            .placeholder("Go to a chat, or find a message")
+            .placeholder("Go to a chat or a channel, find a message, or run a command")
             .group(CommandGroup::new().label("Chats").items(chats))
+            .group(
+                CommandGroup::new().label("Channels").items(
+                    self.channels
+                        .iter()
+                        .map(|(_, name)| CommandItem::new().label(name.clone())),
+                ),
+            )
             .group(
                 CommandGroup::new()
                     .label("Messages")
@@ -285,7 +377,7 @@ impl Render for Switcher {
             .on_confirm(move |index, _, cx| {
                 let _ = on_confirm.update(cx, |this, cx| this.confirm(index, cx));
             })
-            .empty(|_, _, _| div().p_2().child("No chat or message matches"));
+            .empty(|_, _, _| div().p_2().child("No chat, channel, message or command matches"));
         div()
             .debug_selector(|| "switcher".to_owned())
             .w(px(WIDTH))

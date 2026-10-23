@@ -230,16 +230,50 @@ fn the_list_asks_about_its_top_chats_people_within_the_watch_the_top_and_the_ope
     assert_eq!(header_presence(&shell, cx), Some(Availability::Unknown));
 }
 
+/// The kinds of the trace's `header shown` lines, in order.
+fn headers(written: &Written) -> Vec<(String, serde_json::Value)> {
+    written
+        .lines()
+        .into_iter()
+        .filter(|line| line["view"] == "header" && line["change"] == "shown")
+        .map(|line| (line["conversation"].as_str().unwrap().to_owned(), line["kinds"].clone()))
+        .collect()
+}
+
 #[test]
-fn the_trace_carries_no_presence_and_a_stopped_engine_leaves_it_unknown() {
+fn the_trace_tells_the_header_s_presence_by_its_key_once_per_change_and_a_stopped_engine_leaves_it() {
     let rig = seeded();
     let written = Written::default();
     let (shell, cx) = shell_traced(&rig, Arc::new(ViewTrace::new(written.clone())));
     told(&rig, LAB_B, Availability::Busy);
     draw(cx);
+    told(&rig, LAB_B, Availability::Busy);
+    told(&rig, LAB_C, Availability::Away);
+    draw(cx);
     assert!(rig.core.asked().contains(&"presence"));
-    assert!(!written.text().contains("Busy"), "the trace names no one's presence");
+    // the chat's header: its other member's presence by its key, its name from people's names, no picture; a change
+    // of anyone else's, or the same told again, is no new line
+    assert_eq!(
+        headers(&written),
+        [
+            (AB.to_owned(), serde_json::json!(["unknown", "named", "no-picture"])),
+            (AB.to_owned(), serde_json::json!(["busy", "named", "no-picture"])),
+        ]
+    );
+    // never a label or a name
+    for text in ["Busy", "Lab Bee", "Away"] {
+        assert!(!written.text().contains(text), "the trace holds {text}");
+    }
     assert!(written.lines().iter().any(|line| line["view"] == "chat-list"));
+    // the group chat opened: its header has no presence
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(TRIO.to_owned(), window, cx)));
+    draw(cx);
+    assert_eq!(
+        headers(&written).last(),
+        Some(&(TRIO.to_owned(), serde_json::json!(["none", "named", "no-picture"])))
+    );
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+    draw(cx);
 
     let shutdown = cx.update(|_, cx| rig.bridge.update(cx, teams_ui::Bridge::shutdown));
     shutdown.detach();
