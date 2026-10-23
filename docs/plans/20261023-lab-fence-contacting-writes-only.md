@@ -11,9 +11,16 @@
   allowlist entry, a review, tests, an `endpoints.md` row and an expected-deny review. The team spent more time getting
   around its own fence than building Teams features.
 - What stays: the fence still sees every request (the browser stays armed, the native transport checks every request),
-  still judges every contacting write by its target's fresh, complete member list, and still never answers a call.
-  What goes: the own-state lists, the read-by-`POST` lists, the own-availability exception, most of the expected-deny
+  still judges every contacting write by its target's fresh, complete member list, and still never answers a call
+  from outside the lab. What goes: the own-state lists, the read-by-`POST` lists, the own-availability exception, most of the expected-deny
   list, and the single-enrolled group chat.
+- **Calls (M3) aren't blocked by this plan.** A call between lab accounts is a contacting write like a message: it may
+  be started, answered and carried on when its participants are lab accounts (or the echo service). The fence trusts
+  the calls it permitted itself (a registry of the calls this run started or answered), since no endpoint gives an
+  authoritative call roster, and it doesn't watch the roster (the user's decision of 2026-10-23: a participant from
+  outside the lab can appear only through a tenant policy bot, forwarding on the callee's account or a transfer, none
+  of which the lab expects). This plan writes that rule down and removes what forbade it; mapping the call writes is
+  M3's.
 - **Where "default allow" stops**: on the few services whose purpose is reaching people (the chat service, calling,
   Graph, Outlook, SharePoint sharing, AMS, the middle tier's team, meeting and invite paths, CSA writes), a mutating
   request is treated as contacting unless it's a mapped write or a named carve-out. Everywhere else every request is
@@ -62,7 +69,9 @@
 - **Docs and rules**: `CLAUDE.md` hard rules and Patterns; `docs/protocol/{endpoints,fence-targets,trouter,
   calling-echo,auth}.md`; backlog `seeded-own-rules-ignore-the-query.md`, `group-chat-member-read-completeness.md`,
   `bot-invokes-and-message-extensions.md`.
-- **Out of scope**: the personal build's rules; writes on an existing call (`docs/backlog/fence-call-follow-ups.md`).
+- **Out of scope**: the personal build's rules; mapping the call writes (M3: the call start to lab callees, answering,
+  the follow-ups, the call registry). This plan only makes sure nothing in the rules or the code's structure forbids
+  them (Technical Details, "Calls").
 
 ## Development Approach
 
@@ -158,8 +167,9 @@ or carves it out.
 
 **Calling** (`api.flightproxy.teams.microsoft.com`, `api.fl.teams.microsoft.com`, `*.conv.skype.com`, `*.cc.skype.com`,
 `*.broker.skype.com`, and their `ep/<host>/…` forms; Task 2 checks the list): every mutating request is `Unreadable`
-except the echo call start that `calling.rs` maps today, `Write(Call)` to the policy's echo callee. A call's
-`acceptance` link falls in this service, so it's always denied.
+except the echo call start that `calling.rs` maps today, `Write(Call)` to the policy's echo callee. Until M3 maps the
+rest (Technical Details, "Calls"), a call to a lab account, the `acceptance` link and the follow-ups stay
+`Unreadable`; each becomes a row of this table, not a new mechanism.
 
 **Graph** (`graph.microsoft.com`, every version, `$batch` included): every mutating request `Unreadable`.
 
@@ -200,6 +210,30 @@ query values exact.
   the chat is, and the member list carries everything the fence judges; the other checks stay.
 - `LiveMembershipSource::new` and `for_fence` both admit group and meeting chats; `for_fence` stays the lab constructor.
 
+### Calls (what M3 builds on)
+
+The rule, as the new hard rules state it: a call is a contacting write whose participants are its callees, its
+caller and whoever it adds.
+
+- **Starting**: allowed when every callee is a lab account or the echo service (`Scope::Call` with its `to[]`), in the
+  shape the call start's capture shows; the native client registers the calling stack's own Trouter endpoint
+  (`SkypeSpacesWeb`) freely: it's the account's own session (registrar → `None`).
+- **Answering**: allowed when the incoming call's invitation (the Trouter delivery) names a caller and participants
+  that are all lab accounts or the echo service. Answering is the `acceptance` request and, where the flow uses one, a
+  typed delivery response for that call; every other incoming call is ignored, never answered.
+- **Follow-ups** (`updateEndpointMetadata`, `applyChannelParameters`, `acknowledge`, `mediaRenegotiation`, hold,
+  `updateCallState`, `controlVideoStreaming`, screen sharing, `leave`): allowed on a call in the fence's **call
+  registry**, the calls this run's fence permitted a start or an answer for, keyed by the conversation and call ids
+  the start's answer and the acceptance bind together. `add` is judged per invitee like a start. A call not in the
+  registry is `Partial` and denied.
+- **No roster watch**: the user decided on 2026-10-23 not to check later roster updates for non-lab participants.
+- **Media** (TURN, ICE, DTLS-SRTP, over UDP or TCP to the relay hosts) doesn't go through the HTTP transport and isn't
+  classified: it carries a call the signaling fence already permitted. Audio and video are the same call.
+- What this plan does for it: the hard-rules text below says the above; Task 1 marks the Patterns line "Don't stand
+  in a registry of what the fence permitted" and the "Never answer a call" lines as superseded; the calling family is a
+  table M3 adds rows to; `Scope::Call` and `WriteKind::Call` stay; the frame rule keeps delivery responses denied until
+  M3 adds typed ones for a registered call; Task 7 rewrites `docs/backlog/fence-call-follow-ups.md` to this path.
+
 ### The new `CLAUDE.md` hard rules
 
 They replace, on merged `main`'s `CLAUDE.md`, everything from "These hold for every agent and every change…" through
@@ -230,8 +264,13 @@ and tokens, the personal build and protocol notes stay as they are:
 >   as contacting.
 > - **No token or credential goes to a third party** (a bot, an app's backend): a bot invoke stays denied. Sign-in and
 >   token renewal stay in `teams-auth`'s own clients and touch only the account's own credentials.
-> - **Never answer a call.** No scenario clicks answer, the fence doesn't map `acceptance`, a Trouter delivery
->   response is never sent (browser or native), and the native client ignores incoming calls.
+> - **Calls go only to the lab, both ways.** A call may be started when every callee is a lab account or the echo
+>   service, and answered when its invitation names only lab accounts or the echo service; every other incoming call
+>   is ignored, never answered (no `acceptance`, no delivery response for it, no scenario click). A write on an
+>   existing call is allowed only on a call the fence itself permitted a start or an answer for in this run (its call
+>   registry, keyed by the ids the start's answer and the acceptance bind); an `add` is judged per invitee. The roster
+>   isn't watched (the user's decision of 2026-10-23). Media (TURN, ICE, DTLS-SRTP) isn't classified: it carries a
+>   call the signaling fence permitted.
 > - **Live browser runs are armed** (M0 Tasks 6–7): HTTP interception on every host and target, the WebSocket guard,
 >   the service worker neutralized. The arming is what lets the fence deny a contacting write; it lets the rest
 >   through.
@@ -259,7 +298,8 @@ and tokens, the personal build and protocol notes stay as they are:
 - [ ] replace the hard-rules block named in Technical Details with the quoted text, word for word
 - [ ] mark the Patterns lines that describe the old rules (the read-by-`POST` list, the group chat's enrolment and
       `chats.toml` admission, own presence's exception, the expected-deny list's review, "Own-state is added only after
-      a review", the native client's sealed lists) with "(being removed: 2026-10-23 rule)" until Task 11 rewrites them
+      a review", the native client's sealed lists, "Don't stand in a registry of what the fence permitted", the
+      "Never answer a call" lines under Live runs and the native client) with "(being removed: 2026-10-23 rule)" until Task 11 rewrites them
 - [ ] ⚠️ the auto-mode classifier refused this edit on 2026-10-23 as self-modification: if it refuses again, stop and
       ask the user to apply it (or to allow the edit); don't work around the refusal
 - [ ] `cargo test -p fixture-guard` passes
@@ -378,8 +418,9 @@ and tokens, the personal build and protocol notes stay as they are:
   `crates/teams-fence/tests/{fence_core,log_processes}.rs`, `crates/teams-headless/tests/chat_live.rs`,
   `crates/teams-app/tests/ui_live.rs`, `crates/fence-seal/tests/ui/proto_own_frame.*`
 
-- [ ] write tests first: the sink sends every typed frame without a `fence.log` record; no constructor makes a
-      delivery response or takes raw text (`proto_raw_frame` stays)
+- [ ] write tests first: the sink sends every typed frame without a `fence.log` record; no constructor takes raw
+      text (`proto_raw_frame` stays) and none makes a delivery response yet (M3 adds a typed one for a registered
+      call)
 - [ ] drop `FrameRecord` (unless the personal build uses it) and the "reviewed list" rule; the trait stays sealed only
       to keep raw text out, so adding a frame (e.g. `user.activity`) is an ordinary change
 - [ ] tests pass
@@ -396,6 +437,9 @@ and tokens, the personal build and protocol notes stay as they are:
 - [ ] `fence-targets.md`: the services, the table and the member read; the abc shape section goes
 - [ ] delete the two backlog items the rule settles; `bot-invokes…`: bot invokes stay denied (a token to a third
       party), say so
+- [ ] rewrite `docs/backlog/fence-call-follow-ups.md` to the path in Technical Details, "Calls": the call registry
+      instead of an authoritative read, starting and answering lab-only calls, no roster watch (the user's decisions
+      of 2026-10-23), and the follow-ups to map in M3
 - [ ] `cargo test -p fixture-guard` passes
 
 ### Task 8: Remove what nothing uses any more
@@ -428,7 +472,8 @@ run in the background.
 - [ ] every row of Technical Details' table has a table-test row, and both sides call the one classifier
 - [ ] every mutating request the live runs logged `allowed` was checked against the table (Task 9)
 - [ ] a natively created lab-only group chat is writable (mock test)
-- [ ] no delivery response can be sent from either side (frame tests)
+- [ ] no delivery response can be sent from either side yet (frame tests), and nothing in the rules or the types
+      stops M3 from adding one for a registered call
 - [ ] the full gate passes: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D
       warnings`, `scripts/lint-report.sh`, `cargo test --workspace`
 
