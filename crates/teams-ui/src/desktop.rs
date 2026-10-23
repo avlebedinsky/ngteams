@@ -11,6 +11,9 @@
 //! - A notification activated opens its chat in the window, opened again if it was closed; the tray's "Open" (or a
 //!   click on the item) shows the window, its "Quit" quits.
 //! - The notifier is told the chat shown in a focused window, which never notifies.
+//! - The account's own presence ([`OwnPresence`], M2 Task 20) lives as long as the app, not the window: its refresh goes
+//!   on while the app stays in the tray, the shell of each window it opens tells it of the window's use and shows it
+//!   in the account menu, and the quit stops it before the app asks for its shutdown (nothing is sent on quit).
 //! - [`Desktop::connect`] connects to the bus the app is given ([`crate::bus`]) and puts the notifications and the
 //!   tray item on it; without one, neither is there and nothing else is tried.
 //!
@@ -29,6 +32,7 @@ use zbus::Connection;
 
 use crate::bus::{self, BusError};
 use crate::notify::{BusNotifications, Notifier, NotifierEvent};
+use crate::own_presence::OwnPresence;
 use crate::shell::{Main, Shell, ShellParts};
 use crate::trace::TraceLine;
 use crate::tray::{BusTray, Hosted, Tray, TrayEvent};
@@ -60,6 +64,7 @@ pub struct Desktop {
     window: Option<WindowHandle<KitRoot>>,
     notifier: Entity<Notifier>,
     tray: Entity<Tray>,
+    own_presence: Entity<OwnPresence>,
     /// The tray item is up: closing the window keeps the app.
     in_tray: bool,
     /// The connection to the bus the app is given, kept for the notifications and the tray item on it.
@@ -120,6 +125,15 @@ impl Desktop {
                 cx,
             )
         });
+        let own_presence = cx.new(|cx| {
+            OwnPresence::new(
+                Arc::clone(&shell.core),
+                &shell.models,
+                &shell.settings,
+                Arc::clone(&shell.trace),
+                cx,
+            )
+        });
         let desktop = cx.entity().downgrade();
         let closing = cx.on_window_closed(move |cx, id| {
             // a desktop that is gone has no window to watch
@@ -130,6 +144,7 @@ impl Desktop {
             window: None,
             notifier,
             tray,
+            own_presence,
             in_tray: false,
             bus: None,
             _subscriptions: [opening, closing],
@@ -144,6 +159,12 @@ impl Desktop {
     #[must_use]
     pub fn tray(&self) -> &Entity<Tray> {
         &self.tray
+    }
+
+    /// The account's own presence as the app reports it.
+    #[must_use]
+    pub fn own_presence(&self) -> &Entity<OwnPresence> {
+        &self.own_presence
     }
 
     /// The window, while it is open.
@@ -185,6 +206,12 @@ impl Desktop {
         } = self.parts.clone();
         let window = window::open(cx, app_id, title, shell)?;
         self.window = Some(window);
+        let own_presence = self.own_presence.clone();
+        let _ = window.update(cx, |kit, _, cx| {
+            let shell = kit.view().clone().downcast::<Root>().ok()?.read(cx).shell()?.clone();
+            shell.update(cx, |shell, cx| shell.set_own_presence(own_presence, cx));
+            Some(())
+        });
         Ok(window)
     }
 
@@ -231,8 +258,15 @@ impl Desktop {
         self.window = None;
         self.parts.shell.trace.record(&TraceLine::new("window", "closed"));
         if !self.in_tray {
-            cx.emit(DesktopEvent::Quit);
+            self.quit(cx);
         }
+    }
+
+    /// Asks the app to quit, the account's own presence stopped first: nothing more is reported (and nothing is sent
+    /// for the quit: no captured request reports Offline, M2 Task 20).
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        self.own_presence.update(cx, OwnPresence::quit);
+        cx.emit(DesktopEvent::Quit);
     }
 
     /// What the tray item asked: the window shown, or the app quit.
@@ -244,7 +278,7 @@ impl Desktop {
             }
             TrayEvent::Quit => {
                 self.parts.shell.trace.record(&TraceLine::new("tray", "quit"));
-                cx.emit(DesktopEvent::Quit);
+                self.quit(cx);
             }
         }
     }

@@ -4,32 +4,40 @@
 //! [`ChatView`] under its name, and a 1:1 chat's other member's presence, M2 Task 17; a channel opened in a
 //! [`ChannelView`] under its team's and its own name, read-only; or the settings).
 //!
+//! The account menu (M2 Task 20): the rail's status button, above Settings, shows what the account's own presence
+//! reports ([`OwnPresence`], handed in by the desktop) and opens a menu of the statuses the user may set (Automatic and
+//! the captured manual ones, the same setting the settings view changes) with the last failed report; the shell's
+//! mouse and key input tells the own presence the window is used.
+//!
 //! The keyboard: Ctrl+K opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
 //! at its next start. Ctrl+Shift+F opens the [`Search`] of the stored messages the same way (one of the two at a
 //! time); a message found there or in the switcher opens its chat at the message ([`ChatView::reveal`]). What the
 //! shell shows is traced (`chat opened`, `channel opened`, `settings opened`, `switcher opened`/`closed`, `search
-//! opened`/`closed`).
+//! opened`/`closed`, `status-menu opened`/`closed`/`chosen` with the status's key).
 
 use std::sync::Arc;
 
 use gpui::{
     AnyElement, AnyView, App, AppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div,
-    px, rgb,
+    IntoElement, KeyBinding, KeyDownEvent, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ResizableState, h_resizable, resizable_panel};
-use teams_core::Availability;
+use teams_core::{Availability, Reporting};
+use teams_proto::ManualAvailability;
 
 use crate::bridge::Core;
 use crate::channel_view::ChannelView;
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView};
 use crate::models::Models;
+use crate::own_presence::{self, OwnPresence};
 use crate::presence;
 use crate::search::{HitTarget, Search, SearchEvent};
-use crate::settings::SettingsModel;
+use crate::settings::{ManualStatus, SettingsModel};
 use crate::settings_view::SettingsView;
 use crate::switcher::{Switcher, SwitcherEvent};
 use crate::teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
@@ -112,6 +120,10 @@ pub struct Shell {
     main: Main,
     panes: Entity<ResizableState>,
     focus: FocusHandle,
+    /// The account's own presence, once the desktop handed it in, with the shell's observation of it.
+    own_presence: Option<(Entity<OwnPresence>, Subscription)>,
+    /// The account menu is open.
+    status_menu: bool,
     _subscriptions: [Subscription; 4],
 }
 
@@ -181,7 +193,54 @@ impl Shell {
             main: selected.map_or(Main::Nothing, Main::Chat),
             panes: cx.new(|_| ResizableState::default()),
             focus,
+            own_presence: None,
+            status_menu: false,
             _subscriptions: [opened, channel_opened, kept_channel, presence],
+        }
+    }
+
+    /// Shows the account's own presence in the account menu, and tells it of the window's use from now on.
+    pub fn set_own_presence(&mut self, own_presence: Entity<OwnPresence>, cx: &mut Context<Self>) {
+        let observing = cx.observe(&own_presence, |_, _, cx| cx.notify());
+        self.own_presence = Some((own_presence, observing));
+        cx.notify();
+    }
+
+    /// The account's own presence, once the desktop handed it in.
+    #[must_use]
+    pub fn own_presence(&self) -> Option<&Entity<OwnPresence>> {
+        self.own_presence.as_ref().map(|(own, _)| own)
+    }
+
+    /// Whether the account menu is open.
+    #[must_use]
+    pub fn status_menu_open(&self) -> bool {
+        self.status_menu
+    }
+
+    /// Opens the account menu, or closes it when it is open.
+    pub fn toggle_status_menu(&mut self, cx: &mut Context<Self>) {
+        self.status_menu = !self.status_menu;
+        let change = if self.status_menu { "opened" } else { "closed" };
+        self.trace.record(&TraceLine::new("status-menu", change));
+        cx.notify();
+    }
+
+    /// The user chose `status` in the account menu: kept in the settings (the own presence sends it), the menu closed.
+    pub fn choose_status(&mut self, status: ManualStatus, cx: &mut Context<Self>) {
+        self.trace
+            .record(&TraceLine::new("status-menu", "chosen").kind(status.key()));
+        self.settings.update(cx, |settings, cx| {
+            settings.change(|settings| settings.manual_status = status, cx);
+        });
+        self.status_menu = false;
+        cx.notify();
+    }
+
+    /// The window was used: the own presence is told (Available again at once after idle).
+    fn used(&mut self, cx: &mut Context<Self>) {
+        if let Some((own, _)) = &self.own_presence {
+            own.update(cx, OwnPresence::active);
         }
     }
 
@@ -512,6 +571,7 @@ impl Shell {
                 this.show_rail(RailItem::Teams, cx);
             }))
             .child(div().flex_1())
+            .child(self.status_button(palette, cx))
             .child(Self::rail_button(
                 "rail-settings",
                 "Settings",
@@ -519,6 +579,119 @@ impl Shell {
                 cx,
                 Self::show_settings,
             ))
+    }
+
+    /// What the account's own presence reports now, as the account menu shows it; `None` before the desktop handed it
+    /// in.
+    #[must_use]
+    pub fn own_reporting(&self, cx: &App) -> Option<Reporting> {
+        self.own_presence().map(|own| own.read(cx).reporting(cx))
+    }
+
+    /// The rail's status button: a dot for what the own presence reports, opening the account menu.
+    fn status_button(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let reporting = self.own_reporting(cx);
+        let failed = self.own_presence().is_some_and(|own| own.read(cx).failure().is_some());
+        // the account's own dot, with a selector of its own: the `presence-…` ones are others' (the views' dots)
+        let dot = reporting.map(|reporting| {
+            let shown = shown_as(reporting);
+            let dot = div()
+                .debug_selector(|| "rail-status-dot".to_owned())
+                .size(px(presence::DOT))
+                .flex_none()
+                .rounded_full()
+                .border_1()
+                .border_color(rgb(palette.background));
+            match presence::fill(&shown) {
+                Some(color) => dot.bg(rgb(color)),
+                None => dot
+                    .border_color(rgb(palette.muted_foreground))
+                    .bg(rgb(palette.background)),
+            }
+        });
+        div()
+            .debug_selector(|| "rail-status".to_owned())
+            .id("rail-status")
+            .mx_1()
+            .px_1()
+            .py_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_xs()
+            .when(self.status_menu, |button| button.bg(rgb(palette.border)))
+            .children(dot)
+            .child(if failed { "Status !" } else { "Status" })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_status_menu(cx)))
+    }
+
+    /// The account menu: the statuses the user may set (the one set marked), what is reported, and the last failed
+    /// report.
+    fn status_menu_view(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = self.settings.read(cx).settings().manual_status;
+        let entries = ManualStatus::ALL.map(|status| {
+            let id: SharedString = format!("status-menu-{}", status.key()).into();
+            let selector = id.to_string();
+            let button = Button::new(id)
+                .label(status.label())
+                .compact()
+                .on_click(cx.listener(move |this, _, _, cx| this.choose_status(status, cx)));
+            let button = if status == chosen {
+                button.primary()
+            } else {
+                button.ghost()
+            };
+            div()
+                .debug_selector(move || selector.clone())
+                .w_full()
+                .child(button.w_full())
+        });
+        let reported = self.own_reporting(cx).map(|reporting| {
+            div()
+                .debug_selector(|| "status-menu-reported".to_owned())
+                .text_xs()
+                .text_color(rgb(palette.muted_foreground))
+                .child(SharedString::from(format!(
+                    "Reported: {}",
+                    own_presence::reporting_label(reporting)
+                )))
+        });
+        let failure = self
+            .own_presence()
+            .and_then(|own| own.read(cx).failure().cloned())
+            .map(|failure| {
+                div()
+                    .debug_selector(|| "status-menu-failure".to_owned())
+                    .text_xs()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(SharedString::from(format!(
+                        "Not reported ({}): {}",
+                        own_presence::kind(failure.status),
+                        failure.why
+                    )))
+            });
+        div()
+            .debug_selector(|| "status-menu".to_owned())
+            .absolute()
+            .left(px(RAIL_WIDTH + 4.0))
+            .bottom(px(48.0))
+            .w(px(220.0))
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .bg(rgb(palette.surface))
+            .border_1()
+            .border_color(rgb(palette.border))
+            .rounded_md()
+            .shadow_md()
+            .children(entries)
+            .children(reported)
+            .children(failure)
+            .into_any_element()
     }
 
     fn list_pane(&self, palette: Palette) -> AnyElement {
@@ -632,9 +805,15 @@ impl Render for Shell {
         };
         let switcher = self.switcher().map(|switcher| overlay(switcher.clone().into()));
         let search = self.search().map(|search| overlay(search.clone().into()));
+        let status_menu = self.status_menu.then(|| self.status_menu_view(palette, cx));
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
+            // the window's use, for the account's own presence
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.used(cx)))
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.used(cx)))
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| this.used(cx)))
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| this.toggle_search(window, cx)))
             .relative()
@@ -644,5 +823,19 @@ impl Render for Shell {
             .child(div().flex_1().h_full().min_w_0().child(panes))
             .children(switcher)
             .children(search)
+            .children(status_menu)
+    }
+}
+
+/// The dot the account menu shows for what is reported: a manual status's own, Available's green, grey while nothing
+/// is reported.
+fn shown_as(reporting: Reporting) -> Availability {
+    match reporting {
+        Reporting::Available | Reporting::Manual(ManualAvailability::Available) => Availability::Available,
+        Reporting::Manual(ManualAvailability::Busy) => Availability::Busy,
+        Reporting::Manual(ManualAvailability::DoNotDisturb) => Availability::DoNotDisturb,
+        Reporting::Manual(ManualAvailability::Away) => Availability::Away,
+        Reporting::Inactive | Reporting::Halted | Reporting::Quit => Availability::Offline,
+        Reporting::Connecting => Availability::Unknown,
     }
 }

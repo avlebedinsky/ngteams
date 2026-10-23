@@ -503,6 +503,11 @@ async fn an_availability_writes_to_no_chat_and_only_the_newer_of_its_kind_replac
     );
     assert!(available.replaces(&available));
     assert!(!available.replaces(&busy) && !busy.replaces(&available));
+    // the own status each sets, as the app's policy names it (M2 Task 20)
+    assert_eq!(available.own_status(), Some(OwnStatus::Available));
+    assert_eq!(busy.own_status(), Some(OwnStatus::Manual(ManualAvailability::Busy)));
+    assert_eq!(reset.own_status(), Some(OwnStatus::ClearManual));
+    assert_eq!(typing.own_status(), None);
 }
 
 #[tokio::test]

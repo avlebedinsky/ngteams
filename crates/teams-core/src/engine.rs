@@ -63,7 +63,7 @@
 //!   registered in this run ([`PushEvent::Registered`]); refused before a registration went through and after the push
 //!   channel stopped, when one still waiting out a `Retry-After` is dropped too (told as [`Event::Transient`]). The
 //!   fence permits it for its own account only, without a member read. When to send what is the app's policy (Task
-//!   20), not the engine's.
+//!   20, [`crate::own_presence`]), not the engine's.
 //! - **Its handles**: [`EngineRequests`], the request side (writes and queries, each a [`Reply`]), is cloneable, for a
 //!   UI's views to share; [`EngineHandle`] owns the engine: its events, its thread and its shutdown.
 //! - **One engine per account** ([`teams_store::Store::engine_lock`]): [`start`] takes the account's engine lock

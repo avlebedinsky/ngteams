@@ -23,7 +23,9 @@ use futures_util::FutureExt as _;
 use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
-use teams_core::{Action, Availability, EngineHandle, EngineRequests, Event, Person, Reply, Transient, TransientSent};
+use teams_core::{
+    Action, Availability, EngineHandle, EngineRequests, Event, OwnStatus, Person, Reply, Transient, TransientSent,
+};
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
 };
@@ -42,6 +44,10 @@ pub trait Core: Send + Sync + 'static {
     fn resend(&self, id: i64) -> Reply<OutboxEntry>;
     /// A transient write (typing), as no row.
     fn transient(&self, transient: Transient) -> Reply<TransientSent>;
+    /// The account's own availability, a transient write from the endpoint the push channel registered (M2 Tasks
+    /// 19–20): `EngineError::NoEndpoint` before a registration went through and once the channel stopped. When to send
+    /// which is the app's policy ([`crate::own_presence`]).
+    fn own_availability(&self, status: OwnStatus) -> Reply<TransientSent>;
     /// A catch-up now.
     fn sync(&self) -> Reply<CatchUpReport>;
     /// The next older page of a conversation, from the service.
@@ -103,6 +109,10 @@ impl Core for EngineRequests {
 
     fn transient(&self, transient: Transient) -> Reply<TransientSent> {
         EngineRequests::transient(self, transient)
+    }
+
+    fn own_availability(&self, status: OwnStatus) -> Reply<TransientSent> {
+        EngineRequests::own_availability(self, status)
     }
 
     fn sync(&self) -> Reply<CatchUpReport> {
@@ -215,6 +225,10 @@ impl Core for StoppedCore {
     }
 
     fn transient(&self, _: Transient) -> Reply<TransientSent> {
+        stopped()
+    }
+
+    fn own_availability(&self, _: OwnStatus) -> Reply<TransientSent> {
         stopped()
     }
 

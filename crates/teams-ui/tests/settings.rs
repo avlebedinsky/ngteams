@@ -289,3 +289,35 @@ fn a_file_that_couldn_t_be_read_is_never_written_over(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[test]
+fn only_the_captured_manual_statuses_are_kept_and_each_is_the_policy_s_choice() {
+    use teams_core::Choice;
+    use teams_proto::ManualAvailability;
+    // "Be right back" and "Appear offline" were never captured (M2 Task 18): reported, Automatic kept
+    for uncaptured in ["be-right-back", "appear-offline"] {
+        let (read, problems) = parse(&format!("manual_status = \"{uncaptured}\"")).expect("TOML");
+        assert_eq!(read.manual_status, ManualStatus::Automatic, "{uncaptured}");
+        assert!(
+            matches!(
+                &problems[..],
+                [Problem::BadValue {
+                    key: "manual_status",
+                    ..
+                }]
+            ),
+            "{uncaptured}: {problems:?}"
+        );
+    }
+    let choices: Vec<Choice> = ManualStatus::ALL.iter().map(|status| status.choice()).collect();
+    assert_eq!(
+        choices,
+        [
+            Choice::Automatic,
+            Choice::Manual(ManualAvailability::Available),
+            Choice::Manual(ManualAvailability::Busy),
+            Choice::Manual(ManualAvailability::DoNotDisturb),
+            Choice::Manual(ManualAvailability::Away),
+        ]
+    );
+}

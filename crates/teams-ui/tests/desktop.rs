@@ -22,7 +22,7 @@ use common::{LAB_A, LAB_B, Rig, Written};
 use futures_util::future::BoxFuture;
 use gpui::{AppContext as _, Entity, WindowHandle};
 use notices::{Asked, FakeServer, chat, message};
-use teams_core::{Event, MessageChange, Source};
+use teams_core::{AVAILABLE_REFRESH, Event, MessageChange, OwnStatus, RegistrationReport, Reporting, Source};
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::ViewTrace;
 use teams_ui::desktop::{Desktop, DesktopEvent, DesktopParts};
@@ -290,6 +290,44 @@ fn with_a_tray_item_closing_the_window_keeps_the_app_and_the_tray_shows_it_again
     d.tray(TrayEvent::Quit);
     assert_eq!(*d.asked.lock().unwrap(), [DesktopEvent::Quit]);
     assert_eq!(d.traced("tray", "quit"), 1);
+}
+
+#[test]
+fn the_own_presence_outlives_the_window_is_shown_in_each_one_and_stops_on_quit() {
+    let d = OnDesktop::start();
+    d.rig
+        .cx
+        .update(|cx| d.desktop.update(cx, |desktop, cx| desktop.set_in_tray(true, cx)));
+    let own = d.rig.cx.read(|cx| d.desktop.read(cx).own_presence().clone());
+    let shell_s = |d: &OnDesktop| {
+        let window = d.window()?;
+        d.rig.cx.update(|cx| {
+            let shell = window::content(window, cx)?.read(cx).shell()?.clone();
+            shell.read(cx).own_presence().cloned()
+        })
+    };
+    let window = d.open();
+    assert_eq!(shell_s(&d).map(|shown| shown.entity_id()), Some(own.entity_id()));
+    d.rig.send(Event::Registration(RegistrationReport::Registered));
+    assert_eq!(*d.rig.core.own_statuses.lock().unwrap(), [OwnStatus::Available]);
+    // the window closed, the app in the tray: still reported
+    d.close(window);
+    d.rig.cx.executor().advance_clock(AVAILABLE_REFRESH);
+    d.rig.cx.run_until_parked();
+    assert_eq!(
+        *d.rig.core.own_statuses.lock().unwrap(),
+        [OwnStatus::Available, OwnStatus::Available]
+    );
+    // opened again: the same one shown
+    d.tray(TrayEvent::Open);
+    assert_eq!(shell_s(&d).map(|shown| shown.entity_id()), Some(own.entity_id()));
+    // the quit stops it before the app is asked, and sends nothing
+    d.tray(TrayEvent::Quit);
+    assert_eq!(*d.asked.lock().unwrap(), [DesktopEvent::Quit]);
+    assert_eq!(d.rig.cx.read(|cx| own.read(cx).reporting(cx)), Reporting::Quit);
+    d.rig.cx.executor().advance_clock(AVAILABLE_REFRESH * 2);
+    d.rig.cx.run_until_parked();
+    assert_eq!(d.rig.core.own_statuses.lock().unwrap().len(), 2);
 }
 
 #[test]

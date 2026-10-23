@@ -2,8 +2,8 @@
 //! (`teams_fence::lab::LabPaths::ui_settings_file`), the personal build's in its own data dir.
 //!
 //! - **What**: the chat shown last ([`Settings::selected_chat`]), whether typing and read receipts are sent, which
-//!   messages notify ([`Notifications`]), the idle time before the account shows away, the account's manual status
-//!   ([`ManualStatus`]). Tasks 13 and 14 and Tasks 18–20 act on the ones this task only keeps.
+//!   messages notify ([`Notifications`]), the idle time after which the account's availability stops being reported, the
+//!   account's manual status ([`ManualStatus`]). Tasks 13, 14 and 20 act on the ones Task 8 only kept.
 //! - **Forgiving to read**: a missing file gives the defaults; a file that can't be read or isn't TOML gives the
 //!   defaults and is reported, and is never written over: changes hold in memory until the app quits, so the file
 //!   is there to mend by hand; a value that is bad (of the wrong type, out of range, a name this build doesn't know)
@@ -23,8 +23,10 @@ use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt 
 use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, AsyncApp, ClipboardItem, Context, Task, WeakEntity};
+use teams_core::Choice;
 pub use teams_log::Level as LogLevel;
 use teams_log::diagnostics::{Report, Source as DiagnosticsSource};
+use teams_proto::ManualAvailability;
 use toml::{Table, Value};
 
 /// The settings file's mode.
@@ -79,30 +81,28 @@ impl Notifications {
     }
 }
 
-/// The account's status as the user sets it; [`ManualStatus::Automatic`] follows the app (Tasks 18–20 decide which
-/// of these can be set, and how).
+/// The account's status as the user sets it ([`crate::own_presence`], M2 Task 20): [`ManualStatus::Automatic`] follows
+/// the app; the others are the manual statuses a capture showed (M2 Task 18), each sent as it is chosen and overriding
+/// the app's until Automatic is chosen again (the reset). "Be right back" and "Appear offline" were never captured, so
+/// they aren't offered: a file naming one is reported and Automatic kept.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ManualStatus {
-    /// Available while the app is used, away after the idle time.
+    /// Available while the window is used; nothing reported once it hasn't been for the idle time.
     #[default]
     Automatic,
     Available,
     Busy,
     DoNotDisturb,
-    BeRightBack,
     Away,
-    AppearOffline,
 }
 
 impl ManualStatus {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 5] = [
         Self::Automatic,
         Self::Available,
         Self::Busy,
         Self::DoNotDisturb,
-        Self::BeRightBack,
         Self::Away,
-        Self::AppearOffline,
     ];
 
     /// Its name in the file.
@@ -113,13 +113,11 @@ impl ManualStatus {
             Self::Available => "available",
             Self::Busy => "busy",
             Self::DoNotDisturb => "do-not-disturb",
-            Self::BeRightBack => "be-right-back",
             Self::Away => "away",
-            Self::AppearOffline => "appear-offline",
         }
     }
 
-    /// What the settings view calls it.
+    /// What the settings view and the account menu call it.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -127,9 +125,19 @@ impl ManualStatus {
             Self::Available => "Available",
             Self::Busy => "Busy",
             Self::DoNotDisturb => "Do not disturb",
-            Self::BeRightBack => "Be right back",
             Self::Away => "Appear away",
-            Self::AppearOffline => "Appear offline",
+        }
+    }
+
+    /// The own-presence policy's choice it is.
+    #[must_use]
+    pub fn choice(self) -> Choice {
+        match self {
+            Self::Automatic => Choice::Automatic,
+            Self::Available => Choice::Manual(ManualAvailability::Available),
+            Self::Busy => Choice::Manual(ManualAvailability::Busy),
+            Self::DoNotDisturb => Choice::Manual(ManualAvailability::DoNotDisturb),
+            Self::Away => Choice::Manual(ManualAvailability::Away),
         }
     }
 
@@ -148,7 +156,8 @@ pub struct Settings {
     /// Read receipts are sent as a chat is read (Task 13).
     pub send_read_receipts: bool,
     pub notifications: Notifications,
-    /// Minutes without use before the account shows away (Task 20), within [`IDLE_MINUTES`].
+    /// Minutes without use after which the account's availability stops being reported (Task 20,
+    /// [`crate::own_presence`]), within [`IDLE_MINUTES`].
     pub idle_minutes: u32,
     pub manual_status: ManualStatus,
     /// The diagnostic log's level (`teams-log`), changed live; `TEAMS_APP_LOG` overrides it.

@@ -125,7 +125,7 @@ impl SettingsView {
                 move |settings| settings.idle_minutes = minutes,
             )
         });
-        section("Show me away after").child(div().flex().flex_wrap().gap_3().children(radios))
+        section("Stop reporting me available after").child(div().flex().flex_wrap().gap_3().children(radios))
     }
 
     fn status(&self, settings: &Settings) -> impl IntoElement {

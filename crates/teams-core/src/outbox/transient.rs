@@ -29,6 +29,7 @@ use teams_proto::{
 };
 
 use super::{Outbox, Tried};
+use crate::engine::OwnStatus;
 
 /// The longest `Retry-After` a transient waits out: a typing sent later than this would tell the chat of a moment long
 /// gone, so one throttled for longer is dropped.
@@ -83,6 +84,20 @@ impl Transient {
         match self {
             Self::Typing { conversation } => Some(conversation),
             Self::EndpointAvailable { .. } | Self::ManualStatus { .. } => None,
+        }
+    }
+
+    /// The account's own availability it sets, as [`EngineRequests::own_availability`](crate::EngineRequests::own_availability)
+    /// takes it; `None` for a typing.
+    #[must_use]
+    pub fn own_status(&self) -> Option<OwnStatus> {
+        match self {
+            Self::Typing { .. } => None,
+            Self::EndpointAvailable { .. } => Some(OwnStatus::Available),
+            Self::ManualStatus {
+                status: Some(status), ..
+            } => Some(OwnStatus::Manual(*status)),
+            Self::ManualStatus { status: None, .. } => Some(OwnStatus::ClearManual),
         }
     }
 

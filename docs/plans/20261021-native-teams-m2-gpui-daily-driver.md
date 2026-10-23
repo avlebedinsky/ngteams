@@ -1195,10 +1195,32 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 **Files:**
 - Modify: `crates/teams-core/src/*`, `crates/teams-ui/src/*`
 
-- [ ] tests first: the app reports Available while it runs and the window was used recently, Away after the idle time
+- [x] tests first: the app reports Available while it runs and the window was used recently, Away after the idle time
       (a setting), Offline on quit (best effort, transient); a manual status from the account menu overrides it until
       cleared; a failed report shown, never retried outside the transient kind's rules
-- [ ] `cargo test -p teams-core -p teams-ui` and the gate pass
+- [x] `cargo test -p teams-core -p teams-ui` and the gate pass
+- Done (2026-10-23), where it differs from the lines above (settled with Codex, transcript
+  `discussions/task-20-away-offline`):
+  - The policy is `teams_core::own_presence` (`OwnPresencePolicy`: inputs in, the `OwnStatus`es to send out, on the
+    caller's clock), driven by `teams-ui`'s `OwnPresence` (`own_presence.rs`), which the desktop holds for the app's
+    life (its refresh goes on in the tray) and hands to each window's shell; the shell's mouse and key input is the
+    window's use. **Available**: the endpoint `PUT` at each registration that went through while the window was used
+    within the idle time (the start counts as use) or a manual status is set, and again every 2 min
+    (`AVAILABLE_REFRESH`, inside the 5 min 20 s lapse Task 19 saw); a registration while idle sends nothing, the next
+    use sends it at once.
+  - **Idle reports no Away**: nothing is sent and the endpoint lapses on its own, so others see `Offline` some minutes
+    later. The only captured Away is the manual status, account-wide server state that overrides other devices and
+    outlives the app (a suspend, a crash), so it is never sent on the user's behalf; the setting reads "Stop reporting
+    me available after". **Quit sends nothing** (no captured request reports Offline): the refresh stops before the
+    engine's shutdown closes the push channel. Both in `docs/backlog/own-presence-idle-and-offline-shapes.md`.
+  - The account menu is the rail's status button (above Settings) with the statuses and what is reported; it and the
+    settings view change the same `manual_status` setting, now Automatic and the four captured statuses only ("Be
+    right back" and "Appear offline" dropped: a file naming one is reported, Automatic kept). A manual status is sent
+    when chosen and once at the run's first registration (Automatic at the start sends no reset), keeps the endpoint
+    refreshed while idle, and Automatic sends the reset. A failed report is shown in the menu and traced
+    (`own-presence` `failed`), never sent again; a fence denial stops the reports for the run.
+  - Not in the Files list: `docs/protocol/{trouter.md,endpoints.md}` (the policy written up), the backlog item, and
+    `teams_core::RegistrationReport` re-exported for the feed's new `Registered`, `PushStopped` and `OwnReport` events.
 
 ### Task 21: Images (1/2): settle sending
 **Files:**

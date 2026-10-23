@@ -14,6 +14,8 @@
 //!   runs after every reconnect. One engine per account (its lock); its request side is a cloneable handle of its own.
 //! - [`profiles`]: people's names and pictures, read in the background (Graph, else the middle tier's profile lookup)
 //!   and kept in the store.
+//! - [`own_presence`]: the app's policy for the account's own presence: which own-availability write to send when
+//!   (M2 Task 20); it sends nothing itself.
 //! - [`presence`]: others' presence, read from UPS by polling for the people the views asked about; never stored.
 //! - [`search`]: local search: each message's plain text handed to the store's index as it is stored, and the
 //!   messages stored before indexed by a backfill in batches.
@@ -28,6 +30,7 @@
 pub mod engine;
 pub mod lab;
 pub mod outbox;
+pub mod own_presence;
 pub mod presence;
 pub mod profiles;
 pub mod search;
@@ -43,6 +46,7 @@ pub use outbox::{
     MAX_TRANSIENT_WAIT, Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient, TransientSent,
     UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id,
 };
+pub use own_presence::{AVAILABLE_REFRESH, Choice, OwnPresencePolicy, Reporting};
 pub use presence::{Availability, MAX_WATCHED, PRESENCE_MIN_GAP, PRESENCE_POLL};
 pub use profiles::{MAX_LOOKUPS, NameFrom, PROFILE_MAX_AGE, PROFILE_RETRY, Person};
 pub use search::{Backfill, INDEX_BATCH, search_text};
@@ -51,3 +55,5 @@ pub use sync::{
     Synced,
 };
 pub use teams::{READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
+/// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.
+pub use teams_trouter::RegistrationReport;

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
 
 use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, SharedString};
-use teams_core::{Event, MessageChange, READING_TEAMS, Source};
+use teams_core::{Event, MessageChange, OwnStatus, READING_TEAMS, RegistrationReport, Source, TransientSent};
 use teams_store::{Applied, Message, OutboxEntry};
 
 use crate::presence::Presences;
@@ -212,6 +212,14 @@ pub enum FeedEvent {
     /// The push channel went down: `heard` is when its socket last read a frame once connected, the last moment it
     /// was known to deliver; `None` when it never connected.
     Down { heard: Option<SystemTime> },
+    /// A registration of the push channel's endpoint went through: the account's own availability can be reported
+    /// from it (M2 Task 20).
+    Registered,
+    /// The push channel stopped for good: no own availability can be reported any more.
+    PushStopped,
+    /// A report of the account's own availability that waited out a `Retry-After` went as `sent` (or was dropped while
+    /// it waited).
+    OwnReport { status: OwnStatus, sent: TransientSent },
 }
 
 /// The engine's events that single things act on, told one by one ([`FeedEvent`]); it holds nothing.
@@ -297,14 +305,14 @@ impl Models {
                 chats.teams = chats.revision;
                 cx.notify();
             }),
-            // how the push channel's registration went, a waiting transient's send, the search backfill over: nothing a
-            // view shows yet
+            // how the push channel's registration went and a waiting transient's send (told on the feed, for the own
+            // presence's policy), the search backfill over: nothing a view shows
             Event::Registration(_) | Event::Transient(..) | Event::Indexed { .. } => {}
         }
     }
 
-    /// Tells a message newly stored, a read horizon that moved, a conversation that changed or the push channel gone
-    /// down, on the [`Feed`].
+    /// Tells a message newly stored, a read horizon that moved, a conversation that changed, the push channel gone
+    /// down, registered or stopped, or how a waiting report of the account's own availability went, on the [`Feed`].
     fn feed(&self, event: &Event, cx: &mut App) {
         let told = match event {
             Event::Message {
@@ -326,6 +334,15 @@ impl Models {
                 conversation: conversation.clone(),
             },
             Event::Disconnected { heard, .. } => FeedEvent::Down { heard: *heard },
+            Event::Registration(RegistrationReport::Registered) => FeedEvent::Registered,
+            Event::PushStopped(_) => FeedEvent::PushStopped,
+            Event::Transient(transient, sent) => match transient.own_status() {
+                Some(status) => FeedEvent::OwnReport {
+                    status,
+                    sent: sent.clone(),
+                },
+                None => return,
+            },
             _ => return,
         };
         self.feed.update(cx, |_, cx| cx.emit(told));

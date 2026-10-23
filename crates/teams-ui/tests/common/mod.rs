@@ -1,14 +1,16 @@
 //! Stand-ins for the engine the view tests run on: a fake event source the test feeds, and a fake core that records
 //! every request and answers from its own state. Every id here is made up.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
-use teams_core::{Action, Answer, Availability, EngineError, Event, NameFrom, Person, Reply, Transient, TransientSent};
+use teams_core::{
+    Action, Answer, Availability, EngineError, Event, NameFrom, OwnStatus, Person, Reply, Transient, TransientSent,
+};
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
     ReadHorizon, SearchHit, Team,
@@ -73,6 +75,10 @@ pub struct FakeCore {
     pub actions: Mutex<Vec<Action>>,
     /// Every transient asked for, in order; each is answered sent.
     pub transients: Mutex<Vec<Transient>>,
+    /// Every own availability asked for, in order.
+    pub own_statuses: Mutex<Vec<OwnStatus>>,
+    /// The answers the next own availabilities get, in order; sent once none is left.
+    pub own_answers: Mutex<VecDeque<Result<TransientSent, EngineError>>>,
     /// Every row resent, by id, in order.
     pub resent: Mutex<Vec<i64>>,
     /// The outbox rows that aren't sent, of any conversation, the oldest first.
@@ -121,6 +127,8 @@ impl Default for FakeCore {
             limits: Mutex::default(),
             actions: Mutex::default(),
             transients: Mutex::default(),
+            own_statuses: Mutex::default(),
+            own_answers: Mutex::default(),
             resent: Mutex::default(),
             unsettled: Mutex::default(),
             hold_unsettled: Mutex::new(false),
@@ -256,6 +264,15 @@ impl Core for FakeCore {
     fn transient(&self, transient: Transient) -> Reply<TransientSent> {
         locked(&self.transients).push(transient);
         self.answer("transient", || TransientSent::Sent)
+    }
+
+    fn own_availability(&self, status: OwnStatus) -> Reply<TransientSent> {
+        locked(&self.own_statuses).push(status);
+        locked(&self.asked).push("own_availability");
+        if *locked(&self.stopped) {
+            return Reply::ready(Err(EngineError::Stopped));
+        }
+        Reply::ready(locked(&self.own_answers).pop_front().unwrap_or(Ok(TransientSent::Sent)))
     }
 
     fn sync(&self) -> Reply<CatchUpReport> {

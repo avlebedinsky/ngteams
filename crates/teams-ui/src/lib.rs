@@ -23,6 +23,9 @@
 //!   service's search; a hit opens its chat at the message.
 //! - [`teams_list`]: the Teams rail's list, the account's teams and their channels (M2 Task 16); [`channel_view`] a
 //!   channel's posts with their reply chains, read-only: no composer, and no write a channel could take.
+//! - [`own_presence`]: the account's own presence as the app reports it (M2 Task 20): `teams-core`'s policy driven by
+//!   the window's use, the push channel's registration, the settings' manual status (the shell's account menu) and idle
+//!   time, held by the desktop for the app's life.
 //! - [`settings`]: the settings and their file (`0600` in a `0700` directory; defaults for what can't be read);
 //!   [`settings_view`] changes them.
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
@@ -40,7 +43,7 @@
 //! one (nothing here hands GPUI another), so an image URL loads nothing. Pictures reach a view only as bytes from
 //! the engine ([`people`]).
 //!
-//! M2 Tasks 6–17 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+//! M2 Tasks 6–17 and 20 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod bridge;
 pub mod bus;
@@ -51,6 +54,7 @@ pub mod compose;
 pub mod desktop;
 pub mod models;
 pub mod notify;
+pub mod own_presence;
 pub mod people;
 pub mod presence;
 pub mod rich_text;
@@ -75,6 +79,7 @@ pub use compose::{Compose, ComposeEvent, ComposeParts};
 pub use desktop::{Desktop, DesktopEvent, DesktopParts};
 pub use models::{Account, Chats, Engine, Feed, FeedEvent, Link, Models, Status};
 pub use notify::{Notice, NoticeKind, NotificationServer, Notifier, NotifierEvent};
+pub use own_presence::OwnPresence;
 pub use people::Shown;
 pub use presence::Presences;
 pub use search::{Hit, HitTarget, Search, SearchEvent};

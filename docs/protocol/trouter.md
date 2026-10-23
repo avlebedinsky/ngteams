@@ -448,6 +448,33 @@ So:
   and didn't reach that point. A client that wants to stay online sends it again before then (Task 20's policy); what
   interval the web client keeps, and whether a manual status lapses the same way, are open.
 
+### The app's policy (M2 Task 20)
+
+When the app sends which of the writes above: `teams_core::own_presence` (`OwnPresencePolicy`), driven by
+`teams-ui`'s `OwnPresence` (held by the desktop for the app's life, told of the window's use by the shell's mouse and
+key input, of the push channel by the engine's events, of the manual status and idle time by the settings). Only the
+captured requests are used; settled with Codex (2026-10-23, `discussions/task-20-away-offline`):
+
+- **Available**: the endpoint `PUT` once a registration went through, if the window was used within the idle time
+  (the app's start counts as use) or a manual status is chosen; sent again every 2 min (`AVAILABLE_REFRESH`), a
+  policy number well inside the 5 min 20 s after which one `PUT` was read `Offline`. A registration while idle sends
+  nothing; the window used again sends the `PUT` at once.
+- **Idle** (the settings' idle time, 5 min by default): nothing is sent; the endpoint lapses on its own, so others see
+  `Offline` some minutes later, **not Away**. No captured request reports Away for one endpoint: the manual `Away`
+  is account-wide server state (it overrode a live endpoint's `Available` as b saw it, Task 19), so sent for idle it
+  would override the account's other devices, clear a status set elsewhere when reset on the next use, and outlive
+  the app after a suspend or a crash. How the web client reports idle is open
+  (`docs/backlog/own-presence-idle-and-offline-shapes.md`). Cross-device aggregation is inferred, not observed.
+- **Quit**: nothing is sent (no captured request reports Offline); the refresh stops, the engine's shutdown closes the
+  push channel, and the endpoint goes after it (timing not measured natively). A manual status stays as set.
+- **A manual status** (the account menu, or the settings; Automatic and the four captured ones, "Be right back" and
+  "Appear offline" not offered): sent once when chosen; Automatic sends the reset, only after a manual status. It
+  overrides Available until cleared, and the endpoint keeps being refreshed meanwhile, idle or not (a manual status
+  with no live endpoint read `Offline`, runs 9–10). The saved choice is sent once at the run's first registration;
+  Automatic at the start sends no reset.
+- **A failed report** is shown in the account menu and never sent again (the transient kind's own rules are the only
+  retries); a failed `PUT` doesn't bring the refresh forward. A fence denial stops the reports for the run.
+
 ### The browser fence's mapping
 
 `availability.rs`, asked only by a classifier built with `Classifier::with_own_availability` (both requests:

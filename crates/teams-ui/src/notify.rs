@@ -222,6 +222,8 @@ impl Notifier {
             } => this.arrived(conversation, message, *source, cx),
             FeedEvent::Read { conversation } | FeedEvent::Changed { conversation } => this.read(conversation, cx),
             FeedEvent::Down { heard } => this.went_down(*heard),
+            // the account's own presence's, nothing to notify
+            FeedEvent::Registered | FeedEvent::PushStopped | FeedEvent::OwnReport { .. } => {}
         });
         Self {
             core,
