@@ -1149,15 +1149,47 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 - Modify: `crates/teams-proto/src/{write/*,frame.rs,endpoint.rs}`, `crates/teams-fence/src/{target.rs,decision.rs}`,
   `crates/teams-trouter/src/*`, `crates/teams-core/src/*`, `crates/fence-seal/tests/ui/*`
 
-- [ ] tests first: a new `WriteKind` and `Scope` for "the account itself": `Fence::judge` permits it without a member
+- [x] tests first: a new `WriteKind` and `Scope` for "the account itself": `Fence::judge` permits it without a member
       read only under the exception (today it reads members for every scope but `New`), for the fence's own account
       only
-- [ ] tests first: the endpoint `PUT`'s `id` is checked as this account's own registered Trouter endpoint (the one
+- [x] tests first: the endpoint `PUT`'s `id` is checked as this account's own registered Trouter endpoint (the one
       the push channel registered this run), any other id `Unknown`; availability values only those captured
-- [ ] tests first: the sealed `Mutating` write(s) for availability (and the manual status, if Task 18 mapped it), sent
+- [x] tests first: the sealed `Mutating` write(s) for availability (and the manual status, if Task 18 mapped it), sent
       through the outbox's transient kind; `user.activity` as an `OwnFrame` entry if Task 18 shows it is needed,
       logged before it is sent; a `fence-seal` case
-- [ ] `cargo test -p teams-proto -p teams-fence -p teams-trouter -p teams-core -p fence-seal` and the gate pass
+- [x] `cargo test -p teams-proto -p teams-fence -p teams-trouter -p teams-core -p fence-seal` and the gate pass
+- Done (2026-10-23), where it differs from the lines above:
+  - `teams-fence`: `WriteKind::OwnAvailability` and `Scope::Account { mri }`. `Fence::check` reads no members for
+    either; it permits the own availability only on `Scope::Account` naming the fence's own account, a lab account,
+    with nobody added (`DenyReason::NotOwnAccount` otherwise, before any fetch), and denies any other kind on
+    `Scope::Account` (`DenyReason::AccountScope`). The own account comes from `Fence::open_lab_account(alias)` (the MRI
+    `lab.toml` gives it; `None` while unknown, which permits nothing); `Fence::open_lab` (the browser fence's) owns no
+    account. `teams-headless` and `teams-app` now open their fence with it. Tests: `teams-fence/tests/own_availability.rs`.
+  - The endpoint check is by construction, in `teams-proto`: the writes take a `RegisteredEndpoint`, which only
+    `teams_proto::register` makes (no public constructor), from an `EndpointRegistration` the account's transport sent
+    and the registrar answered with a success; the push channel's registrar goes through it and hands the endpoint on
+    as `PushEvent::Registered`, and the engine keeps it while the channel runs (dropped when it stops). So no other id
+    can be named at all, rather than one named and found `Unknown`.
+  - `teams-proto`: `SetEndpointAvailability` (the endpoint `PUT`, `Available`/`Available` only: the captured
+    `Busy`/`InACall` is a call's) and `ForceAvailability` (`set` of the four captured values, `ManualAvailability`;
+    `reset` with no body), on UPS (`Wire` gained its service and headers), sent with the presence token, the presence
+    read's header values, `x-ms-endpoint-id` and `Content-Type` (the reset too), without the caller, session ids or
+    cookies (as Task 17 left them out of the read); the transport takes them only as `Authorized` writes, to the two
+    `v1/me/…/` paths. Fixtures checked: `tests/fixtures/ups/endpoint-requests.json`, `manual-status-requests.json`.
+  - `teams-core`: the transient kinds `Transient::EndpointAvailable` and `Transient::ManualStatus`, and
+    `EngineRequests::own_availability(OwnStatus)` (`EngineError::NoEndpoint` before a registration of this run went
+    through). `lab.rs`'s writes' transport gets UPS's base too (found missing by the first live run). No
+    `user.activity` frame: Task 18 showed it isn't needed to show online.
+  - `fence-seal` cases: `fence_own_account`, `fence_open_account_config`, `proto_registered_endpoint`,
+    `proto_availability_literal`. `teams-mock` serves the two UPS `PUT`s (`ups.rs`, not in the Files list), checking the
+    endpoint against its registrar's registrations.
+  - Live (not in the lines above): `teams-headless <alias> availability` (not in the Files list) and
+    `scripts/own-availability-native-run.sh`. Run 1 (07:15 UTC) sent nothing (the outbox's transport had no presence
+    base: three permits, each refused by the transport before sending); run 2 (07:26 UTC, after the fix): b read a
+    `Available` 12 s after the endpoint `PUT`, **`Busy` 6 s after the manual status beside the live endpoint**, back to
+    `Available` with the reset, and `Offline` 5 min 20 s after the one `PUT` while the socket was still up: the `PUT`
+    lapses and has to be sent again (Task 20's policy). `fence.log`: three `own_availability` permits a run, nothing
+    denied. Written up in `trouter.md` ("The native client's own availability"), rows in `endpoints.md`.
 
 ### Task 20: Own presence (3/3): the app's policy
 **Files:**

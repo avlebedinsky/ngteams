@@ -1,7 +1,7 @@
 //! `teams-app`: the lab's GPUI app for one lab account, and its credential broker.
 //!
 //! `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]` is the app ([`app`]): one lab account's window, built
-//! as `teams-headless` builds its client (`teams_core::lab::start`: the fence from `Fence::open_lab`, the account's
+//! as `teams-headless` builds its client (`teams_core::lab::start`: the fence from `Fence::open_lab_account`, the account's
 //! `Session`, the region's chat base, the live member read with the chat transport's credential, the store at
 //! `LabPaths::store_file`, Trouter), its tokens only through the credential broker's socket (`--secrets-fd`, a
 //! `teams_auth::broker::BrokerSecretStore`; the app never opens the Secret Service itself and has no fallback). It

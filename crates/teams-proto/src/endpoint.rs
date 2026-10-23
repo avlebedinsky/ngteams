@@ -39,8 +39,10 @@ pub enum Service {
     /// (`https://<AFD host>/ups/<geo>`, the geo lowercase letters: `noam`), which a transport reaches only once it was
     /// given one (`HttpTransport::with_presence`), with the account's token for
     /// `https://presence.teams.microsoft.com/` (M2 Task 17). Only the sealed `PostRead` list's presence read goes here
-    /// (`v1/presence/getpresence/`, [`crate::PresenceRead`]), sent with the trailing slash every captured UPS path had;
-    /// the transport refuses any other endpoint on it, and any request on it that isn't that read by `POST`.
+    /// (`v1/presence/getpresence/`, [`crate::PresenceRead`]) and the account's own availability, as an authorized write
+    /// (M2 Task 19: `v1/me/endpoints/`, [`crate::SetEndpointAvailability`]; `v1/me/forceavailability/`,
+    /// [`crate::ForceAvailability`]), each sent with the trailing slash every captured UPS path had; the transport
+    /// refuses any other endpoint on it, a read or an own-state request on it, and either of those sent as the other.
     Presence,
 }
 

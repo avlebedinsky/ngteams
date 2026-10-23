@@ -181,9 +181,13 @@ What the code does and why. A change that undoes one of these needs a new reason
   never settle a row.
 - **Deliveries are never answered** (M1 Task 14: no harm shown; on a reconnect the service replays up to ~15 min of
   unanswered events, which the catch-up and the versioned store absorb). An incoming call is ignored, and the native
-  client sends no `user.activity` and sets no presence yet; what makes an account show online is UPS's endpoint `PUT`,
-  not `user.activity` (M2 Task 18, `docs/protocol/trouter.md`, "Own presence"). A message-loss report means: catch up, then acknowledge it. A token renewal reconnects
-  the socket (5 min before expiry, and on the session's renewal); an open socket is never re-authenticated.
+  client sends no `user.activity`; what makes an account show online is UPS's endpoint `PUT`, not `user.activity` (M2
+  Task 18, `docs/protocol/trouter.md`, "Own presence"). Its own availability goes out only as the sealed writes
+  `SetEndpointAvailability` and `ForceAvailability` (M2 Task 19), transient writes of the outbox on `Scope::Account`,
+  which the fence permits without a member read only for its own account (`Fence::open_lab_account`), each naming
+  only a `RegisteredEndpoint` (only `teams_proto::register` makes one, from a registration of this run the registrar
+  took). A message-loss report means: catch up, then acknowledge it. A token renewal reconnects the socket (5 min
+  before expiry, and on the session's renewal); an open socket is never re-authenticated.
 - **Read a field's whole captured range, not the mock's.** Two bugs passed every offline test in M1 and lost
   messages live, because the fixtures held only the common form: a delivery's socket.io `id` is a signed 32-bit
   number (about one in ten negative), and the push URL's endpoint id is base64url (`-` and `_`). A fixture of a

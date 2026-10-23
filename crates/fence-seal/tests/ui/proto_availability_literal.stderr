@@ -1,0 +1,21 @@
+error[E0451]: fields `account` and `endpoint` of struct `SetEndpointAvailability` are private
+  --> tests/ui/proto_availability_literal.rs:9:9
+   |
+ 8 |     let _ = SetEndpointAvailability {
+   |             ----------------------- in this type
+ 9 |         account: Mri::new("8:orgid:anyone"),
+   |         ^^^^^^^ private field
+10 |         endpoint: endpoint.clone(),
+   |         ^^^^^^^^ private field
+
+error[E0451]: fields `account`, `endpoint` and `status` of struct `ForceAvailability` are private
+  --> tests/ui/proto_availability_literal.rs:13:9
+   |
+12 |     let _ = ForceAvailability {
+   |             ----------------- in this type
+13 |         account: Mri::new("8:orgid:anyone"),
+   |         ^^^^^^^ private field
+14 |         endpoint,
+   |         ^^^^^^^^ private field
+15 |         status: None,
+   |         ^^^^^^ private field

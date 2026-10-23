@@ -31,7 +31,9 @@
 //! verifier. Only the `test-support` feature (tests, never a lab binary) points it at a loopback mock
 //! ([`Trouter::with_mock_origin`]), the URL built and checked as above first.
 //!
-//! **What it hands on** ([`PushEvent`]): connects (catch up after each), registrations, message-loss reports,
+//! **What it hands on** ([`PushEvent`]): connects (catch up after each), registrations (and the endpoint each one
+//! that went through registered, `teams_proto::RegisteredEndpoint`: the one id the account's own availability may
+//! name, M2 Task 19), message-loss reports,
 //! deliveries as typed chat events ([`events`]: new messages, typing, edits, deletes, reactions, the read horizon,
 //! the chat's updates; anything else `Unknown`, logged by its kind only), ignored deliveries, disconnects and the
 //! stop. Nothing here logs a token: tokens are [`teams_auth::secrets::Secret`]s, and errors carry no token, frame or

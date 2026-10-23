@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use teams_core::{Availability, Cause, Event, MessageChange, Source, Transient, TransientSent};
+use teams_core::{Availability, Cause, Event, MessageChange, Source, TransientSent};
 use teams_proto::chat;
 use teams_store::{Applied, Conversation, Member, Message, OutboxEntry, OutboxState, Reaction};
 use teams_trouter::RegistrationReport;
@@ -262,7 +262,7 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         }),
         Event::Transient(transient, sent) => json!({
             "event": "transient",
-            "kind": match transient { Transient::Typing { .. } => "typing" },
+            "kind": transient.kind(),
             "conversation": transient.conversation(),
             "outcome": transient_outcome(sent),
         }),

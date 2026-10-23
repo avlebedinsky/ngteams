@@ -7,15 +7,18 @@ use std::time::Duration;
 
 use clap::Parser;
 use teams_core::{Action, EngineHandle};
-use teams_headless::chat;
 use teams_headless::cli::{Cli, Command};
 use teams_headless::commands::{self, WatchEnd};
 use teams_headless::lab::Lab;
 use teams_headless::print::visible;
+use teams_headless::{availability, chat};
 use teams_proto::chat::MessageText;
 use teams_store::OutboxState;
 use teams_trouter::Stop;
 use tokio::signal::unix::{Signal, SignalKind, signal};
+
+/// How long `availability` waits for its push channel's registration.
+const REGISTER_WAIT: Duration = Duration::from_secs(90);
 
 /// The exit code after SIGINT or SIGTERM cut a one-shot command short.
 const INTERRUPTED: u8 = 130;
@@ -96,6 +99,20 @@ async fn run(cli: Cli) -> Outcome {
         }
         Command::Watch { json } => watch(&lab, json, &mut signals, &mut out).await,
         Command::Presence { wait } => presence(&lab, Duration::from_secs(wait), &mut signals, &mut out).await,
+        Command::Availability {
+            manual,
+            manual_after,
+            reset_after,
+            hold,
+        } => {
+            let plan = availability::Plan {
+                manual: manual.map(|status| (status.into(), Duration::from_secs(manual_after))),
+                reset_after: reset_after.map(Duration::from_secs),
+                hold: Duration::from_secs(hold),
+                register_wait: REGISTER_WAIT,
+            };
+            own_availability(&lab, plan, &mut signals, &mut out).await
+        }
         command => {
             let (action, wait) = write_action(&lab, command)?;
             let mut handle = lab.start_engine(false).await?;
@@ -192,7 +209,8 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::List { .. }
         | Command::Show { .. }
         | Command::Watch { .. }
-        | Command::Presence { .. } => {
+        | Command::Presence { .. }
+        | Command::Availability { .. } => {
             return Err("not a write".into());
         }
     };
@@ -220,6 +238,21 @@ async fn watch(lab: &Lab, json: bool, signals: &mut Signals, out: &mut impl Writ
         WatchEnd::Stopped | WatchEnd::PushStopped(Stop::Requested) => Ok(ExitCode::SUCCESS),
         WatchEnd::PushStopped(why) => Err(format!("the push channel stopped: {why:?}").into()),
         WatchEnd::EngineStopped => Err("the engine stopped".into()),
+    }
+}
+
+/// The account's own availability from its push channel's endpoint ([`availability::run`]): exits 0 when every step
+/// went through or a signal ended it, non-zero otherwise.
+async fn own_availability(lab: &Lab, plan: availability::Plan, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let mut handle = lab.start_engine(true).await?;
+    let end = availability::run(&mut handle, plan, out, signals.next()).await;
+    handle.shutdown();
+    match end? {
+        availability::End::Done { all_sent: true } | availability::End::Stopped => Ok(ExitCode::SUCCESS),
+        availability::End::Done { all_sent: false } => Err("a step didn't go through".into()),
+        availability::End::NotRegistered => Err("no registration went through: nothing was set".into()),
+        availability::End::PushStopped(why) => Err(format!("the push channel stopped: {why:?}").into()),
+        availability::End::EngineStopped => Err("the engine stopped".into()),
     }
 }
 

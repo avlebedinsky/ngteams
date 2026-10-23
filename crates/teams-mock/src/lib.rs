@@ -40,6 +40,11 @@
 //! /api/csa/<region>/api/v3/teams/users/me` with the web client's query), from `tests/fixtures/csa/teams.json`, under
 //! the CSA base `https://teams.microsoft.com/api/csa/amer`, taking the account's token alone.
 //!
+//! **UPS** (`ups.rs`, M2 Task 19): the account's own availability, its presence endpoint's `PUT` and its manual status
+//! (set, or cleared with no body), in the shapes the web client sent, under the presence base [`PRESENCE_BASE`],
+//! naming an endpoint the account registered with the registrar here; answered `201` and `200` with no body, as UPS
+//! answered, and kept ([`ChatServiceMock::own_availability`]).
+//!
 //! **Trouter** ([`ChatServiceMock::start_trouter`], `trouter.rs`): connect, authenticate, `trouter.connected`, pings,
 //! the deliveries of the queued events and their replay on connect, from the synthetic `tests/fixtures/trouter/`
 //! fixtures; the registrar's `POST /registrar/prod/V2/registrations` is served on this origin.
@@ -64,6 +69,7 @@ mod csa;
 mod fixtures;
 mod reads;
 mod trouter;
+mod ups;
 mod world;
 mod writes;
 
@@ -76,6 +82,7 @@ use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 pub use fixtures::FixtureError;
 pub use trouter::{REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
+pub use ups::{AvailabilityChange, OwnAvailability};
 
 /// The region of the mock's chat base.
 pub const REGION: &str = "amer";
@@ -87,6 +94,10 @@ pub const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 /// The CSA base a client is given (`chatSvcAggAfd` as the region's GTMs give it); its requests go to
 /// [`ChatServiceMock::origin`] with this base's path.
 pub const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/amer";
+
+/// The presence base a client is given (`presenceUPS` as the region's GTMs give it); its requests go to
+/// [`ChatServiceMock::origin`] with this base's path.
+pub const PRESENCE_BASE: &str = "https://teams.microsoft.com/ups/noam";
 
 /// The regional host the service names new resources on in a 201's `Location` (`docs/protocol/fence-targets.md`).
 pub const REGIONAL_HOST: &str = "https://amer.ng.msg.teams.microsoft.com";
@@ -304,6 +315,12 @@ impl ChatServiceMock {
             .with_priority(1)
             .mount(&self.server)
             .await;
+    }
+
+    /// The own-availability writes UPS took, in order (see the crate docs).
+    #[must_use]
+    pub fn own_availability(&self) -> Vec<OwnAvailability> {
+        self.lock().availability.clone()
     }
 
     /// Every request the mock got, in order (to check what a client sent, and how often).

@@ -58,6 +58,11 @@
 //!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
 //!   once and briefly ([`crate::MAX_TRANSIENT_WAIT`]), and a message post to its conversation drops it (told as
 //!   [`Event::Transient`] with its drop).
+//! - **The account's own availability** (M2 Task 19, [`EngineRequests::own_availability`]): its endpoint's `PUT`
+//!   (available) and its manual status (set or cleared), transient writes naming the endpoint the push channel
+//!   registered in this run ([`PushEvent::Registered`]); refused before a registration went through and after the push
+//!   channel stopped. The fence permits it for its own account only, without a member read. When to send what is the
+//!   app's policy (Task 20), not the engine's.
 //! - **Its handles**: [`EngineRequests`], the request side (writes and queries, each a [`Reply`]), is cloneable, for a
 //!   UI's views to share; [`EngineHandle`] owns the engine: its events, its thread and its shutdown.
 //! - **One engine per account** ([`teams_store::Store::engine_lock`]): [`start`] takes the account's engine lock
@@ -86,7 +91,7 @@ use std::time::{Duration, SystemTime};
 
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
-use teams_proto::{Client, Credentials, HttpError, HttpTransport, Transport};
+use teams_proto::{Client, Credentials, HttpError, HttpTransport, ManualAvailability, RegisteredEndpoint, Transport};
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
     ReadHorizon, SearchHit, Store, StoreError, Team,
@@ -350,6 +355,10 @@ pub enum EngineError {
     },
     #[error("those members don't make a chat (none, the account itself, or one given twice)")]
     NotAChat,
+    /// The account's own availability names its endpoint, and no registration of this run went through yet (or the
+    /// push channel stopped): nothing can be sent.
+    #[error("no endpoint of the account's is registered in this run, so its availability can't be set")]
+    NoEndpoint,
     #[error("the engine's runtime can't be built: {0}")]
     Runtime(#[source] io::Error),
     #[error("the engine's thread can't be started: {0}")]
@@ -375,6 +384,7 @@ impl EngineError {
             Self::Deleted { .. } => "deleted",
             Self::Unknown { .. } => "unknown field",
             Self::NotAChat => "not a chat",
+            Self::NoEndpoint => "no endpoint",
             Self::Runtime(_) => "runtime",
             Self::Thread(_) => "thread",
             Self::AlreadyRunning { .. } => "already running",
@@ -452,6 +462,7 @@ enum Request {
     Write(Action, Responder<OutboxEntry>),
     Resend(i64, Responder<OutboxEntry>),
     Transient(Transient, Responder<TransientSent>),
+    OwnAvailability(OwnStatus, Responder<TransientSent>),
     Sync(Responder<CatchUpReport>),
     LoadOlder(String, Responder<Option<Synced>>),
     SyncConversation(String, Responder<Synced>),
@@ -499,6 +510,18 @@ enum Query {
     },
 }
 
+/// What the account's own availability is set to ([`EngineRequests::own_availability`]), in the values a capture showed
+/// (M2 Task 18).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OwnStatus {
+    /// The account's endpoint is up and available (UPS's presence endpoint `PUT`): what makes it show online.
+    Available,
+    /// A manual status, as the account menu sets it, until it is cleared.
+    Manual(ManualAvailability),
+    /// The manual status cleared ("Reset status").
+    ClearManual,
+}
+
 /// The engine's request side: writes and queries, each answered by a [`Reply`]. Cloneable and `Send`, so a UI's
 /// views can share it; a request made after the engine stopped answers [`EngineError::Stopped`]. Holding one doesn't
 /// keep the engine running: its [`EngineHandle`] owns it.
@@ -536,6 +559,14 @@ impl EngineRequests {
     /// A typing in a conversation the store doesn't know is refused.
     pub fn transient(&self, transient: Transient) -> Reply<TransientSent> {
         self.ask(|reply| Request::Transient(transient, reply))
+    }
+
+    /// Sets the account's own availability (M2 Task 19): a transient write through the outbox ([`Transient`]:
+    /// [`Transient::EndpointAvailable`] or [`Transient::ManualStatus`]), naming the endpoint the push channel
+    /// registered in this run, under the fence's permit for its own account; the reply is how its send went.
+    /// [`EngineError::NoEndpoint`] before a registration of this run went through, or once the push channel stopped.
+    pub fn own_availability(&self, status: OwnStatus) -> Reply<TransientSent> {
+        self.ask(|reply| Request::OwnAvailability(status, reply))
     }
 
     /// Catches up now, whatever [`Gaps`] says.
@@ -847,6 +878,9 @@ struct Core<C, T> {
     gaps: Gaps,
     /// The push channel is connected.
     up: bool,
+    /// The endpoint the push channel's last registration that went through registered ([`PushEvent::Registered`]),
+    /// while the channel runs: the one the account's own availability names.
+    endpoint: Option<RegisteredEndpoint>,
     /// When a catch-up is tried again after one that failed, or after something a delivery brought was missed.
     retry_at: Option<Instant>,
     /// Message-loss reports waiting for a catch-up that runs clean.
@@ -888,6 +922,7 @@ where
             push: parts.push,
             gaps: Gaps::new(),
             up: false,
+            endpoint: None,
             retry_at: None,
             losses: Vec::new(),
             backfill: Some(Backfill::new(parts.options.index_batch)),
@@ -1044,6 +1079,10 @@ where
             }
             Request::Transient(transient, reply) => {
                 let _ = reply.send(self.transient(transient).await);
+            }
+            Request::OwnAvailability(status, reply) => {
+                log::info!("action: own availability {status:?}");
+                let _ = reply.send(self.own_availability(status).await);
             }
             Request::LoadOlder(conversation, reply) => {
                 log::info!("action: older history of {conversation}");
@@ -1219,6 +1258,20 @@ where
         {
             return Err(StoreError::UnknownConversation(conversation.to_owned()).into());
         }
+        Ok(self.outbox.send_transient(transient).await)
+    }
+
+    /// The account's own availability ([`EngineRequests::own_availability`]), from the endpoint registered in this run.
+    async fn own_availability(&mut self, status: OwnStatus) -> Result<TransientSent, EngineError> {
+        let endpoint = self.endpoint.clone().ok_or(EngineError::NoEndpoint)?;
+        let transient = match status {
+            OwnStatus::Available => Transient::EndpointAvailable { endpoint },
+            OwnStatus::Manual(status) => Transient::ManualStatus {
+                endpoint,
+                status: Some(status),
+            },
+            OwnStatus::ClearManual => Transient::ManualStatus { endpoint, status: None },
+        };
         Ok(self.outbox.send_transient(transient).await)
     }
 
@@ -1445,6 +1498,7 @@ where
                 self.emit(Event::Connected { endpoint });
                 self.auto_catch_up(Cause::Connected).await;
             }
+            PushEvent::Registered(endpoint) => self.endpoint = Some(endpoint),
             PushEvent::Registration(report) => self.emit(Event::Registration(report)),
             PushEvent::MessageLoss(loss) => {
                 if loss.messaging() {
@@ -1466,6 +1520,8 @@ where
             }
             PushEvent::Stopped(stop) => {
                 self.up = false;
+                // no registration is renewed any more: the endpoint it kept is no longer the account's live one
+                self.endpoint = None;
                 self.gaps.disconnected();
                 self.emit(Event::PushStopped(stop));
             }

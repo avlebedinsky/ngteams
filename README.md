@@ -49,6 +49,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `build/patches/`, `vendor/`, `scripts/vendor-gpui.sh` | GPUI (`gpui-pre` 0.3.9) vendored with agterm-rs's external-surfaces patches, used through `[patch.crates-io]`; `scripts/vendor-gpui.sh --check` verifies it |
 | `scripts/lint-report.sh` | refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s |
 | `scripts/own-presence-run.sh` | one `own-presence-*` live run with b's presence reads of a sampled beside it (M2 Task 18) |
+| `scripts/own-availability-native-run.sh` | one native own-availability run (`teams-headless a availability`) with b's presence reads of a sampled beside it (M2 Task 19) |
 | `tools/` | interim Node tools: `ca-probe` (the Conditional Access probe), `lab-login` (the first sign-in of the profiles) |
 
 ## Third-party UI code
@@ -250,6 +251,8 @@ teams-headless a react b <message> like [--remove]
 teams-headless b read a <message>         # b's read horizon in the a–b chat moved up to that message (a read receipt)
 teams-headless b watch [--json]           # every event of the push channel with its receive time, until SIGINT/SIGTERM
 teams-headless a presence [--wait 30]     # b's and c's presence, read from UPS (a read by POST, lab accounts only)
+teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
+  [--hold 300]                            # a's own availability, from its push channel's endpoint
 ```
 
 A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat
@@ -258,7 +261,11 @@ recorded in `chats.toml`), or a conversation id. Each write first catches up (it
 through. `watch` answers no delivery and no call; it exits 0 on SIGINT or SIGTERM, non-zero when the push channel
 stopped on its own. `presence` reads only, under the fence's permit for the exact MRIs it names; it waits up to
 `--wait` seconds (30) for each account's presence to be told, then prints one `presence <alias> <availability>` line
-per account, `Unknown` for one not told in time or whose read failed. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on stderr (Trouter's packets and
+per account, `Unknown` for one not told in time or whose read failed. `availability` is a write others see (the
+account's own availability, the user's exception of 2026-10-21): once its push channel's registration went through it
+sends the endpoint's presence `PUT` (available), then the manual status at `--manual-after` and its reset at
+`--reset-after` seconds after the `PUT`, each under the fence's permit for the account's own availability; it prints
+each step with its time and ends `--hold` seconds after the `PUT`, which takes the endpoint down. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on stderr (Trouter's packets and
 deliveries by kind and size, never a payload); nothing else is logged.
 
 The live acceptance test (M1 Task 21, `tests/chat_live.rs`) only spawns a normally built binary and reads its output

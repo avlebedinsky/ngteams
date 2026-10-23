@@ -1,5 +1,5 @@
-//! The outbox's transient kind: a write that matters only at the moment it is asked for (typing; later the account's
-//! own availability). It goes out through the outbox like every other write, each send under a fresh
+//! The outbox's transient kind: a write that matters only at the moment it is asked for (typing, and the account's own
+//! availability: its endpoint's `PUT` and its manual status, M2 Task 19). It goes out through the outbox like every other write, each send under a fresh
 //! [`Fence::check`](teams_fence::Fence::check) with its `fence.log` line and the transport's rules, but it is never a
 //! row: nothing of it is stored, so nothing is checked for, tried again after an unknown outcome, adopted by a later
 //! run or offered to send again. A durable row for `Control/Typing` would never settle (a `Control/*` message never
@@ -19,7 +19,10 @@
 use std::sync::PoisonError;
 use std::time::Duration;
 
-use teams_proto::{DEFAULT_RETRY_WAIT, HttpError, Response, Transport, Typing};
+use teams_proto::{
+    DEFAULT_RETRY_WAIT, ForceAvailability, HttpError, ManualAvailability, RegisteredEndpoint, Response,
+    SetEndpointAvailability, Transport, Typing,
+};
 
 use super::{Outbox, Tried};
 
@@ -32,22 +35,47 @@ pub const MAX_TRANSIENT_WAIT: Duration = Duration::from_secs(5);
 pub enum Transient {
     /// The account is typing in a chat (`Control/Typing`).
     Typing { conversation: String },
+    /// The account's registered endpoint is up and available: UPS's presence endpoint `PUT`
+    /// ([`SetEndpointAvailability`]), what makes the account show online. Its endpoint is one a registration of this
+    /// run registered: no other can be named.
+    EndpointAvailable { endpoint: RegisteredEndpoint },
+    /// The account's manual status set (`Some`) or cleared (`None`), from its registered endpoint
+    /// ([`ForceAvailability`]).
+    ManualStatus {
+        endpoint: RegisteredEndpoint,
+        status: Option<ManualAvailability>,
+    },
 }
 
 impl Transient {
-    /// Whether this one takes `other`'s place while `other` waits: the same kind on the same target.
+    /// Whether this one takes `other`'s place while `other` waits: the same kind on the same target (a typing in the
+    /// same chat; the account's endpoint; its manual status, whichever the newer one sets).
     #[must_use]
     pub fn replaces(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Typing { conversation }, Self::Typing { conversation: other }) => conversation == other,
+            (Self::EndpointAvailable { .. }, Self::EndpointAvailable { .. })
+            | (Self::ManualStatus { .. }, Self::ManualStatus { .. }) => true,
+            _ => false,
         }
     }
 
-    /// The conversation it writes to.
+    /// Its kind, as a log or a printed event names it: `typing`, `endpoint_available` or `manual_status`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Typing { .. } => "typing",
+            Self::EndpointAvailable { .. } => "endpoint_available",
+            Self::ManualStatus { .. } => "manual_status",
+        }
+    }
+
+    /// The conversation it writes to; `None` for the account's own availability, which writes to no conversation.
     #[must_use]
     pub fn conversation(&self) -> Option<&str> {
         match self {
             Self::Typing { conversation } => Some(conversation),
+            Self::EndpointAvailable { .. } | Self::ManualStatus { .. } => None,
         }
     }
 }
@@ -135,8 +163,19 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     async fn try_transient(&self, transient: Transient, waited: bool) -> TransientSent {
         let mut refreshed = false;
         loop {
+            let me = self.me.mri().clone();
             let tried = match &transient {
                 Transient::Typing { conversation } => self.deliver(Typing::new(conversation.clone())).await,
+                Transient::EndpointAvailable { endpoint } => {
+                    self.deliver(SetEndpointAvailability::available(me, endpoint)).await
+                }
+                Transient::ManualStatus {
+                    endpoint,
+                    status: Some(status),
+                } => self.deliver(ForceAvailability::set(me, endpoint, *status)).await,
+                Transient::ManualStatus { endpoint, status: None } => {
+                    self.deliver(ForceAvailability::reset(me, endpoint)).await
+                }
             };
             log::info!(
                 "transient {transient:?}{}: {}",

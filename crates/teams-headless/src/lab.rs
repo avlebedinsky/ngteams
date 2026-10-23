@@ -1,5 +1,6 @@
 //! A lab account's native client, as the binary builds it: [`teams_core::lab::start`] over the fence from
-//! [`Fence::open_lab`] (the roster from `lab.toml`, the lab's `fence.log`) and the tokens from the Secret Service
+//! [`Fence::open_lab_account`] (the roster from `lab.toml`, the lab's `fence.log`, the account's own MRI) and the tokens
+//! from the Secret Service
 //! (`teams-lab`, [`LabPaths::KEYRING_APPLICATION`], as `proto-lab auth` stored them); the store at
 //! [`LabPaths::store_file`]. Nothing here reads or prints a token: the session asks the Secret Service for one only
 //! when a request needs it.
@@ -79,7 +80,7 @@ impl Lab {
     /// # Errors
     /// See [`LabError`].
     pub async fn start_engine(&self, push: bool) -> Result<EngineHandle, LabError> {
-        let fence = Arc::new(Fence::open_lab()?);
+        let fence = Arc::new(Fence::open_lab_account(self.alias)?);
         let secrets = KeyringSecretStore::new(LabPaths::KEYRING_APPLICATION).await?;
         let LabEngine { handle, .. } = core_lab::start(&self.config, self.alias, fence, secrets, push)?;
         Ok(handle)

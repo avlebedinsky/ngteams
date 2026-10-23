@@ -106,6 +106,14 @@ fn log_entries(path: &Path) -> Result<Vec<serde_json::Value>, Box<dyn std::error
     Ok(entries)
 }
 
+/// Every kind of write judged by its participants: all but the account's own availability, which lands only on the
+/// account itself and is judged by whose account it is (`tests/own_availability.rs`).
+fn fenced_kinds() -> impl Iterator<Item = WriteKind> {
+    WriteKind::ALL
+        .into_iter()
+        .filter(|kind| *kind != WriteKind::OwnAvailability)
+}
+
 /// The verdict for a participant set; `None` means allow.
 type Expected = Option<DenyReason>;
 
@@ -167,7 +175,7 @@ fn membership_cases() -> Vec<(&'static str, Membership, Expected)> {
 #[tokio::test]
 async fn every_write_kind_is_fenced_by_its_participants() {
     let lab = try_lab().unwrap();
-    for kind in WriteKind::ALL {
+    for kind in fenced_kinds() {
         for (case, membership, expected) in membership_cases() {
             let source = Fixed::new(membership);
             let verdict = lab.fence.check(Target::new(kind, chat()), &source).await;
@@ -207,6 +215,7 @@ async fn write_kinds_are_distinct_and_named() {
         "chat_create",
         "channel_post",
         "bot_reply",
+        "own_availability",
     ] {
         assert!(names.contains(name), "missing write kind {name}");
     }
@@ -308,7 +317,7 @@ async fn a_new_chat_is_judged_by_its_proposed_members_without_a_fetch() {
 async fn only_a_kind_that_creates_a_target_may_name_a_new_one() {
     let lab = try_lab().unwrap();
     let creating = [WriteKind::ChatCreate, WriteKind::Call, WriteKind::Meeting];
-    for kind in WriteKind::ALL {
+    for kind in fenced_kinds() {
         let unused = Fixed::complete(&[LAB_A, LAB_B]);
         let target = Target::new(kind, Scope::New).with_added(mris(&[LAB_A, LAB_B]));
         let verdict = lab.fence.check(target, &unused).await;
@@ -322,12 +331,12 @@ async fn only_a_kind_that_creates_a_target_may_name_a_new_one() {
         assert_eq!(unused.fetches(), 0, "{kind:?}: a new target is never fetched");
     }
     let entries = log_entries(&lab.log_path).unwrap();
-    assert_eq!(entries.len(), WriteKind::ALL.len());
+    assert_eq!(entries.len(), fenced_kinds().count());
     let not_creatable = entries
         .iter()
         .filter(|entry| entry["reason"] == "not_creatable")
         .count();
-    assert_eq!(not_creatable, WriteKind::ALL.len() - creating.len());
+    assert_eq!(not_creatable, fenced_kinds().count() - creating.len());
 }
 
 #[tokio::test]
@@ -512,7 +521,7 @@ async fn the_fail_closed_source_denies_every_write_that_needs_a_fetch() {
     let call = Scope::Call {
         id: "call-from-lab-b".to_owned(),
     };
-    for kind in WriteKind::ALL {
+    for kind in fenced_kinds() {
         for scope in [chat(), call.clone()] {
             let denied = lab
                 .fence
@@ -527,7 +536,7 @@ async fn the_fail_closed_source_denies_every_write_that_needs_a_fetch() {
         }
     }
     let entries = log_entries(&lab.log_path).unwrap();
-    assert_eq!(entries.len(), WriteKind::ALL.len() * 2);
+    assert_eq!(entries.len(), fenced_kinds().count() * 2);
     for entry in &entries {
         assert_eq!(entry["reason"], serde_json::json!({"partial": "no_source"}), "{entry}");
     }

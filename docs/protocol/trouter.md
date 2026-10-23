@@ -401,10 +401,49 @@ So:
   and, 6 minutes later, its reset, and b read `Offline` before, during and after. Whether a manual status overrides
   an endpoint's `Available` as b sees it (what the menu promises) was not observed: the web client sent no endpoint
   `PUT` in any run that let the manual status through. The native client sends its endpoint `PUT` itself (Task 19),
-  so its first live runs settle it: Busy set beside a live endpoint, then the reset, each read by b.
+  so its first live runs settle it: Busy set beside a live endpoint, then the reset, each read by b. **Settled by
+  Task 19** ([below](#the-native-clients-own-availability-m2-task-19)): it does, Busy shows while the endpoint is
+  live, and the reset brings back `Available`.
 - **A manual status is cleared** by the reset (the bodiless `PUT`, answered `200`); no other request clears it.
 - For the native client (Tasks 19–20): the endpoint `PUT` is needed and enough to show online; `user.activity` isn't
   needed for it, and without it the account went offline within seconds of the client's end rather than minutes.
+
+### The native client's own availability (M2 Task 19)
+
+- **The writes**: `teams_proto::SetEndpointAvailability` (the endpoint `PUT`, `Available`/`Available` only: the
+  captured `Busy`/`InACall` is a call's) and `ForceAvailability` (`set` of `Busy`, `DoNotDisturb`, `Away` or
+  `Available`; `reset` with no body), sealed `Mutating` writes in the captured shapes ([endpoints.md](endpoints.md)).
+  Their target is `WriteKind::OwnAvailability` on `Scope::Account` (the account's MRI): `Fence::check` permits it
+  without a member read, and only for the fence's own account (`Fence::open_lab_account`, the MRI `lab.toml` gives the
+  account the binary runs as). The endpoint each names (the body's `id`, and `x-ms-endpoint-id` on both) is a
+  `RegisteredEndpoint`, which only `teams_proto::register` gives, once a registration of this run that the account's
+  transport sent was answered with a success: the push channel hands it on (`PushEvent::Registered`) and the engine
+  keeps it while the channel runs. They go out as transient writes of the outbox (`EngineRequests::own_availability`),
+  under the presence token and the presence read's header values, without the web client's caller, session ids or
+  cookies, which UPS took. No `user.activity` (above: not needed to show online).
+- **Live** (`scripts/own-availability-native-run.sh busy 120 240 360 12`, 2026-10-23 07:26–07:35 UTC, under the live
+  lock, from a normal lab build; a's `teams-headless a availability --manual busy --manual-after 120 --reset-after 240
+  --hold 360`, b's `teams-headless b presence` about every 16 s). The first attempt (run 1, 07:15) sent nothing: the
+  fence permitted each of its three steps, but the outbox's transport hadn't been given UPS's base, so the transport
+  refused them before sending (`no presence base`); b read `Offline` throughout. Fixed in `teams-core`'s `lab.rs`
+  (the writes' transport gets the base too), then run 2:
+
+  | after the `PUT` | a sent (each answered with a success) | b read a as |
+  |---|---|---|
+  | 0 s (1.2 s after the registration went through) | the endpoint `PUT`, `Available` | `Available` from the first sample after it (12 s) |
+  | 119 s | the manual status `Busy` | `Busy` from the first sample after it (6 s) |
+  | 239 s | the reset | `Available` at once (the sample taken as it was sent) |
+  | 320 s | nothing (the socket still up, its pings answered) | `Offline` from then on |
+  | 360 s | (the command ended, its socket closed) | `Offline` throughout the 3 min after |
+
+  `fence.log` holds, for each run, the three `own_availability` permits and nothing denied; b's 72 presence reads
+  each a permitted read by `POST`.
+- **So**: the native endpoint `PUT` alone makes the account show online, as the browser's did; **a manual status
+  overrides it** as another account sees it (Busy beside a live endpoint), and the reset clears it back to the
+  endpoint's `Available`. **One endpoint `PUT` lapses on its own**: b read `Offline` 5 min 20 s after it, with the
+  push channel up and the manual status cleared. The browser runs of Task 18 kept a page open 5 min after one `PUT`
+  and didn't reach that point. A client that wants to stay online sends it again before then (Task 20's policy); what
+  interval the web client keeps, and whether a manual status lapses the same way, are open.
 
 ### The browser fence's mapping
 
@@ -501,5 +540,8 @@ place.
 - ~~What makes an account show online ([presence](#useractivity-and-presence)).~~ **Answered (live, M2 Task 18,
   2026-10-23)**: UPS's presence endpoint `PUT`; `user.activity` alone doesn't
   ([Own presence](#own-presence-m2-task-18)).
+- How often the endpoint `PUT` has to be sent again: one lapsed 5 min 20 s after it with the socket up (M2 Task 19,
+  [above](#the-native-clients-own-availability-m2-task-19)); the web client's interval isn't known, nor whether a
+  manual status lapses too.
 - Why a closed browser that had sent `user.activity` stayed online about 6 minutes, and one that hadn't only seconds
   ([Own presence](#own-presence-m2-task-18)); and why the web client sent no endpoint `PUT` at all in some runs.

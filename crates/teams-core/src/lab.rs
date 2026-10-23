@@ -1,11 +1,13 @@
 //! A lab account's engine, assembled the one way every lab binary builds it (`teams-headless`, `teams-app`): the
-//! fence the binary opened ([`teams_fence::Fence::open_lab`]: the roster from `lab.toml`, the lab's `fence.log`), the
+//! fence the binary opened ([`teams_fence::Fence::open_lab_account`]: the roster from `lab.toml`, the lab's
+//! `fence.log`, the account's own MRI, whose own availability alone it permits), the
 //! account's [`Session`] over the secret store the binary hands in (the Secret Service for `teams-headless`, the
 //! credential broker's socket for the sandboxed app), the chat base from the region record `proto-lab auth` saved
 //! ([`LabPaths::region_file`], read by [`Region::load`]), the 1:1 chats' and the lab group chat's members read live
 //! ([`LiveMembershipSource::for_fence`], its credential the chat transport's), the store at [`LabPaths::store_file`],
 //! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's), CSA's from the
-//! GTM `chatSvcAggAfd` (the teams read's) and UPS's from the GTM `presenceUPS` (the presence read's), the lab
+//! GTM `chatSvcAggAfd` (the teams read's) and UPS's from the GTM `presenceUPS` (the presence read's; the writes'
+//! transport gets UPS's base too, for the account's own availability, M2 Task 19), the lab
 //! accounts' names as lab.toml has them ([`known_names`]), and the push channel ([`Trouter`]) when asked for.
 //!
 //! Nothing here reads or prints a token, and nothing is sent while the engine is built: the session asks its store for
@@ -87,7 +89,13 @@ pub fn start<S: SecretStore + 'static>(
         region,
     ));
     let base = session.service_base(CHAT_BASE_GTM).ok_or(LabError::NoChatBase)?;
-    let transport = Arc::new(HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?);
+    let presence = session.service_base(PRESENCE_GTM);
+    // the writes' transport (the outbox's, the push channel's registration): UPS's base too, for the account's own
+    // availability (M2 Task 19), which goes out only as an authorized write under the fence's permit
+    let transport = Arc::new(with_presence(
+        HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?,
+        presence.as_deref(),
+    )?);
     let membership = LiveMembershipSource::for_fence(&fence)?;
     membership.set_credential_source(transport.clone());
     let reads = with_middle_tier(
@@ -95,7 +103,7 @@ pub fn start<S: SecretStore + 'static>(
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
     let reads = with_csa(reads, session.service_base(CSA_GTM).as_deref())?;
-    let reads = with_presence(reads, session.service_base(PRESENCE_GTM).as_deref())?;
+    let reads = with_presence(reads, presence.as_deref())?;
     let client = Arc::new(Client::new(reads));
     let push = if push {
         Some(Push::new(Trouter::new(
@@ -162,9 +170,10 @@ fn with_csa<C: Credentials>(reads: HttpTransport<C>, csa: Option<&str>) -> Resul
 /// The GTM UPS's base comes from (the presence read's).
 pub const PRESENCE_GTM: &str = "presenceUPS";
 
-/// The reads' transport with UPS's base (the presence read's) when the region has one the transport accepts. Without
-/// one, or with one of another form (logged, without its value), the presence read is refused and everyone's presence
-/// stays unknown: an optional read never stops the engine.
+/// A transport with UPS's base when the region has one the transport accepts: the reads' (the presence read's) and the
+/// writes' (the account's own availability, M2 Task 19). Without one, or with one of another form (logged, without
+/// its value), UPS is refused, everyone's presence stays unknown and the own availability isn't sent: neither ever
+/// stops the engine.
 fn with_presence<C: Credentials>(
     reads: HttpTransport<C>,
     presence: Option<&str>,
@@ -262,6 +271,9 @@ mod tests {
         .unwrap();
         assert!(given.has_presence() && given.has_middle_tier());
         assert!(!with_presence(reads(None).unwrap(), None).unwrap().has_presence());
+        // the writes' transport, which has no middle tier, takes it too (the account's own availability)
+        let writes = with_presence(reads(None).unwrap(), Some("https://teams.microsoft.com/ups/noam")).unwrap();
+        assert!(writes.has_presence() && !writes.has_middle_tier());
         for other in [
             "https://presence.teams.microsoft.com",
             "https://teams.microsoft.com/ups/NOAM",

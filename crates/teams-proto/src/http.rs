@@ -19,7 +19,8 @@
 //!   me` with the web client's query exactly, `GET` only, M2 Task 16); and, once the transport was given the account's
 //!   presence base ([`HttpTransport::with_presence`], the GTM `presenceUPS`: `https://<AFD host>/ups/<geo>`), UPS's
 //!   presence read (`v1/presence/getpresence/` with its trailing slash, no query, by `POST` under the sealed `PostRead`
-//!   list only, M2 Task 17). An endpoint with an empty, `.` or `..` segment is refused, and so is
+//!   list only, M2 Task 17) and the account's own availability (`v1/me/endpoints/` and `v1/me/forceavailability/`, by
+//!   `PUT` as an [`Authorized`] write only, M2 Task 19). An endpoint with an empty, `.` or `..` segment is refused, and so is
 //!   any URL whose decoded path isn't exactly the base's plus the endpoint's segments. Entra and authz aren't on it
 //!   (they stay in `teams-auth`'s own clients, the reviewed exception), and neither is AMS.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
@@ -38,7 +39,8 @@
 //!   probe's form); CSA the account's `https://chatsvcagg.teams.microsoft.com` token and nothing else (the probe's
 //!   form); UPS the account's `https://presence.teams.microsoft.com/` token with the values every captured presence
 //!   read carried (`behavioroverride: redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent:
-//!   Teams-V2-Web`, an empty `x-ms-object-id`) and its body as `application/json`.
+//!   Teams-V2-Web`, an empty `x-ms-object-id`) and its body as `application/json` (an own-availability write adds its
+//!   `x-ms-endpoint-id`, and sends `Content-Type` even without a body, as captured).
 //! - **Retries** (the transport's part of the plan's retry table), for reads and own-state requests: a 401 makes the
 //!   session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's maximum,
 //!   [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is the
@@ -208,11 +210,12 @@ pub enum Refusal {
     /// A presence request on a transport that wasn't given the account's presence base.
     #[error("no presence base")]
     NoPresence,
-    /// A presence endpoint that isn't the presence read ([`Service::Presence`]).
-    #[error("a presence endpoint that isn't the presence read")]
+    /// A presence endpoint that isn't the presence read or an own-availability write ([`Service::Presence`]), or one
+    /// of them sent as the other.
+    #[error("a presence endpoint that isn't the presence read or an own-availability write")]
     PresencePath,
-    /// A request to UPS that isn't the presence read by `POST`: nothing else goes there.
-    #[error("a request to UPS that isn't the presence read by POST")]
+    /// A request to UPS that isn't the presence read by `POST` or an own-availability write: nothing else goes there.
+    #[error("a request to UPS that isn't the presence read by POST or an own-availability write")]
     PresenceReadByPostOnly,
     /// The URL built isn't on the host allowlist, or its path isn't exactly the base's and the endpoint's.
     #[error("the URL isn't on the transport's allowlist")]
@@ -757,22 +760,35 @@ impl<C: Credentials> Transport for HttpTransport<C> {
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
         let wire = write.wire().ok_or(HttpError::NoRoute)?;
-        let url = self.url_for(Service::ChatService, wire.endpoint())?;
+        let service = wire.service();
+        match service {
+            Service::ChatService => {}
+            // UPS takes the account's own availability as a write, and nothing but the two own-availability endpoints
+            Service::Presence if is_presence_write(wire.endpoint()) => {}
+            Service::Presence => return Err(HttpError::Refused(Refusal::PresencePath)),
+            _ => return Err(HttpError::NoRoute),
+        }
+        let url = self.url_for(service, wire.endpoint())?;
+        let audience = audience(service).ok_or(HttpError::NoRoute)?;
         let token = self
             .credentials
-            .bearer(IC3_AUDIENCE)
+            .bearer(audience)
             .await
             .map_err(HttpError::Credentials)?;
-        let outgoing = Outgoing {
-            method: wire.method().to_reqwest(),
-            url: &url,
-            service: Service::ChatService,
-            body: wire.body(),
-        };
-        let answer = self.send(&outgoing, Some(&token)).await?;
+        // an own-availability write sends its `Content-Type` even without a body (the reset), as captured
+        let mut headers = plain_headers(service, wire.body().is_some() || service == Service::Presence);
+        headers.extend(
+            wire.headers()
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), value.clone())),
+        );
+        let body = wire.body().map(|body| body.to_string().into_bytes());
+        let answer = self
+            .send_as(wire.method().to_reqwest(), &url, &headers, Some(&token), body)
+            .await?;
         if answer.status() == 401 {
             // the session refreshes the refused token for the outbox's next attempt, which also meets any failure of it
-            let _ = self.credentials.bearer_rejected(IC3_AUDIENCE, &token).await;
+            let _ = self.credentials.bearer_rejected(audience, &token).await;
         }
         Ok(answer)
     }
@@ -966,8 +982,13 @@ fn on_base(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
         })
 }
 
-/// UPS's presence read ([`Service::Presence`]): `v1/presence/getpresence`, no query.
+/// An endpoint the transport reaches on UPS ([`Service::Presence`]): the presence read or an own-availability write.
 fn is_presence_endpoint(endpoint: &Endpoint) -> bool {
+    is_presence_read(endpoint) || is_presence_write(endpoint)
+}
+
+/// UPS's presence read: `v1/presence/getpresence`, no query.
+fn is_presence_read(endpoint: &Endpoint) -> bool {
     endpoint
         .segments()
         .iter()
@@ -976,8 +997,15 @@ fn is_presence_endpoint(endpoint: &Endpoint) -> bool {
         && endpoint.query().is_empty()
 }
 
-/// Whether `url` is the presence read on the presence `base` and nothing else: the base's host, its decoded path the
-/// base's, the endpoint's segments and the trailing slash (an empty last segment), no query.
+/// The account's own availability on UPS (M2 Task 19): `v1/me/endpoints` or `v1/me/forceavailability`, no query.
+fn is_presence_write(endpoint: &Endpoint) -> bool {
+    let own = |name: &str| endpoint.segments().iter().map(String::as_str).eq(["v1", "me", name]);
+    (own("endpoints") || own("forceavailability")) && endpoint.query().is_empty()
+}
+
+/// Whether `url` is one of UPS's endpoints the transport reaches ([`is_presence_endpoint`]) on the presence `base` and
+/// nothing else: the base's host, its decoded path the base's, the endpoint's segments and the trailing slash (an
+/// empty last segment), no query.
 fn on_presence(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
     let base_path = decoded_path(base).unwrap_or_default();
     let mut wanted = base_path;

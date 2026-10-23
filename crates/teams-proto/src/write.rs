@@ -4,10 +4,12 @@ use serde_json::Value;
 use teams_fence::{Mri, Scope, Target, WriteKind, WritePermit};
 use url::Url;
 
-use crate::endpoint::{Endpoint, Method};
+use crate::endpoint::{Endpoint, Method, Service};
 
+mod availability;
 mod chat;
 
+pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};
 pub use chat::{
     Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage, SetReaction,
     Typing,
@@ -31,8 +33,7 @@ mod sealed {
     /// The seal on [`Mutating`](super::Mutating): a public trait no other crate can name, implemented for this crate's
     /// requests only. It also carries the request's wire form, built from the same fields as its target.
     pub trait Sealed {
-        /// What the transport sends for this request on the chat service; `None` for a request the native transport
-        /// has no route for.
+        /// What the transport sends for this request; `None` for a request the native transport has no route for.
         fn wire(&self) -> Option<Wire>;
     }
 
@@ -52,17 +53,30 @@ mod sealed {
     }
 }
 
-/// A mutating request as the transport sends it: its method, its endpoint under the chat base and its JSON body.
-/// Sealed: only this crate's requests make one, from the same fields their [`Mutating::target`] comes from, and only
-/// this crate reads one, so a permit for one target can't carry another request's wire form.
+/// A mutating request as the transport sends it: the service it goes to (the chat service, or UPS for the account's
+/// own availability), its method, its endpoint under that service's base, the headers it adds to the service's own
+/// (the presence writes' `x-ms-endpoint-id`) and its JSON body. Sealed: only this crate's requests make one, from the
+/// same fields their [`Mutating::target`] comes from, and only this crate reads one, so a permit for one target can't
+/// carry another request's wire form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wire {
+    service: Service,
     method: Method,
     endpoint: Endpoint,
+    /// By lower-cased name, none of them a credential.
+    headers: Vec<(&'static str, String)>,
     body: Option<Value>,
 }
 
 impl Wire {
+    pub(crate) fn service(&self) -> Service {
+        self.service
+    }
+
+    pub(crate) fn headers(&self) -> &[(&'static str, String)] {
+        &self.headers
+    }
+
     pub(crate) fn method(&self) -> Method {
         self.method
     }

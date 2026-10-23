@@ -11,10 +11,17 @@
 //!   **messaging** stack, in the shape the web client's messaging stack sent (M1 Task 14, `docs/protocol/trouter.md`),
 //!   so the account's chat events reach its push socket. Never the calling stack's (`SkypeSpacesWeb`): that one makes
 //!   the account reachable for calls.
+//!
+//! [`register`] sends the registration and, once the registrar took it, gives the endpoint it registered as a
+//! [`RegisteredEndpoint`]: the only way to get one, and the only id the account's own availability may name (M2 Task
+//! 19, `crate::SetEndpointAvailability`, `crate::ForceAvailability`).
+
+use std::fmt;
 
 use serde_json::{Value, json};
 use url::Url;
 
+use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Method, Service};
 
 /// The messaging stack's app on the registrar, exactly (`clientDescription.appId`).
@@ -122,6 +129,47 @@ impl OwnState for EndpointRegistration {
             },
         }))
     }
+}
+
+/// The account's own Trouter endpoint, as a registration of this run registered it for the messaging stack: the
+/// `registrationId` of an [`EndpointRegistration`] the account's transport sent and the registrar took (a 2xx). It is
+/// the one endpoint id the account's own availability names (CLAUDE.md: "every id it names must be the account itself
+/// or its own registered endpoint (one this run registered for this account)"), and only [`register`] makes one: it
+/// has no public constructor, isn't deserialized from anything, and lives only in memory, so it is always this run's.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RegisteredEndpoint {
+    id: String,
+}
+
+impl RegisteredEndpoint {
+    /// The endpoint's id: a lowercase GUID, the socket's `epid`.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl fmt::Debug for RegisteredEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RegisteredEndpoint").field(&self.id).finish()
+    }
+}
+
+/// Sends `registration` through `transport` (the reviewed own-state request: the transport logs it to `fence.log`
+/// before it goes) and returns the answer, with the endpoint it registered when the answer is a success. A refusal or
+/// a failure registers nothing.
+///
+/// # Errors
+/// The transport's.
+pub async fn register<T: Transport>(
+    transport: &T,
+    registration: &EndpointRegistration,
+) -> Result<(Response, Option<RegisteredEndpoint>), T::Error> {
+    let answer = transport.own_state(registration).await?;
+    let endpoint = answer.is_success().then(|| RegisteredEndpoint {
+        id: registration.registration_id.clone(),
+    });
+    Ok((answer, endpoint))
 }
 
 /// A GUID as `8-4-4-4-12` lowercase hex digits.

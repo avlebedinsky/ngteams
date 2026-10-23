@@ -25,10 +25,15 @@ use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Parts, Push}
 use teams_core::{EngineError, Outbox};
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster, one_to_one_id};
+use teams_headless::availability;
 use teams_headless::chat::{ChatError, LabNames, resolve};
 use teams_headless::commands::{self, CommandError, WatchEnd};
 use teams_headless::lab::display_name;
-use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
+use teams_mock::{
+    AB_CHAT, ABC_CHAT, AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, PRESENCE_BASE, TrouterMock,
+    lab_toml,
+};
+use teams_proto::ManualAvailability;
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Authorized, AuthorizedPostRead, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState,
@@ -52,7 +57,17 @@ fn help_names_every_command() {
     assert!(output.status.success(), "{output:?}");
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
-        "sync", "list", "show", "send", "edit", "delete", "react", "read", "watch", "presence",
+        "sync",
+        "list",
+        "show",
+        "send",
+        "edit",
+        "delete",
+        "react",
+        "read",
+        "watch",
+        "presence",
+        "availability",
     ] {
         assert!(
             help.lines().any(|line| line.trim_start().starts_with(command)),
@@ -281,17 +296,39 @@ impl Lab {
 
     /// As [`Self::engine`], its first write answered 429 with a short `Retry-After` with `throttle_first_write`.
     fn engine_with(&self, me: &str, push: bool, throttle_first_write: bool) -> EngineHandle {
+        self.build(me, push, throttle_first_write, false)
+    }
+
+    /// `me`'s engine with its push channel, as the lab binary builds it for its own availability: its fence's own
+    /// account `me` (`Fence::open_lab_account`'s), its transport given the mock's presence base.
+    fn engine_owning(&self, me: &str) -> EngineHandle {
+        self.build(me, true, false, true)
+    }
+
+    fn build(&self, me: &str, push: bool, throttle_first_write: bool, own: bool) -> EngineHandle {
         let tokens = Arc::new(Tokens {
             token: self.mock.token(me).unwrap(),
             renewals: broadcast::channel(4).0,
         });
-        let fence = Arc::new(Fence::new(
+        let fence = Fence::new(
             Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
             FenceLog::from_writer(io::sink()),
-        ));
+        );
+        let fence = Arc::new(if own {
+            fence.with_own_account(Mri::new(me))
+        } else {
+            fence
+        });
         let origin = self.mock.origin();
-        let http =
-            || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+        let http = || {
+            let transport =
+                HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+            if own {
+                transport.with_presence(PRESENCE_BASE).unwrap()
+            } else {
+                transport
+            }
+        };
         let transport = Arc::new(http());
         // the lab's group chat policy, as `LiveMembershipSource::for_fence` gives the lab binary's source
         let membership = LiveMembershipSource::with_mock_origin(&origin)
@@ -731,5 +768,112 @@ async fn presence_prints_each_account_as_the_engine_has_it_unknown_without_a_rea
         String::from_utf8(out).unwrap(),
         "presence b Unknown\npresence c Unknown\n"
     );
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_sets_the_endpoint_then_the_manual_status_and_its_reset_printing_each_step() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine_owning(LAB_A);
+    let mut out = Vec::new();
+    let plan = availability::Plan {
+        manual: Some((ManualAvailability::Busy, Duration::from_millis(100))),
+        reset_after: Some(Duration::from_millis(200)),
+        hold: Duration::from_millis(300),
+        register_wait: WAIT,
+    };
+
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+
+    assert_eq!(end, availability::End::Done { all_sent: true });
+    let printed = String::from_utf8(out).unwrap();
+    let steps: Vec<String> = printed
+        .lines()
+        .map(|line| line.rsplit_once(" at_ms=").unwrap().0.to_owned())
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "availability registered",
+            "availability available sent",
+            "availability manual Busy sent",
+            "availability reset sent",
+        ],
+        "{printed}"
+    );
+    let changes: Vec<AvailabilityChange> = lab
+        .mock
+        .own_availability()
+        .into_iter()
+        .map(|taken| {
+            assert_eq!(taken.account, LAB_A);
+            taken.change
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            AvailabilityChange::Endpoint {
+                availability: "Available".to_owned(),
+                activity: "Available".to_owned(),
+            },
+            AvailabilityChange::Manual("Busy".to_owned()),
+            AvailabilityChange::Reset,
+        ]
+    );
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_without_its_own_account_prints_the_denial_and_sets_nothing() {
+    let lab = Lab::start().await;
+    // a fence of no account: what a binary built on `Fence::open_lab` would have
+    let mut a = lab.engine(LAB_A, true);
+    let mut out = Vec::new();
+    let plan = availability::Plan {
+        manual: None,
+        reset_after: None,
+        hold: Duration::ZERO,
+        register_wait: WAIT,
+    };
+
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+
+    assert_eq!(end, availability::End::Done { all_sent: false });
+    let printed = String::from_utf8(out).unwrap();
+    assert!(
+        printed.contains("availability available denied: ") && printed.contains("not the fence's own account"),
+        "{printed}"
+    );
+    assert!(lab.mock.own_availability().is_empty());
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_ends_on_its_stop_and_without_a_push_channel_sets_nothing() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+    let mut out = Vec::new();
+    let plan = availability::Plan {
+        manual: None,
+        reset_after: None,
+        hold: Duration::from_secs(60),
+        register_wait: Duration::from_millis(200),
+    };
+    // no push channel, so no registration
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+    assert_eq!(end, availability::End::NotRegistered);
+    let end = availability::run(&mut a, plan, &mut out, future::ready(()))
+        .await
+        .unwrap();
+    assert_eq!(end, availability::End::Stopped);
+    assert!(out.is_empty());
+    assert!(lab.mock.own_availability().is_empty());
     a.shutdown();
 }

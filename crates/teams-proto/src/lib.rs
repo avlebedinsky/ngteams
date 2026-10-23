@@ -17,7 +17,10 @@
 //!   was issued for the request's own target before anything reaches the [`Transport`], which sends the request's
 //!   sealed wire form and returns the service's answer. The chat writes (a message post, an edit, a delete, a
 //!   reaction and taking it back, a read receipt, typing, a new chat) are such requests, each with its target and the
-//!   wire form the web client sent; a message's text is a [`chat::MessageText`], never raw HTML.
+//!   wire form the web client sent; a message's text is a [`chat::MessageText`], never raw HTML. So is the account's
+//!   own availability (M2 Task 19: UPS's presence endpoint `PUT`, [`SetEndpointAvailability`], and the manual status,
+//!   [`ForceAvailability`]), on the account itself, naming only the endpoint a registration of this run registered
+//!   ([`RegisteredEndpoint`], which only [`register`] gives).
 //!
 //! On the push channel's socket the same holds for frames: a [`FrameSink`] sends only an [`OwnFrame`], the sealed,
 //! reviewed list of the Trouter session's own frames (authentication, keep-alive, the message-loss acknowledgement,
@@ -55,7 +58,7 @@ pub use http::{
 pub use own::ProbeOwnState;
 pub use own::{
     CLIENT_BUILD, EndpointRegistration, MESSAGING_APP_ID, MESSAGING_TEMPLATE, OwnState, REGISTRATION_TTL,
-    TROUTER_DOMAIN,
+    RegisteredEndpoint, TROUTER_DOMAIN, register,
 };
 #[cfg(feature = "test-support")]
 pub use post_read::ProbePostRead;
@@ -68,6 +71,7 @@ pub use read::{
     GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team, TeamsAnswer, object_id,
 };
 pub use write::{
-    AddToCall, Author, Authorized, ConversationUrl, CreateChat, DeleteMessage, EditMessage, Mutating, Original,
-    ReadReceipt, RemoveReaction, SendMessage, SetReaction, StartCall, TEST_CALL_SCENARIO, TargetMismatch, Typing, Wire,
+    AddToCall, Author, Authorized, ConversationUrl, CreateChat, DeleteMessage, EditMessage, ForceAvailability,
+    ManualAvailability, Mutating, Original, ReadReceipt, RemoveReaction, SendMessage, SetEndpointAvailability,
+    SetReaction, StartCall, TEST_CALL_SCENARIO, TargetMismatch, Typing, Wire,
 };

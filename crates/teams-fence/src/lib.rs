@@ -4,7 +4,9 @@
 //! [`Fence::check`] takes a [`Target`] (a [`WriteKind`] and a [`Scope`], plus any participants the write adds) and a
 //! [`MembershipSource`], fetches the scope's members on every call, and returns a [`WritePermit`] or [`Denied`].
 //! Anything unknown is denied: a failed, empty, paginated or truncated membership, an org-wide team or channel, an
-//! outside participant, a [`Scope::New`] target for a kind that doesn't create one. Every decision goes to `fence.log`
+//! outside participant, a [`Scope::New`] target for a kind that doesn't create one. The one write judged without a
+//! member read is the account's own availability ([`WriteKind::OwnAvailability`] on [`Scope::Account`], the user's
+//! exception of 2026-10-21): only the fence's own account's ([`Fence::open_lab_account`], [`Fence::own_account`]). Every decision goes to `fence.log`
 //! ([`FenceLog`]), and so do the browser requests the browser fence decides without a membership check
 //! ([`RequestRecord`]), the targets it couldn't arm ([`ArmingRecord`]) and the native client's own WebSocket frames
 //! ([`FrameRecord`]).

@@ -45,7 +45,7 @@ use teams_auth::token::TokenError;
 use teams_fence::Fence;
 use teams_proto::{
     Authenticate, ConnectParams, Disconnect, DroppedIndicator, EndpointRegistration, FrameError, FrameSink,
-    IC3_AUDIENCE, MessageLossAck, OwnFrame, Ping, Sent, Transport,
+    IC3_AUDIENCE, MessageLossAck, OwnFrame, Ping, RegisteredEndpoint, Sent, Transport,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -55,7 +55,7 @@ use tokio_tungstenite::tungstenite::{self, Message};
 use crate::credentials::TrouterCredentials;
 use crate::events::Delivery;
 use crate::frames::{self, Connected, Event, Incoming, RawDelivery};
-use crate::registration::{Registrar, RegistrationReport, RegistrationTimes};
+use crate::registration::{Outcome, Registrar, RegistrationReport, RegistrationTimes};
 use crate::socket::{self, ConnectBase, ConnectError, Opener, SocketWriter, Stream, WriteFailed};
 
 /// The least time between two reconnects without a wait: a second one sooner waits a backoff, so a service that keeps
@@ -112,6 +112,10 @@ pub enum PushEvent {
     /// A socket is up and its endpoint known (`trouter.connected`): pushes may have been missed before it, so catch
     /// up. `new_endpoint` when the service handed over another endpoint id than the last connection's.
     Connected { endpoint: String, new_endpoint: bool },
+    /// A registration of the endpoint went through: the endpoint it registered (the client's `epid`), the account's own
+    /// registered endpoint of this run, the one id its own availability may name (M2 Task 19). Told just before the
+    /// registration's [`PushEvent::Registration`] report.
+    Registered(RegisteredEndpoint),
     /// How a registration of the endpoint went.
     Registration(RegistrationReport),
     /// The service reported pushes the endpoint missed.
@@ -591,7 +595,7 @@ enum Step {
     HelloLate,
     RenewCheck,
     Renewal(Result<Renewal, broadcast::error::RecvError>),
-    Report(RegistrationReport),
+    Report(Outcome),
     CaughtUp(Vec<DroppedIndicator>),
 }
 
@@ -616,8 +620,8 @@ struct Link {
     pong_timeout: Duration,
     registration: RegistrationTimes,
     registrar: Option<Registrar>,
-    reports: mpsc::UnboundedReceiver<RegistrationReport>,
-    reports_to: mpsc::UnboundedSender<RegistrationReport>,
+    reports: mpsc::UnboundedReceiver<Outcome>,
+    reports_to: mpsc::UnboundedSender<Outcome>,
     acks: FuturesUnordered<LossAck>,
 }
 
@@ -714,7 +718,10 @@ impl Link {
             Step::Ping => self.ping().await,
             Step::RenewCheck => self.renew_check(run).await,
             Step::Renewal(renewal) => self.on_renewal(renewal, run).await,
-            Step::Report(report) => {
+            Step::Report((report, endpoint)) => {
+                if let Some(endpoint) = endpoint {
+                    run.emit(PushEvent::Registered(endpoint));
+                }
                 run.emit(PushEvent::Registration(report));
                 None
             }

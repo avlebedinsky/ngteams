@@ -82,6 +82,8 @@ pub(crate) struct State {
     pub(crate) events: BTreeMap<String, Vec<ChatEvent>>,
     /// The endpoints registered with the registrar (the mock's Trouter delivers only to those).
     pub(crate) registrations: Vec<crate::trouter::Registration>,
+    /// The own-availability writes UPS took, in order (`ups.rs`).
+    pub(crate) availability: Vec<crate::ups::OwnAvailability>,
     /// Counts the changes the mock's Trouter acts on (a queued event, a registration), so its sockets wake up.
     pub(crate) changes: watch::Sender<u64>,
     clock: u64,
@@ -112,6 +114,7 @@ impl State {
             conversations,
             events: BTreeMap::new(),
             registrations: Vec::new(),
+            availability: Vec::new(),
             changes: watch::Sender::new(0),
             clock: CLOCK_START,
             groups_made: 0,

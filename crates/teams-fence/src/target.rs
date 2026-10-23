@@ -26,10 +26,15 @@ pub enum WriteKind {
     ChatCreate,
     ChannelPost,
     BotReply,
+    /// The account's own availability (UPS's presence endpoint `PUT` and the manual status): seen across the tenant,
+    /// so no participant check can pass for it. The fence permits it only under the user's exception of 2026-10-21
+    /// (CLAUDE.md, "A lab account may set its own availability"): on [`Scope::Account`] naming the fence's own
+    /// account, with nobody added, never read from a membership source.
+    OwnAvailability,
 }
 
 impl WriteKind {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Message,
         Self::Edit,
         Self::Delete,
@@ -44,6 +49,7 @@ impl WriteKind {
         Self::ChatCreate,
         Self::ChannelPost,
         Self::BotReply,
+        Self::OwnAvailability,
     ];
 
     /// The name used in `fence.log`.
@@ -64,6 +70,7 @@ impl WriteKind {
             Self::ChatCreate => "chat_create",
             Self::ChannelPost => "channel_post",
             Self::BotReply => "bot_reply",
+            Self::OwnAvailability => "own_availability",
         }
     }
 
@@ -120,6 +127,10 @@ pub enum Scope {
     /// exactly the target's added participants. Only kinds that [create a target](WriteKind::creates_target) may use
     /// it; the fence denies any other kind on `New`.
     New,
+    /// The account itself, by its MRI: where its own availability lands ([`WriteKind::OwnAvailability`]). It has no
+    /// members to fetch: the fence permits a write here only when it is the account's own availability and `mri` is
+    /// the fence's own account ([`crate::Fence::own_account`]); it denies any other kind here.
+    Account { mri: String },
 }
 
 impl fmt::Display for Scope {
@@ -130,6 +141,7 @@ impl fmt::Display for Scope {
             Self::Team { id } => write!(f, "team {id}"),
             Self::Call { id } => write!(f, "call {id}"),
             Self::New => f.write_str("a new target"),
+            Self::Account { mri } => write!(f, "account {mri}"),
         }
     }
 }

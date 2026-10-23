@@ -1095,20 +1095,36 @@ async fn a_failed_registration_is_tried_again_and_a_good_one_renewed_before_its_
     let endpoint = connected(&mut push).await;
     let mut reports = Vec::new();
     let mut at = Vec::new();
+    // the endpoint each registration that went through registered, told just before its report (M2 Task 19)
+    let mut endpoints = Vec::new();
     while reports.len() < 3 {
-        reports.push(
-            next(&mut push, |event| match event {
-                PushEvent::Registration(report) => Some(report),
-                _ => None,
-            })
-            .await,
-        );
-        at.push(tokio::time::Instant::now());
+        let event = next(&mut push, |event| match event {
+            PushEvent::Registration(report) => Some(Ok(report)),
+            PushEvent::Registered(endpoint) => Some(Err(endpoint)),
+            _ => None,
+        })
+        .await;
+        match event {
+            Ok(report) => {
+                reports.push(report);
+                at.push(tokio::time::Instant::now());
+            }
+            Err(endpoint) => endpoints.push((reports.len(), endpoint)),
+        }
     }
     assert!(matches!(reports[0], RegistrationReport::Failed(ref why) if why.contains("503")));
     assert_eq!(
         reports[1..],
         [RegistrationReport::Registered, RegistrationReport::Registered]
+    );
+    let told: Vec<(usize, String)> = endpoints
+        .iter()
+        .map(|(before, endpoint)| (*before, endpoint.id().to_owned()))
+        .collect();
+    assert_eq!(
+        told,
+        [(1, epid.clone()), (2, epid.clone())],
+        "the refused registration registered nothing; each taken one its epid, before its report"
     );
     assert!(at[1] - at[0] >= Duration::from_millis(200), "retried after its wait");
     assert!(

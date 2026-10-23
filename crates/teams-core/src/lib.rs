@@ -35,8 +35,8 @@ pub mod sync;
 pub mod teams;
 
 pub use engine::{
-    Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, Parts, Push,
-    Reply, Source,
+    Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, OwnStatus,
+    Parts, Push, Reply, Source,
 };
 pub use outbox::{
     Arrival, CHECK_RETRY_WAIT, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS, MAX_FAILED_CHECKS,
