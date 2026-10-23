@@ -28,15 +28,16 @@
 
 ## Context (from discovery)
 
-- **Base: `main` after M2 merges** (the user's decision of 2026-10-23). When this plan was written, M2 was on its
-  branch (`native-teams-m2-gpui-daily-driver`): 75 commits, Tasks 1–24 and 26 done, Task 25 running, Tasks 27 (the
-  personal build) and 28 open. Every path below is as it was on that branch; Task 27 adds more (the `teams` personal
-  binary, a personal fence). Task 2 re-runs discovery on merged `main` before any code changes.
+- **Base: the M2 branch after M2 Task 25** (`native-teams-m2-gpui-daily-driver`; the user's decision of 2026-10-23,
+  revised the same day from "after M2 merges": the old fence slows M2's remaining work too much). M2 Tasks 1–26 are
+  done there; M2 Tasks 27 (the personal build) and 28 wait until this plan is complete, then build on the new fence.
+  Every path below is as it is on that branch. Task 2 re-runs discovery there before any code changes.
 - **The personal build keeps its own rules** (`docs/personal-build.md`, approved 2026-10-23). Where it relies on a
   piece this plan removes for the lab (`PostRead`, `OwnState`, `check_post_read`, `OwnAvailability`, the host
   allowlist, `OwnFrame`, `FrameRecord`, `Classifier::sign_in`, `OwnRule`, `RequestOutcome::Own`), the piece stays for
-  the personal build, or moves into the personal fence or `teams-signin`; its rules don't change. Every "delete" below
-  means "delete unless Task 2 found a personal-build user".
+  the personal build, or moves into the personal fence or `teams-signin`; its rules don't change. The personal build's
+  code doesn't exist yet (M2 Task 27), so Task 2 reads `docs/personal-build.md` and M2 Task 27's text for what it will
+  need. Every "delete" below means "delete unless Task 2 found a personal-build need".
 - **Browser fence** (`crates/proto-lab`): `src/classify.rs` (`Classification::{Read, Own, PostRead, Write, Unknown}`,
   `OwnKind`, `OwnRule`, `UrlPattern`, the per-run classifier sets, `map_write`), `src/post_read.rs`,
   `src/availability.rs`, `src/fence_http.rs`, `src/fence_ws.rs` (`FrameClassifier`, `FrameRule`), `src/calling.rs`
@@ -236,7 +237,7 @@ caller and whoever it adds.
 
 ### The new `CLAUDE.md` hard rules
 
-They replace, on merged `main`'s `CLAUDE.md`, everything from "These hold for every agent and every change…" through
+They replace, on the M2 branch's `CLAUDE.md`, everything from "These hold for every agent and every change…" through
 the end of the bullet "The native client's fourth list, `teams-proto`'s sealed `PostRead`…"; the bullets on captures
 and tokens, the personal build and protocol notes stay as they are:
 
@@ -285,7 +286,7 @@ and tokens, the personal build and protocol notes stay as they are:
 
 ## What Goes Where
 
-- **Implementation Steps**: code, tests and docs in this repo, on `main` after M2 merges.
+- **Implementation Steps**: code, tests and docs in this repo, on the M2 branch after M2 Task 25.
 - **Post-Completion**: the `CLAUDE.md` edit if the agent's auto mode refuses it.
 
 ## Implementation Steps
@@ -312,8 +313,8 @@ and tokens, the personal build and protocol notes stay as they are:
 - Modify: `crates/teams-fence/src/lib.rs`, `crates/teams-fence/src/target.rs`, `crates/teams-fence/Cargo.toml`
 - Modify: this plan (Technical Details' host list, own-view property names, carve-outs; ➕ tasks)
 
-- [ ] on merged `main`, list every use of the pieces Context names (personal build, `teams-signin`, M2's later code)
-      and add a ➕ task, or a note on the task that deletes it, for each
+- [ ] on the M2 branch, list every use of the pieces Context names (`teams-signin`, M2's code, and what
+      `docs/personal-build.md` and M2 Task 27 will need) and add a ➕ task, or a note on the task that deletes it, for each
 - [ ] go through every row of `docs/protocol/endpoints.md`, `calling-echo.md` and `auth.md`: settle each contacting
       service's hosts, the carve-outs and the own-view property names, and write them into Technical Details
 - [ ] write the table test first: a row per mapped write, carve-out and `Unreadable` form of Technical Details,
@@ -348,7 +349,7 @@ and tokens, the personal build and protocol notes stay as they are:
 - Modify: `crates/proto-lab/src/{classify,fence_http,fence_ws,calling,session,lib}.rs`,
   `crates/proto-lab/src/commands/{auth,login,status}.rs`
 - Modify: `crates/proto-lab/src/scenario/{mod,expected,load,ab_chat,ab_chat_full,ab_image,ab_file,ab_trouter,abc_chat,chat_shapes,echo_call,own_presence}.rs`
-  (and any other scenario on merged `main`)
+  (and any other scenario on the M2 branch)
 - Delete: `crates/proto-lab/src/post_read.rs`, `crates/proto-lab/src/availability.rs`
 - Modify: `crates/proto-lab/tests/{fence_http,fence_targets,fence_ws,expected_denies,calling,login,auth_redirect,capture,scenario_dsl,ab_trouter}.rs`
 - Delete or rewrite: `crates/proto-lab/tests/{post_reads,own_availability}.rs`
@@ -487,8 +488,10 @@ run in the background.
 
 *Items requiring the user's decision or action - informational only*
 
-**Order against M2.** The user decided on 2026-10-23 that this plan runs after M2 merges to `main`; M2 finishes on
-the old fence, untouched. The M2 plan is not edited by this plan.
+**Order against M2.** The user decided on 2026-10-23 that this plan runs on the M2 branch after M2 Task 25 and before
+M2 Task 27; the M2 run stopped after Task 25 for it. When this plan is complete, M2 Tasks 27 and 28 resume on the new
+fence. The M2 plan is not edited by this plan: if Task 27's text needs adjusting to the new fence, that's a request
+about that plan.
 
 **`CLAUDE.md`.** The agent's auto mode refused editing `CLAUDE.md` on 2026-10-23. If it refuses again in Tasks 1 or
 11, the user applies the text from Technical Details or allows the edit.
