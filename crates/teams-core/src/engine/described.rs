@@ -98,6 +98,7 @@ fn plain(event: &Event) -> String {
         Event::ConversationChanged { conversation } => format!("conversation {conversation} changed"),
         Event::Transient(transient, sent) => format!("transient {transient:?}: {sent:?}"),
         Event::Profile { mri } => format!("profile of {mri} changed"),
+        Event::Presence { mri, availability } => format!("presence of {mri}: {availability:?}"),
         Event::Teams => "the teams changed".to_owned(),
         Event::Indexed { messages } => format!("search backfill over: {messages} message(s) indexed"),
         Event::Message { .. }
@@ -135,6 +136,18 @@ mod tests {
             logged(&Event::Teams, LevelFilter::Info).map(|(level, _)| level),
             Some(Level::Info)
         );
+    }
+
+    #[test]
+    fn a_presence_change_is_logged_at_info_by_mri_and_availability() {
+        let event = Event::Presence {
+            mri: "8:orgid:00000000-0000-0000-0000-00000000000b".to_owned(),
+            availability: crate::presence::Availability::Away,
+        };
+        let (level, line) = logged(&event, LevelFilter::Info).expect("a line at info");
+        assert_eq!(level, Level::Info);
+        assert_eq!(line, "presence of 8:orgid:00000000-0000-0000-0000-00000000000b: Away");
+        assert!(logged(&event, LevelFilter::Warn).is_none());
     }
 
     #[test]
