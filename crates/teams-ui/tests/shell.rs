@@ -2,7 +2,9 @@
 //! (`common`): the three panes and the list pane's resizing; the chats by last activity with their names, previews,
 //! times and unread counts from the store, channels and own streams left out, kept up to date by the engine's events
 //! (a catch-up's too); the connection state; Ctrl+K's switcher, fuzzy, Enter opening, Escape closing; the selected chat
-//! kept in the settings and opened again; the settings view changing the settings. Every id and name is made up.
+//! kept in the settings and opened again; the settings view changing the settings (the log's level among them);
+//! "Copy diagnostics" from the settings view and from the palette, said to be unsafe to paste when it holds a `debug`
+//! line. Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -15,10 +17,11 @@ use common::{FakeCore, LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px};
 use teams_core::sync::CatchUpReport;
 use teams_core::{Cause, Event, MessageChange, Source};
+use teams_log::diagnostics::{Source as DiagnosticsSource, WARNING};
 use teams_store::{Applied, Conversation, ConversationKind, Member, Message};
 use teams_trouter::{Down, Stop};
 use teams_ui::chat_list::{ChatList, DELETED, RowKind, format_time, listed, one_to_one_partner, preview};
-use teams_ui::settings::{ManualStatus, Notifications, Settings, SettingsModel};
+use teams_ui::settings::{Copied, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel};
 use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, RailItem, Shell, ShellParts};
 use teams_ui::switcher::{fuzzy_score, matches};
 use teams_ui::view::{Shown, status_text};
@@ -122,11 +125,15 @@ fn seeded() -> Rig {
 }
 
 fn parts(rig: &Rig, settings: Settings, trace: Arc<ViewTrace>) -> ShellParts {
+    parts_with(rig, SettingsModel::in_memory(settings), trace)
+}
+
+fn parts_with(rig: &Rig, settings: SettingsModel, trace: Arc<ViewTrace>) -> ShellParts {
     // the views' request side, as the app hands it: the bridge's
     ShellParts {
         core: rig.cx.read(|cx| rig.bridge.read(cx).core()),
         models: rig.models.clone(),
-        settings: rig.cx.update(|cx| cx.new(|_| SettingsModel::in_memory(settings))),
+        settings: rig.cx.update(|cx| cx.new(|_| settings)),
         trace,
     }
 }
@@ -137,7 +144,16 @@ fn shell_window(
     settings: Settings,
     trace: Arc<ViewTrace>,
 ) -> (Entity<Shell>, &'static mut VisualTestContext) {
-    let parts = parts(rig, settings, trace);
+    shell_window_with(rig, SettingsModel::in_memory(settings), trace)
+}
+
+/// The shell in a window of its own, over the settings model `settings`.
+fn shell_window_with(
+    rig: &Rig,
+    settings: SettingsModel,
+    trace: Arc<ViewTrace>,
+) -> (Entity<Shell>, &'static mut VisualTestContext) {
+    let parts = parts_with(rig, settings, trace);
     let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
     let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
     cx.run_until_parked();
@@ -630,6 +646,7 @@ fn the_settings_view_changes_the_settings() {
         "notifications-mentions",
         "idle-15",
         "status-do-not-disturb",
+        "log-level-debug",
     ] {
         click(cx, selector);
     }
@@ -642,8 +659,140 @@ fn the_settings_view_changes_the_settings() {
             notifications: Notifications::Mentions,
             idle_minutes: 15,
             manual_status: ManualStatus::DoNotDisturb,
+            log_level: LogLevel::Debug,
             ..Settings::default()
         }
+    );
+}
+
+/// Where "copy diagnostics" reads from: a log under `dir` holding `log`, and a `fence.log`.
+fn diagnostics_in(dir: &tempfile::TempDir, log: &str) -> DiagnosticsSource {
+    let log_file = dir.path().join("teams-app.log");
+    let fence_log = dir.path().join("fence.log");
+    std::fs::write(&log_file, log).unwrap();
+    std::fs::write(&fence_log, "{\"ts_ms\":1,\"verdict\":\"allow\"}\n").unwrap();
+    DiagnosticsSource {
+        app: "teams-app 0.1.0".to_owned(),
+        log_file: Some(log_file),
+        log_problem: None,
+        fence_log: Some(fence_log),
+    }
+}
+
+fn clipboard(cx: &mut VisualTestContext) -> String {
+    cx.read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default()
+}
+
+const INFO_LINE: &str = "2026-10-22T08:00:00.000Z INFO  teams_core::engine: action: send to a chat\n";
+const DEBUG_LINE: &str =
+    "2026-10-22T08:00:01.000Z DEBUG teams_proto::http: response GET https://example.invalid/ -> 200\n";
+
+#[test]
+fn the_settings_view_copies_the_diagnostics_and_says_when_they_aren_t_safe_to_paste() {
+    let rig = seeded();
+    let dir = tempfile::tempdir().unwrap();
+    let model = SettingsModel::in_memory(Settings::default()).with_diagnostics(diagnostics_in(&dir, INFO_LINE));
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    assert!(bounds(cx, "diagnostics-copied").is_none(), "nothing copied yet");
+    click(cx, "copy-diagnostics");
+    let copied = clipboard(cx);
+    assert!(copied.starts_with("teams-app 0.1.0 ("), "{copied}");
+    assert!(copied.contains("action: send to a chat") && copied.contains("\"verdict\":\"allow\""));
+    assert!(!copied.contains(WARNING));
+    assert!(bounds(cx, "diagnostics-copied").is_some());
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).settings().read(cx).copied()),
+        Some(Copied { has_debug: false })
+    );
+
+    // a debug line among them: said first in the text, and in the view
+    std::fs::write(dir.path().join("teams-app.log"), format!("{INFO_LINE}{DEBUG_LINE}")).unwrap();
+    click(cx, "copy-diagnostics");
+    let copied = clipboard(cx);
+    assert!(copied.starts_with(&format!("WARNING: {WARNING}")), "{copied}");
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).settings().read(cx).copied()),
+        Some(Copied { has_debug: true })
+    );
+}
+
+#[test]
+fn the_diagnostics_are_collected_off_the_foreground_and_copied_once_ready() {
+    let rig = seeded();
+    let dir = tempfile::tempdir().unwrap();
+    let model = SettingsModel::in_memory(Settings::default()).with_diagnostics(diagnostics_in(&dir, INFO_LINE));
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("before".to_owned()));
+    // the foreground's own turn only asks: the flush and the reads run on a background task
+    cx.update(|_, cx| {
+        let settings = shell.read(cx).settings().clone();
+        settings.update(cx, SettingsModel::copy_diagnostics);
+        assert_eq!(
+            settings.read(cx).copied(),
+            None,
+            "nothing copied within the click's turn"
+        );
+    });
+    assert_eq!(clipboard(cx), "before");
+    cx.run_until_parked();
+    assert!(clipboard(cx).contains("action: send to a chat"), "{}", clipboard(cx));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).settings().read(cx).copied()),
+        Some(Copied { has_debug: false })
+    );
+}
+
+#[test]
+fn the_palette_s_copy_diagnostics_copies_them_and_shows_the_settings() {
+    let rig = seeded();
+    let dir = tempfile::tempdir().unwrap();
+    let model = SettingsModel::in_memory(Settings::default())
+        .with_diagnostics(diagnostics_in(&dir, &format!("{INFO_LINE}{DEBUG_LINE}")));
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window_with(&rig, model, trace);
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("copy diag");
+    cx.run_until_parked();
+    let switcher = cx.update(|_, cx| shell.read(cx).switcher().cloned()).expect("open");
+    assert_eq!(cx.update(|_, cx| switcher.read(cx).commands()), ["Copy diagnostics"]);
+    assert!(cx.update(|_, cx| switcher.read(cx).matches().is_empty()));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let copied = clipboard(cx);
+    assert!(copied.starts_with(&format!("WARNING: {WARNING}")), "{copied}");
+    assert!(cx.update(|_, cx| shell.read(cx).switcher().is_none()));
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Settings);
+    assert!(bounds(cx, "diagnostics-copied").is_some());
+    assert!(
+        written
+            .lines()
+            .iter()
+            .any(|line| line["view"] == "diagnostics" && line["change"] == "copied")
+    );
+}
+
+#[test]
+fn a_log_that_couldn_t_be_opened_is_shown_with_the_settings_problems() {
+    let model = SettingsModel::in_memory(Settings::default()).with_diagnostics(DiagnosticsSource {
+        app: "teams-app 0.1.0".to_owned(),
+        log_file: None,
+        log_problem: Some("the diagnostic log can't be opened".to_owned()),
+        fence_log: None,
+    });
+    assert_eq!(
+        model.problems(),
+        [Problem::LogUnavailable {
+            why: "the diagnostic log can't be opened".to_owned()
+        }]
+    );
+    assert!(
+        model
+            .diagnostics()
+            .text
+            .contains("log: not written (the diagnostic log can't be opened)")
     );
 }
 

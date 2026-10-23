@@ -384,6 +384,19 @@ enum Tried {
     Uncertain(String),
 }
 
+impl Tried {
+    /// What the attempt came to, for the log: the fence's decision and the service's status, never a body.
+    fn summary(&self) -> String {
+        match self {
+            Self::Answered(answer) => format!("fence allowed, HTTP {}", answer.status()),
+            Self::Denied(denied) => format!("fence denied: {}", denied.reason()),
+            Self::NotSent(why) => format!("not sent: {why}"),
+            Self::Throttled { wait, .. } => format!("throttled for {} ms", wait.as_millis()),
+            Self::Uncertain(why) => format!("outcome unknown: {why}"),
+        }
+    }
+}
+
 /// Sends the outbox's rows over a transport, each attempt under a fresh permit (see the module docs).
 pub struct Outbox<T> {
     transport: Arc<T>,
@@ -524,8 +537,18 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             }
             let row = store.begin_attempt(id)?;
             let tried = self.attempt(&row).await;
+            let summary = tried.summary();
             let (outcome, again) = self.settle(&row, tried);
             let row = store.finish_attempt(id, &outcome)?;
+            // the fence's decision is the `fence.log` line written just before, for the same target
+            log::info!(
+                "outbox row {} ({:?}, clientmessageid {}) attempt {}: {summary}; now {:?}",
+                row.id,
+                row.kind,
+                row.client_message_id,
+                row.attempts,
+                row.state
+            );
             if !again || row.state != OutboxState::Pending {
                 return Ok(row);
             }
@@ -689,6 +712,12 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             }
         };
         let after = store.check_failed(row.id, &outcome)?;
+        log::info!(
+            "outbox row {} (clientmessageid {}): check {failed} before another attempt failed; now {:?}",
+            after.id,
+            after.client_message_id,
+            after.state
+        );
         self.replace_arrived(&after);
         Ok(after)
     }
@@ -698,6 +727,13 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     /// changed it on the way (a sync page that holds an entry of it no read can take and then a readable one): an
     /// earlier copy told after a later one would leave its owner with a row the store no longer has.
     fn keep_arrived(&self, row: &OutboxEntry) {
+        log::info!(
+            "outbox row {} ({:?}, clientmessageid {}) settled by a read: now {:?}",
+            row.id,
+            row.kind,
+            row.client_message_id,
+            row.state
+        );
         let mut arrived = self.arrived.lock().unwrap_or_else(PoisonError::into_inner);
         arrived.retain(|queued| queued.id != row.id);
         arrived.push(row.clone());
@@ -779,8 +815,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
 
     async fn deliver<R: Mutating + Send>(&self, request: R) -> Tried {
         let permit = match self.fence.check(request.target(), &*self.membership).await {
-            Ok(permit) => permit,
-            Err(denied) => return Tried::Denied(denied),
+            Ok(permit) => {
+                log::info!("fence allowed {}", request.target());
+                permit
+            }
+            Err(denied) => {
+                log::info!("{denied}");
+                return Tried::Denied(denied);
+            }
         };
         let write = match Authorized::new(request, permit) {
             Ok(write) => write,

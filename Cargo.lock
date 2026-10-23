@@ -8047,11 +8047,13 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "libc",
+ "log",
  "rustix",
  "serde_json",
  "teams-auth",
  "teams-core",
  "teams-fence",
+ "teams-log",
  "teams-mock",
  "teams-proto",
  "teams-store",
@@ -8071,6 +8073,7 @@ dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
  "httpdate",
+ "log",
  "oo7",
  "reqwest",
  "serde_json",
@@ -8094,6 +8097,7 @@ dependencies = [
  "serde_json",
  "teams-auth",
  "teams-fence",
+ "teams-log",
  "teams-mock",
  "teams-proto",
  "teams-store",
@@ -8135,6 +8139,7 @@ dependencies = [
  "teams-auth",
  "teams-core",
  "teams-fence",
+ "teams-log",
  "teams-mock",
  "teams-proto",
  "teams-store",
@@ -8142,6 +8147,16 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "teams-log"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -8167,6 +8182,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "ego-tree",
+ "log",
  "percent-encoding",
  "reqwest",
  "scraper",
@@ -8174,8 +8190,10 @@ dependencies = [
  "serde_json",
  "teams-auth",
  "teams-fence",
+ "teams-log",
  "teams-mock",
  "teams-proto",
+ "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -8214,6 +8232,7 @@ dependencies = [
 name = "teams-store"
 version = "0.1.0"
 dependencies = [
+ "log",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.21",
@@ -8232,6 +8251,7 @@ dependencies = [
  "serde_json",
  "teams-auth",
  "teams-fence",
+ "teams-log",
  "teams-mock",
  "teams-proto",
  "teams-trouter",
@@ -8252,10 +8272,12 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
+ "log",
  "serde_json",
  "teams-auth",
  "teams-core",
  "teams-fence",
+ "teams-log",
  "teams-mock",
  "teams-proto",
  "teams-store",

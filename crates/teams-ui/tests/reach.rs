@@ -6,8 +6,9 @@
 //! The UI kit's audit (M2 Task 7), what can be checked of it: `gpui-component`'s whole tree for the host holds no
 //! HTTP or WebSocket client, and every package in it is under a licence an Apache-2.0/MIT project can take; the
 //! default features the kit turns on in `gpui-pre` give GPUI's Linux platform no X11 backend; and the app crates never
-//! start the kit's theme directory watcher nor install a `log` logger or a `tracing` subscriber, so the kit's log
-//! lines go nowhere.
+//! start the kit's theme directory watcher nor install a `log` logger or a `tracing` subscriber of their own: the only
+//! logger is the diagnostic log's (`teams-log`, M2 Task 24a), installed by `teams-app` through its `install`, and it
+//! takes only our crates' records, so the kit's log lines (and its `tracing` events, forwarded to `log`) go nowhere.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -295,7 +296,8 @@ fn sources(dir: &Path) -> Vec<(PathBuf, String)> {
 }
 
 /// What the app crates' sources never name: another HTTP client for GPUI, a token's value, the kit's theme directory
-/// watcher, a `log` logger or a `tracing` subscriber (the kit's lines would reach it).
+/// watcher, a `log` logger or a `tracing` subscriber of their own (the only logger is `teams-log`'s, installed through
+/// its `install`).
 const FORBIDDEN: [&str; 8] = [
     "set_http_client",
     "with_http_client",
@@ -306,6 +308,72 @@ const FORBIDDEN: [&str; 8] = [
     "set_global_default",
     "tracing_subscriber",
 ];
+
+/// What sets a `log` logger or a `tracing` subscriber.
+const LOGGER_SETUP: [&str; 4] = [
+    "set_logger",
+    "set_boxed_logger",
+    "set_global_default",
+    "tracing_subscriber",
+];
+
+/// The crates the app is built from besides the app crates: none of them sets a logger either.
+const LINKED_CRATES: [&str; 6] = [
+    "teams-proto",
+    "teams-core",
+    "teams-trouter",
+    "teams-store",
+    "teams-auth",
+    "teams-fence",
+];
+
+/// Only this logger (M2 Task 24a): `teams-log` is the one crate of the app that sets a logger, and only with `log`'s
+/// `set_logger` (no `tracing` subscriber, so the kit's `tracing` events reach `log` and its filter); no other crate the
+/// app is built from sets one; the app crates install it only through `teams_log::install`, which `teams-app` calls
+/// once and `teams-ui` never.
+#[test]
+fn the_only_logger_is_teams_log_s_installed_by_the_app() {
+    let mut read = 0;
+    for package in APP_CRATES.iter().chain(&LINKED_CRATES) {
+        for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
+            read += 1;
+            for setup in LOGGER_SETUP {
+                assert!(!text.contains(setup), "{} names {setup}", path.display());
+            }
+            let installs = text.matches("teams_log::install(").count();
+            if path.ends_with("teams-app/src/app.rs") {
+                assert_eq!(installs, 1, "the app installs the log once");
+            } else {
+                assert_eq!(installs, 0, "{} installs the log", path.display());
+            }
+        }
+    }
+    assert!(read >= 60, "the crates' sources were read ({read} files)");
+    let log = sources(&workspace_root().join("crates/teams-log/src"));
+    let setters: Vec<&PathBuf> = log
+        .iter()
+        .filter(|(_, text)| text.contains("log::set_logger("))
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(setters.len(), 1, "teams-log sets the logger in one place");
+    for (path, text) in &log {
+        for setup in ["set_boxed_logger", "set_global_default", "tracing_subscriber"] {
+            assert!(!text.contains(setup), "{} names {setup}", path.display());
+        }
+    }
+    let manifest = fs::read_to_string(workspace_root().join("crates/teams-log/Cargo.toml")).expect("UTF-8");
+    let dependencies = manifest
+        .split("[dependencies]")
+        .nth(1)
+        .and_then(|rest| rest.split("\n[").next())
+        .expect("its dependencies");
+    assert!(
+        !dependencies
+            .lines()
+            .any(|line| line.trim_start().starts_with("tracing")),
+        "teams-log takes no tracing: {dependencies}"
+    );
+}
 
 #[test]
 fn gpui_keeps_its_null_http_client_and_no_token_is_read_out() {

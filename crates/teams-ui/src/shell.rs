@@ -416,11 +416,23 @@ impl Shell {
             SwitcherEvent::Open(id) => this.open_chat(id.clone(), window, cx),
             SwitcherEvent::OpenMessage(target) => this.open_message(target.clone(), window, cx),
             SwitcherEvent::Dismissed => this.close_switcher(window, cx),
+            SwitcherEvent::CopyDiagnostics => this.copy_diagnostics(window, cx),
         });
         switcher.update(cx, |switcher, cx| switcher.focus(window, cx));
         self.switcher = Some((switcher, events));
         self.trace.record(&TraceLine::new("switcher", "opened"));
         cx.notify();
+    }
+
+    /// The palette's "Copy diagnostics": the text on the clipboard, the switcher closed, and the settings shown, where
+    /// what was copied is told (said plainly when it holds full requests and responses).
+    fn copy_diagnostics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.update(cx, |settings, cx| {
+            settings.copy_diagnostics(cx);
+        });
+        self.trace.record(&TraceLine::new("diagnostics", "copied"));
+        self.close_switcher(window, cx);
+        self.show_settings(cx);
     }
 
     fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {

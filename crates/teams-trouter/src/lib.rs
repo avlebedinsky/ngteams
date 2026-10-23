@@ -34,8 +34,11 @@
 //! **What it hands on** ([`PushEvent`]): connects (catch up after each), registrations, message-loss reports,
 //! deliveries as typed chat events ([`events`]: new messages, typing, edits, deletes, reactions, the read horizon,
 //! the chat's updates; anything else `Unknown`, logged by its kind only), ignored deliveries, disconnects and the
-//! stop. Nothing here logs a token: tokens are [`teams_auth::secrets::Secret`]s, frames' text is never logged, and
-//! errors carry no token, frame or body.
+//! stop. Nothing here logs a token: tokens are [`teams_auth::secrets::Secret`]s, and errors carry no token, frame or
+//! body. A frame's text reaches a log only at `debug`, every frame both ways, as a `teams_log::wire::Frame` record
+//! (under `teams_log::wire::FRAME_TARGET`), whose formatting redacts `user.authenticate`'s arguments and every
+//! credential field (the `connectparams` signature of `trouter.connected` among them); no other log line carries a
+//! frame's text.
 
 pub mod credentials;
 pub mod events;

@@ -19,6 +19,9 @@ fn only_our_crates_records_at_the_level_or_above_are_shown() {
         "rustls::client",
         "hyper",
         "teams",
+        // the app's full requests, answers and frames: this log stays by kind and size
+        "teams_wire::http",
+        "teams_wire::trouter",
     ] {
         assert!(!shown(&metadata(Level::Error, target), Level::Debug), "{target}");
     }

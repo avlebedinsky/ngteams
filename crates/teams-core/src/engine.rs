@@ -105,6 +105,8 @@ use crate::search::{Backfill, INDEX_BATCH, Step};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
 use crate::teams::{READING_TEAMS, TEAMS_RETRY, Teams, TeamsReadError};
 
+mod described;
+
 /// How the engine paces itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EngineOptions {
@@ -359,6 +361,28 @@ pub enum EngineError {
     Stopped,
 }
 
+impl EngineError {
+    /// The error's kind, as the log names a failed reply: no id, no text.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Store(_) => "store",
+            Self::Outbox(_) => "outbox",
+            Self::CatchUp(_) => "catch-up",
+            Self::Teams(_) => "teams",
+            Self::UnknownMessage { .. } => "unknown message",
+            Self::NotOwn { .. } => "not the account's own",
+            Self::Deleted { .. } => "deleted",
+            Self::Unknown { .. } => "unknown field",
+            Self::NotAChat => "not a chat",
+            Self::Runtime(_) => "runtime",
+            Self::Thread(_) => "thread",
+            Self::AlreadyRunning { .. } => "already running",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
 /// The answer to one request, once the engine has made it: await it on any executor, or block on it outside one.
 #[derive(Debug)]
 #[must_use = "the request is made whether or not its reply is taken"]
@@ -393,10 +417,20 @@ impl<T> Reply<T> {
 impl<T> Future for Reply<T> {
     type Output = Result<T, EngineError>;
 
+    /// A failed answer is told to the log by its kind ([`EngineError::kind`]): how a view's failed request shows there.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.get_mut().0)
-            .poll(cx)
-            .map(|answer| answer.unwrap_or(Err(EngineError::Stopped)))
+        Pin::new(&mut self.get_mut().0).poll(cx).map(|answer| {
+            let answer = answer.unwrap_or(Err(EngineError::Stopped));
+            if let Err(error) = &answer {
+                let level = if matches!(error, EngineError::Stopped) {
+                    log::Level::Debug
+                } else {
+                    log::Level::Warn
+                };
+                log::log!(level, "a request's reply failed: {}", error.kind());
+            }
+            answer
+        })
     }
 }
 
@@ -915,6 +949,10 @@ where
     }
 
     fn emit(&self, event: Event) {
+        // each event judged at its own level: a failure's warning is logged at `warn` too
+        if let Some((level, line)) = described::logged(&event, log::max_level()) {
+            log::log!(level, "{line}");
+        }
         // an owner that dropped its handle takes no more events
         let _ = self.events.send(event);
     }
@@ -989,9 +1027,10 @@ where
     async fn on_request(&mut self, request: Request) {
         match request {
             Request::Write(action, reply) => {
-                let _ = reply.send(self.write(action).await);
+                let _ = reply.send(self.logged_write(action).await);
             }
             Request::Sync(reply) => {
+                log::info!("action: a catch-up asked for");
                 self.gaps.missed();
                 let report = self
                     .catch_up_due()
@@ -1000,20 +1039,24 @@ where
                 let _ = reply.send(report.map_err(EngineError::from));
             }
             Request::Resend(id, reply) => {
-                let _ = reply.send(self.resend(id).await);
+                log::info!("action: resend of row {id}");
+                let _ = reply.send(logged(self.resend(id).await, || format!("resend of row {id}")));
             }
             Request::Transient(transient, reply) => {
                 let _ = reply.send(self.transient(transient).await);
             }
             Request::LoadOlder(conversation, reply) => {
+                log::info!("action: older history of {conversation}");
                 let older = self.catch_up.load_older(&mut self.store, &conversation).await;
                 self.brought(Source::History);
                 self.arrived(&[]);
                 let _ = reply.send(older.map_err(EngineError::from));
             }
             Request::SyncConversation(conversation, reply) => {
+                log::info!("action: a sync of {conversation}");
                 let synced = self.catch_up.sync_messages(&mut self.store, &conversation).await;
-                let _ = reply.send(synced.map_err(EngineError::from));
+                let synced = synced.map_err(EngineError::from);
+                let _ = reply.send(logged(synced, || format!("sync of {conversation}")));
             }
             Request::Person(mri, reply) => {
                 let person = self.profiles.person(&self.store, &mri);
@@ -1136,6 +1179,17 @@ where
     }
 
     // --- writes ---
+
+    /// [`EngineRequests::write`]'s action, told to the log by its kind and ids and the row it made.
+    async fn logged_write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
+        let described = described::action(&action);
+        log::info!("action: {described}");
+        let written = self.write(action).await;
+        if let Ok(row) = &written {
+            log::info!("action {described}: row {} {:?}", row.id, row.state);
+        }
+        logged(written, || described)
+    }
 
     async fn write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
         let command = self.command(action)?;
@@ -1546,6 +1600,14 @@ fn original(message: &Message) -> Result<Sent, EngineError> {
         compose_time_ms: message.compose_time.ok_or_else(|| unknown("compose time"))?,
         arrival_time_ms: message.arrival_time,
     })
+}
+
+/// `result` as it is, its failure told to the log with what failed (`what`, by kind and ids).
+fn logged<T>(result: Result<T, EngineError>, what: impl FnOnce() -> String) -> Result<T, EngineError> {
+    if let Err(error) = &result {
+        log::warn!("action {} failed: {error}", what());
+    }
+    result
 }
 
 /// A read in the background that is over.

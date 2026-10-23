@@ -19,6 +19,11 @@ ego-tree.workspace = true
 # the session's tokens (`Credentials`), `TokenError`, and `Retry-After` read as Entra's and authz's answers are
 teams-auth.workspace = true
 teams-fence.workspace = true
+# at `debug`, each request and its answer in full as the diagnostic log's typed records, which redact the credentials
+teams-log.workspace = true
+# the requests in the app's diagnostic log: by method, host, path, status and latency at `info`; capped at `debug` at
+# compile time like teams-trouter's
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
 # the allowlist compares a built URL's decoded path with the endpoint's segments
 percent-encoding.workspace = true
 # the transport's own HTTPS client: no proxy, no redirects, a fixed host allowlist
@@ -45,6 +50,8 @@ teams-fence = { workspace = true, features = ["test-support"] }
 teams-proto = { workspace = true, features = ["test-support"] }
 # the chat reads' tests run against the mock chat service, through the transport's mock origin
 teams-mock.workspace = true
+# the diagnostic log's directory in its test (`tests/debug_log.rs`)
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 trybuild.workspace = true
 wiremock.workspace = true

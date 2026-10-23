@@ -7,13 +7,14 @@
 //! What the WebSocket layer itself sends on the socket (the masked handshake request, a pong to a WebSocket ping, the
 //! reply to a close) carries no data of ours and reaches no one: those are the protocol's own control frames.
 //!
-//! **No frame reaches a log.** tungstenite logs every frame it sends and reads at `trace` level, its payload
-//! included (`Sending frame: …`, `writing frame …`, `Received message …`), and `user.authenticate` carries the bearer
-//! token. This crate takes `log` with `max_level_debug` and `release_max_level_debug` (`Cargo.toml`), so those
-//! `trace!` calls compile to nothing in any build with this crate in it, whatever logger a binary installs. Its
-//! `debug!` lines (the handshake, a close, a send error's kind) carry no payload. rustls logs only the handshake's
-//! metadata, and hyper and h2 log through `tracing` without its `log` feature (h2's frame `Debug` leaves the header
-//! fields out on purpose).
+//! **No frame reaches a log unredacted.** tungstenite logs every frame it sends and reads at `trace` level, its
+//! payload included (`Sending frame: …`, `writing frame …`, `Received message …`), and `user.authenticate` carries the
+//! bearer token. This crate takes `log` with `max_level_debug` and `release_max_level_debug` (`Cargo.toml`), so those
+//! `trace!` calls compile to nothing in any build with this crate in it, whatever logger a binary installs. At `debug`
+//! the write half logs each frame it sends itself, as a `teams_log::wire::Frame`, whose formatting redacts
+//! `user.authenticate`'s arguments and every credential field (M2 Task 24a: the app's diagnostic log); the session
+//! logs each frame it reads the same way. rustls logs only the handshake's metadata, and hyper and h2 log through
+//! `tracing` without its `log` feature (h2's frame `Debug` leaves the header fields out on purpose).
 
 use std::future::Future;
 use std::io;
@@ -289,7 +290,17 @@ impl FrameWriter for SocketWriter {
     type Error = WriteFailed;
 
     fn write(&mut self, text: FrameText) -> impl Future<Output = Result<(), WriteFailed>> + Send {
-        let message = Message::text(text.into_string());
+        let text = text.into_string();
+        // the frame in full at `debug`, `user.authenticate` included: its record redacts the arguments
+        log::debug!(
+            target: teams_log::wire::FRAME_TARGET,
+            "{}",
+            teams_log::wire::Frame {
+                direction: teams_log::wire::Direction::Sent,
+                text: &text,
+            }
+        );
+        let message = Message::text(text);
         async move { self.0.send(message).await.map_err(WriteFailed::from) }
     }
 }

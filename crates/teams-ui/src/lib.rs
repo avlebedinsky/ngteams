@@ -78,7 +78,7 @@ pub use notify::{Notice, NoticeKind, NotificationServer, Notifier, NotifierEvent
 pub use people::Shown;
 pub use presence::Presences;
 pub use search::{Hit, HitTarget, Search, SearchEvent};
-pub use settings::{Settings, SettingsFile, SettingsModel};
+pub use settings::{Copied, LogLevel, Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};
 pub use switcher::Switcher;
 pub use teams_list::{ChannelChosen, TeamsList, TeamsListEvent};

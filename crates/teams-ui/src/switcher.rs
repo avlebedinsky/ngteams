@@ -4,7 +4,7 @@
 //!
 //! It reads the chat list's rows (one model for both), so a chat that changes while it is open shows changed. Under
 //! the chats it lists the messages the query finds in the store ([`crate::search`]): one chosen opens its chat at the
-//! message.
+//! message. Last come the app's commands the query matches ([`COMMAND_NAMES`]: "Copy diagnostics").
 
 use std::sync::Arc;
 
@@ -99,12 +99,19 @@ pub enum SwitcherEvent {
     OpenMessage(HitTarget),
     /// Close the switcher.
     Dismissed,
+    /// Put the diagnostics on the clipboard (the "Copy diagnostics" command).
+    CopyDiagnostics,
 }
 
 /// The palette's section of the chats; the messages found are the next.
 const CHATS: usize = 0;
 /// The palette's section of the messages found.
 const MESSAGES: usize = 1;
+/// The palette's section of the app's commands.
+const COMMANDS: usize = 2;
+
+/// The commands the palette offers, matched on their names as the chats are.
+pub const COMMAND_NAMES: [&str; 1] = ["Copy diagnostics"];
 
 /// The switcher (see the module docs).
 pub struct Switcher {
@@ -175,6 +182,15 @@ impl Switcher {
         &self.hits
     }
 
+    /// The commands the query matches ([`COMMAND_NAMES`]), listed last.
+    #[must_use]
+    pub fn commands(&self) -> Vec<&'static str> {
+        COMMAND_NAMES
+            .into_iter()
+            .filter(|name| fuzzy_score(&self.query, name).is_some())
+            .collect()
+    }
+
     /// Whether a search for the query runs.
     #[must_use]
     pub fn searching(&self) -> bool {
@@ -229,6 +245,7 @@ impl Switcher {
                 .hits
                 .get(index.row)
                 .map(|hit| SwitcherEvent::OpenMessage(hit.target.clone())),
+            COMMANDS => self.commands().get(index.row).map(|_| SwitcherEvent::CopyDiagnostics),
             _ => None,
         };
         if let Some(event) = event {
@@ -255,6 +272,11 @@ impl Render for Switcher {
                 CommandGroup::new()
                     .label("Messages")
                     .items(self.hits.iter().map(search::hit_item)),
+            )
+            .group(
+                CommandGroup::new()
+                    .label("Commands")
+                    .items(self.commands().into_iter().map(|name| CommandItem::new().label(name))),
             )
             .on_query(move |query, _, cx| {
                 // a switcher already closed has nothing to filter

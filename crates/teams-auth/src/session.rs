@@ -35,7 +35,8 @@
 //! - **The region** comes from the account's stored [`Region`] (`proto-lab auth` persists it), and service bases are
 //!   read through [`Region::base`]: trimmed, with a fallback for names the region lacks.
 //!
-//! Nothing here logs. No `Debug` output or error carries a token: [`Secret`] redacts itself, and the session's own
+//! The log (M2 Task 24a) has each renewal by its audience, its expiry and its outcome, and the signing out, never a
+//! token or a token's value in any form. No `Debug` output or error carries a token: [`Secret`] redacts itself, and the session's own
 //! `Debug` names only the account and which audiences it holds.
 //!
 //! Sign-in and renewal POSTs (Entra's token endpoint, authz) go through [`TokenClient`] and [`AuthzClient`], the
@@ -383,8 +384,15 @@ impl<S: SecretStore> Session<S> {
             .exchange_at(&spaces.token, AuthzKind::TokenRefresh, self.clock.as_ref())
             .await
             .map_err(TokenError::from);
+        if let Err(error) = &exchanged {
+            log::warn!("session: the skypetoken can't be renewed: {error}");
+        }
         let mut skypetoken = self.authz_backoff.record(exchanged, self.clock.now())?;
         skypetoken.expires_at = skypetoken.expires_at.min(spaces.expires_at);
+        log::info!(
+            "session: the skypetoken renewed, it expires in {} s",
+            self.seconds_left(skypetoken.expires_at)
+        );
         skypetoken.store(&self.store, &self.account).await?;
         *lock(&self.region) = skypetoken.region.clone();
         self.announce(Renewal::Skypetoken {
@@ -416,11 +424,16 @@ impl<S: SecretStore> Session<S> {
                 )
                 .await;
             if let Err(error) = &refreshed {
+                log::warn!("session: the token for {resource} can't be renewed: {error}");
                 self.sign_out_on(error);
             }
             self.entra_backoff.record(refreshed, self.clock.now())?
         };
         let token = AccessToken::from(tokens);
+        log::info!(
+            "session: the token for {resource} renewed, it expires in {} s",
+            self.seconds_left(token.expires_at)
+        );
         *cached = Some(token.clone());
         self.announce(Renewal::AccessToken {
             resource: resource.to_owned(),
@@ -440,14 +453,22 @@ impl<S: SecretStore> Session<S> {
     /// Signs the session out for good when `error` says the account has to sign in again; told to watchers once.
     fn sign_out_on(&self, error: &TokenError) {
         if let Some(signed_out) = SignedOut::from_error(error) {
-            self.signed_out.send_if_modified(|state| {
+            let first = self.signed_out.send_if_modified(|state| {
                 let first = state.is_none();
                 if first {
                     *state = Some(signed_out);
                 }
                 first
             });
+            if first {
+                log::warn!("session: signed out ({error}); nothing more is sent until the account signs in again");
+            }
         }
+    }
+
+    /// Whole seconds from now to `at`; 0 for a time past.
+    fn seconds_left(&self, at: SystemTime) -> u64 {
+        at.duration_since(self.clock.now()).unwrap_or_default().as_secs()
     }
 
     fn slot(&self, resource: &str) -> Arc<AsyncMutex<Option<AccessToken>>> {

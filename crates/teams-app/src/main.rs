@@ -96,6 +96,13 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
     let config = LabLocations::from_env()
         .and_then(|locations| LabConfig::load(&locations))
         .map_err(|error| error.to_string())?;
+    let settings = SettingsFile::new(config.paths().ui_settings_file(alias));
+    // the log first, at the settings' level, so the engine's start is in it
+    let diagnostics = app::install_log(
+        config.paths().app_log_dir(alias),
+        settings.load().settings.log_level,
+        config.paths().fence_log(),
+    );
     let fence = Arc::new(Fence::open_lab().map_err(|error| format!("the fence can't be opened: {error}"))?);
     let secrets = BrokerSecretStore::new(socket, LabPaths::KEYRING_APPLICATION)
         .map_err(|error| format!("the broker's socket: {error}"))?;
@@ -107,9 +114,10 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
         signed_out: Some(lab.session.watch_signed_out()),
         engine: lab.handle,
         trace,
-        settings: SettingsFile::new(config.paths().ui_settings_file(alias)),
+        settings,
         // the bus the app is given, read once: nothing else is ever connected to for notifications or the tray
         bus: teams_ui::bus::address_from_env(),
+        diagnostics: Some(diagnostics),
     })
 }
 

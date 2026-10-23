@@ -10,6 +10,7 @@ members = [
     "crates/teams-core",
     "crates/teams-fence",
     "crates/teams-headless",
+    "crates/teams-log",
     "crates/teams-mock",
     "crates/teams-proto",
     "crates/teams-signin",
@@ -38,6 +39,8 @@ proto-lab = { path = "crates/proto-lab" }
 teams-auth = { path = "crates/teams-auth" }
 teams-core = { path = "crates/teams-core" }
 teams-fence = { path = "crates/teams-fence" }
+# the app's diagnostic log (M2 Task 24a): installed by the app crates only, through its `install`
+teams-log = { path = "crates/teams-log" }
 # tests only: a crate takes it under [dev-dependencies], never [dependencies] (crates/teams-mock/tests/mock.rs checks)
 teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }
@@ -134,6 +137,9 @@ tokio-tungstenite = "0.30.0"
 toml = "1.1.8"
 # edits lab.toml in place (the MRI of an account after its first login), keeping its comments
 toml_edit = "0.25.17"
+# tests only: the UI kit's `tracing` events forwarded to `log` (its `log` feature, no subscriber), the version the kit
+# already links
+tracing = { version = "0.1.44", default-features = false }
 trybuild = "1.0.122"
 url = "2.5.8"
 # The UI sandbox's virtual keyboard and pointer: a Wayland client of the nested niri, on the versions GPUI already

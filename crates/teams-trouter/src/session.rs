@@ -415,11 +415,13 @@ where
             let started = Instant::now();
             let (down, wait) = match self.connection().await {
                 End::Stop(stop) => {
+                    log::info!("push channel stopped: {stop:?}");
                     self.emit(PushEvent::Stopped(stop));
                     return;
                 }
                 End::Again(down, wait) => (down, wait),
             };
+            log::info!("push channel down: {down:?}");
             let heard = self.heard.take();
             self.emit(PushEvent::Disconnected { down, heard });
             if started.elapsed() >= self.trouter.options.stable_after {
@@ -431,12 +433,14 @@ where
             let delay = match wait {
                 Wait::None if immediate_allowed => {
                     self.last_immediate = Some(Instant::now());
+                    log::info!("push channel reconnecting at once");
                     continue;
                 }
                 Wait::None | Wait::Backoff => self.backoff(),
                 // the service's wait is a floor: a `Retry-After: 0` (or a past date) still waits the backoff
                 Wait::For(delay) => delay.max(self.backoff()),
             };
+            log::info!("push channel reconnecting in {} ms", delay.as_millis());
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
                 _ = &mut self.stop => {
@@ -556,6 +560,12 @@ where
             _ => None,
         };
         let new_endpoint = self.last_endpoint.as_deref() != Some(connected.id.as_str());
+        log::info!(
+            "push channel connected (connect {}, endpoint {}{})",
+            self.connects,
+            connected.id,
+            if new_endpoint { ", a new one" } else { "" }
+        );
         self.last_endpoint = Some(connected.id.clone());
         self.emit(PushEvent::Connected {
             endpoint: connected.id.clone(),
@@ -744,7 +754,18 @@ impl Link {
         K: TrouterCredentials + 'static,
     {
         match frame {
-            Some(Ok(Message::Text(text))) => self.on_text(text.as_str(), run).await,
+            Some(Ok(Message::Text(text))) => {
+                // the frame in full at `debug`: its record redacts every credential field
+                log::debug!(
+                    target: teams_log::wire::FRAME_TARGET,
+                    "{}",
+                    teams_log::wire::Frame {
+                        direction: teams_log::wire::Direction::Received,
+                        text: text.as_str(),
+                    }
+                );
+                self.on_text(text.as_str(), run).await
+            }
             Some(Ok(Message::Close(_)) | Err(_)) | None => Some(End::Again(Down::Closed, Wait::Backoff)),
             Some(Ok(_)) => None,
         }

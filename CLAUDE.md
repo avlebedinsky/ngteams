@@ -179,10 +179,20 @@ What the code does and why. A change that undoes one of these needs a new reason
   messages live, because the fixtures held only the common form: a delivery's socket.io `id` is a signed 32-bit
   number (about one in ten negative), and the push URL's endpoint id is base64url (`-` and `_`). A fixture of a
   field's shape covers every form the captures show.
-- **No log line carries a payload.** `teams-trouter` caps `log` at `debug` at compile time (`max_level_debug`, for any
-  binary that links it): `tungstenite`'s `trace!` prints every frame it sends, the `user.authenticate` with its bearer
-  token included. A new dependency that logs at `debug` or below is checked the same way. `TEAMS_HEADLESS_LOG=debug`
-  logs our own crates only, by kind and size.
+- **No log line carries a payload, except the app's debug log.** `teams-trouter` caps `log` at `debug` at compile time
+  (`max_level_debug`, for any binary that links it): `tungstenite`'s `trace!` prints every frame it sends, the
+  `user.authenticate` with its bearer token included. A new dependency that logs at `debug` or below is checked the
+  same way. `TEAMS_HEADLESS_LOG=debug` logs our own crates only, by kind and size. The one exception, by the user's
+  decision of 2026-10-22: at `debug` the app's own diagnostic log (`teams-log`) carries full HTTP requests and
+  responses (method, URL with its query, headers, bodies) and every Trouter frame both ways; at `info` it stays
+  payload-free. The hard rule "Tokens never reach logs" is unchanged: credentials are redacted by the logger itself
+  (`Authorization`, `Cookie`/`Set-Cookie`, the skypetoken and every other token header, the token fields of sign-in
+  and renewal answers, sign-in's code and verifier wherever they are written, Trouter's `user.authenticate` and the
+  `connectparams` signature (`sig`) of `trouter.connected`, a credential's `name=` value anywhere on a line in any
+  escaped form: a SAS link's `sig` in a message's HTML as `&amp;sig=`, `%26sig%3D`, `\u0026sig=`), never left to
+  call sites. A lab run's debug log is lab
+  data like a capture (never in the repo, never sanitized into it); the personal build's is the user's data, which
+  agents never read.
 - **The store** (`teams-store`): one SQLite file per account (`0600`, its dir `0700`), WAL, migrations by
   `user_version`, each in an `IMMEDIATE` transaction; a released migration is never edited, a new one is added. A new
   file is made and switched to WAL under `<store>-runs/open.lock`: SQLite answers two connections switching at once

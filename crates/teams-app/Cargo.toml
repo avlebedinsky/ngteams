@@ -24,6 +24,11 @@ teams-core.workspace = true
 teams-fence.workspace = true
 # the bridge over the engine, the models, the window, the view trace
 teams-ui.workspace = true
+# the account's diagnostic log, installed once before the engine starts (its `install`, the only logger)
+teams-log.workspace = true
+# the app's own lines in that log (its start, the settings' and the desktop's problems); capped at `debug` at compile
+# time like teams-trouter's
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
 thiserror.workspace = true
 # the broker's runtime: its socket, the Secret Service connected on the first request; the session's sign-out watch
 tokio = { workspace = true, features = ["net", "rt", "sync"] }
