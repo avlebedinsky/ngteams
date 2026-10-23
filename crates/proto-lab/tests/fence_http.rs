@@ -1,6 +1,7 @@
-//! The browser fence's HTTP layer: the classifier, the decision on one paused request, the arming of the browser and
-//! of every target (against a scripted fake browser), and, with Chrome installed, enforcement on local pages: a denied
-//! request never reaches the mock server and the page sees a network error, wherever it comes from.
+//! The browser fence's HTTP layer: the lab rule's classifier, the decision on one paused request, the arming of the
+//! browser and of every target (against a scripted fake browser), and, with Chrome installed, enforcement on local pages
+//! (whose requests the lab rule lets through, so a forced deny stands in for one it denies): a denied request never
+//! reaches the mock server and the page sees a network error, wherever it comes from.
 //!
 //! The Chrome tests run headless on throwaway user-data-dirs against a local mock server; see `common` for how Chrome
 //! is found.
@@ -25,10 +26,10 @@ use proto_lab::arming::{
 use proto_lab::browser::{Browser, BrowserError, LaunchOptions};
 use proto_lab::capture::{Capture, Recorder, RtcHooks};
 use proto_lab::cdp::{Cdp, CdpError, SessionId};
-use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, QueryRule, ValueRule, classify, is_mutating};
+use proto_lab::classify::{Classification, Classifier, classify, is_mutating};
 use proto_lab::config::Alias;
-use proto_lab::fence_http::{DenyCause, HttpFence, MalformedPause, PausedRequest, Verdict};
-use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use proto_lab::fence_http::{DenyCause, ForcedDeny, HttpFence, MalformedPause, PausedRequest, Verdict};
+use proto_lab::fence_ws::{GuardScript, WsFence};
 use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport};
 use proto_lab::session::FenceReport;
 use serde_json::{Value, json};
@@ -50,17 +51,10 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 /// The same, for what a spawned task returns.
 type SendResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// The token endpoint with the query the web client sends most: its request id alone.
-const TOKEN: &str = "https://login.microsoftonline.com/0f0e0d0c-0b0a-0908-0706-050403020100/oauth2/v2.0/token\
-                     ?client-request-id=0a1b2c3d-4e5f-4061-8293-a4b5c6d7e8f9";
-/// The token endpoint's path, with no query.
-const TOKEN_PATH: &str = "https://login.microsoftonline.com/0f0e0d0c-0b0a-0908-0706-050403020100/oauth2/v2.0/token";
-/// A request id as the web client makes one.
-const REQUEST_ID: &str = "0a1b2c3d-4e5f-4061-8293-a4b5c6d7e8f9";
-/// The broker's parameters the web client's nested app adds before its request id (the captured values).
-const BROKER: &str =
-    "client_id=f4060917-6abe-40d7-baa6-f634c0eda4ac&brk_client_id=5e3ce6c0-2b1f-4285-8d4b-75ee78787346";
+/// A message post to a chat on a regional chat service host.
 const CHAT: &str = "https://emea.ng.msg.teams.microsoft.com/v1/users/ME/conversations/19:lab@thread.v2/messages";
+/// An outsider's MRI, as a read by `POST` might name it (made up).
+const OUTSIDER: &str = "8:orgid:00000000-0000-4000-8000-0000000000ff";
 
 // --- the classifier ---
 
@@ -74,261 +68,169 @@ fn reading_methods_are_reads_whatever_the_url() {
 }
 
 #[test]
-fn every_other_method_is_mutating_and_unknown_outside_the_own_list() {
+fn every_other_method_is_mutating_and_judged_by_the_table() {
     for method in [
         "POST", "PUT", "PATCH", "DELETE", "post", "PROPFIND", "CONNECT", "TRACE", "",
     ] {
         assert!(is_mutating(method), "{method}");
+        // the chat service reads no such body: unknown, whatever the method
         assert_eq!(classify(method, CHAT, Some(b"{}")), Classification::Unknown, "{method}");
-    }
-}
-
-/// The two query forms the captures show for the token endpoint, every value form among them.
-fn captured_token_queries() -> Vec<String> {
-    let redirect = |origin: &str| format!("https%3A%2F%2F{origin}%2Fv2%2Fauthv2");
-    vec![
-        format!("client-request-id={REQUEST_ID}"),
-        format!("client-request-id=Core-{REQUEST_ID}"),
-        format!(
-            "{BROKER}&brk_redirect_uri={}&client-request-id={REQUEST_ID}",
-            redirect("teams.cloud.microsoft")
-        ),
-        format!(
-            "{BROKER}&brk_redirect_uri={}&client-request-id={REQUEST_ID}",
-            redirect("teams.microsoft.com")
-        ),
-        // a set is a set: its order plays no part
-        format!(
-            "client-request-id={REQUEST_ID}&brk_redirect_uri={}&{BROKER}",
-            redirect("teams.microsoft.com")
-        ),
-    ]
-}
-
-#[test]
-fn the_entra_token_endpoint_of_any_tenant_is_own_with_a_captured_query() {
-    for tenant in [
-        "0f0e0d0c-0b0a-0908-0706-050403020100",
-        "common",
-        "organizations",
-        "contoso.example",
-    ] {
-        for query in captured_token_queries() {
-            let url = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token?{query}");
-            assert_eq!(
-                classify("POST", &url, None),
-                Classification::Own(OwnKind::EntraToken),
-                "{url}"
-            );
-        }
-    }
-    assert_eq!(classify("post", TOKEN, None), Classification::Own(OwnKind::EntraToken));
-    assert_eq!(
-        classify(
-            "POST",
-            &format!("https://login.microsoftonline.com:443/common/oauth2/v2.0/token?client-request-id={REQUEST_ID}"),
-            None
-        ),
-        Classification::Own(OwnKind::EntraToken),
-        "the default port is the same origin"
-    );
-}
-
-#[test]
-fn the_token_endpoint_with_any_other_query_is_unknown() {
-    let redirect = "brk_redirect_uri=https%3A%2F%2Fteams.microsoft.com%2Fv2%2Fauthv2";
-    let other_queries = [
-        // no query, or an empty one
-        String::new(),
-        "?".to_owned(),
-        // a request id in a form no capture showed
-        "?client-request-id=1".to_owned(),
-        format!("?client-request-id={}", REQUEST_ID.to_uppercase()),
-        format!("?client-request-id={{{REQUEST_ID}}}"),
-        format!("?client-request-id=Other-{REQUEST_ID}"),
-        // the `Core-` form only ever came alone
-        format!("?{BROKER}&{redirect}&client-request-id=Core-{REQUEST_ID}"),
-        // a key twice, in any spelling that decodes to it, or a key in another case
-        format!("?client-request-id={REQUEST_ID}&client-request-id={REQUEST_ID}"),
-        format!("?client-request-id={REQUEST_ID}&client%2Drequest-id={REQUEST_ID}"),
-        format!("?Client-Request-Id={REQUEST_ID}"),
-        format!("?{BROKER}&{redirect}&client-request-id={REQUEST_ID}&client_id=f4060917-6abe-40d7-baa6-f634c0eda4ac"),
-        // a key no capture showed, alone or beside a captured set
-        format!("?client-request-id={REQUEST_ID}&prompt=none"),
-        format!("?{BROKER}&{redirect}&client-request-id={REQUEST_ID}&x=1"),
-        "?x=1".to_owned(),
-        // a captured set with a key missing
-        format!("?{BROKER}&client-request-id={REQUEST_ID}"),
-        format!("?{redirect}&client-request-id={REQUEST_ID}"),
-        // a broker value no capture showed
-        format!(
-            "?client_id=00000000-0000-4000-8000-000000000001&brk_client_id=5e3ce6c0-2b1f-4285-8d4b-75ee78787346&{redirect}\
-             &client-request-id={REQUEST_ID}"
-        ),
-        format!(
-            "?{BROKER}&brk_redirect_uri=https%3A%2F%2Fattacker.example%2Fv2%2Fauthv2&client-request-id={REQUEST_ID}"
-        ),
-        // pairs that can't be read with certainty
-        format!("?client-request-id={REQUEST_ID}&"),
-        format!("?&client-request-id={REQUEST_ID}"),
-        format!("?client-request-id={REQUEST_ID}&&x=1"),
-        format!("?client-request-id={REQUEST_ID}&flag"),
-    ];
-    for query in other_queries {
-        let url = format!("{TOKEN_PATH}{query}");
-        assert_eq!(classify("POST", &url, None), Classification::Unknown, "{url}");
+        // a host that is no contacting service: it reaches nobody
         assert_eq!(
-            Classifier::mapped().classify("POST", &url, None),
-            Classification::Unknown,
-            "{url}"
+            classify(
+                method,
+                "https://browser.events.data.microsoft.com/OneCollector/1.0/",
+                Some(b"{}")
+            ),
+            Classification::Allow,
+            "{method}"
         );
     }
+    // a mutating request whose URL doesn't parse can't be told apart from one to a contacting service
+    assert_eq!(classify("POST", "not a url", Some(b"{}")), Classification::Unknown);
 }
 
-const AUTHZ_URLS: [&str; 4] = [
-    "https://teams.microsoft.com/api/authsvc/v1.0/authz",
-    "https://teams.microsoft.com/api/authsvc/v1.0/authzcore",
-    "https://authsvc.teams.microsoft.com/v1.0/authz",
-    "https://authsvc.teams.microsoft.com/v1.0/authzcore",
+/// What the default-deny fence of M0–M2 denied, and the lab rule lets through: the account's own state off the old
+/// reviewed list, a read by `POST` naming someone outside the lab, settings, apps, presence and telemetry.
+const REACHES_NOBODY: [(&str, &str, &str); 14] = [
+    (
+        "POST",
+        "https://login.microsoftonline.com/common/oauth2/v2.0/token?prompt=none&x=1",
+        "grant_type=refresh_token",
+    ),
+    ("POST", "https://login.microsoftonline.com/common/login", "login=a"),
+    (
+        "POST",
+        "https://teams.microsoft.com/api/mt/part/emea-02/beta/users/fetchShortProfile?isMailAddress=false",
+        r#"["8:orgid:00000000-0000-4000-8000-0000000000ff"]"#,
+    ),
+    (
+        "POST",
+        "https://teams.microsoft.com/api/mt/part/emea-02/beta/users/fetch",
+        r#"["8:orgid:00000000-0000-4000-8000-0000000000ff"]"#,
+    ),
+    (
+        "POST",
+        "https://teams.microsoft.com/api/mt/part/emea-02/beta/users/useraggregatesettings",
+        r#"{"anything":true}"#,
+    ),
+    (
+        "POST",
+        "https://teams.microsoft.com/api/mt/part/emea-02/beta/users/apps/batchedDefinitions",
+        "{}",
+    ),
+    (
+        "PUT",
+        "https://teams.microsoft.com/api/mt/part/emea-02/beta/me/engagementSurfaces/displayed",
+        "{}",
+    ),
+    (
+        "POST",
+        "https://teams.microsoft.com/ups/emea/v1/presence/getpresence/",
+        r#"[{"mri":"8:orgid:00000000-0000-4000-8000-0000000000ff"}]"#,
+    ),
+    (
+        "PUT",
+        "https://teams.microsoft.com/ups/emea/v1/me/endpoints/",
+        r#"{"id":"made-up","availability":"Available"}"#,
+    ),
+    (
+        "PUT",
+        "https://teams.microsoft.com/ups/emea/v1/me/forceavailability/",
+        r#"{"availability":"Busy"}"#,
+    ),
+    (
+        "PUT",
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/properties?name=userDetails",
+        "{}",
+    ),
+    (
+        "POST",
+        "https://teams.microsoft.com/registrar/prod/V2/registrations",
+        r#"{"clientDescription":{"appId":"SkypeSpacesWeb"}}"#,
+    ),
+    (
+        "POST",
+        "https://substrate.office.com/search/api/v1/suggestions",
+        r#"{"Query":{"QueryString":"someone"}}"#,
+    ),
+    ("POST", "https://browser.pipe.aria.microsoft.com/Collector/3.0/", "{}"),
 ];
 
 #[test]
-fn the_authz_endpoints_are_own_only_without_a_query() {
-    for url in AUTHZ_URLS {
+fn what_the_old_fence_denied_reaches_nobody_now() {
+    for (method, url, body) in REACHES_NOBODY {
         assert_eq!(
-            classify("POST", url, None),
-            Classification::Own(OwnKind::Authz),
-            "{url}"
+            classify(method, url, Some(body.as_bytes())),
+            Classification::Allow,
+            "{method} {url}"
         );
-        for query in ["?", "?x=1", "?client-request-id=0a1b2c3d-4e5f-4061-8293-a4b5c6d7e8f9"] {
-            let with_query = format!("{url}{query}");
-            assert_eq!(
-                classify("POST", &with_query, None),
-                Classification::Unknown,
-                "{with_query}"
-            );
-        }
     }
 }
 
 #[test]
-fn lookalikes_of_own_endpoints_are_unknown() {
-    let lookalikes = [
-        ("PUT", TOKEN_PATH),
-        ("DELETE", "https://teams.microsoft.com/api/authsvc/v1.0/authz"),
-        ("POST", "http://login.microsoftonline.com/common/oauth2/v2.0/token"),
+fn a_contacting_write_is_mapped_and_an_unreadable_one_is_unknown() {
+    let chat = format!("19:{}_{}@unq.gbl.spaces", "0".repeat(8), "1".repeat(8));
+    let message = format!("https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{chat}/messages");
+    assert_eq!(
+        classify("POST", &message, Some(br#"{"messagetype":"Text","content":"hi"}"#)),
+        Classification::Write(Target::new(WriteKind::Message, Scope::Conversation { id: chat }))
+    );
+    for (method, url, body) in [
+        ("POST", "https://graph.microsoft.com/v1.0/$batch", "{}"),
+        ("POST", "https://graph.microsoft.com/v1.0/me/sendMail", "{}"),
+        ("POST", "https://outlook.office.com/api/v2.0/me/sendmail", "{}"),
         (
             "POST",
-            "https://login.microsoftonline.com:8443/common/oauth2/v2.0/token",
+            "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
+            "{}",
         ),
         (
             "POST",
-            "https://login.microsoftonline.com.attacker.example/common/oauth2/v2.0/token",
+            "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/48%3Anotes/messages",
+            r#"{"messagetype":"Text","content":"hi"}"#,
         ),
         (
             "POST",
-            "https://attacker.example/login.microsoftonline.com/common/oauth2/v2.0/token",
+            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv/x/acceptance",
+            "{}",
         ),
-        ("POST", "https://login.microsoftonline.com//oauth2/v2.0/token"),
-        ("POST", "https://login.microsoftonline.com/oauth2/v2.0/token"),
-        ("POST", "https://login.microsoftonline.com/common/oauth2/v2.0/token/"),
-        (
-            "POST",
-            "https://login.microsoftonline.com/common/oauth2/v2.0/token/more",
-        ),
-        ("POST", "https://login.microsoftonline.com/a/b/oauth2/v2.0/token"),
-        ("POST", "https://login.microsoftonline.com/common/oauth2/token"),
-        ("POST", "https://login.microsoftonline.com/common/oauth2/v2.0/%74oken"),
-        ("POST", "https://teams.microsoft.com/api/authsvc/v1.0/authz/extra"),
-        ("POST", "https://teams.microsoft.com/api/authsvc/v1.0/users/region"),
-        ("POST", "https://teams.live.com/api/auth/v2.0/authz/consumer"),
-        ("POST", "not a url"),
-        ("POST", ""),
-    ];
-    for (method, url) in lookalikes {
-        assert_eq!(classify(method, url, None), Classification::Unknown, "{method} {url}");
-        // with the token endpoint's captured query too, so only the method, origin and path are what's off
-        let with_query = format!("{url}?client-request-id={REQUEST_ID}");
+        ("POST", "https://contoso.sharepoint.com/_api/web/x", "{}"),
+        ("POST", "https://teams.microsoft.com//api/chatsvc/emea/v1/threads", "{}"),
+    ] {
         assert_eq!(
-            classify(method, &with_query, None),
+            classify(method, url, Some(body.as_bytes())),
             Classification::Unknown,
-            "{method} {with_query}"
+            "{method} {url}"
         );
     }
 }
 
 #[test]
-fn a_local_rule_stands_in_for_an_own_endpoint_without_widening_the_seeded_list() {
-    let classifier = Classifier::seeded().with_own(OwnRule::new(
-        OwnKind::Authz,
-        "post",
-        "http://127.0.0.1:4000",
-        "/own/authz",
-    ));
-    assert_eq!(
-        classifier.classify("POST", "http://127.0.0.1:4000/own/authz", None),
-        Classification::Own(OwnKind::Authz)
-    );
-    assert_eq!(
-        classifier.classify("POST", "http://127.0.0.1:4001/own/authz", None),
-        Classification::Unknown
-    );
-    assert_eq!(
-        classify("POST", "http://127.0.0.1:4000/own/authz", None),
-        Classification::Unknown,
-        "the seeded classifier doesn't know it"
-    );
-    assert_eq!(
-        classifier.classify("POST", TOKEN, None),
-        Classification::Own(OwnKind::EntraToken)
-    );
-    // a local rule takes no query unless it is given the one it takes
-    assert_eq!(
-        classifier.classify("POST", "http://127.0.0.1:4000/own/authz?x=1", None),
-        Classification::Unknown
-    );
-    let with_query = Classifier::seeded().with_own(
-        OwnRule::new(OwnKind::Authz, "POST", "http://127.0.0.1:4000", "/own/authz")
-            .with_query(QueryRule::OneOf(&[&[("x", ValueRule::Exact(&["1"]))]])),
-    );
-    assert_eq!(
-        with_query.classify("POST", "http://127.0.0.1:4000/own/authz?x=1", None),
-        Classification::Own(OwnKind::Authz)
-    );
-    for url in [
-        "http://127.0.0.1:4000/own/authz",
-        "http://127.0.0.1:4000/own/authz?x=2",
-        "http://127.0.0.1:4000/own/authz?x=1&x=1",
-    ] {
-        assert_eq!(with_query.classify("POST", url, None), Classification::Unknown, "{url}");
-    }
-}
-
-#[test]
-fn the_sign_in_form_still_takes_any_query_and_only_with_login() {
-    for url in [
-        "https://login.microsoftonline.com/common/login",
-        "https://login.microsoftonline.com/common/login?ctx=1&x=y",
-        "https://login.microsoftonline.com/common/GetCredentialType?mkt=en-US&mkt=de-DE",
-    ] {
+fn a_get_with_a_body_or_a_method_override_is_judged_as_mutating() {
+    let graph = "https://graph.microsoft.com/v1.0/me/messages";
+    assert_eq!(classify("GET", graph, None), Classification::Read);
+    assert_eq!(classify("GET", graph, Some(b"")), Classification::Unknown);
+    for header in ["X-HTTP-Method-Override", "x-http-method", "X-Method-Override"] {
+        let headers = [(header.to_owned(), Some("DELETE".to_owned()))];
         assert_eq!(
-            Classifier::sign_in().classify("POST", url, None),
-            Classification::Own(OwnKind::EntraSignIn),
-            "{url}"
+            Classifier::new().classify("GET", graph, &headers, None),
+            Classification::Unknown,
+            "{header}"
         );
-        assert_eq!(classify("POST", url, None), Classification::Unknown, "{url}");
+        // an override naming the request's own method changes nothing
+        let same = [(header.to_owned(), Some("get".to_owned()))];
+        assert_eq!(
+            Classifier::new().classify("GET", graph, &same, None),
+            Classification::Read,
+            "{header}"
+        );
     }
-    // the seeded rules keep their captured queries under login too
+    let other = [("X-Other".to_owned(), Some("DELETE".to_owned()))];
     assert_eq!(
-        Classifier::sign_in().classify("POST", &format!("{TOKEN_PATH}?x=1"), None),
-        Classification::Unknown
+        Classifier::new().classify("GET", graph, &other, None),
+        Classification::Read
     );
-}
-
-#[test]
-fn own_kinds_are_named_for_the_log() {
-    assert_eq!(OwnKind::EntraToken.as_str(), "entra_token");
-    assert_eq!(OwnKind::Authz.as_str(), "authz");
 }
 
 // --- the decision on one paused request ---
@@ -365,20 +267,15 @@ fn lab() -> TestResult<Lab> {
     })
 }
 
-fn http_fence(lab: &Lab, classifier: Classifier, members: &[&str]) -> HttpFence {
+fn http_fence(lab: &Lab, members: &[&str]) -> HttpFence {
     let members = Membership::Complete(members.iter().map(|&mri| Mri::new(mri)).collect());
-    HttpFence::new(classifier, Arc::clone(&lab.fence), Arc::new(Fixed(members)))
+    HttpFence::new(Classifier::new(), Arc::clone(&lab.fence), Arc::new(Fixed(members)))
 }
 
-/// The WebSocket layer with the seeded classifier: every frame is denied.
+/// The WebSocket layer under the frame rule.
 fn ws_fence(lab: &Lab) -> TestResult<WsFence> {
     let members = Arc::new(Fixed(Membership::Complete(Vec::new())));
-    Ok(WsFence::new(
-        FrameClassifier::seeded(),
-        Arc::clone(&lab.fence),
-        members,
-        GuardScript::generate()?,
-    ))
+    Ok(WsFence::new(Arc::clone(&lab.fence), members, GuardScript::generate()?))
 }
 
 fn log_entries(path: &Path) -> TestResult<Vec<Value>> {
@@ -401,10 +298,18 @@ fn paused(method: &str, url: &str) -> PausedRequest {
     }
 }
 
+/// [`paused`] with `body`.
+fn paused_with(method: &str, url: &str, body: &str) -> PausedRequest {
+    PausedRequest {
+        body: Some(body.as_bytes().to_vec()),
+        ..paused(method, url)
+    }
+}
+
 #[tokio::test]
-async fn an_unclassified_post_is_denied_kept_and_logged_without_its_query() {
+async fn an_unknown_post_is_denied_kept_and_logged_without_its_query() {
     let lab = lab().unwrap();
-    let fence = http_fence(&lab, Classifier::seeded(), &[LAB_A]);
+    let fence = http_fence(&lab, &[LAB_A]);
 
     let verdict = fence.decide(&paused("POST", &format!("{CHAT}?secret=planted"))).await;
 
@@ -422,22 +327,51 @@ async fn an_unclassified_post_is_denied_kept_and_logged_without_its_query() {
 }
 
 #[tokio::test]
-async fn reads_pass_unlogged_and_own_requests_pass_logged() {
+async fn reads_pass_unlogged_and_what_reaches_nobody_passes_logged_as_allowed() {
     let lab = lab().unwrap();
-    let fence = http_fence(&lab, Classifier::seeded(), &[LAB_A]);
+    let fence = http_fence(&lab, &[LAB_A]);
 
     assert_eq!(fence.decide(&paused("GET", CHAT)).await, Verdict::Allow);
-    assert_eq!(fence.decide(&paused("POST", TOKEN)).await, Verdict::Allow);
+    for (method, url, body) in REACHES_NOBODY {
+        assert_eq!(
+            fence.decide(&paused_with(method, url, body)).await,
+            Verdict::Allow,
+            "{method} {url}"
+        );
+    }
 
     assert!(fence.denials().is_empty());
     let entries = log_entries(&lab.log_path).unwrap();
-    assert_eq!(entries.len(), 1, "only the own request: {entries:?}");
-    assert_eq!(entries[0]["verdict"], "allow");
-    assert_eq!(entries[0]["own"], "entra_token");
+    assert_eq!(
+        entries.len(),
+        REACHES_NOBODY.len(),
+        "every allowed mutating request, no read: {entries:?}"
+    );
+    for (entry, (method, url, _)) in entries.iter().zip(REACHES_NOBODY) {
+        assert_eq!(entry["verdict"], "allow");
+        assert_eq!(entry["event"], "allowed");
+        assert_eq!(entry["method"], method);
+        let url = url::Url::parse(url).unwrap();
+        assert_eq!(entry["host"], url.host_str().unwrap());
+    }
+    // the shape of a path, never a query, header or body: no MRI, no query value
+    let fetch = &entries[2];
+    assert_eq!(fetch["path"], "/api/mt/part/emea-02/beta/users/fetchShortProfile");
+    let log = std::fs::read_to_string(&lab.log_path).unwrap();
+    for planted in [
+        "isMailAddress",
+        "0000000000ff",
+        "prompt=none",
+        "refresh_token",
+        "Busy",
+        "someone",
+    ] {
+        assert!(!log.contains(planted), "{planted}: {log}");
+    }
 }
 
 #[tokio::test]
-async fn an_own_request_that_cannot_be_logged_is_denied() {
+async fn an_allowed_request_that_cannot_be_logged_is_denied() {
     struct Broken;
     impl std::io::Write for Broken {
         fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
@@ -449,15 +383,57 @@ async fn an_own_request_that_cannot_be_logged_is_denied() {
     }
     let fence = Arc::new(Fence::new(Roster::default(), FenceLog::from_writer(Broken)));
     let http = HttpFence::new(
-        Classifier::seeded(),
+        Classifier::new(),
         fence,
         Arc::new(Fixed(Membership::Complete(Vec::new()))),
     );
 
-    let verdict = http.decide(&paused("POST", TOKEN)).await;
+    let (method, url, body) = REACHES_NOBODY[0];
+    let verdict = http.decide(&paused_with(method, url, body)).await;
 
     assert_eq!(verdict, Verdict::Deny(DenyCause::LogUnavailable));
     assert_eq!(http.denials().len(), 1);
+    // a read needs no log entry
+    assert_eq!(http.decide(&paused("GET", CHAT)).await, Verdict::Allow);
+}
+
+#[tokio::test]
+async fn a_body_chrome_did_not_inline_is_read_as_an_empty_one() {
+    let lab = lab().unwrap();
+    let fence = http_fence(&lab, &[LAB_A, LAB_B]);
+    let unread = |method: &str, url: &str| PausedRequest {
+        body_unread: true,
+        ..paused(method, url)
+    };
+    // a message whose body the fence can't read is unknown, never a write it judges by a guess
+    assert_eq!(
+        fence.decide(&unread("POST", CHAT)).await,
+        Verdict::Deny(DenyCause::Unclassified)
+    );
+    // a GET that has a body is mutating: judged by the table, and logged when it passes
+    let graph = "https://graph.microsoft.com/v1.0/me/messages";
+    assert_eq!(
+        fence.decide(&unread("GET", graph)).await,
+        Verdict::Deny(DenyCause::Unclassified)
+    );
+    let telemetry = "https://browser.events.data.microsoft.com/OneCollector/1.0/";
+    assert_eq!(fence.decide(&unread("GET", telemetry)).await, Verdict::Allow);
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert_eq!(entries.last().unwrap()["event"], "allowed");
+}
+
+#[tokio::test]
+async fn a_forced_deny_wins_over_a_request_that_reaches_nobody() {
+    let lab = lab().unwrap();
+    let fence = http_fence(&lab, &[]);
+    let (method, url, body) = REACHES_NOBODY[8];
+    fence.force_deny(ForcedDeny::new(method, "/ups/").unwrap().labelled("held"));
+    let verdict = fence.decide(&paused_with(method, url, body)).await;
+    assert_eq!(verdict, Verdict::Deny(DenyCause::Forced));
+    assert_eq!(fence.denials()[0].label.as_deref(), Some("held"));
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["reason"], "forced");
 }
 
 #[tokio::test]
@@ -472,11 +448,11 @@ async fn a_mapped_write_goes_through_the_fence_with_a_fresh_membership() {
         )
     };
 
-    let lab_only = http_fence(&lab, Classifier::seeded(), &[LAB_A, LAB_B]);
+    let lab_only = http_fence(&lab, &[LAB_A, LAB_B]);
     let verdict = lab_only.judge(Classification::Write(target()), "POST", CHAT).await;
     assert_eq!(verdict, Verdict::Allow);
 
-    let with_coworker = http_fence(&lab, Classifier::seeded(), &[LAB_A, COWORKER]);
+    let with_coworker = http_fence(&lab, &[LAB_A, COWORKER]);
     let verdict = with_coworker.judge(Classification::Write(target()), "POST", CHAT).await;
     assert_eq!(
         verdict,
@@ -487,6 +463,21 @@ async fn a_mapped_write_goes_through_the_fence_with_a_fresh_membership() {
     let entries = log_entries(&lab.log_path).unwrap();
     let verdicts: Vec<&Value> = entries.iter().map(|entry| &entry["verdict"]).collect();
     assert_eq!(verdicts, [&json!("allow"), &json!("deny")], "the fence logs both");
+
+    // decided whole: a message to a chat of lab accounts passes, one mentioning an outsider doesn't
+    let chat = "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/19%3Alab%40thread.v2/messages";
+    assert_eq!(
+        lab_only
+            .decide(&paused_with("POST", chat, r#"{"messagetype":"Text","content":"hi"}"#))
+            .await,
+        Verdict::Allow
+    );
+    let mention = json!([{"mri": OUTSIDER}]).to_string();
+    let body = json!({"messagetype": "RichText/Html", "content": "<p>hi</p>", "properties": {"mentions": mention}});
+    assert_eq!(
+        lab_only.decide(&paused_with("POST", chat, &body.to_string())).await,
+        Verdict::Deny(DenyCause::Fenced(DenyReason::Outsiders { count: 1 }))
+    );
 }
 
 #[test]
@@ -501,26 +492,36 @@ fn a_paused_event_gives_the_request_and_its_inline_body() {
     assert_eq!(request.method, "POST");
     assert_eq!(request.url, CHAT);
     assert_eq!(request.body.as_deref(), Some(&b"{\"content\":\"hi\"}"[..]));
+    assert_eq!(request.classified_body(), Some(&b"{\"content\":\"hi\"}"[..]));
 
     let without_body = json!({"requestId": "r", "request": {"method": "GET", "url": CHAT}});
-    assert_eq!(PausedRequest::from_params(&without_body).unwrap().body, None);
+    let request = PausedRequest::from_params(&without_body).unwrap();
+    assert_eq!(request.body, None);
+    assert_eq!(request.classified_body(), None);
+    // a body the event says is there but doesn't inline is read as an empty one
+    let not_inlined = json!({"requestId": "r", "request": {"method": "POST", "url": CHAT, "hasPostData": true}});
+    let request = PausedRequest::from_params(&not_inlined).unwrap();
+    assert!(request.body_unread);
+    assert_eq!(request.classified_body(), Some(&b""[..]));
 
-    // every header's name, but the value only of those the read-by-POST list reads, and only when it is a string
+    // every header's name, but the value only of a method override, and only when it is a string
     let with_headers = json!({"requestId": "r", "request": {"method": "POST", "url": CHAT, "headers": {
         "Authorization": "Bearer planted-token",
         "Cookie": "planted-cookie",
         "Content-Type": "application/json",
-        "Origin": 7,
-        "x-ms-migration": "True",
+        "X-HTTP-Method-Override": "DELETE",
+        "x-http-method": 7,
+        "X-Method-Override": "PATCH",
     }}});
     let mut headers = PausedRequest::from_params(&with_headers).unwrap().headers;
     headers.sort();
     let expected = [
         ("Authorization", None),
-        ("Content-Type", Some("application/json")),
+        ("Content-Type", None),
         ("Cookie", None),
-        ("Origin", None),
-        ("x-ms-migration", Some("True")),
+        ("X-HTTP-Method-Override", Some("DELETE")),
+        ("X-Method-Override", Some("PATCH")),
+        ("x-http-method", None),
     ]
     .map(|(name, value)| (name.to_owned(), value.map(str::to_owned)));
     assert_eq!(headers, expected);
@@ -810,13 +811,7 @@ async fn arm_fake(fake: &FakeBrowser, origins: &[&str]) -> TestResult<(ArmedBrow
     let options = ArmOptions {
         service_worker_origins: origins.iter().map(|&origin| origin.to_owned()).collect(),
     };
-    let armed = ArmedBrowser::arm(
-        fake.launch().await?,
-        http_fence(&lab, Classifier::seeded(), &[]),
-        ws_fence(&lab)?,
-        &options,
-    )
-    .await?;
+    let armed = ArmedBrowser::arm(fake.launch().await?, http_fence(&lab, &[]), ws_fence(&lab)?, &options).await?;
     Ok((armed, lab))
 }
 
@@ -1203,7 +1198,7 @@ async fn arm_fake_capturing(fake: &FakeBrowser, lab: &Lab) -> TestResult<(ArmedB
     let options = ArmOptions {
         service_worker_origins: Vec::new(),
     };
-    let http = http_fence(lab, Classifier::seeded(), &[]);
+    let http = http_fence(lab, &[]);
     let armed = ArmedBrowser::arm_capturing(fake.launch().await?, http, ws_fence(lab)?, &options, capture).await?;
     Ok((armed, recorder))
 }
@@ -1569,7 +1564,7 @@ async fn closing_the_fence_waits_for_the_decisions_still_running() {
         membership: Membership::Complete(vec![Mri::new(LAB_A), Mri::new(COWORKER)]),
         asked: Arc::clone(&asked),
     };
-    let http = HttpFence::new(Classifier::mapped(), Arc::clone(&lab.fence), Arc::new(members));
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&lab.fence), Arc::new(members));
     let options = ArmOptions {
         service_worker_origins: Vec::new(),
     };
@@ -1579,7 +1574,7 @@ async fn closing_the_fence_waits_for_the_decisions_still_running() {
     let decisions = armed.decisions();
     let body = r#"{"messagetype":"Text","content":"hi"}"#;
     assert!(matches!(
-        Classifier::mapped().classify("POST", CHAT, Some(body.as_bytes())),
+        classify("POST", CHAT, Some(body.as_bytes())),
         Classification::Write(_)
     ));
     let pause = json!({
@@ -1620,7 +1615,7 @@ async fn a_dropped_fence_kills_the_browser_first_and_its_decisions_running_still
         membership: Membership::Complete(vec![Mri::new(LAB_A), Mri::new(COWORKER)]),
         asked: Arc::clone(&asked),
     };
-    let http = HttpFence::new(Classifier::mapped(), Arc::clone(&lab.fence), Arc::new(members));
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&lab.fence), Arc::new(members));
     let options = ArmOptions {
         service_worker_origins: Vec::new(),
     };
@@ -1885,14 +1880,19 @@ struct Run {
     _profile: tempfile::TempDir,
 }
 
-async fn start_run(chrome: &Path, server: &MockServer, classifier: Classifier) -> TestResult<Run> {
+/// An armed browser under the lab rule, which lets the local server's requests through; a `POST` to its `/sink/` or
+/// `/own/other` is force-denied, standing in for a request the fence denies.
+async fn start_run(chrome: &Path, server: &MockServer) -> TestResult<Run> {
     let profile = tempfile::tempdir()?;
     let browser = Browser::launch(chrome, &LaunchOptions::new(profile.path().join("p")), STEP).await?;
     let lab = lab()?;
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };
-    let armed = ArmedBrowser::arm(browser, http_fence(&lab, classifier, &[]), ws_fence(&lab)?, &options).await?;
+    let http = http_fence(&lab, &[]);
+    let origin = regex::escape(&server.uri());
+    http.force_deny(ForcedDeny::new("POST", &format!("^{origin}/(sink/|own/other$)"))?);
+    let armed = ArmedBrowser::arm(browser, http, ws_fence(&lab)?, &options).await?;
     Ok(Run {
         armed,
         lab,
@@ -1908,14 +1908,14 @@ impl Run {
 }
 
 /// Runs `body` on an armed browser, then closes the browser whatever `body` returned. Without Chrome it does nothing.
-async fn with_run<F>(server: &MockServer, classifier: Classifier, body: F) -> TestResult
+async fn with_run<F>(server: &MockServer, body: F) -> TestResult
 where
     F: AsyncFnOnce(&Run) -> TestResult,
 {
     let Some(chrome) = common::chrome_or_skip() else {
         return Ok(());
     };
-    let run = start_run(&chrome, server, classifier).await?;
+    let run = start_run(&chrome, server).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(90), body(&run)).await;
     run.finish().await?;
     outcome.map_err(|_| "the run took over 90 s")?
@@ -1986,7 +1986,7 @@ async fn pagehide_requests_are_denied(run: &Run, server: &MockServer) -> TestRes
 #[tokio::test]
 async fn every_mutating_request_is_denied_before_it_leaves_the_browser() {
     let server = serve_pages().await;
-    with_run(&server, Classifier::seeded(), async |run| {
+    with_run(&server, async |run| {
         posts_from_every_scope_are_denied(run, &server).await?;
         pagehide_requests_are_denied(run, &server).await?;
 
@@ -1999,7 +1999,7 @@ async fn every_mutating_request_is_denied_before_it_leaves_the_browser() {
             .armed
             .denials()
             .iter()
-            .inspect(|denial| assert_eq!(denial.cause, DenyCause::Unclassified, "{denial:?}"))
+            .inspect(|denial| assert_eq!(denial.cause, DenyCause::Forced, "{denial:?}"))
             .map(|denial| format!("{} {}", denial.method, denial.url))
             .collect();
         let sinks: Vec<&str> = SOURCES.iter().chain(&PAGEHIDE_SINKS).copied().collect();
@@ -2028,10 +2028,9 @@ async fn every_mutating_request_is_denied_before_it_leaves_the_browser() {
 }
 
 #[tokio::test]
-async fn a_get_passes_and_an_own_post_reaches_the_server() {
+async fn a_get_and_a_post_that_reaches_nobody_reach_the_server() {
     let server = serve_pages().await;
-    let classifier = Classifier::seeded().with_own(OwnRule::new(OwnKind::Authz, "POST", &server.uri(), "/own/authz"));
-    with_run(&server, classifier, async |run| {
+    with_run(&server, async |run| {
         let cdp = run.armed.cdp();
         let page = run.armed.open_page(STEP).await?;
         navigate(cdp, &page, &format!("{}/pages/own.html", server.uri())).await?;
@@ -2045,15 +2044,15 @@ async fn a_get_passes_and_an_own_post_reaches_the_server() {
         assert_eq!(
             received(&server, "/own/").await,
             ["POST /own/authz"],
-            "only the own POST got out"
+            "only the allowed POST got out"
         );
         let denied: Vec<String> = run.armed.denials().iter().map(|denial| denial.url.clone()).collect();
         assert_eq!(denied, [format!("{}/own/other", server.uri())]);
-        let own_entries = log_entries(&run.lab.log_path)?
+        let allowed = log_entries(&run.lab.log_path)?
             .into_iter()
-            .filter(|entry| entry["own"] == "authz")
+            .filter(|entry| entry["event"] == "allowed" && entry["path"] == "/own/authz")
             .count();
-        assert!(own_entries >= 1, "the own request is in fence.log");
+        assert!(allowed >= 1, "the allowed request is in fence.log");
         Ok(())
     })
     .await
@@ -2063,7 +2062,7 @@ async fn a_get_passes_and_an_own_post_reaches_the_server() {
 #[tokio::test]
 async fn an_audio_worklet_is_resumed_without_an_arming_failure() {
     let server = serve_pages().await;
-    with_run(&server, Classifier::seeded(), async |run| {
+    with_run(&server, async |run| {
         let cdp = run.armed.cdp();
         let page = run.armed.open_page(STEP).await?;
         navigate(cdp, &page, &format!("{}/pages/worklet.html", server.uri())).await?;
@@ -2136,13 +2135,7 @@ async fn service_workers_are_neutralized_at_run_start_and_bypassed_during_it() {
         let options = ArmOptions {
             service_worker_origins: vec![server.uri()],
         };
-        let armed = ArmedBrowser::arm(
-            browser,
-            http_fence(&lab, Classifier::seeded(), &[]),
-            ws_fence(&lab)?,
-            &options,
-        )
-        .await?;
+        let armed = ArmedBrowser::arm(browser, http_fence(&lab, &[]), ws_fence(&lab)?, &options).await?;
         let cdp = armed.cdp().clone();
         let page = armed.open_page(STEP).await?;
         navigate(&cdp, &page, &probe_page).await?;
@@ -2304,13 +2297,7 @@ async fn reports_reaching(chrome: &Path, reporting_on: bool) -> TestResult<(Vec<
     let options = ArmOptions {
         service_worker_origins: vec![],
     };
-    let armed = ArmedBrowser::arm(
-        browser,
-        http_fence(&lab, Classifier::seeded(), &[]),
-        ws_fence(&lab)?,
-        &options,
-    )
-    .await?;
+    let armed = ArmedBrowser::arm(browser, http_fence(&lab, &[]), ws_fence(&lab)?, &options).await?;
     let page = armed.open_page(STEP).await?;
     navigate(armed.cdp(), &page, &format!("{}/page", server.origin)).await?;
     let reported = async {

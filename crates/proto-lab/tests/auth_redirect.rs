@@ -15,7 +15,7 @@ use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::classify::Classifier;
 use proto_lab::fence_http::{CatchError, HttpFence, RedirectCatch};
-use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use proto_lab::fence_ws::{GuardScript, WsFence};
 use serde_json::{Value, json};
 use teams_auth::pkce::Pkce;
 use teams_auth::redirect::RedirectError;
@@ -36,7 +36,7 @@ const NATIVE_PATH: &str = "/common/oauth2/nativeclient";
 // --- the fence's patterns ---
 
 fn fence(lab: &Lab, catch: Option<RedirectCatch>) -> HttpFence {
-    let http = HttpFence::new(Classifier::seeded(), Arc::clone(&lab.fence), Arc::new(FailClosed));
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&lab.fence), Arc::new(FailClosed));
     match catch {
         Some(catch) => http.with_redirect_catch(catch),
         None => http,
@@ -208,12 +208,7 @@ async fn start(
     let authorize = format!("{}/organizations/oauth2/v2.0/authorize", server.uri());
     let (redirect_catch, caught) = RedirectCatch::new(&authorize, redirect_uri)?;
     let http = fence(&lab, catch.then_some(redirect_catch));
-    let ws = WsFence::new(
-        FrameClassifier::seeded(),
-        Arc::clone(&lab.fence),
-        Arc::new(FailClosed),
-        GuardScript::generate()?,
-    );
+    let ws = WsFence::new(Arc::clone(&lab.fence), Arc::new(FailClosed), GuardScript::generate()?);
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };

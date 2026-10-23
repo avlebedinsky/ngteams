@@ -98,7 +98,7 @@ on both.
   `UserInitiatedTestCall`, the roster and conversation callbacks, and `callInvitation` with `Audio`, the five call
   callbacks and `mediaContent` (`application/sdp-ngc-1.0`). The test checks it against the captured start: the same
   participants and links, every key one the client sent, and the browser fence's own mapping
-  (`proto_lab::calling::call_start`) reads it as exactly the `StartCall`'s target. The rest of the client's body
+  (`teams_fence::contacting`) reads it as exactly the `StartCall`'s target. The rest of the client's body
   (capabilities, endpoint state, client details) is left out; whether the service needs any of it is unconfirmed.
 - **Callback links**: `CallbackLinks` builds each link as the web client does, `<Trouter push URL>callAgent/<agent
   id>/<8 hex digits of its own>/<call|conversation>/<name>/`, and `OutgoingCall` acts only on deliveries at its own

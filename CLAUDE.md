@@ -8,9 +8,9 @@ and layout are in [README.md](README.md).
 ## Hard rules
 
 These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
-else is allowed.** The fences in the code are still stricter than this (they deny by default, as Patterns describes);
-`docs/plans/20261023-lab-fence-contacting-writes-only.md` brings them to this rule, and each of its tasks updates
-this file as its code lands.
+else is allowed.** The lab browser's fence follows this rule; the native transport is still stricter (it sends only
+reads and its sealed lists, as Patterns describes), and `docs/plans/20261023-lab-fence-contacting-writes-only.md`
+brings it to this rule, each of its tasks updating this file as its code lands.
 
 - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
@@ -76,7 +76,11 @@ What the code does and why. A change that undoes one of these needs a new reason
   iframes through `Runtime.enable` + `Page.enable` + a new-document script with `runImmediately`, workers through a
   `Runtime.evaluate` that must report `armed`. Frames wait per socket and go out only on an explicit allow, answered
   with the run's token; a send on a socket made in another realm is refused (`foreign`). `Network.webSocketFrameSent`
-  is only an audit: a frame no allow covers is a breach.
+  is only an audit: a frame no allow covers is a breach. The frame rule (`fence_ws::classify_frame`): on a Trouter
+  socket (any host under `trouter.teams.microsoft.com`) only socket.io 0.9 types `0`, `1`, `2` and `5` pass, so a
+  delivery response (`3`), a JSON message, an acknowledgement, a binary frame and anything unparsable are denied; on a
+  contacting service's socket (`teams_fence::on_contacting_service`) every frame is denied; anywhere else a frame
+  passes. A frame let through is logged `allowed` (method `SEND`).
 - **Service workers only through the browser.** Target-level auto-attach filters them out: one attached twice while
   paused answers nothing until it runs. At run start they are unregistered and their caches cleared
   (`Storage.clearDataForOrigin` works only on a page session), and pages bypass them (`Network.setBypassServiceWorker`
@@ -119,26 +123,24 @@ What the code does and why. A change that undoes one of these needs a new reason
   row is code plus a case in `crates/teams-fence/tests/contacting.rs` or its fixtures under
   `crates/teams-fence/tests/fixtures/contacting/`. A mutating request let through as `None` is logged as `allowed`
   (`FenceLog::record_allowed`: method, host and `path_shape`, every id replaced by its kind, never a query, header or
-  body). Neither the browser fence nor the native transport calls either yet: `proto-lab`'s `map_write` and
-  `calling::call_start` still decide the lab browser's writes.
+  body). The browser fence asks it for every paused request (`proto-lab`'s `Classifier`: a read passes unlogged,
+  `None` passes logged, `Write` goes to `Fence::check`, `Unreadable` is denied); the native transport doesn't yet.
 - `Fence::check` reads the target's members for every write except typing and read receipts on a chat and the
   account's own availability (which keeps its own-account check). Typing and read receipts reach nobody: on a chat
   id `is_chat_id` takes (1:1, group or meeting, the rule `contacting` carves them out by) they are permitted without a
   member read, judged only by the participants they name, and logged like every decision; anywhere else (a channel, a
   chat id in another form) they are judged like any write. So a caller hands it a `Typing` or `ReadReceipt` target
-  only for the content-free signal: `map_write` maps typing only in its captured body (`content` empty or absent,
-  no key but `content`, `contenttype`, `messagetype`) and a read receipt only with `name` its one query key.
+  only for the content-free signal: `contacting` carves typing out only in its captured body (`content` empty or
+  absent, no key but `content`, `contenttype`, `messagetype`) and a read receipt only with `name` its one query key.
 - Writes on an existing call are denied: the follow-ups aren't mapped, and the native `add` (`AddToCall`, an `Invite`
   on `Scope::Call`) is `Partial`, since no membership source reads a call's members
   (`docs/backlog/fence-call-follow-ups.md`).
 - A group or meeting chat is judged like a 1:1 chat, by its fresh member list: a lab-only one is writable, a group
   chat the native client creates included. `chats.toml` is lab data for the scenarios and clients (`abc-chat` records
   the lab's a–b–c chat in it, once); the fence doesn't read it.
-- The read-by-`POST` list (`crates/proto-lab/src/post_read.rs`, `fence.log` `post_read`) is a class of its own, asked
-  only after the write mapping: the mention picker's profile lookups (`users/fetchShortProfile`, `users/fetch`) in
-  their captured query, header values and body, let through only when every MRI is a lab account of the roster at
-  decision time (`Fence::lab_accounts_only`; approved services don't count). A `PausedRequest` keeps header values
-  only for the headers the list reads, never a token or cookie.
+- A `PausedRequest` keeps header values only for the method overrides `contacting` reads (`OVERRIDE_HEADERS`), never a
+  token or cookie, and a body Chrome didn't inline is classified as an empty one: a row that reads the body takes
+  nothing, so such a request is never judged by a guess.
 
 ### The native client (`crates/teams-proto`, `teams-trouter`, `teams-core`, `teams-store`)
 
@@ -234,21 +236,21 @@ What the code does and why. A change that undoes one of these needs a new reason
   and with it the group chat's first message, which begins with the probe's marker.
 - A scenario's `DenyPolicy` says which denies it expects: `load` all of them; the writing scenarios only their own
   forced denies, by label, and the reviewed **expected-deny list** (`scenario/expected.rs`: host + method +
-  `/`-segment path pattern, frames by socket host, each class with the reason the scenario doesn't need it;
-  `ab-trouter` adds its own classes, `TROUTER_RUN_REQUESTS`). The list judges the run only, never a verdict:
-  everything on it stays denied and logged. A deny on the scenario's own chat, one for a partial or refused
-  membership, one whose `fence.log` entry was lost, and any class off the list fail the run; a new class goes onto the
-  list with its reason, never waved through. `echo-call` still exits 1 on the call's follow-ups: they are needed, so
-  they aren't on it.
-- Classifiers are chosen per run: `seeded` (status, load, auth), `sign_in` (login only), `mapped` (ab-chat,
-  ab-chat-full, ab-image, abc-chat), `messaging` (ab-trouter: the messaging stack's registration and the Trouter
-  session frames), `calling` (echo-call, a superset of `mapped`). An own-state rule (`OwnRule`) matches the method,
-  the origin, the path and the query (none unless given its `QueryRule`), never the body or headers. `UrlPattern`
-  ignores the query, `QueryRule::Any` takes any query, and `classify` checks own rules before `map_write`: such a rule
-  on a chat-service path would pass a mapped write (a reaction, `?name=emotions`) unfenced, so an own rule never takes
-  a request the write mapping would classify. The seeded rules match their captured queries; only `login`'s sign-in
-  form still takes any query, a known gap until a `login` capture (`captures/login/`, recorded without request bodies)
-  shows its queries (`docs/backlog/seeded-own-rules-ignore-the-query.md`).
+  `/`-segment path pattern, frames by socket host, each class with the reason the scenario doesn't need it: bot
+  invokes, the account's own channel entry and channel properties, Trouter delivery responses). The list judges the
+  run only, never a verdict: everything on it stays denied and logged, and it holds only what the lab rule denies. A
+  deny on the scenario's own chat, one for a partial or refused membership, one whose `fence.log` entry was lost, a
+  deny of what the lab rule lets through, and any class off the list fail the run, the failure naming the deny's
+  contacting service; a new class goes onto the list with its reason, never waved through. `echo-call` still exits 1
+  on the call's follow-ups: they are needed, so they aren't on it.
+- Every run uses the one classifier (`classify::Classifier`, the lab rule; `echo-call` adds the echo service's MRI
+  for its test call start), so a scenario picks none. What a scenario holds back on purpose is a labelled forced deny,
+  of requests (`ForcedDeny`) or of frames (`ForcedFrameDeny`: `ab-trouter-quiet` and `own-presence-endpoint` hold
+  back `user.activity`, the other `own-presence` runs the endpoint `PUT` or the manual status), expected by its label.
+- The sign-in window (`teams-signin`) keeps default-deny rules of its own (`teams_signin::classify`): reads, the
+  token endpoint and authz in their captured queries, and Entra's sign-in form, which still takes any query
+  (`docs/backlog/seeded-own-rules-ignore-the-query.md`). An own-state rule (`OwnRule`) matches the method, the
+  origin, the path and the query (none unless given its `QueryRule`), never the body or headers.
 - After native runs the web client opens a chat at its "last read" mark (a native read receipt moves the stored
   horizon but not that mark), so a scenario waiting for a new message clicks "Jump to newest" or the "New messages"
   pill (`ab_chat::wait_for_newest`).

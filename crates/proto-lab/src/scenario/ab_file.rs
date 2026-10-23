@@ -1,10 +1,10 @@
 //! The `ab-file` scenario: what the web client sends when account a sends a file in the a–b chat, with every write of
 //! it denied, recorded for the protocol notes (`docs/protocol/chat.md`, M2 Task 23), as `ab-image` did for an image.
-//! It runs under `ab-chat`'s fence: the write mapping ([`Classifier::mapped`]), members read live, `ab-chat`'s
-//! forced-deny probes and the reviewed expected-deny list.
+//! It runs under `ab-chat`'s fence: the lab rule (`crate::classify`), members read live, `ab-chat`'s forced-deny probes
+//! and the reviewed expected-deny list.
 //!
 //! A file sent in a chat lives in the sender's `OneDrive` (`SharePoint`) and is shared with the chat's members; the
-//! message carries a reference to it. None of that is mapped, so the fence would deny it as unknown anyway; the
+//! message carries a reference to it. Those are contacting services no row maps, so the fence would deny it anyway; the
 //! scenario denies it on purpose, from before a's page loads to the end of the run, so the run expects it by name and
 //! the capture holds each request whole (headers and body) as data for deciding whether the file's sharing could be
 //! fenced:
@@ -40,10 +40,8 @@
 use std::time::Duration;
 
 use crate::browser::Media;
-use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::{Denial, DenyCause, ForcedDeny};
-use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
@@ -358,14 +356,13 @@ pub fn mark_unsent_file(stem: &str) -> String {
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
-        classifier: Classifier::mapped(),
-        frames: FrameClassifier::seeded(),
         live_members: true,
         capture: Some(ScenarioName::AbFile.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
+        ..SessionOptions::fail_closed()
     };
     let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {

@@ -1,7 +1,7 @@
 //! The `abc-chat` scenario: the group chat of accounts a, b and c (M1 Task 8).
 //!
-//! Every account runs with the write mapping ([`Classifier::mapped`]) and members read live (`LiveMembershipSource`),
-//! as in [`super::ab_chat`]. The group chat's id isn't derived from MRIs as a 1:1 chat's is: the scenario creates the
+//! Every account runs under the lab rule (`crate::classify`) with members read live (`LiveMembershipSource`), as in
+//! [`super::ab_chat`]. The group chat's id isn't derived from MRIs as a 1:1 chat's is: the scenario creates the
 //! chat once and keeps its id in the lab's `chats.toml` ([`LabChats`]), never in the repo. What a run does depends on
 //! whether that id is there yet.
 //!
@@ -32,7 +32,7 @@
 //! 3. **Live enforcement test**: a sends this run's probe; the fence must force-deny, under [`THIS_RUN_PROBE`], a
 //!    message post to the group chat, and that very post must fail in a's page with `net::ERR_BLOCKED_BY_CLIENT`.
 //! 4. a sends the real message; then b and c, one after the other, open the web client at the group chat, so each
-//!    reads its history from the service (the fence denies the push channel's frames), and must show the message within
+//!    reads its history from the service, and must show the message within
 //!    [`DELIVERY`](super::ab_chat::DELIVERY) and not the probe. A chat with unread messages opens at its "last
 //!    read" mark, the newest ones not rendered: each jumps to the newest ([`wait_for_newest`]).
 //! 5. Judged by [`policy`]: no deny but the three forced ones and the reviewed expected-deny list
@@ -49,10 +49,9 @@ use teams_fence::{Fence, LiveMembershipSource, Scope, is_group_chat_id};
 use url::Url;
 
 use crate::browser::Media;
-use crate::classify::{Classifier, chat_service_path};
+use crate::classify::chat_service_path;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::{DenyCause, ForcedDeny};
-use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
@@ -180,14 +179,13 @@ pub fn messaging_blocked(source: &LiveMembershipSource, chat_id: &str) -> Option
 
 fn session_options(options: RunOptions) -> SessionOptions {
     SessionOptions {
-        classifier: Classifier::mapped(),
-        frames: FrameClassifier::seeded(),
         live_members: true,
         capture: Some(ScenarioName::AbcChat.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
+        ..SessionOptions::fail_closed()
     }
 }
 

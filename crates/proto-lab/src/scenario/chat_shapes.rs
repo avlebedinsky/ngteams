@@ -2,9 +2,9 @@
 //! `docs/protocol/chat.md`. M1 captured one reaction key (the like), typing as one post per message and never its end,
 //! and no message with a line break or a link; the mention was captured in the 1:1 chat only.
 //!
-//! Both accounts run with the **messaging set**, as `ab-trouter` does ([`Classifier::messaging`],
-//! [`FrameClassifier::messaging`]): b's open chat shows a's typing only once b's push channel is up. Every write is on
-//! the a–b chat or the lab's recorded group chat, mapped and judged by the fence with members read live.
+//! Both accounts run under the lab rule with members read live, as `ab-trouter` does: b's open chat shows a's typing
+//! only once b's push channel is up. Every contacting write is on the a–b chat or the lab's recorded group chat, mapped
+//! and judged by the fence with members read live.
 //!
 //! 1. Before anything loads, a's fence force-denies this run's probe and any earlier run's probe, and the group chat's
 //!    first message of any `abc-chat` run ([`super::abc_chat::forced_denies`]): a's profile holds both kinds unsent
@@ -31,8 +31,8 @@
 //!
 //! A step that fails after the enforcement test is reported (with a screenshot in the capture dir and the page's
 //! `data-tid`s) and the run goes on with the next one. Judged as `ab-trouter` is ([`policy`]): the forced denies of
-//! step 1, the reviewed expected-deny list and [`TROUTER_RUN_REQUESTS`]; nothing denied on the a–b chat or the group
-//! chat but those forced denies. Nothing answers a call.
+//! step 1 and the reviewed expected-deny list; nothing denied on the a–b chat or the group chat but those forced
+//! denies. Nothing answers a call.
 
 use std::time::Duration;
 
@@ -40,9 +40,7 @@ use serde_json::Value;
 use tokio::time::Instant;
 
 use crate::browser::Media;
-use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
@@ -50,7 +48,7 @@ use super::ab_chat::{
     one_to_one_id, press_until_sent, probe_text, save_screenshot_as, setup, wait_for_newest,
 };
 use super::ab_chat_full::{MARKED, VISIBLE_TIDS, Writes, answered, click_visible, find_message, mention_b, send};
-use super::ab_trouter::{TROUTER_RUN_REQUESTS, size, wait_registered};
+use super::ab_trouter::{size, wait_registered};
 use super::abc_chat::{self, chat_link_by_id, lab_source, messaging_blocked};
 use super::dsl::{Driver, Key, RequestPattern, SeenRequest, js_string};
 use super::expected::Review;
@@ -163,16 +161,14 @@ impl Texts {
     }
 }
 
-/// The denies a run of this scenario expects: `ab-trouter`'s ([`TROUTER_RUN_REQUESTS`] and the reviewed list), the
+/// The denies a run of this scenario expects: the reviewed list, the
 /// forced denies of [`abc_chat::EXPECTED_FORCED`] (this run's probe, earlier runs' probes, the group chat's first
 /// messages), and nothing else on the a–b chat (`ab_chat_id`) or the group chat (`group_chat_id`).
 ///
 /// # Errors
 /// When a chat's pattern doesn't compile (never for a 1:1 chat id or a group chat id).
 pub fn policy(ab_chat_id: Option<&str>, group_chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new()
-        .expecting_forced(&abc_chat::EXPECTED_FORCED)
-        .expecting_requests(TROUTER_RUN_REQUESTS);
+    let mut review = Review::new().expecting_forced(&abc_chat::EXPECTED_FORCED);
     for chat_id in [ab_chat_id, group_chat_id].into_iter().flatten() {
         review = review.with_mapped_target(chat_url(chat_id)?);
     }
@@ -360,14 +356,13 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         },
     };
     let session_options = SessionOptions {
-        classifier: Classifier::messaging(),
-        frames: FrameClassifier::messaging(),
         live_members: true,
         capture: Some(ScenarioName::ChatShapes.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
+        ..SessionOptions::fail_closed()
     };
     let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
@@ -386,11 +381,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let ab_chat_id = one_to_one_id(&mri(Alias::A), &mri(Alias::B));
     let policy = policy(ab_chat_id.as_deref(), group.as_deref().ok()).unwrap_or_else(|error| {
         report.failures.push(format!("can't tell a chat in a URL: {error}"));
-        DenyPolicy::Reviewed(
-            Review::new()
-                .expecting_forced(&abc_chat::EXPECTED_FORCED)
-                .expecting_requests(TROUTER_RUN_REQUESTS),
-        )
+        DenyPolicy::Reviewed(Review::new().expecting_forced(&abc_chat::EXPECTED_FORCED))
     });
     let shapes = Shapes {
         mri_a: mri(Alias::A),

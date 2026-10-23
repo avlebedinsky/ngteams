@@ -1,7 +1,7 @@
 //! Scenarios: scripted runs of the Teams web client in lab profiles under the armed fence (`proto-lab run`).
 //!
-//! - [`load`] (account a, fail-closed): opens the web client, waits for it to load and records the traffic. Every
-//!   request the fence denies is expected and goes into the capture as data for mapping writes.
+//! - [`load`] (account a, membership source fail-closed): opens the web client, waits for it to load and records the
+//!   traffic. Every request the fence denies is expected and goes into the capture as data for mapping writes.
 //! - [`ab_chat`] (accounts a and b, writes mapped, members read live): a sends a message in the a–b chat and b
 //!   receives it; before that, a forced deny on one a–b message checks live that a denied write never leaves the
 //!   browser.
@@ -13,17 +13,17 @@
 //! - [`ab_file`] (accounts a and b, as `ab-chat`, every write of the file force-denied): what the web client sends
 //!   when a sends a file in the a–b chat; recorded.
 //! - [`abc_chat`] (accounts a, b and c, writes mapped, members read live): the group chat of a, b and c, created once
-//!   (its id kept in the lab's `chats.toml`); messaging it (a sends, b and c receive, after a live enforcement test)
-//!   is refused before anything opens until the fence can read a group chat's members in full.
-//! - [`ab_trouter`] (accounts a and b, writes mapped, members read live, the push channel's own frames and the
-//!   messaging endpoint's registration let out): b's Trouter session while a sends, edits and reacts in the a–b chat,
-//!   recorded; `ab-trouter-quiet` holds back the client's own `user.activity` as well.
+//!   (its id kept in the lab's `chats.toml`), then messaged (a sends, b and c receive, after a live enforcement
+//!   test), each write judged by the group chat's member list, read fresh.
+//! - [`ab_trouter`] (accounts a and b, writes mapped, members read live): b's Trouter session while a sends, edits and
+//!   reacts in the a–b chat, recorded; `ab-trouter-quiet` holds back the client's own `user.activity` with a forced
+//!   deny.
 //! - [`chat_shapes`] (accounts a and b, as `ab-trouter`, plus the lab's group chat): the chat shapes the native UI
 //!   still needs, recorded: each quick reaction set and taken back, typing as a types, pauses and empties its box
 //!   (and how long b's open chat shows it), a message with line breaks and a link, a mention of b in the group chat.
-//! - [`own_presence`] (account a, the messaging set of `ab-trouter`, its own availability under the user's exception of
-//!   2026-10-21): what makes a show online as b reads it (`own-presence-activity`, `-endpoint`, `-both`) and what a
-//!   manual status sends (`own-presence-manual-held`, `own-presence-manual`); recorded.
+//! - [`own_presence`] (account a, as `ab-trouter`): what makes a show online as b reads it (`own-presence-activity`,
+//!   `-endpoint`, `-both`, each holding the other report back with a forced deny) and what a manual status sends
+//!   (`own-presence-manual-held`, `own-presence-manual`); recorded.
 //! - [`echo_call`] (account a, writes mapped, members read live, fake microphone): a places the web client's test call
 //!   to the echo service, the one approved participant outside the lab, stays in it a while and hangs up; recorded.
 //!
@@ -245,14 +245,19 @@ impl ScenarioReport {
         }
         for denial in policy.unexpected(&run.denials) {
             self.failures.push(format!(
-                "{alias}: unexpected deny of {} {} ({:?})",
-                denial.method, denial.url, denial.cause
+                "{alias}: unexpected deny of {} {} ({:?}; {})",
+                denial.method,
+                denial.url,
+                denial.cause,
+                service_class(&denial.url)
             ));
         }
         for denial in run.frame_denials.iter().filter(|denial| !policy.expects_frame(denial)) {
             self.failures.push(format!(
-                "{alias}: unexpected deny of a WebSocket frame to {} ({:?})",
-                denial.url, denial.cause
+                "{alias}: unexpected deny of a WebSocket frame to {} ({:?}; {})",
+                denial.url,
+                denial.cause,
+                service_class(&denial.url)
             ));
         }
         // the report's count, taken at another moment, may hold frames the list doesn't: nothing says what they were
@@ -288,6 +293,21 @@ impl ScenarioReport {
             },
             policy,
         );
+    }
+}
+
+/// The class an unexpected deny is named by in a run's failures: the contacting service its URL goes to
+/// (`teams_fence::service_of`: `chat_service`, `calling`, …), `unreadable teams path` for a Teams origin path whose
+/// service can't be read, `no contacting service` for any other URL, `unparsable url` for one that doesn't parse.
+#[must_use]
+pub fn service_class(url: &str) -> &'static str {
+    let Ok(url) = url::Url::parse(url) else {
+        return "unparsable url";
+    };
+    match teams_fence::service_of(&url) {
+        Some(service) => service.as_str(),
+        None if teams_fence::on_contacting_service(&url) => "unreadable teams path",
+        None => "no contacting service",
     }
 }
 

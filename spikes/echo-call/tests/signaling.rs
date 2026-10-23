@@ -14,7 +14,10 @@ use echo_call::signaling::{
 };
 use fixture_guard::Guard;
 use serde_json::{Value, json};
-use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
+use teams_fence::{
+    Contact, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Policy, Request, Roster, Scope,
+    contacting,
+};
 use teams_proto::{AddToCall, Authorized, ConversationUrl, Mutating as _, StartCall, TEST_CALL_SCENARIO};
 
 /// The fixtures' placeholders for lab account a and the echo bot.
@@ -231,11 +234,11 @@ async fn the_browser_fence_maps_the_native_start_to_the_permitted_target() {
     let (_, captured) = test_call_start().unwrap();
     let offer = NgcSdp::new(captured["callInvitation"]["mediaContent"]["blob"].as_str().unwrap()).unwrap();
     let body = serde_json::to_vec(&call_start_body(&call, &me(), &offer, &fixture_links().unwrap())).unwrap();
-    let url = url::Url::parse(CALL_START_URL).unwrap();
 
-    let mapped = proto_lab::calling::call_start("POST", &url, Some(&body), Some(&Mri::new(ECHO)));
-    assert_eq!(mapped.as_ref(), Some(&call.request().target()));
-    assert_eq!(TEST_CALL_SCENARIO, proto_lab::calling::TEST_CALL_SCENARIO);
+    let request = Request::new("POST", CALL_START_URL).with_body(Some(&body));
+    let mapped = contacting(&request, &Policy::new().with_echo_callee(Mri::new(ECHO)));
+    assert_eq!(mapped, Contact::Write(call.request().target()));
+    assert_eq!(TEST_CALL_SCENARIO, teams_fence::TEST_CALL_SCENARIO);
 }
 
 #[test]

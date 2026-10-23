@@ -1,4 +1,4 @@
-//! The guard's decisions, offline: as proto-lab's `sign_in` classifier for an armed page, every one in `fence.log`
+//! The guard's decisions, offline: by the sign-in rules (`teams_signin::classify`) for an armed page, every one in `fence.log`
 //! before the answer, the redirect caught and never let through, an unarmed page or an unlogged decision denied; and
 //! the guard's socket, as the extension talks to it.
 

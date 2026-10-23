@@ -1,7 +1,7 @@
 //! `proto-lab auth <a|b|c>`: the native sign-in of one lab account, with no human (M0 spike 1).
 //!
-//! 1. **Authorize** in the account's persistent profile, headless, under the armed fence (fail-closed, the seeded
-//!    own-state list: no sign-in form gets through). The authorize URL ([`Authorization`]: the native Teams client, the
+//! 1. **Authorize** in the account's persistent profile, headless, under the armed fence (the lab rule, its membership
+//!    source fail-closed). The authorize URL ([`Authorization`]: the native Teams client, the
 //!    `nativeclient` redirect, PKCE, `login_hint`) is opened in the profile, whose Microsoft session signs it in
 //!    silently. The fence catches Entra's redirect to the registered redirect URI and fails it
 //!    ([`RedirectCatch`]); the code comes from that URL once its `state` is the request's. If Entra shows a page
@@ -33,7 +33,6 @@ use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError, Tokens};
 use tokio::sync::mpsc;
 
-use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabPaths};
 use crate::fence_http::{CatchError, RedirectCatch};
 use crate::session::{FenceReport, LabSession, SessionError, SessionState};
@@ -218,7 +217,7 @@ async fn redirect_through_profile(
     timeout: Duration,
 ) -> Result<(Secret, FenceReport), AuthError> {
     let (catch, mut caught) = RedirectCatch::new(&entra.authorize_endpoint(), entra.redirect_uri())?;
-    let mut session = LabSession::open_catching(paths, alias, Classifier::seeded(), catch).await?;
+    let mut session = LabSession::open_catching(paths, alias, catch).await?;
     let redirect = within(timeout, async {
         session.navigate(authorization.url()).await?;
         wait_for_redirect(&mut session, &mut caught).await

@@ -24,13 +24,10 @@ tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 fixture-guard.workspace = true
-# the native call start is checked against the browser fence's call-start mapping (`proto_lab::calling`)
-proto-lab.workspace = true
 tempfile.workspace = true
 # the call-flow tests build fences over test rosters
 teams-fence = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
-url.workspace = true
 
 [lints]
 workspace = true

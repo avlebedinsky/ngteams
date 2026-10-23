@@ -9,8 +9,6 @@ publish.workspace = true
 [dependencies]
 # the window, in this process's own GTK main loop
 gtk4.workspace = true
-# the guard's classifier: proto-lab's `sign_in` rules, so the window decides as the browser fence does for Chrome
-proto-lab.workspace = true
 # the answer channel: stdout duplicated close-on-exec, then pointed at stderr
 rustix = { workspace = true, features = ["stdio"] }
 # the request and answer lines, the redirect URI and the code as a secret

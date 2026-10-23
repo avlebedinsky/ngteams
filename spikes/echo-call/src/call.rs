@@ -50,7 +50,7 @@ pub enum CallError {
 
 /// The test call of lab account `alias` for the `echo` service of `config`. There is no other echo: the call start
 /// doesn't name it, so a target counting in any other MRI would describe a call the body doesn't place (the strict
-/// classifier, `proto_lab::calling::call_start`, counts in `lab.toml`'s echo too).
+/// classifier, `teams_fence::contacting`, counts in `lab.toml`'s echo too).
 ///
 /// # Errors
 /// [`CallError::NoCallerMri`] or [`CallError::NoEchoMri`] when an MRI is missing.

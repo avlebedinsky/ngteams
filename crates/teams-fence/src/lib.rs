@@ -37,7 +37,8 @@ mod post_read;
 mod target;
 
 pub use contacting::{
-    CALL_START_URL, Contact, OWN_VIEW_PROPERTIES, Policy, Request, Service, TEST_CALL_SCENARIO, contacting, service_of,
+    CALL_START_URL, Contact, OVERRIDE_HEADERS, OWN_VIEW_PROPERTIES, Policy, Request, Service, TEST_CALL_SCENARIO,
+    contacting, on_contacting_service, service_of,
 };
 pub use decision::{
     Denied, DenyReason, FailClosed, Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, OpenError,

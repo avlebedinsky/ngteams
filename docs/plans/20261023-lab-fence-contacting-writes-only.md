@@ -402,7 +402,7 @@ and tokens, the personal build and protocol notes stay as they are:
   moved into `teams-signin` if `proto-lab` no longer needs them)
 - Modify: `spikes/echo-call/tests/signaling.rs` (or keep `proto_lab::calling::call_start` as a re-export)
 
-- [ ] rewrite the tests first:
+- [x] rewrite the tests first:
       - HTTP: requests the old fence denied (off-list own state, `PostRead` naming a non-lab MRI, settings, apps,
         presence) are let through and logged `allowed`; every contacting shape is `Write` and judged; `Unreadable` is
         denied; a forced deny still wins before classification
@@ -410,15 +410,15 @@ and tokens, the personal build and protocol notes stay as they are:
         denied; calling-host frames as today; foreign-realm refusal and the token check unchanged
       - scenarios: a run whose denies are only its forced denies and the reviewed expected list passes; any other
         deny fails the run naming its class
-- [ ] `Classification` becomes `Read | Allow | Write(Target) | Unknown`, `classify` calls `teams_fence::contacting`,
+- [x] `Classification` becomes `Read | Allow | Write(Target) | Unknown`, `classify` calls `teams_fence::contacting`,
       `proto-lab`'s own `map_write` and its helpers are deleted; one `Classifier` with `with_test_call_callee`
-- [ ] `FrameClassifier` collapses to the frame rule; `FrameRule`, `seeded`/`calling`/`messaging`/`without_activity` go
+- [x] `FrameClassifier` collapses to the frame rule; `FrameRule`, `seeded`/`calling`/`messaging`/`without_activity` go
       (keeping what the calling-host frames need)
-- [ ] `expected.rs` shrinks to the contacting-service classes a run meets but doesn't need, each with its reason (no
+- [x] `expected.rs` shrinks to the contacting-service classes a run meets but doesn't need, each with its reason (no
       capture review): bot invokes on editor open, the account's own channel entry
       (`PUT v1/threads/<channel>/members/<own>?returnThreadMetadata`) and channel properties, delivery responses, and
       `echo-call`'s call follow-ups (still exit 1); every scenario stops picking a classifier
-- [ ] tests pass; arming tests (`tests/browser.rs` and friends) untouched and green
+- [x] tests pass; arming tests (`tests/browser.rs` and friends) untouched and green
 - ➕ note (Task 2 discovery): `teams-signin` is the only crate outside `proto-lab` that classifies at run time:
       `src/guard.rs` uses `Classifier::sign_in`, `OwnRule` (`Guard::with_own`, `window.rs`'s hook),
       `Classification::{Own, PostRead, OwnAvailability}` and `RequestOutcome::Own`; `tests/{window,guard}.rs` build
@@ -429,6 +429,21 @@ and tokens, the personal build and protocol notes stay as they are:
       `proto_lab::calling::call_start` and `TEST_CALL_SCENARIO`: switch it to `teams_fence::contacting` (and
       `teams_fence::TEST_CALL_SCENARIO`) or keep a re-export. `strict_json` has users in `calling.rs`,
       `availability.rs` and `post_read.rs`: whichever survive need a copy or `teams-fence`'s (crate-private today).
+- ➕ note (Task 4): `proto-lab`'s `post_read.rs`, `availability.rs` and `calling.rs` are deleted, and so are
+      `tests/{post_reads,own_availability}.rs` (what they pinned now passes, pinned in `fence_http.rs`'s
+      `what_the_old_fence_denied_reaches_nobody_now` and `reads_pass_unlogged_and_what_reaches_nobody_passes_logged_as_allowed`).
+      The sign-in rules (`OwnKind::{EntraToken, Authz, EntraSignIn}`, `OwnRule`, `UrlPattern`, `QueryRule`,
+      `ValueRule`, `TOKEN_QUERY`, `Classifier::{seeded, sign_in, with_own}`) moved into `teams-signin`
+      (`teams_signin::classify`, its tests `tests/classify.rs`), which no longer depends on `proto-lab`; the lab browser's
+      `login`, `auth` and `status` run the lab rule like every run. `RequestOutcome::Own` stays (the sign-in guard).
+      `spikes/echo-call` checks its call start against `teams_fence::contacting`; `CALL_START_URL` is teams-fence's.
+      Holding something back is now a labelled forced deny: `ForcedFrameDeny` (new, frames) for `ab-trouter-quiet`'s
+      and `own-presence-endpoint`'s `user.activity`, `ForcedDeny` for the other `own-presence` holds; the local test
+      sockets and pages stand in for denied ones the same way. `teams-fence` gained `OVERRIDE_HEADERS` (public) and
+      `on_contacting_service` (a socket's URL read as a request's). The shared fixtures' expectations follow the new
+      verdicts (`tests/fixtures/calling/echo/{requests,frames}.json`, `tests/fixtures/trouter/{session,registration}.json`,
+      three carve-out cases of `tests/fixtures/chatsvc/writes.json`). `docs/protocol/*` still describe the old fence:
+      Task 7's.
 
 ### Task 5: The native transport: plain requests, checked by `contacting`
 
@@ -514,6 +529,10 @@ and tokens, the personal build and protocol notes stay as they are:
       instead of an authoritative read, starting and answering lab-only calls, no roster watch (the user's decisions
       of 2026-10-23), and the follow-ups to map in M3
 - [ ] `cargo test -p fixture-guard` passes
+- ➕ (found in Task 4) `docs/backlog/one-time-code-sign-in-under-the-fence.md` says `Classifier::sign_in` denies
+      Entra's `SAS/*` requests; the lab browser now lets them through (they reach nobody) and `login` stops at a
+      multi-factor prompt by itself, while `teams_signin::classify` still denies them: say so. `docs/spikes/echo-call.md`
+      already names `teams_fence::contacting`.
 
 ### Task 8: Remove what nothing uses any more
 

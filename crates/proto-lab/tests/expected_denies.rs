@@ -1,12 +1,14 @@
 //! The reviewed expected-deny list of the writing scenarios (`proto_lab::scenario::expected`): it changes only how a
-//! run is judged, never a verdict; it covers the classes the M0 acceptance runs showed; and whatever it says, a deny on
-//! the scenario's mapped target, a deny that isn't `Unclassified` and any class off the list stay unexpected, with the
-//! two `ab-chat` probes' forced denies as the only exception. All URLs and ids here are made up.
+//! run is judged, never a verdict; it holds only contacting-service classes the fence denies under the lab rule (bot
+//! invokes, the account's own channel entry and channel properties, Trouter delivery responses); and whatever it says,
+//! a deny on the scenario's mapped target, a deny that isn't `Unclassified`, a deny of what the lab rule lets through
+//! and any class off the list stay unexpected, the scenario's own labelled forced denies the only exception. All URLs
+//! and ids here are made up.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use proto_lab::classify::Classifier;
+use proto_lab::classify::{Classification, Classifier};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence, PausedRequest, Verdict};
 use proto_lab::fence_ws::FrameDenial;
@@ -24,73 +26,23 @@ const LAB_B: &str = "8:orgid:0000000b-0000-4000-8000-00000000000b";
 const AB_CHAT: &str = "19:0000000a-0000-4000-8000-00000000000a_0000000b-0000-4000-8000-00000000000b@unq.gbl.spaces";
 const AB_CHAT_ENCODED: &str =
     "19%3A0000000a-0000-4000-8000-00000000000a_0000000b-0000-4000-8000-00000000000b%40unq.gbl.spaces";
+/// A made-up team channel, plain and as the web client encodes it.
+const CHANNEL: &str = "19:0123456789abcdef0123456789abcdef@thread.tacv2";
+const CHANNEL_ENCODED: &str = "19%3A0123456789abcdef0123456789abcdef%40thread.tacv2";
 
-/// One request of every class the backlog item named (2026-10-20), with a made-up region, partition and ids, on both of
-/// the web client's origins where it used both.
-fn backlog_classes() -> Vec<(&'static str, String)> {
+/// One request of every class on the list, with a made-up region and ids, on both of the web client's origins.
+fn listed_classes() -> Vec<(&'static str, String)> {
     let mut classes = Vec::new();
     for origin in ["https://teams.microsoft.com", "https://teams.cloud.microsoft"] {
-        classes.push(("PUT", format!("{origin}/api/chatsvc/emea/v1/users/ME/properties")));
-        for lookup in [
-            "beta/users/fetchShortProfile",
-            "beta/users/apps/aggregatedEntitlements",
-            "beta/users/apps/eligibilities",
-            "beta/users/apps/batchedDefinitions",
-            "beta/teams/apps/aggregatedEntitlements",
-            "beta/users/fetch",
-            "beta/users/fetchfeaturesettings",
-            "beta/users/useraggregatesettings",
-            "beta/users/effectivePolicies",
-            "beta/users/0000000c-0000-4000-8000-00000000000c/cookiev2",
-            "beta/me/files/availability",
-            "v1/mcps/initArtifactFolder",
-            "v1/sharetoteams/installApp",
-        ] {
-            classes.push(("POST", format!("{origin}/api/mt/part/emea-02/{lookup}")));
+        let chat_service = format!("{origin}/api/chatsvc/emea/v1");
+        classes.push(("POST", format!("{chat_service}/agents/28:made-up-bot/invoke")));
+        for channel in [CHANNEL, CHANNEL_ENCODED] {
+            classes.push(("PUT", format!("{chat_service}/threads/{channel}/members/{LAB_A}")));
+            classes.push((
+                "PUT",
+                format!("{chat_service}/users/ME/conversations/{channel}/properties"),
+            ));
         }
-        for apps in [
-            "users/apps/aggregatedEntitlements",
-            "users/apps/eligibilities",
-            "users/apps/batchedDefinitions",
-            "teams/apps/aggregatedEntitlements",
-        ] {
-            classes.push(("POST", format!("{origin}/api/apps/part/emea-02/beta/{apps}")));
-        }
-        classes.push((
-            "PUT",
-            format!("{origin}/api/mt/part/emea-02/beta/me/engagementSurfaces/actions"),
-        ));
-        classes.push(("POST", format!("{origin}/ups/emea/v1/presence/getpresence/")));
-        classes.push((
-            "POST",
-            format!("{origin}/api/tps/api/v1/teams/users/me/metadata/pushupdates"),
-        ));
-        classes.push((
-            "POST",
-            format!("{origin}/api/csa/emea/api/v1/teams/users/me/chatsAndChannelsByIds"),
-        ));
-    }
-    for (method, url) in [
-        (
-            "POST",
-            "https://eu-prod.asyncgw.teams.microsoft.com/v1/0000000d-0000-4000-8000-00000000000d/aadtokenauth",
-        ),
-        ("POST", "https://eu-prod.asyncgw.teams.microsoft.com/v1/skypetokenauth"),
-        ("POST", "https://eu-api.asm.skype.com/v1/skypetokenauth"),
-        ("POST", "https://substrate.office.com/search/api/v1/suggestions"),
-        ("POST", "https://editor.svc.cloud.microsoft/NLEditor/Config/V2"),
-        (
-            "POST",
-            "https://editor.svc.cloud.microsoft/NLEditor/api/V1/LanguageInfo",
-        ),
-        ("POST", "https://augloop.office.com/"),
-        ("POST", "https://admin.microsoft.com/api/instrument/logclient"),
-        ("POST", "https://browser.pipe.aria.microsoft.com/Collector/3.0/"),
-        ("POST", "https://browser.events.data.microsoft.com/OneCollector/1.0/"),
-        ("POST", "https://teams.events.data.microsoft.com/OneCollector/1.0/"),
-        ("POST", "https://ic3.events.data.microsoft.com/OneCollector/1.0/"),
-    ] {
-        classes.push((method, url.to_owned()));
     }
     classes
 }
@@ -100,10 +52,7 @@ fn denial(method: &str, url: &str, cause: DenyCause) -> Denial {
 }
 
 fn frame(url: &str, cause: DenyCause) -> FrameDenial {
-    FrameDenial {
-        url: url.to_owned(),
-        cause,
-    }
+    FrameDenial::new(url, cause)
 }
 
 fn ab_chat_policy() -> TestResult<DenyPolicy> {
@@ -111,131 +60,136 @@ fn ab_chat_policy() -> TestResult<DenyPolicy> {
 }
 
 #[test]
-fn every_class_the_backlog_item_named_is_expected() -> TestResult {
+fn every_listed_class_is_expected() -> TestResult {
     let policies = [ab_chat_policy()?, echo_call::policy()];
-    for (method, url) in backlog_classes() {
+    for (method, url) in listed_classes() {
         let denied = denial(method, &url, DenyCause::Unclassified);
         assert!(request_class(&denied).is_some(), "no class for {method} {url}");
         for policy in &policies {
             assert!(policy.expects(&denied), "{method} {url}");
         }
         // the query is gone from a kept deny: it changes nothing
-        let queried = denial(method, &format!("{url}?x=1"), DenyCause::Unclassified);
-        assert!(policies[0].expects(&queried), "{method} {url}?x=1");
+        let queried = denial(
+            method,
+            &format!("{url}?returnThreadMetadata=true"),
+            DenyCause::Unclassified,
+        );
+        assert!(policies[0].expects(&queried), "{method} {url}?…");
+    }
+    Ok(())
+}
+
+/// The list holds only what the fence denies: every listed request, with any query or body, is unknown to the lab
+/// rule, so a class can't stand in for one the rule lets through.
+#[test]
+fn every_listed_class_is_one_the_lab_rule_denies() {
+    for (method, url) in listed_classes() {
+        for query in ["", "?returnThreadMetadata=true", "?name=sortOrder"] {
+            let url = format!("{url}{query}");
+            assert_eq!(
+                Classifier::new().classify(method, &url, &[], Some(b"{}")),
+                Classification::Unknown,
+                "{method} {url}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_channel_classes_take_a_channel_s_id_only() -> TestResult {
+    let policy = ab_chat_policy()?;
+    let chat_service = "https://teams.microsoft.com/api/chatsvc/emea/v1";
+    for id in [
+        // a group chat, a meeting chat and another 1:1 chat aren't channels
+        "19%3A0123456789abcdef0123456789abcdef%40thread.v2",
+        "19%3Ameeting_made-up%40thread.v2",
+        "19%3A0000000a-0000-4000-8000-00000000000a_0000000d-0000-4000-8000-00000000000d%40unq.gbl.spaces",
+        // nor is an id that only holds the suffix, or nothing before it
+        "%40thread.tacv2",
+        "19%3Ax%40thread.tacv2.example",
+    ] {
+        for url in [
+            format!("{chat_service}/threads/{id}/members/{LAB_A}"),
+            format!("{chat_service}/users/ME/conversations/{id}/properties"),
+        ] {
+            let denied = denial("PUT", &url, DenyCause::Unclassified);
+            assert!(request_class(&denied).is_none(), "{url}");
+            assert!(!policy.expects(&denied), "{url}");
+        }
+    }
+    // the channel's id in another case is the channel all the same
+    let upper = format!("{chat_service}/threads/19%3AX%40THREAD.TACV2/members/{LAB_A}");
+    assert!(policy.expects(&denial("PUT", &upper, DenyCause::Unclassified)));
+    // other methods and paths on a channel are no class of the list
+    for (method, url) in [
+        (
+            "POST",
+            format!("{chat_service}/users/ME/conversations/{CHANNEL_ENCODED}/messages"),
+        ),
+        (
+            "DELETE",
+            format!("{chat_service}/threads/{CHANNEL_ENCODED}/members/{LAB_A}"),
+        ),
+        ("PUT", format!("{chat_service}/threads/{CHANNEL_ENCODED}/members")),
+    ] {
+        assert!(
+            !policy.expects(&denial(method, &url, DenyCause::Unclassified)),
+            "{method} {url}"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn the_compose_boxs_bot_invokes_are_expected_and_nothing_like_them() -> TestResult {
-    // seen in ab-chat-full (2026-10-20): `composeExtension/fetchCommands` to two bots when an editor opened
-    let policies = [ab_chat_policy()?, echo_call::policy()];
-    let invoke =
-        "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000b0/invoke";
-    for policy in &policies {
-        assert!(policy.expects(&denial("POST", invoke, DenyCause::Unclassified)));
-    }
-    assert_unlisted(&[
-        ("PUT", invoke),
-        (
-            "POST",
-            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000b0/invoke/x",
-        ),
-        (
-            "POST",
-            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/invoke",
-        ),
-        ("POST", "https://example.test/api/chatsvc/amer/v1/agents/28:x/invoke"),
-    ])
-}
-
-#[test]
-fn marking_an_own_feed_item_read_is_expected_and_nothing_like_it() -> TestResult {
-    // seen in ab-chat-full (2026-10-20): `?name=isread` with `{"isread":"true"}` once b's reaction reached a's feed
-    let policies = [ab_chat_policy()?, echo_call::policy()];
-    let feed = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Anotifications/messages";
-    let isread = format!("{feed}/1760000000000/properties");
-    // and the mentions feed's, seen from b in ab-image (2026-10-21)
-    let mentions = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Amentions/messages";
-    let mention_read = format!("{mentions}/1760000000000/properties");
-    for policy in &policies {
-        assert!(policy.expects(&denial("PUT", &isread, DenyCause::Unclassified)));
-        assert!(policy.expects(&denial("PUT", &mention_read, DenyCause::Unclassified)));
-    }
-    assert_unlisted(&[
-        ("POST", &isread),
-        ("PUT", &format!("{feed}/1760000000000")),
-        ("POST", feed),
-        ("POST", &mention_read),
-        ("PUT", &format!("{mentions}/1760000000000")),
-        (
-            "PUT",
-            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Acalllogs/messages/1/properties",
-        ),
-        (
-            "PUT",
-            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/19%3Aother%40thread.v2/messages/1/properties",
-        ),
-    ])
-}
-
-#[test]
-fn marking_an_own_mention_read_is_expected_and_nothing_like_it() -> TestResult {
-    // seen in ab-chat-full (2026-10-21): the same `isread` put on b's own mentions stream once a mentioned b
-    let policies = [ab_chat_policy()?, echo_call::policy()];
-    let mentions = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Amentions/messages";
-    let isread = format!("{mentions}/1760000000000/properties");
-    for policy in &policies {
-        assert!(policy.expects(&denial("PUT", &isread, DenyCause::Unclassified)));
-    }
-    assert_unlisted(&[
-        ("POST", &isread),
-        ("DELETE", &isread),
-        ("PUT", &format!("{mentions}/1760000000000")),
-        ("POST", mentions),
-        (
-            "PUT",
-            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Amentions/properties",
-        ),
-    ])
-}
-
-#[test]
-fn frames_are_expected_by_their_socket_host() -> TestResult {
+fn trouter_frames_are_expected_by_their_socket_host_and_nothing_else_is() -> TestResult {
     let policy = ab_chat_policy()?;
     for url in [
         "wss://go.trouter.teams.microsoft.com/v4/c",
-        "wss://pub-ent-xxxx-01-t.trouter.teams.microsoft.com/v4/c",
-        "wss://augloop.office.com/",
+        "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c",
     ] {
         let denied = frame(url, DenyCause::Unclassified);
-        assert!(frame_class(&denied).is_some(), "{url}");
+        assert_eq!(
+            frame_class(&denied).map(|entry| entry.class),
+            Some("Trouter delivery responses")
+        );
         assert!(policy.expects_frame(&denied), "{url}");
-        // a frame sent through another realm's socket stays unexpected
         assert!(!policy.expects_frame(&frame(url, DenyCause::ForeignSocket)), "{url}");
+        assert!(!policy.expects_frame(&frame(url, DenyCause::Forced)), "{url}");
     }
     for url in [
+        // the lab rule lets these through: a deny of one means something is off
+        "wss://augloop.office.com/",
         "wss://teams.microsoft.com/api/socket",
-        "wss://trouter.teams.microsoft.com/",
-        "wss://augloop.office.com.example.com/",
-        "ws://augloop.office.com/",
-        "wss://augloop.office.com:8443/",
-        "wss://go.trouter.teams.microsoft.com.example.com/",
-        "https://augloop.office.com/",
+        "wss://trouter.teams.microsoft.com/v4/c",
+        "wss://go.trouter.teams.microsoft.com.example.com/v4/c",
+        "ws://go.trouter.teams.microsoft.com/v4/c",
+        "wss://go.trouter.teams.microsoft.com:8443/v4/c",
         "not a url",
     ] {
-        let denied = frame(url, DenyCause::Unclassified);
-        assert!(frame_class(&denied).is_none(), "{url}");
-        assert!(!policy.expects_frame(&denied), "{url}");
+        assert!(!policy.expects_frame(&frame(url, DenyCause::Unclassified)), "{url}");
     }
     assert!(DenyPolicy::AllExpected.expects_frame(&frame("not a url", DenyCause::ForeignSocket)));
     Ok(())
 }
 
 #[test]
+fn a_forced_frame_deny_is_expected_only_under_a_label_the_scenario_names() -> TestResult {
+    let held = |label: Option<&str>| FrameDenial {
+        label: label.map(str::to_owned),
+        ..frame("wss://go.trouter.teams.microsoft.com/v4/c", DenyCause::Forced)
+    };
+    let review = Review::new().expecting_forced(&["held"]);
+    assert!(review.expects_frame(&held(Some("held"))));
+    assert!(!review.expects_frame(&held(Some("other"))));
+    assert!(!review.expects_frame(&held(None)));
+    assert!(!ab_chat_policy()?.expects_frame(&held(Some("held"))));
+    Ok(())
+}
+
+#[test]
 fn a_listed_request_denied_for_another_cause_is_unexpected() -> TestResult {
     let policy = ab_chat_policy()?;
-    let url = "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/properties";
+    let url = "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke";
     for cause in [
         DenyCause::Fenced(DenyReason::Partial(PartialReason::NoSource)),
         DenyCause::Fenced(DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Malformed))),
@@ -245,7 +199,7 @@ fn a_listed_request_denied_for_another_cause_is_unexpected() -> TestResult {
         DenyCause::ForeignSocket,
         DenyCause::Forced,
     ] {
-        let denied = denial("PUT", url, cause);
+        let denied = denial("POST", url, cause);
         assert!(request_class(&denied).is_some());
         assert!(!policy.expects(&denied), "{cause:?}");
     }
@@ -257,7 +211,7 @@ fn a_mapped_write_stays_unexpected_whatever_the_list_says() -> TestResult {
     let policy = ab_chat_policy()?;
     let chat_service = "https://teams.microsoft.com/api/chatsvc/emea/v1";
     let on_the_chat = [
-        // a message, an edit, a read receipt on the a–b chat: unclassified or refused
+        // a message, an edit, a read receipt and a member change on the a–b chat: unclassified or refused
         (
             "POST",
             format!("{chat_service}/users/ME/conversations/{AB_CHAT_ENCODED}/messages"),
@@ -277,7 +231,7 @@ fn a_mapped_write_stays_unexpected_whatever_the_list_says() -> TestResult {
         // a listed path that names the a–b chat all the same
         (
             "POST",
-            format!("https://eu-prod.asyncgw.teams.microsoft.com/v1/{AB_CHAT_ENCODED}/aadtokenauth"),
+            format!("{chat_service}/agents/28:made-up-bot/invoke/{AB_CHAT_ENCODED}"),
         ),
     ];
     for (method, url) in &on_the_chat {
@@ -289,9 +243,6 @@ fn a_mapped_write_stays_unexpected_whatever_the_list_says() -> TestResult {
             assert!(!policy.expects(&denied), "{method} {url} {cause:?}");
         }
     }
-    // the listed path itself is expected on any other id: the chat's name is what makes it unexpected
-    let elsewhere = "https://eu-prod.asyncgw.teams.microsoft.com/v1/0000000d-0000-4000-8000-00000000000d/aadtokenauth";
-    assert!(policy.expects(&denial("POST", elsewhere, DenyCause::Unclassified)));
     // without the chat's id the scenario can't run, and the list alone still leaves its message post off
     let unmapped = ab_chat::policy(None)?;
     assert!(!unmapped.expects(&denial("POST", &on_the_chat[0].1, DenyCause::Unclassified)));
@@ -336,10 +287,74 @@ fn only_ab_chats_own_probes_are_expected_among_forced_denies() -> TestResult {
     Ok(())
 }
 
-/// Each of `unlisted` is no class of the list, and neither scenario expects it.
-fn assert_unlisted(unlisted: &[(&str, &str)]) -> TestResult {
+/// What the lab rule lets through is no class of the list: a deny of any of it fails a writing run.
+#[test]
+fn a_deny_of_what_the_lab_rule_lets_through_is_unexpected() -> TestResult {
     let policies = [ab_chat_policy()?, echo_call::policy()];
-    for &(method, url) in unlisted {
+    let teams = "https://teams.microsoft.com";
+    for (method, url) in [
+        (
+            "POST",
+            "https://browser.events.data.microsoft.com/OneCollector/1.0/".to_owned(),
+        ),
+        (
+            "POST",
+            "https://browser.pipe.aria.microsoft.com/Collector/3.0/".to_owned(),
+        ),
+        (
+            "PUT",
+            format!("{teams}/api/chatsvc/emea/v1/users/ME/properties?name=userDetails"),
+        ),
+        (
+            "PUT",
+            format!(
+                "{teams}/api/chatsvc/emea/v1/users/ME/conversations/48%3Anotifications/messages/1/properties?name=isread"
+            ),
+        ),
+        (
+            "POST",
+            format!("{teams}/api/mt/part/emea-02/beta/users/fetchShortProfile"),
+        ),
+        (
+            "POST",
+            format!("{teams}/api/mt/part/emea-02/beta/users/useraggregatesettings"),
+        ),
+        (
+            "POST",
+            format!("{teams}/api/csa/emea/api/v1/teams/users/me/chatsAndChannelsByIds"),
+        ),
+        ("POST", format!("{teams}/ups/emea/v1/presence/getpresence/")),
+        ("PUT", format!("{teams}/ups/emea/v1/me/endpoints/")),
+        ("PUT", format!("{teams}/ups/emea/v1/me/forceavailability/")),
+        ("POST", format!("{teams}/registrar/prod/V2/registrations")),
+        (
+            "POST",
+            "https://substrate.office.com/search/api/v1/suggestions".to_owned(),
+        ),
+        (
+            "POST",
+            "https://eu-prod.asyncgw.teams.microsoft.com/v1/skypetokenauth".to_owned(),
+        ),
+        ("POST", "https://augloop.office.com/".to_owned()),
+    ] {
+        assert_ne!(
+            Classifier::new().classify(method, &url, &[], Some(br#"{"isread":"true"}"#)),
+            Classification::Unknown,
+            "{method} {url}: the lab rule denies it after all"
+        );
+        let denied = denial(method, &url, DenyCause::Unclassified);
+        assert!(request_class(&denied).is_none(), "{method} {url}");
+        for policy in &policies {
+            assert!(!policy.expects(&denied), "{method} {url}");
+        }
+    }
+    Ok(())
+}
+
+/// Each of `unlisted` is no class of the list, and neither scenario expects it.
+fn assert_unlisted(unlisted: &[(&str, String)]) -> TestResult {
+    let policies = [ab_chat_policy()?, echo_call::policy()];
+    for (method, url) in unlisted {
         let denied = denial(method, url, DenyCause::Unclassified);
         assert!(request_class(&denied).is_none(), "{method} {url}");
         for policy in &policies {
@@ -350,98 +365,40 @@ fn assert_unlisted(unlisted: &[(&str, &str)]) -> TestResult {
 }
 
 #[test]
-fn classes_off_the_list_stay_unexpected() -> TestResult {
+fn classes_off_the_list_and_lookalikes_stay_unexpected() -> TestResult {
+    let chat_service = "https://teams.microsoft.com/api/chatsvc/emea/v1";
     assert_unlisted(&[
-        // writes on another conversation (a tenant team's thread)
-        (
-            "PUT",
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/19%3Aother%40thread.tacv2/properties",
-        ),
-        (
-            "PUT",
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/threads/19%3Aother%40thread.tacv2/members/8%3Aorgid%3Ax",
-        ),
-        // a chat create and a message elsewhere
-        ("POST", "https://teams.microsoft.com/api/chatsvc/emea/v1/threads"),
+        // a write on another conversation, a call follow-up, a share, a Graph write: all unknown to the lab rule
         (
             "POST",
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/19%3Aother%40thread.v2/messages",
-        ),
-        // the calling stack's own state and the call's follow-ups (echo-call needs them)
-        ("POST", "https://teams.microsoft.com/registrar/prod/V2/registrations"),
-        ("PUT", "https://teams.microsoft.com/ups/emea/v1/me/endpoints/"),
-        ("POST", "https://teams.microsoft.com/ups/emea/v1/pubsub/subscriptions/x"),
-        (
-            "POST",
-            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-x.conv.skype.com/conv/abc/add",
+            format!("{chat_service}/users/ME/conversations/48%3Anotes/messages"),
         ),
         (
             "POST",
-            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-x.cc.skype.com/cc/v1/callAcceptance/x/acknowledge",
-        ),
-        // the chat service's endpoints
-        (
-            "PUT",
-            "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints/x",
-        ),
-    ])
-}
-
-#[test]
-fn lookalikes_of_listed_classes_stay_unexpected() -> TestResult {
-    // another method, host, scheme, port, depth, case, or an empty segment
-    assert_unlisted(&[
-        (
-            "PATCH",
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/properties",
-        ),
-        (
-            "DELETE",
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/properties",
-        ),
-        (
-            "PUT",
-            "https://teams.microsoft.com.example.com/api/chatsvc/emea/v1/users/ME/properties",
-        ),
-        (
-            "PUT",
-            "https://example.com/teams.microsoft.com/api/chatsvc/emea/v1/users/ME/properties",
-        ),
-        (
-            "PUT",
-            "http://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/properties",
-        ),
-        (
-            "PUT",
-            "https://teams.microsoft.com:8443/api/chatsvc/emea/v1/users/ME/properties",
-        ),
-        ("PUT", "https://teams.microsoft.com/api/chatsvc//v1/users/ME/properties"),
-        (
-            "PUT",
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/properties/x",
-        ),
-        (
-            "PUT",
-            "https://teams.microsoft.com/api/chatsvc/emea/x/v1/users/ME/properties",
-        ),
-        (
-            "PUT",
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/users/me/properties",
+            format!("{chat_service}/users/ME/conversations/{CHANNEL_ENCODED}/messages"),
         ),
         (
             "POST",
-            "https://teams.microsoft.com/api/mt/part/emea-02/beta/users/fetchShortProfile/x",
+            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv/x/leave".to_owned(),
         ),
-        ("POST", "https://xevents.data.microsoft.com/OneCollector/1.0/"),
-        ("POST", "https://events.data.microsoft.com/OneCollector/1.0/"),
+        ("POST", "https://graph.microsoft.com/v1.0/me/sendMail".to_owned()),
+        // a bot invoke's lookalikes
+        ("GET", format!("{chat_service}/agents/28:made-up-bot/invoke")),
+        ("POST", format!("{chat_service}/agents/28:made-up-bot/invoke/more")),
+        ("POST", format!("{chat_service}/agents/invoke")),
         (
             "POST",
-            "https://notevents.data.microsoft.com.example.com/OneCollector/1.0/",
+            "https://teams.microsoft.com.example.com/api/chatsvc/emea/v1/agents/28:x/invoke".to_owned(),
         ),
-        ("POST", "https://browser.events.data.microsoft.com/OneCollector/2.0/"),
-        ("POST", "https://asyncgw.teams.microsoft.com/v1/skypetokenauth"),
-        ("POST", "https://augloop.office.com/x"),
-        ("POST", "not a url"),
+        (
+            "POST",
+            "http://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:x/invoke".to_owned(),
+        ),
+        (
+            "POST",
+            "https://teams.microsoft.com:8443/api/chatsvc/emea/v1/agents/28:x/invoke".to_owned(),
+        ),
+        ("POST", "not a url".to_owned()),
     ])
 }
 
@@ -488,14 +445,14 @@ fn assert_hosts(hosts: Hosts) {
 
 #[test]
 fn hosts_match_on_a_dot_boundary() {
-    let under = Hosts::Under("events.data.microsoft.com");
-    assert!(under.covers("browser.events.data.microsoft.com"));
-    assert!(under.covers("BROWSER.Events.Data.Microsoft.com"));
+    let under = Hosts::Under("trouter.teams.microsoft.com");
+    assert!(under.covers("go.trouter.teams.microsoft.com"));
+    assert!(under.covers("GO.Trouter.Teams.Microsoft.com"));
     for host in [
-        "events.data.microsoft.com",
-        ".events.data.microsoft.com",
-        "xevents.data.microsoft.com",
-        "events.data.microsoft.com.example.com",
+        "trouter.teams.microsoft.com",
+        ".trouter.teams.microsoft.com",
+        "xtrouter.teams.microsoft.com",
+        "trouter.teams.microsoft.com.example.com",
         "",
     ] {
         assert!(!under.covers(host), "{host:?}");
@@ -543,13 +500,13 @@ fn paused(method: &str, url: &str, body: Option<&str>) -> PausedRequest {
     }
 }
 
-/// The list is the scenario's judgement only: the fence (`ab-chat`'s classifier) still denies, keeps and logs every
-/// request on it, and a mapped write refused for a partial membership is denied and unexpected.
+/// The list is the scenario's judgement only: the fence still denies, keeps and logs every request on it, and a mapped
+/// write refused for a partial membership is denied and unexpected.
 #[tokio::test]
 async fn the_list_changes_only_the_judgement_never_the_verdict() -> TestResult {
     let lab = lab()?;
-    let http = HttpFence::new(Classifier::mapped(), Arc::clone(&lab.fence), Arc::new(FailClosed));
-    let classes = backlog_classes();
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&lab.fence), Arc::new(FailClosed));
+    let classes = listed_classes();
     for (method, url) in &classes {
         assert_eq!(
             http.decide(&paused(method, url, Some("{}"))).await,
@@ -626,8 +583,8 @@ async fn a_listed_deny_the_log_refuses_is_unexpected() -> TestResult {
         Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], []),
         FenceLog::from_writer(Refuses),
     ));
-    let http = HttpFence::new(Classifier::mapped(), fence, Arc::new(FailClosed));
-    let classes = backlog_classes();
+    let http = HttpFence::new(Classifier::new(), fence, Arc::new(FailClosed));
+    let classes = listed_classes();
     for (method, url) in &classes {
         assert_eq!(
             http.decide(&paused(method, url, Some("{}"))).await,
@@ -649,11 +606,15 @@ fn the_list_alone_expects_no_forced_deny_and_maps_nothing() {
         ..denial("POST", "https://teams.microsoft.com/", DenyCause::Forced)
     };
     assert!(!review.expects(&probe));
-    assert!(review.expects(&denial("POST", "https://augloop.office.com/", DenyCause::Unclassified)));
+    let invoke = denial(
+        "POST",
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:x/invoke",
+        DenyCause::Unclassified,
+    );
+    assert!(review.expects(&invoke));
     // the list's lookups find the same entries as the review
-    let denied = denial("POST", "https://augloop.office.com/", DenyCause::Unclassified);
     assert_eq!(
-        expected::request_class(&denied).map(|entry| entry.class),
-        Some("AugLoop posts")
+        expected::request_class(&invoke).map(|entry| entry.class),
+        Some("bot invokes")
     );
 }

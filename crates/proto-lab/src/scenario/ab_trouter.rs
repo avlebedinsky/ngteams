@@ -1,21 +1,19 @@
 //! The `ab-trouter` scenario (M1 Task 14, `docs/protocol/trouter.md`): account b's push channel (Trouter) while a
 //! sends, edits and reacts in the a–b chat, recorded for the native client's Trouter notes.
 //!
-//! Both accounts run with the **messaging set**: the write mapping with members read live, as `ab-chat`, plus the
-//! Trouter session's own frames ([`FrameClassifier::messaging`]: authenticate, keep-alives, the client's own
-//! `user.activity`, the loss acknowledgement) and the registration of the messaging stack's endpoint only
-//! ([`Classifier::messaging`]: `TeamsCDLWebWorker`, never the calling stack's `SkypeSpacesWeb`). The responses to what
-//! the service delivers stay unknown and denied, so the run shows what an endpoint that never answers a delivery gets.
-//! `ab-trouter-quiet` ([`Activity::HeldBack`]) also holds back every `user.activity`, to see whether the service treats
-//! an endpoint that never reports its activity differently.
+//! Both accounts run under the lab rule with members read live, as `ab-chat`: the Trouter session's own frames
+//! (authenticate, keep-alives, the client's own `user.activity`, the loss acknowledgement) and the endpoints'
+//! registrations reach nobody and pass; the responses to what the service delivers stay denied
+//! (`crate::fence_ws::classify_frame`), so the run shows what an endpoint that never answers a delivery gets.
+//! `ab-trouter-quiet` ([`Activity::HeldBack`]) also holds back every `user.activity` ([`hold_activity`]), to see
+//! whether the service treats an endpoint that never reports its activity differently.
 //!
 //! The steps:
 //! 1. Before anything loads, a's fence force-denies every write carrying the probe marker, as in `ab-chat`
 //!    ([`super::ab_chat`]).
-//! 2. b opens the web client and must register its messaging endpoint, then opens the chat with a (a new document,
-//!    which registers again) and must read it: b now shows the a–b chat, with its push channel up. Each document must
-//!    get a registration answered with a 2xx ([`wait_registered`]): only the messaging stack's can be, so a denied one
-//!    (the calling stack's retries, or a messaging one off the reviewed shape) or the earlier document's never counts.
+//! 2. b opens the web client and must register its endpoint, then opens the chat with a (a new document, which
+//!    registers again) and must read it: b now shows the a–b chat, with its push channel up. Each document must get a
+//!    registration answered with a 2xx ([`wait_registered`]): the earlier document's never counts.
 //! 3. a opens the web client and the chat with b, and proves enforcement live with this run's probe (`ab-chat`'s
 //!    step 4).
 //! 4. a sends the message; b, already showing the chat, must show it within [`DELIVERY`] (it can only come by push or
@@ -28,13 +26,11 @@
 //!    lifetime a chat delivery carries): the capture shows whether the service delivers again what went unanswered,
 //!    how often and for how long, and whether it closes the socket.
 //! 7. The notes count each account's endpoint registrations, answered and denied ([`registrations_note`]). Judged as
-//!    `ab-chat`, plus what comes up only with the push channel ([`trouter_policy`]): no deny but the probes' forced
-//!    ones, the reviewed expected-deny list (the denied delivery responses are Trouter frames, on it) and
-//!    [`TROUTER_RUN_REQUESTS`] (the calling stack's registration, presence; the activity feed's read state and agent
-//!    invocations, first seen here, are on the reviewed list since `ab-chat-full` showed them too); nothing denied on
-//!    the a–b chat.
+//!    `ab-chat` ([`trouter_policy`]): no deny but the probes' forced ones (and, quiet, the held-back activity) and the
+//!    reviewed expected-deny list (the denied delivery responses are Trouter frames, on it); nothing denied on the a–b
+//!    chat.
 //!
-//! Nothing in the run answers a call, and nothing registers the calling stack's endpoint.
+//! Nothing in the run answers a call.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -43,27 +39,59 @@ use serde_json::json;
 use tokio::time::Instant;
 
 use crate::browser::Media;
-use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::without_query;
-use crate::fence_ws::FrameClassifier;
+use crate::fence_ws::ForcedFrameDeny;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_link, chat_requests, chat_url, deny_probes, enforce, load,
-    message_text, nonce, one_to_one_id, probe_text, save_screenshot, send, wait_for_newest,
+    CHAT_OPEN, COMPOSE, DELIVERY, EARLIER_RUN_PROBE, EXPECTED_FORCED, THIS_RUN_PROBE, chat_link, chat_requests,
+    chat_url, deny_probes, enforce, load, message_text, nonce, one_to_one_id, probe_text, save_screenshot, send,
+    wait_for_newest,
 };
 use super::dsl::{Driver, RequestPattern, SeenRequest, Selector, StepError, js_string};
-use super::expected::{ExpectedRequest, Review, TEAMS};
+use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// Whether the client's own `user.activity` goes out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
-    /// It goes out, as the messaging set allows (`ab-trouter`).
+    /// It goes out: it reaches nobody (`ab-trouter`).
     Reported,
-    /// Every `user.activity` is denied (`ab-trouter-quiet`).
+    /// Every `user.activity` is force-denied ([`hold_activity`], `ab-trouter-quiet`).
     HeldBack,
+}
+
+/// The label of the forced deny that holds back the client's own `user.activity` ([`hold_activity`]).
+pub const HELD_ACTIVITY: &str = "held-back activity";
+
+/// The forced denies a quiet run expects: `ab-chat`'s two probe rules' and the held-back activity.
+pub const QUIET_FORCED: [&str; 3] = [THIS_RUN_PROBE, EARLIER_RUN_PROBE, HELD_ACTIVITY];
+
+/// A socket of the Trouter service, by its URL.
+pub const TROUTER_SOCKET: &str = r"^wss://[a-z0-9-]+\.trouter\.teams\.microsoft\.com/";
+
+/// What every `user.activity` event's text holds, as the web client writes it.
+pub const ACTIVITY_EVENT: &str = r#""name":"user.activity""#;
+
+/// The rule that holds back every `user.activity` on the Trouter sockets, labelled [`HELD_ACTIVITY`]: what
+/// `ab-trouter-quiet` and `own-presence-endpoint` force on each account's fence before its page loads.
+///
+/// # Errors
+/// Never: the pattern is fixed.
+pub fn hold_activity() -> Result<ForcedFrameDeny, regex::Error> {
+    Ok(ForcedFrameDeny::new(TROUTER_SOCKET)?
+        .with_text_containing(ACTIVITY_EVENT)
+        .labelled(HELD_ACTIVITY))
+}
+
+/// The forced denies a run with `activity` expects.
+#[must_use]
+pub fn expected_forced(activity: Activity) -> &'static [&'static str] {
+    match activity {
+        Activity::Reported => &EXPECTED_FORCED,
+        Activity::HeldBack => &QUIET_FORCED,
+    }
 }
 
 /// The registration of an endpoint with the registrar (either stack's; the fence lets only the messaging stack's out).
@@ -112,47 +140,13 @@ const EDITOR_MARK: Selector<'static> = Selector::Css(r#"[data-lab-editor="1"]"#)
 /// The page's size: the client lays out a message's actions in full.
 const VIEWPORT: (u32, u32) = (1440, 900);
 
-/// The denied classes a run of this scenario expects besides the reviewed list: what comes up only once the push
-/// channel is (seen live 2026-10-20), none of it needed for chat.
-pub const TROUTER_RUN_REQUESTS: &[ExpectedRequest] = &[
-    ExpectedRequest {
-        class: "the calling stack's endpoint registration",
-        hosts: TEAMS,
-        method: "POST",
-        path: "/registrar/prod/V2/registrations",
-        reason: "the calling stack registers its own endpoint (`SkypeSpacesWeb`) once the push channel is up; the \
-                 messaging set lets only the messaging stack's registration out, and the account must not become \
-                 reachable for calls. The class reads only method, host and path, so it also covers a messaging \
-                 registration denied for being off the reviewed shape: what catches that is step 2 (each of b's \
-                 documents must get a registration answered with a 2xx) and the run's notes (every account's \
-                 registrations, answered and denied, counted by URL)",
-    },
-    ExpectedRequest {
-        class: "presence endpoint",
-        hosts: TEAMS,
-        method: "PUT",
-        path: "/ups/*/v1/me/endpoints/",
-        reason: "creates the client's presence endpoint (availability and activity reported over the push channel): \
-                 the scenario needs no presence, and setting it is out of M1's scope",
-    },
-    ExpectedRequest {
-        class: "presence subscriptions",
-        hosts: TEAMS,
-        method: "POST",
-        path: "/ups/*/v1/pubsub/subscriptions/*",
-        reason: "subscribes the account's push endpoint to other people's presence: the scenario shows no presence",
-    },
-];
-
-/// How a run of this scenario judges its denies: `ab-chat`'s policy ([`super::ab_chat::policy`]) plus
-/// [`TROUTER_RUN_REQUESTS`].
+/// How a run with `activity` judges its denies: `ab-chat`'s policy ([`super::ab_chat::policy`]), with the held-back
+/// activity's forced deny for a quiet run ([`expected_forced`]).
 ///
 /// # Errors
 /// Never for an id from [`one_to_one_id`]; when the chat's pattern doesn't compile.
-pub fn trouter_policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new()
-        .expecting_forced(&EXPECTED_FORCED)
-        .expecting_requests(TROUTER_RUN_REQUESTS);
+pub fn trouter_policy(activity: Activity, chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
+    let mut review = Review::new().expecting_forced(expected_forced(activity));
     if let Some(chat_id) = chat_id {
         review = review.with_mapped_target(chat_url(chat_id)?);
     }
@@ -167,9 +161,8 @@ pub fn registration() -> Result<RequestPattern, regex::Error> {
     RequestPattern::new(Some("POST"), REGISTRATION)
 }
 
-/// Whether `request` is a registration (`pattern`, [`registration`]) answered with a 2xx: the messaging stack's, the
-/// only one the messaging set lets out. A denied one (the calling stack's, or a messaging one off the reviewed shape)
-/// fails in the page and never is.
+/// Whether `request` is a registration (`pattern`, [`registration`]) answered with a 2xx, either stack's. One that failed
+/// in the page never is.
 #[must_use]
 pub fn registered(pattern: &RequestPattern, request: &SeenRequest) -> bool {
     pattern.matches(&request.method, &request.url) && request.status.is_some_and(|status| (200..300).contains(&status))
@@ -193,9 +186,8 @@ pub async fn wait_registered(driver: &mut Driver, step: &str, since: usize) -> R
 }
 
 /// What `requests` hold of endpoint registrations ([`REGISTRATION`]), for the run's notes: how many were answered
-/// with a 2xx, how many failed in the page or were answered otherwise (each URL, without its query, with its count:
-/// the calling stack's denied retries, and any messaging registration off the reviewed shape), and how many got
-/// neither yet.
+/// with a 2xx, how many failed in the page or were answered otherwise (each URL, without its query, with its count),
+/// and how many got neither yet.
 #[must_use]
 pub fn registrations_note(who: &str, requests: &[SeenRequest]) -> String {
     let Ok(pattern) = registration() else {
@@ -255,15 +247,6 @@ pub fn scenario(activity: Activity) -> ScenarioName {
     }
 }
 
-/// The frame classifier of a run with `activity`.
-#[must_use]
-pub fn frames(activity: Activity) -> FrameClassifier {
-    match activity {
-        Activity::Reported => FrameClassifier::messaging(),
-        Activity::HeldBack => FrameClassifier::messaging().without_activity(),
-    }
-}
-
 /// Runs `ab-trouter` or `ab-trouter-quiet` (see the module docs).
 ///
 /// # Errors
@@ -272,14 +255,13 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let name = scenario(activity);
     let session_options = SessionOptions {
-        classifier: Classifier::messaging(),
-        frames: frames(activity),
         live_members: true,
         capture: Some(name.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
+        ..SessionOptions::fail_closed()
     };
     let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
@@ -295,17 +277,22 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
     if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
         report.failures.push(error.to_string());
     }
+    if activity == Activity::HeldBack {
+        match hold_activity() {
+            Ok(rule) => {
+                a.force_deny_frames(rule.clone());
+                b.force_deny_frames(rule);
+            }
+            Err(error) => report.failures.push(format!("can't hold the activity back: {error}")),
+        }
+    }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
     let chat_id = one_to_one_id(mri(Alias::A), mri(Alias::B));
-    let policy = trouter_policy(chat_id.as_deref()).unwrap_or_else(|error| {
+    let policy = trouter_policy(activity, chat_id.as_deref()).unwrap_or_else(|error| {
         report
             .failures
             .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(
-            Review::new()
-                .expecting_forced(&EXPECTED_FORCED)
-                .expecting_requests(TROUTER_RUN_REQUESTS),
-        )
+        DenyPolicy::Reviewed(Review::new().expecting_forced(expected_forced(activity)))
     });
     let steps = Steps {
         mri_a: mri(Alias::A),

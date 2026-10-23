@@ -21,9 +21,9 @@ use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TargetKind}
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::capture::{Capture, CaptureError, EVENTS_FILE, RTC_BINDING, Recorder, RtcHooks, capture_dir_name};
 use proto_lab::cdp::{Cdp, SessionId};
-use proto_lab::classify::{Classifier, OwnKind, OwnRule};
-use proto_lab::fence_http::HttpFence;
-use proto_lab::fence_ws::{FrameClassifier, FrameRule, GuardScript, WsFence};
+use proto_lab::classify::Classifier;
+use proto_lab::fence_http::{ForcedDeny, HttpFence};
+use proto_lab::fence_ws::{ForcedFrameDeny, GuardScript, WsFence};
 use serde_json::{Value, json};
 use teams_fence::{FailClosed, Fence, FenceLog, Roster};
 use tokio_tungstenite::tungstenite::Message;
@@ -225,8 +225,8 @@ async fn navigate(cdp: &Cdp, tab: &ArmedTarget, url: &str) -> TestResult {
     page::navigate(cdp, &tab.session, url, STEP).await
 }
 
-/// One recorded run, armed on a throwaway profile; `echo` (when given) stands in for an own-state socket for
-/// `allow:` frames, and a `POST` to the pages' `/own` is own-state.
+/// One recorded run, armed on a throwaway profile under the lab rule, which lets the local pages' requests and frames
+/// through: a `POST` to the pages' `/sink` and a frame holding `deny:` are force-denied.
 struct Run {
     armed: ArmedBrowser,
     recorder: Arc<Recorder>,
@@ -260,13 +260,15 @@ async fn start_run(pages: &MockServer, echo: Option<&str>, recording: Recording)
         Roster::new([], []),
         FenceLog::open(&dirs.path().join("fence.log"))?,
     ));
-    let own = Classifier::seeded().with_own(OwnRule::new(OwnKind::Authz, "POST", &pages.uri(), "/own"));
-    let http = HttpFence::new(own, Arc::clone(&fence), Arc::new(FailClosed));
-    let mut frames = FrameClassifier::seeded();
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::new(FailClosed));
+    http.force_deny(ForcedDeny::new(
+        "POST",
+        &format!("^{}/sink$", regex::escape(&pages.uri())),
+    )?);
+    let ws = WsFence::new(fence, Arc::new(FailClosed), GuardScript::generate()?);
     if let Some(origin) = echo {
-        frames = frames.with_own(FrameRule::new(OwnKind::Authz, origin, "/*", "allow:"));
+        ws.force_deny(ForcedFrameDeny::new(&format!("^{}/", regex::escape(origin)))?.with_text_containing("deny:"));
     }
-    let ws = WsFence::new(frames, fence, Arc::new(FailClosed), GuardScript::generate()?);
     let recorder = Arc::new(Recorder::create(&dirs.path().join("captures"), "test")?);
     let capture = Capture::new(Arc::clone(&recorder), RtcHooks::new(recording.stats));
     let capture = if recording.request_bodies {
@@ -373,8 +375,8 @@ async fn a_recorded_run_holds_the_network_the_frames_the_bodies_and_every_verdic
     );
 }
 
-/// Posts from the page: a string and a `Blob` to the own-state `/own` (Chrome leaves a `Blob` out of its request
-/// event, so the capture would fetch it), and a short one to `/sink`, which the fence denies.
+/// Posts from the page: a string and a `Blob` to `/own`, which reaches nobody (Chrome leaves a `Blob` out of its
+/// request event, so the capture would fetch it), and a short one to `/sink`, which the fence denies.
 const POSTS: &str = r"(async () => {
   const post = (path, body) => fetch(path, { method: 'POST', body }).then((r) => r.status, (e) => 'error ' + e.name);
   return {
@@ -397,7 +399,7 @@ async fn a_capture_without_request_bodies_keeps_the_requests_and_none_of_their_b
         let results = evaluate(cdp, &run.page.session, POSTS).await?;
         assert_eq!(results, json!({"short": 200, "blob": 200, "denied": "error TypeError"}));
         let file = run.recorder.events_file();
-        // both own posts have their answers, so whatever their requests would have fetched was asked for before
+        // both posts to `/own` have their answers, so whatever their requests would have fetched was asked for before
         let entries = entries_until(&file, |entries| {
             let answered = cdp_events(entries, "Network.responseReceived");
             let posts = posts_to(entries, "/own");
@@ -497,7 +499,7 @@ fn check_http_verdicts(entries: &[Value], verdicts: &[&Value], get: &str) {
     assert_eq!(denied.len(), 1, "{denied:?}");
     assert_eq!(denied[0]["channel"], "http");
     assert_eq!(denied[0]["method"], "POST");
-    assert_eq!(denied[0]["cause"], "unclassified");
+    assert_eq!(denied[0]["cause"], "forced");
     assert_eq!(denied[0]["request"]["postData"], "lab-post");
     assert!(denied[0]["session"].is_string());
     assert!(

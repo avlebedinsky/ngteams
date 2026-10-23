@@ -14,15 +14,14 @@
 //! - a request to register an MFA method stops the run, and so does any other multi-factor prompt: one to pick a
 //!   method, to approve in an app, or to enter a one-time code.
 //!
-//! The fence lets Entra's sign-in form through for this command only ([`Classifier::sign_in`]); everything else
-//! mutating is denied as in every run, and the denies are expected (the web client loads in a reduced state). The run
-//! is recorded like a scenario's, under `captures/login/<ts>/` ([`LOGIN_CAPTURE`]), so the sign-in form's queries can
-//! be reviewed before its own-state rules are narrowed to them, but without any request body
-//! ([`crate::capture::Capture::without_request_bodies`]): the form's posts carry the account's password.
-//! Multi-factor sign-in (Entra's `SAS/*` requests) isn't on that list: no such exchange has been captured, so what its
-//! requests set off (a code sent by text or call, a push to a phone, as soon as the page shows the prompt) and whether
-//! verifying a method can be told apart from registering one are unknown. A one-time code could never be submitted
-//! under the fence, so the run stops instead of asking for one.
+//! The fence runs the lab rule as in every run: Entra's sign-in form reaches nobody, so it goes through, and any deny
+//! is expected (the web client loads in a reduced state). The run is recorded like a scenario's, under
+//! `captures/login/<ts>/` ([`LOGIN_CAPTURE`]), so the sign-in form's queries can be read for the sign-in window's own
+//! rules (`teams-signin`), but without any request body ([`crate::capture::Capture::without_request_bodies`]): the
+//! form's posts carry the account's password. Multi-factor sign-in (Entra's `SAS/*` requests) is never driven: no such
+//! exchange has been captured, so what its requests set off (a code sent by text or call, a push to a phone, as soon as
+//! the page shows the prompt) and whether verifying a method can be told apart from registering one are unknown, and
+//! the run stops instead of asking for a one-time code.
 //!
 //! Once the web client has loaded, the account's MRI is made from the object id in the claims of a bearer token the
 //! page sent for that account's UPN, and recorded in `lab.toml` ([`record_account_mri`]). An account that is signed
@@ -38,7 +37,6 @@ use serde_json::{Value, json};
 
 use crate::accounts::{ACCOUNTS_FILE, AccountsError, AccountsFile, Credentials};
 use crate::cdp::{Cdp, CdpError, SessionId};
-use crate::classify::Classifier;
 use crate::config::{Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri};
 use crate::scenario::dsl::js_string;
 use crate::session::{
@@ -459,14 +457,14 @@ pub struct LoginOptions {
 /// The scenario name `login` records its runs under (`captures/login/<ts>/` in the lab's data dir).
 pub const LOGIN_CAPTURE: &str = "login";
 
-/// How `login` runs its browser: fail-closed with Entra's sign-in form ([`Classifier::sign_in`]), headless, recorded
-/// under [`LOGIN_CAPTURE`] with no request body.
+/// How `login` runs its browser: the lab rule, its membership source fail-closed, headless, recorded under
+/// [`LOGIN_CAPTURE`] with no request body.
 #[must_use]
 pub fn session_options() -> SessionOptions {
     SessionOptions {
         capture: Some(LOGIN_CAPTURE.to_owned()),
         capture_request_bodies: false,
-        ..SessionOptions::fail_closed(Classifier::sign_in())
+        ..SessionOptions::fail_closed()
     }
 }
 

@@ -6,7 +6,7 @@
 use serde_json::Value;
 use teams_fence::{
     CALL_START_URL, Contact, Mri, OWN_VIEW_PROPERTIES, Policy, Request, Scope, Service, TEST_CALL_SCENARIO, Target,
-    WriteKind, contacting, is_chat_id, service_of,
+    WriteKind, contacting, is_chat_id, on_contacting_service, service_of,
 };
 use url::Url;
 
@@ -610,6 +610,40 @@ const SERVICES_BY_URL: &[(&str, Option<Service>)] = &[
 fn each_contacting_service_is_told_by_its_host_or_path() -> TestResult {
     for (url, service) in SERVICES_BY_URL {
         assert_eq!(service_of(&Url::parse(url)?), *service, "{url}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_socket_is_on_a_contacting_service_by_the_same_host_and_path_rules() -> TestResult {
+    for (url, service) in SERVICES_BY_URL {
+        let url = Url::parse(url)?;
+        if service.is_some() {
+            assert!(on_contacting_service(&url), "{url}");
+        }
+        // the scheme plays no part: a socket's URL is read as a request's
+        let mut socket = url.clone();
+        let scheme = if url.scheme() == "http" { "ws" } else { "wss" };
+        if socket.set_scheme(scheme).is_ok() {
+            assert_eq!(on_contacting_service(&socket), on_contacting_service(&url), "{socket}");
+        }
+    }
+    for url in [
+        // first segments that can't be read: where a frame could reach people
+        "wss://teams.microsoft.com//api/chatsvc/emea/v1/threads",
+        "wss://teams.microsoft.com/api/chatsvc%2Femea/v1",
+        "wss://api.flightproxy.teams.microsoft.com/",
+        "wss://go.skype.com/x",
+    ] {
+        assert!(on_contacting_service(&Url::parse(url)?), "{url}");
+    }
+    for url in [
+        "wss://go.trouter.teams.microsoft.com/v4/c",
+        "wss://augloop.office.com/",
+        "wss://teams.microsoft.com/v2/",
+        "ws://127.0.0.1:9/echo",
+    ] {
+        assert!(!on_contacting_service(&Url::parse(url)?), "{url}");
     }
     Ok(())
 }

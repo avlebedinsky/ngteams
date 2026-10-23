@@ -116,8 +116,9 @@ impl Policy {
     }
 }
 
-/// The method-override headers a service may act on in place of the request's method.
-const OVERRIDE_HEADERS: [&str; 3] = ["x-http-method-override", "x-http-method", "x-method-override"];
+/// The method-override headers a service may act on in place of the request's method: the only headers whose values
+/// [`contacting`] reads (in any case), so a caller that keeps header values for the classifier keeps these.
+pub const OVERRIDE_HEADERS: [&str; 3] = ["x-http-method-override", "x-http-method", "x-method-override"];
 
 /// The methods that only read.
 const READING: [&str; 3] = ["GET", "HEAD", "OPTIONS"];
@@ -294,6 +295,14 @@ pub fn service_of(url: &Url) -> Option<Service> {
         Route::Service(service) => Some(service),
         Route::Other | Route::Unreadable => None,
     }
+}
+
+/// Whether `url` goes to a contacting service ([`service_of`]), or to a Teams origin path whose service-naming segments
+/// can't be read: where anything sent could reach people. Its scheme plays no part, so a WebSocket's URL is read the
+/// same way: the browser fence denies every frame on a socket there but Trouter's.
+#[must_use]
+pub fn on_contacting_service(url: &Url) -> bool {
+    !matches!(route(url), Route::Other)
 }
 
 /// [`service_of`], with a Teams origin path whose first segments can't be read told apart.

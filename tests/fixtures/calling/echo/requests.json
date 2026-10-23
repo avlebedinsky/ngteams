@@ -1,19 +1,19 @@
 {
-  "_synthetic": "Made up, shaped like the echo-call capture of 2026-10-20 (read locally from its sanitized reference copy; docs/protocol/calling-echo.md): the requests of the web client's test call to the echo service, each with what a run that calls (Classifier::calling with the echo service as the test call's callee) makes of it. <guid:a> is lab account a's object id, <guid:echo> the echo bot's id, other <guid:N> made-up ids; tests fill in made-up GUIDs. Hosts' region names, ids in paths, tokens and the SDP are made up and shortened.",
+  "_synthetic": "Made up, shaped like the echo-call capture of 2026-10-20 (read locally from its sanitized reference copy; docs/protocol/calling-echo.md): the requests of the web client's test call to the echo service, each with what the browser fence's lab rule (with the echo service as the test call's callee) makes of it. <guid:a> is lab account a's object id, <guid:echo> the echo bot's id, other <guid:N> made-up ids; tests fill in made-up GUIDs. Hosts' region names, ids in paths, tokens and the SDP are made up and shortened.",
   "cases": [
     {
       "name": "reading the account's own settings",
       "method": "POST",
       "url": "https://teams.cloud.microsoft/api/mt/part/amer-01/beta/users/useraggregatesettings",
       "body": {"userPropertiesSettings": true, "voiceAdminSettings": true, "adminSettings": true, "tenantSettingsV2": true, "clientSettings": true},
-      "expected": "own:settings_read"
+      "expected": "allow"
     },
     {
       "name": "reading the account's own policies",
       "method": "POST",
       "url": "https://teams.cloud.microsoft/api/mt/part/amer-01/beta/users/effectivePolicies",
       "body": ["teamsCallingPolicy", "teamsMeetingPolicy", "externalAccessPolicy", "teamsMessagingPolicy"],
-      "expected": "own:settings_read"
+      "expected": "allow"
     },
     {
       "name": "registering the calling stack's endpoint",
@@ -25,7 +25,7 @@
         "nodeId": "",
         "transports": {"TROUTER": [{"context": "", "path": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/", "ttl": 3600}]}
       },
-      "expected": "own:endpoint_registration"
+      "expected": "allow"
     },
     {
       "name": "the chat with the echo bot the test call starts from",
@@ -107,7 +107,7 @@
       "expected": "read"
     },
     {
-      "name": "the caller's endpoint metadata on the call (a call follow-up: unknown until the fence can read a call's members)",
+      "name": "the caller's endpoint metadata on the call (a call follow-up: unknown until a row maps it)",
       "method": "PUT",
       "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/updateEndpointMetadata?i=0-0-0-0&e=1",
       "body": {"participants": {"from": {"id": "8:orgid:<guid:a>", "displayName": "Lab A", "endpointId": "<guid:3>", "participantId": "<guid:4>", "languageId": "en-us"}}, "endpointMetadata": {"holographicCapabilities": 3}},

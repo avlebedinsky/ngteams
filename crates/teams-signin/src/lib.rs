@@ -3,8 +3,9 @@
 //! authorization code to its parent, and `teams-auth` does the rest (`teams_auth::signin`: the redirect tied to the
 //! request, the code redeemed only for the account the ID token names).
 //!
-//! - [`guard`]: every request a page sends is decided as proto-lab's `sign_in` classifier decides it for Chrome, and
-//!   logged to `fence.log` before it goes; the redirect is caught, never let through.
+//! - [`guard`]: every request a page sends is decided by the sign-in rules ([`classify`]: reads, the token endpoint,
+//!   authz and Entra's sign-in form in their captured shapes, nothing else), and logged to `fence.log` before it goes;
+//!   the redirect is caught, never let through.
 //! - [`window`]: the webview set up behind the guard (`teams-signin-extension` in every web process), with what the
 //!   guard can't see switched off.
 //! - [`egress`]: the network session's only way off loopback, a proxy that refuses everything.
@@ -18,6 +19,7 @@
 //! anywhere else only through [`egress::BlackHole`], which refuses it. The window is tested offline, and the lab keeps
 //! signing in through `proto-lab auth` (`docs/backlog/webkit-sign-in-guard-redirects.md`).
 
+pub mod classify;
 pub mod cli;
 pub mod egress;
 pub mod guard;

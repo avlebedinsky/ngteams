@@ -13,10 +13,10 @@ use futures_util::StreamExt as _;
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::cdp::{Cdp, CdpError, Event, RemoteError, SessionId};
-use proto_lab::classify::{Classifier, OwnKind, OwnRule};
+use proto_lab::classify::Classifier;
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
-use proto_lab::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
+use proto_lab::fence_ws::{FrameDenial, GuardScript, WsFence};
 use proto_lab::scenario::ab_chat::{
     self, MESSAGE_POST, PROBE_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id, probe_text,
 };
@@ -126,9 +126,8 @@ where
         FenceLog::open(&dir.path().join("fence.log"))?,
     ));
     let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-    let classifier = Classifier::seeded().with_own(OwnRule::new(OwnKind::Authz, "POST", &server.uri(), "/api/send"));
-    let http = HttpFence::new(classifier, Arc::clone(&fence), Arc::clone(&members));
-    let ws = WsFence::new(FrameClassifier::seeded(), fence, members, GuardScript::generate()?);
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::clone(&members));
+    let ws = WsFence::new(fence, members, GuardScript::generate()?);
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };
@@ -699,11 +698,11 @@ fn a_writing_scenario_expects_only_its_probes_and_the_reviewed_list() -> TestRes
     let policy = ab_chat::policy(Some(CHAT))?;
     let expected = [
         denial(
-            "https://browser.events.data.microsoft.com/OneCollector/1.0/",
+            "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
             DenyCause::Unclassified,
         ),
         denial(
-            "https://teams.events.data.microsoft.com/OneCollector/1.0/",
+            "https://teams.cloud.microsoft/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
             DenyCause::Unclassified,
         ),
         forced(
@@ -721,11 +720,15 @@ fn a_writing_scenario_expects_only_its_probes_and_the_reviewed_list() -> TestRes
             "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints/x",
             DenyCause::Unclassified,
         ),
+        // telemetry reaches nobody and passes: a deny of it means something is off
         denial(
-            "https://notevents.data.microsoft.com.example.com/",
+            "https://browser.events.data.microsoft.com/OneCollector/1.0/",
             DenyCause::Unclassified,
         ),
-        denial("https://xevents.data.microsoft.com/", DenyCause::Unclassified),
+        denial(
+            "https://teams.microsoft.com.example.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
+            DenyCause::Unclassified,
+        ),
         denial("not a url", DenyCause::Malformed),
     ];
     for denial in &expected {
@@ -804,14 +807,8 @@ fn account(denials: Vec<Denial>, fence: FenceReport) -> AccountRun {
 #[test]
 fn a_writing_run_fails_on_a_denied_frame_off_the_list() -> TestResult {
     let policy = ab_chat::policy(Some(CHAT))?;
-    let frame = FrameDenial {
-        url: "wss://teams.microsoft.com/api/socket".to_owned(),
-        cause: DenyCause::Unclassified,
-    };
-    let listed = FrameDenial {
-        url: "wss://augloop.office.com/".to_owned(),
-        cause: DenyCause::Unclassified,
-    };
+    let frame = FrameDenial::new("wss://teams.microsoft.com/api/socket", DenyCause::Unclassified);
+    let listed = FrameDenial::new("wss://go.trouter.teams.microsoft.com/v4/c", DenyCause::Unclassified);
     let fence = FenceReport {
         denied_frames: 2,
         ..FenceReport::default()
@@ -868,7 +865,7 @@ fn a_writing_run_fails_on_a_denied_frame_off_the_list() -> TestResult {
 #[test]
 fn a_run_fails_on_an_unexpected_deny_or_a_breach_only() {
     let telemetry = denial(
-        "https://browser.events.data.microsoft.com/OneCollector/1.0/",
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
         DenyCause::Unclassified,
     );
     let endpoint = denial(
@@ -893,6 +890,8 @@ fn a_run_fails_on_an_unexpected_deny_or_a_breach_only() {
         "{:?}",
         denied.failures
     );
+    // the failure names the deny's class: the contacting service its URL goes to
+    assert!(denied.failures[0].contains("chat_service"), "{:?}", denied.failures);
 
     // the fail-closed load expects every deny, but not a breach
     let mut load = ScenarioReport::new(ScenarioName::Load);

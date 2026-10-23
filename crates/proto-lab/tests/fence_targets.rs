@@ -1,6 +1,7 @@
-//! The fence target mapping (`docs/protocol/fence-targets.md`): which chat service writes map to which `Target`, how
-//! the browser fence decides them with the live membership source, where the source's credential comes from, and the
-//! forced deny `ab-chat`'s live enforcement test uses.
+//! The fence target mapping (`docs/protocol/fence-targets.md`) on the browser side: the browser fence's classifier
+//! gives `teams_fence::contacting`'s verdict on every chat service write (the same classifier the native transport
+//! calls), how the browser fence decides them with the live membership source, where the source's credential comes
+//! from, and the forced deny `ab-chat`'s live enforcement test uses.
 //!
 //! The requests are the synthetic fixture `tests/fixtures/chatsvc/writes.json` (sanitized form) and the writes of the
 //! capture-shaped fixtures beside it (`edit.json`, `delete.json`, `reaction.json`, `reply.json`, `mention.json`); the
@@ -17,14 +18,14 @@ use std::time::Duration;
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::cdp::SessionId;
-use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule, QueryRule, ValueRule, chat_service_path};
+use proto_lab::classify::{Classification, Classifier, chat_service_path};
 use proto_lab::fence_http::{DenyCause, ForcedDeny, HttpFence, PausedRequest, Verdict};
-use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use proto_lab::fence_ws::{GuardScript, WsFence};
 use proto_lab::scenario::dsl::{Driver, RequestPattern, SeenRequest, Selector};
 use serde_json::{Value, json};
 use teams_fence::{
-    ChatCredential, DenyReason, FailClosed, Fence, FenceLog, FetchFailure, LiveMembershipSource, MembershipSource, Mri,
-    PartialReason, Roster, Scope, Target, WriteKind,
+    ChatCredential, Contact, DenyReason, FailClosed, Fence, FenceLog, FetchFailure, LiveMembershipSource,
+    MembershipSource, Mri, PartialReason, Policy, Request, Roster, Scope, Target, WriteKind, contacting,
 };
 use url::Url;
 use wiremock::matchers::{method, path};
@@ -54,13 +55,13 @@ fn one_to_one() -> String {
     format!("19:{GUID_A}_{GUID_B}@unq.gbl.spaces")
 }
 
-/// One fixture case: the request, and the target it should map to (`None`: unknown).
+/// One fixture case: the request, and what the classifier should make of it.
 struct Case {
     name: String,
     method: String,
     url: String,
     body: Option<Vec<u8>>,
-    expect: Option<Target>,
+    expect: Classification,
 }
 
 fn cases() -> TestResult<Vec<Case>> {
@@ -87,9 +88,14 @@ fn cases() -> TestResult<Vec<Case>> {
     Ok(cases)
 }
 
-fn expected(expect: &Value) -> TestResult<Option<Target>> {
+/// What the fixture's expectation is under the lab rule: `unknown` maps to nothing, `none` reaches nobody (a carve-out),
+/// and a target is a write reaching people, or typing or a read receipt, which reach nobody and pass.
+fn expected(expect: &Value) -> TestResult<Classification> {
     if expect == "unknown" {
-        return Ok(None);
+        return Ok(Classification::Unknown);
+    }
+    if expect == "none" {
+        return Ok(Classification::Allow);
     }
     let kind = WriteKind::ALL
         .into_iter()
@@ -104,21 +110,52 @@ fn expected(expect: &Value) -> TestResult<Option<Target>> {
         .as_array()
         .map(|added| added.iter().filter_map(Value::as_str).map(Mri::new).collect())
         .unwrap_or_default();
-    Ok(Some(Target::new(kind, scope).with_added(added)))
+    let target = Target::new(kind, scope).with_added(added);
+    Ok(if kind.is_contacting() {
+        Classification::Write(target)
+    } else {
+        Classification::Allow
+    })
+}
+
+/// The browser classifier's verdict on `method` `url` with `body`, and no headers.
+fn classify(method: &str, url: &str, body: Option<&[u8]>) -> Classification {
+    Classifier::new().classify(method, url, &[], body)
 }
 
 #[test]
-fn the_mapped_classifier_maps_each_chat_write_to_its_target() -> TestResult {
-    let classifier = Classifier::mapped();
+fn the_classifier_maps_each_chat_write_to_its_target() -> TestResult {
     let cases = cases()?;
     assert!(cases.len() > 20);
-    for case in &cases {
-        let got = classifier.classify(&case.method, &case.url, case.body.as_deref());
-        let want = case
-            .expect
-            .clone()
-            .map_or(Classification::Unknown, Classification::Write);
-        assert_eq!(got, want, "{}", case.name);
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let got = classify(&case.method, &case.url, case.body.as_deref());
+            (got != case.expect).then(|| format!("{}: {got:?}, the fixture says {:?}", case.name, case.expect))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    Ok(())
+}
+
+/// Both sides call one classifier: the browser fence's verdict on every fixture request is `teams_fence::contacting`'s,
+/// the native transport's.
+#[test]
+fn the_browser_fence_gives_the_shared_classifier_s_verdict() -> TestResult {
+    for case in cases()? {
+        let request = Request::new(&case.method, &case.url).with_body(case.body.as_deref());
+        let want = match contacting(&request, &Policy::new()) {
+            Contact::None if !request.is_mutating() => Classification::Read,
+            Contact::None => Classification::Allow,
+            Contact::Write(target) => Classification::Write(target),
+            Contact::Unreadable => Classification::Unknown,
+        };
+        assert_eq!(
+            classify(&case.method, &case.url, case.body.as_deref()),
+            want,
+            "{}",
+            case.name
+        );
     }
     Ok(())
 }
@@ -170,7 +207,6 @@ fn shaped_request(name: &str, at: &str) -> TestResult<(String, String, Option<Ve
 
 #[test]
 fn the_capture_shaped_fixtures_map_to_their_writes_on_the_lab_chat() -> TestResult {
-    let classifier = Classifier::mapped();
     for (name, at, kind) in SHAPED {
         let (method, url, body, json_body) = shaped_request(name, at)?;
         // only the mention fixture mentions anyone: the chat's other member
@@ -180,7 +216,7 @@ fn the_capture_shaped_fixtures_map_to_their_writes_on_the_lab_chat() -> TestResu
         let target =
             Target::new(*kind, Scope::Conversation { id: one_to_one() }).with_added(mentioned.then(|| lab_mri(GUID_B)));
         assert_eq!(
-            classifier.classify(&method, &url, body.as_deref()),
+            classify(&method, &url, body.as_deref()),
             Classification::Write(target),
             "{name} {at}"
         );
@@ -200,52 +236,52 @@ fn a_mention_in_the_group_chat_maps_to_a_message_there_adding_the_mentioned() ->
         },
     )
     .with_added([lab_mri(GUID_B)]);
-    assert_eq!(
-        Classifier::mapped().classify(&method, &url, body.as_deref()),
-        Classification::Write(target)
-    );
+    assert_eq!(classify(&method, &url, body.as_deref()), Classification::Write(target));
     Ok(())
 }
 
 #[test]
-fn the_seeded_classifier_maps_no_write() -> TestResult {
-    for case in cases()? {
-        assert_eq!(
-            Classifier::seeded().classify(&case.method, &case.url, case.body.as_deref()),
-            Classification::Unknown,
-            "{}",
-            case.name
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn reads_and_own_state_stay_as_they_were_with_the_mapping() {
-    let classifier = Classifier::mapped();
+fn reads_pass_and_what_reaches_nobody_is_allowed() {
     let messages = format!(
         "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{}/messages",
         one_to_one()
     );
-    assert_eq!(classifier.classify("GET", &messages, None), Classification::Read);
+    assert_eq!(classify("GET", &messages, None), Classification::Read);
+    // a GET with a body, or one overriding its method, can change something: read by the table
     assert_eq!(
-        classifier.classify("POST", "https://teams.microsoft.com/api/authsvc/v1.0/authz", None),
-        Classification::Own(OwnKind::Authz)
-    );
-    // the start-a-trial variant of authz stays denied
-    assert_eq!(
-        classifier.classify(
-            "POST",
-            "https://teams.microsoft.com/api/authsvc/v1.0/authz/signuptrial",
-            None
-        ),
+        classify("GET", &messages, Some(br#"{"messagetype":"Text","content":"hi"}"#)),
         Classification::Unknown
     );
+    let overridden = Classifier::new().classify(
+        "GET",
+        &messages,
+        &[("X-HTTP-Method-Override".to_owned(), Some("POST".to_owned()))],
+        None,
+    );
+    assert_eq!(overridden, Classification::Unknown);
+    // an override whose value the paused event didn't give reads as one naming another method
+    let unread = Classifier::new().classify("GET", &messages, &[("X-HTTP-Method".to_owned(), None)], None);
+    assert_eq!(unread, Classification::Unknown);
+    for (method, url) in [
+        ("POST", "https://teams.microsoft.com/api/authsvc/v1.0/authz"),
+        // the trial's sign-up is the account's own (no scenario starts one)
+        ("POST", "https://teams.microsoft.com/api/authsvc/v1.0/authz/signuptrial"),
+        (
+            "POST",
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token?prompt=none",
+        ),
+        ("PUT", "https://teams.microsoft.com/ups/emea/v1/me/forceavailability/"),
+    ] {
+        assert_eq!(
+            classify(method, url, Some(b"{}")),
+            Classification::Allow,
+            "{method} {url}"
+        );
+    }
 }
 
 #[test]
 fn a_write_is_mapped_only_on_the_chat_service_hosts() {
-    let classifier = Classifier::mapped();
     let body = br#"{"messagetype": "Text", "content": "hi"}"#;
     let chat = format!("19%3A{GUID_A}_{GUID_B}%40unq.gbl.spaces");
     let path = format!("v1/users/ME/conversations/{chat}/messages");
@@ -256,7 +292,7 @@ fn a_write_is_mapped_only_on_the_chat_service_hosts() {
     ];
     for url in &mapped {
         assert!(
-            matches!(classifier.classify("POST", url, Some(body)), Classification::Write(_)),
+            matches!(classify("POST", url, Some(body)), Classification::Write(_)),
             "{url}"
         );
     }
@@ -265,7 +301,6 @@ fn a_write_is_mapped_only_on_the_chat_service_hosts() {
         format!("https://teams.microsoft.com:444/api/chatsvc/emea/{path}"),
         format!("https://teams.microsoft.com/api/mt/emea/{path}"),
         format!("https://msg.teams.microsoft.com/{path}"),
-        format!("https://teams.microsoft.com.example.com/api/chatsvc/emea/{path}"),
         format!("https://emea.ng.msg.teams.microsoft.com/api/{path}"),
         format!("https://chatsvcagg.teams.microsoft.com/{path}"),
         format!("https://graph.microsoft.com/v1.0/chats/{chat}/messages"),
@@ -277,12 +312,11 @@ fn a_write_is_mapped_only_on_the_chat_service_hosts() {
         format!("https://a..b.msg.teams.microsoft.com/{path}"),
     ];
     for url in &unmapped {
-        assert_eq!(
-            classifier.classify("POST", url, Some(body)),
-            Classification::Unknown,
-            "{url}"
-        );
+        assert_eq!(classify("POST", url, Some(body)), Classification::Unknown, "{url}");
     }
+    // a lookalike host is no contacting service: what goes there reaches nobody of the tenant
+    let elsewhere = format!("https://teams.microsoft.com.example.com/api/chatsvc/emea/{path}");
+    assert_eq!(classify("POST", &elsewhere, Some(body)), Classification::Allow);
 }
 
 #[test]
@@ -305,7 +339,7 @@ fn the_chat_service_path_is_decoded_segment_by_segment() -> TestResult {
         "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/19%3Aa%2F..%2Fb%40thread.v2/messages",
     )?;
     assert_eq!(
-        Classifier::mapped().classify("POST", sneaky.as_str(), Some(br#"{"messagetype":"Text"}"#)),
+        classify("POST", sneaky.as_str(), Some(br#"{"messagetype":"Text"}"#)),
         Classification::Unknown
     );
     Ok(())
@@ -334,9 +368,9 @@ fn the_mapping_and_the_live_read_accept_the_same_chat_service_urls() -> TestResu
     Ok(())
 }
 
-/// The mapped classifier's verdict on a body: the target, or `None` for unknown.
+/// The classifier's verdict on a body: the target, or `None` for anything else.
 fn mapped_target(method: &str, url: &str, body: &str) -> Option<Target> {
-    match Classifier::mapped().classify(method, url, Some(body.as_bytes())) {
+    match classify(method, url, Some(body.as_bytes())) {
         Classification::Write(target) => Some(target),
         _ => None,
     }
@@ -401,24 +435,27 @@ fn a_body_the_chat_service_could_read_differently_is_unknown() {
     }
 }
 
-/// `Fence::check` permits typing on a chat and a read receipt without reading its members, so the mapping takes each
-/// only in its captured form: typing with only `content` (empty), `contenttype` and `messagetype`, a read receipt with
-/// `name` its one query key. Any other form is unknown, never typing or a read receipt.
+/// Typing and a read receipt reach nobody, so the classifier lets each through on a chat without a member read, but only
+/// in its captured form: typing with only `content` (empty), `contenttype` and `messagetype`, a read receipt with `name`
+/// its one query key. Any other form is unknown, never typing or a read receipt.
 #[test]
-fn typing_and_read_receipts_map_only_in_their_captured_form() {
+fn typing_and_read_receipts_pass_only_in_their_captured_form() {
     let chat = format!(
         "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{}",
         one_to_one()
     );
     let messages = format!("{chat}/messages");
-    let typing = || Some(Target::new(WriteKind::Typing, Scope::Conversation { id: one_to_one() }));
     let captured = [
         r#"{"content":"","contenttype":"Application/Message","messagetype":"Control/Typing"}"#,
         r#"{"contenttype":"Application/Message","messagetype":"Control/ClearTyping"}"#,
         r#"{"messagetype":"Control/Typing"}"#,
     ];
     for body in captured {
-        assert_eq!(mapped_target("POST", &messages, body), typing(), "{body}");
+        assert_eq!(
+            classify("POST", &messages, Some(body.as_bytes())),
+            Classification::Allow,
+            "{body}"
+        );
     }
     let off_shape = [
         r#"{"content":"hello","contenttype":"Application/Message","messagetype":"Control/Typing"}"#,
@@ -429,17 +466,17 @@ fn typing_and_read_receipts_map_only_in_their_captured_form() {
         r#"{"messagetype":"Control/Typing","imdisplayname":"a"}"#,
     ];
     for body in off_shape {
-        assert_eq!(mapped_target("POST", &messages, body), None, "{body}");
+        assert_eq!(
+            classify("POST", &messages, Some(body.as_bytes())),
+            Classification::Unknown,
+            "{body}"
+        );
     }
-    let horizon = r#"{"consumptionhorizon":"1;2;3"}"#;
-    let receipt = Some(Target::new(
-        WriteKind::ReadReceipt,
-        Scope::Conversation { id: one_to_one() },
-    ));
+    let horizon = br#"{"consumptionhorizon":"1;2;3"}"#;
     let properties = format!("{chat}/properties");
     assert_eq!(
-        mapped_target("PUT", &format!("{properties}?name=consumptionhorizon"), horizon),
-        receipt
+        classify("PUT", &format!("{properties}?name=consumptionhorizon"), Some(horizon)),
+        Classification::Allow
     );
     for query in [
         "name=consumptionhorizon&x=1",
@@ -448,8 +485,8 @@ fn typing_and_read_receipts_map_only_in_their_captured_form() {
         "Name=consumptionhorizon",
     ] {
         assert_eq!(
-            mapped_target("PUT", &format!("{properties}?{query}"), horizon),
-            None,
+            classify("PUT", &format!("{properties}?{query}"), Some(horizon)),
+            Classification::Unknown,
             "{query}"
         );
     }
@@ -464,7 +501,7 @@ async fn live_source(server: &MockServer) -> TestResult<Arc<LiveMembershipSource
         .mount(server)
         .await;
     let live = Arc::new(LiveMembershipSource::with_mock_origin(&server.uri())?);
-    let fence = HttpFence::new(Classifier::mapped(), Arc::new(fence(&[])), live.clone()).with_credentials(live.clone());
+    let fence = HttpFence::new(Classifier::new(), Arc::new(fence(&[])), live.clone()).with_credentials(live.clone());
     fence.offer_credential(&paused_params(
         "GET",
         "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations?view=msnp24Equivalent",
@@ -504,7 +541,7 @@ async fn a_message_in_the_lab_chat_passes_with_live_members_and_nothing_else_doe
     let live = live_source(&server).await?;
     let members: Arc<dyn MembershipSource + Send> = live.clone();
     let decide = async |lab: &[&str], request: &PausedRequest| {
-        HttpFence::new(Classifier::mapped(), Arc::new(fence(lab)), Arc::clone(&members))
+        HttpFence::new(Classifier::new(), Arc::new(fence(lab)), Arc::clone(&members))
             .decide(request)
             .await
     };
@@ -534,7 +571,7 @@ async fn a_mention_of_an_outsider_in_the_lab_chat_is_denied() -> TestResult {
     let server = MockServer::start().await;
     let live = live_source(&server).await?;
     let members: Arc<dyn MembershipSource + Send> = live.clone();
-    let http = HttpFence::new(Classifier::mapped(), Arc::new(fence(&[GUID_A, GUID_B])), members);
+    let http = HttpFence::new(Classifier::new(), Arc::new(fence(&[GUID_A, GUID_B])), members);
     let mentioning = |guid: &str| {
         let mentions = json!([{"@type": "http://schema.skype.com/Mention", "itemid": "0", "mri": format!("8:orgid:{guid}"),
             "mentionType": "person", "displayName": "Someone"}]);
@@ -558,13 +595,13 @@ async fn a_mention_of_an_outsider_in_the_lab_chat_is_denied() -> TestResult {
 #[tokio::test]
 async fn without_live_members_or_a_credential_a_mapped_write_is_still_denied() -> TestResult {
     let lab = [GUID_A, GUID_B];
-    let fail_closed = HttpFence::new(Classifier::mapped(), Arc::new(fence(&lab)), Arc::new(FailClosed));
+    let fail_closed = HttpFence::new(Classifier::new(), Arc::new(fence(&lab)), Arc::new(FailClosed));
     assert_eq!(
         fail_closed.decide(&message_to(&one_to_one())).await,
         Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::NoSource)))
     );
     let no_credential = HttpFence::new(
-        Classifier::mapped(),
+        Classifier::new(),
         Arc::new(fence(&lab)),
         Arc::new(LiveMembershipSource::new()?),
     );
@@ -579,7 +616,7 @@ async fn without_live_members_or_a_credential_a_mapped_write_is_still_denied() -
 async fn a_new_chat_is_judged_by_its_members_without_a_read() -> TestResult {
     let server = MockServer::start().await;
     let live = Arc::new(LiveMembershipSource::with_mock_origin(&server.uri())?);
-    let http = |lab: &[&str]| HttpFence::new(Classifier::mapped(), Arc::new(fence(lab)), live.clone());
+    let http = |lab: &[&str]| HttpFence::new(Classifier::new(), Arc::new(fence(lab)), live.clone());
     let create = |members: &[&str]| {
         PausedRequest {
         request_id: "interception-1".to_owned(),
@@ -610,7 +647,7 @@ async fn a_new_chat_is_judged_by_its_members_without_a_read() -> TestResult {
 #[test]
 fn the_credential_is_taken_only_from_a_chat_service_request_that_carries_one() -> TestResult {
     let live = Arc::new(LiveMembershipSource::new()?);
-    let http = HttpFence::new(Classifier::mapped(), Arc::new(fence(&[])), live.clone()).with_credentials(live.clone());
+    let http = HttpFence::new(Classifier::new(), Arc::new(fence(&[])), live.clone()).with_credentials(live.clone());
     let auth = json!({"Authentication": format!("skypetoken={TOKEN}")});
     // the web client sends the chat service an Entra bearer token (2026-10-20 capture), the middle tier one too
     let bearer = json!({"authorization": format!("Bearer {TOKEN}")});
@@ -636,7 +673,7 @@ fn the_credential_is_taken_only_from_a_chat_service_request_that_carries_one() -
     ));
     assert!(live.has_credential());
     let by_bearer = Arc::new(LiveMembershipSource::new()?);
-    HttpFence::new(Classifier::mapped(), Arc::new(fence(&[])), by_bearer.clone())
+    HttpFence::new(Classifier::new(), Arc::new(fence(&[])), by_bearer.clone())
         .with_credentials(by_bearer.clone())
         .offer_credential(&paused_params(
             "GET",
@@ -646,7 +683,7 @@ fn the_credential_is_taken_only_from_a_chat_service_request_that_carries_one() -
     assert!(by_bearer.has_credential());
     // a fence without `with_credentials` takes none
     let other = Arc::new(LiveMembershipSource::new()?);
-    let plain = HttpFence::new(Classifier::mapped(), Arc::new(fence(&[])), other.clone());
+    let plain = HttpFence::new(Classifier::new(), Arc::new(fence(&[])), other.clone());
     plain.offer_credential(&paused_params(
         "GET",
         "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations",
@@ -685,11 +722,7 @@ async fn a_forced_deny_comes_before_classification_and_is_logged() -> TestResult
     let dir = tempfile::tempdir()?;
     let log_path = dir.path().join("fence.log");
     let fence = Arc::new(Fence::new(Roster::default(), FenceLog::open(&log_path)?));
-    let own = Classifier::seeded().with_own(
-        OwnRule::new(OwnKind::Authz, "POST", "http://127.0.0.1:9", "/api/send")
-            .with_query(QueryRule::OneOf(&[&[("x", ValueRule::Exact(&["1"]))]])),
-    );
-    let http = HttpFence::new(own, fence, Arc::new(FailClosed));
+    let http = HttpFence::new(Classifier::new(), fence, Arc::new(FailClosed));
     let send = |body: &str| PausedRequest {
         request_id: "r".to_owned(),
         headers: Vec::new(),
@@ -779,10 +812,9 @@ async fn a_forced_deny_never_leaves_the_browser_and_the_page_sees_an_error() -> 
         Roster::default(),
         FenceLog::open(&dir.path().join("fence.log"))?,
     ));
-    let own = Classifier::seeded().with_own(OwnRule::new(OwnKind::Authz, "POST", &server.uri(), "/api/send"));
     let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-    let http = HttpFence::new(own, Arc::clone(&fence), Arc::clone(&members));
-    let ws = WsFence::new(FrameClassifier::seeded(), fence, members, GuardScript::generate()?);
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::clone(&members));
+    let ws = WsFence::new(fence, members, GuardScript::generate()?);
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };

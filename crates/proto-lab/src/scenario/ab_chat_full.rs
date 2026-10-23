@@ -1,5 +1,5 @@
 //! The `ab-chat-full` scenario: the a–b 1:1 chat beyond a plain message, recorded for the protocol notes
-//! (`docs/protocol/chat.md`). It runs under `ab-chat`'s fence: the write mapping ([`Classifier::mapped`]), members read
+//! (`docs/protocol/chat.md`). It runs under `ab-chat`'s fence: the lab rule (`crate::classify`), members read
 //! live, `ab-chat`'s forced-deny probes and its deny policy ([`ab_chat::policy`]: the reviewed expected-deny list, and
 //! nothing denied on the a–b chat but the probes).
 //!
@@ -18,9 +18,8 @@
 //! 5. The run is judged as `ab-chat` is: a probe in b's copy fails it like any failed step.
 //!
 //! The mention needs the web client's mention picker to offer b, which it can only once it can read b's profile: the
-//! middle tier's profile lookups are `POST`s, let through by the fence's read-by-`POST` list when they name only lab
-//! accounts (`crate::post_read`, the user's decision of 2026-10-21). Without them b shows as "Unknown User" and the
-//! picker offers nobody (live, 2026-10-20). The step picks b only once the picker's highlighted suggestion is b by its
+//! middle tier's profile lookups are `POST`s, reads that reach nobody, so the fence lets them through. Without them b
+//! shows as "Unknown User" and the picker offers nobody. The step picks b only once the picker's highlighted suggestion is b by its
 //! id, never whatever came first, and checks that the post's `properties.mentions` names b.
 //!
 //! A step that fails after the enforcement test (the web client's controls moved, a write denied) is reported, with a
@@ -38,10 +37,9 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::browser::Media;
-use crate::classify::{Classifier, strict_json};
+use crate::classify::strict_json;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::without_query;
-use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
@@ -149,14 +147,13 @@ impl Writes {
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
-        classifier: Classifier::mapped(),
-        frames: FrameClassifier::seeded(),
         live_members: true,
         capture: Some(ScenarioName::AbChatFull.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
+        ..SessionOptions::fail_closed()
     };
     let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {

@@ -1,6 +1,6 @@
 //! The `ab-image` scenario: what the web client sends when account a sends an image in the a–b chat, with every write
 //! to the media service (AMS: the object's creation and its upload) denied, recorded for the protocol notes
-//! (`docs/protocol/chat.md`, M1 Task 20). It runs under `ab-chat`'s fence: the write mapping ([`Classifier::mapped`]),
+//! (`docs/protocol/chat.md`, M1 Task 20). It runs under `ab-chat`'s fence: the lab rule (`crate::classify`),
 //! members read live, `ab-chat`'s forced-deny probes and the reviewed expected-deny list.
 //!
 //! An AMS object is created with a list of the conversations that may read it, and its content is put afterwards under
@@ -38,10 +38,8 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
 use crate::browser::Media;
-use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::{Denial, DenyCause, ForcedDeny};
-use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
@@ -235,14 +233,13 @@ pub fn compose_has_image() -> String {
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
-        classifier: Classifier::mapped(),
-        frames: FrameClassifier::seeded(),
         live_members: true,
         capture: Some(ScenarioName::AbImage.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
+        ..SessionOptions::fail_closed()
     };
     let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {

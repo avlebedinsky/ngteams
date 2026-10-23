@@ -1,7 +1,7 @@
-//! The request guard: decides each request a page of the sign-in window sends, as proto-lab's `sign_in` classifier
-//! decides it for Chrome (`GET`, `HEAD` and `OPTIONS` reads; the seeded own-state rules in their exact captured
-//! shapes, Entra's sign-in form among them; everything else denied, never by host alone), and appends the decision to
-//! `fence.log` before answering. A decision that can't be logged is a deny.
+//! The request guard: decides each request a page of the sign-in window sends by the sign-in rules
+//! ([`crate::classify::Classifier::sign_in`]: `GET`, `HEAD` and `OPTIONS` reads; the own-state rules in their exact
+//! captured shapes, Entra's sign-in form among them; everything else denied, never by host alone), and appends the
+//! decision to `fence.log` before answering. A decision that can't be logged is a deny.
 //!
 //! On top of the classifier:
 //! - a page that hasn't told the guard it is armed gets every request denied;
@@ -22,12 +22,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 
-use proto_lab::classify::{Classification, Classifier};
 use teams_auth::redirect::RedirectUri;
 use teams_auth::secrets::Secret;
 use teams_fence::{Channel, FenceLog, RequestOutcome, RequestRecord};
 use teams_signin_extension::protocol::{ALLOW, DENY, LINE_LIMIT, OK, Query};
 
+use crate::classify::{Classification, Classifier};
 use crate::cli::is_local_page;
 
 /// What the guard tells the window.
@@ -68,7 +68,7 @@ impl std::fmt::Debug for Guard {
 }
 
 impl Guard {
-    /// A guard with proto-lab's `sign_in` classifier, logging to `log`, catching the redirect to `redirect`, telling
+    /// A guard with the sign-in rules ([`Classifier::sign_in`]), logging to `log`, catching the redirect to `redirect`, telling
     /// its events on `events`.
     #[must_use]
     pub fn new(log: FenceLog, redirect: RedirectUri, events: mpsc::Sender<GuardEvent>) -> Self {
@@ -94,7 +94,7 @@ impl Guard {
     /// `test-support` build, which the `teams-signin` binary refuses to run.
     #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn with_own(mut self, rule: proto_lab::classify::OwnRule) -> Self {
+    pub fn with_own(mut self, rule: crate::classify::OwnRule) -> Self {
         self.classifier = self.classifier.with_own(rule);
         self
     }
@@ -136,14 +136,10 @@ impl Guard {
             self.refuse(method, url);
             return Decision::Deny;
         }
-        let outcome = match self.classifier.classify(method, url, None) {
+        let outcome = match self.classifier.classify(method, url) {
             Classification::Read => RequestOutcome::Read,
             Classification::Own(kind) => RequestOutcome::Own(kind.as_str()),
-            // the sign-in classifier maps no writes, no read by POST and no own availability
-            Classification::PostRead { .. }
-            | Classification::OwnAvailability { .. }
-            | Classification::Write(_)
-            | Classification::Unknown => RequestOutcome::Unclassified,
+            Classification::Unknown => RequestOutcome::Unclassified,
         };
         let allow = matches!(outcome, RequestOutcome::Read | RequestOutcome::Own(_));
         if self.record(method, url, outcome) && allow {

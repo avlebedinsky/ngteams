@@ -46,8 +46,7 @@ fn every_text_holds_the_run_s_nonce_and_none_is_a_probe_or_a_first_message() {
 }
 
 #[test]
-fn only_the_forced_denies_the_list_and_the_trouter_classes_are_expected_and_nothing_on_either_chat()
--> Result<(), regex::Error> {
+fn only_the_forced_denies_and_the_list_are_expected_and_nothing_on_either_chat() -> Result<(), regex::Error> {
     let ab = ab();
     let policy = policy(Some(&ab), Some(GROUP))?;
     let forced = |label: &str, url: &str| Denial {
@@ -72,11 +71,14 @@ fn only_the_forced_denies_the_list_and_the_trouter_classes_are_expected_and_noth
         THIS_RUN_PROBE,
         &format!("{BASE}/users/ME/conversations/x/messages")
     )));
-    // the reviewed list, and what comes up only once the push channel is
+    // the reviewed list
+    let invoke = "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke";
+    assert!(policy.expects(&Denial::new("POST", invoke, DenyCause::Unclassified)));
+    // what the lab rule lets through (telemetry, either stack's registration): a deny of it is unexpected
     let telemetry = "https://eu-mobile.events.data.microsoft.com/OneCollector/1.0/";
-    assert!(policy.expects(&Denial::new("POST", telemetry, DenyCause::Unclassified)));
+    assert!(!policy.expects(&Denial::new("POST", telemetry, DenyCause::Unclassified)));
     let calling = "https://teams.microsoft.com/registrar/prod/V2/registrations";
-    assert!(policy.expects(&Denial::new("POST", calling, DenyCause::Unclassified)));
+    assert!(!policy.expects(&Denial::new("POST", calling, DenyCause::Unclassified)));
     // without the group chat (not recorded) the a–b chat is still guarded
     let without_group = proto_lab::scenario::chat_shapes::policy(Some(&ab), None)?;
     let post = format!("{BASE}/users/ME/conversations/{ab}/messages");

@@ -164,7 +164,7 @@ pub const TEST_CALL_SCENARIO: &str = "UserInitiatedTestCall";
 /// the caller alone (no callee, scenario [`TEST_CALL_SCENARIO`]), and the caller then invites the echo service into
 /// it with an [`AddToCall`]. The echo is counted in here anyway, so the fence lets the start through only for a call
 /// it would let the echo join: the target is [`WriteKind::Call`] on [`Scope::New`] with the caller and the echo, the
-/// same target the browser fence gives the web client's start (`proto_lab::calling::call_start`).
+/// same target the browser fence gives the web client's start (`teams_fence::contacting`).
 ///
 /// There is no request here that answers an incoming call ([`WriteKind::CallAnswer`]): a lab client never answers one.
 #[derive(Clone, Debug, PartialEq, Eq)]

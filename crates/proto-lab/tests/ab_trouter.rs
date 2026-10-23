@@ -1,5 +1,5 @@
-//! The `ab-trouter` scenario's offline parts (M1 Task 14, `docs/protocol/trouter.md`): its names, the frame classifier
-//! of each variant, how it judges its denies, and its registration checks (also on a local page in a throwaway armed
+//! The `ab-trouter` scenario's offline parts (`docs/protocol/trouter.md`): its names, what the quiet variant holds
+//! back, how it judges its denies, and its registration checks (also on a local page in a throwaway armed
 //! browser). All URLs and ids here are made up.
 
 mod common;
@@ -10,10 +10,10 @@ use std::time::Duration;
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::cdp::SessionId;
-use proto_lab::classify::{Classification, Classifier, OwnKind, OwnRule};
+use proto_lab::classify::{Classification, Classifier};
 use proto_lab::fence_http::{Denial, DenyCause, ForcedDeny, HttpFence};
-use proto_lab::fence_ws::{Frame, FrameClassifier, FrameDenial, GuardScript, Payload, WsFence};
-use proto_lab::scenario::ab_trouter::{self, Activity, TROUTER_RUN_REQUESTS};
+use proto_lab::fence_ws::{Frame, FrameDenial, GuardScript, Payload, WsFence, classify_frame};
+use proto_lab::scenario::ab_trouter::{self, Activity};
 use proto_lab::scenario::dsl::{Driver, SeenRequest, StepError};
 use proto_lab::scenario::{ScenarioName, ab_chat};
 use serde_json::{Value, json};
@@ -43,106 +43,75 @@ fn the_two_variants_have_their_own_names() {
 }
 
 #[test]
-fn only_the_quiet_variant_holds_back_the_activity() {
+fn only_the_quiet_variant_holds_back_the_activity() -> TestResult {
     let frame = Frame {
         url: REGIONAL.to_owned(),
         payload: Payload::Text(ACTIVITY.to_owned()),
     };
+    // the frame rule lets the client's own activity through; the quiet run force-denies it
+    assert_eq!(classify_frame(&frame), Classification::Allow);
+    assert!(ab_trouter::hold_activity()?.matches(&frame));
+    let ping = Frame {
+        url: REGIONAL.to_owned(),
+        payload: Payload::Text(r#"5:5+::{"name":"ping"}"#.to_owned()),
+    };
+    assert!(!ab_trouter::hold_activity()?.matches(&ping));
+    let held = FrameDenial {
+        label: Some(ab_trouter::HELD_ACTIVITY.to_owned()),
+        ..FrameDenial::new(REGIONAL, DenyCause::Forced)
+    };
+    assert!(ab_trouter::trouter_policy(Activity::HeldBack, Some(AB_CHAT))?.expects_frame(&held));
+    assert!(!ab_trouter::trouter_policy(Activity::Reported, Some(AB_CHAT))?.expects_frame(&held));
     assert_eq!(
-        ab_trouter::frames(Activity::Reported).classify(&frame),
-        Classification::Own(OwnKind::TrouterSession)
+        ab_trouter::expected_forced(Activity::Reported),
+        ab_chat::EXPECTED_FORCED
     );
     assert_eq!(
-        ab_trouter::frames(Activity::HeldBack).classify(&frame),
-        Classification::Unknown
+        ab_trouter::expected_forced(Activity::HeldBack),
+        [
+            ab_chat::THIS_RUN_PROBE,
+            ab_chat::EARLIER_RUN_PROBE,
+            ab_trouter::HELD_ACTIVITY
+        ]
     );
-    assert_eq!(ab_trouter::frames(Activity::Reported), FrameClassifier::messaging());
-}
-
-#[test]
-fn the_run_expects_what_only_the_push_channel_brings_up() -> TestResult {
-    let policy = ab_trouter::trouter_policy(Some(AB_CHAT))?;
-    for (method, url) in [
-        ("POST", "https://teams.microsoft.com/registrar/prod/V2/registrations"),
-        ("POST", "https://teams.cloud.microsoft/registrar/prod/V2/registrations"),
-        ("PUT", "https://teams.microsoft.com/ups/noam/v1/me/endpoints/"),
-        ("POST", "https://teams.microsoft.com/ups/noam/v1/pubsub/subscriptions/x"),
-        (
-            "PUT",
-            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/48%3Anotifications/messages/1700000000000/properties?name=isread",
-        ),
-        (
-            "POST",
-            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000aa/invoke",
-        ),
-        // the list's classes still hold
-        ("POST", "https://teams.microsoft.com/ups/noam/v1/presence/getpresence/"),
-    ] {
-        assert!(policy.expects(&denial(method, url)), "{method} {url}");
-    }
-    // and `ab-chat` keeps them unexpected
-    let ab_chat = ab_chat::policy(Some(AB_CHAT))?;
-    for entry in TROUTER_RUN_REQUESTS {
-        let url = format!("https://teams.microsoft.com{}", entry.path.replace('*', "x"));
-        assert!(!ab_chat.expects(&denial(entry.method, &url)), "{}", entry.class);
-    }
     Ok(())
 }
 
+/// What comes up only once the push channel is (the endpoints' registrations, presence, the account's own feed) reaches
+/// nobody: the lab rule lets it through, so a deny of it is no class the run expects.
 #[test]
-fn the_run_s_own_classes_hold_only_as_the_list_s_do() -> TestResult {
-    let policy = ab_trouter::trouter_policy(Some(AB_CHAT))?;
-    for (method, url, cause) in [
-        // another method, path or host
-        (
-            "PUT",
-            "https://teams.microsoft.com/registrar/prod/V2/registrations",
-            DenyCause::Unclassified,
-        ),
-        (
-            "POST",
-            "https://teams.microsoft.com/registrar/prod/V2/registrations/x",
-            DenyCause::Unclassified,
-        ),
-        (
-            "POST",
-            "https://example.com/registrar/prod/V2/registrations",
-            DenyCause::Unclassified,
-        ),
-        (
-            "DELETE",
-            "https://teams.microsoft.com/ups/noam/v1/me/endpoints/",
-            DenyCause::Unclassified,
-        ),
-        // the feed's read state on a real chat, or an agent's other operations
-        (
-            "PUT",
-            "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/19%3Ax%40thread.v2/messages/1/properties",
-            DenyCause::Unclassified,
-        ),
-        (
-            "POST",
-            "https://teams.microsoft.com/api/chatsvc/amer/v1/agents/28:x/messages",
-            DenyCause::Unclassified,
-        ),
-        // a deny for another cause than an unknown request
-        (
-            "POST",
-            "https://teams.microsoft.com/registrar/prod/V2/registrations",
-            DenyCause::Malformed,
-        ),
-    ] {
-        assert!(
-            !policy.expects(&Denial::new(method, url, cause)),
-            "{method} {url} {cause:?}"
+fn what_the_push_channel_brings_up_passes_and_its_deny_is_unexpected() -> TestResult {
+    let teams = "https://teams.microsoft.com";
+    for activity in [Activity::Reported, Activity::HeldBack] {
+        let policy = ab_trouter::trouter_policy(activity, Some(AB_CHAT))?;
+        for (method, url) in [
+            ("POST", format!("{teams}/registrar/prod/V2/registrations")),
+            (
+                "POST",
+                "https://teams.cloud.microsoft/registrar/prod/V2/registrations".to_owned(),
+            ),
+            ("PUT", format!("{teams}/ups/noam/v1/me/endpoints/")),
+            ("POST", format!("{teams}/ups/noam/v1/pubsub/subscriptions/x")),
+            ("POST", format!("{teams}/ups/noam/v1/presence/getpresence/")),
+        ] {
+            assert_eq!(
+                Classifier::new().classify(method, &url, &[], Some(b"{}")),
+                Classification::Allow,
+                "{method} {url}"
+            );
+            assert!(!policy.expects(&denial(method, &url)), "{method} {url}");
+        }
+        // the list's classes hold
+        let invoke =
+            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000aa/invoke";
+        assert!(policy.expects(&denial("POST", invoke)));
+        // a write on the a–b chat stays unexpected
+        let chat = format!(
+            "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/{}/messages",
+            AB_CHAT.replace(':', "%3A").replace('@', "%40")
         );
+        assert!(!policy.expects(&denial("POST", &chat)));
     }
-    // a write on the a–b chat stays unexpected
-    let chat = format!(
-        "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/{}/messages",
-        AB_CHAT.replace(':', "%3A").replace('@', "%40")
-    );
-    assert!(!policy.expects(&denial("POST", &chat)));
     Ok(())
 }
 
@@ -160,22 +129,20 @@ fn the_edit_adds_no_space_and_the_reported_run_outlasts_a_delivery_s_lifetime() 
 }
 
 #[test]
-fn every_own_class_says_what_it_is_and_why_it_isnt_needed() {
-    assert!(!TROUTER_RUN_REQUESTS.is_empty());
-    for entry in TROUTER_RUN_REQUESTS {
-        assert!(!entry.class.is_empty() && !entry.reason.is_empty());
-        assert!(entry.path.starts_with('/'), "{}", entry.class);
-    }
-}
-
-#[test]
 fn denied_delivery_responses_are_expected_trouter_frames() -> TestResult {
-    let policy = ab_trouter::trouter_policy(Some(AB_CHAT))?;
-    let denied = FrameDenial {
-        url: "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c".to_owned(),
-        cause: DenyCause::Unclassified,
-    };
-    assert!(policy.expects_frame(&denied));
+    for activity in [Activity::Reported, Activity::HeldBack] {
+        let policy = ab_trouter::trouter_policy(activity, Some(AB_CHAT))?;
+        let denied = FrameDenial::new(
+            "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c",
+            DenyCause::Unclassified,
+        );
+        assert!(policy.expects_frame(&denied));
+        let answer = Frame {
+            url: REGIONAL.to_owned(),
+            payload: Payload::Text(r#"3:::{"id":"-1","status":200}"#.to_owned()),
+        };
+        assert_eq!(classify_frame(&answer), Classification::Unknown);
+    }
     Ok(())
 }
 
@@ -292,15 +259,9 @@ async fn a_registration_wait_meets_only_a_success_from_its_document_on() -> Test
         Roster::default(),
         FenceLog::open(&dir.path().join("fence.log"))?,
     ));
-    let own = Classifier::seeded().with_own(OwnRule::new(
-        OwnKind::EndpointRegistration,
-        "POST",
-        &server.uri(),
-        LOCAL_REGISTRAR,
-    ));
     let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-    let http = HttpFence::new(own, Arc::clone(&fence), Arc::clone(&members));
-    let ws = WsFence::new(FrameClassifier::seeded(), fence, members, GuardScript::generate()?);
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::clone(&members));
+    let ws = WsFence::new(fence, members, GuardScript::generate()?);
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };

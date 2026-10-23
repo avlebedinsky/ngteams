@@ -3,10 +3,8 @@
 
 pub mod accounts;
 pub mod arming;
-pub mod availability;
 pub mod browser;
 pub mod bundles;
-pub mod calling;
 pub mod capture;
 pub mod cdp;
 pub mod classify;
@@ -14,7 +12,6 @@ pub mod commands;
 pub mod config;
 pub mod fence_http;
 pub mod fence_ws;
-pub mod post_read;
 pub mod sanitize;
 pub mod scenario;
 pub mod session;

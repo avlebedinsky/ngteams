@@ -40,11 +40,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fs, thread};
 
-use proto_lab::classify::{OwnKind, OwnRule};
 use serde_json::Value;
 use teams_auth::signin::{WindowAnswer, WindowRequest};
 use teams_auth::token::NATIVE_CLIENT_REDIRECT;
 use teams_fence::FenceLog;
+use teams_signin::classify::{OwnKind, OwnRule};
 use teams_signin::window::{self, WindowConfig};
 use ui_sandbox::{Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip, wait_until};
 

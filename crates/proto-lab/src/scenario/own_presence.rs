@@ -1,23 +1,19 @@
-//! The `own-presence-*` scenarios (M2 Task 18, `docs/protocol/trouter.md`, "Own presence"): what makes account a show
-//! online as b sees it, and what a manual status sends, under the user's exception of 2026-10-21 (CLAUDE.md: a lab
-//! account may set its own availability, in its captured shapes, availability values only).
+//! The `own-presence-*` scenarios (`docs/protocol/trouter.md`, "Own presence"): what makes account a show online as b
+//! sees it, and what a manual status sends. Presence reaches nobody (CLAUDE.md), so under the lab rule it all passes;
+//! each run holds back on purpose, with a labelled forced deny, what it leaves out.
 //!
 //! Only account a's browser runs. b's view is read outside the scenario, by `teams-headless b presence` (UPS's
 //! presence read, under b's own fence) while a's page is open and after it closes (`scripts/own-presence-run.sh`):
 //! the scenario notes the Unix time of each step, so the reads can be lined up with it.
 //!
-//! Each runs with the **messaging set** of `ab-trouter` (the write mapping with members read live, the Trouter session's
-//! own frames, the messaging stack's registration), and differs in what reports a's availability ([`Report`]):
-//! - `own-presence-activity`: the Trouter `user.activity` frame alone; UPS's presence endpoint `PUT` stays denied (as in
-//!   `ab-trouter`).
-//! - `own-presence-endpoint`: the endpoint `PUT` alone ([`crate::availability`], on the endpoint the session registered);
-//!   every `user.activity` held back (as in `ab-trouter-quiet`).
+//! Each runs as `ab-trouter` does (the lab rule, members read live), and differs in what reports a's availability
+//! ([`Report`], [`Report::hold`]):
+//! - `own-presence-activity`: the Trouter `user.activity` frame alone; UPS's presence endpoint `PUT` held back.
+//! - `own-presence-endpoint`: the endpoint `PUT` alone; every `user.activity` held back (as in `ab-trouter-quiet`).
 //! - `own-presence-both`: both.
 //! - `own-presence-manual-held`: both, and a sets its status by hand (Busy, Do not disturb, Away, Available, then a
-//!   reset) with the request each sends denied, to capture it: its classifier recognizes the endpoint `PUT` alone
-//!   ([`Classifier::with_own_endpoint_put`]), so the manual status stays unknown.
-//! - `own-presence-manual`: as `own-presence-manual-held`, the manual status let through once it is mapped
-//!   ([`Classifier::with_own_availability`]): the only run that recognizes it.
+//!   reset) with the request each sends held back, to capture it.
+//! - `own-presence-manual`: as `own-presence-manual-held`, the manual status let through.
 //!
 //! The steps:
 //! 1. Before anything loads, a's fence force-denies every write carrying the probe marker, as in `ab-chat`.
@@ -29,8 +25,7 @@
 //! 4. The manual runs set each status of [`STATUSES`] and then reset it, from the account menu, each held for
 //!    [`STATUS_HOLD`]; the others hold the page open, nothing driven, for [`OBSERVE`].
 //! 5. The notes count the endpoint `PUT`s and the manual status requests, answered and denied. Judged as `ab-trouter`
-//!    ([`super::ab_trouter::trouter_policy`]), with what the account menu sends when it opens
-//!    ([`OWN_PRESENCE_REQUESTS`]); the held manual run also expects the manual status denies ([`MANUAL_HELD_REQUESTS`]).
+//!    ([`super::ab_trouter::trouter_policy`]), with the run's own held-back requests or frames ([`policy`]).
 //!
 //! Nothing in the run answers a call, sets a status note, out-of-office or a work location.
 
@@ -38,19 +33,17 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::browser::Media;
-use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::without_query;
-use crate::fence_ws::FrameClassifier;
+use crate::fence_http::{ForcedDeny, without_query};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, EXPECTED_FORCED, chat_link, chat_url, deny_probes, enforce, load, nonce, one_to_one_id,
-    probe_text, save_screenshot, setup,
+    CHAT_OPEN, COMPOSE, EARLIER_RUN_PROBE, EXPECTED_FORCED, THIS_RUN_PROBE, chat_link, chat_url, deny_probes, enforce,
+    load, nonce, one_to_one_id, probe_text, save_screenshot, setup,
 };
-use super::ab_trouter::{TROUTER_RUN_REQUESTS, size, wait_registered};
+use super::ab_trouter::{HELD_ACTIVITY, hold_activity, size, wait_registered};
 use super::dsl::{Driver, RequestPattern, SeenRequest, Selector};
-use super::expected::{ExpectedRequest, Review, TEAMS};
+use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// What reports a's availability in a run.
@@ -95,23 +88,27 @@ impl Report {
         .find(|report| report.scenario() == name)
     }
 
-    /// The request classifier: the messaging set; the endpoint `PUT` too but for [`Report::Activity`]; the manual
-    /// status too for [`Report::Manual`] alone (every other run, [`Report::ManualHeld`] among them, denies it).
+    /// What the run holds back on purpose (a forced deny labelled as [`Hold::label`] says), if anything: the endpoint
+    /// `PUT` for [`Report::Activity`], every `user.activity` for [`Report::Endpoint`], the manual status for
+    /// [`Report::ManualHeld`].
     #[must_use]
-    pub fn classifier(self) -> Classifier {
+    pub fn hold(self) -> Option<Hold> {
         match self {
-            Self::Activity => Classifier::messaging(),
-            Self::Endpoint | Self::Both | Self::ManualHeld => Classifier::messaging().with_own_endpoint_put(),
-            Self::Manual => Classifier::messaging().with_own_availability(),
+            Self::Activity => Some(Hold::EndpointPut),
+            Self::Endpoint => Some(Hold::Activity),
+            Self::ManualHeld => Some(Hold::ManualStatus),
+            Self::Both | Self::Manual => None,
         }
     }
 
-    /// The frame classifier: the messaging set's, every `user.activity` held back for [`Report::Endpoint`].
+    /// The forced denies a run with this report expects: `ab-chat`'s two probe rules', and its hold's.
     #[must_use]
-    pub fn frames(self) -> FrameClassifier {
-        match self {
-            Self::Endpoint => FrameClassifier::messaging().without_activity(),
-            _ => FrameClassifier::messaging(),
+    pub fn expected_forced(self) -> &'static [&'static str] {
+        match self.hold() {
+            None => &EXPECTED_FORCED,
+            Some(Hold::EndpointPut) => &[THIS_RUN_PROBE, EARLIER_RUN_PROBE, HELD_ENDPOINT_PUT],
+            Some(Hold::Activity) => &[THIS_RUN_PROBE, EARLIER_RUN_PROBE, HELD_ACTIVITY],
+            Some(Hold::ManualStatus) => &[THIS_RUN_PROBE, EARLIER_RUN_PROBE, HELD_MANUAL_STATUS],
         }
     }
 
@@ -159,6 +156,36 @@ pub const STATUSES: [(&str, &str); 4] = [
 /// How long a step of the menu looks for a control that may already show (the menu left open by the last choice).
 const GLANCE: Duration = Duration::from_secs(2);
 
+/// What a run holds back on purpose ([`Report::hold`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// UPS's presence endpoint `PUT` ([`ENDPOINT_PUT`]), labelled [`HELD_ENDPOINT_PUT`].
+    EndpointPut,
+    /// Every `user.activity` frame (`super::ab_trouter::hold_activity`), labelled [`HELD_ACTIVITY`].
+    Activity,
+    /// The manual status ([`MANUAL_STATUS`]), a set or its reset, labelled [`HELD_MANUAL_STATUS`].
+    ManualStatus,
+}
+
+/// The label of the forced deny that holds the endpoint `PUT` back.
+pub const HELD_ENDPOINT_PUT: &str = "held-back endpoint PUT";
+
+/// The label of the forced deny that holds the manual status back.
+pub const HELD_MANUAL_STATUS: &str = "held-back manual status";
+
+/// Forces `hold` on `session`'s fence: from before its page loads to the end of the run.
+///
+/// # Errors
+/// Never: the patterns are fixed.
+pub fn force_hold(session: &LabSession, hold: Hold) -> Result<(), regex::Error> {
+    match hold {
+        Hold::EndpointPut => session.force_deny(ForcedDeny::new("PUT", ENDPOINT_PUT)?.labelled(HELD_ENDPOINT_PUT)),
+        Hold::Activity => session.force_deny_frames(hold_activity()?),
+        Hold::ManualStatus => session.force_deny(ForcedDeny::new("PUT", MANUAL_STATUS)?.labelled(HELD_MANUAL_STATUS)),
+    }
+    Ok(())
+}
+
 /// UPS's presence endpoint `PUT`.
 pub const ENDPOINT_PUT: &str = r"/ups/[a-z]+/v1/me/endpoints/$";
 
@@ -170,57 +197,13 @@ const ACCOUNT_MENU: Selector<'static> = Selector::Tid("me-control-avatar-trigger
 const STATUS_MENU: Selector<'static> = Selector::Tid("set-presence-status-menu-item");
 const RESET_STATUS: Selector<'static> = Selector::Tid("set-availability-reset-status");
 
-/// What the account menu sends when it opens (seen first in `own-presence-manual-held` of 2026-10-23): the client
-/// noting which of its own prompts it showed the account. It stays denied: the scenario needs no prompt.
-const PROMPT_SHOWN: ExpectedRequest = ExpectedRequest {
-    class: "engagement surfaces shown",
-    hosts: TEAMS,
-    method: "PUT",
-    path: "/api/mt/part/*/beta/me/engagementSurfaces/displayed",
-    reason: "records which of the client's own prompts it showed the account (the account menu's): the scenario \
-             needs no prompt",
-};
-
-/// The denied classes these runs expect besides the reviewed list: `ab-trouter`'s ([`TROUTER_RUN_REQUESTS`]) and what
-/// the account menu sends when it opens ([`PROMPT_SHOWN`]).
-pub const OWN_PRESENCE_REQUESTS: [ExpectedRequest; 4] = [
-    TROUTER_RUN_REQUESTS[0],
-    TROUTER_RUN_REQUESTS[1],
-    TROUTER_RUN_REQUESTS[2],
-    PROMPT_SHOWN,
-];
-
-/// The denied classes the held manual run expects: [`OWN_PRESENCE_REQUESTS`] and the manual status (a set, or its
-/// reset, the same `PUT` with no body), held back to capture it before it was mapped.
-pub const MANUAL_HELD_REQUESTS: [ExpectedRequest; 5] = [
-    TROUTER_RUN_REQUESTS[0],
-    TROUTER_RUN_REQUESTS[1],
-    TROUTER_RUN_REQUESTS[2],
-    PROMPT_SHOWN,
-    ExpectedRequest {
-        class: "manual status",
-        hosts: TEAMS,
-        method: "PUT",
-        path: "/ups/*/v1/me/forceavailability/",
-        reason: "the request a manual status sends: held back in `own-presence-manual-held` to capture its shape \
-                 before it was mapped (M2 Task 18)",
-    },
-];
-
-/// How a run with `report` judges its denies: `ab-trouter`'s forced denies and mapped target, with
-/// [`OWN_PRESENCE_REQUESTS`] ([`MANUAL_HELD_REQUESTS`] for [`Report::ManualHeld`]).
+/// How a run with `report` judges its denies: `ab-trouter`'s forced denies and mapped target, with the forced deny of
+/// what the run holds back ([`Report::expected_forced`]).
 ///
 /// # Errors
 /// Never for an id from [`one_to_one_id`]; when the chat's pattern doesn't compile.
 pub fn policy(report: Report, chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let requests: &'static [ExpectedRequest] = if report == Report::ManualHeld {
-        &MANUAL_HELD_REQUESTS
-    } else {
-        &OWN_PRESENCE_REQUESTS
-    };
-    let mut review = Review::new()
-        .expecting_forced(&EXPECTED_FORCED)
-        .expecting_requests(requests);
+    let mut review = Review::new().expecting_forced(report.expected_forced());
     if let Some(chat_id) = chat_id {
         review = review.with_mapped_target(chat_url(chat_id)?);
     }
@@ -287,14 +270,13 @@ pub async fn run(paths: &LabPaths, options: RunOptions, report_with: Report) -> 
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let name = report_with.scenario();
     let session_options = SessionOptions {
-        classifier: report_with.classifier(),
-        frames: report_with.frames(),
         live_members: true,
         capture: Some(name.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
+        ..SessionOptions::fail_closed()
     };
     let mut a = LabSession::open_with(paths, Alias::A, session_options).await?;
     let mut report = ScenarioReport::new(name);
@@ -302,17 +284,18 @@ pub async fn run(paths: &LabPaths, options: RunOptions, report_with: Report) -> 
     if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
         report.failures.push(error.to_string());
     }
+    if let Some(hold) = report_with.hold()
+        && let Err(error) = force_hold(&a, hold)
+    {
+        report.failures.push(format!("can't hold {hold:?} back: {error}"));
+    }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
     let chat_id = one_to_one_id(mri(Alias::A), mri(Alias::B));
     let policy = policy(report_with, chat_id.as_deref()).unwrap_or_else(|error| {
         report
             .failures
             .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(
-            Review::new()
-                .expecting_forced(&EXPECTED_FORCED)
-                .expecting_requests(&OWN_PRESENCE_REQUESTS),
-        )
+        DenyPolicy::Reviewed(Review::new().expecting_forced(report_with.expected_forced()))
     });
     let steps = Steps {
         mri_b: mri(Alias::B),

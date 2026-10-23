@@ -218,8 +218,8 @@ fn only_the_scenario_s_forced_denies_and_the_list_are_expected_and_nothing_on_th
     let receipt = format!("{BASE}/users/ME/conversations/{GROUP_ENCODED}/properties?name=consumptionhorizon");
     assert!(!policy.expects(&Denial::new("PUT", &receipt, DenyCause::Unclassified)));
     // a listed class elsewhere is
-    let telemetry = "https://eu-mobile.events.data.microsoft.com/OneCollector/1.0/";
-    assert!(policy.expects(&Denial::new("POST", telemetry, DenyCause::Unclassified)));
+    let invoke = "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke";
+    assert!(policy.expects(&Denial::new("POST", invoke, DenyCause::Unclassified)));
     // without the chat's id (a creation run that didn't learn it) the forced denies are still the only ones expected
     let creation = proto_lab::scenario::abc_chat::policy(None)?;
     assert!(creation.expects(&forced(FIRST_MESSAGE)));
@@ -237,9 +237,14 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
     Ok(Some(match name {
         ScenarioName::Load => return Ok(None),
         ScenarioName::AbChat | ScenarioName::AbChatFull => (probe_rules(Some(&probe))?, ab_chat::policy(ab)?),
-        ScenarioName::AbTrouter | ScenarioName::AbTrouterQuiet => {
-            (probe_rules(Some(&probe))?, ab_trouter::trouter_policy(ab)?)
-        }
+        ScenarioName::AbTrouter => (
+            probe_rules(Some(&probe))?,
+            ab_trouter::trouter_policy(ab_trouter::Activity::Reported, ab)?,
+        ),
+        ScenarioName::AbTrouterQuiet => (
+            probe_rules(Some(&probe))?,
+            ab_trouter::trouter_policy(ab_trouter::Activity::HeldBack, ab)?,
+        ),
         ScenarioName::AbImage => (
             [probe_rules(Some(&probe))?, ab_image::media_rules()?].concat(),
             ab_image::policy(ab)?,
