@@ -559,6 +559,11 @@ const SERVICES_BY_URL: &[(&str, Option<Service>)] = &[
     ),
     ("https://westus1-mediap.svc.ms/x", Some(Service::SharePoint)),
     ("https://onedrive.live.com/x", Some(Service::SharePoint)),
+    ("https://api.onedrive.com/v1.0/x", Some(Service::SharePoint)),
+    (
+        "https://contoso-my.sharepoint-df.com/personal/x",
+        Some(Service::SharePoint),
+    ),
     ("https://my.microsoftpersonalcontent.com/x", Some(Service::SharePoint)),
     (
         "https://us-prod.asyncgw.teams.microsoft.com/v1/objects/",

@@ -661,13 +661,43 @@ run in the background.
 
 ### Task 10: Verify acceptance criteria
 
-- [ ] every row of Technical Details' table has a table-test row, and both sides call the one classifier
-- [ ] every mutating request the live runs logged `allowed` was checked against the table (Task 9)
-- [ ] a natively created lab-only group chat is writable (mock test)
-- [ ] no delivery response can be sent from either side yet (frame tests), and nothing in the rules or the types
+- [x] every row of Technical Details' table has a table-test row, and both sides call the one classifier
+  - result: holds. `crates/teams-fence/tests/contacting.rs` reads `fixtures/contacting/chat_service.json` (every chat
+    service row: messages and mentions, typing, edit, delete, reactions, read receipts, own-view properties, the own
+    feed's `isread`, own settings, endpoints, `threads` and members, and each `Unreadable` form) and
+    `services.json` (Graph, Outlook/OWA/Substrate with the search carve-outs, SharePoint/OneDrive, AMS with the token
+    exchanges, the middle tier and apps with `aggregatedEntitlements`, CSA with `chatsAndChannelsByIds`, calling, and
+    "everything else"), plus the echo call start's own tests. Gap closed: the SharePoint row's `*.sharepoint-df.com`
+    and `*.onedrive.com` hosts and the middle tier's `conversation(s)`/`thread(s)` segments had no case; rows added
+    (and the two hosts to `SERVICES_BY_URL`), the code already gave the table's verdict. Both sides call
+    `teams_fence::contacting`: the browser fence through `proto-lab`'s `Classifier::classify` (`classify.rs`), the
+    native transport through `HttpTransport::judge` before every plain request (`teams-proto/src/http.rs`; refused
+    unsent: `tests/http.rs` `a_plain_write_or_unreadable_request_is_refused_before_anything_is_sent`).
+- [x] every mutating request the live runs logged `allowed` was checked against the table (Task 9)
+  - result: holds, from Task 9's record (its results above and the progress log): every `allowed` line of the
+    browser and native runs (41 shapes) was checked against the table, none reaching people, no family added. Nothing
+    was run live in this task.
+- [x] a natively created lab-only group chat is writable (mock test)
+  - result: holds. `teams-core/tests/engine.rs` `a_group_chat_made_natively_takes_its_first_message_under_the_live_read`
+    creates a group chat with b and c through the engine against the mock lab, and its first message is permitted
+    (`allow` in `fence.log`) after exactly one fresh member-list read, with no `chats.toml` entry;
+    `a_new_group_chat_is_created_and_its_first_message_brings_it_to_b_and_c` carries it to b and c.
+- [x] no delivery response can be sent from either side yet (frame tests), and nothing in the rules or the types
       stops M3 from adding one for a registered call
-- [ ] the full gate passes: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D
+  - result: holds. Browser: `proto-lab/tests/fence_ws.rs`
+    `on_a_trouter_socket_the_session_s_frames_pass_and_a_delivery_s_answer_does_not` denies type `3` (and `4`, `6`,
+    binary, unparsable) on every Trouter socket. Native: `teams-proto`'s sealed frame content has no `3:::` form, and
+    `fence-seal`'s `proto_raw_frame` proves a hand-built delivery answer, raw frame text and a `DeliveryResponse` don't
+    compile. For M3: the hard rules allow answering a call whose invitation names only lab accounts or the echo
+    service, the Patterns say a delivery answer may come only as a typed response for a call the fence permitted, and
+    a new frame type in `teams-proto` is an ordinary change (`frame.rs`'s module docs; `OwnFrame` is sealed only to
+    keep raw text out); the browser's frame rule is one function (`fence_ws::classify_frame`) a registered call's
+    allow can be added to.
+- [x] the full gate passes: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D
       warnings`, `scripts/lint-report.sh`, `cargo test --workspace`
+  - result: passes: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+    `scripts/lint-report.sh`, `cargo test --workspace` (165 test results, all ok, no flake hit) and `cargo test -p
+    fixture-guard`, with the rows added above.
 
 ### Task 11: [Final] Update documentation
 
