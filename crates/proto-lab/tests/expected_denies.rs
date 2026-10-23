@@ -183,6 +183,17 @@ fn a_forced_frame_deny_is_expected_only_under_a_label_the_scenario_names() -> Te
     assert!(!review.expects_frame(&held(Some("other"))));
     assert!(!review.expects_frame(&held(None)));
     assert!(!ab_chat_policy()?.expects_frame(&held(Some("held"))));
+    // a forced deny whose log entry was lost keeps its label, and fails the run all the same
+    let lost = FrameDenial {
+        cause: DenyCause::LogUnavailable,
+        ..held(Some("held"))
+    };
+    assert!(!review.expects_frame(&lost));
+    let lost_request = Denial {
+        label: Some("held".to_owned()),
+        ..denial("POST", "https://teams.microsoft.com/", DenyCause::LogUnavailable)
+    };
+    assert!(!review.expects(&lost_request));
     Ok(())
 }
 

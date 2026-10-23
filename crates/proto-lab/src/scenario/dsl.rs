@@ -678,6 +678,37 @@ impl Driver {
         }
     }
 
+    /// `request` with its body: the one its `Network` event carried inline or, when it carried none, the one the
+    /// browser still holds for it (`Network.getRequestPostData` on the session it was seen on, within the call
+    /// timeout), kept for later looks. A body neither gives (a request without one, one the browser no longer holds)
+    /// stays `None`. Chrome leaves some bodies out of the event (the registrar's registrations, seen live).
+    ///
+    /// # Errors
+    /// [`StepError::Timeout`] when the browser doesn't answer in time.
+    pub async fn read_body(&mut self, step: &str, request: &SeenRequest) -> Result<SeenRequest, StepError> {
+        if request.body.is_some() {
+            return Ok(request.clone());
+        }
+        let call = self.cdp.call(
+            request.session.as_ref(),
+            "Network.getRequestPostData",
+            json!({"requestId": request.request_id}),
+        );
+        let answer = tokio::time::timeout(self.call_timeout, call)
+            .await
+            .map_err(|_| StepError::Timeout {
+                step: step.to_owned(),
+                waited: self.call_timeout,
+                waiting_for: format!("the body of {} {}", request.method, without_query(&request.url)),
+            })?;
+        let mut read = request.clone();
+        read.body = answer.ok().and_then(|answer| post_data_text(&answer));
+        if let Some(seen) = self.seen_mut(request.session.as_ref(), &request.request_id) {
+            seen.body.clone_from(&read.body);
+        }
+        Ok(read)
+    }
+
     /// Reads every event that has come in.
     fn drain(&mut self) {
         loop {
@@ -879,6 +910,18 @@ pub fn navigated_away(error: &StepError) -> bool {
         StepError::Cdp { source: CdpError::Remote { error, .. }, .. }
             if NAVIGATED_AWAY.iter().any(|text| error.message.contains(text))
     )
+}
+
+/// The text of a `Network.getRequestPostData` answer (`postData`, base64 when `base64Encoded`); `None` for a body that
+/// isn't UTF-8.
+fn post_data_text(answer: &Value) -> Option<String> {
+    let data = answer["postData"].as_str()?;
+    if answer["base64Encoded"] == true {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+        String::from_utf8(bytes).ok()
+    } else {
+        Some(data.to_owned())
+    }
 }
 
 /// A `Network.requestWillBeSent`'s `wallTime` (seconds since the Unix epoch, with a fraction) in whole ms; `None` for

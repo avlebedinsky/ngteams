@@ -505,6 +505,16 @@ async fn a_frame_that_reaches_nobody_passes_logged_as_allowed_and_one_that_canno
         Verdict::Deny(DenyCause::LogUnavailable)
     );
     assert_eq!(ws.denials()[0].cause, DenyCause::LogUnavailable);
+    // a forced deny the log won't take is still denied, but as lost, never as the forced deny a scenario expects
+    ws.force_deny(ForcedFrameDeny::new("^ws://").unwrap().labelled("held"));
+    assert_eq!(
+        ws.decide(&text(LOCAL, "allow:1")).await,
+        Verdict::Deny(DenyCause::LogUnavailable)
+    );
+    let denials = ws.denials();
+    assert_eq!(denials.len(), 2);
+    assert_eq!(denials[1].cause, DenyCause::LogUnavailable);
+    assert_eq!(denials[1].label.as_deref(), Some("held"));
 }
 
 #[tokio::test]

@@ -446,7 +446,7 @@ impl WsFence {
 
     /// Classifies a frame and decides it. Every deny is logged and kept. A [`Payload::Foreign`] frame is denied
     /// unclassified ([`DenyCause::ForeignSocket`]; `fence.log` has it as `unclassified`); a forced one comes next
-    /// ([`DenyCause::Forced`], logged as `forced`).
+    /// ([`DenyCause::Forced`], logged as `forced`; [`DenyCause::LogUnavailable`] when the log won't take it).
     pub async fn decide(&self, frame: &Frame) -> Verdict {
         if frame.payload == Payload::Foreign {
             let record = RequestRecord {
@@ -474,13 +474,16 @@ impl WsFence {
                 url: &frame.url,
                 outcome: RequestOutcome::Forced,
             };
-            // denied whether or not the log takes it
-            let _ = self.fence.log().record_request(&record);
+            // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
+            let cause = match self.fence.log().record_request(&record) {
+                Ok(()) => DenyCause::Forced,
+                Err(_) => DenyCause::LogUnavailable,
+            };
             self.keep(FrameDenial {
                 label: rule.label,
-                ..FrameDenial::new(&frame.url, DenyCause::Forced)
+                ..FrameDenial::new(&frame.url, cause)
             });
-            return Verdict::Deny(DenyCause::Forced);
+            return Verdict::Deny(cause);
         }
         self.judge(classify_frame(frame), &frame.url).await
     }

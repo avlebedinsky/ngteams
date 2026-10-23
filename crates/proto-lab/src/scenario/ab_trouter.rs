@@ -13,7 +13,7 @@
 //!    ([`super::ab_chat`]).
 //! 2. b opens the web client and must register its endpoint, then opens the chat with a (a new document, which
 //!    registers again) and must read it: b now shows the a–b chat, with its push channel up. Each document must get a
-//!    registration answered with a 2xx ([`wait_registered`]): the earlier document's never counts.
+//!    messaging-stack registration answered with a 2xx ([`wait_registered`]): the earlier document's never counts.
 //! 3. a opens the web client and the chat with b, and proves enforcement live with this run's probe (`ab-chat`'s
 //!    step 4).
 //! 4. a sends the message; b, already showing the chat, must show it within [`DELIVERY`] (it can only come by push or
@@ -39,6 +39,7 @@ use serde_json::json;
 use tokio::time::Instant;
 
 use crate::browser::Media;
+use crate::cdp::SessionId;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::without_query;
 use crate::fence_ws::ForcedFrameDeny;
@@ -94,8 +95,12 @@ pub fn expected_forced(activity: Activity) -> &'static [&'static str] {
     }
 }
 
-/// The registration of an endpoint with the registrar (either stack's; the fence lets only the messaging stack's out).
+/// The registration of an endpoint with the registrar (either stack's; under the lab rule both pass).
 pub const REGISTRATION: &str = r"/registrar/prod/[Vv]2/registrations$";
+
+/// What the messaging stack's registration body holds and the calling stack's (`SkypeSpacesWeb`) doesn't: its
+/// `clientDescription.appId`, as the web client writes it (compact JSON).
+pub const MESSAGING_REGISTRATION: &str = r#""appId":"TeamsCDLWebWorker""#;
 
 /// How long b's endpoint gets to register after a load.
 pub const REGISTER: Duration = Duration::from_secs(90);
@@ -153,40 +158,79 @@ pub fn trouter_policy(activity: Activity, chat_id: Option<&str>) -> Result<DenyP
     Ok(DenyPolicy::Reviewed(review))
 }
 
-/// The pattern of an endpoint's registration ([`REGISTRATION`]), either stack's.
+/// The pattern of the messaging stack's endpoint registration: a [`REGISTRATION`] whose body holds
+/// [`MESSAGING_REGISTRATION`]. Its URL alone ([`RequestPattern::matches`]) takes either stack's.
 ///
 /// # Errors
 /// Never: the pattern is fixed.
 pub fn registration() -> Result<RequestPattern, regex::Error> {
-    RequestPattern::new(Some("POST"), REGISTRATION)
+    Ok(RequestPattern::new(Some("POST"), REGISTRATION)?.with_body_containing(MESSAGING_REGISTRATION))
 }
 
-/// Whether `request` is a registration (`pattern`, [`registration`]) answered with a 2xx, either stack's. One that failed
-/// in the page never is.
+/// Whether `request` is the messaging stack's registration (`pattern`, [`registration`], body included) answered with a
+/// 2xx. The calling stack's, one whose body the events left out, and one that failed in the page never are.
 #[must_use]
 pub fn registered(pattern: &RequestPattern, request: &SeenRequest) -> bool {
-    pattern.matches(&request.method, &request.url) && request.status.is_some_and(|status| (200..300).contains(&status))
+    pattern.matches_request(request) && answered_2xx(request)
 }
 
-/// Waits up to [`REGISTER`] for a registration sent as the `since`th request seen by `driver` or later (since a
-/// document began: [`Driver::seen_so_far`]) to be answered with a 2xx ([`registered`]), and gives it. A denied
-/// registration, or one an earlier document made, never meets the wait, and the other request waits keep their place.
+fn answered_2xx(request: &SeenRequest) -> bool {
+    request.status.is_some_and(|status| (200..300).contains(&status))
+}
+
+/// Waits up to [`REGISTER`] for the messaging stack's registration sent as the `since`th request seen by `driver` or
+/// later (since a document began: [`Driver::seen_so_far`]) to be answered with a 2xx ([`registered`]), and gives it.
+/// Each registration answered with a 2xx has its body read ([`Driver::read_body`]: the event leaves it out) to tell the
+/// stacks apart. The calling stack's registration, one whose body can't be read, a denied one, or one an earlier
+/// document made never meets the wait, and the other request waits keep their place.
 ///
 /// # Errors
-/// [`StepError::Timeout`] when none is answered so in time, [`StepError::Closed`] when the connection goes.
+/// [`StepError::Timeout`] when none is answered so in time (saying how many other stacks' or unreadable ones were),
+/// [`StepError::Closed`] when the connection goes.
 pub async fn wait_registered(driver: &mut Driver, step: &str, since: usize) -> Result<SeenRequest, StepError> {
     let pattern = registration().map_err(|error| StepError::Failed {
         step: step.to_owned(),
         reason: error.to_string(),
     })?;
     let waiting_for = format!("{pattern} answered with a 2xx");
-    driver
-        .wait_for_seen(step, &waiting_for, since, REGISTER, |seen| registered(&pattern, seen))
-        .await
+    let deadline = Instant::now() + REGISTER;
+    let mut passed_over = Vec::<(Option<SessionId>, String)>::new();
+    let (mut other_stack, mut unreadable) = (0, 0);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let answered = driver
+            .wait_for_seen(step, &waiting_for, since, left, |seen| {
+                pattern.matches(&seen.method, &seen.url)
+                    && answered_2xx(seen)
+                    && !passed_over.contains(&(seen.session.clone(), seen.request_id.clone()))
+            })
+            .await
+            .map_err(|error| match error {
+                StepError::Timeout { step, .. } => StepError::Timeout {
+                    step,
+                    waited: REGISTER,
+                    waiting_for: format!(
+                        "{waiting_for} ({other_stack} other stack's and {unreadable} unreadable registration(s) \
+                         answered with a 2xx passed over)"
+                    ),
+                },
+                other => other,
+            })?;
+        let read = driver.read_body(step, &answered).await?;
+        if registered(&pattern, &read) {
+            return Ok(read);
+        }
+        if read.body.is_some() {
+            other_stack += 1;
+        } else {
+            unreadable += 1;
+        }
+        passed_over.push((read.session, read.request_id));
+    }
 }
 
-/// What `requests` hold of endpoint registrations ([`REGISTRATION`]), for the run's notes: how many were answered
-/// with a 2xx, how many failed in the page or were answered otherwise (each URL, without its query, with its count),
+/// What `requests` hold of endpoint registrations ([`REGISTRATION`], either stack's, by URL), for the run's notes: how
+/// many were answered with a 2xx, how many failed in the page or were answered otherwise (each URL, without its query, with its count),
 /// and how many got neither yet.
 #[must_use]
 pub fn registrations_note(who: &str, requests: &[SeenRequest]) -> String {
@@ -199,7 +243,7 @@ pub fn registrations_note(who: &str, requests: &[SeenRequest]) -> String {
         .iter()
         .filter(|request| pattern.matches(&request.method, &request.url))
     {
-        if registered(&pattern, request) {
+        if answered_2xx(request) {
             answered += 1;
         } else if request.failed.is_some() || request.status.is_some() {
             *denied.entry(without_query(&request.url)).or_default() += 1;

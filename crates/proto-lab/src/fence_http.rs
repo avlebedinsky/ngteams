@@ -125,8 +125,8 @@ pub struct MalformedPause(pub &'static str);
 pub enum DenyCause {
     /// A mutating request (or a frame) that could reach people and that nothing reads: unknown to the classifier.
     Unclassified,
-    /// A request (or a frame) let through as reaching nobody whose `allowed` entry, or an unclassified one whose deny,
-    /// couldn't be written to `fence.log`.
+    /// A request (or a frame) let through as reaching nobody whose `allowed` entry, or an unclassified or forced one
+    /// whose deny, couldn't be written to `fence.log`.
     LogUnavailable,
     /// The fence refused the write (its reason is in `fence.log`).
     Fenced(teams_fence::DenyReason),
@@ -420,7 +420,8 @@ impl HttpFence {
         }
     }
 
-    /// Classifies a request and decides it. Every deny is logged and kept; a forced one comes first.
+    /// Classifies a request and decides it. Every deny is logged and kept; a forced one comes first
+    /// ([`DenyCause::Forced`]; [`DenyCause::LogUnavailable`] when the log won't take it).
     pub async fn decide(&self, request: &PausedRequest) -> Verdict {
         if let Some(rule) = self.forced(request) {
             let record = RequestRecord {
@@ -429,14 +430,17 @@ impl HttpFence {
                 url: &request.url,
                 outcome: RequestOutcome::Forced,
             };
-            // denied whether or not the log takes it
-            let _ = self.fence.log().record_request(&record);
+            // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
+            let cause = match self.fence.log().record_request(&record) {
+                Ok(()) => DenyCause::Forced,
+                Err(_) => DenyCause::LogUnavailable,
+            };
             self.keep(Denial {
                 label: rule.label,
                 network_id: request.network_id.clone(),
-                ..Denial::new(&request.method, &request.url, DenyCause::Forced)
+                ..Denial::new(&request.method, &request.url, cause)
             });
-            return Verdict::Deny(DenyCause::Forced);
+            return Verdict::Deny(cause);
         }
         let classification = self.classifier.classify(
             &request.method,

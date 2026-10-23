@@ -395,6 +395,16 @@ async fn an_allowed_request_that_cannot_be_logged_is_denied() {
     assert_eq!(http.denials().len(), 1);
     // a read needs no log entry
     assert_eq!(http.decide(&paused("GET", CHAT)).await, Verdict::Allow);
+    // a forced deny the log won't take is still denied, but as lost, never as the forced deny a scenario expects
+    http.force_deny(ForcedDeny::new(method, "/").unwrap().labelled("held"));
+    assert_eq!(
+        http.decide(&paused_with(method, url, body)).await,
+        Verdict::Deny(DenyCause::LogUnavailable)
+    );
+    let denials = http.denials();
+    assert_eq!(denials.len(), 2);
+    assert_eq!(denials[1].cause, DenyCause::LogUnavailable);
+    assert_eq!(denials[1].label.as_deref(), Some("held"));
 }
 
 #[tokio::test]
