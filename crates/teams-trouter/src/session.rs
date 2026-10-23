@@ -268,6 +268,14 @@ where
         Ok(trouter)
     }
 
+    /// Every URL this client asks its mock origin to open, as built and checked: the host a connect chose, which the
+    /// mock's handshake can't show. Tests only (`test-support`).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn opened_urls(&self) -> socket::OpenedUrls {
+        self.opener.opened()
+    }
+
     /// Another clock (a fake one in tests); the session's should be the same.
     #[must_use]
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {

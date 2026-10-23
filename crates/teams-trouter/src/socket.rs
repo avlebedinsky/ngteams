@@ -170,12 +170,37 @@ pub(crate) fn tls_config() -> Result<Arc<ClientConfig>, tokio_rustls::rustls::Er
     Ok(Arc::new(config))
 }
 
+/// Every URL a client on a mock origin was asked to open, as it was built and checked (before the mock took its
+/// path and query), in order. Under a mock origin the handshake carries the mock's address, so this is how a test sees
+/// which host a connect chose. Tests only (`test-support`).
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Default)]
+pub struct OpenedUrls(Arc<std::sync::Mutex<Vec<Url>>>);
+
+#[cfg(feature = "test-support")]
+impl OpenedUrls {
+    /// The URLs asked for so far, oldest first.
+    #[must_use]
+    pub fn urls(&self) -> Vec<Url> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    fn push(&self, url: &Url) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(url.clone());
+    }
+}
+
 /// How a socket is opened: TLS to the URL's host, or (`test-support` only) plain TCP to a loopback mock.
 #[derive(Clone)]
 pub(crate) struct Opener {
     tls: Arc<ClientConfig>,
     #[cfg(feature = "test-support")]
     mock_origin: Option<Url>,
+    #[cfg(feature = "test-support")]
+    opened: OpenedUrls,
 }
 
 impl Opener {
@@ -184,6 +209,8 @@ impl Opener {
             tls,
             #[cfg(feature = "test-support")]
             mock_origin: None,
+            #[cfg(feature = "test-support")]
+            opened: OpenedUrls::default(),
         }
     }
 
@@ -191,6 +218,12 @@ impl Opener {
     pub(crate) fn with_mock_origin(mut self, origin: Url) -> Self {
         self.mock_origin = Some(origin);
         self
+    }
+
+    /// The URLs this opener was asked to open on its mock origin.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn opened(&self) -> OpenedUrls {
+        self.opened.clone()
     }
 
     /// Opens the socket at `url` (checked against the allowlist first) within `limit`: TCP, TLS, the WebSocket
@@ -207,6 +240,7 @@ impl Opener {
     async fn open_checked(&self, url: &Url) -> Result<Stream, ConnectError> {
         #[cfg(feature = "test-support")]
         if let Some(origin) = &self.mock_origin {
+            self.opened.push(url);
             let mut mocked = origin.clone();
             mocked.set_path(url.path());
             mocked.set_query(url.query());

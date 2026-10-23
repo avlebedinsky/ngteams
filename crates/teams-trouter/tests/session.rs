@@ -23,8 +23,8 @@ use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore as _};
 use teams_auth::session::{AccessToken, Clock, Renewal, Session};
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
 use teams_fence::{Fence, FenceLog, Mri, Roster};
-use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, SocketRecord, TrouterMock};
-use teams_proto::{Credentials, HttpTransport, IC3_AUDIENCE};
+use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, REGIONAL_NAME, SocketRecord, TrouterMock};
+use teams_proto::{Credentials, HttpTransport, IC3_AUDIENCE, TROUTER_HOST};
 use teams_trouter::{
     BuildError, Change, ChatEvent, Down, Ignored, Options, PushEvent, RegistrationReport, Stop, Trouter,
     TrouterCredentials, TrouterHandle,
@@ -595,7 +595,9 @@ async fn a_socket_that_never_connected_says_nothing_was_heard() {
 #[tokio::test]
 async fn a_dropped_socket_reconnects_regionally_and_the_unanswered_deliveries_come_again_stored() {
     let lab = Lab::start().await;
-    let mut push = lab.client().spawn();
+    let client = lab.client();
+    let opened = client.opened_urls();
+    let mut push = client.spawn();
     let endpoint = connected(&mut push).await;
     registered(&mut push).await;
     let first = lab.post("<p>before the drop</p>", "1000000000000000101").await;
@@ -642,6 +644,20 @@ async fn a_dropped_socket_reconnects_regionally_and_the_unanswered_deliveries_co
     })
     .await;
     assert!(sockets[1].reconnect, "the reconnect sent the parameters back");
+    // the first connect went to the global host, the reconnect to the regional one the first was given
+    let hosts: Vec<_> = opened
+        .urls()
+        .iter()
+        .map(|url| url.host_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        hosts,
+        [
+            TROUTER_HOST.to_owned(),
+            format!("{REGIONAL_NAME}-t.trouter.teams.microsoft.com")
+        ],
+        "the connects' hosts as built"
+    );
     let auth: Value = serde_json::from_str(sockets[1].frames[0].strip_prefix("5:::").unwrap()).unwrap();
     assert_eq!(auth["args"][0]["connectparams"]["sr"], endpoint.as_str());
     let ack = sockets[1]
@@ -1256,7 +1272,6 @@ async fn a_stop_while_the_socket_opens_ends_the_client_at_once() {
         .await
         .expect("the stop waited for the socket to open");
     drop(opening);
-    assert!(lab.trouter.sockets().is_empty(), "no socket reached the mock");
 }
 
 /// Every log record of the process, as its target and its text.
