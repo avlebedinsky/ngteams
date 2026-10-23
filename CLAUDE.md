@@ -121,10 +121,13 @@ What the code does and why. A change that undoes one of these needs a new reason
   (`FenceLog::record_allowed`: method, host and `path_shape`, every id replaced by its kind, never a query, header or
   body). Neither the browser fence nor the native transport calls either yet: `proto-lab`'s `map_write` and
   `calling::call_start` still decide the lab browser's writes.
-- `Fence::check` reads the target's members only for a contacting kind (`WriteKind::is_contacting`). Typing and read
-  receipts reach nobody: on a chat (1:1, group or meeting, by its id) they are permitted without a member read, judged
-  only by the participants they name, and logged like every decision; anywhere else (a channel) they are judged like
-  any write. The account's own availability keeps its own-account check.
+- `Fence::check` reads the target's members for every write except typing and read receipts on a chat and the
+  account's own availability (which keeps its own-account check). Typing and read receipts reach nobody: on a chat
+  id `is_chat_id` takes (1:1, group or meeting, the rule `contacting` carves them out by) they are permitted without a
+  member read, judged only by the participants they name, and logged like every decision; anywhere else (a channel, a
+  chat id in another form) they are judged like any write. So a caller hands it a `Typing` or `ReadReceipt` target
+  only for the content-free signal: `map_write` maps typing only in its captured body (`content` empty or absent,
+  no key but `content`, `contenttype`, `messagetype`) and a read receipt only with `name` its one query key.
 - Writes on an existing call are denied: the follow-ups aren't mapped, and the native `add` (`AddToCall`, an `Invite`
   on `Scope::Call`) is `Partial`, since no membership source reads a call's members
   (`docs/backlog/fence-call-follow-ups.md`).

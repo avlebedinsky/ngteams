@@ -11,9 +11,8 @@
 //! - a edits its first message and reacts to it; both reach b.
 //! - The a–b–c group chat (`chats.toml`'s `abc`): c watches too, in a process of its own; a sends
 //!   [`GROUP_MESSAGES`] messages to the group chat, and each reaches both b's and c's watch (latencies reported per
-//!   receiver, not held to a limit). The fence lets these writes out only because it reads this one recorded chat as
-//!   complete when both of its member reads agree on exactly a, b and c: an assumption the user accepted on
-//!   2026-10-21, not evidence (`CLAUDE.md`, `docs/protocol/fence-targets.md`, "The lab's group chat").
+//!   receiver, not held to a limit). The fence lets these writes out because its fresh member-list read of the chat,
+//!   made on every write, finds only lab accounts (`CLAUDE.md`, "The sealed fence API").
 //! - Catch-up: b's watch stops (its socket closes), a sends [`GAP_MESSAGES`] more, b watches again, and b's store then
 //!   has every message of the run exactly once (each catch-up must sync every conversation); then b reads the chat up
 //!   to the run's last message: a read receipt, which moves b's stored read horizon (the consumption horizon) but not

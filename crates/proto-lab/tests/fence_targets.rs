@@ -401,6 +401,60 @@ fn a_body_the_chat_service_could_read_differently_is_unknown() {
     }
 }
 
+/// `Fence::check` permits typing on a chat and a read receipt without reading its members, so the mapping takes each
+/// only in its captured form: typing with only `content` (empty), `contenttype` and `messagetype`, a read receipt with
+/// `name` its one query key. Any other form is unknown, never typing or a read receipt.
+#[test]
+fn typing_and_read_receipts_map_only_in_their_captured_form() {
+    let chat = format!(
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{}",
+        one_to_one()
+    );
+    let messages = format!("{chat}/messages");
+    let typing = || Some(Target::new(WriteKind::Typing, Scope::Conversation { id: one_to_one() }));
+    let captured = [
+        r#"{"content":"","contenttype":"Application/Message","messagetype":"Control/Typing"}"#,
+        r#"{"contenttype":"Application/Message","messagetype":"Control/ClearTyping"}"#,
+        r#"{"messagetype":"Control/Typing"}"#,
+    ];
+    for body in captured {
+        assert_eq!(mapped_target("POST", &messages, body), typing(), "{body}");
+    }
+    let off_shape = [
+        r#"{"content":"hello","contenttype":"Application/Message","messagetype":"Control/Typing"}"#,
+        r#"{"content":"hello","messagetype":"Control/ClearTyping"}"#,
+        r#"{"content":null,"messagetype":"Control/Typing"}"#,
+        r#"{"content":"","messagetype":"Control/Typing","properties":{}}"#,
+        r#"{"content":"","messagetype":"Control/Typing","amsreferences":["x"]}"#,
+        r#"{"messagetype":"Control/Typing","imdisplayname":"a"}"#,
+    ];
+    for body in off_shape {
+        assert_eq!(mapped_target("POST", &messages, body), None, "{body}");
+    }
+    let horizon = r#"{"consumptionhorizon":"1;2;3"}"#;
+    let receipt = Some(Target::new(
+        WriteKind::ReadReceipt,
+        Scope::Conversation { id: one_to_one() },
+    ));
+    let properties = format!("{chat}/properties");
+    assert_eq!(
+        mapped_target("PUT", &format!("{properties}?name=consumptionhorizon"), horizon),
+        receipt
+    );
+    for query in [
+        "name=consumptionhorizon&x=1",
+        "x=1&name=consumptionhorizon",
+        "name=consumptionhorizon&name=consumptionhorizon",
+        "Name=consumptionhorizon",
+    ] {
+        assert_eq!(
+            mapped_target("PUT", &format!("{properties}?{query}"), horizon),
+            None,
+            "{query}"
+        );
+    }
+}
+
 /// A source reading the fixture's thread answer from `server`, with a credential taken from a page request.
 async fn live_source(server: &MockServer) -> TestResult<Arc<LiveMembershipSource>> {
     let fixture: Value = serde_json::from_str(&fill(THREAD))?;

@@ -403,7 +403,7 @@ async fn run_probe_thread(alias: Alias, save: Option<&str>) -> Result<(), Box<dy
         &config,
         alias,
         &probe::Origin::ChatService,
-        // the read a lab fence makes, with the lab's group chat policy (the fence itself decides nothing here)
+        // the read a lab fence makes (the fence itself decides nothing here)
         teams_fence::LiveMembershipSource::for_fence(&teams_fence::Fence::open_lab()?)?,
     )
     .await?;

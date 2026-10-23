@@ -6,7 +6,7 @@
 use serde_json::Value;
 use teams_fence::{
     CALL_START_URL, Contact, Mri, OWN_VIEW_PROPERTIES, Policy, Request, Scope, Service, TEST_CALL_SCENARIO, Target,
-    WriteKind, contacting, service_of,
+    WriteKind, contacting, is_chat_id, service_of,
 };
 use url::Url;
 
@@ -233,6 +233,49 @@ fn the_account_s_own_mri_reads_as_me_only_when_the_policy_names_it() {
     let request = Request::new("PUT", &url).with_body(Some(br#"{"locale":"en-us"}"#));
     assert_eq!(contacting(&request, &policy()), Contact::None);
     assert_eq!(contacting(&request, &Policy::new()), Contact::Unreadable);
+}
+
+/// Typing and a read receipt reach nobody on exactly the chat ids `Fence::check` permits them on without a member read
+/// ([`is_chat_id`]); a chat-like id in any other form (a self 1:1, halves that aren't GUIDs, a `@thread.v2` id with `.`
+/// or `=` or over 128 characters, `meeting_` with nothing after it) is unreadable.
+#[test]
+fn typing_and_read_receipts_reach_nobody_only_on_a_chat_id_the_fence_takes() {
+    let chats = [
+        one_to_one(),
+        format!("19:{GROUP}@thread.v2"),
+        "19:meeting_lab0001@thread.v2".to_owned(),
+    ];
+    let odd = [
+        format!("19:{GUID_A}_{GUID_A}@unq.gbl.spaces"),
+        "19:alice_bob@unq.gbl.spaces".to_owned(),
+        "19:group.chat@thread.v2".to_owned(),
+        "19:groupchat=@thread.v2".to_owned(),
+        format!("19:{}@thread.v2", "a".repeat(129)),
+        "19:meeting_@thread.v2".to_owned(),
+    ];
+    let base = "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations";
+    let typing = br#"{"content":"","contenttype":"Application/Message","messagetype":"Control/Typing"}"#;
+    let horizon = br#"{"consumptionhorizon":"1;2;3"}"#;
+    for (id, reaches_nobody) in chats
+        .iter()
+        .map(|id| (id, true))
+        .chain(odd.iter().map(|id| (id, false)))
+    {
+        assert_eq!(is_chat_id(id), reaches_nobody, "{id}");
+        let expect = if reaches_nobody {
+            Contact::None
+        } else {
+            Contact::Unreadable
+        };
+        let posted = verdict("POST", &format!("{base}/{id}/messages"), Some(typing));
+        assert_eq!(posted, expect, "typing on {id}");
+        let receipt = verdict(
+            "PUT",
+            &format!("{base}/{id}/properties?name=consumptionhorizon"),
+            Some(horizon),
+        );
+        assert_eq!(receipt, expect, "read receipt on {id}");
+    }
 }
 
 #[test]

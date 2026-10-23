@@ -7,7 +7,7 @@ use url::Url;
 
 use super::json::{optional, strict_json};
 use super::{Contact, Parsed, Policy};
-use crate::{Mri, Scope, Target, WriteKind, chat_service_path};
+use crate::{Mri, Scope, Target, WriteKind, chat_service_path, is_chat_id};
 
 /// The conversation properties that change only the account's own view of a conversation (a chat or a channel), set
 /// with `PUT v1/users/ME/conversations/<id>/properties?name=<n>`: when it was last made a favourite (seen on a
@@ -85,8 +85,9 @@ fn carve_out(request: &Parsed<'_>, version: &str, path: &[&str]) -> Option<Conta
 }
 
 /// A post to a chat's messages that is a typing signal: `Some(None)` for `Control/Typing` or `Control/ClearTyping` on
-/// a chat (1:1, group or meeting) in the captured form (only [`TYPING_KEYS`], no content), `Some(Unreadable)` for a
-/// typing signal in any other form, and `None` (so the mapping reads it) for a post that isn't a typing signal.
+/// a chat by its id ([`is_chat_id`]: 1:1, group or meeting, the rule `Fence::check` permits it by) in the captured form
+/// (only [`TYPING_KEYS`], no content), `Some(Unreadable)` for a typing signal in any other form or on any other id,
+/// and `None` (so the mapping reads it) for a post that isn't a typing signal.
 fn typing(request: &Parsed<'_>, chat: &str) -> Option<Contact> {
     let body = request.body.and_then(strict_json)?;
     let kind = body.get("messagetype")?.as_str()?;
@@ -97,7 +98,7 @@ fn typing(request: &Parsed<'_>, chat: &str) -> Option<Contact> {
     let captured = object.keys().all(|key| TYPING_KEYS.contains(&key.as_str()))
         && object.get("content").is_none_or(|content| content == "");
     Some(
-        if captured && chat_scope(chat).is_some() && chat_service_path(request.url).is_some() {
+        if captured && is_chat_id(chat) && chat_service_path(request.url).is_some() {
             Contact::None
         } else {
             Contact::Unreadable
@@ -105,11 +106,12 @@ fn typing(request: &Parsed<'_>, chat: &str) -> Option<Contact> {
     )
 }
 
-/// A conversation property that reaches nobody, set with exactly one query key: the read horizon on a chat (a read
-/// receipt, which others may see), or one of [`OWN_VIEW_PROPERTIES`] on a chat or a channel.
+/// A conversation property that reaches nobody, set with exactly one query key: the read horizon on a chat by its id
+/// ([`is_chat_id`], the rule `Fence::check` permits a read receipt by; a read receipt, which others may see), or one
+/// of [`OWN_VIEW_PROPERTIES`] on a chat or a channel.
 fn own_property(request: &Parsed<'_>, id: &str) -> bool {
     match request.only_query("name") {
-        Some("consumptionhorizon") => chat_scope(id).is_some(),
+        Some("consumptionhorizon") => is_chat_id(id),
         Some(name) => OWN_VIEW_PROPERTIES.contains(&name) && is_conversation(id),
         None => false,
     }
@@ -157,8 +159,10 @@ fn mapped(request: &Parsed<'_>, path: &[&str]) -> Option<Target> {
     }
 }
 
-/// A chat's conversation id: `19:…@unq.gbl.spaces` (1:1) or `19:…@thread.v2` (group and meeting chats), never a
-/// channel or team (`@thread.tacv2`, `@thread.skype`) or a reply chain within one (`;messageid=`).
+/// A mapped write's chat: `19:…@unq.gbl.spaces` (1:1) or `19:…@thread.v2` (group and meeting chats), never a
+/// channel or team (`@thread.tacv2`, `@thread.skype`) or a reply chain within one (`;messageid=`). Looser than
+/// [`is_chat_id`] on purpose: a mapped write is judged by its chat's live member read, which refuses an id it doesn't
+/// know; the carve-outs, which skip that read, take only [`is_chat_id`].
 fn chat_scope(id: &str) -> Option<Scope> {
     let chat = id.starts_with("19:")
         && (id.ends_with("@unq.gbl.spaces") || id.ends_with("@thread.v2"))

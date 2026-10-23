@@ -546,7 +546,7 @@ impl LiveMembershipSource {
         let Scope::Conversation { id } = scope else {
             return false;
         };
-        one_to_one_pair(id).is_some() || is_group_chat_id(id) || is_meeting_chat_id(id)
+        is_chat_id(id)
     }
 }
 
@@ -586,6 +586,16 @@ fn failure(error: &reqwest::Error) -> PartialReason {
     } else {
         PartialReason::FetchFailed(FetchFailure::Network)
     }
+}
+
+/// Whether `id` is a chat's conversation id in a form the fence knows: a 1:1 chat's ([`one_to_one_pair`]), a group
+/// chat's ([`is_group_chat_id`]) or a meeting chat's ([`is_meeting_chat_id`]). It is the one chat-id rule for typing
+/// and read receipts: [`crate::contacting`] carves them out only on such an id, and [`crate::Fence::check`] permits
+/// them without a member read only there. Any other id, a looser `19:…@unq.gbl.spaces` or `19:…@thread.v2` included,
+/// is none of these.
+#[must_use]
+pub fn is_chat_id(id: &str) -> bool {
+    one_to_one_pair(id).is_some() || is_group_chat_id(id) || is_meeting_chat_id(id)
 }
 
 /// The two members a 1:1 chat id names: `19:<oid>_<oid>@unq.gbl.spaces` → `8:orgid:<oid>` each, lowercased. `None`

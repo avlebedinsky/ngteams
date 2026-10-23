@@ -537,7 +537,10 @@ fn map_write(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
         {
             on(WriteKind::Reaction, chat)
         }
-        ("PUT", ["users", "ME", "conversations", chat, "properties"]) if name()? == "consumptionhorizon" => {
+        // a read receipt only with `name` its one query key, as captured: `Fence::check` doesn't read its chat's members
+        ("PUT", ["users", "ME", "conversations", chat, "properties"])
+            if only_query_name(url).as_deref() == Some("consumptionhorizon") =>
+        {
             on(WriteKind::ReadReceipt, chat)
         }
         ("POST", ["threads"]) => Some(Target::new(WriteKind::ChatCreate, Scope::New).with_added(body_members(body?)?)),
@@ -584,16 +587,40 @@ fn message_write(body: &[u8], chat: &str, post: Post) -> Option<Target> {
     Some(Target::new(kind, chat_scope(chat)?).with_added(mentioned(&body)?))
 }
 
+/// The value of a URL's query when its one key is `name`; `None` for any other query, extra keys included.
+fn only_query_name(url: &Url) -> Option<String> {
+    let mut pairs = url.query_pairs();
+    match (pairs.next(), pairs.next()) {
+        (Some((key, value)), None) if key == "name" => Some(value.into_owned()),
+        _ => None,
+    }
+}
+
+/// The keys a typing signal's body may have: what the web client sends, key for key (`chat-shapes`), as
+/// `teams_fence::contacting` reads it.
+const TYPING_KEYS: [&str; 3] = ["content", "contenttype", "messagetype"];
+
 /// What a message post (or edit) is, by the `messagetype` of its body (read by [`strict_json`]): typing
-/// (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`, `RichText`, `RichText/…`). Any other type, or a
-/// body that isn't a JSON object with one, is unknown.
+/// (`Control/Typing`, `Control/ClearTyping`) only in its captured form ([`is_captured_typing`]), or a message (`Text`,
+/// `RichText`, `RichText/…`). A typing type in any other form, any other type, or a body that isn't a JSON object with
+/// one, is unknown.
 fn message_kind(body: &Value) -> Option<WriteKind> {
     match body.get("messagetype")?.as_str()? {
-        "Control/Typing" | "Control/ClearTyping" => Some(WriteKind::Typing),
+        "Control/Typing" | "Control/ClearTyping" => is_captured_typing(body).then_some(WriteKind::Typing),
         "Text" | "RichText" => Some(WriteKind::Message),
         kind if kind.starts_with("RichText/") => Some(WriteKind::Message),
         _ => None,
     }
+}
+
+/// Whether a typing body is in the captured form: only [`TYPING_KEYS`], its `content` absent or empty. `Fence::check`
+/// permits typing on a chat without reading its members, so a typing body that could carry anything to them (text,
+/// properties, attachments) is never mapped as typing.
+fn is_captured_typing(body: &Value) -> bool {
+    body.as_object().is_some_and(|object| {
+        object.keys().all(|key| TYPING_KEYS.contains(&key.as_str()))
+            && object.get("content").is_none_or(|content| content == "")
+    })
 }
 
 /// `Some` for a message body whose fields that could take it beyond the chat are as the captures showed them, or left

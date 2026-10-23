@@ -15,7 +15,7 @@ use teams_fence::lab::LabConfig;
 use teams_fence::{
     AllowedRecord, ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, DenyReason, FailClosed, Fence,
     FenceLog, FetchFailure, FrameRecord, Membership, MembershipFuture, MembershipSource, Mri, OpenError, PartialReason,
-    RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind, path_shape,
+    RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind, is_chat_id, path_shape,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -403,11 +403,27 @@ async fn typing_and_read_receipts_are_still_judged_by_what_they_name() {
     assert_eq!(unused.fetches(), 0);
 }
 
+/// Chat-like ids that aren't a chat's by [`is_chat_id`]: a self 1:1, a 1:1 whose halves aren't GUIDs, a `@thread.v2`
+/// id with `.` or `=` or over 128 characters, and a meeting chat with nothing after `meeting_`.
+fn odd_chat_ids() -> Vec<String> {
+    let ids = vec![
+        "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000a@unq.gbl.spaces".to_owned(),
+        "19:alice_bob@unq.gbl.spaces".to_owned(),
+        "19:group.chat@thread.v2".to_owned(),
+        "19:groupchat=@thread.v2".to_owned(),
+        format!("19:{}@thread.v2", "a".repeat(129)),
+        "19:meeting_@thread.v2".to_owned(),
+    ];
+    assert!(ids.iter().all(|id| !is_chat_id(id)));
+    ids
+}
+
 #[tokio::test]
 async fn typing_and_read_receipts_off_a_chat_are_judged_by_its_members() {
-    // a channel (by its scope or by a conversation id that isn't a chat's) isn't carved out: its members are read
+    // a channel (by its scope or by a conversation id that isn't a chat's) isn't carved out: its members are read; nor
+    // is a chat id in a form `is_chat_id` doesn't take, which `contacting` doesn't carve out either
     let lab = try_lab().unwrap();
-    let scopes = [
+    let mut scopes = vec![
         Scope::Channel {
             team: "19:team@thread.tacv2".to_owned(),
             channel: "19:channel@thread.tacv2".to_owned(),
@@ -416,6 +432,7 @@ async fn typing_and_read_receipts_off_a_chat_are_judged_by_its_members() {
             id: "19:channel@thread.tacv2".to_owned(),
         },
     ];
+    scopes.extend(odd_chat_ids().into_iter().map(|id| Scope::Conversation { id }));
     for kind in SIGNALS {
         for scope in scopes.clone() {
             let partial = Fixed::new(Membership::Partial(PartialReason::Unsupported));

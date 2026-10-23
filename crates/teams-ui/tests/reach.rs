@@ -469,9 +469,8 @@ const CREATES_A_CHAT: [&str; 5] = [
     "CreateChat {",
 ];
 
-/// Creating a chat is never offered (M2 Task 13): a group chat the native client creates is denied its writes
-/// (CLAUDE.md: it isn't recorded in `chats.toml`), and starting a 1:1 chat needs the people search, whose results list
-/// other tenant users. No app crate's source asks the engine for one.
+/// Creating a chat is never offered (M2 Task 13): starting one needs the people search, whose results list other
+/// tenant users. No app crate's source asks the engine for one.
 #[test]
 fn no_view_offers_creating_a_chat() {
     let mut read = 0;

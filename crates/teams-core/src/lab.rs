@@ -3,7 +3,7 @@
 //! `fence.log`, the account's own MRI, whose own availability alone it permits), the
 //! account's [`Session`] over the secret store the binary hands in (the Secret Service for `teams-headless`, the
 //! credential broker's socket for the sandboxed app), the chat base from the region record `proto-lab auth` saved
-//! ([`LabPaths::region_file`], read by [`Region::load`]), the 1:1 chats' and the lab group chat's members read live
+//! ([`LabPaths::region_file`], read by [`Region::load`]), 1:1, group and meeting chats' members read live
 //! ([`LiveMembershipSource::for_fence`], its credential the chat transport's), the store at [`LabPaths::store_file`],
 //! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's), CSA's from the
 //! GTM `chatSvcAggAfd` (the teams read's) and UPS's from the GTM `presenceUPS` (the presence read's; the writes'

@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
-use crate::membership::{is_group_chat_id, is_meeting_chat_id, one_to_one_pair};
+use crate::membership::is_chat_id;
 use crate::target::{Mri, Scope, Target, WriteKind};
 
 /// Who may take part in a write: the lab accounts and the approved service participants, by exact MRI. A lab account
@@ -364,14 +364,17 @@ impl Fence {
     }
 
     /// Fetches the target scope's members from `source` (never from a cache) and allows the write only when every
-    /// participant, current or added, is in the roster. A [`Scope::New`] target isn't fetched: it is judged by its
-    /// added participants alone, and only for a kind that [creates a target](crate::WriteKind::creates_target).
-    /// A write that reaches nobody ([`WriteKind::is_contacting`] false) isn't fetched either: typing and a read receipt
-    /// on a chat (a 1:1, group or meeting chat by its id) are allowed with only lab accounts or approved services added
-    /// (if any), and anywhere else are judged like any write; the account's own availability is allowed only on
-    /// [`Scope::Account`] naming the fence's [own account](Fence::own_account), a lab account, with nobody added; and
-    /// nothing else lands on [`Scope::Account`]. Every decision is appended to
-    /// `fence.log`; an allow that can't be logged is denied.
+    /// participant, current or added, is in the roster. Every write is fetched so but three:
+    /// - a [`Scope::New`] target, judged by its added participants alone, and only for a kind that
+    ///   [creates a target](crate::WriteKind::creates_target);
+    /// - typing and a read receipt on a chat by its id ([`is_chat_id`]: a 1:1, group or meeting chat), allowed with
+    ///   only lab accounts or approved services added (if any); off a chat (a channel, a chat id in another form) they
+    ///   are fetched and judged like any write;
+    /// - the account's own availability, allowed only on [`Scope::Account`] naming the fence's
+    ///   [own account](Fence::own_account), a lab account, with nobody added.
+    ///
+    /// Nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
+    /// logged is denied.
     ///
     /// # Errors
     /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, when
@@ -460,14 +463,12 @@ impl Fence {
     }
 }
 
-/// Whether `target` is typing or a read receipt on a chat (a 1:1, group or meeting chat by its id: what
-/// [`crate::contacting`] carves them out on), which the fence permits without a member read. On anything else (a
-/// channel, a team, a call) they are judged like any write.
+/// Whether `target` is typing or a read receipt on a chat by its id ([`is_chat_id`]: a 1:1, group or meeting chat, the
+/// same rule [`crate::contacting`] carves them out by), which the fence permits without a member read. On anything else
+/// (a channel, a team, a call, a chat id in another form) they are judged like any write.
 fn is_signal_on_a_chat(target: &Target) -> bool {
     let Scope::Conversation { id } = target.scope() else {
         return false;
     };
-    !target.kind().is_contacting()
-        && target.kind() != WriteKind::OwnAvailability
-        && (one_to_one_pair(id).is_some() || is_group_chat_id(id) || is_meeting_chat_id(id))
+    !target.kind().is_contacting() && target.kind() != WriteKind::OwnAvailability && is_chat_id(id)
 }
