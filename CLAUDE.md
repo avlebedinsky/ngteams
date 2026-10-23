@@ -248,12 +248,12 @@ What the code does and why. A change that undoes one of these needs a new reason
 - A scenario's `DenyPolicy` says which denies it expects: `load` all of them; the writing scenarios only their own
   forced denies, by label, and the reviewed **expected-deny list** (`scenario/expected.rs`: host + method +
   `/`-segment path pattern, frames by socket host, each class with the reason the scenario doesn't need it: bot
-  invokes, the account's own channel entry and channel properties, Trouter delivery responses). The list judges the
-  run only, never a verdict: everything on it stays denied and logged, and it holds only what the lab rule denies. A
-  deny on the scenario's own chat, one for a partial or refused membership, one whose `fence.log` entry was lost, a
-  deny of what the lab rule lets through, and any class off the list fail the run, the failure naming the deny's
-  contacting service; a new class goes onto the list with its reason, never waved through. `echo-call` still exits 1
-  on the call's follow-ups: they are needed, so they aren't on it.
+  invokes, the account's own channel entry and channel properties, the file browser's prewarm, Trouter delivery
+  responses). The list judges the run only, never a verdict: everything on it stays denied and logged, and it holds
+  only what the lab rule denies. A deny on the scenario's own chat, one for a partial or refused membership, one whose
+  `fence.log` entry was lost, a deny of what the lab rule lets through, and any class off the list fail the run, the
+  failure naming the deny's contacting service; a new class goes onto the list with its reason, never waved through.
+  `echo-call` still exits 1 on the call's follow-ups: they are needed, so they aren't on it.
 - Every run uses the one classifier (`classify::Classifier`, the lab rule; `echo-call` adds the echo service's MRI
   for its test call start), so a scenario picks none. What a scenario holds back on purpose is a labelled forced deny,
   of requests (`ForcedDeny`) or of frames (`ForcedFrameDeny`: `ab-trouter-quiet` and `own-presence-endpoint` hold

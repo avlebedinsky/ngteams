@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use teams_core::{Availability, Cause, Event, MessageChange, Source, TransientSent};
+use teams_core::{Availability, Cause, Event, MessageChange, NameFrom, Source, TransientSent};
 use teams_proto::chat;
 use teams_store::{Applied, Conversation, Member, Message, OutboxEntry, OutboxState, Reaction};
 use teams_trouter::RegistrationReport;
@@ -276,6 +276,18 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         }),
         Event::Failed { during, error } => json!({"event": "failed", "during": during, "error": error.to_string()}),
         Event::Indexed { messages } => json!({"event": "indexed", "messages": messages}),
+    }
+}
+
+/// Where a person's name came from, as printed: `graph`, `short_profile`, `message`, `known`, or `none` without a name.
+#[must_use]
+pub const fn name_source_word(from: Option<NameFrom>) -> &'static str {
+    match from {
+        Some(NameFrom::Graph) => "graph",
+        Some(NameFrom::ShortProfile) => "short_profile",
+        Some(NameFrom::Message) => "message",
+        Some(NameFrom::Known) => "known",
+        None => "none",
     }
 }
 

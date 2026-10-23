@@ -32,6 +32,9 @@ pub enum Hosts {
     Exact(&'static [&'static str]),
     /// Any subdomain of this domain, not the domain itself.
     Under(&'static str),
+    /// A host exactly one label under this domain (a tenant's own host: `<tenant>-my.sharepoint.com`), neither the
+    /// domain itself nor a host deeper under it.
+    OneLabelUnder(&'static str),
 }
 
 impl Hosts {
@@ -40,17 +43,23 @@ impl Hosts {
     pub fn covers(self, host: &str) -> bool {
         match self {
             Self::Exact(hosts) => hosts.iter().any(|exact| host.eq_ignore_ascii_case(exact)),
-            Self::Under(domain) => host
-                .len()
-                .checked_sub(domain.len() + 1)
-                .filter(|&dot| dot > 0)
-                .is_some_and(|dot| {
-                    host.as_bytes()[dot] == b'.'
-                        && host.is_char_boundary(dot + 1)
-                        && host[dot + 1..].eq_ignore_ascii_case(domain)
-                }),
+            Self::Under(domain) => subdomain(host, domain).is_some(),
+            Self::OneLabelUnder(domain) => subdomain(host, domain).is_some_and(|label| !label.contains('.')),
         }
     }
+}
+
+/// What `host` holds before `.<domain>` (in any case), when that is a non-empty name.
+fn subdomain<'a>(host: &'a str, domain: &str) -> Option<&'a str> {
+    host.len()
+        .checked_sub(domain.len() + 1)
+        .filter(|&dot| dot > 0)
+        .filter(|&dot| {
+            host.as_bytes()[dot] == b'.'
+                && host.is_char_boundary(dot + 1)
+                && host[dot + 1..].eq_ignore_ascii_case(domain)
+        })
+        .map(|dot| &host[..dot])
 }
 
 /// One class of denied requests on the list: `https` to one of `hosts` on the default port, with `method`, on `path`.
@@ -162,6 +171,16 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         path: "/api/chatsvc/*/v1/users/ME/conversations/*@thread.tacv2/properties",
         reason: "a property of a team channel the client sets as it lists the account's teams, beyond the account's \
                  own view of it (which passes): the scenario uses no channel",
+    },
+    ExpectedRequest {
+        class: "file browser prewarm",
+        hosts: Hosts::OneLabelUnder("sharepoint.com"),
+        method: "POST",
+        path: "/personal/*/_layouts/15/filebrowser.aspx",
+        reason: "the OneDrive file browser's frame, which the client prewarms (`preWarmFB`) as a document loaded by a \
+                 form `POST` of the account's own SharePoint token to its personal site: it reaches nobody, but on \
+                 SharePoint every write is contacting unless a row carves it out, and none does; the scenario \
+                 sends no file",
     },
 ];
 

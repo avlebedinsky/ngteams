@@ -250,7 +250,8 @@ teams-headless a delete b <message>       # one of a's messages, deleted
 teams-headless a react b <message> like [--remove]
 teams-headless b read a <message>         # b's read horizon in the a–b chat moved up to that message (a read receipt)
 teams-headless b watch [--json]           # every event of the push channel with its receive time, until SIGINT/SIGTERM
-teams-headless a presence [--wait 30]     # b's and c's presence, read from UPS (a read by POST, lab accounts only)
+teams-headless a presence [--wait 30] [--mri <mri>]...  # b's and c's presence, and anyone's by MRI, read from UPS
+teams-headless a profile <mri>... [--wait 30]           # where the engine's name for each comes from (Graph, the middle tier's lookup)
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
 ```
@@ -259,9 +260,12 @@ A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab
 recorded in `chats.toml`), or a conversation id. Each write first catches up (its summary on stderr), then waits up to
 `--wait` seconds (120) for a write that has to wait out a `Retry-After`; it exits non-zero unless the write went
 through. `watch` answers no delivery and no call; it exits 0 on SIGINT or SIGTERM, non-zero when the push channel
-stopped on its own. `presence` reads only, under the fence's permit for the exact MRIs it names; it waits up to
-`--wait` seconds (30) for each account's presence to be told, then prints one `presence <alias> <availability>` line
-per account, `Unknown` for one not told in time or whose read failed. `availability` is a write others see (the
+stopped on its own. `presence` reads only (a read sent as a `POST`, which reaches nobody whoever it names); it waits up to
+`--wait` seconds (30) for each person's presence to be told, then prints one `presence <alias or MRI> <availability>`
+line per person, `Unknown` for one not told in time or whose read failed. `profile` reads only too: it asks the
+engine for each person, which looks them up (Graph's user record, then the middle tier's profile lookup for a name
+Graph doesn't give) unless its store has them fresh, waits up to `--wait` seconds for each lookup, and prints
+`profile <alias or MRI> <graph|short_profile|message|known|none>`, never the name. `availability` is a write others see (the
 account's own availability, the user's exception of 2026-10-21): once its push channel's registration went through it
 sends the endpoint's presence `PUT` (available), then the manual status at `--manual-after` and its reset at
 `--reset-after` seconds after the `PUT`, each under the fence's permit for the account's own availability; it prints

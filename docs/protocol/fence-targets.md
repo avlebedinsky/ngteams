@@ -431,6 +431,10 @@ logged `allowed` before it goes), whoever it names:
 
 Not sent: `users/fetch` (names come from Graph and `short_profile`).
 
+Both went out naming an account outside the lab for the first time on 2026-10-23 (`teams-headless a presence --mri`,
+`teams-headless a profile`, which name anyone by MRI): each was logged `allowed` and answered 200 (the lookup for an
+account Graph answered 404 for, with no name for it).
+
 The personal build keeps both as entries of `teams-proto`'s sealed `PostRead` list (`short_profile`, `presence`),
 sent by `HttpTransport::post_read` only as an `AuthorizedPostRead`: `Fence::check_post_read(kind, names)` decides on
 the entry's kind and its exact, ordered MRIs (logged as `post_read_decision`, never with the MRIs) and makes a

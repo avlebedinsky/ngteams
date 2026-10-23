@@ -11,7 +11,8 @@ use teams_trouter::Stop;
 
 use crate::chat::LabNames;
 use crate::print::{
-    availability_word, conversation_line, event_json, event_line, json_line, message_line, now_ms, visible, write_lines,
+    availability_word, conversation_line, event_json, event_line, json_line, message_line, name_source_word, now_ms,
+    visible, write_lines,
 };
 
 /// Why a command failed.
@@ -56,6 +57,40 @@ pub async fn presence(
     for mri in whom {
         let availability = handle.presence(mri.clone()).await?;
         writeln!(out, "presence {} {}", names.show(mri), availability_word(&availability))?;
+    }
+    Ok(())
+}
+
+/// The names of `whom` (MRIs) as the engine looks them up (M2 Task 12: Graph's user record, then the middle tier's
+/// profile lookup for a name Graph doesn't give): each asked about, then their `Event::Profile`s waited for until each
+/// was told or `wait` is over, then one `profile <who> <source>` line each as the engine has it then
+/// ([`name_source_word`]: where the name came from, `none` without one), never the name. Reads only: a lookup reaches
+/// nobody, whoever it names.
+///
+/// # Errors
+/// The engine's refusal, or when the output can't be written.
+pub async fn profile(
+    handle: &mut EngineHandle,
+    whom: &[String],
+    wait: Duration,
+    names: &LabNames,
+    out: &mut impl Write,
+) -> Result<(), CommandError> {
+    for mri in whom {
+        handle.person(mri.clone()).await?;
+    }
+    let mut untold: Vec<&String> = whom.iter().collect();
+    let deadline = tokio::time::Instant::now() + wait;
+    while !untold.is_empty() {
+        match tokio::time::timeout_at(deadline, handle.next_event()).await {
+            Ok(Some(Event::Profile { mri })) => untold.retain(|asked| **asked != mri),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    for mri in whom {
+        let person = handle.person(mri.clone()).await?;
+        writeln!(out, "profile {} {}", names.show(mri), name_source_word(person.from))?;
     }
     Ok(())
 }

@@ -2,7 +2,8 @@
 //! `test-support` is unified into it), which chat a command's argument names, and the commands themselves on native
 //! engines of a and b against the mock chat service and its Trouter (`teams-mock`, through the `test-support` mock
 //! origins): a's `sync`, `send`, `edit` and `react` print what they did, b's `watch` (as JSON and as text) prints each
-//! event with its receive time, and `list` and `show` print a's store.
+//! event with its receive time, `list` and `show` print a's store, and `presence` and `profile` print anyone asked
+//! about by MRI.
 //!
 //! Every id and token here is the mock's made-up one, never a real one.
 
@@ -17,21 +18,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use clap::Parser as _;
 use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Parts, Push};
-use teams_core::{EngineError, Outbox};
+use teams_core::{EngineError, NameFrom, Outbox};
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster, one_to_one_id};
 use teams_headless::availability;
 use teams_headless::chat::{ChatError, LabNames, resolve};
+use teams_headless::cli::{Cli, Command as CliCommand};
 use teams_headless::commands::{self, CommandError, WatchEnd};
 use teams_headless::lab::display_name;
+use teams_headless::print::name_source_word;
 use teams_mock::{
-    AB_CHAT, ABC_CHAT, AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, PRESENCE_BASE, TrouterMock,
-    lab_toml,
+    AB_CHAT, ABC_CHAT, AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OUTSIDER, PRESENCE_BASE,
+    TrouterMock, lab_toml,
 };
 use teams_proto::ManualAvailability;
 use teams_proto::chat::MessageText;
@@ -67,6 +71,7 @@ fn help_names_every_command() {
         "read",
         "watch",
         "presence",
+        "profile",
         "availability",
     ] {
         assert!(
@@ -115,6 +120,31 @@ fn a_usage_error_is_reported_by_the_parser() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let output = Command::new(BINARY).args(["a", "send", "b"]).output().unwrap();
     assert_eq!(output.status.code(), Some(2), "{output:?}");
+    // a lookup names whom it looks up
+    let output = Command::new(BINARY).args(["a", "profile"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+#[test]
+fn presence_takes_anyone_by_mri_and_profile_takes_their_mris() {
+    let parsed = Cli::try_parse_from(["teams-headless", "a", "presence", "--mri", OUTSIDER, "--mri", LAB_B]).unwrap();
+    match parsed.command {
+        CliCommand::Presence { wait, mris } => {
+            assert_eq!(wait, 30);
+            assert_eq!(mris, [OUTSIDER, LAB_B]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let parsed = Cli::try_parse_from(["teams-headless", "a", "presence"]).unwrap();
+    assert!(matches!(parsed.command, CliCommand::Presence { ref mris, .. } if mris.is_empty()));
+    let parsed = Cli::try_parse_from(["teams-headless", "b", "profile", OUTSIDER, LAB_C, "--wait", "5"]).unwrap();
+    match parsed.command {
+        CliCommand::Profile { mris, wait } => {
+            assert_eq!(mris, [OUTSIDER, LAB_C]);
+            assert_eq!(wait, 5);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 // --- which chat ---
@@ -753,6 +783,45 @@ async fn presence_prints_each_account_as_the_engine_has_it_unknown_without_a_rea
         "presence b Unknown\npresence c Unknown\n"
     );
     a.shutdown();
+}
+
+#[tokio::test]
+async fn presence_and_profile_print_anyone_asked_about_by_mri_never_a_name() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+
+    // an outsider is printed by MRI, a lab account by alias; the mock's reads have no presence base, so each stays
+    // unknown once the wait is over
+    let whom = [LAB_B.to_owned(), OUTSIDER.to_owned()];
+    let mut out = Vec::new();
+    commands::presence(&mut a, &whom, Duration::from_millis(300), &names(), &mut out)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("presence b Unknown\npresence {OUTSIDER} Unknown\n")
+    );
+
+    // nothing gives the mock's engine a name for either (no Graph or middle-tier base, no message, no known names):
+    // each is printed with where its name came from, `none`
+    let mut out = Vec::new();
+    commands::profile(&mut a, &whom, Duration::from_millis(300), &names(), &mut out)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("profile b none\nprofile {OUTSIDER} none\n")
+    );
+    a.shutdown();
+}
+
+#[test]
+fn a_name_s_source_is_printed_as_one_word() {
+    assert_eq!(name_source_word(Some(NameFrom::Graph)), "graph");
+    assert_eq!(name_source_word(Some(NameFrom::ShortProfile)), "short_profile");
+    assert_eq!(name_source_word(Some(NameFrom::Message)), "message");
+    assert_eq!(name_source_word(Some(NameFrom::Known)), "known");
+    assert_eq!(name_source_word(None), "none");
 }
 
 #[tokio::test]

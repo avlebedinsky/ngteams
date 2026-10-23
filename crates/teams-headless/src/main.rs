@@ -89,16 +89,14 @@ async fn run(cli: Cli) -> Outcome {
             commands::show(&lab.open_store()?, &conversation, limit, &lab.names, &mut out)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Sync => {
-            let handle = lab.start_engine(false).await?;
-            let synced = tokio::select! {
-                synced = commands::sync(&handle, &mut out) => Some(synced),
-                () = signals.next() => None,
-            };
-            finish(handle, synced.map(|synced| synced.map(|_| ExitCode::SUCCESS)))
-        }
+        Command::Sync => sync(&lab, &mut signals, &mut out).await,
         Command::Watch { json } => watch(&lab, json, &mut signals, &mut out).await,
-        Command::Presence { wait } => presence(&lab, Duration::from_secs(wait), &mut signals, &mut out).await,
+        Command::Presence { wait, mris } => {
+            presence(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
+        }
+        Command::Profile { mris, wait } => {
+            profile(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
+        }
         Command::Availability {
             manual,
             manual_after,
@@ -115,29 +113,65 @@ async fn run(cli: Cli) -> Outcome {
         }
         command => {
             let (action, wait) = write_action(&lab, command)?;
-            let mut handle = lab.start_engine(false).await?;
-            let written = tokio::select! {
-                written = write(&mut handle, action, wait, &mut out) => Some(written),
-                () = signals.next() => None,
-            };
-            finish(handle, written)
+            one_write(&lab, action, wait, &mut signals, &mut out).await
         }
     }
 }
 
-/// The other lab accounts' presence, read once through the engine ([`commands::presence`]).
-async fn presence(lab: &Lab, wait: Duration, signals: &mut Signals, out: &mut impl Write) -> Outcome {
-    let whom: Vec<String> = teams_fence::lab::Alias::ALL
+/// A catch-up through the engine ([`commands::sync`]).
+async fn sync(lab: &Lab, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let handle = lab.start_engine(false).await?;
+    let synced = tokio::select! {
+        synced = commands::sync(&handle, out) => Some(synced),
+        () = signals.next() => None,
+    };
+    finish(handle, synced.map(|synced| synced.map(|_| ExitCode::SUCCESS)))
+}
+
+/// One write through the engine ([`write`]).
+async fn one_write(lab: &Lab, action: Action, wait: Duration, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let mut handle = lab.start_engine(false).await?;
+    let written = tokio::select! {
+        written = write(&mut handle, action, wait, out) => Some(written),
+        () = signals.next() => None,
+    };
+    finish(handle, written)
+}
+
+/// The other lab accounts' presence and `others`', read once through the engine ([`commands::presence`]).
+async fn presence(
+    lab: &Lab,
+    others: &[String],
+    wait: Duration,
+    signals: &mut Signals,
+    out: &mut impl Write,
+) -> Outcome {
+    let mut whom: Vec<String> = teams_fence::lab::Alias::ALL
         .into_iter()
         .filter(|alias| *alias != lab.alias)
         .filter_map(|alias| lab.names.mri(alias).map(str::to_owned))
         .collect();
+    for mri in others {
+        if !whom.contains(mri) {
+            whom.push(mri.clone());
+        }
+    }
     let mut handle = lab.start_engine(false).await?;
     let read = tokio::select! {
         read = commands::presence(&mut handle, &whom, wait, &lab.names, out) => Some(read),
         () = signals.next() => None,
     };
     finish(handle, read.map(|read| read.map(|()| ExitCode::SUCCESS)))
+}
+
+/// `whom`'s names as the engine looks them up ([`commands::profile`]).
+async fn profile(lab: &Lab, whom: &[String], wait: Duration, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let mut handle = lab.start_engine(false).await?;
+    let looked_up = tokio::select! {
+        looked_up = commands::profile(&mut handle, whom, wait, &lab.names, out) => Some(looked_up),
+        () = signals.next() => None,
+    };
+    finish(handle, looked_up.map(|looked_up| looked_up.map(|()| ExitCode::SUCCESS)))
 }
 
 /// The conversation a command's chat argument names for the lab account.
@@ -210,6 +244,7 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::Show { .. }
         | Command::Watch { .. }
         | Command::Presence { .. }
+        | Command::Profile { .. }
         | Command::Availability { .. } => {
             return Err("not a write".into());
         }

@@ -102,10 +102,25 @@ pub enum Command {
         #[arg(long, default_value_t = DEFAULT_WAIT_SECS)]
         wait: u64,
     },
-    /// The other lab accounts' presence, read once from UPS (a read sent as a `POST`); prints
-    /// `presence <alias> <availability>` per account. Reads only.
+    /// The other lab accounts' presence, and anyone's `--mri` names, read once from UPS (a read sent as a `POST`,
+    /// which reaches nobody whoever it names); prints `presence <alias or MRI> <availability>` per person. Reads only.
     Presence {
         /// Seconds to wait for the read.
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+        /// Someone else to read too, by MRI (`8:orgid:…`); repeatable.
+        #[arg(long = "mri", value_name = "MRI")]
+        mris: Vec<String>,
+    },
+    /// People's names as the engine looks them up (Graph's user record, then the middle tier's profile lookup, a read
+    /// sent as a `POST`, for a name Graph doesn't give), by MRI, whoever they are; prints `profile <alias or MRI>
+    /// <source>` per person: where the name the engine has came from (`graph`, `short_profile`, `message`, `known`,
+    /// or `none`), never the name. Reads only.
+    Profile {
+        /// Their MRIs (`8:orgid:…`).
+        #[arg(required = true, value_name = "MRI")]
+        mris: Vec<String>,
+        /// Seconds to wait for the lookups.
         #[arg(long, default_value_t = 30)]
         wait: u64,
     },

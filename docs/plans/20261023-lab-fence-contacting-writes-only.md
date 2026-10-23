@@ -607,14 +607,57 @@ Every command under `flock ~/.local/share/teams-lab/live.lock` and `timeout --si
 per lab profile, from a normal build (`cargo build -p proto-lab`, the lab binaries with `--target-dir target/lab`),
 run in the background.
 
-- [ ] `proto-lab scenario load`, `ab-chat`, `ab-chat-full`, `ab-trouter`: each passes with only its forced denies and
+- [x] `proto-lab scenario load`, `ab-chat`, `ab-chat-full`, `ab-trouter`: each passes with only its forced denies and
       the reviewed expected list; read `fence.log`'s `allowed` lines and check every mutating one against the table —
       one that reaches people is a missing family: stop, add it (Task 2's file) and rerun
-- [ ] `abc-chat`: passes; the group chat's write permitted through the new member read
-- [ ] `teams-headless` (or `teams-app --lab`): a message, a reaction, typing and a read receipt in the a–b chat; a
+- [x] `abc-chat`: passes; the group chat's write permitted through the new member read
+- [x] `teams-headless` (or `teams-app --lab`): a message, a reaction, typing and a read receipt in the a–b chat; a
       profile lookup and a presence read of a non-lab colleague go out and come back (reads only)
-- [ ] the forced-deny probe of every writing scenario still fails in the page and never reaches the other account
-- [ ] a breached run is reported as breached (CLAUDE.md, "A fence breach is never a flake"), never rerun into a pass
+- [x] the forced-deny probe of every writing scenario still fails in the page and never reaches the other account
+- [x] a breached run is reported as breached (CLAUDE.md, "A fence breach is never a flake"), never rerun into a pass
+- ➕ results (2026-10-23, `proto-lab run <scenario> --headless` from `target/lab`, each under the live lock and an outer
+      `timeout --signal=INT`): `load` passed at once (exit 0; its denies, all expected under fail-closed: the a–b
+      chat's earlier unsent post sent again on load, `Partial(NoSource)`, and Trouter delivery responses).
+      `ab-chat`, `ab-chat-full` and `ab-trouter` each failed their first run (exit 1, goal and enforcement reached) on
+      one class off the list, the same in all three: b's page prewarms the OneDrive file browser, a frame loaded by a
+      form `POST` of the account's own SharePoint token to its personal site (`…/personal/<user>/_layouts/15/filebrowser.aspx`
+      on the tenant's `-my` SharePoint host), denied as SharePoint (`Unreadable`), rightly by the table. It reaches
+      nobody and the scenarios send no file, so it went onto the expected-deny list as "file browser prewarm" (new
+      `Hosts::OneLabelUnder`, a host one label under a domain; tests in `tests/expected_denies.rs`; an `endpoints.md`
+      row; CLAUDE.md's class list); the gate passed and all three reran clean (exit 0), each with only its forced
+      denies (this run's probe, an earlier run's probe and the group chat's first message sent again on load), the bot
+      invokes, the prewarm and Trouter delivery responses. `ab-trouter`'s `wait_registered` (bodies read through
+      `Network.getRequestPostData`) found each document's messaging registration live, both runs. No family added:
+      3,204 `allowed` lines over all runs, 41 shapes, each checked against the table, none reaching people:
+      telemetry, Entra's token endpoint, the editor service, Substrate's suggestions (carve-out), the middle tier's
+      own, settings, app-catalogue and lookup `POST`s (`users/fetch`, `fetchShortProfile`, `effectivePolicies`,
+      `useraggregatesettings`, `fetchfeaturesettings`, `me/files/availability`, `users/<id>/cookiev2`,
+      `mcps/initArtifactFolder`, `sharetoteams/installApp` (the share-to-Teams app installed for the account
+      itself), `me/engagementSurfaces/actions`, `apps/…`), the push service's `pushupdates`, registrar
+      registrations, UPS's endpoint `PUT`, presence reads and pubsub subscriptions, the AMS and async gateway token
+      exchanges, the chat service's carve-outs (own `properties`; on a chat, `consumptionhorizon` and the `isread` of
+      `48:notifications`/`48:mentions`, each checked by name in the captures; every `messages` `POST` logged `allowed`
+      was a `Control/Typing` on the a–b or the group chat), and frames on AugLoop's and Trouter's sockets (types 0, 1,
+      2, 5). The scenarios of the forced-deny item are the writing ones this task runs (`ab-chat`, `ab-chat-full`,
+      `ab-trouter`, first runs and reruns, and `abc-chat`): in each, this run's probe was force-denied under its own
+      label, failed in a's page (`net::ERR_BLOCKED_BY_CLIENT`, by `networkId`), and b's (and c's) copy of the chat
+      held the real message and not the probe. No run was breached: no `breach` or `contained` line in `fence.log`,
+      no frame sent without an allow, no lab browser left after any run.
+- ➕ results, `abc-chat` (after the prewarm class): passed (exit 0); a's message to the group chat was permitted by
+      `Fence::check` after the fresh member-list read (the fence no longer reads `chats.toml`), b and c showed it
+      and not the probe.
+- ➕ results, native: `teams-app`'s `ui_live` passed (a, b, c in the UI sandbox): its `fence.log` lines all allows,
+      on the a–b chat 25 messages, an edit, a reaction, 24 read receipts and 32 typing, on the group chat a message, 3
+      read receipts and a typing, 12 own availabilities, and `allowed` only the registrar's registrations and presence
+      reads; no deny, no frame entry. `teams-headless`'s `chat_live` passed (50 messages a → b, p95 send → receive
+      1514 ms; the edit, the reaction, 10 group messages to b and c, the catch-up, b's read receipt; `allowed` only
+      the registrations). Neither named anyone outside the lab (the app's profiles of a channel's people were still
+      fresh in its store, and it reads presence only of people its views show beside chats), so `teams-headless`
+      gained `presence --mri <MRI>` and `profile <MRI>…` (reads only; `tests/cli.rs`, README; the gate passed): a's
+      presence read naming a non-lab colleague went out (`allowed` `POST …/presence/getpresence/`, 200) and came back
+      with their availability; a's profile lookups of two non-lab colleagues: Graph's user read (200) named one, and
+      for the other (Graph 404) the middle tier's `fetchShortProfile` naming them went out (`allowed`, 200) and came
+      back, without a name for them.
 
 ### Task 10: Verify acceptance criteria
 

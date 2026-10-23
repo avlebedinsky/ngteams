@@ -1,9 +1,9 @@
 //! The reviewed expected-deny list of the writing scenarios (`proto_lab::scenario::expected`): it changes only how a
 //! run is judged, never a verdict; it holds only contacting-service classes the fence denies under the lab rule (bot
-//! invokes, the account's own channel entry and channel properties, Trouter delivery responses); and whatever it says,
-//! a deny on the scenario's mapped target, a deny that isn't `Unclassified`, a deny of what the lab rule lets through
-//! and any class off the list stay unexpected, the scenario's own labelled forced denies the only exception. All URLs
-//! and ids here are made up.
+//! invokes, the account's own channel entry and channel properties, the file browser's prewarm, Trouter delivery
+//! responses); and whatever it says, a deny on the scenario's mapped target, a deny that isn't `Unclassified`, a deny
+//! of what the lab rule lets through and any class off the list stay unexpected, the scenario's own labelled forced
+//! denies the only exception. All URLs and ids here are made up.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,6 +26,9 @@ const LAB_B: &str = "8:orgid:0000000b-0000-4000-8000-00000000000b";
 const AB_CHAT: &str = "19:0000000a-0000-4000-8000-00000000000a_0000000b-0000-4000-8000-00000000000b@unq.gbl.spaces";
 const AB_CHAT_ENCODED: &str =
     "19%3A0000000a-0000-4000-8000-00000000000a_0000000b-0000-4000-8000-00000000000b%40unq.gbl.spaces";
+/// The file browser's prewarm on a made-up tenant's personal site of a made-up account.
+const FILE_BROWSER: &str =
+    "https://made-up-my.sharepoint.com/personal/made_up_example_com/_layouts/15/filebrowser.aspx";
 /// A made-up team channel, plain and as the web client encodes it.
 const CHANNEL: &str = "19:0123456789abcdef0123456789abcdef@thread.tacv2";
 const CHANNEL_ENCODED: &str = "19%3A0123456789abcdef0123456789abcdef%40thread.tacv2";
@@ -44,6 +47,7 @@ fn listed_classes() -> Vec<(&'static str, String)> {
             ));
         }
     }
+    classes.push(("POST", FILE_BROWSER.to_owned()));
     classes
 }
 
@@ -410,6 +414,22 @@ fn classes_off_the_list_and_lookalikes_stay_unexpected() -> TestResult {
             "https://teams.microsoft.com:8443/api/chatsvc/emea/v1/agents/28:x/invoke".to_owned(),
         ),
         ("POST", "not a url".to_owned()),
+        // the file browser's lookalikes: another page, a team site, the domain itself, a host deeper under it
+        ("POST", FILE_BROWSER.replace("filebrowser.aspx", "upload.aspx")),
+        ("POST", FILE_BROWSER.replace("/personal/", "/sites/")),
+        (
+            "POST",
+            FILE_BROWSER.replace("/personal/made_up_example_com", "/personal"),
+        ),
+        (
+            "POST",
+            FILE_BROWSER.replace("made-up-my.sharepoint.com", "sharepoint.com"),
+        ),
+        ("POST", FILE_BROWSER.replace("made-up-my.", "deeper.made-up-my.")),
+        (
+            "POST",
+            FILE_BROWSER.replace("sharepoint.com", "sharepoint.com.example.com"),
+        ),
     ])
 }
 
@@ -451,6 +471,10 @@ fn assert_hosts(hosts: Hosts) {
         }
         // a whole public suffix would be far too wide
         Hosts::Under(domain) => assert!(domain.matches('.').count() >= 2, "{domain}"),
+        // one label under a registrable domain: a tenant's own host, never a whole suffix's
+        Hosts::OneLabelUnder(domain) => {
+            assert!(domain.contains('.') && !domain.starts_with('.'), "{domain}");
+        }
     }
 }
 
@@ -467,6 +491,18 @@ fn hosts_match_on_a_dot_boundary() {
         "",
     ] {
         assert!(!under.covers(host), "{host:?}");
+    }
+    let one = Hosts::OneLabelUnder("sharepoint.com");
+    assert!(one.covers("made-up-my.sharepoint.com") && one.covers("Made-Up-My.SharePoint.com"));
+    for host in [
+        "sharepoint.com",
+        ".sharepoint.com",
+        "deeper.made-up-my.sharepoint.com",
+        "xsharepoint.com",
+        "made-up-my.sharepoint.com.example.com",
+        "",
+    ] {
+        assert!(!one.covers(host), "{host:?}");
     }
     let exact = Hosts::Exact(&["teams.microsoft.com"]);
     assert!(exact.covers("teams.microsoft.com") && exact.covers("Teams.Microsoft.com"));
