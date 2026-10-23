@@ -11,9 +11,10 @@
 //! material: it stays local (0600) and goes through the fixture guard and a manual review before any of it is copied
 //! into the repo. Allows are logged too (without a reason), so the log is the full audit of a run.
 //!
-//! The browser fence logs the requests it decides without a membership check ([`RequestRecord`]): an own-state request
-//! let through, or one that nothing classifies, denied. Such an entry holds the channel, the method and the URL without
-//! its query, fragment or user info (where tokens travel), never a body:
+//! The browser fence logs a request it denies without a membership check (one that nothing classifies, or a forced
+//! deny) as a [`RequestRecord`], and a mutating one it lets through as an [`AllowedRecord`]; the sign-in window and the
+//! native transport's own-state requests are [`RequestRecord`]s too. Such an entry holds the channel, the method and
+//! the URL without its query, fragment or user info (where tokens travel), never a body:
 //!
 //! ```json
 //! {"ts_ms":1760000000000,"verdict":"deny","channel":"http","method":"POST","url":"https://host/path",
@@ -160,7 +161,7 @@ pub enum RequestOutcome {
     SignInRedirect,
 }
 
-/// A browser request the fence decided without a membership check. The URL is logged without its query, fragment or
+/// A request the fence decided without a membership check. The URL is logged without its query, fragment or
 /// user info.
 #[derive(Clone, Copy, Debug)]
 pub struct RequestRecord<'a> {

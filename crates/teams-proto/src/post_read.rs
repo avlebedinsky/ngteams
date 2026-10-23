@@ -280,7 +280,7 @@ pub struct PostReadMismatch {
 }
 
 /// The query every captured profile lookup sent (ab-chat-full, ab-chat and load captures of 2026-10-20), in the
-/// order it was sent; the browser fence's `LOOKUP_QUERY`. `isMailAddress=true` (a lookup by address) isn't on it.
+/// order it was sent. `isMailAddress=true` (a lookup by address) isn't on it.
 const LOOKUP_QUERY: &[(&str, &str)] = &[
     ("isMailAddress", "false"),
     ("enableGuest", "true"),
@@ -292,10 +292,10 @@ const LOOKUP_QUERY: &[(&str, &str)] = &[
 
 /// The headers a profile lookup goes out with besides its token: the captured values of those that could change what
 /// it does or name someone, each pinned to the one value every captured lookup carried (5869 lookups in the captures
-/// of 2026-10-20, the browser fence's `LOOKUP_HEADER_VALUES`), and `Accept` (the answer's format, free in the browser
-/// fence's review; the transport asks every service for JSON). `x-ms-object-id` is sent empty, as it always was: it
-/// would name an account by its object id. Nothing that names the client's components or the session
-/// (`x-ms-client-caller`, `x-ms-request-id`, `x-ms-session-id`) and no cookie.
+/// of 2026-10-20), and `Accept` (the answer's format, free in the browser fence's review; the transport asks every
+/// service for JSON). `x-ms-object-id` is sent empty, as it always was: it would name an account by its object id.
+/// Nothing that names the client's components or the session (`x-ms-client-caller`, `x-ms-request-id`,
+/// `x-ms-session-id`) and no cookie.
 const LOOKUP_HEADERS: &[(&str, &str)] = &[
     ("accept", "application/json"),
     ("content-type", "application/json;charset=UTF-8"),
@@ -320,9 +320,9 @@ const PRESENCE_PATH: &[&str] = &["v1", "presence", "getpresence"];
 
 /// The headers a presence read goes out with besides its token: `Accept` (the transport asks every service for
 /// JSON), the body's `Content-Type`, and the values every captured presence read carried for those that could change
-/// what it does or name someone (5461 reads in the captures of 2026-10-19 to 2026-10-21, the browser fence's
-/// `PRESENCE_HEADER_VALUES`). `x-ms-object-id` is sent empty, as it always was. No `x-ms-endpoint-id` (it would name
-/// the client's endpoint), nothing that names the client's components or the session, and no cookie.
+/// what it does or name someone (5461 reads in the captures of 2026-10-19 to 2026-10-21). `x-ms-object-id` is sent
+/// empty, as it always was. No `x-ms-endpoint-id` (it would name the client's endpoint), nothing that names the
+/// client's components or the session, and no cookie.
 const PRESENCE_HEADERS: &[(&str, &str)] = &[
     ("accept", "application/json"),
     ("content-type", "application/json"),
@@ -345,7 +345,7 @@ static PRESENCE: Shape = Shape {
 /// canBeSmtpAddress=false&includeIBBarredUsers=true&includeDisabledAccounts=true` with a JSON list of MRIs: the short
 /// profiles (names, addresses, object ids) of exactly those accounts. Reviewed from the web client's lookups the
 /// browser fence let through for lab accounts (ab-chat-full of 2026-10-20: each answer named only the accounts asked
-/// for); the browser fence's `short_profile`. Its answer is read with [`ShortProfileLookup::read_answer`].
+/// for). Its answer is read with [`ShortProfileLookup::read_answer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShortProfileLookup {
     names: Vec<Mri>,
@@ -493,7 +493,7 @@ pub enum AnswerError {
 /// `POST <presence base>/v1/presence/getpresence/` with a JSON list of `{"mri": …}`: the presence of exactly those
 /// accounts. Reviewed from the web client's reads the browser fence let through for lab accounts (ab-chat of
 /// 2026-10-22, M2 Task 17: 14 reads of a, b and c, each answered 200 with the presence of the accounts asked for and
-/// nobody else); the browser fence's `presence`. Its answer is read with [`PresenceRead::read_answer`].
+/// nobody else). Its answer is read with [`PresenceRead::read_answer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PresenceRead {
     names: Vec<Mri>,

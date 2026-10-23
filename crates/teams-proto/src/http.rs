@@ -916,7 +916,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
             ("x-ms-object-id", ""),
             ("x-ms-test-user", "False"),
         ],
-        // the values every captured presence read carried (the browser fence's `PRESENCE_HEADER_VALUES`)
+        // the values every captured presence read carried
         Service::Presence => &[
             ("behavioroverride", "redirectAs404"),
             ("x-ms-client-type", "cdlworker"),

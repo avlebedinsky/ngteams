@@ -590,8 +590,10 @@ and tokens, the personal build and protocol notes stay as they are:
         (`teams-proto/src/chat/model.rs`, the membership read); `RequestOutcome::{Unclassified, SentWithoutAllow,
         Forced}` and `Channel::WebSocket` (the browser fence's denies and frame audit); `proto_lab::classify::classify`
         and `strict_json` (the fence tests' and `ab-chat-full`'s readers); `ForcedFrameDeny::except_text_starting_with`
-        (the Chrome tests' local sockets);
-      - for M3: `WriteKind::{Call, CallAnswer, Invite, Meeting, ChannelPost, BotReply}`, `Scope::Call`.
+        (the Chrome tests' local sockets); `WriteKind::Call` (the echo test call start: `contacting/call.rs`'s row and
+        the native `StartCall`), `WriteKind::Invite` and `Scope::Call` (the native `AddToCall`), both used by
+        `spikes/echo-call`;
+      - for M3: `WriteKind::{CallAnswer, Meeting, ChannelPost, BotReply}`.
 - ➕ note (Task 2 discovery): the `chats.toml` readers (`LabChats`, `record_abc_chat`, `chats_file`) have callers
       beyond the fence (`teams-headless/src/lab.rs`, `proto-lab`'s `abc_chat.rs`, `chat_shapes.rs`, `thread_probe.rs`,
       and the tests of `teams-headless`, `teams-app`, `teams-core`, `proto-lab`), so they stay as lab data; `LabGroup`

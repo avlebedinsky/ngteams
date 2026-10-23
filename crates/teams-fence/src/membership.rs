@@ -126,8 +126,8 @@ impl ChatBase {
 
 /// The chat service path of a request URL after its base, from `v1` on (`v1` itself left out), each segment
 /// percent-decoded: `Some` only for a URL whose base the live read accepts too (see [`ChatCredential::from_request`]).
-/// The browser fence's write mapping reads its targets from it, so the mapping and the live read recognize the chat
-/// service by one check.
+/// The contacting classifier ([`crate::contacting`]) reads its chat targets from it, so the classifier and the live
+/// read recognize the chat service by one check.
 #[must_use]
 pub fn chat_service_path(url: &Url) -> Option<Vec<String>> {
     let (_, rest) = ChatBase::split(url)?;
