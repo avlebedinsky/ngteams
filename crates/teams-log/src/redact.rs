@@ -134,22 +134,33 @@ pub fn form(text: &str) -> String {
 /// `%3D`, `%253D`, `\u003d`, `\x3d`, `&#61;`, `&amp;#61;`, `&#x3d;`, `&equals;`), its value everything up to a
 /// space, a control character, a quote, `&`, `<`, `>`, `\`, `#` or `` ` ``. It can't tell a link from prose, so
 /// a message's own `code=1` goes too: redacting more, never less.
+///
+/// One pass, linear in the text: every name that starts inside a run of name bytes ends where the run does, so a run's
+/// `=` and value are read once for all of them, and whether a name can start at a byte ([`word_start`]) is read from
+/// the escapes carried forward ([`percent_escapes`]), never by walking back.
 #[must_use]
 pub fn params(text: &str) -> String {
     let bytes = text.as_bytes();
+    let escapes = percent_escapes(bytes);
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
     // `at` always sits on a char boundary: names, `=` forms and value ends are ASCII
     while at < bytes.len() {
-        if let Some((name, equals, value)) = secret_param_at(bytes, at) {
-            out.push_str(&text[at..at + name + equals]);
-            out.push_str(REDACTED);
-            at += name + equals + value;
+        if !name_byte(bytes[at]) {
+            let ch = text[at..].chars().next().unwrap_or_default();
+            out.push(ch);
+            at += ch.len_utf8();
             continue;
         }
-        let ch = text[at..].chars().next().unwrap_or_default();
-        out.push(ch);
-        at += ch.len_utf8();
+        let end = at + bytes[at..].iter().take_while(|byte| name_byte(**byte)).count();
+        if let Some((equals, value)) = secret_in_run(bytes, &escapes, at, end) {
+            out.push_str(&text[at..end + equals]);
+            out.push_str(REDACTED);
+            at = end + equals + value;
+        } else {
+            out.push_str(&text[at..end]);
+            at = end;
+        }
     }
     out
 }
@@ -159,30 +170,68 @@ fn name_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
 }
 
-/// The lengths of a credential's name, its `=` and its (non-empty) value at `at` in `bytes`, if one starts there
-/// ([`params`]).
-fn secret_param_at(bytes: &[u8], at: usize) -> Option<(usize, usize, usize)> {
-    if !word_start(&bytes[..at]) {
+/// For each `at` in `0..=bytes.len()`, whether `bytes[..at]` ends with a `%` and any number of `25`s: the start of a
+/// percent escape, encoded again or not. Carried forward, so no prefix is walked back.
+fn percent_escapes(bytes: &[u8]) -> Vec<bool> {
+    let mut escapes = vec![false; bytes.len() + 1];
+    for at in 1..=bytes.len() {
+        escapes[at] = bytes[at - 1] == b'%' || (at >= 2 && bytes[at - 2..at] == *b"25" && escapes[at - 2]);
+    }
+    escapes
+}
+
+/// The lengths of the `=` and the (non-empty) value after the run of name bytes `bytes[start..end]`, if a
+/// credential's name ([`secret_param`]) starts somewhere in the run, at a byte a name can start at ([`word_start`]).
+/// Every such name ends at `end`: the `=` and the value are read once for the run, the value's length only for a
+/// credential's.
+fn secret_in_run(bytes: &[u8], escapes: &[bool], start: usize, end: usize) -> Option<(usize, usize)> {
+    let equals = equals_len(&bytes[end..])?;
+    if bytes.get(end + equals).is_none_or(|byte| value_end(*byte)) {
         return None;
     }
-    let rest = &bytes[at..];
-    let name = rest.iter().take_while(|byte| name_byte(**byte)).count();
-    if name == 0 {
-        return None;
-    }
-    let equals = equals_len(&rest[name..])?;
-    let value = rest[name + equals..]
+    let names = SecretSuffixes::new(&bytes[start..end]);
+    (start..end).find(|&from| word_start(bytes, escapes, from) && names.secret(from - start))?;
+    let value = bytes[end + equals..]
         .iter()
         .take_while(|byte| !value_end(**byte))
         .count();
-    // a run of `name_byte`s: ASCII
-    let name_text = std::str::from_utf8(&rest[..name]).ok()?;
-    (value > 0 && secret_param(name_text)).then_some((name, equals, value))
+    Some((equals, value))
 }
 
-/// Whether a name can start right after `before`: at the start, after a byte that can't be in a name, or after an
-/// escape (`%XX`, `%25XX`, …, `\uXXXX`, `\xXX`) whose hex digits would otherwise read as the name's start.
-fn word_start(before: &[u8]) -> bool {
+/// Which suffixes of a run of name bytes are a credential's name ([`secret_param`]), each answered without reading
+/// the suffix again: one holding one of [`SECRET_WORDS`] starts at or before the run's last such word, and one of
+/// [`SECRET_NAMES`] or [`SECRET_PARAMS`] is compared whole (a name of another length is unequal at once).
+struct SecretSuffixes {
+    lower: Vec<u8>,
+    last_word: Option<usize>,
+}
+
+impl SecretSuffixes {
+    fn new(run: &[u8]) -> Self {
+        let lower = run.to_ascii_lowercase();
+        // a run of `name_byte`s: ASCII
+        let last_word = std::str::from_utf8(&lower)
+            .ok()
+            .and_then(|text| SECRET_WORDS.iter().filter_map(|word| text.rfind(word)).max());
+        Self { lower, last_word }
+    }
+
+    /// Whether the run's suffix from `from` is a credential's name: [`secret_param`] of it.
+    fn secret(&self, from: usize) -> bool {
+        let name = &self.lower[from..];
+        self.last_word.is_some_and(|word| from <= word)
+            || SECRET_NAMES
+                .iter()
+                .chain(SECRET_PARAMS.iter())
+                .any(|secret| secret.as_bytes() == name)
+    }
+}
+
+/// Whether a name can start at `at` in `bytes`: at the start, after a byte that can't be in a name, or after an escape
+/// (`%XX`, `%25XX`, …, `\uXXXX`, `\xXX`) whose hex digits would otherwise read as the name's start. `percents` is
+/// [`percent_escapes`] of `bytes`.
+fn word_start(bytes: &[u8], percents: &[bool], at: usize) -> bool {
+    let before = &bytes[..at];
     let Some(&last) = before.last() else {
         return true;
     };
@@ -196,18 +245,7 @@ fn word_start(before: &[u8]) -> bool {
             && before.len() >= digits + prefix.len()
             && before[before.len() - digits - prefix.len()..before.len() - digits].eq_ignore_ascii_case(prefix)
     };
-    escaped(b"\\u", 4) || escaped(b"\\x", 2) || (hex_tail(2) && percent_escape(&before[..before.len() - 2]))
-}
-
-/// Whether `before` ends with a `%` and any number of `25`s: the start of a percent escape, encoded again or not.
-fn percent_escape(mut before: &[u8]) -> bool {
-    loop {
-        match before {
-            [.., b'%'] => return true,
-            [rest @ .., b'2', b'5'] => before = rest,
-            _ => return false,
-        }
-    }
+    escaped(b"\\u", 4) || escaped(b"\\x", 2) || (hex_tail(2) && percents[at - 2])
 }
 
 /// The length of an `=` in any of its forms at the start of `rest`: `=`; `%3D` (encoded again, `%253D`, …);
@@ -535,4 +573,176 @@ pub fn one_line(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{REDACTED, equals_len, name_byte, params, secret_param, value_end};
+
+    /// Round 2's `params`, which walked back through every escape and read a run's name, `=` and value again at
+    /// every byte of it: the reference the linear scan must agree with on every text.
+    fn reference(text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            if let Some((name, equals, value)) = reference_at(bytes, at) {
+                out.push_str(&text[at..at + name + equals]);
+                out.push_str(REDACTED);
+                at += name + equals + value;
+                continue;
+            }
+            let ch = text[at..].chars().next().unwrap_or_default();
+            out.push(ch);
+            at += ch.len_utf8();
+        }
+        out
+    }
+
+    fn reference_at(bytes: &[u8], at: usize) -> Option<(usize, usize, usize)> {
+        if !reference_word_start(&bytes[..at]) {
+            return None;
+        }
+        let rest = &bytes[at..];
+        let name = rest.iter().take_while(|byte| name_byte(**byte)).count();
+        if name == 0 {
+            return None;
+        }
+        let equals = equals_len(&rest[name..])?;
+        let value = rest[name + equals..]
+            .iter()
+            .take_while(|byte| !value_end(**byte))
+            .count();
+        let name_text = std::str::from_utf8(&rest[..name]).ok()?;
+        (value > 0 && secret_param(name_text)).then_some((name, equals, value))
+    }
+
+    fn reference_word_start(before: &[u8]) -> bool {
+        let Some(&last) = before.last() else {
+            return true;
+        };
+        if !name_byte(last) {
+            return true;
+        }
+        let hex_tail =
+            |digits: usize| before.len() >= digits && before[before.len() - digits..].iter().all(u8::is_ascii_hexdigit);
+        let escaped = |prefix: &[u8], digits: usize| {
+            hex_tail(digits)
+                && before.len() >= digits + prefix.len()
+                && before[before.len() - digits - prefix.len()..before.len() - digits].eq_ignore_ascii_case(prefix)
+        };
+        escaped(b"\\u", 4) || escaped(b"\\x", 2) || (hex_tail(2) && reference_escape(&before[..before.len() - 2]))
+    }
+
+    fn reference_escape(mut before: &[u8]) -> bool {
+        loop {
+            match before {
+                [.., b'%'] => return true,
+                [rest @ .., b'2', b'5'] => before = rest,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Pieces a text is made of: names (credentials' and others', in any case, run together or not), every form of a
+    /// separator, an escape and an `=`, value bytes and value ends, and a non-ASCII character.
+    const PIECES: [&str; 44] = [
+        "sig",
+        "SIG",
+        "code",
+        "Code_Verifier",
+        "client_secret",
+        "assertion",
+        "proxy-authorization",
+        "set-cookie",
+        "skypeToken",
+        "x-ms-signature",
+        "password1",
+        "aeskey",
+        "passcode",
+        "sv",
+        "a",
+        "x",
+        "q.",
+        "_",
+        "-",
+        "41",
+        "2",
+        "5",
+        "25",
+        "3D",
+        "u003d",
+        "x3d",
+        "0026",
+        "%",
+        "=",
+        "&",
+        "amp;",
+        "#61;",
+        "#x3d;",
+        "equals;",
+        "#",
+        "\\",
+        "\\u",
+        "?",
+        " ",
+        "\"",
+        ";",
+        "<",
+        "é",
+        "value",
+    ];
+
+    /// A small xorshift generator: the same texts on every run.
+    struct Texts(u64);
+
+    impl Texts {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn piece(&mut self) -> &'static str {
+            let at = self.next() % PIECES.len() as u64;
+            PIECES[usize::try_from(at).unwrap_or_default()]
+        }
+
+        fn text(&mut self) -> String {
+            let pieces = 1 + self.next() % 24;
+            (0..pieces).map(|_| self.piece()).collect()
+        }
+    }
+
+    #[test]
+    fn the_linear_scan_redacts_exactly_what_the_reference_does() {
+        let mut texts = Texts(0x9e37_79b9_7f4a_7c15);
+        let mut redacted = 0;
+        for _ in 0..200_000 {
+            let text = texts.text();
+            let expected = reference(&text);
+            assert_eq!(params(&text), expected, "{text:?}");
+            redacted += usize::from(expected != text);
+        }
+        // the texts reach the redaction often, not only the pass-through
+        assert!(redacted > 10_000, "{redacted}");
+    }
+
+    #[test]
+    fn crafted_runs_redact_as_the_reference_does() {
+        let runs = [
+            format!("%{}", "25".repeat(300)),
+            format!("%{}%253Dvalue", "25".repeat(300)),
+            format!("%{}sig=1", "25".repeat(300)),
+            format!("%{}41sig=1 {}x_token=2", "25".repeat(300), "a".repeat(300)),
+            format!("{}sig=1 \\u0041{}code=2", "b".repeat(300), "c".repeat(300)),
+            "a=".repeat(300),
+            "sig=".repeat(300),
+            format!("x&#{}", "1".repeat(300)),
+        ];
+        for text in runs {
+            assert_eq!(params(&text), reference(&text), "{text:?}");
+        }
+    }
 }

@@ -456,6 +456,61 @@ fn the_last_pass_catches_tokens_anywhere_in_a_line() {
     assert!(shown.contains("Bearer [redacted]"), "{shown}");
 }
 
+/// How long the passes over one crafted 200 KB text may take. Linear, they take about 0.15 s unoptimized on an idle
+/// machine (over 30 times less); the quadratic scan this guards against hadn't finished the first text in 20 s.
+const CRAFTED_LIMIT: Duration = Duration::from_secs(5);
+
+/// `text` through the redactor's passes (a URL's, `params`, the last pass, a JSON string's), run on a thread of their
+/// own so passes that stall fail the test at four times [`CRAFTED_LIMIT`] rather than hang it.
+fn redacts_in_time(what: &'static str, text: String) -> String {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let shown = redact::line(&redact::params(&redact::url(&text)));
+        let mut value = serde_json::Value::String(text);
+        redact::json(&mut value);
+        let _ = sender.send(shown);
+    });
+    receiver
+        .recv_timeout(CRAFTED_LIMIT * 4)
+        .unwrap_or_else(|_| panic!("{what}: the passes took over {:?}", CRAFTED_LIMIT * 4))
+}
+
+#[test]
+fn a_crafted_text_is_redacted_in_linear_time() {
+    let run = 100_000;
+    let texts = [
+        // every other offset a `%25…` escape's end: a name start whose prefix walked back to the `%`
+        ("a long %2525… escape", format!("%{}", "25".repeat(run))),
+        ("one escape run after another", format!("%{0}%{0}x=1", "25".repeat(run))),
+        ("a long name without its =", "a".repeat(2 * run)),
+        ("a long escape then an = form", format!("%{}=value", "25".repeat(run))),
+        (
+            "a long escape then an escaped =",
+            format!("%{}%253Dvalue", "25".repeat(run)),
+        ),
+        ("names chained by =", "a=".repeat(run)),
+        ("a long HTML reference", format!("x&#{}", "1".repeat(2 * run))),
+        ("a long run of backslashes", format!("x{}u003d1", "\\".repeat(2 * run))),
+    ];
+    for (what, text) in texts {
+        let started = std::time::Instant::now();
+        redacts_in_time(what, text);
+        let took = started.elapsed();
+        assert!(took < CRAFTED_LIMIT, "{what}: {took:?}");
+    }
+    // still redacted at the end of a long run: the scan skips a failed run, never a credential after it
+    let sig = signature("crafted");
+    let text = format!(
+        "%{}&sig={sig} {}&amp;sig%3D{sig}",
+        "25".repeat(run),
+        "a".repeat(2 * run)
+    );
+    let shown = redacts_in_time("a signature after the runs", text);
+    assert!(holds_no_signature(&shown, &sig), "a signature survived");
+    assert_eq!(shown.matches(&format!("sig={REDACTED}")).count(), 1);
+    assert_eq!(shown.matches(&format!("sig%3D{REDACTED}")).count(), 1);
+}
+
 /// Every file of the log in `dir` (the current one and the rotated ones), with its text.
 fn log_files(dir: &Path) -> Vec<(String, String)> {
     let mut files: Vec<(String, String)> = fs::read_dir(dir)
