@@ -147,55 +147,72 @@
 
 ### The contacting services and their table
 
-Task 2 settles the exact host list from `docs/protocol/endpoints.md`, `calling-echo.md` and `auth.md` and writes it
-into `contacting.rs` and this section. On each service below, a mutating request is `Unreadable` unless a row maps it
-or carves it out.
+Task 2 settled the host list from `docs/protocol/endpoints.md`, `calling-echo.md` and `auth.md` (and the hosts
+`ab-file`'s and `ab-image`'s forced denies name); it is in `contacting.rs` (`Service`, `service_of`) and below. On each
+service below, a mutating request is `Unreadable` unless a row maps it or carves it out. Hosts are matched in lower
+case on a dot boundary (the host or any host under it), a trailing dot dropped, any scheme and port; on a Teams origin
+(`teams.microsoft.com`, `teams.cloud.microsoft`, `teams.live.com` and the hosts under them) the service is told by the
+path's first two segments, decoded and in any case. A method override on a contacting service is `Unreadable` (the
+fence can't tell which method the service acts on); a mutating request whose URL doesn't parse is `Unreadable`.
 
-**Chat service** (an AFD host's `/api/chatsvc/<region>/…`, the regional chat hosts): any version, any case of `ME`
-(`ME`, `me`, the account's own MRI), any path `chat_service_path` can read or not.
+**Chat service** (a Teams origin's `/api/chatsvc/…`, `*.msg.teams.microsoft.com`): any version, any case of `ME`
+(`ME`, `me`, the account's own MRI, which `Policy::with_own_account` names), any path `chat_service_path` can read or
+not. A mapped write needs a URL `chat_service_path` reads (`https`, an exact AFD host or a regional host, `v1`), so the
+mapping and the live member read accept the same URLs; any other chat service URL is `Unreadable` unless carved out.
+Any path segment that is empty or holds `/ ; ? #` once decoded, and any query key twice in any case, is `Unreadable`.
 
 | Request | Verdict |
 |---|---|
 | `POST v1/users/ME/conversations/{chat}/messages`, `Text`, `RichText`, `RichText/*` | `Write(Message)` on the chat, mentions added (today's `message_write`, `chat_only`, `mentioned`) |
-| same path, `Control/Typing`, `Control/ClearTyping`, the body passing `strict_json` and `chat_only`, no `mentions`, `{chat}` a chat id by `chat_scope` | `None` (typing) |
+| same path, `Control/Typing`, `Control/ClearTyping`, the body read by `strict_json` with only the captured keys (`content`, `contenttype`, `messagetype`; so no `mentions`, no `crossPostChannels`) and `content` empty or absent, `{chat}` a chat id by `chat_scope`; a typing body in any other form is `Unreadable` | `None` (typing) |
 | `PUT …/messages/{id}`, `DELETE …/messages/{id}` | `Write(Edit)`, `Write(Delete)` |
 | `PUT`/`DELETE …/messages/{id}/properties?name=emotions` (exactly one query key) | `Write(Reaction)` |
 | `PUT v1/users/ME/conversations/{chat}/properties?name=consumptionhorizon` (exactly one query key, `{chat}` a chat id) | `None` (read receipt) |
-| `PUT v1/users/ME/conversations/{chat}/properties?name=<n>`, `<n>` in the own-view set Task 2 lists from `endpoints.md` (e.g. `lastTimeFavorited`, favourite, mute), exactly one query key | `None` (the account's own view of a chat) |
+| `PUT v1/users/ME/conversations/{id}/properties?name=<n>`, `<n>` in `OWN_VIEW_PROPERTIES` (`lastTimeFavorited`, seen on a channel; `favorite`, the bundle's form in `writes.json`), exactly one query key, `{id}` a `19:` chat or channel id | `None` (the account's own view of a conversation) |
 | `PUT v1/users/ME/conversations/48:{notifications,mentions}/messages/{id}/properties?name=isread`, exactly one query key, body exactly `{"isread": <string>}` | `None` (own feed) |
-| `PUT v1/users/ME/properties?name=<n>` | `None` (own settings) |
-| `v2/users/ME/endpoints/<id>`, `…/endpoints/<id>/active` and the other own-endpoint paths `endpoints.md` lists | `None` (own session) |
+| `PUT v1/users/ME/properties?name=<n>`, exactly one query key | `None` (own settings) |
+| `PUT`, `POST`, `DELETE` on `v1`/`v2` `users/ME/endpoints`, `…/endpoints/<id>`, `…/endpoints/<id>/active`, `…/endpoints/<id>/activeendpoint`, `users/ME/activeendpoint` | `None` (own session) |
 | `POST v1/threads` | `Write(ChatCreate)` with the body's members |
 | `PUT v1/threads/{chat}/members[/{m}]`, `DELETE v1/threads/{chat}/members/{m}` | `Write(MemberChange)` |
 | anything else: other `48:` streams and paths (notes, `sharedcalllogs`, forward, move), `8:…`/`28:…` conversation ids, drafts and scheduled sends, `PUT`/`DELETE` on a conversation itself, bot invokes (`agents/…`), channel and team ids, reply chains, any id segment holding `/ ; ? #`, any duplicate query key | `Unreadable` |
 
-**Calling** (`api.flightproxy.teams.microsoft.com`, `api.fl.teams.microsoft.com`, `*.conv.skype.com`, `*.cc.skype.com`,
-`*.broker.skype.com`, and their `ep/<host>/…` forms; Task 2 checks the list): every mutating request is `Unreadable`
-except the echo call start that `calling.rs` maps today, `Write(Call)` to the policy's echo callee. Until M3 maps the
+**Calling** (`*.flightproxy.teams.microsoft.com`, whose `ep/<host>/…` forms reach the hosts behind it,
+`api.fl.teams.microsoft.com`, and every `*.skype.com` host but AMS's: `*.conv.skype.com`, `*.cc.skype.com`,
+`*.broker.skype.com` and any other Skype host, since one whose purpose is unknown counts as contacting): every mutating
+request is `Unreadable` except the echo call start that `calling.rs` maps today (`CALL_START_URL`, no query, the
+captured shape), `Write(Call)` to the policy's echo callee (`Policy::with_echo_callee`; without one it is
+`Unreadable`). Until M3 maps the
 rest (Technical Details, "Calls"), a call to a lab account, the `acceptance` link and the follow-ups stay
 `Unreadable`; each becomes a row of this table, not a new mechanism.
 
-**Graph** (`graph.microsoft.com`, every version, `$batch` included): every mutating request `Unreadable`.
+**Graph** (`*.graph.microsoft.com`, every version, `$batch` included): every mutating request `Unreadable`.
 
-**Outlook, OWA and Substrate** (`outlook.office.com`, `outlook.office365.com`, `substrate.office.com`): every mutating
-request `Unreadable` except the search and suggestion `POST`s `endpoints.md` lists.
+**Outlook, OWA and Substrate** (`*.outlook.office.com`, `*.outlook.office365.com`, `*.substrate.office.com`): every
+mutating request `Unreadable` except `POST /search/api/<version>/suggestions` (the one `endpoints.md` lists) and
+`…/query` on Substrate: search reads.
 
-**SharePoint and OneDrive** (`*.sharepoint.com`, the OneDrive API hosts): every mutating request `Unreadable`.
+**SharePoint and OneDrive** (`*.sharepoint.com`, `*.sharepoint-df.com`, `*.microsoftpersonalcontent.com`,
+`*.onedrive.com`, `onedrive.live.com`, the media hosts `*.svc.ms`: `ab-file`'s list): every mutating request
+`Unreadable`.
 
-**AMS and the async gateway**: object creation and `…/objects/<id>/forward` (they name who can read an object) are
-`Unreadable` unless today's mapping (`fence-targets.md`, AMS) maps them to a chat target, which `Fence::check` then
-judges; the rest of AMS `None` only where `endpoints.md` shows it is the account's own (an upload to an object it
-created).
+**AMS and the async gateway** (`*.asyncgw.teams.microsoft.com`, `*.asm.skype.com`, a Teams origin's `/asm/…` and
+`/ams/…`): object creation, `…/objects/<id>/forward` and an object's content upload are `Unreadable` (no mapping is
+left: the M2 mapping of the a–b chat's image object was removed, and the fence can't tell whether the account made an
+object); the token exchanges (`POST …/v1/skypetokenauth`, `POST …/v1/<id>/aadtokenauth`), which trade the account's
+own token for the media service's cookie, are `None`.
 
-**Middle tier** (`teams.microsoft.com/api/mt/…`): mutating requests under `…/teams/…`, `…/meetings…`, anything with
-`invite` in a segment are `Unreadable`; the rest of the middle tier is `None`, out-of-office with automatic replies
+**Middle tier and apps** (a Teams origin's `/api/mt/…` and `/api/apps/…`): a mutating request with a segment (in any
+case) `team(s)`, `chat(s)`, `channel(s)`, `conversation(s)`, `thread(s)` or `group(s)`, or a segment holding
+`meeting` or `invite`, is `Unreadable`, except `POST …/beta/teams/apps/aggregatedEntitlements` (the app catalogue of
+the account's teams, a read); the rest of the middle tier is `None`, out-of-office with automatic replies
 (`…/automaticRepliesSetting`) included: the user counted it as own settings on 2026-10-23.
 
-**CSA** (`/api/csa/…`): mutating requests `Unreadable` except the reads by `POST` `endpoints.md` lists
-(`chatsAndChannelsByIds` and the like).
+**CSA** (a Teams origin's `/api/csa/…`, `*.chatsvcagg.teams.microsoft.com`): mutating requests `Unreadable` except
+`POST …/api/<version>/teams/users/me/chatsAndChannelsByIds`, the read by `POST` `endpoints.md` lists.
 
 **Everything else**: `None` (telemetry, logging, apps, middle-tier settings and profile lookups, searches, presence and
-`forceavailability`, the registrar, Entra and authz).
+`forceavailability`, the registrar, Entra and authz, the push service `/api/tps/…`, whose `pushupdates` `POST` is the
+account's own subscription, Trouter's HTTP side, the page and its static hosts).
 
 Bodies are read by the strict JSON reader (case-folded duplicate keys → `Unreadable`), path segments percent-decoded,
 query values exact.
@@ -319,18 +336,21 @@ and tokens, the personal build and protocol notes stay as they are:
 - Modify: `crates/teams-fence/src/lib.rs`, `crates/teams-fence/src/target.rs`, `crates/teams-fence/Cargo.toml`
 - Modify: this plan (Technical Details' host list, own-view property names, carve-outs; ➕ tasks)
 
-- [ ] on the M2 branch, list every use of the pieces Context names (`teams-signin`, M2's code, and what
+- [x] on the M2 branch, list every use of the pieces Context names (`teams-signin`, M2's code, and what
       `docs/personal-build.md` and M2 Task 27 will need) and add a ➕ task, or a note on the task that deletes it, for each
-- [ ] go through every row of `docs/protocol/endpoints.md`, `calling-echo.md` and `auth.md`: settle each contacting
+- [x] go through every row of `docs/protocol/endpoints.md`, `calling-echo.md` and `auth.md`: settle each contacting
       service's hosts, the carve-outs and the own-view property names, and write them into Technical Details
-- [ ] write the table test first: a row per mapped write, carve-out and `Unreadable` form of Technical Details,
+- [x] write the table test first: a row per mapped write, carve-out and `Unreadable` form of Technical Details,
       including every shape `proto-lab/tests/fence_targets.rs` pins, method overrides and `GET` with a body, an
       unreadable chat-service path, `8:`/`28:`/`48:notes` conversations, a duplicate `name`, a Graph `$batch`, an
       Outlook `sendmail`, a bot invoke, a calling-host `acceptance`
-- [ ] add `contacting.rs` next to `proto-lab`'s `map_write` (copied in, not moved yet: `proto-lab` keeps building
+- [x] add `contacting.rs` next to `proto-lab`'s `map_write` (copied in, not moved yet: `proto-lab` keeps building
       unchanged), with the families, carve-outs and the echo call start (the callee in `Policy`)
-- [ ] `WriteKind::is_contacting()`: false for `Typing`, `ReadReceipt`, `OwnAvailability`
-- [ ] tests pass
+- [x] `WriteKind::is_contacting()`: false for `Typing`, `ReadReceipt`, `OwnAvailability`
+- [x] tests pass
+- ➕ discovery (Task 2): the uses of each piece, and the personal build's needs, are noted on the task that would
+      delete it (Tasks 4, 5, 6, 8). `docs/personal-build.md`'s header still reads "A proposal, not yet approved"
+      (line 3), though the user approved it on 2026-10-23; not this plan's to change.
 
 ### Task 3: `Fence::check` and group chats under the new rule
 
@@ -380,6 +400,16 @@ and tokens, the personal build and protocol notes stay as they are:
       (`PUT v1/threads/<channel>/members/<own>?returnThreadMetadata`) and channel properties, delivery responses, and
       `echo-call`'s call follow-ups (still exit 1); every scenario stops picking a classifier
 - [ ] tests pass; arming tests (`tests/browser.rs` and friends) untouched and green
+- ➕ note (Task 2 discovery): `teams-signin` is the only crate outside `proto-lab` that classifies at run time:
+      `src/guard.rs` uses `Classifier::sign_in`, `OwnRule` (`Guard::with_own`, `window.rs`'s hook),
+      `Classification::{Own, PostRead, OwnAvailability}` and `RequestOutcome::Own`; `tests/{window,guard}.rs` build
+      `OwnRule::new(OwnKind::EntraSignIn, …)` and check the `own` log names `entra_token` and `entra_sign_in`. The
+      personal sign-in window keeps the lab's `sign_in` rules and extends them (`docs/personal-build.md` lines 193,
+      212-214), so `sign_in`, `OwnRule`, `OwnKind::{EntraToken, Authz, EntraSignIn}` and `RequestOutcome::Own` stay
+      (moved into `teams-signin` if `proto-lab` stops needing them). `spikes/echo-call/tests/signaling.rs` calls
+      `proto_lab::calling::call_start` and `TEST_CALL_SCENARIO`: switch it to `teams_fence::contacting` (and
+      `teams_fence::TEST_CALL_SCENARIO`) or keep a re-export. `strict_json` has users in `calling.rs`,
+      `availability.rs` and `post_read.rs`: whichever survive need a copy or `teams-fence`'s (crate-private today).
 
 ### Task 5: The native transport: plain requests, checked by `contacting`
 
@@ -415,6 +445,20 @@ and tokens, the personal build and protocol notes stay as they are:
       `proto_presence_read_literal` to the new API; keep that `Mutating` and `WritePermit` can't be made outside their
       crates; add a case that a `Request` can't be handed to `deliver`
 - [ ] tests pass
+- ➕ note (Task 2 discovery): the personal build relies on `PostRead` / `AuthorizedPostRead`, `check_post_read`,
+      `PostReadPermit` and the lab's `lab_accounts_only` limit for lab builds (`docs/personal-build.md` lines 11, 78,
+      148-152, 382, 429; M2 Task 27: "a `PostRead` for a non-lab MRI the account's chats name is allowed"), on the
+      sealed `OwnState` list (lines 146-147), on the host allowlist (lines 144, 362-363: "the fixed host allowlist,
+      `https` only, no proxy, no redirects", for both builds), and on `WriteKind::OwnAvailability` on `Scope::Account`
+      (lines 113-117, 380). So `teams-proto/src/{own,post_read}.rs`, `check_post_read`, `PostReadPermit` and
+      `lab_accounts_only` stay for the personal build: the lab's callers (`teams-core` `profiles.rs`, `presence.rs`,
+      which also calls `lab_accounts_only`) move onto `send`, the pieces aren't deleted, and the per-`Service` base
+      keeps the allowlist's form. `EndpointRegistrar` and `register` (from `own.rs`) are used by `teams-trouter`
+      (`registration.rs`, `session.rs`) and `teams-core/src/engine.rs`. The `Transport` fakes that implement
+      `own_state` and `post_read`: `teams-core/tests/{outbox,sync,engine,own_availability}.rs`,
+      `teams-headless/tests/cli.rs`, `teams-ui/tests/own_presence.rs`, `teams-trouter/tests/session.rs`,
+      `teams-proto/tests/{fence_types,own_availability}.rs`, `fence-seal/tests/ui/proto_register_fake_transport.rs`;
+      the host allowlist's `accepts_csa_base` and `accepts_presence_base` are used by `teams-core/src/lab.rs`.
 
 ### Task 6: Native frames: typed, unreviewed
 
@@ -431,6 +475,9 @@ and tokens, the personal build and protocol notes stay as they are:
 - [ ] drop `FrameRecord` (unless the personal build uses it) and the "reviewed list" rule; the trait stays sealed only
       to keep raw text out, so adding a frame (e.g. `user.activity`) is an ordinary change
 - [ ] tests pass
+- ➕ note (Task 2 discovery): the personal build logs its sealed `OwnFrame` list to the personal `fence.log`
+      (`docs/personal-build.md` lines 146-147), so `FrameRecord` stays; only the lab's per-frame review rule goes.
+      `FrameSink` and `OwnFrame` are `teams-trouter/src/session.rs`'s only way to send a frame.
 
 ### Task 7: The endpoint catalog and protocol notes
 
@@ -457,6 +504,11 @@ and tokens, the personal build and protocol notes stay as they are:
 
 - [ ] grep for each piece Context names; delete the ones with no caller left and no personal-build user; list the
       ones kept and why in this plan
+- ➕ note (Task 2 discovery): the `chats.toml` readers (`LabChats`, `record_abc_chat`, `chats_file`) have callers
+      beyond the fence (`teams-headless/src/lab.rs`, `proto-lab`'s `abc_chat.rs`, `chat_shapes.rs`, `thread_probe.rs`,
+      and the tests of `teams-headless`, `teams-app`, `teams-core`, `proto-lab`), so they stay as lab data; `LabGroup`
+      and `PartialReason::UnrecordedGroupChat` have no caller outside `teams-fence`. `is_group_chat_id` stays
+      (`teams-proto/src/chat/model.rs`); `Fence::open_lab_account` stays (`teams-headless`, `teams-app`).
 - [ ] tests pass
 
 ### Task 9: Live check under the new fence

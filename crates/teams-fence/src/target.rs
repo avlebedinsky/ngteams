@@ -74,6 +74,13 @@ impl WriteKind {
         }
     }
 
+    /// Whether this kind of write reaches other people, so its target's members are judged: every kind but typing,
+    /// read receipts and the account's own availability, which others may see but which carry nothing to them.
+    #[must_use]
+    pub fn is_contacting(self) -> bool {
+        !matches!(self, Self::Typing | Self::ReadReceipt | Self::OwnAvailability)
+    }
+
     /// Whether this kind of write can create its own target ([`Scope::New`]): a new chat, a new call, a new meeting.
     /// Every other kind lands on something that already exists, whose members the fence has to fetch.
     #[must_use]

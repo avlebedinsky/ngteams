@@ -110,6 +110,13 @@ What the code does and why. A change that undoes one of these needs a new reason
 - One permit covers one write to one exact `Target` (kind, scope, added participants); `Authorized::new` checks it. A
   request the fence can't read with certainty is `Unknown` and denied: bodies are read strictly (case-folded duplicate
   keys make it `Unknown`), and the echo call start is matched in its captured shape.
+- `teams_fence::contacting(&Request, &Policy)` is the classifier of the lab rule, for both sides: `None` (reaches
+  nobody), `Write(Target)` (judged by `Fence::check`) or `Unreadable` (denied). Only a mutating request (a method
+  other than `GET`/`HEAD`/`OPTIONS`, a body, or a method override) on a contacting service (`Service`, told by host
+  and, on a Teams origin, by path) is looked at further; there it is unreadable unless a row of its
+  table (`crates/teams-fence/src/contacting.rs`, `contacting/chat.rs`) maps or carves it out. A row is code plus a
+  case in `crates/teams-fence/tests/fixtures/contacting/`. Neither the browser fence nor the native transport calls it
+  yet: `proto-lab`'s `map_write` and `calling::call_start` still decide the lab browser's writes.
 - Writes on an existing call are denied: the follow-ups aren't mapped, and the native `add` (`AddToCall`, an `Invite`
   on `Scope::Call`) is `Partial`, since no membership source reads a call's members
   (`docs/backlog/fence-call-follow-ups.md`).

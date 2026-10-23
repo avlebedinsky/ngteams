@@ -11,6 +11,10 @@
 //! ([`RequestRecord`]), the targets it couldn't arm ([`ArmingRecord`]) and the native client's own WebSocket frames
 //! ([`FrameRecord`]).
 //!
+//! Which requests are writes at all is [`contacting`]'s to say: the one classifier of the lab rule, for the browser
+//! fence and the native transport alike, telling a request that reaches nobody ([`Contact::None`]) from a mapped write
+//! ([`Contact::Write`]) and from a mutating request on a contacting service that no row reads ([`Contact::Unreadable`]).
+//!
 //! A native read by `POST` (`teams-proto`'s sealed `PostRead` list) is decided by [`Fence::check_post_read`]: a
 //! [`PostReadPermit`] for its exact list of MRIs when every one is a lab account, none twice, the decision logged.
 //!
@@ -23,6 +27,7 @@
 //! as a membership source); only dev-dependencies enable it, and a lab binary refuses to run when a build turned it on
 //! ([`test_support_enabled`]).
 
+mod contacting;
 mod decision;
 pub mod lab;
 mod log;
@@ -30,6 +35,9 @@ mod membership;
 mod post_read;
 mod target;
 
+pub use contacting::{
+    CALL_START_URL, Contact, OWN_VIEW_PROPERTIES, Policy, Request, Service, TEST_CALL_SCENARIO, contacting, service_of,
+};
 pub use decision::{
     Denied, DenyReason, FailClosed, Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, OpenError,
     PartialReason, Roster, WritePermit,
