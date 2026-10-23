@@ -1,20 +1,17 @@
-//! Own-state requests: the reviewed list of requests that aren't reads but touch only the signed-in account's own
-//! state (registering its own endpoint, say), sent without a membership check.
-//!
-//! The list is the set of types implementing [`OwnState`], and the trait is sealed, so only this crate adds to it.
-//! It started empty (M1 Task 5): each entry is added by the task that captured and reviewed it, in its exact shape
-//! (method, service, path, body schema), the way `proto-lab`'s browser fence adds its own-state kinds. The transport
-//! logs every own-state request to `fence.log` before it sends it, and sends none it couldn't log.
+//! Own-state requests: requests that aren't reads but touch only the signed-in account's own state (registering its
+//! own endpoint, say). Each is a plain [`Request`], which the transport sends when the fence's classifier says it
+//! reaches nobody; the personal build also keeps them as a sealed list ([`OwnState`]: only this crate adds to it), sent
+//! by [`HttpTransport::own_state`](crate::HttpTransport::own_state) and logged to `fence.log` by its entry's kind.
 //!
 //! The entries:
-//! - [`EndpointRegistration`] (M1 Task 16): the registrar registration of the account's own Trouter endpoint for the
-//!   **messaging** stack, in the shape the web client's messaging stack sent (M1 Task 14, `docs/protocol/trouter.md`),
-//!   so the account's chat events reach its push socket. Never the calling stack's (`SkypeSpacesWeb`): that one makes
-//!   the account reachable for calls.
+//! - [`EndpointRegistration`]: the registrar registration of the account's own Trouter endpoint for the **messaging**
+//!   stack, in the shape the web client's messaging stack sent (`docs/protocol/trouter.md`), so the account's chat
+//!   events reach its push socket. Not the calling stack's (`SkypeSpacesWeb`): that one makes the account reachable for
+//!   calls.
 //!
-//! [`register`] sends the registration and, once the registrar took it, gives the endpoint it registered as a
-//! [`RegisteredEndpoint`]: the only way to get one, and the only id the account's own availability may name (M2 Task
-//! 19, `crate::SetEndpointAvailability`, `crate::ForceAvailability`). It takes only an [`EndpointRegistrar`], the
+//! [`register`] sends the registration (as a plain request) and, once the registrar took it, gives the endpoint it
+//! registered as a [`RegisteredEndpoint`]: the only way to get one, and the only id the account's own availability may
+//! name (`crate::SetEndpointAvailability`, `crate::ForceAvailability`). It takes only an [`EndpointRegistrar`], the
 //! native HTTP transport (any transport under `test-support`), so a fake transport's made-up answer can't mint one,
 //! and records the account it was registered for, the transport's fence's own ([`Transport::own_account`]): a write
 //! of another account's availability can't name it.
@@ -27,6 +24,7 @@ use url::Url;
 
 use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Method, Service};
+use crate::request::Request;
 
 /// The messaging stack's app on the registrar, exactly (`clientDescription.appId`).
 pub const MESSAGING_APP_ID: &str = "TeamsCDLWebWorker";
@@ -44,7 +42,8 @@ pub const REGISTRATION_TTL: u32 = 3600;
 /// The host suffix of every Trouter host (`go.`, `<name>-t.`, `<name>-f.`).
 pub const TROUTER_DOMAIN: &str = ".trouter.teams.microsoft.com";
 
-/// A reviewed own-state request (see the module docs). Sealed: no other crate can implement it.
+/// An entry of the personal build's sealed own-state list (see the module docs). Sealed: no other crate can implement
+/// it.
 pub trait OwnState: sealed::Sealed {
     /// The entry's name, logged to `fence.log` with every request of it.
     const KIND: &'static str;
@@ -101,9 +100,7 @@ impl EndpointRegistration {
     }
 }
 
-impl OwnState for EndpointRegistration {
-    const KIND: &'static str = "endpoint_registration";
-
+impl Request for EndpointRegistration {
     fn service(&self) -> Service {
         Service::Registrar
     }
@@ -132,6 +129,26 @@ impl OwnState for EndpointRegistration {
                 "TROUTER": [{"context": "", "path": self.push_url, "ttl": REGISTRATION_TTL}],
             },
         }))
+    }
+}
+
+impl OwnState for EndpointRegistration {
+    const KIND: &'static str = "endpoint_registration";
+
+    fn service(&self) -> Service {
+        Request::service(self)
+    }
+
+    fn method(&self) -> Method {
+        Request::method(self)
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Request::endpoint(self)
+    }
+
+    fn body(&self) -> Option<Value> {
+        Request::body(self)
     }
 }
 
@@ -177,7 +194,7 @@ impl fmt::Debug for RegisteredEndpoint {
 }
 
 /// A transport whose registration may give a [`RegisteredEndpoint`]: the native [`HttpTransport`](crate::HttpTransport)
-/// only, which sends to its allowlisted hosts and logs every own-state request to `fence.log` before it goes. Sealed:
+/// only, which sends only to its services' bases and logs every plain request to `fence.log` before it goes. Sealed:
 /// [`Transport`] is open (a test's fake implements it, and its answer is whatever the fake says), so a registration
 /// "taken" by another transport proves nothing was registered, and no other crate can make a transport one. Under
 /// `test-support` (tests only, which a lab binary refuses to run with) every transport is one, so a test's fake can
@@ -197,8 +214,7 @@ mod registrar {
     impl<T: crate::Transport> Sealed for T {}
 }
 
-/// Sends `registration` through `transport` (the reviewed own-state request: the transport logs it to `fence.log`
-/// before it goes) and returns the answer, with the endpoint it registered when the answer is a success, recorded for
+/// Sends `registration` through `transport` (a plain request: the transport logs it to `fence.log` before it goes) and returns the answer, with the endpoint it registered when the answer is a success, recorded for
 /// the transport's own account ([`Transport::own_account`]: its fence's, the account whose token the registrar took).
 /// A refusal or a failure registers nothing. Only an [`EndpointRegistrar`] (the native HTTP transport) registers: a
 /// fake transport answering a success can't make a [`RegisteredEndpoint`] outside `test-support`.
@@ -209,7 +225,7 @@ pub async fn register<T: EndpointRegistrar>(
     transport: &T,
     registration: &EndpointRegistration,
 ) -> Result<(Response, Option<RegisteredEndpoint>), T::Error> {
-    let answer = transport.own_state(registration).await?;
+    let answer = transport.send(registration).await?;
     let endpoint = answer.is_success().then(|| RegisteredEndpoint {
         id: registration.registration_id.clone(),
         account: transport.own_account().cloned(),
@@ -258,7 +274,7 @@ fn is_push_url(text: &str) -> bool {
         && url.as_str() == text
 }
 
-/// An own-state request of the test's choosing, `POST`ed: the transport's tests need one beyond the reviewed list.
+/// An own-state request of the test's choosing, `POST`ed: the transport's tests need one beyond the sealed list.
 /// Tests only (`test-support`), which a lab binary refuses to run with.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -15,13 +15,13 @@ use std::future::{self, Future};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_fence::{DenyReason, FailClosed, Fence, FenceLog, Mri, Roster, Scope, Target, WriteKind};
 use teams_proto::{
-    AuthorizedPostRead, Client, Credentials, EndpointRegistration, ForceAvailability, HttpError, HttpTransport,
-    ManualAvailability, Mutating, OwnState, PRESENCE_AUDIENCE, PostRead, Read, Refusal, RegisteredEndpoint, Response,
+    Client, Credentials, EndpointRegistration, ForceAvailability, HttpError, HttpTransport, ManualAvailability,
+    Mutating, PRESENCE_AUDIENCE, Read, Refusal, RegisteredEndpoint, Request as ProtoRequest, Response,
     SetEndpointAvailability, Transport, WriteError, register,
 };
 use wiremock::matchers::{method, path};
@@ -235,9 +235,9 @@ async fn only_a_registration_the_registrar_took_registers_an_endpoint() {
     );
     assert_eq!(format!("{endpoint:?}"), format!("RegisteredEndpoint({EPID:?})"));
     assert_eq!(
-        setup.log.lines()[0]["own"],
-        "endpoint_registration",
-        "the registration was logged as own state before it went"
+        (&setup.log.lines()[0]["event"], &setup.log.lines()[0]["path"]),
+        (&json!("allowed"), &json!("/registrar/prod/V2/registrations")),
+        "the registration was logged as allowed before it went"
     );
 
     // the registrar refuses it: the transport answers the status, and nothing is registered
@@ -260,7 +260,7 @@ async fn only_a_registration_the_registrar_took_registers_an_endpoint() {
     assert_eq!(endpoint.map(|endpoint| endpoint.id().to_owned()), Some(EPID.to_owned()));
 }
 
-/// A transport answering every own-state request with one status; it is never asked anything else.
+/// A transport answering every plain request with one status; it is never asked anything else.
 struct Answering(u16);
 
 impl Transport for Answering {
@@ -270,15 +270,8 @@ impl Transport for Answering {
         future::ready(Err(HttpError::NoRoute))
     }
 
-    fn own_state<R: OwnState>(&self, _: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+    fn send<R: ProtoRequest>(&self, _: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
         future::ready(Ok(Response::new(self.0, Vec::new())))
-    }
-
-    fn post_read<R: PostRead + Send>(
-        &self,
-        _: AuthorizedPostRead<R>,
-    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        future::ready(Err(HttpError::NoRoute))
     }
 
     fn deliver<R: Mutating + Send>(

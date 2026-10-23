@@ -27,8 +27,8 @@ use teams_mock::{
     AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OwnAvailability, PRESENCE_BASE, TrouterMock,
 };
 use teams_proto::{
-    Author, Authorized, AuthorizedPostRead, Client, Credentials, EndpointRegistration, HttpError, HttpTransport,
-    ManualAvailability, Mutating, OwnState, PostRead, Read, Response, Transport, register,
+    Author, Authorized, Client, Credentials, EndpointRegistration, HttpError, HttpTransport, ManualAvailability,
+    Mutating, Read, Request as ProtoRequest, Response, Transport, register,
 };
 use teams_store::Store;
 use teams_trouter::{Options, RegistrationReport, Stop, Trouter, TrouterCredentials};
@@ -224,15 +224,8 @@ impl Transport for ThrottledOnce {
         self.inner.read(request)
     }
 
-    fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        self.inner.own_state(request)
-    }
-
-    fn post_read<R: PostRead + Send>(
-        &self,
-        read: AuthorizedPostRead<R>,
-    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        self.inner.post_read(read)
+    fn send<R: ProtoRequest>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.send(request)
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {

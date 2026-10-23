@@ -1,8 +1,9 @@
-//! UPS's presence read (M2 Task 17) on wiremock, through the `test-support` mock origin: an entry of the sealed
-//! `PostRead` list that goes out only with the permit the fence gave for its exact MRIs, in its captured shape (the
+//! UPS's presence read on wiremock, through the `test-support` mock origin: as a plain request it goes out whoever it
+//! names (a read reaches nobody), logged to `fence.log` as `allowed` first; as an entry of the personal build's sealed
+//! `PostRead` list it goes out only with the permit the fence gave for its exact MRIs, in its captured shape (the
 //! trailing slash, no query, the captured header values, a list of `{"mri": …}`), to the presence base the transport
-//! was given, with the presence token, logged to `fence.log` first and sent once; nothing else reaches UPS; its answer
-//! is read only when it names nobody but the accounts asked for.
+//! was given, with the presence token, logged to `fence.log` first and sent once; any read of UPS goes to its base with
+//! the trailing slash; its answer is read only when it names nobody but the accounts asked for.
 //!
 //! Tokens and MRIs here are placeholders; the answers follow the synthetic fixture
 //! `tests/fixtures/ups/getpresence-answer.json`.
@@ -19,9 +20,9 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, PostReadDenyReason, Roster};
 use teams_proto::{
-    AnswerError, BuildError, Client, Credentials, Endpoint, HttpError, HttpTransport, Method, OwnState,
-    PRESENCE_AUDIENCE, PostRead, PostReadError, PresenceRead, ProbePostRead, Read, Refusal, Service,
-    ShortProfileLookup, Transport, UserPresence,
+    AnswerError, BuildError, Client, Credentials, Endpoint, HttpError, HttpTransport, Method, PRESENCE_AUDIENCE,
+    PostRead, PostReadError, PresenceRead, ProbePostRead, Read, Request as _, Service, ShortProfileLookup, Transport,
+    UserPresence,
 };
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -330,12 +331,9 @@ async fn anything_the_presence_entry_doesnt_name_is_unknown_and_nothing_goes_out
 
         let error = Client::new(setup.transport).post_read(probe, permit).await.unwrap_err();
 
-        // a query is refused before it is built (UPS's read has none), anything else when it is read back
+        // anything off the captured shape is refused when it is read back
         assert!(
-            matches!(
-                error,
-                PostReadError::Transport(HttpError::Unknown | HttpError::Refused(Refusal::PresencePath))
-            ),
+            matches!(error, PostReadError::Transport(HttpError::Unknown)),
             "{name}: {error:?}"
         );
         assert!(setup.server.received_requests().await.unwrap().is_empty(), "{name}");
@@ -521,37 +519,57 @@ impl Read for Get {
 }
 
 #[tokio::test]
-async fn nothing_but_the_presence_read_by_post_reaches_ups() {
+async fn a_read_of_ups_goes_to_its_base_with_the_trailing_slash() {
     let setup = setup(Some(PRESENCE_BASE)).await;
-    for segments in [
-        vec!["v1", "presence", "getpresence"],
-        vec!["v1", "me", "endpoints"],
-        vec!["v1", "pubsub", "subscriptions", "endpoint"],
-    ] {
-        let error = setup
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&setup.server)
+        .await;
+    for segments in [vec!["v1", "me", "endpoints"], vec!["v1", "pubsub", "subscriptions"]] {
+        setup
             .transport
-            .read(&Get(Service::Presence, Endpoint::new(segments.clone())))
+            .read(&Get(Service::Presence, Endpoint::new(segments)))
             .await
-            .unwrap_err();
-        assert!(
-            matches!(error, HttpError::Refused(Refusal::PresenceReadByPostOnly)),
-            "{segments:?}: {error:?}"
-        );
+            .unwrap();
     }
-    // an own-state request to UPS (none is on the sealed list) is refused the same way: `ProbeOwnState` stands in
-    let own = teams_proto::ProbeOwnState::new(
-        Service::Presence,
-        Endpoint::new(["v1", "presence", "getpresence"]),
-        Some(json!([{"mri": LAB_B}])),
+    let paths: Vec<String> = setup
+        .server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| request.url.path().to_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        ["/ups/noam/v1/me/endpoints/", "/ups/noam/v1/pubsub/subscriptions/"]
     );
-    assert_eq!(own.method(), Method::Post);
-    let error = setup.transport.own_state(&own).await.unwrap_err();
-    assert!(
-        matches!(error, HttpError::Refused(Refusal::PresenceReadByPostOnly)),
-        "{error:?}"
-    );
-    assert!(setup.server.received_requests().await.unwrap().is_empty());
-    assert!(setup.tokens.audiences().is_empty());
+    assert!(setup.log.lines().is_empty(), "a read isn't logged");
+}
+
+#[tokio::test]
+async fn the_presence_read_as_a_plain_request_goes_whoever_it_names_logged_as_allowed() {
+    let setup = setup(Some(PRESENCE_BASE)).await;
+    Mock::given(method("POST"))
+        .and(path(GET_PRESENCE))
+        .and(header("x-ms-client-type", "cdlworker"))
+        .and(body_json(json!([{"mri": LAB_B}, {"mri": COWORKER}])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&setup.server)
+        .await;
+    let read = read_of(&[LAB_B, COWORKER]);
+    assert_eq!(read.method(), Method::Post);
+
+    setup.transport.send(&read).await.unwrap();
+
+    let lines = setup.log.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["event"], "allowed");
+    assert_eq!(lines[0]["method"], "POST");
+    assert_eq!(lines[0]["host"], "teams.microsoft.com");
+    assert_eq!(lines[0]["path"], "/ups/noam/v1/presence/getpresence/");
+    assert_eq!(setup.tokens.audiences(), [PRESENCE_AUDIENCE]);
 }
 
 #[test]

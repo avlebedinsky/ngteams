@@ -1,6 +1,6 @@
-//! The registrar registration of the endpoint's push URL, for the messaging stack only, and its renewal: the reviewed
-//! own-state request [`EndpointRegistration`] (`teams_proto`), sent through the account's transport, which logs it to
-//! `fence.log` first and takes the `ic3` token from the session.
+//! The registrar registration of the endpoint's push URL, for the messaging stack only, and its renewal: the plain
+//! request [`EndpointRegistration`] (`teams_proto`), sent through the account's transport, which asks the fence's
+//! classifier, logs it to `fence.log` as `allowed` first and takes the `ic3` token from the session.
 //!
 //! As the web client's messaging stack does it (`docs/protocol/trouter.md`): a registration on every
 //! `trouter.connected`, again [`RegistrationTimes::renew_before`] before its TTL ends, and after a failure again once

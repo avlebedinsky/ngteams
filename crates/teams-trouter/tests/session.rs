@@ -516,7 +516,7 @@ async fn a_client_authenticates_first_registers_and_gets_a_delivery_it_never_ans
         (Some("TeamsCDL"), Some(teams_proto::CLIENT_BUILD))
     );
     assert_eq!((query[1].1.as_str(), query[2].1.as_str()), ("40", epid.as_str()));
-    // the registration: the messaging stack's, the endpoint's push URL, logged before it was sent
+    // the registration: the messaging stack's, the endpoint's push URL, logged as allowed before it was sent
     let registrations = lab.trouter.registrations();
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].registration_id, epid);
@@ -525,7 +525,7 @@ async fn a_client_authenticates_first_registers_and_gets_a_delivery_it_never_ans
         lab.log
             .lines()
             .iter()
-            .any(|line| line["own"] == "endpoint_registration")
+            .any(|line| line["event"] == "allowed" && line["path"] == "/registrar/prod/V2/registrations")
     );
 
     push.stop().await;
@@ -1030,7 +1030,7 @@ async fn with_the_session_a_renewal_it_announces_reconnects_at_once() {
 /// A registrar that refuses the first registration (503) and takes every later one (202), keeping what it was sent.
 #[derive(Default)]
 struct FlakyRegistrar {
-    sent: Mutex<Vec<(&'static str, Value)>>,
+    sent: Mutex<Vec<(String, Value)>>,
 }
 
 #[cfg(test)]
@@ -1044,21 +1044,17 @@ impl teams_proto::Transport for FlakyRegistrar {
         future::ready(Err(io::Error::other("the push channel reads nothing")))
     }
 
-    fn own_state<R: teams_proto::OwnState>(
+    fn send<R: teams_proto::Request>(
         &self,
         request: &R,
     ) -> impl Future<Output = Result<teams_proto::Response, io::Error>> + Send {
         let mut sent = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
-        sent.push((R::KIND, request.body().unwrap_or_default()));
+        sent.push((
+            request.endpoint().segments().join("/"),
+            request.body().unwrap_or_default(),
+        ));
         let status = if sent.len() == 1 { 503 } else { 202 };
         future::ready(Ok(teams_proto::Response::new(status, Vec::new())))
-    }
-
-    fn post_read<R: teams_proto::PostRead + Send>(
-        &self,
-        _read: teams_proto::AuthorizedPostRead<R>,
-    ) -> impl Future<Output = Result<teams_proto::Response, io::Error>> + Send {
-        future::ready(Err(io::Error::other("the push channel reads nothing by POST")))
     }
 
     fn deliver<R: teams_proto::Mutating + Send>(
@@ -1132,8 +1128,8 @@ async fn a_failed_registration_is_tried_again_and_a_good_one_renewed_before_its_
         "renewed 200 ms before a 500 ms TTL ends"
     );
     let sent = registrar.sent.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    for (kind, body) in &sent {
-        assert_eq!(*kind, "endpoint_registration");
+    for (endpoint_path, body) in &sent {
+        assert_eq!(endpoint_path, "prod/V2/registrations");
         assert_eq!(body["registrationId"], epid.as_str());
         assert_eq!(body["clientDescription"]["appId"], "TeamsCDLWebWorker");
         let path = body["transports"]["TROUTER"][0]["path"].as_str().unwrap();

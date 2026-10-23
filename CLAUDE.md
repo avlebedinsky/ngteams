@@ -8,9 +8,10 @@ and layout are in [README.md](README.md).
 ## Hard rules
 
 These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
-else is allowed.** The lab browser's fence follows this rule; the native transport is still stricter (it sends only
-reads and its sealed lists, as Patterns describes), and `docs/plans/20261023-lab-fence-contacting-writes-only.md`
-brings it to this rule, each of its tasks updating this file as its code lands.
+else is allowed.** The lab browser's fence and the native HTTP transport follow this rule; the native client's Trouter
+frames are still a sealed, reviewed list (as Patterns describes), and
+`docs/plans/20261023-lab-fence-contacting-writes-only.md` brings them to this rule, each of its tasks updating this
+file as its code lands.
 
 - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
@@ -38,7 +39,9 @@ brings it to this rule, each of its tasks updating this file as its code lands.
   target, the WebSocket guard, the service worker neutralized.
 - **The native client sends a contacting write only as `Authorized<_>`** with a `WritePermit` from `Fence::check`
   for its exact target, logged to `fence.log` by `Fence::check`; a sealed `Mutating` type in `teams-proto` is the
-  only way to build one. The transport is `https` only, with no proxy and no redirects, to its fixed host allowlist.
+  only way to build one, and the transport refuses any other request `teams_fence::contacting` doesn't call `None`.
+  The transport is `https` only, with no proxy and no redirects, to its services' bases, and hands each token only to
+  its own service's host.
   A write is never resent by the transport (the HTTP client's own retries stay off: an HTTP/2 retry could post
   twice). A mock origin (HTTP or socket) exists only under a `test-support` feature, which a lab binary refuses to
   run with. No write ever comes from a `cargo test` process: a live test spawns a normally built lab binary (built
@@ -124,7 +127,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   `crates/teams-fence/tests/fixtures/contacting/`. A mutating request let through as `None` is logged as `allowed`
   (`FenceLog::record_allowed`: method, host and `path_shape`, every id replaced by its kind, never a query, header or
   body). The browser fence asks it for every paused request (`proto-lab`'s `Classifier`: a read passes unlogged,
-  `None` passes logged, `Write` goes to `Fence::check`, `Unreadable` is denied); the native transport doesn't yet.
+  `None` passes logged, `Write` goes to `Fence::check`, `Unreadable` is denied), and so does the native transport for
+  every plain request (`Transport::send`: `None` is sent, logged; `Write` and `Unreadable` are refused before anything
+  is sent, `Refusal::Write` and `Refusal::Unreadable`).
 - `Fence::check` reads the target's members for every write except typing and read receipts on a chat and the
   account's own availability (which keeps its own-account check). Typing and read receipts reach nobody: on a chat
   id `is_chat_id` takes (1:1, group or meeting, the rule `contacting` carves them out by) they are permitted without a
@@ -153,13 +158,17 @@ What the code does and why. A change that undoes one of these needs a new reason
   `clientmessageid`, never stored twice. **No resend across runs**: each open store is a run holding a lock; rows of
   an earlier run go out only after an explicit `Store::resend`, never a row of a run still open (the web client
   resends a failed send on a later load; this rules that out).
-- **What the native client sends** (`teams-proto`): a read (`GET`, no body), an entry of the sealed `OwnState` list,
-  an entry of the sealed `PostRead` list (every MRI it names checked by `Fence::lab_accounts_only`), or a sealed
-  `Mutating` write as `Authorized<_>`; a Trouter frame only as an entry of the sealed `OwnFrame` list, through
-  `FrameSink`. Each own-state request, read by `POST` and frame is logged to `fence.log` before it is sent, and one
-  that can't be logged isn't sent. There is no raw request or frame, no answer to a delivery, and no retry the
-  transport didn't decide.
-- **The retry table, by layer**: the transport retries a read or own-state request once (after a 401 the session
+- **What the native client sends** (`teams-proto`): a read (`Read`: `GET`, no body), a plain request (`Request`, an
+  open trait: any method and body, sent by `Transport::send` only when `teams_fence::contacting` calls it `None`,
+  logged `allowed` before it goes: the registration, profile lookups and presence reads whoever they name, the
+  account's own settings), or a sealed `Mutating` write as `Authorized<_>`; a Trouter frame only as an entry of the
+  sealed `OwnFrame` list, through `FrameSink`, logged to `fence.log` before it is sent. A request or frame that can't
+  be logged isn't sent. Each service has one base (`Service`; a new one is a code change: its base and its token's
+  audience), and every URL is built on it and checked against it. The personal build's sealed `OwnState` and
+  `PostRead` lists stay beside them (`HttpTransport::own_state`, `HttpTransport::post_read` under a
+  `Fence::check_post_read` permit); a lab binary sends their entries as plain requests. There is no raw frame, no
+  answer to a delivery, and no retry the transport didn't decide.
+- **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The
   session returns throttling as `TokenError::Throttled` with its wait, shared by every caller already waiting, with

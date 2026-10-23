@@ -449,7 +449,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         &self.me
     }
 
-    /// The fence every attempt asks: the engine asks it too, for its reads by `POST` (the profile lookup).
+    /// The fence every attempt asks.
     #[must_use]
     pub fn fence(&self) -> &Arc<Fence> {
         &self.fence

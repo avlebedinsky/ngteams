@@ -102,8 +102,8 @@ pub enum Command {
         #[arg(long, default_value_t = DEFAULT_WAIT_SECS)]
         wait: u64,
     },
-    /// The other lab accounts' presence, read once from UPS (a read by `POST` under the fence's permit, lab accounts
-    /// only); prints `presence <alias> <availability>` per account. Reads only.
+    /// The other lab accounts' presence, read once from UPS (a read sent as a `POST`); prints
+    /// `presence <alias> <availability>` per account. Reads only.
     Presence {
         /// Seconds to wait for the read.
         #[arg(long, default_value_t = 30)]

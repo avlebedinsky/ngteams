@@ -26,8 +26,8 @@ use teams_core::{
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_proto::chat::{MessageText, Node, RichText};
 use teams_proto::{
-    Author, Authorized, AuthorizedPostRead, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport,
-    Mutating, OwnState, PostRead, Read, Response, Transport,
+    Author, Authorized, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport, Mutating, Read,
+    Request as ProtoRequest, Response, Transport,
 };
 use teams_store::{
     Applied, AttemptOutcome, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState, Store,
@@ -163,15 +163,8 @@ impl Transport for Flaky {
         self.inner.read(request)
     }
 
-    fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        self.inner.own_state(request)
-    }
-
-    fn post_read<R: PostRead + Send>(
-        &self,
-        read: AuthorizedPostRead<R>,
-    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        self.inner.post_read(read)
+    fn send<R: ProtoRequest>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.send(request)
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {

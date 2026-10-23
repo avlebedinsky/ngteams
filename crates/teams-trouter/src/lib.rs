@@ -23,8 +23,9 @@
 //! included (it is never answered; the calling stack's registration isn't made either).
 //!
 //! **What it requests over HTTP.** The registrar registration of the endpoint for the messaging stack and its
-//! renewal ([`registration`]), the reviewed own-state request `teams_proto::EndpointRegistration`, through the
-//! account's transport (logged to `fence.log` first, the `ic3` token from the session).
+//! renewal ([`registration`]), the plain request `teams_proto::EndpointRegistration` (the account's own state: it
+//! reaches nobody), through the account's transport (logged to `fence.log` as `allowed` first, the `ic3` token from
+//! the session).
 //!
 //! **Where it connects.** `wss://go.trouter.teams.microsoft.com/v4/c`, then the regional `<name>-t` host a
 //! `trouter.connected` names: a fixed allowlist ([`socket::allowed`]), the server certificate checked by the system's

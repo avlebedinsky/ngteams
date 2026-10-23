@@ -30,7 +30,7 @@ pub enum CommandError {
 /// The presence of `whom` (MRIs), read once through the engine (M2 Task 17): each asked about, then their
 /// `Event::Presence`s waited for until each was told or `wait` is over, then one `presence <who> <availability>` line
 /// each as the engine has it then ([`availability_word`]: `Unknown` when the read failed, gave nothing for them, or
-/// isn't one this build may send). Reads only: UPS's presence read is a read by `POST` under the fence's permit.
+/// can't be sent). Reads only: UPS's presence read is a read sent as a `POST`, which reaches nobody.
 ///
 /// # Errors
 /// The engine's refusal, or when the output can't be written.

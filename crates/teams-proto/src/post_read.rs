@@ -1,5 +1,6 @@
-//! Reads by `POST` (M2 Task 11): the native client's fourth sealed list, for requests the web client sends as a `POST`
-//! although they change nothing (CLAUDE.md, "The native client's fourth list", the user's decision of 2026-10-21).
+//! Reads by `POST`: requests the web client sends as a `POST` although they change nothing. Each entry is a plain
+//! [`Request`], which the transport sends when the fence's classifier says it reaches nobody (a read reaches nobody,
+//! whoever it names). The personal build also keeps them as a sealed list (`docs/personal-build.md`), described below.
 //!
 //! The list is the set of types implementing [`PostRead`], and the trait is sealed, so only this crate adds to it.
 //! Each entry is added only after a review, in its exact captured shape: its [`Service`] (and so its host), the
@@ -30,7 +31,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use teams_fence::{Mri, PostReadPermit};
 
-use crate::endpoint::{Endpoint, Service};
+use crate::endpoint::{Endpoint, Method, Service};
+use crate::request::Request;
 
 /// A reviewed read by `POST` (see the module docs). Sealed: no other crate can implement it.
 pub trait PostRead: sealed::Sealed {
@@ -315,7 +317,7 @@ static SHORT_PROFILE: Shape = Shape {
 };
 
 /// The presence read's path under the presence base (the transport adds the trailing slash).
-pub(crate) const PRESENCE_PATH: &[&str] = &["v1", "presence", "getpresence"];
+const PRESENCE_PATH: &[&str] = &["v1", "presence", "getpresence"];
 
 /// The headers a presence read goes out with besides its token: `Accept` (the transport asks every service for
 /// JSON), the body's `Content-Type`, and the values every captured presence read carried for those that could change
@@ -376,6 +378,24 @@ impl ShortProfileLookup {
             return Err(AnswerError::Unasked { count: unasked });
         }
         Ok(answer.value.into_iter().map(ShortProfile::from).collect())
+    }
+}
+
+impl Request for ShortProfileLookup {
+    fn service(&self) -> Service {
+        SHORT_PROFILE.service
+    }
+
+    fn method(&self) -> Method {
+        Method::Post
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        PostReadWire::lookup(&SHORT_PROFILE, &self.names).endpoint
+    }
+
+    fn body(&self) -> Option<Value> {
+        Some(SHORT_PROFILE.body.of(&self.names))
     }
 }
 
@@ -503,6 +523,24 @@ impl PresenceRead {
             return Err(AnswerError::Unasked { count: unasked });
         }
         Ok(answer.into_iter().map(UserPresence::from).collect())
+    }
+}
+
+impl Request for PresenceRead {
+    fn service(&self) -> Service {
+        PRESENCE.service
+    }
+
+    fn method(&self) -> Method {
+        Method::Post
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        PostReadWire::lookup(&PRESENCE, &self.names).endpoint
+    }
+
+    fn body(&self) -> Option<Value> {
+        Some(PRESENCE.body.of(&self.names))
     }
 }
 

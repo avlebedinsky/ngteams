@@ -39,10 +39,10 @@
 //!   denied one) goes out again only by the explicit [`EngineRequests::resend`].
 //! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
 //!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
-//!   profile lookup under the fence's permit); each change stored is told as [`Event::Profile`].
+//!   profile lookup, a read sent as a `POST`); each change stored is told as [`Event::Profile`].
 //! - **Others' presence** (M2 Task 17, [`EngineRequests::presence`]): the availability of the people the views asked
-//!   about, read from UPS by polling ([`crate::presence`]: [`EngineOptions::presence_poll`], under the fence's permit,
-//!   never stored); each change told as [`Event::Presence`].
+//!   about, read from UPS by polling ([`crate::presence`]: [`EngineOptions::presence_poll`], never stored); each change
+//!   told as [`Event::Presence`].
 //! - **Search** ([`EngineRequests::search`]): the store's own index of the messages' plain text ([`crate::search`]),
 //!   never the service's search. Each message is indexed as it is stored; the messages stored before are indexed by a
 //!   backfill that runs from the engine's start, a batch at a time ([`EngineOptions::index_batch`]) between the
@@ -679,7 +679,7 @@ impl EngineRequests {
 
     /// Someone's presence as last read ([`Availability::Unknown`] before the first read); from now on they are watched,
     /// and each change of their presence comes as [`Event::Presence`] ([`crate::presence`]: read from UPS every
-    /// [`EngineOptions::presence_poll`], only those the fence lets a read name). At most
+    /// [`EngineOptions::presence_poll`]). At most
     /// [`MAX_WATCHED`](crate::MAX_WATCHED) people are watched: past it the one asked about longest ago is dropped and
     /// told as [`Availability::Unknown`], so a view asks again about the people it shows whenever it shows them anew.
     pub fn presence(&self, mri: impl Into<String>) -> Reply<Availability> {
@@ -904,16 +904,11 @@ where
         let me = outbox.me().mri().clone();
         let profiles = Profiles::new(
             Arc::clone(&parts.client),
-            Arc::clone(outbox.fence()),
             parts.known_names,
             parts.options.profile_retry,
         );
         let teams = Teams::new(Arc::clone(&parts.client), parts.options.teams_retry);
-        let presences = Presences::new(
-            Arc::clone(&parts.client),
-            Arc::clone(outbox.fence()),
-            parts.options.presence_poll,
-        );
+        let presences = Presences::new(Arc::clone(&parts.client), parts.options.presence_poll);
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
         Self {
             store: parts.store,

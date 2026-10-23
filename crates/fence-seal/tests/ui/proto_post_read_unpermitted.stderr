@@ -23,7 +23,7 @@ error[E0308]: mismatched types
   = note: expected struct `AuthorizedPostRead<_>`
              found struct `ShortProfileLookup`
 note: method defined here
- --> $WORKSPACE/crates/teams-proto/src/client.rs
+ --> $WORKSPACE/crates/teams-proto/src/http.rs
   |
-  |     fn post_read<R: PostRead + Send>(
-  |        ^^^^^^^^^
+  |     pub async fn post_read<R: PostRead + Send>(&self, read: AuthorizedPostRead<R>) -> Result<Response, HttpError> {
+  |                  ^^^^^^^^^

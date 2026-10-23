@@ -1,24 +1,21 @@
 //! Others' presence (M2 Task 17): the availability the views show beside people, read from UPS in the background by
 //! polling, never stored.
 //!
-//! - **What is read**: UPS's presence read ([`PresenceRead`], `v1/presence/getpresence/`), an entry of the sealed
-//!   `PostRead` list, sent only with the permit `Fence::check_post_read` gives for its exact MRIs (in a lab build:
-//!   every one a lab account) and only once the reads' transport has the presence base (the GTM `presenceUPS`). No
-//!   pubsub subscription: subscribing changes UPS's state, so it is no read (the web client's other way to hear of a
+//! - **What is read**: UPS's presence read ([`PresenceRead`], `v1/presence/getpresence/`), a read sent as a `POST`,
+//!   which the transport sends whoever it names, once the reads' transport has the presence base (the GTM
+//!   `presenceUPS`). No pubsub subscription: subscribing changes UPS's state, so it is no read (the web client's other way to hear of a
 //!   change); the views' presence is as fresh as the last poll.
-//! - **Who**: the people the views asked about ([`EngineRequests::presence`](crate::EngineRequests::presence)) whom
-//!   the fence would let a read name (a lab build: the lab accounts, [`teams_fence::Fence::lab_accounts_only`]): a
+//! - **Who**: the people the views asked about ([`EngineRequests::presence`](crate::EngineRequests::presence)): a
 //!   view asks for someone it shows, and from then on they are watched, at most [`MAX_WATCHED`] at once. Asking again
 //!   about someone watched makes them the latest asked; a new one past the cap drops the one asked about longest ago,
 //!   whose presence is then told as [`Availability::Unknown`] (when a view was told another), so no view keeps showing
-//!   a value no read refreshes: a view asks again about the people it shows each time it shows them anew. Anyone the
-//!   fence wouldn't let a read name is answered [`Availability::Unknown`] and never watched, and the fence is never
-//!   asked about them. Everyone watched is read in one read.
+//!   a value no read refreshes: a view asks again about the people it shows each time it shows them anew. Everyone
+//!   watched is read in one read.
 //! - **When**: every [`PRESENCE_POLL`] (the engine's
 //!   [`EngineOptions::presence_poll`](crate::EngineOptions::presence_poll)), from the engine's tick, one read at a time.
 //!   A view asking about someone not watched yet brings the next read forward to the next tick, but never sooner than
-//!   [`PRESENCE_MIN_GAP`] after the last read started, so the reads never follow the views' rebuilds. A throttled read
-//!   (429, 503) waits its `Retry-After`, counted from its answer: no read goes out before it is over, whoever is asked
+//!   [`PRESENCE_MIN_GAP`] after the last read started, so the reads never follow the views' rebuilds. A read the
+//!   transport's one retry left throttled (429, 503) waits its `Retry-After`, counted from its answer: no read goes out before it is over, whoever is asked
 //!   about meanwhile.
 //! - **What is shown**: an availability as UPS gave it ([`Availability`]); [`Availability::Unknown`] before the first
 //!   read, for someone the answer left out or gave no presence for, and for everyone a read asked about when it failed
@@ -29,8 +26,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use teams_fence::{Fence, Mri};
-use teams_proto::{Client, Credentials, HttpError, HttpTransport, PostRead as _, PostReadError, PresenceRead};
+use teams_fence::Mri;
+use teams_proto::{Client, Credentials, HttpError, HttpTransport, PresenceRead};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -159,8 +156,7 @@ impl Schedule {
 /// The presence polling: who is watched, what each was last read as, and the read under way.
 pub(crate) struct Presences<C> {
     client: Arc<Client<HttpTransport<C>>>,
-    fence: Arc<Fence>,
-    /// Watched, the one asked about longest ago first; only people the fence would let a read name.
+    /// Watched, the one asked about longest ago first.
     watched: VecDeque<String>,
     known: HashMap<String, Availability>,
     running: JoinSet<Polled>,
@@ -170,10 +166,9 @@ pub(crate) struct Presences<C> {
 }
 
 impl<C: Credentials + 'static> Presences<C> {
-    pub(crate) fn new(client: Arc<Client<HttpTransport<C>>>, fence: Arc<Fence>, poll: Duration) -> Self {
+    pub(crate) fn new(client: Arc<Client<HttpTransport<C>>>, poll: Duration) -> Self {
         Self {
             client,
-            fence,
             watched: VecDeque::new(),
             known: HashMap::new(),
             running: JoinSet::new(),
@@ -182,8 +177,7 @@ impl<C: Credentials + 'static> Presences<C> {
         }
     }
 
-    /// `mri`'s availability as last read; from now on they are watched, when the fence would let a read name them
-    /// (see the module docs). Someone newly watched brings the next read forward. The second value is whom the watch
+    /// `mri`'s availability as last read; from now on they are watched (see the module docs). Someone newly watched brings the next read forward. The second value is whom the watch
     /// dropped to make room, when a view was told a presence of theirs: now [`Availability::Unknown`], to be told.
     pub(crate) fn presence(&mut self, mri: &str) -> (Availability, Option<String>) {
         let mut dropped = None;
@@ -191,7 +185,7 @@ impl<C: Credentials + 'static> Presences<C> {
             if let Some(moved) = self.watched.remove(at) {
                 self.watched.push_back(moved);
             }
-        } else if self.fence.lab_accounts_only(&[Mri::new(mri)]) {
+        } else {
             self.watched.push_back(mri.to_owned());
             if self.watched.len() > MAX_WATCHED
                 && let Some(gone) = self.watched.pop_front()
@@ -200,8 +194,6 @@ impl<C: Credentials + 'static> Presences<C> {
                 dropped = Some(gone);
             }
             self.schedule.bring_forward(Instant::now());
-        } else {
-            return (Availability::Unknown, None);
         }
         let availability = self.known.get(mri).cloned().unwrap_or(Availability::Unknown);
         (availability, dropped)
@@ -214,16 +206,15 @@ impl<C: Credentials + 'static> Presences<C> {
         if !self.running.is_empty() || !self.schedule.due(now) {
             return;
         }
-        // without the presence base the read can't go out: the fence isn't asked for a permit nobody would use
+        // without the presence base the read can't go out
         if !self.client.transport().has_presence() || self.watched.is_empty() {
             self.schedule.skipped(now);
             return;
         }
         self.schedule.started(now);
         let asked: Vec<String> = self.watched.iter().cloned().collect();
-        let (client, fence) = (Arc::clone(&self.client), Arc::clone(&self.fence));
         self.asking.clone_from(&asked);
-        self.running.spawn(read(client, fence, asked));
+        self.running.spawn(read(Arc::clone(&self.client), asked));
     }
 
     /// Whether a read runs.
@@ -273,18 +264,15 @@ impl<C: Credentials + 'static> Presences<C> {
     }
 }
 
-/// One read of `asked`'s presence, under the fence's permit.
-async fn read<C: Credentials>(client: Arc<Client<HttpTransport<C>>>, fence: Arc<Fence>, asked: Vec<String>) -> Polled {
+/// One read of `asked`'s presence.
+async fn read<C: Credentials>(client: Arc<Client<HttpTransport<C>>>, asked: Vec<String>) -> Polled {
     let failed = |asked, wait| Polled { asked, read: Err(wait) };
     let Some(request) = PresenceRead::new(asked.iter().map(|mri| Mri::new(mri.as_str()))) else {
         return failed(asked, None);
     };
-    let Ok(permit) = fence.check_post_read(PresenceRead::KIND, request.names()) else {
-        return failed(asked, None);
-    };
-    let answer = match client.post_read(request.clone(), permit).await {
+    let answer = match client.send(&request).await {
         Ok(answer) => answer,
-        Err(PostReadError::Transport(HttpError::Status(answer))) => {
+        Err(HttpError::Status(answer)) => {
             log::debug!("the presence read was answered HTTP {}", answer.status());
             let wait = matches!(answer.status(), 429 | 503)
                 .then(|| answer.retry_after())

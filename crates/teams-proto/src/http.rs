@@ -1,64 +1,62 @@
-//! The native HTTP transport (M1 Task 5): the one way the native client sends anything to Teams over HTTP.
+//! The native HTTP transport: the one way the native client sends anything to Teams over HTTP.
 //!
-//! [`HttpTransport`] takes the four classes of request [`Transport`] defines and nothing else: a [`Read`] (always a
-//! `GET`), an [`OwnState`] request (the sealed, reviewed list, logged to `fence.log` before it is sent; one that can't
-//! be logged isn't sent), an [`AuthorizedPostRead`] (an entry of the sealed `PostRead` list under the permit
-//! `Fence::check_post_read` gave for its exact MRIs: read back against the entry's captured shape, logged before it is
-//! sent, sent once) and an [`Authorized`] write (its sealed wire form, under the permit `Fence::check` issued for its
-//! target). It has no method that takes a URL, a method or a body of the caller's choosing.
+//! [`HttpTransport`] takes the three classes of request [`Transport`] defines and nothing else: a [`Read`] (always a
+//! `GET`), a plain [`Request`] (any method, sent only when [`teams_fence::contacting`] says it reaches nobody, logged to
+//! `fence.log` as `allowed` before it goes; one that can't be logged isn't sent; a write or a request the classifier
+//! can't read is refused before anything is sent) and an [`Authorized`] write (its sealed wire form, under the permit
+//! `Fence::check` issued for its target). It has no method that takes a URL or a host of the caller's choosing. Beside
+//! them it keeps the personal build's sealed lists: an [`OwnState`] request ([`HttpTransport::own_state`]) and an
+//! [`AuthorizedPostRead`] ([`HttpTransport::post_read`], read back against its entry's captured shape and the permit's
+//! MRIs, sent once), each also asked of the classifier and logged by its entry's kind before it goes.
 //!
-//! - **Hosts**: a fixed allowlist. Every URL is built from a [`Service`]'s base and checked before anything is sent:
-//!   the chat service exactly as [`teams_fence::chat_service_path`] accepts it (the base the account's region gives,
-//!   `chatServiceAfd`), the registrar on an AFD host (`https://<AFD host>/registrar/…`), and Trouter's HTTP side
-//!   (`https://go.trouter.teams.microsoft.com/`), and, once the transport was given the account's middle-tier base
-//!   ([`HttpTransport::with_middle_tier`], the GTM `middleTier`: `https://<AFD host>/api/mt/part/<partition>`), that
-//!   base's `beta/users/…` endpoints; and Microsoft Graph's two reads (`https://graph.microsoft.com/v1.0/users/
-//!   <object id>?$select=id,displayName` and `…/users/<object id>/photos/96x96/$value`, `GET` only, M2 Task 12); and,
-//!   once the transport was given the account's CSA base ([`HttpTransport::with_csa`], the GTM `chatSvcAggAfd`:
-//!   `https://<AFD host>/api/csa/<region>`), CSA's one read of the account's teams and channels (`api/v3/teams/users/
-//!   me` with the web client's query exactly, `GET` only, M2 Task 16); and, once the transport was given the account's
-//!   presence base ([`HttpTransport::with_presence`], the GTM `presenceUPS`: `https://<AFD host>/ups/<geo>`), UPS's
-//!   presence read (`v1/presence/getpresence/` with its trailing slash, no query, by `POST` under the sealed `PostRead`
-//!   list only, M2 Task 17) and the account's own availability (`v1/me/endpoints/` and `v1/me/forceavailability/`, by
-//!   `PUT` as an [`Authorized`] write only, M2 Task 19). An endpoint with an empty, `.` or `..` segment is refused, and so is
-//!   any URL whose decoded path isn't exactly the base's plus the endpoint's segments. Entra and authz aren't on it
-//!   (they stay in `teams-auth`'s own clients, the reviewed exception), and neither is AMS.
+//! - **Hosts**: each [`Service`] has one base, and every URL is built from it and checked before anything is sent:
+//!   `https`, the base's host, no user info, port or fragment, the decoded path exactly the base's and the endpoint's
+//!   segments, the query exactly the endpoint's. The chat service at the account's chat base, exactly as
+//!   [`teams_fence::chat_service_path`] accepts it (the region's `chatServiceAfd`, endpoints under `v1`); the registrar
+//!   on an AFD host (`https://<AFD host>/registrar/…`); Trouter's HTTP side (`https://go.trouter.teams.microsoft.com/`);
+//!   Microsoft Graph (`https://graph.microsoft.com/v1.0/…`); and, once the transport was given them, the middle tier
+//!   ([`HttpTransport::with_middle_tier`], the GTM `middleTier`: `https://<AFD host>/api/mt/part/<partition>`), CSA
+//!   ([`HttpTransport::with_csa`], the GTM `chatSvcAggAfd`: `https://<AFD host>/api/csa/<region>`) and UPS
+//!   ([`HttpTransport::with_presence`], the GTM `presenceUPS`: `https://<AFD host>/ups/<geo>`, every path with the
+//!   trailing slash every captured one had). An endpoint with an empty, `.` or `..` segment is refused. Entra and authz
+//!   aren't a service here (they stay in `teams-auth`'s own clients), and neither is AMS. A new service is a code
+//!   change: a variant, its base and its token's audience.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
 //!   is an answer, never followed: a region hop is the caller's to report), no retries of its own (reqwest's default
-//!   replays a request after an HTTP/2 GOAWAY or `REFUSED_STREAM`, which would send a write again and an own-state
-//!   request unlogged), [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`], bodies read up to [`MAX_BODY`].
-//! - **Credentials** come from the account's [`Session`] ([`Credentials`]), per service: the chat service takes
-//!   `Authorization: Bearer <ic3>` with `X-MS-Migration: True` and `BehaviorOverride: redirectAs404` (the web client's
-//!   set, which the service took with our own non-CAE token, M1 Task 3); the registrar the same token with
-//!   `X-MS-Migration: True` and `X-Ms-Test-User: False` (the messaging stack's registration in the ab-trouter
-//!   captures of 2026-10-20; the calling stack's in the echo-call capture had no `X-Ms-Test-User`); Trouter's HTTP
-//!   side none (its probe carried none); the middle tier the account's `api.spaces.skype.com` token with the values
-//!   every captured profile lookup carried (`x-ms-migration: True`, `x-ms-test-user: False`, `x-ms-client-type:
-//!   cdlworker`, `x-ms-client-request-type: 0`, an empty `x-ms-object-id`) and its body as
-//!   `application/json;charset=UTF-8`; Graph the account's `https://graph.microsoft.com` token and nothing else (the
-//!   probe's form); CSA the account's `https://chatsvcagg.teams.microsoft.com` token and nothing else (the probe's
-//!   form); UPS the account's `https://presence.teams.microsoft.com/` token with the values every captured presence
-//!   read carried (`behavioroverride: redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent:
-//!   Teams-V2-Web`, an empty `x-ms-object-id`) and its body as `application/json` (an own-availability write adds its
-//!   `x-ms-endpoint-id`, and sends `Content-Type` even without a body, as captured).
-//! - **Retries** (the transport's part of the plan's retry table), for reads and own-state requests: a 401 makes the
-//!   session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's maximum,
-//!   [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is the
-//!   only retry. The retry after a wait asks the session for its token again, never sends the one held before it: a
+//!   replays a request after an HTTP/2 GOAWAY or `REFUSED_STREAM`, which would send a write again and a plain request
+//!   unlogged), [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`], bodies read up to [`MAX_BODY`].
+//! - **Credentials** come from the account's [`Session`] ([`Credentials`]), per service, each token only to its own
+//!   service's host: the chat service takes `Authorization: Bearer <ic3>` with `X-MS-Migration: True` and
+//!   `BehaviorOverride: redirectAs404` (the web client's set, which the service took with our own non-CAE token); the
+//!   registrar the same token with `X-MS-Migration: True` and `X-Ms-Test-User: False` (the messaging stack's
+//!   registration as captured; the calling stack's had no `X-Ms-Test-User`); Trouter's HTTP side none (its probe carried
+//!   none); the middle tier the account's `api.spaces.skype.com` token with the values every captured profile lookup
+//!   carried (`x-ms-migration: True`, `x-ms-test-user: False`, `x-ms-client-type: cdlworker`,
+//!   `x-ms-client-request-type: 0`, an empty `x-ms-object-id`) and its body as `application/json;charset=UTF-8`; Graph
+//!   the account's `https://graph.microsoft.com` token and nothing else (the probe's form); CSA the account's
+//!   `https://chatsvcagg.teams.microsoft.com` token and nothing else (the probe's form); UPS the account's
+//!   `https://presence.teams.microsoft.com/` token with the values every captured presence read carried
+//!   (`behavioroverride: redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent: Teams-V2-Web`, an empty
+//!   `x-ms-object-id`) and its body as `application/json` (an own-availability write adds its `x-ms-endpoint-id`, and
+//!   sends `Content-Type` even without a body, as captured).
+//! - **Retries** (the transport's part of the retry table), for reads, plain requests and own-state requests: a 401
+//!   makes the session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's
+//!   maximum, [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is
+//!   the only retry. The retry after a wait asks the session for its token again, never sends the one held before it: a
 //!   session signed out during the wait answers its error, and nothing is sent. Any other answer that isn't a success
 //!   is [`HttpError::Status`]. A write is never sent again here: its answer comes back whatever the status, for the
 //!   outbox to decide, and after a 401 the session refreshes the refused token for the outbox's next attempt. Nor is a
-//!   read by `POST`: one permit, one send; its answer comes back as a read's does (a failure status as
-//!   [`HttpError::Status`]), and after a 401 the session refreshes the refused token for a later request under a new
+//!   read by `POST` of the sealed list: one permit, one send; its answer comes back as a read's does (a failure status
+//!   as [`HttpError::Status`]), and after a 401 the session refreshes the refused token for a later request under a new
 //!   permit.
 //! - **Tests** reach a mock only through [`HttpTransport::with_mock_origin`] (`test-support`): plain `http` to a
-//!   loopback origin, the URL built and checked as above first.
+//!   loopback origin, the URL built, checked and classified as above first.
 //!
-//! **The log** (`teams-log`, M2 Task 24a): every request at `info` by its method, host and path (never its query),
-//! with its status and latency, or how it failed, and the retry decision; at `debug` the request and its answer in
-//! full, as `teams_log::wire` records whose formatting redacts the credentials (the `Authorization` header among
-//! them): redaction is the logger's, never this module's. Otherwise nothing here shows a token: the `Authorization`
-//! header is marked sensitive, errors carry no token or body, and [`Response`]'s `Debug` shows the body's length only.
+//! **The log** (`teams-log`): every request at `info` by its method, host and path (never its query), with its status
+//! and latency, or how it failed, and the retry decision; at `debug` the request and its answer in full, as
+//! `teams_log::wire` records whose formatting redacts the credentials (the `Authorization` header among them):
+//! redaction is the logger's, never this module's. Otherwise nothing here shows a token: the `Authorization` header is
+//! marked sensitive, errors carry no token or body, and [`Response`]'s `Debug` shows the body's length only.
 
 use std::fmt;
 use std::future::Future;
@@ -73,16 +71,17 @@ use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
 use teams_auth::token::{SPACES_RESOURCE, TokenError, retry_after};
 use teams_fence::{
-    AFD_HOSTS, Channel, ChatCredential, CredentialFuture, CredentialSource, Fence, Mri, RequestOutcome, RequestRecord,
-    chat_service_path,
+    AFD_HOSTS, AllowedRecord, Channel, ChatCredential, Contact, CredentialFuture, CredentialSource, Fence, Mri, Policy,
+    Request as FenceRequest, RequestOutcome, RequestRecord, chat_service_path, contacting,
 };
 use url::Url;
 
 use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Service};
 use crate::own::OwnState;
-use crate::post_read::{AuthorizedPostRead, PRESENCE_PATH, PostRead};
-use crate::read::{CSA_TEAMS_PATH, CSA_TEAMS_QUERY, GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT, Read, is_guid};
+use crate::post_read::{AuthorizedPostRead, PostRead};
+use crate::read::Read;
+use crate::request::Request;
 use crate::write::{Authorized, Mutating};
 
 /// The Entra audience of the token the chat service and the registrar take.
@@ -116,7 +115,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long one request may take, end to end.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The longest a throttled read or own-state request waits before it is sent again, by default.
+/// The longest a throttled read, plain or own-state request waits before it is sent again, by default.
 pub const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 
 /// The wait before a throttled request is sent again when the answer gives no `Retry-After` (capped like any other).
@@ -156,7 +155,8 @@ pub enum HttpError {
     /// The write has no wire form the native transport has a route for (a call); nothing was sent.
     #[error("the native transport has no route for this write")]
     NoRoute,
-    /// An own-state request or a read by `POST` whose `fence.log` entry couldn't be written; it wasn't sent.
+    /// A plain request, an own-state request or a read by `POST` whose `fence.log` entry couldn't be written; it wasn't
+    /// sent.
     #[error("fence.log can't be written, so the request wasn't sent: {0}")]
     LogUnavailable(#[source] io::Error),
     /// A read by `POST` whose request isn't exactly its entry's captured shape, or names other MRIs than its permit;
@@ -172,7 +172,8 @@ pub enum HttpError {
     /// The answer's body is longer than [`MAX_BODY`].
     #[error("the answer's body is over {MAX_BODY} bytes")]
     BodyTooLarge,
-    /// A read or own-state request answered with a status other than a success, after the retry the status allows.
+    /// A read, plain or own-state request answered with a status other than a success, after the retry the status
+    /// allows.
     #[error("the service answered HTTP {}", .0.status())]
     Status(Box<Response>),
 }
@@ -189,35 +190,22 @@ pub enum Refusal {
     /// A middle-tier request on a transport that wasn't given the account's middle-tier base.
     #[error("no middle-tier base")]
     NoMiddleTier,
-    /// A middle-tier endpoint that isn't under `beta/users/`.
-    #[error("a middle-tier endpoint that isn't under `beta/users/`")]
-    MiddleTierPath,
-    /// A Graph endpoint that isn't one of the two probed reads ([`Service::Graph`]).
-    #[error("a Graph endpoint that isn't one of the probed reads")]
-    GraphPath,
-    /// A request to Graph that isn't a read: Graph is reached by `GET` only.
-    #[error("a request to Graph that isn't a read")]
-    GraphReadOnly,
     /// A CSA request on a transport that wasn't given the account's CSA base.
     #[error("no CSA base")]
     NoCsa,
-    /// A CSA endpoint that isn't the probed teams read ([`Service::Csa`]).
-    #[error("a CSA endpoint that isn't the probed teams read")]
-    CsaPath,
-    /// A request to CSA that isn't a read: CSA is reached by `GET` only.
-    #[error("a request to CSA that isn't a read")]
-    CsaReadOnly,
     /// A presence request on a transport that wasn't given the account's presence base.
     #[error("no presence base")]
     NoPresence,
-    /// A presence endpoint that isn't the presence read or an own-availability write ([`Service::Presence`]), or one
-    /// of them sent as the other.
-    #[error("a presence endpoint that isn't the presence read or an own-availability write")]
-    PresencePath,
-    /// A request to UPS that isn't the presence read by `POST` or an own-availability write: nothing else goes there.
-    #[error("a request to UPS that isn't the presence read by POST or an own-availability write")]
-    PresenceReadByPostOnly,
-    /// The URL built isn't on the host allowlist, or its path isn't exactly the base's and the endpoint's.
+    /// A plain request [`teams_fence::contacting`] calls a write: one goes out only as an [`Authorized`] write, under
+    /// the permit for its target.
+    #[error("a write sent as a plain request: a write goes out only under its permit")]
+    Write,
+    /// A plain request [`teams_fence::contacting`] can't read: a mutating request on a contacting service that no row
+    /// maps or carves out.
+    #[error("a mutating request on a contacting service the fence can't read")]
+    Unreadable,
+    /// The URL built isn't on its service's base: another host, scheme or port, or a path or query other than the
+    /// base's and the endpoint's exactly.
     #[error("the URL isn't on the transport's allowlist")]
     NotAllowed,
     /// A token that can't be sent as a header value.
@@ -276,6 +264,9 @@ pub struct HttpTransport<C> {
     /// The presence base (`https://<AFD host>/ups/<geo>`, no trailing slash), once given.
     presence: Option<Url>,
     max_retry_wait: Duration,
+    /// What the classifier needs beyond a request: the fence's own account, which a chat service path may name in
+    /// place of `ME`.
+    policy: Policy,
     /// Tests only: every request goes to this origin instead, with the path and query it was built and checked with.
     /// Only [`HttpTransport::with_mock_origin`] (`test-support`) sets it; without that feature it is always `None`.
     mock_origin: Option<Url>,
@@ -299,11 +290,23 @@ struct Outgoing<'a> {
     method: reqwest::Method,
     url: &'a Url,
     service: Service,
-    body: Option<&'a Value>,
+    body: Option<&'a [u8]>,
+}
+
+/// What goes to `fence.log` before each send of a request.
+#[derive(Clone, Copy)]
+enum Record {
+    /// Nothing: a read.
+    Nothing,
+    /// A plain request, let through because it reaches nobody.
+    Allowed,
+    /// An entry of the sealed own-state list, by its kind.
+    Own(&'static str),
 }
 
 impl<C: Credentials> HttpTransport<C> {
-    /// A transport for the account whose tokens `credentials` gives, logging own-state requests to `fence`'s log, with
+    /// A transport for the account whose tokens `credentials` gives, logging the requests it lets through to `fence`'s
+    /// log and reading a chat service path naming `fence`'s own account as `ME`, with
     /// `chat_base` as the chat service's base: the region's GTM `chatServiceAfd` (trimmed), one trailing slash
     /// allowed, and only a base [`teams_fence::chat_service_path`] accepts a request under, exactly (nothing before or
     /// after it, no query or fragment).
@@ -340,6 +343,10 @@ impl<C: Credentials> HttpTransport<C> {
             .and_then(|host| AFD_HOSTS.iter().find(|afd| **afd == host))
             .copied()
             .unwrap_or(AFD_HOSTS[0]);
+        let policy = fence
+            .own_account()
+            .cloned()
+            .map_or_else(Policy::new, |account| Policy::new().with_own_account(account));
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -360,6 +367,7 @@ impl<C: Credentials> HttpTransport<C> {
             csa: None,
             presence: None,
             max_retry_wait: MAX_RETRY_WAIT,
+            policy,
             mock_origin: None,
         })
     }
@@ -426,7 +434,7 @@ impl<C: Credentials> HttpTransport<C> {
         self.presence.is_some()
     }
 
-    /// Another cap on the wait before a throttled read or own-state request is sent again.
+    /// Another cap on the wait before a throttled read, plain or own-state request is sent again.
     #[must_use]
     pub fn with_max_retry_wait(mut self, wait: Duration) -> Self {
         self.max_retry_wait = wait;
@@ -446,7 +454,7 @@ impl<C: Credentials> HttpTransport<C> {
         self.middle_tier.is_some()
     }
 
-    /// The URL of `endpoint` on `service`, checked against the allowlist.
+    /// The URL of `endpoint` on `service`, built on the service's base and checked against it.
     fn url_for(&self, service: Service, endpoint: &Endpoint) -> Result<Url, HttpError> {
         let refused = |refusal| HttpError::Refused(refusal);
         if endpoint
@@ -456,27 +464,8 @@ impl<C: Credentials> HttpTransport<C> {
         {
             return Err(refused(Refusal::Segment));
         }
-        let mut url = match service {
-            Service::ChatService if endpoint.segments().first().is_none_or(|first| first != "v1") => {
-                return Err(refused(Refusal::ChatPath));
-            }
-            Service::ChatService => self.chat_base.clone(),
-            Service::Registrar => Url::parse(&format!("https://{}/registrar", self.registrar_host))
-                .map_err(|_| refused(Refusal::NotAllowed))?,
-            Service::Trouter => {
-                Url::parse(&format!("https://{TROUTER_HOST}/")).map_err(|_| refused(Refusal::NotAllowed))?
-            }
-            Service::MiddleTier if !is_middle_tier_endpoint(endpoint) => return Err(refused(Refusal::MiddleTierPath)),
-            Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier))?,
-            Service::Graph if !is_graph_endpoint(endpoint) => return Err(refused(Refusal::GraphPath)),
-            Service::Graph => {
-                Url::parse(&format!("https://{GRAPH_HOST}/v1.0")).map_err(|_| refused(Refusal::NotAllowed))?
-            }
-            Service::Csa if !is_csa_endpoint(endpoint) => return Err(refused(Refusal::CsaPath)),
-            Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa))?,
-            Service::Presence if !is_presence_endpoint(endpoint) => return Err(refused(Refusal::PresencePath)),
-            Service::Presence => self.presence.clone().ok_or(refused(Refusal::NoPresence))?,
-        };
+        let base = self.base(service, endpoint)?;
+        let mut url = base.clone();
         {
             let mut segments = url.path_segments_mut().map_err(|()| refused(Refusal::NotAllowed))?;
             segments.pop_if_empty().extend(endpoint.segments());
@@ -488,16 +477,75 @@ impl<C: Credentials> HttpTransport<C> {
         if !endpoint.query().is_empty() {
             url.query_pairs_mut().extend_pairs(endpoint.query());
         }
-        let bases = Bases {
-            middle_tier: self.middle_tier.as_ref(),
-            csa: self.csa.as_ref(),
-            presence: self.presence.as_ref(),
-        };
-        if allowed(service, &url, endpoint, bases) {
+        if on_base(service, &base, &url, endpoint) {
             Ok(url)
         } else {
             Err(refused(Refusal::NotAllowed))
         }
+    }
+
+    /// `service`'s base, the one every URL of it is built on.
+    fn base(&self, service: Service, endpoint: &Endpoint) -> Result<Url, HttpError> {
+        let refused = |refusal| HttpError::Refused(refusal);
+        let fixed = |base: String| Url::parse(&base).map_err(|_| refused(Refusal::NotAllowed));
+        match service {
+            Service::ChatService if endpoint.segments().first().is_none_or(|first| first != "v1") => {
+                Err(refused(Refusal::ChatPath))
+            }
+            Service::ChatService => Ok(self.chat_base.clone()),
+            Service::Registrar => fixed(format!("https://{}/registrar", self.registrar_host)),
+            Service::Trouter => fixed(format!("https://{TROUTER_HOST}/")),
+            Service::Graph => fixed(format!("https://{GRAPH_HOST}/v1.0")),
+            Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier)),
+            Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa)),
+            Service::Presence => self.presence.clone().ok_or(refused(Refusal::NoPresence)),
+        }
+    }
+
+    /// Whether the classifier lets a request through (see [`Transport::send`]): `Ok` when it reaches nobody, the
+    /// refusal of a write or of a request it can't read otherwise. It sees the request as it is sent: its method, URL,
+    /// headers (the token aside, which changes nothing about what it does) and body.
+    fn judge(
+        &self,
+        method: &reqwest::Method,
+        url: &Url,
+        headers: &[(String, String)],
+        body: Option<&[u8]>,
+    ) -> Result<(), HttpError> {
+        let request = headers
+            .iter()
+            .fold(
+                FenceRequest::new(method.as_str(), url.as_str()),
+                |request, (name, value)| request.with_header(name, value),
+            )
+            .with_body(body);
+        match contacting(&request, &self.policy) {
+            Contact::None => Ok(()),
+            Contact::Write(_) => Err(HttpError::Refused(Refusal::Write)),
+            Contact::Unreadable => Err(HttpError::Refused(Refusal::Unreadable)),
+        }
+    }
+
+    /// Sends a plain or own-state request (`record`: what is logged before each send) once the classifier let it
+    /// through, with the one retry [`Self::exchange`] allows.
+    async fn send_plain(
+        &self,
+        service: Service,
+        method: reqwest::Method,
+        endpoint: &Endpoint,
+        body: Option<&Value>,
+        record: Record,
+    ) -> Result<Response, HttpError> {
+        let url = self.url_for(service, endpoint)?;
+        let body = body.map(|body| body.to_string().into_bytes());
+        self.judge(&method, &url, &plain_headers(service, body.is_some()), body.as_deref())?;
+        let outgoing = Outgoing {
+            method,
+            url: &url,
+            service,
+            body: body.as_deref(),
+        };
+        self.exchange(outgoing, record).await
     }
 
     /// Where a checked URL is sent: itself, or (`test-support` only) the mock origin with its path and query.
@@ -525,11 +573,11 @@ impl<C: Credentials> HttpTransport<C> {
         }
     }
 
-    /// Sends a read or own-state request (`own`: its kind, logged before every send), with the one retry a 401, 429 or
-    /// 503 allows; any answer but a success is [`HttpError::Status`].
-    async fn exchange(&self, outgoing: Outgoing<'_>, own: Option<&'static str>) -> Result<Response, HttpError> {
+    /// Sends a read, plain or own-state request (`record`: what is logged before every send), with the one retry a 401,
+    /// 429 or 503 allows; any answer but a success is [`HttpError::Status`].
+    async fn exchange(&self, outgoing: Outgoing<'_>, record: Record) -> Result<Response, HttpError> {
         let mut token = self.token(outgoing.service).await?;
-        let first = self.attempt(&outgoing, own, token.as_ref()).await?;
+        let first = self.attempt(&outgoing, record, token.as_ref()).await?;
         let retry = match (first.status(), audience(outgoing.service), &token) {
             (401, Some(audience), Some(refused)) => {
                 log::info!("{}: HTTP 401, sent once more with a renewed token", shown(&outgoing));
@@ -553,7 +601,7 @@ impl<C: Credentials> HttpTransport<C> {
             _ => false,
         };
         let answer = if retry {
-            self.attempt(&outgoing, own, token.as_ref()).await?
+            self.attempt(&outgoing, record, token.as_ref()).await?
         } else {
             first
         };
@@ -564,32 +612,27 @@ impl<C: Credentials> HttpTransport<C> {
         }
     }
 
-    /// One send; an own-state request is logged first, and not sent when it can't be.
+    /// One send; a plain or own-state request is logged first, and not sent when it can't be.
     async fn attempt(
         &self,
         outgoing: &Outgoing<'_>,
-        own: Option<&'static str>,
+        record: Record,
         token: Option<&Secret>,
     ) -> Result<Response, HttpError> {
-        if let Some(kind) = own {
-            let record = RequestRecord {
+        let (method, url) = (outgoing.method.as_str(), outgoing.url.as_str());
+        let logged = match record {
+            Record::Nothing => Ok(()),
+            Record::Allowed => self.fence.log().record_allowed(&AllowedRecord { method, url }),
+            Record::Own(kind) => self.fence.log().record_request(&RequestRecord {
                 channel: Channel::Http,
-                method: outgoing.method.as_str(),
-                url: outgoing.url.as_str(),
+                method,
+                url,
                 outcome: RequestOutcome::Own(kind),
-            };
-            self.fence
-                .log()
-                .record_request(&record)
-                .map_err(HttpError::LogUnavailable)?;
-        }
-        self.send(outgoing, token).await
-    }
-
-    /// One request with the service's headers, and its answer read.
-    async fn send(&self, outgoing: &Outgoing<'_>, token: Option<&Secret>) -> Result<Response, HttpError> {
+            }),
+        };
+        logged.map_err(HttpError::LogUnavailable)?;
         let headers = plain_headers(outgoing.service, outgoing.body.is_some());
-        let body = outgoing.body.map(|body| body.to_string().into_bytes());
+        let body = outgoing.body.map(<[u8]>::to_vec);
         self.send_as(outgoing.method.clone(), outgoing.url, &headers, token, body)
             .await
     }
@@ -664,9 +707,6 @@ impl<C: Credentials> HttpTransport<C> {
         let shape = read.shape();
         let wire = read.wire();
         let service = shape.service();
-        if let Some(refusal) = read_only(service) {
-            return Err(HttpError::Refused(refusal));
-        }
         let url = self.url_for(service, wire.endpoint())?;
         let mut headers = plain_headers(service, true);
         headers.extend(wire.headers().iter().cloned());
@@ -681,6 +721,7 @@ impl<C: Credentials> HttpTransport<C> {
         if names != read.permit().names() {
             return Err(HttpError::Unknown);
         }
+        self.judge(&reqwest::Method::POST, &url, &headers, Some(&body))?;
         let token = self.token(service).await?;
         let record = RequestRecord {
             channel: Channel::Http,
@@ -707,6 +748,38 @@ impl<C: Credentials> HttpTransport<C> {
     }
 }
 
+/// The personal build's sealed lists (see the module docs): a lab binary's requests of their entries go through
+/// [`Transport::send`] instead.
+impl<C: Credentials> HttpTransport<C> {
+    /// Sends an entry of the sealed own-state list once the classifier let it through, logged to `fence.log` by its
+    /// kind before every send, with the one retry a read has.
+    ///
+    /// # Errors
+    /// As [`Transport::send`]'s.
+    pub async fn own_state<R: OwnState>(&self, request: &R) -> Result<Response, HttpError> {
+        let (service, method, endpoint, body) =
+            (request.service(), request.method(), request.endpoint(), request.body());
+        self.send_plain(
+            service,
+            method.to_reqwest(),
+            &endpoint,
+            body.as_ref(),
+            Record::Own(R::KIND),
+        )
+        .await
+    }
+
+    /// Sends a permitted read by `POST` of the sealed list, once, logged to `fence.log` before it goes, and only in its
+    /// entry's captured shape ([`HttpError::Unknown`] otherwise, with nothing sent).
+    ///
+    /// # Errors
+    /// [`HttpError::Unknown`] for a request off its entry's shape or naming other MRIs than its permit; otherwise as a
+    /// read's.
+    pub async fn post_read<R: PostRead + Send>(&self, read: AuthorizedPostRead<R>) -> Result<Response, HttpError> {
+        self.send_post_read(read).await
+    }
+}
+
 impl<C: Credentials> Transport for HttpTransport<C> {
     type Error = HttpError;
 
@@ -714,9 +787,6 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let service = request.service();
         let endpoint = request.endpoint();
         async move {
-            if service == Service::Presence {
-                return Err(HttpError::Refused(Refusal::PresenceReadByPostOnly));
-            }
             let url = self.url_for(service, &endpoint)?;
             let outgoing = Outgoing {
                 method: reqwest::Method::GET,
@@ -724,38 +794,17 @@ impl<C: Credentials> Transport for HttpTransport<C> {
                 service,
                 body: None,
             };
-            self.exchange(outgoing, None).await
+            self.exchange(outgoing, Record::Nothing).await
         }
     }
 
-    fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        let service = request.service();
-        let method = request.method();
-        let endpoint = request.endpoint();
-        let body = request.body();
+    fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        let (service, method, endpoint, body) =
+            (request.service(), request.method(), request.endpoint(), request.body());
         async move {
-            if let Some(refusal) = read_only(service) {
-                return Err(HttpError::Refused(refusal));
-            }
-            if service == Service::Presence {
-                return Err(HttpError::Refused(Refusal::PresenceReadByPostOnly));
-            }
-            let url = self.url_for(service, &endpoint)?;
-            let outgoing = Outgoing {
-                method: method.to_reqwest(),
-                url: &url,
-                service,
-                body: body.as_ref(),
-            };
-            self.exchange(outgoing, Some(R::KIND)).await
+            self.send_plain(service, method.to_reqwest(), &endpoint, body.as_ref(), Record::Allowed)
+                .await
         }
-    }
-
-    fn post_read<R: PostRead + Send>(
-        &self,
-        read: AuthorizedPostRead<R>,
-    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        self.send_post_read(read)
     }
 
     fn own_account(&self) -> Option<&Mri> {
@@ -766,10 +815,8 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let wire = write.wire().ok_or(HttpError::NoRoute)?;
         let service = wire.service();
         match service {
-            Service::ChatService => {}
-            // UPS takes the account's own availability as a write, and nothing but the two own-availability endpoints
-            Service::Presence if is_presence_write(wire.endpoint()) => {}
-            Service::Presence => return Err(HttpError::Refused(Refusal::PresencePath)),
+            // the chat service's writes, and UPS's: the account's own availability
+            Service::ChatService | Service::Presence => {}
             _ => return Err(HttpError::NoRoute),
         }
         let url = self.url_for(service, wire.endpoint())?;
@@ -833,16 +880,6 @@ fn audience(service: Service) -> Option<&'static str> {
     }
 }
 
-/// The refusal of anything but a read to `service`, when it is reached by `GET` only (Graph, CSA). UPS is reached by
-/// its read by `POST` only, which `read` and `own_state` refuse on their own.
-fn read_only(service: Service) -> Option<Refusal> {
-    match service {
-        Service::Graph => Some(Refusal::GraphReadOnly),
-        Service::Csa => Some(Refusal::CsaReadOnly),
-        Service::ChatService | Service::Registrar | Service::Trouter | Service::MiddleTier | Service::Presence => None,
-    }
-}
-
 /// The headers a request to `service` goes out with besides its token, by lower-cased name: `Accept`, the body's
 /// `Content-Type` when it has one, and the service's own.
 fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
@@ -890,55 +927,32 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
     }
 }
 
-/// The bases a transport was given.
-#[derive(Clone, Copy)]
-struct Bases<'a> {
-    middle_tier: Option<&'a Url>,
-    csa: Option<&'a Url>,
-    presence: Option<&'a Url>,
-}
-
-/// Whether `url`, built for `endpoint` on `service`, is on the allowlist: `https`, no user info, port or fragment, an
-/// allowed host, and a decoded path that is exactly the service's base path and the endpoint's segments (the middle
-/// tier's: the base the transport was given and an endpoint under `beta/users/`; CSA's: the base it was given and the
-/// teams read with its query exactly).
-fn allowed(service: Service, url: &Url, endpoint: &Endpoint, bases: Bases<'_>) -> bool {
+/// Whether `url`, built for `endpoint` on `service`, is on `base` and nothing else: `https`, no user info, port or
+/// fragment, the base's host, a decoded path that is exactly the base's and the endpoint's segments (UPS's with its
+/// trailing slash), and the endpoint's query exactly. The chat service's also as [`chat_service_path`] reads it, and the
+/// registrar's on an AFD host.
+fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
     let plain = url.scheme() == "https"
         && url.username().is_empty()
         && url.password().is_none()
         && url.port().is_none()
         && url.fragment().is_none();
     let segments = endpoint.segments();
+    let mut wanted = decoded_path(base).unwrap_or_default();
+    wanted.extend(segments.iter().cloned());
+    if service == Service::Presence {
+        wanted.push(String::new());
+    }
+    let service_rule = match service {
+        Service::ChatService => chat_service_path(url).is_some_and(|rest| segments.get(1..) == Some(&rest[..])),
+        Service::Registrar => url.host_str().is_some_and(|host| AFD_HOSTS.contains(&host)),
+        Service::Trouter | Service::Graph | Service::MiddleTier | Service::Csa | Service::Presence => true,
+    };
     plain
-        && match service {
-            Service::ChatService => chat_service_path(url).is_some_and(|rest| segments.get(1..) == Some(&rest[..])),
-            Service::Registrar => {
-                url.host_str().is_some_and(|host| AFD_HOSTS.contains(&host))
-                    && decoded_path(url).is_some_and(|path| {
-                        path.split_first()
-                            .is_some_and(|(first, rest)| first == "registrar" && rest == segments)
-                    })
-            }
-            Service::Trouter => {
-                url.host_str() == Some(TROUTER_HOST) && decoded_path(url).is_some_and(|path| path == segments)
-            }
-            Service::MiddleTier => bases
-                .middle_tier
-                .is_some_and(|base| on_middle_tier(base, url, endpoint)),
-            Service::Csa => bases.csa.is_some_and(|base| {
-                is_csa_endpoint(endpoint) && on_base(base, url, endpoint) && query_is(url, endpoint.query())
-            }),
-            Service::Presence => bases.presence.is_some_and(|base| on_presence(base, url, endpoint)),
-            Service::Graph => {
-                url.host_str() == Some(GRAPH_HOST)
-                    && is_graph_endpoint(endpoint)
-                    && decoded_path(url).is_some_and(|path| {
-                        path.split_first()
-                            .is_some_and(|(first, rest)| first == "v1.0" && rest == segments)
-                    })
-                    && query_is(url, endpoint.query())
-            }
-        }
+        && url.host_str() == base.host_str()
+        && decoded_path(url).is_some_and(|path| path == wanted)
+        && query_is(url, endpoint.query())
+        && service_rule
 }
 
 /// Whether `url`'s query is exactly `query`, pair by pair in order.
@@ -946,79 +960,6 @@ fn query_is(url: &Url, query: &[(String, String)]) -> bool {
     url.query_pairs()
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .eq(query.iter().cloned())
-}
-
-/// One of Graph's two probed reads ([`Service::Graph`]): `users/<object id>` with the query `$select=id,displayName`
-/// exactly, or `users/<object id>/photos/96x96/$value` with none.
-fn is_graph_endpoint(endpoint: &Endpoint) -> bool {
-    let query = endpoint.query();
-    match endpoint.segments() {
-        [users, id] => {
-            users == "users"
-                && is_guid(id)
-                && matches!(query, [(name, value)] if name == "$select" && value == GRAPH_USER_SELECT)
-        }
-        [users, id, photos, size, value] => {
-            users == "users"
-                && is_guid(id)
-                && photos == "photos"
-                && size == GRAPH_PICTURE_SIZE
-                && value == "$value"
-                && query.is_empty()
-        }
-        _ => false,
-    }
-}
-
-/// Whether `url` is `endpoint` (under `beta/users/`) on the middle-tier `base`, and nothing else: its host and its
-/// decoded path the base's plus the endpoint's segments.
-fn on_middle_tier(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
-    is_middle_tier_endpoint(endpoint) && on_base(base, url, endpoint)
-}
-
-/// Whether `url` is on `base`'s host, its decoded path exactly the base's plus `endpoint`'s segments.
-fn on_base(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
-    let segments = endpoint.segments();
-    let base_path = decoded_path(base).unwrap_or_default();
-    url.host_str() == base.host_str()
-        && decoded_path(url).is_some_and(|path| {
-            path.len() == base_path.len() + segments.len() && path.starts_with(&base_path) && path.ends_with(segments)
-        })
-}
-
-/// An endpoint the transport reaches on UPS ([`Service::Presence`]): the presence read or an own-availability write.
-fn is_presence_endpoint(endpoint: &Endpoint) -> bool {
-    is_presence_read(endpoint) || is_presence_write(endpoint)
-}
-
-/// UPS's presence read: `v1/presence/getpresence`, no query.
-fn is_presence_read(endpoint: &Endpoint) -> bool {
-    endpoint
-        .segments()
-        .iter()
-        .map(String::as_str)
-        .eq(PRESENCE_PATH.iter().copied())
-        && endpoint.query().is_empty()
-}
-
-/// The account's own availability on UPS (M2 Task 19): `v1/me/endpoints` or `v1/me/forceavailability`, no query.
-fn is_presence_write(endpoint: &Endpoint) -> bool {
-    let own = |name: &str| endpoint.segments().iter().map(String::as_str).eq(["v1", "me", name]);
-    (own("endpoints") || own("forceavailability")) && endpoint.query().is_empty()
-}
-
-/// Whether `url` is one of UPS's endpoints the transport reaches ([`is_presence_endpoint`]) on the presence `base` and
-/// nothing else: the base's host, its decoded path the base's, the endpoint's segments and the trailing slash (an
-/// empty last segment), no query.
-fn on_presence(base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
-    let base_path = decoded_path(base).unwrap_or_default();
-    let mut wanted = base_path;
-    wanted.extend(endpoint.segments().iter().cloned());
-    wanted.push(String::new());
-    is_presence_endpoint(endpoint)
-        && url.host_str() == base.host_str()
-        && url.query().is_none()
-        && decoded_path(url).is_some_and(|path| path == wanted)
 }
 
 /// The presence base, if `base` is one [`HttpTransport::with_presence`] accepts.
@@ -1041,16 +982,6 @@ fn parse_presence_base(base: &str) -> Option<Url> {
         [ups, geo] if ups == "ups" && !geo.is_empty() && geo.bytes().all(|byte| byte.is_ascii_lowercase())
     );
     (plain && geo).then_some(url)
-}
-
-/// CSA's one probed read ([`Service::Csa`]): `api/v3/teams/users/me` with [`CSA_TEAMS_QUERY`] exactly, in order.
-fn is_csa_endpoint(endpoint: &Endpoint) -> bool {
-    endpoint.segments().iter().map(String::as_str).eq(CSA_TEAMS_PATH)
-        && endpoint
-            .query()
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .eq(CSA_TEAMS_QUERY)
 }
 
 /// The CSA base, if `base` is one [`HttpTransport::with_csa`] accepts.
@@ -1076,11 +1007,6 @@ fn parse_csa_base(base: &str) -> Option<Url> {
             && region.bytes().all(|byte| byte.is_ascii_lowercase())
     );
     (plain && region).then_some(url)
-}
-
-/// A middle-tier endpoint under `beta/users/`, with at least one segment after it.
-fn is_middle_tier_endpoint(endpoint: &Endpoint) -> bool {
-    matches!(endpoint.segments(), [beta, users, _, ..] if beta == "beta" && users == "users")
 }
 
 /// The middle-tier base, if `base` is one [`HttpTransport::with_middle_tier`] accepts.

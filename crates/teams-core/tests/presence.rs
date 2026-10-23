@@ -1,9 +1,9 @@
 //! Others' presence (M2 Task 17) through a running engine, against wiremock as UPS (the transport's `test-support`
-//! mock origin): a person a view asked about is read at once and then every poll, in one read of everyone watched the
-//! fence lets a read name (lab accounts only, under its permit, logged to `fence.log` before it is sent); each change
-//! told once as `Event::Presence`; someone outside the lab never read and unknown; a failed read making everyone it
-//! asked about unknown; a throttled read waiting its `Retry-After`, whoever is asked about meanwhile; the watch's cap
-//! dropping the one asked about longest ago, told as unknown; and nothing read without the presence base.
+//! mock origin): a person a view asked about is read at once and then every poll, in one read of everyone watched
+//! (whoever they are: a read reaches nobody; logged to `fence.log` as `allowed` before it is sent); each change told
+//! once as `Event::Presence`; a failed read making everyone it asked about unknown; a read the transport's one retry
+//! left throttled waiting its `Retry-After`, whoever is asked about meanwhile; the watch's cap dropping the one asked
+//! about longest ago, told as unknown; and nothing read without the presence base.
 //!
 //! Tokens and ids here are made up; the answers follow the synthetic fixture `tests/fixtures/ups/getpresence-answer.json`.
 
@@ -36,6 +36,8 @@ const PRESENCE_BASE: &str = "https://teams.microsoft.com/ups/noam";
 const GET_PRESENCE: &str = "/ups/noam/v1/presence/getpresence/";
 /// How long a test waits for an event before it fails.
 const WAIT: Duration = Duration::from_secs(30);
+/// The longest the transport waits before its one retry of a throttled read.
+const RETRY_WAIT: Duration = Duration::from_millis(50);
 
 fn mri(guid: &str) -> String {
     format!("8:orgid:{guid}")
@@ -140,8 +142,11 @@ fn rig_of(server: MockServer, poll: Duration, presence: bool, others: Vec<String
     let lab = std::iter::once(mri(GUID_A)).chain(others).map(Mri::new);
     let fence = Arc::new(Fence::new(Roster::new(lab, []), FenceLog::from_writer(log.clone())));
     let tokens = Arc::new(FakeTokens);
-    let transport =
-        || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
+    let transport = || {
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri())
+            .unwrap()
+            .with_max_retry_wait(RETRY_WAIT)
+    };
     let reads = if presence {
         transport().with_presence(PRESENCE_BASE).unwrap()
     } else {
@@ -212,7 +217,7 @@ impl Rig {
 }
 
 #[tokio::test]
-async fn a_lab_accounts_presence_is_read_at_once_and_told_under_the_fences_permit() {
+async fn a_persons_presence_is_read_at_once_and_told_logged_as_allowed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(GET_PRESENCE))
@@ -230,11 +235,11 @@ async fn a_lab_accounts_presence_is_read_at_once_and_told_under_the_fences_permi
     assert_eq!(reads.len(), 1, "read once: the poll is an hour");
     assert_eq!(asked(&reads[0]), [mri(GUID_B)]);
     let lines = rig.log.lines();
-    assert_eq!(lines[0]["event"], "post_read_decision");
-    assert_eq!(lines[0]["post_read"], "presence");
-    assert_eq!(lines[0]["names"], 1);
-    assert_eq!(lines[1]["post_read"], "presence");
-    assert_eq!(lines[1]["url"], format!("{PRESENCE_BASE}/v1/presence/getpresence/"));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["event"], "allowed");
+    assert_eq!(lines[0]["method"], "POST");
+    assert_eq!(lines[0]["host"], "teams.microsoft.com");
+    assert_eq!(lines[0]["path"], GET_PRESENCE);
     rig.handle.shutdown();
 }
 
@@ -281,7 +286,7 @@ async fn everyone_watched_is_read_in_one_read_each_poll_and_only_a_change_is_tol
 }
 
 #[tokio::test]
-async fn someone_outside_the_lab_is_never_read_and_stays_unknown() {
+async fn someone_outside_the_lab_is_read_like_anyone() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(GET_PRESENCE))
@@ -291,19 +296,16 @@ async fn someone_outside_the_lab_is_never_read_and_stays_unknown() {
     let mut rig = rig(server, Duration::from_hours(1), true);
 
     assert_eq!(rig.handle.presence(mri(GUID_OUT)).await.unwrap(), Availability::Unknown);
-    rig.handle.presence(mri(GUID_B)).await.unwrap();
-    assert_eq!(rig.next_presence().await, (mri(GUID_B), Availability::Busy));
-    assert_eq!(rig.handle.presence(mri(GUID_OUT)).await.unwrap(), Availability::Unknown);
+    assert_eq!(rig.next_presence().await, (mri(GUID_OUT), Availability::Busy));
+    assert_eq!(rig.handle.presence(mri(GUID_OUT)).await.unwrap(), Availability::Busy);
 
-    for read in rig.reads().await {
-        assert_eq!(asked(&read), [mri(GUID_B)]);
-    }
+    let reads = rig.reads().await;
+    assert_eq!(reads.len(), 1);
+    assert_eq!(asked(&reads[0]), [mri(GUID_OUT)]);
     let lines = rig.log.lines();
     assert!(
-        lines
-            .iter()
-            .all(|line| line["verdict"] == "allow" && line["names"].as_u64().is_none_or(|names| names == 1)),
-        "the fence is never asked about the outsider: {lines:?}"
+        lines.iter().all(|line| line["event"] == "allowed"),
+        "only the read, let through: {lines:?}"
     );
     rig.handle.shutdown();
 }
@@ -383,14 +385,15 @@ async fn a_throttled_read_waits_its_retry_after() {
     let mut rig = rig(server, Duration::from_millis(100), true);
 
     rig.handle.presence(mri(GUID_B)).await.unwrap();
-    // the first read is sent at once; within the next second (ten polls) no other goes out
+    // the first read is sent at once, and once more by the transport after its (capped) wait; within the next second
+    // (ten polls) no other goes out
     let deadline = tokio::time::Instant::now() + WAIT;
-    while rig.reads().await.is_empty() {
+    while rig.reads().await.len() < 2 {
         assert!(tokio::time::Instant::now() < deadline, "no read in time");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(rig.presences_within(Duration::from_secs(1)).await, Vec::new());
-    assert_eq!(rig.reads().await.len(), 1);
+    assert_eq!(rig.reads().await.len(), 2);
     rig.handle.shutdown();
 }
 
@@ -415,15 +418,15 @@ async fn someone_new_asked_about_while_throttled_brings_no_read_before_the_retry
 
     rig.handle.presence(mri(GUID_B)).await.unwrap();
     assert_eq!(rig.next_presence().await, (mri(GUID_B), Availability::Available));
-    // the throttled read: b unknown again, its Retry-After kept
+    // the throttled read (and the transport's one retry of it): b unknown again, its Retry-After kept
     assert_eq!(rig.next_presence().await, (mri(GUID_B), Availability::Unknown));
-    assert_eq!(rig.reads().await.len(), 2);
+    assert_eq!(rig.reads().await.len(), 3);
 
-    // someone new inside the wait (a lab account, and an outsider): no read goes out
+    // someone new inside the wait (a lab account, and someone outside the lab): no read goes out
     rig.handle.presence(mri(GUID_C)).await.unwrap();
     rig.handle.presence(mri(GUID_OUT)).await.unwrap();
     assert_eq!(rig.presences_within(Duration::from_secs(1)).await, Vec::new());
-    assert_eq!(rig.reads().await.len(), 2, "no read inside the Retry-After");
+    assert_eq!(rig.reads().await.len(), 3, "no read inside the Retry-After");
     rig.handle.shutdown();
 }
 
@@ -435,7 +438,7 @@ async fn past_the_cap_the_one_asked_about_longest_ago_is_dropped_and_told_unknow
         .respond_with(|request: &Request| answer_all(request, "Offline"))
         .mount(&server)
         .await;
-    // the lab a and 40 more lab accounts
+    // 40 people besides the lab a
     let lab: Vec<String> = (1..=40_u32)
         .map(|n| mri(&format!("{n:08x}-0000-4000-8000-000000000001")))
         .collect();
@@ -455,11 +458,6 @@ async fn past_the_cap_the_one_asked_about_longest_ago_is_dropped_and_told_unknow
     for other in &lab[20..22] {
         rig.handle.presence(other.clone()).await.unwrap();
     }
-    // outsiders take no place in the watch
-    for n in 0..30_u32 {
-        let outsider = mri(&format!("{n:08x}-0000-4000-8000-0000000000ff"));
-        assert_eq!(rig.handle.presence(outsider).await.unwrap(), Availability::Unknown);
-    }
     // a drop is told as the ask that made it is answered: none of the first
     assert_eq!(
         told_first(rig.presences_within(Duration::from_millis(300)).await),
@@ -478,7 +476,7 @@ async fn past_the_cap_the_one_asked_about_longest_ago_is_dropped_and_told_unknow
 }
 
 #[tokio::test]
-async fn without_the_presence_base_nothing_is_read_and_the_fence_isnt_asked() {
+async fn without_the_presence_base_nothing_is_read_or_logged() {
     let server = MockServer::start().await;
     let mut rig = rig(server, Duration::from_millis(100), false);
 

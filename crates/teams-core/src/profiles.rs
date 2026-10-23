@@ -2,9 +2,8 @@
 //! background and kept in the store.
 //!
 //! - **Where a name comes from**, first that gives one: Microsoft Graph's user record (`users/<object id>`, a read,
-//!   [`GraphUser`]); the middle tier's profile lookup (`users/fetchShortProfile`, a read by `POST` of the sealed
-//!   `PostRead` list, sent only with the permit `Fence::check_post_read` gives: in a lab build every MRI a lab
-//!   account), for a name Graph doesn't give; the name the person's newest stored message carried (`imdisplayname`);
+//!   [`GraphUser`]); the middle tier's profile lookup (`users/fetchShortProfile`, a read sent as a `POST`, which the
+//!   transport sends whoever it names, [`ShortProfileLookup`]), for a name Graph doesn't give; the name the person's newest stored message carried (`imdisplayname`);
 //!   a name the binary knows already ([`Parts::known_names`](crate::Parts::known_names): a lab binary's lab accounts,
 //!   from `lab.toml`). Else none, and a view shows the MRI. A **picture** is Graph's 96×96 one ([`GraphPicture`]);
 //!   without one a view draws initials.
@@ -13,7 +12,7 @@
 //!   and is tried again [`PROFILE_RETRY`] later (the engine's
 //!   [`EngineOptions::profile_retry`](crate::EngineOptions::profile_retry)), never sooner, from the engine's tick
 //!   whether or not a view asks for them again; an answer that settles it (a 404 for a picture, an account Graph
-//!   doesn't know, a lookup the fence denies) is kept as "none" until the next read by age.
+//!   doesn't know, a lookup the transport refuses) is kept as "none" until the next read by age.
 //! - **One lookup per person at a time**: a person asked for while their lookup is queued or running isn't looked up
 //!   again; at most [`MAX_LOOKUPS`] run at once, on the engine's runtime, so the engine's loop never waits for one.
 //! - **The bytes of a picture reach a view only from the engine** ([`Person::picture`]): nothing else reads them.
@@ -23,11 +22,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use teams_fence::{Fence, Mri};
-use teams_proto::{
-    Client, Credentials, GraphPicture, GraphUser, HttpError, HttpTransport, PostRead as _, PostReadError,
-    ShortProfileLookup,
-};
+use teams_fence::Mri;
+use teams_proto::{Client, Credentials, GraphPicture, GraphUser, HttpError, HttpTransport, ShortProfileLookup};
 use teams_store::{NameSource, PictureState, Profile, Store, StoreError, StoredPicture};
 use tokio::task::{Id, JoinSet};
 use tokio::time::Instant;
@@ -102,7 +98,6 @@ pub(crate) struct Looked {
 /// The lookups: who is queued, who runs, who waits after a failure.
 pub(crate) struct Profiles<C> {
     client: Arc<Client<HttpTransport<C>>>,
-    fence: Arc<Fence>,
     known: HashMap<String, String>,
     running: JoinSet<Looked>,
     /// Who each running task looks up.
@@ -117,15 +112,9 @@ pub(crate) struct Profiles<C> {
 }
 
 impl<C: Credentials + 'static> Profiles<C> {
-    pub(crate) fn new(
-        client: Arc<Client<HttpTransport<C>>>,
-        fence: Arc<Fence>,
-        known: Vec<(String, String)>,
-        retry: Duration,
-    ) -> Self {
+    pub(crate) fn new(client: Arc<Client<HttpTransport<C>>>, known: Vec<(String, String)>, retry: Duration) -> Self {
         Self {
             client,
-            fence,
             known: known.into_iter().collect(),
             running: JoinSet::new(),
             tasks: HashMap::new(),
@@ -250,8 +239,7 @@ impl<C: Credentials + 'static> Profiles<C> {
             let Some(mri) = self.queued.pop_front() else {
                 return;
             };
-            let (client, fence) = (Arc::clone(&self.client), Arc::clone(&self.fence));
-            let handle = self.running.spawn(look_up(client, fence, mri.clone()));
+            let handle = self.running.spawn(look_up(Arc::clone(&self.client), mri.clone()));
             self.tasks.insert(handle.id(), mri);
         }
     }
@@ -290,11 +278,11 @@ fn merged(old: Option<&Profile>, looked: Looked, now: i64) -> Profile {
 }
 
 /// One person's lookup (see the module docs).
-async fn look_up<C: Credentials>(client: Arc<Client<HttpTransport<C>>>, fence: Arc<Fence>, mri: String) -> Looked {
+async fn look_up<C: Credentials>(client: Arc<Client<HttpTransport<C>>>, mri: String) -> Looked {
     let graph = graph_name(&client, &mri).await;
     let name = match graph {
         Part::Found(name) => Part::Found((name, NameSource::Graph)),
-        graph => match short_profile_name(&client, &fence, &mri).await {
+        graph => match short_profile_name(&client, &mri).await {
             Part::Found(name) => Part::Found((name, NameSource::ShortProfile)),
             // the lookup settled there is none: still a failure if Graph's read failed on the way
             Part::Absent if graph.failed() => Part::Failed,
@@ -337,24 +325,16 @@ async fn graph_picture<C: Credentials>(client: &Client<HttpTransport<C>>, mri: &
     }
 }
 
-/// The middle tier's name for `mri`, when the fence permits the lookup (in a lab build: a lab account).
-async fn short_profile_name<C: Credentials>(
-    client: &Client<HttpTransport<C>>,
-    fence: &Fence,
-    mri: &str,
-) -> Part<String> {
-    // without the middle tier's base the lookup can't go out: the fence isn't asked for a permit nobody would use
+/// The middle tier's name for `mri`.
+async fn short_profile_name<C: Credentials>(client: &Client<HttpTransport<C>>, mri: &str) -> Part<String> {
+    // without the middle tier's base the lookup can't go out
     if !client.transport().has_middle_tier() {
         return Part::Absent;
     }
     let Some(lookup) = ShortProfileLookup::new([Mri::new(mri)]) else {
         return Part::Absent;
     };
-    let Ok(permit) = fence.check_post_read(ShortProfileLookup::KIND, lookup.names()) else {
-        // not one the fence lets this build ask about
-        return Part::Absent;
-    };
-    match client.post_read(lookup.clone(), permit).await {
+    match client.send(&lookup).await {
         Ok(answer) => lookup
             .read_answer(answer.body())
             .ok()
@@ -363,14 +343,13 @@ async fn short_profile_name<C: Credentials>(
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty())
             .map_or(Part::Absent, Part::Found),
-        Err(PostReadError::Mismatch(_)) => Part::Absent,
-        Err(PostReadError::Transport(error)) => part_of(&error),
+        Err(error) => part_of(&error),
     }
 }
 
 /// What a read's error says about the part it read: settled when the service answered that there is none (a 4xx
-/// other than a refused token, a timeout or throttling) or the transport can't send it (no route, refused, not its
-/// entry's shape); failed on the way otherwise.
+/// other than a refused token, a timeout or throttling) or the transport can't send it (no route, refused); failed on
+/// the way otherwise.
 fn part_of<T>(error: &HttpError) -> Part<T> {
     match error {
         HttpError::Status(answer) if (400..500).contains(&answer.status()) => match answer.status() {

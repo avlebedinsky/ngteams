@@ -1,9 +1,10 @@
 //! CSA's read of the account's teams and channels (M2 Task 16) on wiremock, through the `test-support` mock origin: a
 //! `GET` of `api/v3/teams/users/me` with the web client's query on the CSA base the transport was given, with the
 //! account's `chatsvcagg` token and nothing else, in the shape `proto-lab probe teams` read live (the synthetic
-//! fixture `tests/fixtures/csa/teams.json`); any other CSA endpoint or query, a CSA read on a transport without a CSA
-//! base, and any request to CSA that isn't a read, are refused before anything is sent. And what a channel's posts
-//! are read with: a channel's thread type and a message's reply chain.
+//! fixture `tests/fixtures/csa/teams.json`); any other CSA read goes to the same base; a CSA read on a transport without
+//! a CSA base, and a plain request to CSA that changes anything (CSA is a contacting service), are refused before
+//! anything is sent, but for the one read sent as a `POST` the fence's classifier carves out. And what a channel's
+//! posts are read with: a channel's thread type and a message's reply chain.
 //!
 //! Tokens and ids here are placeholders, never real ones.
 
@@ -20,7 +21,7 @@ use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::chat::{ConversationKind, Message};
 use teams_proto::{
     BuildError, CSA_AUDIENCE, Client, Credentials, CsaAnswerError, CsaTeams, Endpoint, HttpError, HttpTransport,
-    ProbeOwnState, Read, Refusal, Service,
+    Method, Read, Refusal, Request, Service,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -228,8 +229,7 @@ async fn a_csa_read_without_a_csa_base_is_refused_before_anything_is_sent() {
     assert!(tokens.audiences().is_empty());
 }
 
-/// A read of CSA in a shape the probe didn't show: any type may implement `Read`, so the transport's path check is
-/// what refuses it.
+/// A read of CSA in a shape the probe didn't show: any type may implement `Read`.
 struct OtherCsaRead(Endpoint);
 
 impl Read for OtherCsaRead {
@@ -242,49 +242,93 @@ impl Read for OtherCsaRead {
     }
 }
 
-/// `api/v3/teams/users/me` with the web client's query, but for `change` applied to its pairs.
-fn teams_endpoint(change: impl FnOnce(&mut Vec<(String, String)>)) -> Endpoint {
-    let mut query: Vec<(String, String)> = CsaTeams.endpoint().query().to_vec();
-    change(&mut query);
-    query.into_iter().fold(
-        Endpoint::new(["api", "v3", "teams", "users", "me"]),
-        |endpoint, (name, value)| endpoint.with_query(name, value),
-    )
+/// A plain `POST` to CSA: any type may implement `Request`, so the fence's classifier is what decides it.
+struct CsaPost(Endpoint);
+
+impl Request for CsaPost {
+    fn service(&self) -> Service {
+        Service::Csa
+    }
+
+    fn method(&self) -> Method {
+        Method::Post
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        self.0.clone()
+    }
+
+    fn body(&self) -> Option<Value> {
+        Some(json!({}))
+    }
 }
 
 #[tokio::test]
-async fn any_other_csa_endpoint_or_query_is_refused_before_anything_is_sent() {
-    let (server, tokens, client) = setup(true).await;
+async fn any_other_csa_read_goes_to_the_csa_base_with_its_query() {
+    let (server, _tokens, client) = setup(true).await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("{}", "application/json"))
+        .mount(&server)
+        .await;
     let others = [
-        // what the web client reads besides, unreviewed
         Endpoint::new(["api", "v3", "teams", "users", "me", "updates"]),
         Endpoint::new(["api", "v1", "teams", "users", "me", "pinnedChannels"]),
         Endpoint::new(["api", "v1", "containers", CHANNEL, "posts"]).with_query("pageSize", "20"),
-        Endpoint::new(["api", "v1", "teams", "users", "me", "discover"]),
-        // the teams read with no query, another value, a pair more, a pair less, the pairs reordered
-        Endpoint::new(["api", "v3", "teams", "users", "me"]),
-        teams_endpoint(|query| query[0].1 = "true".to_owned()),
-        teams_endpoint(|query| query.push(("continuationToken".to_owned(), "x".to_owned()))),
-        teams_endpoint(|query| {
-            query.pop();
-        }),
-        teams_endpoint(|query| query.reverse()),
-        Endpoint::new(["api", "v3", "teams", "users", "..", "me"]),
     ];
     for endpoint in others {
+        client.read(&OtherCsaRead(endpoint)).await.unwrap();
+    }
+    let requests = server.received_requests().await.unwrap();
+    let urls: Vec<String> = requests
+        .iter()
+        .map(|request| format!("{}?{}", request.url.path(), request.url.query().unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            "/api/csa/amer/api/v3/teams/users/me/updates?".to_owned(),
+            "/api/csa/amer/api/v1/teams/users/me/pinnedChannels?".to_owned(),
+            format!("/api/csa/amer/api/v1/containers/{CHANNEL}/posts?pageSize=20"),
+        ]
+    );
+    assert!(requests.iter().all(|request| request.method.as_str() == "GET"));
+}
+
+#[tokio::test]
+async fn a_csa_post_is_refused_unless_the_classifier_carves_it_out() {
+    let (server, tokens, client) = setup(true).await;
+    // a path segment `..` is refused before anything else
+    match client
+        .read(&OtherCsaRead(Endpoint::new([
+            "api", "v3", "teams", "users", "..", "me",
+        ])))
+        .await
+    {
+        Err(HttpError::Refused(Refusal::Segment)) => {}
+        other => panic!("{other:?}"),
+    }
+    for endpoint in [
+        CsaTeams.endpoint(),
+        Endpoint::new(["api", "v1", "containers", CHANNEL, "posts"]),
+        Endpoint::new(["api", "v1", "teams", TEAM, "channels"]),
+    ] {
         let shown = format!("{endpoint:?}");
-        match client.read(&OtherCsaRead(endpoint)).await {
-            Err(HttpError::Refused(Refusal::CsaPath | Refusal::Segment)) => {}
+        match client.send(&CsaPost(endpoint)).await {
+            Err(HttpError::Refused(Refusal::Unreadable)) => {}
             other => panic!("{shown}: {other:?}"),
         }
     }
-    let post = ProbeOwnState::new(Service::Csa, CsaTeams.endpoint(), Some(json!({})));
-    match client.own_state(&post).await {
-        Err(HttpError::Refused(Refusal::CsaReadOnly)) => {}
-        other => panic!("{other:?}"),
-    }
     assert!(server.received_requests().await.unwrap().is_empty());
     assert!(tokens.audiences().is_empty(), "no token is asked for a refused request");
+
+    // the read sent as a `POST` the classifier carves out goes
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("{}", "application/json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let by_ids = Endpoint::new(["api", "v2", "teams", "users", "me", "chatsAndChannelsByIds"]);
+    client.send(&CsaPost(by_ids)).await.unwrap();
 }
 
 #[test]

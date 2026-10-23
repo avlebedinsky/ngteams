@@ -467,18 +467,29 @@ and tokens, the personal build and protocol notes stay as they are:
   `check_post_read`, `PostReadPermit`, `lab_accounts_only` once their last caller is gone, unless the personal build
   uses them)
 
-- [ ] write tests first: a `Request` that `contacting` calls `None` is sent (any method, any MRIs in its body) and
+- [x] write tests first: a `Request` that `contacting` calls `None` is sent (any method, any MRIs in its body) and
       logged `allowed` when mutating; one it calls `Write` or `Unreadable` is refused with a typed error and never
       reaches the mock origin; a profile lookup naming a non-lab MRI is sent; a Graph `POST` is refused
-- [ ] `Transport` becomes `read`, `send<R: Request>`, `deliver<R: Mutating>`; `send` builds the URL from the request's
+- [x] `Transport` becomes `read`, `send<R: Request>`, `deliver<R: Mutating>`; `send` builds the URL from the request's
       `Service`, runs `teams_fence::contacting`, refuses anything but `None`; the host allowlist becomes the
       per-`Service` base (`https`, no proxy, no redirects, each token only to its own service's host)
-- [ ] move every caller and fake onto `send`; M2's GPUI UI tests stay green
-- [ ] `fence-seal`: delete `proto_own_state`, `proto_post_read*`, `post_read_permit*`; update
+- [x] move every caller and fake onto `send`; M2's GPUI UI tests stay green
+- [x] `fence-seal`: delete `proto_own_state`, `proto_post_read*`, `post_read_permit*`; update
       `proto_register_fake_transport`, `proto_availability_literal`, `proto_registered_endpoint`,
       `proto_presence_read_literal` to the new API; keep that `Mutating` and `WritePermit` can't be made outside their
-      crates; add a case that a `Request` can't be handed to `deliver`
-- [ ] tests pass
+      crates; add a case that a `Request` can't be handed to `deliver` — ⚠️ the seal cases of the kept pieces
+      (`proto_own_state`, `proto_post_read*`, `post_read_permit*`) stay, per the Task 2 note: the personal build keeps
+      the sealed `OwnState`/`PostRead` lists and `PostReadPermit`; `proto_post_read_unpermitted` now targets
+      `HttpTransport::post_read`; `proto_raw_request` and `proto_register_fake_transport` moved to `send`; the others
+      needed no change; new `proto_request_deliver`
+- [x] tests pass
+- ➕ note (Task 5 as built): `Transport` is `read`, `send`, `deliver` (+ `own_account`); `OwnState` and `PostRead` stay
+      as the personal build's sealed lists, sent by inherent `HttpTransport::own_state` / `HttpTransport::post_read`
+      (and `Client<HttpTransport<_>>::{own_state, post_read}`), each also asked of `contacting`; their entries
+      (`EndpointRegistration`, `ShortProfileLookup`, `PresenceRead`) also implement `Request`, and the lab engine
+      sends them through `send`. `teams-core`'s profiles and presence no longer ask the fence (`check_post_read`,
+      `lab_accounts_only` now have no caller outside `teams-fence`: Task 8 keeps them for the personal build). `send`
+      retries like a read (401, 429/503 once). `docs/protocol/endpoints.md`'s Native column is left to Task 7.
 - ➕ note (Task 2 discovery): the personal build relies on `PostRead` / `AuthorizedPostRead`, `check_post_read`,
       `PostReadPermit` and the lab's `lab_accounts_only` limit for lab builds (`docs/personal-build.md` lines 11, 78,
       148-152, 382, 429; M2 Task 27: "a `PostRead` for a non-lab MRI the account's chats name is allowed"), on the

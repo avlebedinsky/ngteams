@@ -26,8 +26,8 @@ use teams_core::{
     TransientSent,
 };
 use teams_proto::{
-    Authorized, AuthorizedPostRead, EndpointRegistration, HttpError, ManualAvailability, Mutating, OwnState, PostRead,
-    Read, RegisteredEndpoint, Response, Transport, register,
+    Authorized, EndpointRegistration, HttpError, ManualAvailability, Mutating, Read, RegisteredEndpoint,
+    Request as ProtoRequest, Response, Transport, register,
 };
 use teams_trouter::Stop;
 use teams_ui::own_presence::{self, OwnPresence, POLICY_TICK};
@@ -631,7 +631,7 @@ fn the_account_s_own_dot_is_not_one_of_the_others_presence_dots() {
     assert!(bounds(cx, "presence-unknown").is_none());
 }
 
-/// An endpoint a registration of this test registered: [`register`] over a fake transport that takes every own-state
+/// An endpoint a registration of this test registered: [`register`] over a fake transport that takes every plain
 /// request (a fake registers at all only under `teams-proto`'s `test-support`), the only way to get one.
 fn endpoint() -> RegisteredEndpoint {
     let registration = EndpointRegistration::messaging(
@@ -644,7 +644,7 @@ fn endpoint() -> RegisteredEndpoint {
     endpoint.expect("a registration the fake took")
 }
 
-/// A transport answering every own-state request 202; it is never asked anything else.
+/// A transport answering every plain request 202; it is never asked anything else.
 struct Accepting;
 
 impl Transport for Accepting {
@@ -654,15 +654,8 @@ impl Transport for Accepting {
         future::ready(Err(HttpError::NoRoute))
     }
 
-    fn own_state<R: OwnState>(&self, _: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+    fn send<R: ProtoRequest>(&self, _: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
         future::ready(Ok(Response::new(202, Vec::new())))
-    }
-
-    fn post_read<R: PostRead + Send>(
-        &self,
-        _: AuthorizedPostRead<R>,
-    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        future::ready(Err(HttpError::NoRoute))
     }
 
     fn deliver<R: Mutating + Send>(

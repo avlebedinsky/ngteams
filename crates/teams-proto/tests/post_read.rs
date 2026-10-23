@@ -643,36 +643,45 @@ impl Read for Get {
 }
 
 #[tokio::test]
-async fn a_middle_tier_read_is_a_get_under_beta_users_only() {
+async fn a_middle_tier_read_is_a_get_on_its_base() {
     let setup = setup().await;
     Mock::given(method("GET"))
-        .and(path("/api/mt/part/amer-03/beta/users/lab-a"))
         .and(header("x-ms-migration", "True"))
         .respond_with(ResponseTemplate::new(200))
-        .expect(1)
+        .expect(2)
         .mount(&setup.server)
         .await;
 
-    setup
-        .transport
-        .read(&Get(Service::MiddleTier, Endpoint::new(["beta", "users", "lab-a"])))
-        .await
-        .unwrap();
-    for segments in [
-        vec!["beta", "me", "settings"],
-        vec!["beta", "users"],
-        vec!["users", "lab-a"],
-        vec!["beta", "users", ".."],
-    ] {
-        let error = setup
+    for segments in [vec!["beta", "users", "lab-a"], vec!["beta", "me", "settings"]] {
+        setup
             .transport
-            .read(&Get(Service::MiddleTier, Endpoint::new(segments.clone())))
+            .read(&Get(Service::MiddleTier, Endpoint::new(segments)))
             .await
-            .unwrap_err();
-        assert!(matches!(error, HttpError::Refused(_)), "{segments:?}: {error:?}");
+            .unwrap();
     }
+    let error = setup
+        .transport
+        .read(&Get(Service::MiddleTier, Endpoint::new(["beta", "users", ".."])))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HttpError::Refused(Refusal::Segment)), "{error:?}");
 
-    assert_eq!(setup.tokens.audiences(), [MIDDLE_TIER_AUDIENCE]);
+    let paths: Vec<String> = setup
+        .server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| request.url.path().to_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "/api/mt/part/amer-03/beta/users/lab-a",
+            "/api/mt/part/amer-03/beta/me/settings"
+        ]
+    );
+    assert_eq!(setup.tokens.audiences(), [MIDDLE_TIER_AUDIENCE, MIDDLE_TIER_AUDIENCE]);
 }
 
 #[test]

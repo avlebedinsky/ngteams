@@ -37,8 +37,8 @@ use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, 
 use teams_mock::{AB_CHAT, ABC_CHAT, AX_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, TrouterMock};
 use teams_proto::chat::MessageText;
 use teams_proto::{
-    Author, Authorized, AuthorizedPostRead, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState,
-    PostRead, Read, Response, Transport,
+    Author, Authorized, Client, Credentials, HttpError, HttpTransport, Mutating, Read, Request as ProtoRequest,
+    Response, Transport,
 };
 use teams_store::{
     Applied, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState, SearchHit, Store,
@@ -154,15 +154,8 @@ impl Transport for Interposed {
         self.inner.read(request)
     }
 
-    fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        self.inner.own_state(request)
-    }
-
-    fn post_read<R: PostRead + Send>(
-        &self,
-        read: AuthorizedPostRead<R>,
-    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        self.inner.post_read(read)
+    fn send<R: ProtoRequest>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.send(request)
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {

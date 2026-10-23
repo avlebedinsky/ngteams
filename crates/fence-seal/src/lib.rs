@@ -1,9 +1,10 @@
 //! Compile checks against `teams-fence` and `teams-proto` as a lab binary sees them, without their `test-support`
 //! features. The cases under `tests/ui/` must fail: no crate other than `teams-fence` can mint a `WritePermit`, since a
 //! fence comes only from `Fence::open_lab` (the roster from `lab.toml`, the log at the lab's `fence.log`) and
-//! `MembershipSource` is sealed; and the native transport sends only a `Read`, an `OwnState` request (a sealed list no
-//! other crate adds to) or an `Authorized` write, to its allowlisted hosts only (`tests/ui/proto_*.rs`: no request of
-//! another class, no own-state entry from outside, no mock origin). The cases under `tests/pass/` must build and run:
+//! `MembershipSource` is sealed; and the native transport sends only a `Read`, a plain `Request` (which it hands to the
+//! fence's classifier first) or an `Authorized` write, to its services' bases only (`tests/ui/proto_*.rs`: no request
+//! of another class, no plain request handed over as a write, no entry of the personal build's sealed lists from
+//! outside, no mock origin). The cases under `tests/pass/` must build and run:
 //! the sources `teams-fence` defines (`FailClosed`, and `LiveMembershipSource` with a credential parsed from a chat
 //! service request) are usable, so a lab binary can arm the browser fence; the live source's local-mock origin is not
 //! (`tests/ui/live_mock_origin.rs`). A fence's own account (whose own availability it permits) comes only from

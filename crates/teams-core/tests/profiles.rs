@@ -1,8 +1,8 @@
 //! People's names and pictures (M2 Task 12) through a running engine, against wiremock as Graph and the middle tier
 //! (the transport's `test-support` mock origin): a name and a picture from Graph, kept in the store and told as
-//! `Event::Profile`; a name Graph doesn't give from the profile lookup, for a lab account only and under the fence's
-//! permit (logged to `fence.log` before it is sent); someone outside the lab never looked up by `POST` and named from
-//! their messages, else from the names the binary knows; one lookup per person at a time; a failed one not tried
+//! `Event::Profile`; a name Graph doesn't give from the profile lookup, whoever it names (a read reaches nobody; logged
+//! to `fence.log` as `allowed` before it is sent); someone the lookup gives no name for named from their messages,
+//! else from the names the binary knows; one lookup per person at a time; a failed one not tried
 //! again before its wait, and tried again after it without anyone asking; and an old profile read again by age, its
 //! read time kept when a part failed.
 //!
@@ -273,7 +273,7 @@ async fn a_name_and_a_picture_come_from_graph_and_are_kept_in_the_store() {
 }
 
 #[tokio::test]
-async fn a_name_graph_doesnt_give_comes_from_the_profile_lookup_for_a_lab_account_under_the_fence() {
+async fn a_name_graph_doesnt_give_comes_from_the_profile_lookup_logged_as_allowed() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path(graph_user(GUID_B)))
@@ -302,25 +302,19 @@ async fn a_name_graph_doesnt_give_comes_from_the_profile_lookup_for_a_lab_accoun
     assert_eq!(lookups.len(), 1);
     let body: Value = serde_json::from_slice(&lookups[0].body).unwrap();
     assert_eq!(body, json!([mri(GUID_B)]));
-    // the fence's decision, then the request, each logged before it went
+    // the request, logged before it went
     let lines = rig.log.lines();
-    let kinds: Vec<(&str, &str)> = lines
-        .iter()
-        .map(|line| {
-            (
-                line["event"].as_str().or(line["channel"].as_str()).unwrap_or(""),
-                line["verdict"].as_str().or(line["outcome"].as_str()).unwrap_or(""),
-            )
-        })
-        .collect();
-    assert_eq!(lines.len(), 2, "{lines:?}");
-    assert_eq!(kinds[0], ("post_read_decision", "allow"), "{lines:?}");
-    assert_eq!(lines[1]["post_read"], "short_profile", "{lines:?}");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        (&lines[0]["event"], &lines[0]["method"], &lines[0]["path"]),
+        (&json!("allowed"), &json!("POST"), &json!(SHORT_PROFILE)),
+        "{lines:?}"
+    );
     rig.handle.shutdown();
 }
 
 #[tokio::test]
-async fn someone_outside_the_lab_is_never_looked_up_by_post_and_is_named_from_their_messages() {
+async fn someone_outside_the_lab_is_looked_up_like_anyone_and_named_from_their_messages_when_it_fails() {
     let server = MockServer::start().await;
     for guid in [GUID_OUT, GUID_B] {
         Mock::given(method("GET"))
@@ -375,15 +369,14 @@ async fn someone_outside_the_lab_is_never_looked_up_by_post_and_is_named_from_th
     rig.profile_of(&mri(GUID_OUT)).await;
     let outsider = rig.handle.person(mri(GUID_OUT)).await.unwrap();
     assert_eq!(outsider.from, Some(NameFrom::Message), "Graph and the lookup gave none");
-    assert!(
-        rig.requests_to(SHORT_PROFILE).await.is_empty(),
-        "denied before anything went"
-    );
-    let decisions: Vec<Value> = rig.log.lines();
-    assert_eq!(decisions.len(), 1, "{decisions:?}");
-    assert_eq!(decisions[0]["event"], "post_read_decision");
-    assert_eq!(decisions[0]["verdict"], "deny");
-    assert!(!decisions[0].to_string().contains(GUID_OUT), "the log names no MRI");
+    let lookups = rig.requests_to(SHORT_PROFILE).await;
+    assert_eq!(lookups.len(), 1, "the lookup went");
+    let body: Value = serde_json::from_slice(&lookups[0].body).unwrap();
+    assert_eq!(body, json!([mri(GUID_OUT)]));
+    let lines: Vec<Value> = rig.log.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["event"], "allowed");
+    assert!(!lines[0].to_string().contains(GUID_OUT), "the log names no MRI");
 
     // a lab account the lookup fails for (500) is named by the name the binary knows, and tried again later
     let _ = rig.handle.person(mri(GUID_B)).await.unwrap();
@@ -394,7 +387,7 @@ async fn someone_outside_the_lab_is_never_looked_up_by_post_and_is_named_from_th
 }
 
 #[tokio::test]
-async fn without_the_middle_tier_s_base_the_fence_isn_t_asked_for_a_lookup() {
+async fn without_the_middle_tier_s_base_no_lookup_goes() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path(graph_user(GUID_B)))
@@ -412,7 +405,10 @@ async fn without_the_middle_tier_s_base_the_fence_isn_t_asked_for_a_lookup() {
     rig.profile_of(&mri(GUID_B)).await;
     let b = rig.handle.person(mri(GUID_B)).await.unwrap();
     assert_eq!((b.name.as_deref(), b.from), (Some("lab-b"), Some(NameFrom::Known)));
-    assert!(rig.log.lines().is_empty(), "no decision for a lookup that can't go out");
+    assert!(
+        rig.log.lines().is_empty(),
+        "nothing logged for a lookup that can't go out"
+    );
     assert!(rig.requests_to(SHORT_PROFILE).await.is_empty());
     rig.handle.shutdown();
 }

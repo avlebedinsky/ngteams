@@ -37,9 +37,9 @@
 //!   message of the run in the 1:1 chat exactly once.
 //! - Images and files only as far as M2 Tasks 21–23 got: none is sent (sending stays deferred).
 //! - `fence.log` over the run: whole lines; allows only on the a–b chat and the recorded group chat (their messages,
-//!   edits, reactions, read receipts, typing) and the lab accounts' own availability; no deny but the fence refusing
-//!   the profile lookup (`PostRead`) of someone outside the lab, a channel's member, before anything went; own-state
-//!   requests, `PostRead` and frames only from the reviewed lists.
+//!   edits, reactions, read receipts, typing) and the lab accounts' own availability; no deny; requests let through
+//!   because they reach nobody (logged `allowed`: the registration, profile lookups and presence reads, whoever they
+//!   name) and frames only of the sealed kinds.
 //!
 //! Screenshots of each step go to `<data_dir>/screenshots/<time>/` (`0700`), and the traces, the processes' output and
 //! `summary.json` to `<data_dir>/ui-live/<time>/`, never the repo. No file kept there holds a token (the apps' and the
@@ -69,7 +69,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use teams_fence::lab::{Alias, LabChats, LabConfig, LabLocations};
 use teams_fence::one_to_one_id;
-use teams_proto::{Authenticate, Disconnect, EndpointRegistration, MessageLossAck, OwnFrame, OwnState, Ping};
+use teams_proto::{Authenticate, Disconnect, MessageLossAck, OwnFrame, Ping};
 use teams_ui::settings::{ManualStatus, SettingsFile};
 use teams_ui::tray::{ITEM_PATH, MENU_PATH, MENU_QUIT};
 use ui_sandbox::input::{Modifier, VirtualInput, keys};
@@ -1169,16 +1169,14 @@ struct FenceCounts {
     writes: BTreeMap<String, usize>,
     group_writes: BTreeMap<String, usize>,
     own_availability: usize,
-    post_reads: BTreeMap<String, usize>,
-    own_requests: BTreeMap<String, usize>,
+    /// Mutating requests let through because they reach nobody, by method, host and path shape.
+    allowed: BTreeMap<String, usize>,
     own_frames: BTreeMap<String, usize>,
-    /// Profile lookups of people outside the lab (a channel's members) the fence refused before anything went.
-    outsider_lookups_denied: usize,
 }
 
 /// `fence.log`'s lines since `start` (a byte offset): whole JSON lines; allows only on the a–b chat, the recorded
-/// group chat and the lab accounts' own availability; no deny but the fence refusing a profile lookup of someone
-/// outside the lab ([`FenceCounts::deny`]); `PostRead`, own-state requests and frames only of the reviewed kinds.
+/// group chat and the lab accounts' own availability; no deny; the requests let through because they reach nobody,
+/// counted by their shape; frames only of the sealed kinds.
 fn fence_log_holds(lab: &Lab, start: u64) -> Value {
     let log = fs::read(&lab.fence_log).unwrap();
     let run = &log[usize::try_from(start).unwrap()..];
@@ -1188,10 +1186,7 @@ fn fence_log_holds(lab: &Lab, start: u64) -> Value {
     for line in std::str::from_utf8(run).unwrap().lines() {
         lines += 1;
         let entry: Value = serde_json::from_str(line).unwrap_or_else(|error| panic!("not a whole line: {error}"));
-        if entry["verdict"] != "allow" {
-            counts.deny(&entry);
-            continue;
-        }
+        assert_eq!(entry["verdict"], "allow", "a line that is no allow: {entry}");
         counts.add(lab, &entry);
     }
     assert_eq!(
@@ -1208,27 +1203,12 @@ fn fence_log_holds(lab: &Lab, start: u64) -> Value {
         "allowed_writes": counts.writes,
         "allowed_group_writes": counts.group_writes,
         "own_availability": counts.own_availability,
-        "post_reads": counts.post_reads,
-        "own_requests": counts.own_requests,
+        "allowed": counts.allowed,
         "own_frames": counts.own_frames,
-        "outsider_lookups_denied": counts.outsider_lookups_denied,
     })
 }
 
 impl FenceCounts {
-    /// The only deny the run takes: the fence refusing the middle tier's profile lookup of someone outside the lab
-    /// (the engine asks the fence for each name Graph didn't give, M2 Task 12; a channel's members are tenant users),
-    /// so nothing was sent. Any other deny fails the run.
-    fn deny(&mut self, entry: &Value) {
-        let outsider = entry["event"] == "post_read_decision"
-            && entry["post_read"] == "short_profile"
-            && entry["reason"]["outsiders"]["count"]
-                .as_u64()
-                .is_some_and(|count| count > 0);
-        assert!(outsider, "a line that is no allow: {entry}");
-        self.outsider_lookups_denied += 1;
-    }
-
     fn add(&mut self, lab: &Lab, entry: &Value) {
         if let Some(kind) = entry["kind"].as_str() {
             self.add_write(lab, kind, entry);
@@ -1237,22 +1217,11 @@ impl FenceCounts {
             let frames = [Authenticate::KIND, Ping::KIND, MessageLossAck::KIND, Disconnect::KIND];
             assert!(frames.contains(&own.as_str()), "a frame off the list: {entry}");
             *self.own_frames.entry(own).or_default() += 1;
-        } else if let Some(post_read) = entry["post_read"].as_str() {
-            assert!(
-                ["short_profile", "presence"].contains(&post_read),
-                "a PostRead off the list: {entry}"
-            );
-            if entry["event"] == "post_read_decision" {
-                *self.post_reads.entry(format!("{post_read}_decision")).or_default() += 1;
-            } else {
-                assert_eq!(entry["channel"], "http", "{entry}");
-                *self.post_reads.entry(post_read.to_owned()).or_default() += 1;
-            }
         } else {
-            assert_eq!(entry["channel"], "http", "a line of another kind: {entry}");
-            let own = entry["own"].as_str().unwrap_or_default().to_owned();
-            assert_eq!(own, EndpointRegistration::KIND, "a request off the list: {entry}");
-            *self.own_requests.entry(own).or_default() += 1;
+            assert_eq!(entry["event"], "allowed", "a line of another kind: {entry}");
+            let text = |key: &str| entry[key].as_str().unwrap_or_default().to_owned();
+            let shape = format!("{} {}{}", text("method"), text("host"), text("path"));
+            *self.allowed.entry(shape).or_default() += 1;
         }
     }
 

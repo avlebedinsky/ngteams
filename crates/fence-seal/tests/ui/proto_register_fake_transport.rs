@@ -4,10 +4,7 @@
 // `EndpointRegistrar`, which is sealed, and outside `test-support` only `HttpTransport` is one.
 use std::io;
 
-use teams_proto::{
-    Authorized, AuthorizedPostRead, EndpointRegistration, Mutating, OwnState, PostRead, Read, Response, Transport,
-    register,
-};
+use teams_proto::{Authorized, EndpointRegistration, Mutating, Read, Request, Response, Transport, register};
 
 struct Answering;
 
@@ -18,12 +15,8 @@ impl Transport for Answering {
         Ok(Response::new(200, Vec::new()))
     }
 
-    async fn own_state<R: OwnState>(&self, _: &R) -> Result<Response, io::Error> {
+    async fn send<R: Request>(&self, _: &R) -> Result<Response, io::Error> {
         Ok(Response::new(202, Vec::new()))
-    }
-
-    async fn post_read<R: PostRead + Send>(&self, _: AuthorizedPostRead<R>) -> Result<Response, io::Error> {
-        Ok(Response::new(200, Vec::new()))
     }
 
     async fn deliver<R: Mutating + Send>(&self, _: Authorized<R>) -> Result<Response, io::Error> {

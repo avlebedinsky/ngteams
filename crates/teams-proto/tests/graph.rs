@@ -1,8 +1,9 @@
 //! Microsoft Graph's two reads (M2 Task 12) on wiremock, through the `test-support` mock origin: a user's name
 //! (`users/<object id>?$select=id,displayName`) and their 96×96 picture, each a `GET` with the account's Graph token
 //! and nothing else, in the shape `proto-lab probe profile` read live (the synthetic fixture
-//! `tests/fixtures/graph/profile.json`); any other Graph endpoint, and any request to Graph that isn't a read, is
-//! refused before anything is sent.
+//! `tests/fixtures/graph/profile.json`); any other Graph read goes to the same base; a plain request to Graph that
+//! changes anything is refused before anything is sent (Graph is a contacting service the fence's classifier reads no
+//! write of).
 //!
 //! Tokens and ids here are placeholders, never real ones.
 
@@ -21,7 +22,7 @@ use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{
     Client, Credentials, Endpoint, GRAPH_AUDIENCE, GraphAnswerError, GraphPicture, GraphUser, HttpError, HttpTransport,
-    MAX_PICTURE, PictureFormat, Read, Refusal, Response, Service, object_id,
+    MAX_PICTURE, Method, PictureFormat, Read, Refusal, Request, Response, Service, object_id,
 };
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -269,36 +270,84 @@ impl Read for OtherGraphRead {
 }
 
 #[tokio::test]
-async fn any_other_graph_endpoint_is_refused_before_anything_is_sent() {
-    let (server, tokens, client) = setup().await;
-    let user = || Endpoint::new(["users", GUID_A]);
+async fn any_other_graph_read_goes_to_graph_with_its_query() {
+    let (server, _tokens, client) = setup().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("{}", "application/json"))
+        .mount(&server)
+        .await;
     let others = [
-        // the whole record, or another selection
-        user(),
-        user().with_query("$select", "id,displayName,mail"),
-        user()
-            .with_query("$select", "id,displayName")
-            .with_query("$expand", "manager"),
-        // the largest picture, another size, the picture's metadata
+        Endpoint::new(["users", GUID_A]).with_query("$select", "id,displayName,mail"),
         Endpoint::new(["users", GUID_A, "photo", "$value"]),
-        Endpoint::new(["users", GUID_A, "photos", "648x648", "$value"]),
-        Endpoint::new(["users", GUID_A, "photos", "96x96"]),
-        // a search, the account itself, by address, another collection
-        Endpoint::new(["users"]).with_query("$filter", "startswith(displayName,'a')"),
         Endpoint::new(["me"]),
-        Endpoint::new(["users", "someone@lab.example.com"]).with_query("$select", "id,displayName"),
-        Endpoint::new(["groups", GUID_A]),
-        Endpoint::new(["users", GUID_A, "..", "x"]),
     ];
     for endpoint in others {
-        let shown = format!("{endpoint:?}");
-        match client.read(&OtherGraphRead(endpoint)).await {
-            Err(HttpError::Refused(Refusal::GraphPath | Refusal::Segment)) => {}
+        client.read(&OtherGraphRead(endpoint)).await.unwrap();
+    }
+    let urls: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| format!("{}?{}", request.url.path(), request.url.query().unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            format!("/v1.0/users/{GUID_A}?%24select=id%2CdisplayName%2Cmail"),
+            format!("/v1.0/users/{GUID_A}/photo/$value?"),
+            "/v1.0/me?".to_owned(),
+        ]
+    );
+}
+
+/// A plain request to Graph of the test's choosing.
+struct GraphWrite(Method, Endpoint);
+
+impl Request for GraphWrite {
+    fn service(&self) -> Service {
+        Service::Graph
+    }
+
+    fn method(&self) -> Method {
+        self.0
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        self.1.clone()
+    }
+
+    fn body(&self) -> Option<Value> {
+        Some(serde_json::json!({}))
+    }
+}
+
+#[tokio::test]
+async fn a_graph_write_is_refused_before_anything_is_sent() {
+    let (server, tokens, client) = setup().await;
+    let writes = [
+        GraphWrite(Method::Post, Endpoint::new(["$batch"])),
+        GraphWrite(Method::Post, Endpoint::new(["me", "sendMail"])),
+        GraphWrite(Method::Post, Endpoint::new(["chats", "19:chat@thread.v2", "messages"])),
+        GraphWrite(Method::Patch, Endpoint::new(["users", GUID_A])),
+        GraphWrite(Method::Delete, Endpoint::new(["me", "events", "event-id"])),
+    ];
+    for write in writes {
+        let shown = format!("{:?} {:?}", write.0, write.1);
+        match client.send(&write).await {
+            Err(HttpError::Refused(Refusal::Unreadable)) => {}
             other => panic!("{shown}: {other:?}"),
         }
     }
+    match client
+        .read(&OtherGraphRead(Endpoint::new(["users", GUID_A, "..", "x"])))
+        .await
+    {
+        Err(HttpError::Refused(Refusal::Segment)) => {}
+        other => panic!("{other:?}"),
+    }
     assert!(server.received_requests().await.unwrap().is_empty());
-    assert!(tokens.audiences().is_empty(), "no token is asked for a refused read");
+    assert!(tokens.audiences().is_empty(), "no token is asked for a refused request");
 }
 
 #[tokio::test]
