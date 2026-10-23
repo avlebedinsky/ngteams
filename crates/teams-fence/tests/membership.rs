@@ -2,8 +2,8 @@
 //! `with_mock_origin`), and every way an answer falls short of a complete member list.
 //!
 //! The thread answer is the synthetic fixture `tests/fixtures/chatsvc/thread-one-to-one.json` (sanitized form), with
-//! made-up GUIDs filled in for its placeholders. The lab's group chat has tests of its own (`tests/group_chat.rs`). No
-//! real MRI or token appears here.
+//! made-up GUIDs filled in for its placeholders. Group and meeting chats have tests of their own
+//! (`tests/group_chat.rs`). No real MRI or token appears here.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use teams_fence::{
     ChatCredential, CredentialFuture, CredentialSource, DenyReason, Fence, FenceLog, FetchFailure,
     LiveMembershipSource, MAX_BODY, Membership, MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind,
-    chat_service_path, is_group_chat_id, one_to_one_id, one_to_one_pair, parse_thread,
+    chat_service_path, is_group_chat_id, is_meeting_chat_id, one_to_one_id, one_to_one_pair, parse_thread,
 };
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -118,12 +118,14 @@ async fn without_a_credential_nothing_is_read() -> TestResult {
 }
 
 #[tokio::test]
-async fn scopes_other_than_a_one_to_one_chat_are_unsupported_and_never_read() -> TestResult {
+async fn scopes_other_than_a_chat_are_unsupported_and_never_read() -> TestResult {
+    // a group or meeting chat is read (tests/group_chat.rs); a malformed 1:1 id, a stream, a channel, a team or a call
+    // isn't
     let server = MockServer::start().await;
     let source = source(&server)?;
     let scopes = [
         Scope::Conversation {
-            id: "19:abcdef0123456789@thread.v2".to_owned(),
+            id: "19:meeting_@thread.v2".to_owned(),
         },
         Scope::Conversation {
             id: format!("19:{GUID_A}_{GUID_A}@unq.gbl.spaces"),
@@ -562,17 +564,26 @@ fn group_chat() -> Scope {
 }
 
 #[test]
-fn without_the_lab_only_a_one_to_one_chat_can_be_read_in_full() -> TestResult {
-    // a source that doesn't know the lab admits no group chat (the lab's own one: tests/group_chat.rs)
+fn every_source_reads_one_to_one_group_and_meeting_chats_and_nothing_else() -> TestResult {
     let source = LiveMembershipSource::new()?;
-    assert!(source.reads_in_full(&chat()));
     for scope in [
+        chat(),
         group_chat(),
         Scope::Conversation {
             id: "19:meeting_0123456789abcdef@thread.v2".to_owned(),
         },
+    ] {
+        assert!(source.reads_in_full(&scope), "{scope}");
+    }
+    for scope in [
         Scope::Conversation {
             id: format!("19:{GUID_A}_{GUID_A}@unq.gbl.spaces"),
+        },
+        Scope::Conversation {
+            id: "19:0123456789abcdef@thread.tacv2".to_owned(),
+        },
+        Scope::Conversation {
+            id: "48:notes".to_owned(),
         },
         Scope::Channel {
             team: "19:team@thread.tacv2".to_owned(),
@@ -584,10 +595,42 @@ fn without_the_lab_only_a_one_to_one_chat_can_be_read_in_full() -> TestResult {
         Scope::Call {
             id: "call-1".to_owned(),
         },
+        Scope::New,
+        Scope::Account {
+            mri: mri(GUID_A).as_str().to_owned(),
+        },
     ] {
         assert!(!source.reads_in_full(&scope), "{scope}");
     }
     Ok(())
+}
+
+#[test]
+fn a_meeting_chat_id_is_19_meeting_an_id_and_thread_v2_and_never_a_group_chat_s() {
+    for id in [
+        "19:meeting_0123@thread.v2",
+        "19:MEETING_0123@thread.v2",
+        "19:Meeting_MjA4ZmVlNjYtYWJjZC00@thread.v2",
+        "19:meeting_a_b-C9@thread.v2",
+    ] {
+        assert!(is_meeting_chat_id(id), "{id}");
+        assert!(!is_group_chat_id(id), "{id}");
+    }
+    for id in [
+        "19:meeting_@thread.v2",
+        "19:meeting@thread.v2",
+        "19:meeting_01 23@thread.v2",
+        "19:meeting_0123@thread.tacv2",
+        "19:meeting_0123@thread.v2;messageid=1",
+        "19:meeting_0123%40thread.v2",
+        "meeting_0123@thread.v2",
+        &format!("19:{GROUP}@thread.v2"),
+        &format!("19:{GUID_A}_{GUID_B}@unq.gbl.spaces"),
+        &format!("19:meeting_{}@thread.v2", "a".repeat(121)),
+    ] {
+        assert!(!is_meeting_chat_id(id), "{id}");
+    }
+    assert!(is_meeting_chat_id(&format!("19:meeting_{}@thread.v2", "a".repeat(120))));
 }
 
 #[test]
@@ -597,6 +640,7 @@ fn a_group_chat_id_is_19_an_id_and_thread_v2_and_never_a_meeting_s() {
     for id in [
         "19:meeting_0123@thread.v2",
         "19:MEETING_0123@thread.v2",
+        "19:meeting_@thread.v2",
         "19:@thread.v2",
         "19:01 23@thread.v2",
         "19:0123@thread.tacv2",

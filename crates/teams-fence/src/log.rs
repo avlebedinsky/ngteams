@@ -44,6 +44,17 @@
 //! {"ts_ms":1760000000000,"verdict":"allow","event":"post_read_decision","post_read":"short_profile","names":2}
 //! ```
 //!
+//! A mutating request the fence lets through because it reaches nobody (`contacting` called it
+//! [`Contact::None`](crate::Contact::None)) is logged as `allowed` ([`AllowedRecord`]), by the browser fence and the
+//! native transport alike: its method, its host and its path's shape, every id in the path replaced by its kind
+//! ([`path_shape`]: `<chat>`, `<message>`, `<mri>`, `<guid>`, `<id>`), never a query, a header or the body. That is
+//! the record that shows a family of requests reaching people is missing from the classifier:
+//!
+//! ```json
+//! {"ts_ms":1760000000000,"verdict":"allow","event":"allowed","method":"PUT","host":"teams.microsoft.com",
+//!  "path":"/api/chatsvc/emea/v1/users/ME/conversations/<chat>/properties"}
+//! ```
+//!
 //! So is a target the browser fence couldn't arm ([`ArmingRecord`]): its type, the step that failed and how, whether
 //! its resume had been sent, whether it attached held (`waitingForDebugger`), what closing it gave and how it was
 //! contained, with the verdict `breach` when it may have run unguarded and `contained` when it can't have. No target
@@ -73,7 +84,9 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use percent_encoding::percent_decode_str;
 use serde::Serialize;
+use url::Url;
 
 use crate::decision::DenyReason;
 use crate::post_read::PostReadDenyReason;
@@ -190,6 +203,24 @@ struct FrameEntry {
     channel: Channel,
     url: String,
     own: &'static str,
+}
+
+/// A mutating request let through because it reaches nobody: its method and URL. Only the URL's host and its path's
+/// shape ([`path_shape`]) are logged: never its query, user info or fragment, nor any header or body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllowedRecord<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+}
+
+#[derive(Serialize)]
+struct AllowedEntry<'a> {
+    ts_ms: u64,
+    verdict: &'static str,
+    event: &'static str,
+    method: &'a str,
+    host: String,
+    path: String,
 }
 
 /// How an arming step failed.
@@ -466,6 +497,30 @@ impl FenceLog {
         })
     }
 
+    /// Appends one mutating request let through because it reaches nobody, as a single line, and flushes it: its
+    /// method, host (lowercase, no port) and path shape ([`path_shape`]). A URL that doesn't parse is logged with an
+    /// empty host and the path `<unparsable>`. Once an append has failed, every later one fails too.
+    ///
+    /// # Errors
+    /// When the entry can't be written, or an earlier append failed.
+    pub fn record_allowed(&self, request: &AllowedRecord<'_>) -> io::Result<()> {
+        let (host, path) = Url::parse(request.url).map_or_else(
+            |_| (String::new(), "<unparsable>".to_owned()),
+            |url| {
+                let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+                (host, path_shape(url.path()))
+            },
+        );
+        self.append(&AllowedEntry {
+            ts_ms: now_ms(),
+            verdict: "allow",
+            event: "allowed",
+            method: request.method,
+            host,
+            path,
+        })
+    }
+
     /// Appends one target the browser fence couldn't arm, as a single line, and flushes it. Once an append has failed,
     /// every later one fails too.
     ///
@@ -520,6 +575,79 @@ fn redact_url(url: &str) -> String {
         Some(at) => format!("{}{}", &url[..scheme_end], &rest[at + 1..]),
         None => url.to_owned(),
     }
+}
+
+/// The longest path segment [`path_shape`] keeps as it is.
+const MAX_WORD: usize = 32;
+
+/// The shape of a URL path (as [`Url::path`] gives it, percent-encoded): each segment percent-decoded and, when it is
+/// an id, replaced by its kind, so that the shape names an endpoint and not whom it concerns:
+/// - `<chat>`: a conversation id (`19:…`, a chat's, a channel's or a meeting's);
+/// - `<mri>`: any other MRI (`8:orgid:…`, `28:…`), but a named `48:` stream (`48:notifications`) stays as it is;
+/// - `<guid>`: a GUID;
+/// - `<message>`: a number of 6 digits or more (a message id, a timestamp);
+/// - `<id>`: anything else that isn't a short word: longer than 32 characters, holding a character other than ASCII
+///   letters, digits and `. _ ~ $ -`, or a run of 6 digits or more (an object id, an endpoint id, a token).
+///
+/// Every other segment is a word of the API and stays.
+#[must_use]
+pub fn path_shape(path: &str) -> String {
+    path.split('/')
+        .map(|segment| shape_segment(&percent_decode_str(segment).decode_utf8_lossy()))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn shape_segment(segment: &str) -> String {
+    if segment.is_empty() {
+        return String::new();
+    }
+    let kind = if segment.starts_with("19:") {
+        "<chat>"
+    } else if let Some((prefix, rest)) = segment.split_once(':')
+        && !prefix.is_empty()
+        && prefix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        if prefix == "48" && !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_lowercase()) {
+            return segment.to_owned();
+        }
+        "<mri>"
+    } else if is_guid_text(segment) {
+        "<guid>"
+    } else if segment.len() >= 6 && segment.bytes().all(|byte| byte.is_ascii_digit()) {
+        "<message>"
+    } else if is_word(segment) {
+        return segment.to_owned();
+    } else {
+        "<id>"
+    };
+    kind.to_owned()
+}
+
+/// A short word of an API: at most [`MAX_WORD`] ASCII letters, digits and `. _ ~ $ -`, without a run of 6 digits.
+fn is_word(segment: &str) -> bool {
+    segment.len() <= MAX_WORD
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'$' | b'-'))
+        && !segment
+            .as_bytes()
+            .windows(6)
+            .any(|run| run.iter().all(u8::is_ascii_digit))
+}
+
+/// A GUID, `8-4-4-4-12` hex digits, in braces or not.
+fn is_guid_text(segment: &str) -> bool {
+    let bare = segment
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+        .unwrap_or(segment);
+    let groups: Vec<&str> = bare.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(group, len)| group.len() == len && group.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// Ends the file's last line with a newline when it has none.

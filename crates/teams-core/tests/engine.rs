@@ -33,14 +33,8 @@ use teams_core::engine::{
 };
 use teams_core::search::{Backfill, Step};
 use teams_core::{Clock, MAX_FAILED_CHECKS, Outbox, Transient, TransientSent};
-use teams_fence::lab::{LabConfig, record_abc_chat};
-use teams_fence::{
-    Fence, FenceLog, LiveMembershipSource, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope,
-    is_group_chat_id,
-};
-use teams_mock::{
-    AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml,
-};
+use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster, is_group_chat_id};
+use teams_mock::{AB_CHAT, ABC_CHAT, AX_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, TrouterMock};
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Authorized, AuthorizedPostRead, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState,
@@ -111,24 +105,6 @@ impl TrouterCredentials for Tokens {
 
     fn renewals(&self) -> broadcast::Receiver<Renewal> {
         self.renewals.subscribe()
-    }
-}
-
-/// The fence's live member read, except that every group chat reads as complete with a, b and c. A stand-in for the
-/// tests of a group chat the native client creates: the live read admits only the group chat the lab recorded
-/// (`chats.toml`'s `abc`), so a write to a new one is denied
-/// ([`a_group_chat_made_natively_is_denied_its_first_message_under_the_live_read`]); with the stand-in those tests
-/// reach the engine's three-way delivery. Test-only, as any source but the crate's own is.
-struct GroupsOfTheLab(LiveMembershipSource);
-
-impl MembershipSource for GroupsOfTheLab {
-    fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a> {
-        match scope {
-            Scope::Conversation { id } if is_group_chat_id(id) => Box::pin(future::ready(Membership::Complete(
-                [LAB_A, LAB_B, LAB_C].map(Mri::new).to_vec(),
-            ))),
-            _ => self.0.members(scope),
-        }
     }
 }
 
@@ -273,27 +249,26 @@ impl Lab {
             .filter(|request| request.method.as_str() == "POST" && decoded(request.url.path()) == path)
             .count()
     }
+
+    /// The reads of `conversation`'s member list the mock got (the fence's live member read).
+    async fn member_reads_of(&self, conversation: &str) -> usize {
+        let path = format!("/api/chatsvc/amer/v1/threads/{conversation}/members");
+        self.mock
+            .received_requests()
+            .await
+            .iter()
+            .filter(|request| request.method.as_str() == "GET" && decoded(request.url.path()) == path)
+            .count()
+    }
 }
 
 fn decoded(path: &str) -> String {
     path.replace("%3A", ":").replace("%40", "@")
 }
 
-/// What a native client's member read knows of group chats.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Groups {
-    /// The fence's live read without the lab's policy: no group chat is admitted.
-    Unknown,
-    /// The fence's live read with the lab's policy (its `lab.toml`), its `chats.toml` recording [`ABC_CHAT`] or not.
-    Lab { recorded: bool },
-    /// Every group chat reads as a, b and c ([`GroupsOfTheLab`]).
-    StandIn,
-}
-
 /// How a native client is set up.
 #[derive(Clone, Copy)]
 struct How {
-    groups: Groups,
     push: bool,
     /// The first write is throttled ([`Interposed`]).
     throttle_first_write: bool,
@@ -304,7 +279,6 @@ struct How {
 impl Default for How {
     fn default() -> Self {
         Self {
-            groups: Groups::Unknown,
             push: true,
             throttle_first_write: false,
             backoff: Duration::from_millis(50),
@@ -374,23 +348,10 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
     let origin = lab.mock.origin();
     let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
     let transport = Arc::new(http());
+    // the fence's live member read, against the mock: any chat the mock knows, group chats included
     let live = LiveMembershipSource::with_mock_origin(&origin).unwrap();
-    let live = match how.groups {
-        Groups::Lab { recorded } => {
-            let config = LabConfig::parse(&lab_toml(dir.path()), dir.path()).unwrap();
-            if recorded {
-                record_abc_chat(config.paths(), ABC_CHAT).unwrap();
-            }
-            live.with_lab(&config)
-        }
-        Groups::Unknown | Groups::StandIn => live,
-    };
     live.set_credential_source(transport.clone());
-    let membership: Arc<dyn MembershipSource + Send> = if how.groups == Groups::StandIn {
-        Arc::new(GroupsOfTheLab(live))
-    } else {
-        Arc::new(live)
-    };
+    let membership: Arc<dyn MembershipSource + Send> = Arc::new(live);
     let author = Author::new(Mri::new(me), "Lab account");
     let reads_fail = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(Reads {
@@ -802,10 +763,7 @@ async fn a_read_receipt_moves_b_s_horizon_as_the_service_sees_it() {
 #[tokio::test]
 async fn a_message_to_the_lab_s_group_reaches_both_others() {
     let lab = Lab::start().await;
-    let how = How {
-        groups: Groups::Lab { recorded: true },
-        ..How::default()
-    };
+    let how = How::default();
     let mut a = native(&lab, LAB_A, how);
     let mut b = native(&lab, LAB_B, how);
     let mut c = native(&lab, LAB_C, how);
@@ -833,36 +791,11 @@ async fn a_message_to_the_lab_s_group_reaches_both_others() {
 }
 
 #[tokio::test]
-async fn a_write_to_a_group_chat_the_lab_didn_t_record_is_denied() {
+async fn a_group_chat_made_natively_takes_its_first_message_under_the_live_read() {
+    // the live read judges any group chat by its member list, a chat the native client just created included: no lab
+    // record (`chats.toml`) plays a part
     let lab = Lab::start().await;
-    // the lab's policy with nothing recorded, and a read that doesn't know the lab
-    for groups in [Groups::Lab { recorded: false }, Groups::Unknown] {
-        let mut a = native(
-            &lab,
-            LAB_A,
-            How {
-                groups,
-                ..How::default()
-            },
-        );
-        a.ready().await;
-        let row = a.write(send(ABC_CHAT, "never sent")).await;
-        assert_eq!(row.state, OutboxState::Denied, "{groups:?}: {row:?}");
-        assert_eq!(a.log.verdicts("message", ABC_CHAT), ["deny"], "{groups:?}");
-        a.shutdown();
-    }
-    assert_eq!(lab.posts_to(ABC_CHAT).await, 0);
-}
-
-#[tokio::test]
-async fn a_group_chat_made_natively_is_denied_its_first_message_under_the_live_read() {
-    // the live read admits only the group chat chats.toml records, and a native create records nothing
-    let lab = Lab::start().await;
-    let how = How {
-        groups: Groups::Lab { recorded: true },
-        ..How::default()
-    };
-    let mut a = native(&lab, LAB_A, how);
+    let mut a = native(&lab, LAB_A, How::default());
     a.ready().await;
     let created = a
         .write(Action::CreateChat {
@@ -877,20 +810,18 @@ async fn a_group_chat_made_natively_is_denied_its_first_message_under_the_live_r
     let chat = id_of(&created);
     assert!(is_group_chat_id(&chat) && chat != ABC_CHAT, "{chat}");
 
-    let row = a.write(send(&chat, "never sent")).await;
-    assert_eq!(row.state, OutboxState::Denied, "{row:?}");
-    assert_eq!(a.log.verdicts("message", &chat), ["deny"]);
-    assert_eq!(lab.posts_to(&chat).await, 0);
+    let row = a.send(&chat, "the first message").await;
+    assert_eq!(row.state, OutboxState::Sent, "{row:?}");
+    assert_eq!(a.log.verdicts("message", &chat), ["allow"]);
+    assert_eq!(lab.posts_to(&chat).await, 1);
+    assert_eq!(lab.member_reads_of(&chat).await, 1, "judged by one fresh member read");
     a.shutdown();
 }
 
 #[tokio::test]
 async fn a_new_group_chat_is_created_and_its_first_message_brings_it_to_b_and_c() {
     let lab = Lab::start().await;
-    let how = How {
-        groups: Groups::StandIn,
-        ..How::default()
-    };
+    let how = How::default();
     let mut a = native(&lab, LAB_A, how);
     let mut b = native(&lab, LAB_B, how);
     let mut c = native(&lab, LAB_C, how);
@@ -1453,10 +1384,7 @@ async fn a_post_whose_answer_was_lost_is_settled_by_the_sync_after_another_write
 #[tokio::test]
 async fn a_delivery_whose_conversation_cant_be_read_is_caught_up_from_the_tick() {
     let lab = Lab::start().await;
-    let how = How {
-        groups: Groups::StandIn,
-        ..How::default()
-    };
+    let how = How::default();
     let mut a = native(&lab, LAB_A, how);
     let mut b = native(&lab, LAB_B, how);
     a.ready().await;
@@ -1500,7 +1428,6 @@ async fn a_delivery_whose_conversation_cant_be_read_is_caught_up_from_the_tick()
 
 /// A native client without a push channel.
 const QUIET: How = How {
-    groups: Groups::Unknown,
     push: false,
     throttle_first_write: false,
     backoff: Duration::from_millis(50),
@@ -1798,10 +1725,10 @@ async fn a_row_an_earlier_run_left_goes_out_only_by_an_explicit_resend_which_loo
         "{refused:?}"
     );
 
-    // a denied row is the conversation's to show until it is resent
-    let denied = second.write(send(ABC_CHAT, "never sent")).await;
+    // a denied row (a chat with someone outside the lab) is the conversation's to show until it is resent
+    let denied = second.write(send(AX_CHAT, "never sent")).await;
     assert_eq!(denied.state, OutboxState::Denied);
-    assert_eq!(second.handle.outbox_unsettled(ABC_CHAT).await.unwrap(), [denied]);
+    assert_eq!(second.handle.outbox_unsettled(AX_CHAT).await.unwrap(), [denied]);
     second.shutdown();
 }
 
@@ -2086,14 +2013,16 @@ async fn a_message_post_drops_the_typing_waiting_in_its_conversation() {
 }
 
 #[tokio::test]
-async fn typing_is_fenced_like_any_write_and_refused_where_the_store_knows_no_chat() {
+async fn typing_goes_out_without_a_member_read_and_is_refused_where_the_store_knows_no_chat() {
+    // typing reaches nobody: the fence permits it on a chat without reading its members, logged
     let lab = Lab::start().await;
     let a = native(&lab, LAB_A, QUIET);
     a.handle.sync().await.unwrap();
-    let denied = a.handle.transient(typing(ABC_CHAT)).await.unwrap();
-    assert!(matches!(denied, TransientSent::Denied { .. }), "{denied:?}");
-    assert_eq!(a.log.verdicts("typing", ABC_CHAT), ["deny"]);
-    assert_eq!(lab.posts_to(ABC_CHAT).await, 0);
+    let sent = a.handle.transient(typing(ABC_CHAT)).await.unwrap();
+    assert!(matches!(sent, TransientSent::Sent), "{sent:?}");
+    assert_eq!(a.log.verdicts("typing", ABC_CHAT), ["allow"]);
+    assert_eq!(lab.posts_to(ABC_CHAT).await, 1);
+    assert_eq!(lab.member_reads_of(ABC_CHAT).await, 0, "no member read");
 
     let refused = a.handle.transient(typing("19:unknown@thread.v2")).await;
     assert!(

@@ -1,8 +1,8 @@
 //! The decision: [`Fence::check`] fetches the target's members fresh and issues a [`WritePermit`] only when every
-//! participant is a lab account or an approved service. The one exception is the account's own availability
-//! ([`WriteKind::OwnAvailability`] on [`Scope::Account`]): it is seen across the tenant, so no participant check can
-//! pass for it, and the user approved it on 2026-10-21 for a lab account's own (CLAUDE.md): the fence permits it
-//! without a member read, only for its own account ([`Fence::own_account`]).
+//! participant is a lab account or an approved service. A write that reaches nobody ([`WriteKind::is_contacting`]
+//! false) is judged without a member read: typing and read receipts on a chat (1:1, group or meeting), and the
+//! account's own availability ([`WriteKind::OwnAvailability`] on [`Scope::Account`]), which the fence permits only
+//! for its own account ([`Fence::own_account`]), so that a lab account never sets another's presence.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
-use crate::membership::LabGroup;
+use crate::membership::{is_group_chat_id, is_meeting_chat_id, one_to_one_pair};
 use crate::target::{Mri, Scope, Target, WriteKind};
 
 /// Who may take part in a write: the lab accounts and the approved service participants, by exact MRI. A lab account
@@ -99,14 +99,6 @@ pub enum PartialReason {
     NoCredential,
     /// The source can't read this kind of scope in full (yet).
     Unsupported,
-    /// A group chat other than the one the lab recorded as its a–b–c chat (`chats.toml`'s `abc`): never read.
-    UnrecordedGroupChat,
-    /// The lab's `chats.toml` can't be read or is invalid, so no group chat counts as recorded.
-    ChatsUnreadable,
-    /// The reads of one scope disagree (a group chat's thread read and member list: their members or `eTag`s).
-    Inconsistent,
-    /// The lab's group chat reads, consistently, as another roster than exactly a, b and c made by a.
-    UnexpectedRoster,
 }
 
 impl fmt::Display for PartialReason {
@@ -119,10 +111,6 @@ impl fmt::Display for PartialReason {
             Self::NoSource => f.write_str("no membership source (the fence runs fail-closed)"),
             Self::NoCredential => f.write_str("the membership source has no credential yet"),
             Self::Unsupported => f.write_str("the membership source can't read this scope in full"),
-            Self::UnrecordedGroupChat => f.write_str("a group chat the lab didn't record as its own"),
-            Self::ChatsUnreadable => f.write_str("the lab's chats.toml can't be read"),
-            Self::Inconsistent => f.write_str("the membership reads disagree"),
-            Self::UnexpectedRoster => f.write_str("the lab's group chat isn't exactly a, b and c made by a"),
         }
     }
 }
@@ -278,10 +266,6 @@ pub enum OpenError {
 pub struct Fence {
     roster: Roster,
     log: FenceLog,
-    /// The lab's group chat policy, from the same `lab.toml` as the roster: what
-    /// [`LiveMembershipSource::for_fence`](crate::LiveMembershipSource::for_fence) gives its source. `None` for a
-    /// fence of no lab (`Fence::new`), or a lab whose a, b and c aren't three known, distinct MRIs.
-    group: Option<LabGroup>,
     /// The account this fence is a client's of ([`Fence::open_lab_account`]): the one account whose own availability
     /// it permits. `None` for a fence of no account ([`Fence::open_lab`], the browser fence's) or of an account whose
     /// MRI `lab.toml` doesn't know yet: it permits no own availability.
@@ -333,7 +317,6 @@ impl Fence {
         Ok(Self {
             roster: Roster::from_lab(config),
             log,
-            group: LabGroup::from_config(config),
             own: None,
         })
     }
@@ -348,12 +331,7 @@ impl Fence {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn new(roster: Roster, log: FenceLog) -> Self {
-        Self {
-            roster,
-            log,
-            group: None,
-            own: None,
-        }
+        Self { roster, log, own: None }
     }
 
     /// The fence with `mri` as its own account (see [`Fence::own_account`]). Tests only (`test-support`).
@@ -369,11 +347,6 @@ impl Fence {
     #[must_use]
     pub fn own_account(&self) -> Option<&Mri> {
         self.own.as_ref()
-    }
-
-    /// The lab's group chat policy this fence was opened with, if any.
-    pub(crate) fn lab_group(&self) -> Option<&LabGroup> {
-        self.group.as_ref()
     }
 
     /// The log every decision goes to; the browser fence records its own request decisions there too.
@@ -393,20 +366,23 @@ impl Fence {
     /// Fetches the target scope's members from `source` (never from a cache) and allows the write only when every
     /// participant, current or added, is in the roster. A [`Scope::New`] target isn't fetched: it is judged by its
     /// added participants alone, and only for a kind that [creates a target](crate::WriteKind::creates_target).
-    /// The account's own availability isn't fetched either (the user's exception of 2026-10-21): it is allowed only on
+    /// A write that reaches nobody ([`WriteKind::is_contacting`] false) isn't fetched either: typing and a read receipt
+    /// on a chat (a 1:1, group or meeting chat by its id) are allowed with only lab accounts or approved services added
+    /// (if any), and anywhere else are judged like any write; the account's own availability is allowed only on
     /// [`Scope::Account`] naming the fence's [own account](Fence::own_account), a lab account, with nobody added; and
-    /// nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
-    /// logged is denied.
+    /// nothing else lands on [`Scope::Account`]. Every decision is appended to
+    /// `fence.log`; an allow that can't be logged is denied.
     ///
     /// # Errors
     /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, when
     /// a kind that doesn't create a target names [`Scope::New`], when an own availability isn't the fence's own
     /// account's or another write names [`Scope::Account`], or when an allow can't be logged.
     pub async fn check(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
-        let own_state = target.kind() == WriteKind::OwnAvailability;
         let membership = match target.scope() {
             Scope::New | Scope::Account { .. } => Membership::Complete(Vec::new()),
-            _ if own_state => Membership::Complete(Vec::new()),
+            _ if target.kind() == WriteKind::OwnAvailability || is_signal_on_a_chat(&target) => {
+                Membership::Complete(Vec::new())
+            }
             scope => source.members(scope).await,
         };
         let verdict = self.judge(&target, membership);
@@ -429,6 +405,9 @@ impl Fence {
         if !fetched && !target.kind().creates_target() {
             return Verdict::Deny(DenyReason::NotCreatable);
         }
+        if is_signal_on_a_chat(target) {
+            return self.judge_added(target);
+        }
         let current = match membership {
             Membership::Complete(members) => members,
             Membership::Partial(reason) => return Verdict::Deny(DenyReason::Partial(reason)),
@@ -441,11 +420,23 @@ impl Fence {
         if participants.is_empty() {
             return Verdict::Deny(DenyReason::NoMembers);
         }
-        let count = participants.iter().filter(|mri| !self.roster.admits(mri)).count();
+        self.admits_all(participants.into_iter())
+    }
+
+    /// The decision on typing or a read receipt on a chat: it reaches nobody, so the chat's members aren't read and
+    /// only the participants it names itself, if any, are judged.
+    fn judge_added(&self, target: &Target) -> Verdict {
+        self.admits_all(target.added().iter())
+    }
+
+    /// Allow when the roster admits every one of `participants`.
+    fn admits_all<'a>(&self, participants: impl Iterator<Item = &'a Mri>) -> Verdict {
+        let count = participants.filter(|mri| !self.roster.admits(mri)).count();
         if count > 0 {
-            return Verdict::Deny(DenyReason::Outsiders { count });
+            Verdict::Deny(DenyReason::Outsiders { count })
+        } else {
+            Verdict::Allow
         }
-        Verdict::Allow
     }
 
     /// The decision on a write that is the account's own availability or lands on [`Scope::Account`]: allowed only
@@ -467,4 +458,16 @@ impl Fence {
             Verdict::Deny(DenyReason::NotOwnAccount)
         }
     }
+}
+
+/// Whether `target` is typing or a read receipt on a chat (a 1:1, group or meeting chat by its id: what
+/// [`crate::contacting`] carves them out on), which the fence permits without a member read. On anything else (a
+/// channel, a team, a call) they are judged like any write.
+fn is_signal_on_a_chat(target: &Target) -> bool {
+    let Scope::Conversation { id } = target.scope() else {
+        return false;
+    };
+    !target.kind().is_contacting()
+        && target.kind() != WriteKind::OwnAvailability
+        && (one_to_one_pair(id).is_some() || is_group_chat_id(id) || is_meeting_chat_id(id))
 }

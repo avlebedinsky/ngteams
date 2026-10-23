@@ -99,9 +99,10 @@ What the code does and why. A change that undoes one of these needs a new reason
 
 - A lab binary's fence is `Fence::open_lab()` (roster from `lab.toml`, the lab's `fence.log`); its membership source
   is `FailClosed` (every fetched scope `Partial(NoSource)`) or `LiveMembershipSource::for_fence(&fence)` (1:1 chats,
-  complete only when the members are exactly the two the chat id names; and the lab's one group chat, the a–b–c chat
-  `chats.toml` records as `abc`, only in the exact shape `docs/protocol/fence-targets.md` gives, from the same
-  `lab.toml` snapshot as the fence's roster; `LiveMembershipSource::new` admits no group chat). The native client's
+  complete only when the members are exactly the two the chat id names; group and meeting chats, any of them, from one
+  fresh member-list read, complete only in the shape `parse_members` takes: no paging key, the count equal to the
+  members listed, nobody hidden, deleted or listed twice, every MRI `8:orgid:<guid>` or `28:<guid>`;
+  `LiveMembershipSource::new` reads the same). The native client's
   member reads take their credential from a `CredentialSource` asked on every read (the session's current `ic3`
   token), renewed once on a 401; without one every write is `Partial(NoCredential)`. `MembershipSource` and `Mutating`
   are sealed: a new source lives in `teams-fence`, a new write type in `teams-proto`, and `fence-seal`'s trybuild
@@ -116,14 +117,20 @@ What the code does and why. A change that undoes one of these needs a new reason
   and, on a Teams origin, by path) is looked at further; there it is unreadable unless a row of its
   table (`crates/teams-fence/src/contacting.rs`, `contacting/chat.rs`, `contacting/call.rs`) maps or carves it out. A
   row is code plus a case in `crates/teams-fence/tests/contacting.rs` or its fixtures under
-  `crates/teams-fence/tests/fixtures/contacting/`. Neither the browser fence nor the native transport calls it
-  yet: `proto-lab`'s `map_write` and `calling::call_start` still decide the lab browser's writes.
+  `crates/teams-fence/tests/fixtures/contacting/`. A mutating request let through as `None` is logged as `allowed`
+  (`FenceLog::record_allowed`: method, host and `path_shape`, every id replaced by its kind, never a query, header or
+  body). Neither the browser fence nor the native transport calls either yet: `proto-lab`'s `map_write` and
+  `calling::call_start` still decide the lab browser's writes.
+- `Fence::check` reads the target's members only for a contacting kind (`WriteKind::is_contacting`). Typing and read
+  receipts reach nobody: on a chat (1:1, group or meeting, by its id) they are permitted without a member read, judged
+  only by the participants they name, and logged like every decision; anywhere else (a channel) they are judged like
+  any write. The account's own availability keeps its own-account check.
 - Writes on an existing call are denied: the follow-ups aren't mapped, and the native `add` (`AddToCall`, an `Invite`
   on `Scope::Call`) is `Partial`, since no membership source reads a call's members
   (`docs/backlog/fence-call-follow-ups.md`).
-- Every other group chat is `Partial` and its writes are denied, a group chat the native client creates included: it
-  isn't in `chats.toml` (`docs/backlog/group-chat-member-read-completeness.md`). Only `abc-chat` records the lab's
-  chat, once.
+- A group or meeting chat is judged like a 1:1 chat, by its fresh member list: a lab-only one is writable, a group
+  chat the native client creates included. `chats.toml` is lab data for the scenarios and clients (`abc-chat` records
+  the lab's a–b–c chat in it, once); the fence doesn't read it.
 - The read-by-`POST` list (`crates/proto-lab/src/post_read.rs`, `fence.log` `post_read`) is a class of its own, asked
   only after the write mapping: the mention picker's profile lookups (`users/fetchShortProfile`, `users/fetch`) in
   their captured query, header values and body, let through only when every MRI is a lab account of the roster at

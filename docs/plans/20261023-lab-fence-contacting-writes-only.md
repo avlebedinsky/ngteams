@@ -364,15 +364,29 @@ and tokens, the personal build and protocol notes stay as they are:
 - Modify: `crates/teams-fence/tests/{fence_core,group_chat,lab_config,membership,own_availability}.rs`
 - Modify: `crates/proto-lab/src/scenario/abc_chat.rs` (`reads_in_full`), `crates/proto-lab/tests/abc_chat.rs`
 
-- [ ] write tests first: `Typing` and `ReadReceipt` permitted on any chat with no member read, logged;
+- [x] write tests first: `Typing` and `ReadReceipt` permitted on any chat with no member read, logged;
       `OwnAvailability` still only on the account's own scope; a lab-only group chat not in `chats.toml` is
       `Complete`; a lab-only meeting chat is `Complete`; a paged read, a count mismatch, a `hidden` or `isDeleted`
       member, a duplicate MRI, a non-lab member and a timeout deny with the existing reasons; 1:1 unchanged
-- [ ] `Fence::check`: non-contacting kinds without a member read
-- [ ] `membership.rs` as in Technical Details; `is_meeting_chat_id` added, `is_group_chat_id` unchanged
-- [ ] add the `allowed` `fence.log` record (method, host, path shape) for Tasks 4 and 5 to use
-- [ ] `lab_accounts_only`, `check_post_read` and `PostReadPermit` stay for now (callers move in Tasks 4–5)
-- [ ] tests pass
+- [x] `Fence::check`: non-contacting kinds without a member read
+- [x] `membership.rs` as in Technical Details; `is_meeting_chat_id` added, `is_group_chat_id` unchanged
+- [x] add the `allowed` `fence.log` record (method, host, path shape) for Tasks 4 and 5 to use
+- [x] `lab_accounts_only`, `check_post_read` and `PostReadPermit` stay for now (callers move in Tasks 4–5)
+- [x] tests pass
+- ➕ note (Task 3): `LabGroup`, `with_lab`, `parse_group` and `PartialReason::{UnrecordedGroupChat,
+      ChatsUnreadable, Inconsistent, UnexpectedRoster}` are deleted (no caller left); the group read is `parse_members`
+      over one member-list read, still bounded by the source's deadline (`with_deadline`, tests only). Callers of
+      `with_lab` moved too: `teams-core/tests/engine.rs` (the group stand-in and `Groups` gone; a natively created
+      lab-only group chat now takes its first message), `teams-headless/tests/cli.rs`, `teams-app/tests/window.rs`,
+      and `fence-seal`'s `live_with_lab` case became `live_with_deadline` (`live_mock_origin.stderr` follows
+      `for_fence`'s signature). Tests that pinned the old denies now pin the new verdicts:
+      `proto-lab/tests/fence_targets.rs` (a group chat is read), `teams-core/tests/engine.rs` (typing goes out without
+      a member read; the denied row uses the outsider's chat), `teams-proto/tests/chat_write.rs` (typing and read
+      receipts pass on a chat with an outsider; a lab-only group chat, a new one included, is written to). Typing and
+      read receipts skip the member read only on a chat (1:1, group or meeting id), as `contacting` carves them out
+      only there; on a channel they are judged like any write. The `allowed` record is
+      `FenceLog::record_allowed(&AllowedRecord { method, url })` with `teams_fence::path_shape`, which also names
+      opaque ids `<id>`.
 
 ### Task 4: The lab browser fence: HTTP, frames and scenarios together
 

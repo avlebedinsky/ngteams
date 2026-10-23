@@ -20,11 +20,11 @@
 //! `chats.toml`. The id is recorded as soon as that deny names it, whatever happens after ([`record_creation`]): the
 //! chat exists from then on, and a later run without its id would create another one.
 //!
-//! **Messaging** (the id recorded; accounts a, b and c). It starts only when the lab's live source would read the
-//! recorded chat in full ([`messaging_blocked`]: the chat `chats.toml` records, and a, b and c's MRIs in `lab.toml`);
-//! otherwise a message would be denied and resent on every later load, so the run fails before it opens anything.
-//! Since the user's decision of 2026-10-21 the fence admits the lab's recorded group chat when both of its member
-//! reads agree on exactly a, b and c (`docs/protocol/fence-targets.md`).
+//! **Messaging** (the id recorded; accounts a, b and c). It starts only when the lab's live source reads the recorded
+//! chat's members ([`messaging_blocked`]: a group chat id); otherwise a message would be denied and resent on every
+//! later load, so the run fails before it opens anything. The fence admits a write to the group chat when its member
+//! list, read fresh, is complete and every member is a lab account or an approved service
+//! (`docs/protocol/fence-targets.md`).
 //! 1. a's fence force-denies this run's probe ([`THIS_RUN_PROBE`]), any first message ([`FIRST_MESSAGE`]) and any
 //!    earlier run's probe ([`EARLIER_RUN_PROBE`]), in that order (a deny names the first rule that matched it), from
 //!    before the page loads ([`forced_denies`]).
@@ -36,9 +36,9 @@
 //!    [`DELIVERY`](super::ab_chat::DELIVERY) and not the probe. A chat with unread messages opens at its "last
 //!    read" mark, the newest ones not rendered: each jumps to the newest ([`wait_for_newest`]).
 //! 5. Judged by [`policy`]: no deny but the three forced ones and the reviewed expected-deny list
-//!    ([`super::expected`]), and nothing denied on the group chat but those forced ones. The message and the members'
-//!    typing and read receipts pass only when the fence's live read finds the group chat's membership complete and all
-//!    lab accounts (`docs/protocol/fence-targets.md`).
+//!    ([`super::expected`]), and nothing denied on the group chat but those forced ones. The message passes only when
+//!    the fence's live read finds the group chat's membership complete and all lab accounts; the members' typing and
+//!    read receipts reach nobody and pass without a member read (`docs/protocol/fence-targets.md`).
 //!
 //! Every wait for the web client to load takes the run's load timeout (`proto-lab run --timeout`); on a loaded machine
 //! the client can take minutes.
@@ -163,17 +163,17 @@ pub(crate) fn lab_source() -> Result<LiveMembershipSource, ScenarioError> {
 }
 
 /// Why the messaging run must not start, if it mustn't: `source` (the lab's, as every session reads with it) won't
-/// read the group chat's members in full ([`LiveMembershipSource::reads_in_full`]: it isn't the chat `chats.toml`
-/// records, or the lab's a, b and c have no three MRIs), so its message would be denied, and the web client would send
-/// it again on every later load of a's profile, where every scenario would see it denied. Checked before any browser
-/// opens. Eligibility only: the read itself, on every write, decides.
+/// read `chat_id`'s members at all ([`LiveMembershipSource::reads_in_full`]: it isn't a 1:1, group or meeting chat), so
+/// its message would be denied, and the web client would send it again on every later load of a's profile, where
+/// every scenario would see it denied. Checked before any browser opens. Eligibility only: the read itself, on every
+/// write, decides.
 #[must_use]
 pub fn messaging_blocked(source: &LiveMembershipSource, chat_id: &str) -> Option<String> {
     let scope = Scope::Conversation { id: chat_id.to_owned() };
     (!source.reads_in_full(&scope)).then(|| {
-        "the fence won't read the a-b-c chat's members in full (it reads only the group chat chats.toml records as \
-         abc, and only with a, b and c's MRIs in lab.toml: docs/protocol/fence-targets.md), so a message to it would \
-         be denied and then sent again on every later load of a's profile; nothing was opened"
+        "the fence won't read the a-b-c chat's members (it reads 1:1, group and meeting chats: \
+         docs/protocol/fence-targets.md), so a message to it would be denied and then sent again on every later load \
+         of a's profile; nothing was opened"
             .to_owned()
     })
 }

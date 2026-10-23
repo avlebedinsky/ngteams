@@ -10,21 +10,18 @@
 //! the account's session, which renews the token). A made-up credential gets a 401 and a deny; nothing the
 //! caller supplies can make up a member list.
 //!
-//! **What is supported** (M0 Task 11, from the web bundle; see `docs/protocol/fence-targets.md`): 1:1 chats,
+//! **What is supported** (from the web bundle and the live reads; see `docs/protocol/fence-targets.md`): 1:1 chats,
 //! `19:<oid>_<oid>@unq.gbl.spaces`. Their id names both members, so an answer is [`Membership::Complete`] only when
 //! the thread the service returns is that exact thread and lists exactly those two members (`8:orgid:<oid>`); that
 //! cross-check is the evidence that the list is the whole membership and not a view filtered by the caller's
 //! permissions.
 //!
-//! **And one group chat, the lab's own** (the user's decision of 2026-10-21), for a source built with the lab's policy
-//! ([`LiveMembershipSource::for_fence`]): the a–b–c chat `chats.toml` records as `abc` (read when the fence decides),
-//! complete only when its thread read and its member list, read fresh within one [`FETCH_TIMEOUT`], agree on exactly
-//! a, b and c in the shape the service gave live ([`parse_group`]). That is an accepted assumption, not evidence: M1
-//! Task 8 found the two reads agreeing just as consistent with both showing, and counting, a caller-visible subset
-//! (`docs/backlog/group-chat-member-read-completeness.md`), and nothing here rules that out. Every other group chat is
-//! [`PartialReason::UnrecordedGroupChat`], never read; without the lab's policy every group chat is
-//! [`PartialReason::Unsupported`]. Meeting chats, channels, teams and calls are [`PartialReason::Unsupported`] until
-//! evidence shows how their full membership can be confirmed.
+//! **Group and meeting chats** (`19:…@thread.v2`, [`is_group_chat_id`] and [`is_meeting_chat_id`]), any of them, one
+//! the native client created too: one fresh read of the chat's member list, complete only in the shape
+//! [`parse_members`] takes (no paging key, the count equal to the members listed, nobody hidden or deleted, nobody
+//! twice, every member an MRI in a form the reads showed). Whether those members are all lab accounts or approved
+//! services is the fence's to judge. Channels, teams and calls are [`PartialReason::Unsupported`] until evidence shows
+//! how their full membership can be confirmed.
 //!
 //! Anything less than a clean answer is [`Membership::Partial`]: no credential yet, a failed or slow request, a
 //! non-success status, a body over [`MAX_BODY`] (truncated), a pagination marker, a member count above the listed
@@ -32,7 +29,6 @@
 
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -43,7 +39,6 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use crate::decision::{Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, PartialReason};
-use crate::lab::{LabChats, LabConfig};
 use crate::target::{Mri, Scope};
 
 /// The hosts the chat service is reached on through Azure Front Door, as `https://<host>/api/chatsvc/<region>/`: the
@@ -66,7 +61,7 @@ const ONE_TO_ONE_SUFFIX: &str = "@unq.gbl.spaces";
 /// A read the chat service refused the credential of (HTTP 401).
 const REFUSED: PartialReason = PartialReason::FetchFailed(FetchFailure::Status(401));
 
-/// The page size the group chat's member list is read with, as `proto-lab probe thread` read it live.
+/// The page size a group chat's member list is read with, as `proto-lab probe thread` read it live.
 const MEMBERS_PAGE_SIZE: &str = "100";
 
 /// Which of a thread's reads a request makes.
@@ -76,66 +71,6 @@ enum ThreadRead {
     Thread,
     /// The thread's member list (`v1/threads/<id>/members`).
     Members,
-}
-
-/// The lab's group chat policy (see the module docs): the MRIs of a, b and c, and where the lab records its a–b–c
-/// chat. From one `lab.toml`, the one the fence's roster comes from ([`Fence`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LabGroup {
-    /// a, b and c, in that order.
-    accounts: [Mri; 3],
-    chats_file: PathBuf,
-}
-
-impl LabGroup {
-    /// The policy of `config`: `None` unless a, b and c each have an MRI and the three are distinct, case folded too.
-    pub(crate) fn from_config(config: &LabConfig) -> Option<Self> {
-        let [a, b, c] = config.accounts().each_ref().map(|account| account.mri.as_deref());
-        let accounts = [Mri::new(a?), Mri::new(b?), Mri::new(c?)];
-        let folded: std::collections::BTreeSet<String> =
-            accounts.iter().map(|mri| mri.as_str().to_ascii_lowercase()).collect();
-        (folded.len() == accounts.len()).then(|| Self {
-            accounts,
-            chats_file: config.paths().chats_file(),
-        })
-    }
-
-    /// Whether `id` is the chat `chats.toml` records as `abc` now, read without blocking.
-    async fn records(&self, id: &str) -> Recorded {
-        match tokio::fs::read_to_string(&self.chats_file).await {
-            Ok(text) => Recorded::of(&text, id),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Recorded::No,
-            Err(_) => Recorded::Unreadable,
-        }
-    }
-
-    /// [`Self::records`], blocking: for a check before a run, never for a decision.
-    fn records_now(&self, id: &str) -> Recorded {
-        match std::fs::read_to_string(&self.chats_file) {
-            Ok(text) => Recorded::of(&text, id),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Recorded::No,
-            Err(_) => Recorded::Unreadable,
-        }
-    }
-}
-
-/// Whether `chats.toml` records a group chat as the lab's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Recorded {
-    Yes,
-    No,
-    /// The file can't be read or is invalid ([`LabChats::parse`]).
-    Unreadable,
-}
-
-impl Recorded {
-    fn of(text: &str, id: &str) -> Self {
-        match LabChats::parse(text) {
-            Ok(chats) if chats.abc.as_deref() == Some(id) => Self::Yes,
-            Ok(_) => Self::No,
-            Err(_) => Self::Unreadable,
-        }
-    }
 }
 
 /// Where the chat service is, as a validated base: never a caller-chosen path, port or query.
@@ -377,14 +312,13 @@ pub struct LiveSourceError(#[source] reqwest::Error);
 
 /// The membership source of a lab run that writes: it reads a scope's members from the chat service on every check,
 /// with the lab account's [`ChatCredential`] (see the module docs). Until a credential or a [`CredentialSource`] is
-/// set every scope is [`PartialReason::NoCredential`]. A lab run's source is [`Self::for_fence`], which knows the
-/// lab's group chat; [`Self::new`] admits 1:1 chats only.
+/// set every scope is [`PartialReason::NoCredential`]. A lab run's source is [`Self::for_fence`]; it and
+/// [`Self::new`] read the same scopes: 1:1, group and meeting chats.
 pub struct LiveMembershipSource {
     client: reqwest::Client,
     credential: Mutex<Credential>,
-    /// The lab's group chat policy, if this source has it ([`Self::for_fence`]).
-    group: Option<LabGroup>,
-    /// How long a group chat's whole read may take ([`FETCH_TIMEOUT`]; shorter in tests).
+    /// How long a group or meeting chat's whole read may take, its credential and renewal included ([`FETCH_TIMEOUT`];
+    /// shorter in tests).
     deadline: Duration,
     /// Tests only: every read goes to this origin instead of the credential's host.
     #[cfg(feature = "test-support")]
@@ -400,31 +334,27 @@ impl fmt::Debug for LiveMembershipSource {
 }
 
 impl LiveMembershipSource {
-    /// The source, with no credential yet and without the lab's group chat policy: every group chat is
-    /// [`PartialReason::Unsupported`]. A lab run that writes uses [`Self::for_fence`].
+    /// The source, with no credential yet. A lab run that writes uses [`Self::for_fence`].
     ///
     /// # Errors
     /// When the HTTPS client can't be built.
     pub fn new() -> Result<Self, LiveSourceError> {
-        Self::build(true, None)
+        Self::build(true)
     }
 
-    /// The source of a lab run that writes through `fence`, with no credential yet: it knows the lab's group chat by
-    /// the policy `fence` was opened with ([`Fence::open_lab`]: a, b and c's MRIs from the same `lab.toml` as its
-    /// roster, and the lab's `chats.toml`), so the fence and its source judge by one snapshot of the lab. A fence of no
-    /// lab, or of a lab whose a, b and c aren't three known, distinct MRIs, gives a source that admits no group chat.
+    /// The source of a lab run that writes through `fence` ([`Fence::open_lab`]), with no credential yet. It reads
+    /// what [`Self::new`]'s does: which members the fence admits is the fence's roster's to say, not the source's.
     ///
     /// # Errors
     /// When the HTTPS client can't be built.
-    pub fn for_fence(fence: &Fence) -> Result<Self, LiveSourceError> {
-        Self::build(true, fence.lab_group().cloned())
+    pub fn for_fence(_fence: &Fence) -> Result<Self, LiveSourceError> {
+        Self::build(true)
     }
 
-    fn build(https_only: bool, group: Option<LabGroup>) -> Result<Self, LiveSourceError> {
+    fn build(https_only: bool) -> Result<Self, LiveSourceError> {
         Ok(Self {
             client: client(https_only)?,
             credential: Mutex::new(Credential::None),
-            group,
             deadline: FETCH_TIMEOUT,
             #[cfg(feature = "test-support")]
             mock_origin: None,
@@ -440,22 +370,11 @@ impl LiveMembershipSource {
     pub fn with_mock_origin(origin: &str) -> Result<Self, LiveSourceError> {
         Ok(Self {
             mock_origin: Some(origin.trim_end_matches('/').to_owned()),
-            ..Self::build(false, None)?
+            ..Self::build(false)?
         })
     }
 
-    /// This source with the group chat policy of `config`, as [`Self::for_fence`] takes it from a fence opened with
-    /// that config. Tests only (`test-support`).
-    #[cfg(feature = "test-support")]
-    #[must_use]
-    pub fn with_lab(self, config: &LabConfig) -> Self {
-        Self {
-            group: LabGroup::from_config(config),
-            ..self
-        }
-    }
-
-    /// This source with a group chat's whole read bounded by `deadline` instead of [`FETCH_TIMEOUT`]. Tests only
+    /// This source with a group or meeting chat's whole read bounded by `deadline` instead of [`FETCH_TIMEOUT`]. Tests only
     /// (`test-support`).
     #[cfg(feature = "test-support")]
     #[must_use]
@@ -516,18 +435,7 @@ impl LiveMembershipSource {
     }
 
     async fn one_to_one(&self, id: &str, pair: [Mri; 2]) -> Membership {
-        let current = self.current();
-        let Some(credential) = Self::credential(&current).await else {
-            return Membership::Partial(PartialReason::NoCredential);
-        };
-        let body = match self.read_thread(id, &credential, ThreadRead::Thread).await {
-            Err(REFUSED) => match Self::renewed(&current, &credential).await {
-                Some(renewed) => self.read_thread(id, &renewed, ThreadRead::Thread).await,
-                None => Err(REFUSED),
-            },
-            read => read,
-        };
-        let body = match body {
+        let body = match self.read_renewing(id, ThreadRead::Thread).await {
             Ok(body) => body,
             Err(reason) => return Membership::Partial(reason),
         };
@@ -542,65 +450,33 @@ impl LiveMembershipSource {
         }
     }
 
-    /// A group chat's membership: [`PartialReason::Unsupported`] without the lab's policy; otherwise, all of it within
-    /// this source's deadline ([`FETCH_TIMEOUT`]: the record, the credential, a renewal, both reads and their bodies),
-    /// the record looked up and, only for the recorded chat, both reads judged by [`parse_group`].
+    /// A group or meeting chat's membership: its member list, read once within this source's deadline
+    /// ([`FETCH_TIMEOUT`]: the credential, a renewal, the read and its body), judged by [`parse_members`].
     async fn group(&self, id: &str) -> Membership {
-        let Some(group) = &self.group else {
-            return Membership::Partial(PartialReason::Unsupported);
+        let read = async {
+            match self.read_renewing(id, ThreadRead::Members).await {
+                Ok(body) => serde_json::from_slice::<Value>(&body)
+                    .map_or(Membership::Partial(MALFORMED), |members| parse_members(&members)),
+                Err(reason) => Membership::Partial(reason),
+            }
         };
-        tokio::time::timeout(self.deadline, self.read_group(id, group))
+        tokio::time::timeout(self.deadline, read)
             .await
             .unwrap_or(Membership::Partial(PartialReason::FetchFailed(FetchFailure::Timeout)))
     }
 
-    async fn read_group(&self, id: &str, group: &LabGroup) -> Membership {
-        match group.records(id).await {
-            Recorded::Yes => {}
-            Recorded::No => return Membership::Partial(PartialReason::UnrecordedGroupChat),
-            Recorded::Unreadable => return Membership::Partial(PartialReason::ChatsUnreadable),
-        }
+    /// The thread `id`'s `read` with the credential this source has now; when the service refuses it, once more with
+    /// the renewed credential its source gives, if any. No credential is [`PartialReason::NoCredential`], nothing sent.
+    async fn read_renewing(&self, id: &str, read: ThreadRead) -> Result<Vec<u8>, PartialReason> {
         let current = self.current();
-        let Some(credential) = Self::credential(&current).await else {
-            return Membership::Partial(PartialReason::NoCredential);
-        };
-        let bodies = match self.read_pair(id, &current, &credential).await {
+        let credential = Self::credential(&current).await.ok_or(PartialReason::NoCredential)?;
+        match self.read_thread(id, &credential, read).await {
             Err(REFUSED) => match Self::renewed(&current, &credential).await {
-                Some(renewed) => self.read_pair(id, &current, &renewed).await,
+                Some(renewed) => self.read_thread(id, &renewed, read).await,
                 None => Err(REFUSED),
             },
             read => read,
-        };
-        let (thread, members) = match bodies {
-            Ok(bodies) => bodies,
-            Err(reason) => return Membership::Partial(reason),
-        };
-        match (
-            serde_json::from_slice::<Value>(&thread),
-            serde_json::from_slice::<Value>(&members),
-        ) {
-            (Ok(thread), Ok(members)) => parse_group(id, &thread, &members, &group.accounts),
-            _ => Membership::Partial(PartialReason::FetchFailed(FetchFailure::Malformed)),
         }
-    }
-
-    /// A group chat's thread read with `credential`, then its member list with the credential `current` gives after
-    /// it: a source is asked again, since the session may have signed out (or renewed) while the thread was read, and
-    /// none any more is [`PartialReason::NoCredential`] with the member list never sent. A refusal of either read is
-    /// [`REFUSED`], so that both are read again with a renewed credential.
-    async fn read_pair(
-        &self,
-        id: &str,
-        current: &Credential,
-        credential: &ChatCredential,
-    ) -> Result<(Vec<u8>, Vec<u8>), PartialReason> {
-        let thread = self.read_thread(id, credential, ThreadRead::Thread).await?;
-        let after = match current {
-            Credential::Source(_) => Self::credential(current).await.ok_or(PartialReason::NoCredential)?,
-            Credential::None | Credential::Fixed(_) => credential.clone(),
-        };
-        let members = self.read_thread(id, &after, ThreadRead::Members).await?;
-        Ok((thread, members))
     }
 
     /// The thread `id`'s `read`, with `credential`.
@@ -629,8 +505,8 @@ impl LiveMembershipSource {
 
     /// One GET with the credential's token, its body read up to [`MAX_BODY`]; the client's timeout covers the whole
     /// read. The thread read goes with the token alone, the form the fence's read was answered in live; the member
-    /// list ([`ThreadRead::Members`]) with the web client's `X-MS-Migration: True` and `BehaviorOverride: redirectAs404` beside it,
-    /// the only form it was read in live (`proto-lab probe thread`, M1 Task 8).
+    /// list ([`ThreadRead::Members`]) with the web client's `X-MS-Migration: True` and `BehaviorOverride: redirectAs404`
+    /// beside it, the only form it was read in live (`proto-lab probe thread`).
     async fn fetch(&self, url: Url, credential: &ChatCredential, read: ThreadRead) -> Result<Vec<u8>, PartialReason> {
         let (name, value) = credential.header();
         let mut request = self
@@ -660,22 +536,17 @@ impl LiveMembershipSource {
 }
 
 impl LiveMembershipSource {
-    /// Whether this source would try to read `scope`'s membership in full now: a 1:1 chat's ([`one_to_one_pair`]), or,
-    /// for a source with the lab's policy ([`Self::for_fence`]), the group chat `chats.toml` records as the lab's right
-    /// now. Every other scope is [`PartialReason::Unsupported`] or [`PartialReason::UnrecordedGroupChat`], answered
-    /// without a read. It is eligibility, not a verdict: the record or the members can change before a write, and
-    /// every read checks both again. A caller can tell before a write that it will be denied.
+    /// Whether this source reads `scope`'s membership at all: a 1:1 chat's ([`one_to_one_pair`]), a group chat's
+    /// ([`is_group_chat_id`]) or a meeting chat's ([`is_meeting_chat_id`]). Every other scope is
+    /// [`PartialReason::Unsupported`], answered without a read. It is eligibility, not a verdict: whether the read is
+    /// complete and its members all in the lab is decided on every write. A caller can tell before a write that it
+    /// will be denied.
     #[must_use]
     pub fn reads_in_full(&self, scope: &Scope) -> bool {
         let Scope::Conversation { id } = scope else {
             return false;
         };
-        one_to_one_pair(id).is_some()
-            || (is_group_chat_id(id)
-                && self
-                    .group
-                    .as_ref()
-                    .is_some_and(|group| group.records_now(id) == Recorded::Yes))
+        one_to_one_pair(id).is_some() || is_group_chat_id(id) || is_meeting_chat_id(id)
     }
 }
 
@@ -685,7 +556,7 @@ impl MembershipSource for LiveMembershipSource {
             match scope {
                 Scope::Conversation { id } => match one_to_one_pair(id) {
                     Some(pair) => self.one_to_one(id, pair).await,
-                    None if is_group_chat_id(id) => self.group(id).await,
+                    None if is_group_chat_id(id) || is_meeting_chat_id(id) => self.group(id).await,
                     None => Membership::Partial(PartialReason::Unsupported),
                 },
                 _ => Membership::Partial(PartialReason::Unsupported),
@@ -749,17 +620,38 @@ pub fn one_to_one_id(mri_a: &str, mri_b: &str) -> Option<String> {
 const GROUP_SUFFIX: &str = "@thread.v2";
 
 /// Whether `id` is a group chat's conversation id: `19:<id>@thread.v2`, the id 1–128 ASCII letters, digits, `_` or
-/// `-`, and not a meeting's chat (`19:meeting_…`).
+/// `-`, and not a meeting's chat (`19:meeting_…`, [`is_meeting_chat_id`]).
 #[must_use]
 pub fn is_group_chat_id(id: &str) -> bool {
-    let Some(inner) = id.strip_prefix("19:").and_then(|rest| rest.strip_suffix(GROUP_SUFFIX)) else {
-        return false;
-    };
-    (1..=128).contains(&inner.len())
+    thread_v2(id).is_some_and(|inner| !has_meeting_prefix(inner))
+}
+
+/// Whether `id` is a meeting chat's conversation id: `19:meeting_<id>@thread.v2` (`meeting_` in any case), the whole
+/// id 1–128 ASCII letters, digits, `_` or `-`, with something after `meeting_`. No id is both this and a group chat's
+/// ([`is_group_chat_id`]).
+#[must_use]
+pub fn is_meeting_chat_id(id: &str) -> bool {
+    thread_v2(id).is_some_and(|inner| has_meeting_prefix(inner) && inner.len() > MEETING_PREFIX.len())
+}
+
+/// The prefix of a meeting chat's inner id.
+const MEETING_PREFIX: &str = "meeting_";
+
+/// The id inside `19:<id>@thread.v2`, when it is 1–128 ASCII letters, digits, `_` or `-`.
+fn thread_v2(id: &str) -> Option<&str> {
+    let inner = id.strip_prefix("19:")?.strip_suffix(GROUP_SUFFIX)?;
+    ((1..=128).contains(&inner.len())
         && inner
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        && !inner.to_ascii_lowercase().starts_with("meeting_")
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    .then_some(inner)
+}
+
+/// Whether a `@thread.v2` chat's inner id begins with `meeting_`, in any case.
+fn has_meeting_prefix(inner: &str) -> bool {
+    inner
+        .get(..MEETING_PREFIX.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(MEETING_PREFIX))
 }
 
 fn is_guid(text: &str) -> bool {
@@ -839,79 +731,35 @@ fn counts_match(object: &serde_json::Map<String, Value>, listed: usize) -> bool 
 
 const MALFORMED: PartialReason = PartialReason::FetchFailed(FetchFailure::Malformed);
 
-/// Reads the lab's group chat `id` from its thread read (`GET v1/threads/<id>?view=msnp24Equivalent`, `thread`) and
-/// its member list (`GET v1/threads/<id>/members?view=msnp24Equivalent&pageSize=100`, `members`), both read fresh,
-/// against the lab's accounts a, b and c (`lab`, in that order). [`Membership::Complete`] with `lab` only when all of
-/// this holds, in the shape the service gave live (M1 Task 8, `tests/fixtures/chatsvc/thread-group*.json`):
-/// - no pagination key (as [`parse_thread`] reads one) at any depth of either answer → else
-///   [`PartialReason::Paginated`];
-/// - the thread read passes [`parse_thread`], is a `Thread` of `threadType` `chat` made (`creator`) by someone, with a
-///   non-empty `eTag` and an integer `rosterVersion`;
-/// - the member list is an object with `isDeleted` `false`, a non-empty `eTag`, `rosterVersion` exactly `0` (the one
-///   relationship seen; not known to mean anything) and members with string ids;
-/// - its `totalMemberCount` is an integer equal to the members it lists, and any other member count agrees →
-///   else [`PartialReason::Truncated`];
-/// - every member entry of both lists says `hidden` `false`, and neither lists anyone twice (case folded);
-/// - both list the same members and carry the same `eTag` → else [`PartialReason::Inconsistent`];
-/// - those members are exactly `lab`, and the chat's `creator` is a (`lab[0]`) → else
-///   [`PartialReason::UnexpectedRoster`].
+/// Reads a group or meeting chat's member list (`GET v1/threads/<id>/members?view=msnp24Equivalent&pageSize=100`) as
+/// its membership. [`Membership::Complete`] with the listed members only when all of this holds, in the shape the
+/// service gave live (`tests/fixtures/chatsvc/thread-group-members.json`):
+/// - no pagination key (as [`parse_thread`] reads one) at any depth → else [`PartialReason::Paginated`];
+/// - an object with `isDeleted` `false` and a `members` array;
+/// - its `totalMemberCount` an integer equal to the members it lists, and any other member count agreeing → else
+///   [`PartialReason::Truncated`];
+/// - every member says `hidden` `false`, says `isDeleted` `false` or nothing about it, and has an `id` that is an MRI
+///   in a form the reads showed: a work account's `8:orgid:<guid>` or a bot's `28:<guid>`;
+/// - nobody is listed twice, case folded.
 ///
-/// Any other shape is malformed. It narrows the answers it accepts to the lab's own chat; it can't show that neither
-/// answer leaves out a member the service doesn't show (see the module docs).
+/// Any other shape is malformed. Whether the members are lab accounts or approved services is the fence's to judge.
 #[must_use]
-pub fn parse_group(id: &str, thread: &Value, members: &Value, lab: &[Mri; 3]) -> Membership {
-    match judge_group(id, thread, members, lab) {
-        Ok(()) => Membership::Complete(lab.to_vec()),
+pub fn parse_members(members: &Value) -> Membership {
+    match judge_members(members) {
+        Ok(listed) => Membership::Complete(listed),
         Err(reason) => Membership::Partial(reason),
     }
 }
 
-fn judge_group(id: &str, thread: &Value, members: &Value, lab: &[Mri; 3]) -> Result<(), PartialReason> {
-    if has_page_marker(thread) || has_page_marker(members) {
+fn judge_members(answer: &Value) -> Result<Vec<Mri>, PartialReason> {
+    if has_page_marker(answer) {
         return Err(PartialReason::Paginated);
     }
-    match parse_thread(id, thread) {
-        Membership::Complete(_) => {}
-        Membership::Partial(reason) => return Err(reason),
-        Membership::OrgWide => return Err(MALFORMED),
-    }
-    let (thread_tag, creator) = thread_shape(thread).ok_or(MALFORMED)?;
-    let list_tag = list_shape(members)?;
-    let thread_members = entries(thread).ok_or(MALFORMED)?;
-    let listed = entries(members).ok_or(MALFORMED)?;
-    if thread_members != listed || thread_tag != list_tag {
-        return Err(PartialReason::Inconsistent);
-    }
-    let mut wanted: Vec<&str> = lab.iter().map(Mri::as_str).collect();
-    wanted.sort_unstable();
-    if listed != wanted || creator != lab[0].as_str() {
-        return Err(PartialReason::UnexpectedRoster);
-    }
-    Ok(())
-}
-
-/// The thread read's `eTag` and `creator`, when it is a `Thread` of `threadType` `chat` with a non-empty `eTag`, an
-/// integer `rosterVersion` and a `creator`.
-fn thread_shape(thread: &Value) -> Option<(&str, &str)> {
-    let properties = thread.get("properties")?;
-    let shaped = thread.get("type")?.as_str()? == "Thread"
-        && properties.get("threadType")?.as_str()? == "chat"
-        && thread.get("rosterVersion")?.is_u64();
-    let tag = thread.get("eTag")?.as_str().filter(|tag| !tag.is_empty())?;
-    shaped.then_some((tag, properties.get("creator")?.as_str()?))
-}
-
-/// The member list's `eTag`, when it has the shape [`parse_group`] takes: malformed, or truncated when its counts
-/// disagree with the members it lists.
-fn list_shape(members: &Value) -> Result<&str, PartialReason> {
-    let object = members.as_object().ok_or(MALFORMED)?;
+    let object = answer.as_object().ok_or(MALFORMED)?;
     let listed = object.get("members").and_then(Value::as_array).ok_or(MALFORMED)?;
-    let shaped = object.get("isDeleted") == Some(&Value::Bool(false))
-        && object.get("rosterVersion").and_then(Value::as_u64) == Some(0);
-    let tag = object.get("eTag").and_then(Value::as_str).filter(|tag| !tag.is_empty());
-    let (Some(tag), true) = (tag, shaped) else {
+    if object.get("isDeleted") != Some(&Value::Bool(false)) {
         return Err(MALFORMED);
-    };
+    }
     let total = object
         .get("totalMemberCount")
         .and_then(Value::as_u64)
@@ -919,27 +767,30 @@ fn list_shape(members: &Value) -> Result<&str, PartialReason> {
     if Some(total) != u64::try_from(listed.len()).ok() || !counts_match(object, listed.len()) {
         return Err(PartialReason::Truncated);
     }
-    Ok(tag)
-}
-
-/// The member ids an answer lists, sorted, when every entry has a string `id` and says `hidden` `false`, and no id
-/// is listed twice, case folded.
-fn entries(answer: &Value) -> Option<Vec<&str>> {
-    let mut ids = answer
-        .get("members")?
-        .as_array()?
+    let members = listed
         .iter()
-        .map(|member| {
-            (member.get("hidden") == Some(&Value::Bool(false)))
-                .then(|| member.get("id")?.as_str())
-                .flatten()
-        })
-        .collect::<Option<Vec<&str>>>()?;
-    ids.sort_unstable();
-    let mut folded: Vec<String> = ids.iter().map(|id| id.to_ascii_lowercase()).collect();
+        .map(member)
+        .collect::<Option<Vec<Mri>>>()
+        .ok_or(MALFORMED)?;
+    let mut folded: Vec<String> = members.iter().map(|mri| mri.as_str().to_ascii_lowercase()).collect();
     folded.sort_unstable();
     folded.dedup();
-    (folded.len() == ids.len()).then_some(ids)
+    (folded.len() == members.len()).then_some(members).ok_or(MALFORMED)
+}
+
+/// A listed member's MRI, when the entry says `hidden` `false`, isn't deleted, and has an MRI of a form the reads
+/// showed.
+fn member(entry: &Value) -> Option<Mri> {
+    let shown = entry.get("hidden") == Some(&Value::Bool(false))
+        && entry
+            .get("isDeleted")
+            .is_none_or(|deleted| *deleted == Value::Bool(false));
+    let id = entry.get("id")?.as_str()?;
+    let known = id
+        .strip_prefix("8:orgid:")
+        .or_else(|| id.strip_prefix("28:"))
+        .is_some_and(is_guid);
+    (shown && known).then(|| Mri::new(id))
 }
 
 /// Whether any object key at any depth of `value` looks like pagination ([`is_page_marker`]).

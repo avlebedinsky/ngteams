@@ -644,7 +644,7 @@ impl MockLab {
         let origin = mock.origin();
         let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin);
         let transport = Arc::new(http()?);
-        let membership = LiveMembershipSource::with_mock_origin(&origin)?.with_lab(&config);
+        let membership = LiveMembershipSource::with_mock_origin(&origin)?;
         membership.set_credential_source(transport.clone());
         let trouter_client = Trouter::with_mock_origin(
             Arc::clone(&transport),

@@ -196,7 +196,8 @@ impl LabPaths {
 }
 
 /// The lab's chats whose ids can't be derived (`<data_dir>/chats.toml`, [`LabPaths::chats_file`]): today the group
-/// chat of a, b and c, which `proto-lab run abc-chat` creates once and records here.
+/// chat of a, b and c, which `proto-lab run abc-chat` creates once and records here. Lab data for the scenarios and
+/// the clients, which find the chat by it; the fence doesn't read it (a group chat's members are read like any chat's).
 ///
 /// ```toml
 /// abc = "19:<id>@thread.v2"

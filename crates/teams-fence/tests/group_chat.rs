@@ -1,14 +1,14 @@
-//! The lab's group chat (the user's decision of 2026-10-21, `docs/protocol/fence-targets.md`): the live source finds
-//! the a–b–c chat the lab recorded in `chats.toml` complete when its thread read and its member list, both read fresh,
-//! agree on exactly a, b and c in the shape the service gave live, and every other group chat, shape or roster stays
-//! `Partial`.
+//! Group and meeting chats (`docs/protocol/fence-targets.md`): the live source reads any of them, one the native client
+//! created too, with one fresh read of its member list, complete only in the shape the service gave live, and the
+//! fence allows a write to it only when every member is a lab account or an approved service. `chats.toml` plays no
+//! part in it.
 //!
-//! The answers are the synthetic fixtures `tests/fixtures/chatsvc/thread-group.json` and `thread-group-members.json`,
-//! with made-up GUIDs filled in. No real MRI or token appears here.
+//! The answer is the synthetic fixture `tests/fixtures/chatsvc/thread-group-members.json`, with made-up GUIDs filled
+//! in. No real MRI or token appears here.
 
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -17,10 +17,10 @@ use teams_fence::lab::{LabConfig, record_abc_chat};
 use teams_fence::{
     ChatCredential, CredentialFuture, CredentialSource, DenyReason, Fence, FenceLog, FetchFailure,
     LiveMembershipSource, Membership, MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind,
-    parse_group,
+    parse_members,
 };
 use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -28,16 +28,21 @@ const GUID_A: &str = "00000000-0000-4000-8000-00000000000a";
 const GUID_B: &str = "00000000-0000-4000-8000-00000000000b";
 const GUID_C: &str = "00000000-0000-4000-8000-00000000000c";
 const GUID_X: &str = "00000000-0000-4000-8000-0000000000ff";
+const GUID_ECHO: &str = "00000000-0000-4000-8000-0000000000e0";
 const GROUP: &str = "0123456789abcdef0123456789abcdef";
 const OTHER_GROUP: &str = "fedcba9876543210fedcba9876543210";
+const MEETING: &str = "19:meeting_MDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGFh@thread.v2";
 /// A token-shaped made-up credential.
 const TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJza3lwZWlkIjoicGxhbnRlZCJ9.cGxhbnRlZC1zaWduYXR1cmU";
 const BASE: &str = "https://teams.microsoft.com/api/chatsvc/emea";
-const THREAD_FIXTURE: &str = include_str!("../../../tests/fixtures/chatsvc/thread-group.json");
 const MEMBERS_FIXTURE: &str = include_str!("../../../tests/fixtures/chatsvc/thread-group-members.json");
 
 fn mri(guid: &str) -> Mri {
     Mri::new(format!("8:orgid:{guid}"))
+}
+
+fn echo() -> Mri {
+    Mri::new(format!("28:{GUID_ECHO}"))
 }
 
 fn abc() -> Vec<Mri> {
@@ -52,85 +57,57 @@ fn group_chat() -> Scope {
     Scope::Conversation { id: group_id(GROUP) }
 }
 
+fn meeting_chat() -> Scope {
+    Scope::Conversation { id: MEETING.to_owned() }
+}
+
 fn fill(text: &str) -> String {
     text.replace("<guid:a>", GUID_A)
         .replace("<guid:b>", GUID_B)
         .replace("<guid:c>", GUID_C)
-        .replace("<guid:tenant>", GUID_X)
         .replace("<group>", GROUP)
         .replace("<region>", "emea")
 }
 
-/// The fixtures' thread read and member list of the a–b–c chat.
-fn bodies() -> TestResult<(Value, Value)> {
-    let thread: Value = serde_json::from_str(&fill(THREAD_FIXTURE))?;
+/// The fixture's member list of the a–b–c chat.
+fn members_body() -> TestResult<Value> {
     let members: Value = serde_json::from_str(&fill(MEMBERS_FIXTURE))?;
-    Ok((thread["response"]["body"].clone(), members["response"]["body"].clone()))
+    Ok(members["response"]["body"].clone())
 }
 
-/// A `lab.toml` whose accounts a, b and c have the MRIs given (`None`: not known yet), the data dir `data_dir`.
-fn lab_toml(data_dir: &Path, mris: [Option<String>; 3]) -> String {
+/// A `lab.toml` whose accounts a, b and c have the MRIs of [`abc`], the data dir `data_dir`.
+fn lab_toml(data_dir: &Path) -> String {
     let accounts = ["a", "b", "c"]
         .into_iter()
-        .zip(mris)
+        .zip(abc())
         .fold(String::new(), |mut out, (alias, mri)| {
-            let mri = mri.map(|mri| format!("mri = \"{mri}\"\n")).unwrap_or_default();
             let _ = write!(
                 out,
-                "\n[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.com\"\n{mri}"
+                "\n[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.com\"\nmri = \"{mri}\"\n"
             );
             out
         });
     format!("data_dir = \"{}\"\n{accounts}", data_dir.display())
 }
 
-/// A lab in a temporary dir: a, b and c with their MRIs, and `recorded` as the a–b–c chat in its `chats.toml`.
-struct Lab {
-    dir: tempfile::TempDir,
-    config: LabConfig,
+/// The live source reading from `server` with a page's bearer token in `emea`.
+fn source(server: &MockServer) -> TestResult<LiveMembershipSource> {
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    source.set_credential(ChatCredential::bearer(BASE, TOKEN).ok_or("no credential")?);
+    Ok(source)
 }
 
-impl Lab {
-    fn new(recorded: Option<&str>) -> TestResult<Self> {
-        Self::with_mris(
-            [GUID_A, GUID_B, GUID_C].map(|guid| Some(mri(guid).as_str().to_owned())),
-            recorded,
-        )
-    }
-
-    fn with_mris(mris: [Option<String>; 3], recorded: Option<&str>) -> TestResult<Self> {
-        let dir = tempfile::tempdir()?;
-        let config = LabConfig::parse(&lab_toml(dir.path(), mris), dir.path())?;
-        if let Some(id) = recorded {
-            record_abc_chat(config.paths(), id)?;
-        }
-        Ok(Self { dir, config })
-    }
-
-    /// The live source of this lab, reading from `server` with a page's bearer token in `emea`.
-    fn source(&self, server: &MockServer) -> TestResult<LiveMembershipSource> {
-        let source = LiveMembershipSource::with_mock_origin(&server.uri())?.with_lab(&self.config);
-        source.set_credential(ChatCredential::bearer(BASE, TOKEN).ok_or("no credential")?);
-        Ok(source)
-    }
+fn members_path(id: &str) -> String {
+    format!("/api/chatsvc/emea/v1/threads/{id}/members")
 }
 
-/// Serves `thread` and `members` as the group chat's thread read and member list, to the bearer `token` only.
-async fn serve_to(server: &MockServer, token: &str, thread: &Value, members: &Value) {
-    let thread_path = format!("/api/chatsvc/emea/v1/threads/{}", group_id(GROUP));
+/// Serves `members` as chat `id`'s member list, to the bearer `token` only, in the form it was read in live.
+async fn serve_to(server: &MockServer, id: &str, token: &str, members: &Value) {
     Mock::given(method("GET"))
-        .and(path(thread_path.as_str()))
-        .and(query_param("view", "msnp24Equivalent"))
-        .and(header("Authorization", format!("Bearer {token}").as_str()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(thread))
-        .mount(server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path(format!("{thread_path}/members")))
+        .and(path(members_path(id)))
         .and(query_param("view", "msnp24Equivalent"))
         .and(query_param("pageSize", "100"))
         .and(header("Authorization", format!("Bearer {token}").as_str()))
-        // the member list in the header form it was read in live
         .and(header("X-MS-Migration", "True"))
         .and(header("BehaviorOverride", "redirectAs404"))
         .respond_with(ResponseTemplate::new(200).set_body_json(members))
@@ -138,8 +115,8 @@ async fn serve_to(server: &MockServer, token: &str, thread: &Value, members: &Va
         .await;
 }
 
-async fn serve(server: &MockServer, thread: &Value, members: &Value) {
-    serve_to(server, TOKEN, thread, members).await;
+async fn serve(server: &MockServer, members: &Value) {
+    serve_to(server, &group_id(GROUP), TOKEN, members).await;
 }
 
 async fn requests(server: &MockServer) -> Vec<Request> {
@@ -155,16 +132,14 @@ fn malformed() -> Membership {
 }
 
 fn lab_fence() -> Fence {
-    Fence::new(Roster::new(abc(), []), FenceLog::from_writer(std::io::sink()))
+    Fence::new(Roster::new(abc(), [echo()]), FenceLog::from_writer(std::io::sink()))
 }
 
 #[tokio::test]
-async fn the_lab_s_recorded_group_chat_of_a_b_and_c_is_complete() -> TestResult {
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
+async fn a_lab_only_group_chat_is_complete_from_one_fresh_member_list_read() -> TestResult {
     let server = MockServer::start().await;
-    let (thread, members) = bodies()?;
-    serve(&server, &thread, &members).await;
-    let source = lab.source(&server)?;
+    serve(&server, &members_body()?).await;
+    let source = source(&server)?;
 
     assert_eq!(source.members(&group_chat()).await, Membership::Complete(abc()));
     let paths: Vec<String> = requests(&server)
@@ -172,32 +147,83 @@ async fn the_lab_s_recorded_group_chat_of_a_b_and_c_is_complete() -> TestResult 
         .iter()
         .map(|request| request.url.path().to_owned())
         .collect();
-    assert_eq!(
-        paths.len(),
-        2,
-        "the thread read and the member list, each once: {paths:?}"
-    );
-    assert!(paths[1].ends_with("/members"), "{paths:?}");
+    assert_eq!(paths, [members_path(&group_id(GROUP))], "the member list alone, once");
 
-    // every check reads both afresh
+    // every check reads afresh
     assert_eq!(source.members(&group_chat()).await, Membership::Complete(abc()));
-    assert_eq!(requests(&server).await.len(), 4);
+    assert_eq!(requests(&server).await.len(), 2);
     Ok(())
 }
 
 #[tokio::test]
-async fn the_fence_allows_writes_to_the_lab_s_group_chat() -> TestResult {
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
+async fn a_lab_only_meeting_chat_is_complete_too() -> TestResult {
     let server = MockServer::start().await;
-    let (thread, members) = bodies()?;
-    serve(&server, &thread, &members).await;
-    let source = lab.source(&server)?;
+    serve_to(&server, MEETING, TOKEN, &members_body()?).await;
+    let source = source(&server)?;
+    assert_eq!(source.members(&meeting_chat()).await, Membership::Complete(abc()));
+    let permit = lab_fence()
+        .check(Target::new(WriteKind::Message, meeting_chat()), &source)
+        .await;
+    assert!(permit.is_ok(), "{permit:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn any_lab_only_group_chat_is_read_whatever_chats_toml_records() -> TestResult {
+    // the fence doesn't read chats.toml: a chat it doesn't record (another recorded, none recorded, an unreadable
+    // file) is read like the recorded one, a chat the native client created included
+    let dir = tempfile::tempdir()?;
+    let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
+    let fence = Fence::open(&config)?;
+    let server = MockServer::start().await;
+    serve(&server, &members_body()?).await;
+    let source = source(&server)?;
+    let chats = config.paths().chats_file();
+    assert_eq!(source.members(&group_chat()).await, Membership::Complete(abc()));
+    record_abc_chat(config.paths(), &group_id(OTHER_GROUP))?;
+    assert_eq!(source.members(&group_chat()).await, Membership::Complete(abc()));
+    std::fs::write(&chats, "not toml")?;
+    assert_eq!(source.members(&group_chat()).await, Membership::Complete(abc()));
+    let permit = fence
+        .check(Target::new(WriteKind::Message, group_chat()), &source)
+        .await;
+    assert!(permit.is_ok(), "{permit:?}");
+    Ok(())
+}
+
+#[test]
+fn the_source_of_a_lab_fence_reads_every_group_and_meeting_chat() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
+    let source = LiveMembershipSource::for_fence(&Fence::open(&config)?)?;
+    for scope in [
+        group_chat(),
+        Scope::Conversation {
+            id: group_id(OTHER_GROUP),
+        },
+        meeting_chat(),
+    ] {
+        assert!(source.reads_in_full(&scope), "{scope}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_fence_allows_writes_to_a_lab_only_group_chat_and_judges_what_they_add() -> TestResult {
+    let server = MockServer::start().await;
+    let mut members = members_body()?;
+    // an approved service is admitted like a lab account
+    let mut service = members["members"][2].clone();
+    service["id"] = json!(echo().as_str());
+    members["members"].as_array_mut().ok_or("no members")?.push(service);
+    members["totalMemberCount"] = json!(4);
+    serve(&server, &members).await;
+    let source = source(&server)?;
     let fence = lab_fence();
-    for kind in [WriteKind::Message, WriteKind::Typing, WriteKind::ReadReceipt] {
+    for kind in [WriteKind::Message, WriteKind::Reaction, WriteKind::Edit] {
         let permit = fence.check(Target::new(kind, group_chat()), &source).await;
         assert!(permit.is_ok(), "{kind:?}: {permit:?}");
     }
-    // and judges what a write adds as for any chat: an outsider mentioned is denied
     let mention = Target::new(WriteKind::Message, group_chat()).with_added([mri(GUID_X)]);
     let denied = fence.check(mention, &source).await.err().ok_or("allowed")?;
     assert_eq!(*denied.reason(), DenyReason::Outsiders { count: 1 });
@@ -205,207 +231,56 @@ async fn the_fence_allows_writes_to_the_lab_s_group_chat() -> TestResult {
 }
 
 #[tokio::test]
-async fn a_group_chat_the_lab_didn_t_record_is_never_read() -> TestResult {
-    let (thread, members) = bodies()?;
-    // another chat recorded, none recorded
-    for recorded in [Some(group_id(OTHER_GROUP)), None] {
-        let lab = Lab::new(recorded.as_deref())?;
-        let server = MockServer::start().await;
-        serve(&server, &thread, &members).await;
-        let source = lab.source(&server)?;
-        assert_eq!(
-            source.members(&group_chat()).await,
-            partial(PartialReason::UnrecordedGroupChat),
-            "{recorded:?}"
-        );
-        assert!(requests(&server).await.is_empty(), "{recorded:?}");
-        let denied = lab_fence()
-            .check(Target::new(WriteKind::Message, group_chat()), &source)
-            .await
-            .err()
-            .ok_or("allowed")?;
-        assert_eq!(
-            *denied.reason(),
-            DenyReason::Partial(PartialReason::UnrecordedGroupChat)
-        );
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_unreadable_chats_file_is_never_taken_for_a_record() -> TestResult {
-    let lab = Lab::new(None)?;
+async fn a_group_chat_with_a_member_outside_the_lab_is_denied() -> TestResult {
     let server = MockServer::start().await;
-    let (thread, members) = bodies()?;
-    serve(&server, &thread, &members).await;
-    let source = lab.source(&server)?;
-    let chats = lab.config.paths().chats_file();
-    for text in [
-        format!("abc = \"{}\"\nother = 1\n", group_id(GROUP)),
-        "abc = \"19:meeting_0123@thread.v2\"\n".to_owned(),
-        "not toml".to_owned(),
-    ] {
-        std::fs::write(&chats, &text)?;
-        assert_eq!(
-            source.members(&group_chat()).await,
-            partial(PartialReason::ChatsUnreadable),
-            "{text}"
-        );
-    }
-    // a directory where the file should be
-    std::fs::remove_file(&chats)?;
-    std::fs::create_dir(&chats)?;
+    let mut members = members_body()?;
+    members["members"][2]["id"] = json!(mri(GUID_X).as_str());
+    serve(&server, &members).await;
+    let source = source(&server)?;
     assert_eq!(
         source.members(&group_chat()).await,
-        partial(PartialReason::ChatsUnreadable)
-    );
-    assert!(requests(&server).await.is_empty());
-    drop(lab.dir);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_chat_recorded_after_the_source_was_built_is_read_from_then_on() -> TestResult {
-    // the record is read when the fence decides, not when the source is built
-    let lab = Lab::new(None)?;
-    let server = MockServer::start().await;
-    let (thread, members) = bodies()?;
-    serve(&server, &thread, &members).await;
-    let source = lab.source(&server)?;
-    assert!(!source.reads_in_full(&group_chat()));
-    assert_eq!(
-        source.members(&group_chat()).await,
-        partial(PartialReason::UnrecordedGroupChat)
-    );
-    record_abc_chat(lab.config.paths(), &group_id(GROUP))?;
-    assert!(source.reads_in_full(&group_chat()));
-    assert_eq!(source.members(&group_chat()).await, Membership::Complete(abc()));
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_source_without_the_lab_admits_no_group_chat_and_reads_none() -> TestResult {
-    let server = MockServer::start().await;
-    let (thread, members) = bodies()?;
-    serve(&server, &thread, &members).await;
-
-    // no lab at all: `with_mock_origin` alone, as `LiveMembershipSource::new` carries none
-    let bare = LiveMembershipSource::with_mock_origin(&server.uri())?;
-    bare.set_credential(ChatCredential::bearer(BASE, TOKEN).ok_or("no credential")?);
-    assert_eq!(bare.members(&group_chat()).await, partial(PartialReason::Unsupported));
-    assert!(!bare.reads_in_full(&group_chat()));
-    let new = LiveMembershipSource::new()?;
-    assert!(!new.reads_in_full(&group_chat()));
-
-    // a lab whose a, b and c aren't three known, distinct MRIs
-    let a = || Some(mri(GUID_A).as_str().to_owned());
-    let b = || Some(mri(GUID_B).as_str().to_owned());
-    let upper_a = Some(mri(GUID_A).as_str().to_uppercase().replace("8:ORGID:", "8:orgid:"));
-    for mris in [[a(), b(), None], [a(), b(), upper_a]] {
-        let lab = Lab::with_mris(mris.clone(), Some(&group_id(GROUP)))?;
-        let source = lab.source(&server)?;
-        assert_eq!(
-            source.members(&group_chat()).await,
-            partial(PartialReason::Unsupported),
-            "{mris:?}"
-        );
-        assert!(!source.reads_in_full(&group_chat()), "{mris:?}");
-    }
-    assert!(requests(&server).await.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn reads_in_full_says_yes_only_for_a_one_to_one_chat_and_the_recorded_group_chat() -> TestResult {
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
-    let server = MockServer::start().await;
-    let source = lab.source(&server)?;
-    assert!(source.reads_in_full(&group_chat()));
-    assert!(source.reads_in_full(&Scope::Conversation {
-        id: format!("19:{GUID_A}_{GUID_B}@unq.gbl.spaces"),
-    }));
-    for scope in [
-        Scope::Conversation {
-            id: group_id(OTHER_GROUP),
-        },
-        Scope::Conversation {
-            id: group_id(&GROUP.to_uppercase()),
-        },
-        Scope::Conversation {
-            id: "19:meeting_0123456789abcdef@thread.v2".to_owned(),
-        },
-        Scope::Channel {
-            team: "19:team@thread.tacv2".to_owned(),
-            channel: "19:channel@thread.tacv2".to_owned(),
-        },
-        Scope::Team {
-            id: "19:team@thread.tacv2".to_owned(),
-        },
-        Scope::Call {
-            id: "call-1".to_owned(),
-        },
-    ] {
-        assert!(!source.reads_in_full(&scope), "{scope}");
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_group_chat_with_an_outsider_is_denied() -> TestResult {
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
-    let server = MockServer::start().await;
-    let (mut thread, mut members) = bodies()?;
-    for body in [&mut thread, &mut members] {
-        let mut outsider = body["members"][2].clone();
-        outsider["id"] = json!(mri(GUID_X).as_str());
-        body["members"].as_array_mut().ok_or("no members")?.push(outsider);
-    }
-    members["totalMemberCount"] = json!(4);
-    serve(&server, &thread, &members).await;
-    let source = lab.source(&server)?;
-    assert_eq!(
-        source.members(&group_chat()).await,
-        partial(PartialReason::UnexpectedRoster)
+        Membership::Complete(vec![mri(GUID_A), mri(GUID_B), mri(GUID_X)])
     );
     let denied = lab_fence()
         .check(Target::new(WriteKind::Message, group_chat()), &source)
         .await
         .err()
         .ok_or("allowed")?;
-    assert_eq!(*denied.reason(), DenyReason::Partial(PartialReason::UnexpectedRoster));
+    assert_eq!(*denied.reason(), DenyReason::Outsiders { count: 1 });
     Ok(())
 }
 
 #[tokio::test]
 async fn a_failed_member_list_read_is_partial_with_its_status() -> TestResult {
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
     let server = MockServer::start().await;
-    let (thread, _) = bodies()?;
     Mock::given(method("GET"))
-        .and(path(format!("/api/chatsvc/emea/v1/threads/{}", group_id(GROUP))))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&thread))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path(format!(
-            "/api/chatsvc/emea/v1/threads/{}/members",
-            group_id(GROUP)
-        )))
+        .and(path(members_path(&group_id(GROUP))))
         .respond_with(ResponseTemplate::new(403))
         .mount(&server)
         .await;
     assert_eq!(
-        lab.source(&server)?.members(&group_chat()).await,
+        source(&server)?.members(&group_chat()).await,
         partial(PartialReason::FetchFailed(FetchFailure::Status(403)))
     );
     Ok(())
 }
 
-/// A native client's credential source: `token` first, `renewed` once the service refuses it.
+/// A native client's credential source: `token` first, `renewed` once the service refuses it; `None` when `token`
+/// is empty.
 struct Renewing {
     token: Mutex<String>,
     renewed: String,
     refused: AtomicUsize,
+}
+
+impl Renewing {
+    fn new(token: &str, renewed: &str) -> Self {
+        Self {
+            token: Mutex::new(token.to_owned()),
+            renewed: renewed.to_owned(),
+            refused: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl CredentialSource for Renewing {
@@ -425,176 +300,99 @@ impl CredentialSource for Renewing {
 }
 
 #[tokio::test]
-async fn a_refusal_of_either_read_renews_the_token_once_and_reads_both_again_with_it() -> TestResult {
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
+async fn a_refused_read_renews_the_token_once_and_reads_again_with_it() -> TestResult {
     let server = MockServer::start().await;
-    let (thread, members) = bodies()?;
     let renewed = format!("{TOKEN}-renewed");
-    // the old token reads the thread, but the member list refuses it
-    Mock::given(method("GET"))
-        .and(path(format!("/api/chatsvc/emea/v1/threads/{}", group_id(GROUP))))
-        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&thread))
-        .mount(&server)
-        .await;
-    serve_to(&server, &renewed, &thread, &members).await;
+    serve_to(&server, &group_id(GROUP), &renewed, &members_body()?).await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(401))
         .with_priority(10)
         .mount(&server)
         .await;
-    let tokens = Arc::new(Renewing {
-        token: Mutex::new(TOKEN.to_owned()),
-        renewed: renewed.clone(),
-        refused: AtomicUsize::new(0),
-    });
-    let source = LiveMembershipSource::with_mock_origin(&server.uri())?.with_lab(&lab.config);
+    let tokens = Arc::new(Renewing::new(TOKEN, &renewed));
+    let source = LiveMembershipSource::with_mock_origin(&server.uri())?;
     source.set_credential_source(tokens.clone());
 
     assert_eq!(source.members(&group_chat()).await, Membership::Complete(abc()));
     assert_eq!(tokens.refused.load(Ordering::SeqCst), 1);
-    let sent: Vec<(String, String)> = requests(&server)
+    let sent: Vec<String> = requests(&server)
         .await
         .iter()
         .map(|request| {
-            let bearer = request
+            request
                 .headers
                 .get("authorization")
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default()
-                .to_owned();
-            (
-                request.url.path().rsplit('/').next().unwrap_or_default().to_owned(),
-                bearer,
-            )
+                .to_owned()
         })
         .collect();
-    let thread_segment = group_id(GROUP);
+    assert_eq!(sent, [format!("Bearer {TOKEN}"), format!("Bearer {renewed}")]);
+
+    // a renewed token refused too is denied after those two reads
+    let refusing = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&refusing)
+        .await;
+    let source = LiveMembershipSource::with_mock_origin(&refusing.uri())?;
+    source.set_credential_source(Arc::new(Renewing::new(TOKEN, &renewed)));
     assert_eq!(
-        sent,
-        [
-            (thread_segment.clone(), format!("Bearer {TOKEN}")),
-            ("members".to_owned(), format!("Bearer {TOKEN}")),
-            (thread_segment, format!("Bearer {renewed}")),
-            ("members".to_owned(), format!("Bearer {renewed}")),
-        ],
-        "both reads again, with the renewed token"
+        source.members(&group_chat()).await,
+        partial(PartialReason::FetchFailed(FetchFailure::Status(401)))
     );
+    assert_eq!(requests(&refusing).await.len(), 2);
     Ok(())
 }
 
-/// A native client's credential source whose session signs out while the thread is read: [`TOKEN`] until then, then
-/// none.
-#[derive(Default)]
-struct SignsOut {
-    signed_out: AtomicBool,
-    asked: AtomicUsize,
-}
-
-impl CredentialSource for SignsOut {
-    fn credential(&self) -> CredentialFuture<'_> {
-        self.asked.fetch_add(1, Ordering::SeqCst);
-        let signed_out = self.signed_out.load(Ordering::SeqCst);
-        Box::pin(async move { (!signed_out).then(|| ChatCredential::bearer(BASE, TOKEN)).flatten() })
-    }
-}
-
-/// Answers the thread read with `thread`, signing the source out as it does.
-struct ThreadThenSignOut {
-    thread: Value,
-    tokens: Arc<SignsOut>,
-}
-
-impl Respond for ThreadThenSignOut {
-    fn respond(&self, _request: &Request) -> ResponseTemplate {
-        self.tokens.signed_out.store(true, Ordering::SeqCst);
-        ResponseTemplate::new(200).set_body_json(&self.thread)
-    }
-}
-
 #[tokio::test]
-async fn a_session_signed_out_during_the_thread_read_sends_no_member_list_read() -> TestResult {
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
+async fn without_a_credential_no_member_list_is_read() -> TestResult {
     let server = MockServer::start().await;
-    let (thread, members) = bodies()?;
-    let tokens = Arc::new(SignsOut::default());
-    Mock::given(method("GET"))
-        .and(path(format!("/api/chatsvc/emea/v1/threads/{}", group_id(GROUP))))
-        .respond_with(ThreadThenSignOut {
-            thread,
-            tokens: Arc::clone(&tokens),
-        })
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path(format!(
-            "/api/chatsvc/emea/v1/threads/{}/members",
-            group_id(GROUP)
-        )))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&members))
-        .mount(&server)
-        .await;
-    let source = LiveMembershipSource::with_mock_origin(&server.uri())?.with_lab(&lab.config);
-    source.set_credential_source(tokens.clone());
-
+    serve(&server, &members_body()?).await;
+    let bare = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    assert_eq!(bare.members(&group_chat()).await, partial(PartialReason::NoCredential));
+    let signed_out = LiveMembershipSource::with_mock_origin(&server.uri())?;
+    signed_out.set_credential_source(Arc::new(Renewing::new("", "")));
     assert_eq!(
-        source.members(&group_chat()).await,
+        signed_out.members(&meeting_chat()).await,
         partial(PartialReason::NoCredential)
     );
-    assert_eq!(
-        tokens.asked.load(Ordering::SeqCst),
-        2,
-        "asked again before the member list"
-    );
-    let sent = requests(&server).await;
-    assert_eq!(
-        sent.len(),
-        1,
-        "only the thread read went out: {:?}",
-        sent.iter().map(|r| r.url.path()).collect::<Vec<_>>()
-    );
+    assert!(requests(&server).await.is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn both_reads_share_one_deadline() -> TestResult {
-    // each read alone is well within the deadline, the two together aren't
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
+async fn a_slow_read_times_out_and_is_denied() -> TestResult {
     let server = MockServer::start().await;
-    let (thread, members) = bodies()?;
-    let delay = Duration::from_millis(700);
     Mock::given(method("GET"))
-        .and(path(format!("/api/chatsvc/emea/v1/threads/{}", group_id(GROUP))))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&thread).set_delay(delay))
+        .and(path(members_path(&group_id(GROUP))))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(members_body()?)
+                .set_delay(Duration::from_millis(700)),
+        )
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path(format!(
-            "/api/chatsvc/emea/v1/threads/{}/members",
-            group_id(GROUP)
-        )))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&members).set_delay(delay))
-        .mount(&server)
-        .await;
-    let source = lab.source(&server)?.with_deadline(Duration::from_secs(1));
+    let source = source(&server)?.with_deadline(Duration::from_millis(300));
+    let timed_out = partial(PartialReason::FetchFailed(FetchFailure::Timeout));
+    assert_eq!(source.members(&group_chat()).await, timed_out);
+    let denied = lab_fence()
+        .check(Target::new(WriteKind::Message, group_chat()), &source)
+        .await
+        .err()
+        .ok_or("allowed")?;
     assert_eq!(
-        source.members(&group_chat()).await,
-        partial(PartialReason::FetchFailed(FetchFailure::Timeout))
+        *denied.reason(),
+        DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Timeout))
     );
-    // with time for both, the same answers are complete
-    let source = lab.source(&server)?.with_deadline(Duration::from_secs(5));
+    // with time for it, the same answer is complete
+    let source = source.with_deadline(Duration::from_secs(5));
     assert_eq!(source.members(&group_chat()).await, Membership::Complete(abc()));
     Ok(())
 }
 
-/// One way the answers can differ from what the rule accepts: a name, the change, and the answer it must get.
-type Case = (&'static str, fn(&mut Value, &mut Value), Membership);
-
-fn set(body: &mut Value, pointer: &str, value: Value) {
-    if let Some(slot) = body.pointer_mut(pointer) {
-        *slot = value;
-    }
-}
+/// One way the answer can differ from what the rule accepts: a name, the change, and the answer it must get.
+type Case = (&'static str, fn(&mut Value), Membership);
 
 fn remove(body: &mut Value, pointer: &str) {
     let (parent, key) = pointer.rsplit_once('/').unwrap_or_default();
@@ -609,45 +407,32 @@ fn members_of(body: &mut Value) -> &mut Vec<Value> {
         .unwrap_or_else(|| unreachable!("the fixture lists members"))
 }
 
-/// Every case: the answers that must stay partial, each by one change to the fixtures' answers.
+/// Every case: the answers that must stay partial, each by one change to the fixture's answer.
 fn cases() -> Vec<Case> {
-    [
-        paging_cases(),
-        count_cases(),
-        disagreement_cases(),
-        roster_cases(),
-        shape_cases(),
-        more_shape_cases(),
-    ]
-    .concat()
+    [paging_cases(), count_cases(), member_cases(), shape_cases()].concat()
 }
 
-/// Paging, at any depth of either answer.
+/// Paging, at any depth.
 fn paging_cases() -> Vec<Case> {
     vec![
         (
-            "a next link on the list",
-            |_, m| m["nextLink"] = json!("https://x.example.test/next"),
+            "a next link",
+            |m| m["nextLink"] = json!("https://x.example.test/next"),
             partial(PartialReason::Paginated),
         ),
         (
-            "a sync state under the list's _metadata",
-            |_, m| m["_metadata"] = json!({"syncState": "x"}),
+            "a sync state under _metadata",
+            |m| m["_metadata"] = json!({"syncState": "x"}),
             partial(PartialReason::Paginated),
         ),
         (
             "a continuation token in a listed member",
-            |_, m| m["members"][1]["continuationToken"] = json!("x"),
+            |m| m["members"][1]["continuationToken"] = json!("x"),
             partial(PartialReason::Paginated),
         ),
         (
-            "a skip token in the thread's properties",
-            |t, _| t["properties"]["skipToken"] = json!(""),
-            partial(PartialReason::Paginated),
-        ),
-        (
-            "an empty next page marker on the thread",
-            |t, _| t["@odata.nextLink"] = json!(null),
+            "an empty next page marker",
+            |m| m["@odata.nextLink"] = json!(null),
             partial(PartialReason::Paginated),
         ),
     ]
@@ -656,105 +441,36 @@ fn paging_cases() -> Vec<Case> {
 /// The counts.
 fn count_cases() -> Vec<Case> {
     vec![
-        // the count
         (
             "a count above the list",
-            |_, m| m["totalMemberCount"] = json!(4),
+            |m| m["totalMemberCount"] = json!(4),
             partial(PartialReason::Truncated),
         ),
         (
             "a count below the list",
-            |_, m| m["totalMemberCount"] = json!(2),
+            |m| m["totalMemberCount"] = json!(2),
             partial(PartialReason::Truncated),
         ),
-        ("no count", |_, m| remove(m, "/totalMemberCount"), malformed()),
+        (
+            "another member count above the list",
+            |m| m["memberCount"] = json!(4),
+            partial(PartialReason::Truncated),
+        ),
+        ("no count", |m| remove(m, "/totalMemberCount"), malformed()),
         (
             "a count that isn't a number",
-            |_, m| m["totalMemberCount"] = json!("3"),
+            |m| m["totalMemberCount"] = json!("3"),
             malformed(),
         ),
-        (
-            "a member count above the list on the thread",
-            |t, _| t["properties"]["memberCount"] = json!(4),
-            partial(PartialReason::Truncated),
-        ),
-        (
-            "a member count above the list on the list",
-            |_, m| m["memberCount"] = json!(4),
-            partial(PartialReason::Truncated),
-        ),
     ]
 }
 
-/// The two reads disagree.
-fn disagreement_cases() -> Vec<Case> {
+/// The members.
+fn member_cases() -> Vec<Case> {
     vec![
-        // the reads disagree
         (
-            "another member on the list",
-            |_, m| m["members"][2]["id"] = json!(mri(GUID_X).as_str()),
-            partial(PartialReason::Inconsistent),
-        ),
-        (
-            "a member missing from the list",
-            |_, m| {
-                members_of(m).pop();
-                m["totalMemberCount"] = json!(2);
-            },
-            partial(PartialReason::Inconsistent),
-        ),
-        (
-            "other eTags",
-            |_, m| m["eTag"] = json!("\"1760000000001\""),
-            partial(PartialReason::Inconsistent),
-        ),
-    ]
-}
-
-/// The roster both agree on isn't exactly a, b and c made by a.
-fn roster_cases() -> Vec<Case> {
-    vec![
-        // the roster both agree on isn't exactly a, b and c
-        (
-            "both without c",
-            |t, m| {
-                members_of(t).pop();
-                members_of(m).pop();
-                m["totalMemberCount"] = json!(2);
-            },
-            partial(PartialReason::UnexpectedRoster),
-        ),
-        (
-            "both with an outsider for c",
-            |t, m| {
-                t["members"][2]["id"] = json!(mri(GUID_X).as_str());
-                m["members"][2]["id"] = json!(mri(GUID_X).as_str());
-            },
-            partial(PartialReason::UnexpectedRoster),
-        ),
-        (
-            "made by b",
-            |t, _| t["properties"]["creator"] = json!(mri(GUID_B).as_str()),
-            partial(PartialReason::UnexpectedRoster),
-        ),
-    ]
-}
-
-/// The shape the service gave live: the members.
-fn shape_cases() -> Vec<Case> {
-    vec![
-        // the shape the service gave live
-        (
-            "a member twice on the thread",
-            |t, _| {
-                let first = t["members"][0].clone();
-                members_of(t).push(first);
-            },
-            malformed(),
-        ),
-        (
-            "a member twice on the list, counted",
-            |_, m| {
+            "a member twice, counted",
+            |m| {
                 let first = m["members"][0].clone();
                 members_of(m).push(first);
                 m["totalMemberCount"] = json!(4);
@@ -763,141 +479,120 @@ fn shape_cases() -> Vec<Case> {
         ),
         (
             "a member twice in another case",
-            |t, _| t["members"][2]["id"] = json!(mri(GUID_A).as_str().to_uppercase()),
+            |m| m["members"][2]["id"] = json!(mri(GUID_A).as_str().to_uppercase()),
             malformed(),
         ),
         (
-            "a hidden member on the thread",
-            |t, _| t["members"][1]["hidden"] = json!(true),
-            malformed(),
-        ),
-        (
-            "a hidden member on the list",
-            |_, m| m["members"][1]["hidden"] = json!(true),
+            "a hidden member",
+            |m| m["members"][1]["hidden"] = json!(true),
             malformed(),
         ),
         (
             "a member without hidden",
-            |_, m| remove(m, "/members/0/hidden"),
+            |m| remove(m, "/members/0/hidden"),
+            malformed(),
+        ),
+        (
+            "a deleted member",
+            |m| m["members"][1]["isDeleted"] = json!(true),
+            malformed(),
+        ),
+        (
+            "a member deleted in another form",
+            |m| m["members"][1]["isDeleted"] = json!("false"),
+            malformed(),
+        ),
+        ("a member without an id", |m| remove(m, "/members/1/id"), malformed()),
+        (
+            "a member id that isn't text",
+            |m| m["members"][1]["id"] = json!(8),
+            malformed(),
+        ),
+        (
+            "a consumer account's MRI",
+            |m| m["members"][1]["id"] = json!("8:live:someone"),
+            malformed(),
+        ),
+        (
+            "a work MRI without a GUID",
+            |m| m["members"][1]["id"] = json!("8:orgid:someone"),
+            malformed(),
+        ),
+        (
+            "a thread as a member",
+            |m| m["members"][1]["id"] = json!(group_id(OTHER_GROUP)),
+            malformed(),
+        ),
+        (
+            "a bot MRI without a GUID",
+            |m| m["members"][1]["id"] = json!("28:some-bot"),
             malformed(),
         ),
     ]
 }
 
-/// The shape the service gave live: the rest.
-fn more_shape_cases() -> Vec<Case> {
+/// The rest of the shape.
+fn shape_cases() -> Vec<Case> {
     vec![
-        ("a deleted chat", |_, m| m["isDeleted"] = json!(true), malformed()),
-        ("no isDeleted", |_, m| remove(m, "/isDeleted"), malformed()),
-        (
-            "a list roster version other than 0",
-            |_, m| m["rosterVersion"] = json!(1_760_000_000_000_u64),
-            malformed(),
-        ),
-        (
-            "no list roster version",
-            |_, m| remove(m, "/rosterVersion"),
-            malformed(),
-        ),
-        (
-            "no thread roster version",
-            |t, _| remove(t, "/rosterVersion"),
-            malformed(),
-        ),
-        (
-            "a thread roster version that isn't a number",
-            |t, _| t["rosterVersion"] = json!("1760000000000"),
-            malformed(),
-        ),
-        ("no thread eTag", |t, _| remove(t, "/eTag"), malformed()),
-        (
-            "empty eTags",
-            |t, m| {
-                t["eTag"] = json!("");
-                m["eTag"] = json!("");
-            },
-            malformed(),
-        ),
-        (
-            "a meeting's thread",
-            |t, _| set(t, "/properties/threadType", json!("meeting")),
-            malformed(),
-        ),
-        (
-            "no thread type",
-            |t, _| remove(t, "/properties/threadType"),
-            malformed(),
-        ),
-        ("not a thread", |t, _| t["type"] = json!("Conversation"), malformed()),
-        ("no creator", |t, _| remove(t, "/properties/creator"), malformed()),
-        (
-            "another thread's answer",
-            |t, _| t["id"] = json!(group_id(OTHER_GROUP)),
-            malformed(),
-        ),
-        (
-            "a member without an id on the list",
-            |_, m| remove(m, "/members/1/id"),
-            malformed(),
-        ),
-        ("a list that isn't an object", |_, m| *m = json!([]), malformed()),
+        ("a deleted chat", |m| m["isDeleted"] = json!(true), malformed()),
+        ("no isDeleted", |m| remove(m, "/isDeleted"), malformed()),
+        ("no members", |m| remove(m, "/members"), malformed()),
+        ("members that aren't a list", |m| m["members"] = json!({}), malformed()),
+        ("a list that isn't an object", |m| *m = json!([]), malformed()),
     ]
 }
 
 #[test]
 fn every_condition_of_the_rule_keeps_the_chat_partial_when_it_fails() -> TestResult {
-    let (thread, members) = bodies()?;
-    let id = group_id(GROUP);
-    let lab = abc();
-    let lab: [Mri; 3] = [lab[0].clone(), lab[1].clone(), lab[2].clone()];
-    assert_eq!(parse_group(&id, &thread, &members, &lab), Membership::Complete(abc()));
+    let members = members_body()?;
+    assert_eq!(parse_members(&members), Membership::Complete(abc()));
     for (case, change, expected) in cases() {
-        let (mut thread, mut members) = (thread.clone(), members.clone());
-        change(&mut thread, &mut members);
-        assert_eq!(parse_group(&id, &thread, &members, &lab), expected, "{case}");
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn every_condition_holds_over_the_wire_too() -> TestResult {
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
-    let (thread, members) = bodies()?;
-    for (case, change, expected) in cases() {
-        let server = MockServer::start().await;
-        let (mut thread, mut members) = (thread.clone(), members.clone());
-        change(&mut thread, &mut members);
-        serve(&server, &thread, &members).await;
-        assert_eq!(lab.source(&server)?.members(&group_chat()).await, expected, "{case}");
+        let mut members = members.clone();
+        change(&mut members);
+        assert_eq!(parse_members(&members), expected, "{case}");
     }
     Ok(())
 }
 
 #[test]
-fn the_source_of_a_lab_fence_admits_only_that_lab_s_recorded_chat() -> TestResult {
-    // the source every lab session reads with (`for_fence`), not the test-only `with_lab`
-    let lab = Lab::new(Some(&group_id(GROUP)))?;
-    let fence = Fence::open(&lab.config)?;
-    let source = LiveMembershipSource::for_fence(&fence)?;
-    assert!(source.reads_in_full(&group_chat()));
-    let other = Scope::Conversation {
-        id: group_id(OTHER_GROUP),
-    };
-    assert!(!source.reads_in_full(&other));
-    // a lab without c's MRI admits no group chat, recorded or not
-    let without_c = Lab::with_mris(
-        [
-            Some(mri(GUID_A).as_str().to_owned()),
-            Some(mri(GUID_B).as_str().to_owned()),
-            None,
-        ],
-        Some(&group_id(GROUP)),
-    )?;
-    let source = LiveMembershipSource::for_fence(&Fence::open(&without_c.config)?)?;
-    assert!(!source.reads_in_full(&group_chat()));
-    // nor does a lab that recorded no chat yet
-    let unrecorded = Lab::new(None)?;
-    let source = LiveMembershipSource::for_fence(&Fence::open(&unrecorded.config)?)?;
-    assert!(!source.reads_in_full(&group_chat()));
+fn what_the_rule_doesn_t_judge_leaves_the_list_complete() -> TestResult {
+    // the roster version, the eTag and who made the chat aren't judged: the member list carries everything the fence
+    // judges; a bot's MRI is a form the reads showed, and an empty list is complete (the fence denies it: no members)
+    let mut members = members_body()?;
+    members["rosterVersion"] = json!(1_760_000_000_000_u64);
+    remove(&mut members, "/eTag");
+    members["members"][0]["isDeleted"] = json!(false);
+    members["members"][2]["id"] = json!(echo().as_str());
+    assert_eq!(
+        parse_members(&members),
+        Membership::Complete(vec![mri(GUID_A), mri(GUID_B), echo()])
+    );
+    members_of(&mut members).clear();
+    members["totalMemberCount"] = json!(0);
+    assert_eq!(parse_members(&members), Membership::Complete(Vec::new()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_condition_holds_over_the_wire_and_the_fence_denies_with_its_reason() -> TestResult {
+    let members = members_body()?;
+    let fence = lab_fence();
+    for (case, change, expected) in cases() {
+        let server = MockServer::start().await;
+        let mut members = members.clone();
+        change(&mut members);
+        serve(&server, &members).await;
+        let source = source(&server)?;
+        assert_eq!(source.members(&group_chat()).await, expected, "{case}");
+        let denied = fence
+            .check(Target::new(WriteKind::Message, group_chat()), &source)
+            .await
+            .err()
+            .ok_or(case)?;
+        let Membership::Partial(reason) = expected else {
+            unreachable!("every case is partial")
+        };
+        assert_eq!(*denied.reason(), DenyReason::Partial(reason), "{case}");
+    }
     Ok(())
 }

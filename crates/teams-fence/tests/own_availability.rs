@@ -1,8 +1,8 @@
-//! The account's own availability (M2 Task 19): the one write the fence permits without a member read, under the
-//! user's exception of 2026-10-21 (CLAUDE.md, "A lab account may set its own availability"). It is
-//! `WriteKind::OwnAvailability` on `Scope::Account`, allowed only for the fence's own account (a fence opened for a lab
-//! account, `Fence::open_lab_account`), a lab account of the roster, with nobody added; denied for every other account,
-//! scope or fence, and nothing else lands on `Scope::Account`. No decision here asks the membership source.
+//! The account's own availability: a write the fence permits without a member read (it reaches nobody), but only as
+//! the account's own. It is `WriteKind::OwnAvailability` on `Scope::Account`, allowed only for the fence's own account
+//! (a fence opened for a lab account, `Fence::open_lab_account`), a lab account of the roster, with nobody added;
+//! denied for every other account, scope or fence, and nothing else lands on `Scope::Account`. No decision here asks
+//! the membership source.
 //!
 //! MRIs here are placeholders, never real ones.
 

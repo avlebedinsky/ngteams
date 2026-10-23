@@ -23,7 +23,7 @@ use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
 use proto_lab::scenario::dsl::{Driver, RequestPattern, SeenRequest, Selector};
 use serde_json::{Value, json};
 use teams_fence::{
-    ChatCredential, DenyReason, FailClosed, Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri,
+    ChatCredential, DenyReason, FailClosed, Fence, FenceLog, FetchFailure, LiveMembershipSource, MembershipSource, Mri,
     PartialReason, Roster, Scope, Target, WriteKind,
 };
 use url::Url;
@@ -460,10 +460,12 @@ async fn a_message_in_the_lab_chat_passes_with_live_members_and_nothing_else_doe
         decide(&[GUID_A], &lab_chat).await,
         Verdict::Deny(DenyCause::Fenced(DenyReason::Outsiders { count: 1 }))
     );
-    // a group chat's members can't be confirmed in full yet
+    // a group chat's members are read like any chat's: this mock serves no member list, so the read fails and denies
     assert_eq!(
         decide(&[GUID_A, GUID_B], &message_to("19:groupchat0001@thread.v2")).await,
-        Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::Unsupported)))
+        Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::FetchFailed(
+            FetchFailure::Status(404)
+        ))))
     );
     // a channel post isn't mapped at all
     assert_eq!(

@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use fixture_guard::Guard;
 use teams_fence::lab::LabConfig;
 use teams_fence::{
-    ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, DenyReason, FailClosed, Fence, FenceLog,
-    FetchFailure, FrameRecord, Membership, MembershipFuture, MembershipSource, Mri, OpenError, PartialReason,
-    RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind,
+    AllowedRecord, ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, DenyReason, FailClosed, Fence,
+    FenceLog, FetchFailure, FrameRecord, Membership, MembershipFuture, MembershipSource, Mri, OpenError, PartialReason,
+    RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind, path_shape,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -106,13 +106,15 @@ fn log_entries(path: &Path) -> Result<Vec<serde_json::Value>, Box<dyn std::error
     Ok(entries)
 }
 
-/// Every kind of write judged by its participants: all but the account's own availability, which lands only on the
-/// account itself and is judged by whose account it is (`tests/own_availability.rs`).
+/// Every kind of write judged by its target's participants: every contacting kind. Typing and read receipts reach
+/// nobody and are judged without a member read (below), and the account's own availability lands only on the account
+/// itself and is judged by whose account it is (`tests/own_availability.rs`).
 fn fenced_kinds() -> impl Iterator<Item = WriteKind> {
-    WriteKind::ALL
-        .into_iter()
-        .filter(|kind| *kind != WriteKind::OwnAvailability)
+    WriteKind::ALL.into_iter().filter(|kind| kind.is_contacting())
 }
+
+/// The writes that reach nobody but may land on a chat: typing and read receipts.
+const SIGNALS: [WriteKind; 2] = [WriteKind::Typing, WriteKind::ReadReceipt];
 
 /// The verdict for a participant set; `None` means allow.
 type Expected = Option<DenyReason>;
@@ -340,6 +342,106 @@ async fn only_a_kind_that_creates_a_target_may_name_a_new_one() {
 }
 
 #[tokio::test]
+async fn typing_and_read_receipts_are_permitted_on_any_chat_without_a_member_read_and_logged() {
+    let lab = try_lab().unwrap();
+    let chats = [
+        chat(),
+        Scope::Conversation {
+            id: "19:meeting_lab0001@thread.v2".to_owned(),
+        },
+        Scope::Conversation {
+            id: "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces"
+                .to_owned(),
+        },
+    ];
+    // whatever the chat's members would read as: outsiders, a partial or failed read, nothing at all
+    let mut checks = 0;
+    for kind in SIGNALS {
+        assert!(!kind.is_contacting(), "{kind:?}");
+        for (case, membership, _) in membership_cases() {
+            for scope in chats.clone() {
+                let source = Fixed::new(membership.clone());
+                let permit = lab.fence.check(Target::new(kind, scope.clone()), &source).await;
+                assert!(permit.is_ok(), "{kind:?} / {case} / {scope}: {permit:?}");
+                assert_eq!(source.fetches(), 0, "{kind:?} / {case}: no member read");
+                checks += 1;
+            }
+        }
+        assert!(lab.fence.check(Target::new(kind, chat()), &FailClosed).await.is_ok());
+        checks += 1;
+    }
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert_eq!(entries.len(), checks, "every one logged");
+    for entry in &entries {
+        assert_eq!(entry["verdict"], "allow", "{entry}");
+        assert!(entry["kind"] == "typing" || entry["kind"] == "read_receipt", "{entry}");
+    }
+}
+
+#[tokio::test]
+async fn typing_and_read_receipts_are_still_judged_by_what_they_name() {
+    let lab = try_lab().unwrap();
+    let unused = Fixed::complete(&[LAB_A, LAB_B]);
+    for kind in SIGNALS {
+        // an outsider the write names itself
+        let named = Target::new(kind, chat()).with_added(mris(&[LAB_B, COWORKER]));
+        let denied = lab.fence.check(named, &unused).await.unwrap_err();
+        assert_eq!(denied.reason(), &DenyReason::Outsiders { count: 1 }, "{kind:?}");
+        let lab_only = Target::new(kind, chat()).with_added(mris(&[LAB_B, ECHO]));
+        assert!(lab.fence.check(lab_only, &unused).await.is_ok(), "{kind:?}");
+        // nothing new, and nothing on the account itself
+        let new = lab
+            .fence
+            .check(Target::new(kind, Scope::New), &unused)
+            .await
+            .unwrap_err();
+        assert_eq!(new.reason(), &DenyReason::NotCreatable, "{kind:?}");
+        let account = Scope::Account { mri: LAB_A.to_owned() };
+        let denied = lab.fence.check(Target::new(kind, account), &unused).await.unwrap_err();
+        assert_eq!(denied.reason(), &DenyReason::AccountScope, "{kind:?}");
+    }
+    assert_eq!(unused.fetches(), 0);
+}
+
+#[tokio::test]
+async fn typing_and_read_receipts_off_a_chat_are_judged_by_its_members() {
+    // a channel (by its scope or by a conversation id that isn't a chat's) isn't carved out: its members are read
+    let lab = try_lab().unwrap();
+    let scopes = [
+        Scope::Channel {
+            team: "19:team@thread.tacv2".to_owned(),
+            channel: "19:channel@thread.tacv2".to_owned(),
+        },
+        Scope::Conversation {
+            id: "19:channel@thread.tacv2".to_owned(),
+        },
+    ];
+    for kind in SIGNALS {
+        for scope in scopes.clone() {
+            let partial = Fixed::new(Membership::Partial(PartialReason::Unsupported));
+            let denied = lab
+                .fence
+                .check(Target::new(kind, scope.clone()), &partial)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                denied.reason(),
+                &DenyReason::Partial(PartialReason::Unsupported),
+                "{kind:?} / {scope}"
+            );
+            let lab_only = Fixed::complete(&[LAB_A, LAB_B]);
+            assert!(
+                lab.fence
+                    .check(Target::new(kind, scope.clone()), &lab_only)
+                    .await
+                    .is_ok()
+            );
+            assert_eq!((partial.fetches(), lab_only.fetches()), (1, 1), "{kind:?} / {scope}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_denied_write_shows_added_participants_only_as_a_count() {
     let lab = try_lab().unwrap();
     let target = Target::new(WriteKind::Invite, chat()).with_added(mris(&[COWORKER, OTHER_BOT]));
@@ -503,7 +605,10 @@ async fn deny_reasons_are_logged_by_name() {
     for (membership, _) in &cases {
         let _ = lab
             .fence
-            .check(Target::new(WriteKind::Typing, chat()), &Fixed::new(membership.clone()))
+            .check(
+                Target::new(WriteKind::Reaction, chat()),
+                &Fixed::new(membership.clone()),
+            )
             .await;
     }
     let entries = log_entries(&lab.log_path).unwrap();
@@ -511,7 +616,7 @@ async fn deny_reasons_are_logged_by_name() {
     for (entry, (_, reason)) in entries.iter().zip(cases) {
         let expected: serde_json::Value = serde_json::from_str(reason).unwrap();
         assert_eq!(entry["reason"], expected, "{entry}");
-        assert_eq!(entry["kind"], "typing");
+        assert_eq!(entry["kind"], "reaction");
     }
 }
 
@@ -697,6 +802,120 @@ fn only_a_list_of_lab_accounts_names_nobody_outside_the_lab() {
     assert!(!fence.lab_accounts_only(&mris(&[LAB_A, COWORKER])));
     assert!(!fence.lab_accounts_only(&mris(&[OTHER_BOT])));
     assert!(!fence.lab_accounts_only(&mris(&[&LAB_A.to_uppercase()])));
+}
+
+// --- mutating requests let through because they reach nobody ---
+
+#[test]
+fn an_allowed_entry_names_the_method_host_and_path_shape_and_nothing_else() {
+    let lab = try_lab().unwrap();
+    let log = lab.fence.log();
+    let chat = "19%3A0123456789abcdef0123456789abcdef%40thread.v2";
+    let url = format!(
+        "https://user:{PLANTED_TOKEN}@Teams.Example.COM:8443/api/chatsvc/emea/v1/users/ME/conversations/{chat}\
+         /properties?name=consumptionhorizon&token={PLANTED_TOKEN}#{PLANTED_TOKEN}"
+    );
+    log.record_allowed(&AllowedRecord {
+        method: "PUT",
+        url: &url,
+    })
+    .unwrap();
+    log.record_allowed(&AllowedRecord {
+        method: "POST",
+        url: "not a url",
+    })
+    .unwrap();
+    let entries = log_entries(&lab.log_path).unwrap();
+    let expected = [
+        serde_json::json!({
+            "verdict": "allow",
+            "event": "allowed",
+            "method": "PUT",
+            "host": "teams.example.com",
+            "path": "/api/chatsvc/emea/v1/users/ME/conversations/<chat>/properties",
+        }),
+        serde_json::json!({
+            "verdict": "allow",
+            "event": "allowed",
+            "method": "POST",
+            "host": "",
+            "path": "<unparsable>",
+        }),
+    ];
+    assert_eq!(entries.len(), expected.len());
+    for (entry, expected) in entries.iter().zip(&expected) {
+        let mut entry = entry.clone();
+        let ts = entry.as_object_mut().unwrap().remove("ts_ms").unwrap();
+        assert!(ts.as_u64().is_some_and(|ts| ts > 0));
+        assert_eq!(&entry, expected);
+    }
+    let text = fs::read_to_string(&lab.log_path).unwrap();
+    assert!(!text.contains(PLANTED_TOKEN), "{text}");
+    assert!(!text.contains("consumptionhorizon"), "no query value: {text}");
+}
+
+#[test]
+fn a_path_shape_names_the_endpoint_with_every_id_replaced_by_its_kind() {
+    let cases = [
+        ("/", "/"),
+        ("", ""),
+        (
+            "/api/chatsvc/emea/v1/users/ME/conversations/19%3Aabc_def%40thread.v2/messages/1760000000123/properties",
+            "/api/chatsvc/emea/v1/users/ME/conversations/<chat>/messages/<message>/properties",
+        ),
+        (
+            "/v1/users/8%3Aorgid%3A00000000-0000-4000-8000-00000000000a/endpoints/%7B00000000-0000-4000-8000-0000000000ef%7D",
+            "/v1/users/<mri>/endpoints/<guid>",
+        ),
+        (
+            "/v1/users/ME/conversations/48%3Anotifications/messages/1760000000123/properties",
+            "/v1/users/ME/conversations/48:notifications/messages/<message>/properties",
+        ),
+        (
+            "/v1/users/ME/conversations/48%3Anotes2",
+            "/v1/users/ME/conversations/<mri>",
+        ),
+        (
+            "/v1/threads/19:x@thread.tacv2/members/28:bot",
+            "/v1/threads/<chat>/members/<mri>",
+        ),
+        (
+            "/v1/objects/0-weu-d3-0123456789abcdef0123456789abcdef/content/imgpsh",
+            "/v1/objects/<id>/content/imgpsh",
+        ),
+        (
+            "/api/mt/part/amer-01/beta/users/00000000-0000-4000-8000-00000000000a/automaticRepliesSetting",
+            "/api/mt/part/amer-01/beta/users/<guid>/automaticRepliesSetting",
+        ),
+        ("/v1/presence/abc1234567/state", "/v1/presence/<id>/state"),
+        ("/v1/a%20b/c=d/x.y_z~$-w", "/v1/<id>/<id>/x.y_z~$-w"),
+        ("/v1/2/12345/123456", "/v1/2/12345/<message>"),
+        ("/v1/aVeryLongSegmentThatIsMoreThanThirtyTwoChars", "/v1/<id>"),
+        ("/v1/%FF%FE", "/v1/<id>"),
+    ];
+    for (path, shape) in cases {
+        assert_eq!(path_shape(path), shape, "{path}");
+    }
+}
+
+#[test]
+fn allowed_entries_share_the_log_s_failure_mode() {
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = FenceLog::from_writer(Broken);
+    let allowed = AllowedRecord {
+        method: "PUT",
+        url: "https://teams.example.com/v1/users/ME/properties",
+    };
+    assert!(log.record_allowed(&allowed).is_err());
+    assert!(log.record_allowed(&allowed).is_err());
 }
 
 // --- browser requests decided without a membership check ---

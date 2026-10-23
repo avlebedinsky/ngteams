@@ -13,8 +13,11 @@ pub enum WriteKind {
     Edit,
     Delete,
     Reaction,
+    /// A typing signal: others see it, but it carries nothing to them, so the fence permits it on a chat without a
+    /// member read.
     Typing,
-    /// A read receipt or a consumption horizon update.
+    /// A read receipt or a consumption horizon update: like [`WriteKind::Typing`], permitted on a chat without a member
+    /// read.
     ReadReceipt,
     /// Placing a call.
     Call,
@@ -27,9 +30,8 @@ pub enum WriteKind {
     ChannelPost,
     BotReply,
     /// The account's own availability (UPS's presence endpoint `PUT` and the manual status): seen across the tenant,
-    /// so no participant check can pass for it. The fence permits it only under the user's exception of 2026-10-21
-    /// (CLAUDE.md, "A lab account may set its own availability"): on [`Scope::Account`] naming the fence's own
-    /// account, with nobody added, never read from a membership source.
+    /// but it carries nothing to anyone. The fence permits it without a member read, only on [`Scope::Account`] naming
+    /// the fence's own account, with nobody added, so that a lab account never sets another's presence.
     OwnAvailability,
 }
 

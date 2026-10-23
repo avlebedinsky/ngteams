@@ -262,8 +262,6 @@ struct Lab {
     mock: ChatServiceMock,
     trouter: TrouterMock,
     dir: tempfile::TempDir,
-    /// The lab's `lab.toml` (a, b and c with the mock's MRIs), whose `chats.toml` records the mock's a–b–c chat.
-    config: LabConfig,
 }
 
 impl Lab {
@@ -271,14 +269,10 @@ impl Lab {
         let mock = ChatServiceMock::start().await.unwrap();
         let trouter = mock.start_trouter().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        // the lab's `chats.toml` records the mock's a–b–c chat, as `abc-chat` records the lab's
         let config = LabConfig::parse(&lab_toml(dir.path()), dir.path()).unwrap();
         record_abc_chat(config.paths(), ABC_CHAT).unwrap();
-        Self {
-            mock,
-            trouter,
-            dir,
-            config,
-        }
+        Self { mock, trouter, dir }
     }
 
     fn store_file(&self, me: &str) -> std::path::PathBuf {
@@ -335,10 +329,7 @@ impl Lab {
             }
         };
         let transport = Arc::new(http());
-        // the lab's group chat policy, as `LiveMembershipSource::for_fence` gives the lab binary's source
-        let membership = LiveMembershipSource::with_mock_origin(&origin)
-            .unwrap()
-            .with_lab(&self.config);
+        let membership = LiveMembershipSource::with_mock_origin(&origin).unwrap();
         membership.set_credential_source(transport.clone());
         let push = push.then(|| {
             let trouter = Trouter::with_mock_origin(
