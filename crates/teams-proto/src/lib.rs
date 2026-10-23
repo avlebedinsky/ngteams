@@ -20,7 +20,8 @@
 //!   wire form the web client sent; a message's text is a [`chat::MessageText`], never raw HTML. So is the account's
 //!   own availability (M2 Task 19: UPS's presence endpoint `PUT`, [`SetEndpointAvailability`], and the manual status,
 //!   [`ForceAvailability`]), on the account itself, naming only the endpoint a registration of this run registered
-//!   ([`RegisteredEndpoint`], which only [`register`] gives, over the native transport: [`EndpointRegistrar`]).
+//!   for that account ([`RegisteredEndpoint`], which only [`register`] gives, over the native transport:
+//!   [`EndpointRegistrar`], recorded for its fence's own account).
 //!
 //! On the push channel's socket the same holds for frames: a [`FrameSink`] sends only an [`OwnFrame`], the sealed,
 //! reviewed list of the Trouter session's own frames (authentication, keep-alive, the message-loss acknowledgement,

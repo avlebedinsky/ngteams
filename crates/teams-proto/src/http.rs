@@ -73,7 +73,7 @@ use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
 use teams_auth::token::{SPACES_RESOURCE, TokenError, retry_after};
 use teams_fence::{
-    AFD_HOSTS, Channel, ChatCredential, CredentialFuture, CredentialSource, Fence, RequestOutcome, RequestRecord,
+    AFD_HOSTS, Channel, ChatCredential, CredentialFuture, CredentialSource, Fence, Mri, RequestOutcome, RequestRecord,
     chat_service_path,
 };
 use url::Url;
@@ -756,6 +756,10 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         read: AuthorizedPostRead<R>,
     ) -> impl Future<Output = Result<Response, HttpError>> + Send {
         self.send_post_read(read)
+    }
+
+    fn own_account(&self) -> Option<&Mri> {
+        self.fence.own_account()
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {

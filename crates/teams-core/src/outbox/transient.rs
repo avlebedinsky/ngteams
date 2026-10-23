@@ -16,6 +16,9 @@
 //!   ([`Outbox::drop_own_availability`]: its endpoint is no longer the account's live one).
 //! - **Latest wins while one waits**: a transient asked for while one of the same ([`Transient::replaces`]) waits takes
 //!   its place, and waits as long; only the newest goes out.
+//! - **An availability names only the outbox's account's endpoint**: one whose endpoint was registered for another
+//!   account (or for none: the registering transport's fence owned no account) is dropped before anything is asked
+//!   of the fence or sent; `teams_proto` builds no write of it.
 
 use std::sync::PoisonError;
 use std::time::Duration;
@@ -31,6 +34,9 @@ use super::{Outbox, Tried};
 /// gone, so one throttled for longer is dropped.
 pub const MAX_TRANSIENT_WAIT: Duration = Duration::from_secs(5);
 
+/// Why an availability naming an endpoint registered for another account (or for none) is dropped unsent.
+const NOT_THIS_ACCOUNTS: &str = "the endpoint it names wasn't registered for this account, so nothing went out";
+
 /// A write the outbox sends without a row (see the module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transient {
@@ -38,7 +44,7 @@ pub enum Transient {
     Typing { conversation: String },
     /// The account's registered endpoint is up and available: UPS's presence endpoint `PUT`
     /// ([`SetEndpointAvailability`]), what makes the account show online. Its endpoint is one a registration of this
-    /// run registered: no other can be named.
+    /// run registered: no other can be named, and it goes out only when that registration was for the outbox's account.
     EndpointAvailable { endpoint: RegisteredEndpoint },
     /// The account's manual status set (`Some`) or cleared (`None`), from its registered endpoint
     /// ([`ForceAvailability`]).
@@ -191,19 +197,10 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     async fn try_transient(&self, transient: Transient, waited: bool) -> TransientSent {
         let mut refreshed = false;
         loop {
-            let me = self.me.mri().clone();
-            let tried = match &transient {
-                Transient::Typing { conversation } => self.deliver(Typing::new(conversation.clone())).await,
-                Transient::EndpointAvailable { endpoint } => {
-                    self.deliver(SetEndpointAvailability::available(me, endpoint)).await
-                }
-                Transient::ManualStatus {
-                    endpoint,
-                    status: Some(status),
-                } => self.deliver(ForceAvailability::set(me, endpoint, *status)).await,
-                Transient::ManualStatus { endpoint, status: None } => {
-                    self.deliver(ForceAvailability::reset(me, endpoint)).await
-                }
+            let Some(tried) = self.attempt_transient(&transient).await else {
+                return TransientSent::Dropped {
+                    reason: NOT_THIS_ACCOUNTS.to_owned(),
+                };
             };
             log::info!(
                 "transient {transient:?}{}: {}",
@@ -227,6 +224,25 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 }
             }
         }
+    }
+
+    /// One attempt at `transient`; `None` when it names an endpoint registered for another account than the outbox's
+    /// (or for none): nothing of it was built, asked of the fence or sent.
+    async fn attempt_transient(&self, transient: &Transient) -> Option<Tried> {
+        let me = self.me.mri().clone();
+        Some(match transient {
+            Transient::Typing { conversation } => self.deliver(Typing::new(conversation.clone())).await,
+            Transient::EndpointAvailable { endpoint } => {
+                self.deliver(SetEndpointAvailability::available(me, endpoint)?).await
+            }
+            Transient::ManualStatus { endpoint, status } => {
+                let write = match status {
+                    Some(status) => ForceAvailability::set(me, endpoint, *status),
+                    None => ForceAvailability::reset(me, endpoint),
+                };
+                self.deliver(write?).await
+            }
+        })
     }
 
     fn answered(&self, transient: Transient, answer: &Response, waited: bool) -> TransientSent {

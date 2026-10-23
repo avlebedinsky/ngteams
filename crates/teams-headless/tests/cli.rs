@@ -832,9 +832,10 @@ async fn availability_sets_the_endpoint_then_the_manual_status_and_its_reset_pri
 }
 
 #[tokio::test]
-async fn availability_without_its_own_account_prints_the_denial_and_sets_nothing() {
+async fn availability_without_its_own_account_prints_the_refusal_and_sets_nothing() {
     let lab = Lab::start().await;
-    // a fence of no account: what a binary built on `Fence::open_lab` would have
+    // a fence of no account: what a binary built on `Fence::open_lab` would have; its push channel's endpoint is
+    // registered for no account, so no account's availability can name it
     let mut a = lab.engine(LAB_A, true);
     let mut out = Vec::new();
     let plan = availability::Plan {
@@ -851,7 +852,7 @@ async fn availability_without_its_own_account_prints_the_denial_and_sets_nothing
     assert_eq!(end, availability::End::Done { all_sent: false });
     let printed = String::from_utf8(out).unwrap();
     assert!(
-        printed.contains("availability available denied: ") && printed.contains("not the fence's own account"),
+        printed.contains("availability available dropped: ") && printed.contains("wasn't registered for this account"),
         "{printed}"
     );
     assert!(lab.mock.own_availability().is_empty());

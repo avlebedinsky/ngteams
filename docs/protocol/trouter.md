@@ -418,7 +418,8 @@ So:
   account the binary runs as). The endpoint each names (the body's `id`, and `x-ms-endpoint-id` on both) is a
   `RegisteredEndpoint`, which only `teams_proto::register` gives, once a registration of this run that the account's
   native HTTP transport sent was answered with a success (a sealed `EndpointRegistrar`: no fake transport outside
-  `test-support`): the push channel hands it on (`PushEvent::Registered`) and the engine keeps it while the channel
+  `test-support`), recorded for the transport's fence's own account, and no write of another account's availability
+  can name it: the push channel hands it on (`PushEvent::Registered`) and the engine keeps it while the channel
   runs; once the channel stopped, an availability still waiting out a `Retry-After` is dropped and no other is sent.
   They go out as transient writes of the outbox (`EngineRequests::own_availability`), under the presence token and
   the presence read's header values, without the web client's caller, session ids or cookies, which UPS took. No `user.activity` (above: not needed to show online).

@@ -15,11 +15,14 @@
 //! [`register`] sends the registration and, once the registrar took it, gives the endpoint it registered as a
 //! [`RegisteredEndpoint`]: the only way to get one, and the only id the account's own availability may name (M2 Task
 //! 19, `crate::SetEndpointAvailability`, `crate::ForceAvailability`). It takes only an [`EndpointRegistrar`], the
-//! native HTTP transport (any transport under `test-support`), so a fake transport's made-up answer can't mint one.
+//! native HTTP transport (any transport under `test-support`), so a fake transport's made-up answer can't mint one,
+//! and records the account it was registered for, the transport's fence's own ([`Transport::own_account`]): a write
+//! of another account's availability can't name it.
 
 use std::fmt;
 
 use serde_json::{Value, json};
+use teams_fence::Mri;
 use url::Url;
 
 use crate::client::{Response, Transport};
@@ -133,14 +136,17 @@ impl OwnState for EndpointRegistration {
 }
 
 /// The account's own Trouter endpoint, as a registration of this run registered it for the messaging stack: the
-/// `registrationId` of an [`EndpointRegistration`] the account's transport sent and the registrar took (a 2xx). It is
-/// the one endpoint id the account's own availability names (CLAUDE.md: "every id it names must be the account itself
-/// or its own registered endpoint (one this run registered for this account)"), and only [`register`] makes one, over
-/// the native HTTP transport ([`EndpointRegistrar`]): it has no public constructor, isn't deserialized from anything,
-/// and lives only in memory, so it is always this run's.
+/// `registrationId` of an [`EndpointRegistration`] the account's transport sent and the registrar took (a 2xx), and
+/// the account it was registered for. It is the one endpoint id the account's own availability names (CLAUDE.md:
+/// "every id it names must be the account itself or its own registered endpoint (one this run registered for this
+/// account)"), and only [`register`] makes one, over the native HTTP transport ([`EndpointRegistrar`]): it has no
+/// public constructor, isn't deserialized from anything, and lives only in memory, so it is always this run's.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RegisteredEndpoint {
     id: String,
+    /// The account the registration was for: the registering transport's fence's own account
+    /// ([`Transport::own_account`]) when it went through; `None` when that fence owns none.
+    account: Option<Mri>,
 }
 
 impl RegisteredEndpoint {
@@ -148,6 +154,19 @@ impl RegisteredEndpoint {
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The account it was registered for: the registering transport's fence's own account; `None` when that fence
+    /// owns none, and then no account's availability can name it.
+    #[must_use]
+    pub fn account(&self) -> Option<&Mri> {
+        self.account.as_ref()
+    }
+
+    /// Whether it was registered for `account`: the only account whose availability may name it.
+    #[must_use]
+    pub fn is_for(&self, account: &Mri) -> bool {
+        self.account.as_ref() == Some(account)
     }
 }
 
@@ -179,9 +198,10 @@ mod registrar {
 }
 
 /// Sends `registration` through `transport` (the reviewed own-state request: the transport logs it to `fence.log`
-/// before it goes) and returns the answer, with the endpoint it registered when the answer is a success. A refusal or
-/// a failure registers nothing. Only an [`EndpointRegistrar`] (the native HTTP transport) registers: a fake transport
-/// answering a success can't make a [`RegisteredEndpoint`] outside `test-support`.
+/// before it goes) and returns the answer, with the endpoint it registered when the answer is a success, recorded for
+/// the transport's own account ([`Transport::own_account`]: its fence's, the account whose token the registrar took).
+/// A refusal or a failure registers nothing. Only an [`EndpointRegistrar`] (the native HTTP transport) registers: a
+/// fake transport answering a success can't make a [`RegisteredEndpoint`] outside `test-support`.
 ///
 /// # Errors
 /// The transport's.
@@ -192,6 +212,7 @@ pub async fn register<T: EndpointRegistrar>(
     let answer = transport.own_state(registration).await?;
     let endpoint = answer.is_success().then(|| RegisteredEndpoint {
         id: registration.registration_id.clone(),
+        account: transport.own_account().cloned(),
     });
     Ok((answer, endpoint))
 }

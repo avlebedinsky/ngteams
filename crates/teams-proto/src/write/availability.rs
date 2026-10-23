@@ -10,7 +10,8 @@
 //!   only for its own account and without a member read (`teams_fence::Fence::check`);
 //! - names the account only as UPS's `me` (the account is the token's) and the endpoint only as a
 //!   [`RegisteredEndpoint`], which only a registration this run made for the account gives ([`crate::register`]):
-//!   no other id can be put in one;
+//!   no other id can be put in one, and one registered for another account (or for none) makes no request of this
+//!   account's: each constructor gives `None` then;
 //! - sets only the values a capture showed: the endpoint `Available`/`Available` ([`SetEndpointAvailability`]; the
 //!   captured `Busy`/`InACall` is a call's, and the native client has none), a manual status of `Busy`,
 //!   `DoNotDisturb`, `Away` or `Available` ([`ManualAvailability`]), or the manual status's reset
@@ -71,13 +72,14 @@ pub struct SetEndpointAvailability {
 }
 
 impl SetEndpointAvailability {
-    /// `account`'s registered `endpoint`, available.
+    /// `account`'s registered `endpoint`, available; `None` unless `endpoint` was registered for `account`
+    /// ([`RegisteredEndpoint::is_for`]).
     #[must_use]
-    pub fn available(account: Mri, endpoint: &RegisteredEndpoint) -> Self {
-        Self {
+    pub fn available(account: Mri, endpoint: &RegisteredEndpoint) -> Option<Self> {
+        endpoint.is_for(&account).then(|| Self {
             account,
             endpoint: endpoint.clone(),
-        }
+        })
     }
 
     #[must_use]
@@ -149,24 +151,26 @@ pub struct ForceAvailability {
 }
 
 impl ForceAvailability {
-    /// Sets `account`'s manual status to `status`, from its registered `endpoint`.
+    /// Sets `account`'s manual status to `status`, from its registered `endpoint`; `None` unless `endpoint` was
+    /// registered for `account` ([`RegisteredEndpoint::is_for`]).
     #[must_use]
-    pub fn set(account: Mri, endpoint: &RegisteredEndpoint, status: ManualAvailability) -> Self {
-        Self {
-            account,
-            endpoint: endpoint.clone(),
-            status: Some(status),
-        }
+    pub fn set(account: Mri, endpoint: &RegisteredEndpoint, status: ManualAvailability) -> Option<Self> {
+        Self::from_endpoint(account, endpoint, Some(status))
     }
 
-    /// Clears `account`'s manual status, from its registered `endpoint`.
+    /// Clears `account`'s manual status, from its registered `endpoint`; `None` unless `endpoint` was registered for
+    /// `account` ([`RegisteredEndpoint::is_for`]).
     #[must_use]
-    pub fn reset(account: Mri, endpoint: &RegisteredEndpoint) -> Self {
-        Self {
+    pub fn reset(account: Mri, endpoint: &RegisteredEndpoint) -> Option<Self> {
+        Self::from_endpoint(account, endpoint, None)
+    }
+
+    fn from_endpoint(account: Mri, endpoint: &RegisteredEndpoint, status: Option<ManualAvailability>) -> Option<Self> {
+        endpoint.is_for(&account).then(|| Self {
             account,
             endpoint: endpoint.clone(),
-            status: None,
-        }
+            status,
+        })
     }
 
     #[must_use]

@@ -187,7 +187,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   which the fence permits without a member read only for its own account (`Fence::open_lab_account`), each naming
   only a `RegisteredEndpoint` (only `teams_proto::register` makes one, from a registration of this run the registrar
   took, sent over the native `HttpTransport`: `register` and the push channel take only an `EndpointRegistrar`, sealed,
-  which a fake transport is only under `test-support`). A waiting availability is dropped when the push channel stops.
+  which a fake transport is only under `test-support`). It records the account it was registered for, the transport's
+  fence's own (`Transport::own_account`), and a write of any other account's availability can't be built from it (the
+  constructors give `None`; the outbox drops it unsent). A waiting availability is dropped when the push channel stops.
   A message-loss report means: catch up, then acknowledge it. A token renewal reconnects the socket (5 min before
   expiry, and on the session's renewal); an open socket is never re-authenticated.
 - **Read a field's whole captured range, not the mock's.** Two bugs passed every offline test in M1 and lost

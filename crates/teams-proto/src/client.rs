@@ -8,7 +8,7 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use teams_fence::{PostReadPermit, WritePermit};
+use teams_fence::{Mri, PostReadPermit, WritePermit};
 
 use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead, PostReadMismatch};
@@ -41,6 +41,15 @@ pub trait Transport: Sync {
         &self,
         write: Authorized<R>,
     ) -> impl Future<Output = Result<Response, Self::Error>> + Send;
+
+    /// The account this transport sends for, as its fence owns it ([`teams_fence::Fence::own_account`]): the account an
+    /// endpoint registered through it is recorded for ([`crate::register`], [`crate::RegisteredEndpoint::account`]).
+    /// `None` (the default) when it owns none. Only an [`EndpointRegistrar`](crate::EndpointRegistrar)'s is ever read,
+    /// and outside `test-support` that is the native transport's alone, so another transport's answer here can't make
+    /// an endpoint any account's.
+    fn own_account(&self) -> Option<&Mri> {
+        None
+    }
 }
 
 /// A service's answer: its status, the few headers a caller acts on, and the body (capped by the transport that read

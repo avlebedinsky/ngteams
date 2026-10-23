@@ -121,16 +121,22 @@ struct Setup {
 
 /// Account a's transport and fence, the transport given the presence base when `presence`.
 async fn setup(presence: bool) -> Setup {
+    setup_owning(presence, Some(LAB_A)).await
+}
+
+/// A transport and fence whose own account is `own` (none when `None`), given the presence base when `presence`.
+async fn setup_owning(presence: bool, own: Option<&str>) -> Setup {
     let server = MockServer::start().await;
     let tokens = Arc::new(FakeTokens::default());
     let log = SharedLog::default();
-    let fence = Arc::new(
-        Fence::new(
-            Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], []),
-            FenceLog::from_writer(log.clone()),
-        )
-        .with_own_account(Mri::new(LAB_A)),
+    let fence = Fence::new(
+        Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], []),
+        FenceLog::from_writer(log.clone()),
     );
+    let fence = Arc::new(match own {
+        Some(mri) => fence.with_own_account(Mri::new(mri)),
+        None => fence,
+    });
     let mut transport =
         HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
     if presence {
@@ -222,6 +228,11 @@ async fn only_a_registration_the_registrar_took_registers_an_endpoint() {
     let setup = setup(true).await;
     let endpoint = registered(&setup).await;
     assert_eq!(endpoint.id(), EPID);
+    assert_eq!(
+        endpoint.account(),
+        Some(&Mri::new(LAB_A)),
+        "registered for the fence's own account"
+    );
     assert_eq!(format!("{endpoint:?}"), format!("RegisteredEndpoint({EPID:?})"));
     assert_eq!(
         setup.log.lines()[0]["own"],
@@ -289,7 +300,7 @@ async fn the_endpoint_put_goes_out_in_its_captured_shape_under_the_fences_permit
         .expect(1)
         .mount(&setup.server)
         .await;
-    let request = SetEndpointAvailability::available(Mri::new(LAB_A), &endpoint);
+    let request = SetEndpointAvailability::available(Mri::new(LAB_A), &endpoint).unwrap();
     assert_eq!(request.target(), own_target(LAB_A));
     assert_eq!(request.endpoint(), &endpoint);
     assert_eq!(request.account(), &Mri::new(LAB_A));
@@ -344,7 +355,8 @@ async fn each_captured_manual_status_and_its_reset_go_out_in_their_captured_shap
         let request = match status {
             Some(status) => ForceAvailability::set(Mri::new(LAB_A), &endpoint, status),
             None => ForceAvailability::reset(Mri::new(LAB_A), &endpoint),
-        };
+        }
+        .unwrap();
         assert_eq!(request.status(), status);
         assert_eq!(request.target(), own_target(LAB_A), "{name}");
         let permit = setup.fence.check(request.target(), &FailClosed).await.unwrap();
@@ -379,28 +391,78 @@ async fn each_captured_manual_status_and_its_reset_go_out_in_their_captured_shap
     }
 }
 
+/// The three writes of `account`'s availability from `endpoint`, each `None` when it can't be built.
+fn own_writes(account: &str, endpoint: &RegisteredEndpoint) -> [Option<Target>; 3] {
+    let account = Mri::new(account);
+    [
+        SetEndpointAvailability::available(account.clone(), endpoint).map(|write| write.target()),
+        ForceAvailability::set(account.clone(), endpoint, ManualAvailability::Busy).map(|write| write.target()),
+        ForceAvailability::reset(account, endpoint).map(|write| write.target()),
+    ]
+}
+
+#[tokio::test]
+async fn an_endpoint_registered_for_one_account_names_no_other_accounts_availability() {
+    // a's and b's transports, each registering through its own fence's account, and one whose fence owns none
+    let a = setup_owning(true, Some(LAB_A)).await;
+    let b = setup_owning(true, Some(LAB_B)).await;
+    let none = setup_owning(true, None).await;
+    let a_endpoint = registered(&a).await;
+    let b_endpoint = registered(&b).await;
+    let no_ones = registered(&none).await;
+    assert_eq!(a_endpoint.account(), Some(&Mri::new(LAB_A)));
+    assert_eq!(b_endpoint.account(), Some(&Mri::new(LAB_B)));
+    assert_eq!(no_ones.account(), None);
+    assert_eq!(
+        a_endpoint.id(),
+        b_endpoint.id(),
+        "the same id, told apart by the account only"
+    );
+
+    // each account's own endpoint builds its own writes, and only those
+    for (account, endpoint) in [(LAB_A, &a_endpoint), (LAB_B, &b_endpoint)] {
+        for target in own_writes(account, endpoint) {
+            assert_eq!(target, Some(own_target(account)), "{account}");
+        }
+    }
+    // another account's endpoint, or one registered for no account, builds none
+    for (account, endpoint) in [
+        (LAB_A, &b_endpoint),
+        (LAB_B, &a_endpoint),
+        (LAB_A, &no_ones),
+        (LAB_B, &no_ones),
+    ] {
+        assert_eq!(
+            own_writes(account, endpoint),
+            [None, None, None],
+            "{account} from {endpoint:?}"
+        );
+    }
+    for setup in [a, b, none] {
+        let received = setup.server.received_requests().await.unwrap();
+        assert!(received.iter().all(|request| request.method.as_str() != "PUT"));
+    }
+}
+
 #[tokio::test]
 async fn another_accounts_availability_is_denied_and_nothing_goes_out() {
     let setup = setup(true).await;
-    let endpoint = registered(&setup).await;
-    let requests: Vec<Box<dyn Fn() -> Target>> = vec![
-        Box::new(|| SetEndpointAvailability::available(Mri::new(LAB_B), &endpoint).target()),
-        Box::new(|| ForceAvailability::set(Mri::new(LAB_B), &endpoint, ManualAvailability::Busy).target()),
-        Box::new(|| ForceAvailability::reset(Mri::new(LAB_B), &endpoint).target()),
-    ];
-    for target in requests {
-        let denied = setup.fence.check(target(), &FailClosed).await.unwrap_err();
+    // b's write, from the endpoint b's own transport registered
+    let b = setup_owning(true, Some(LAB_B)).await;
+    let b_endpoint = registered(&b).await;
+    for target in own_writes(LAB_B, &b_endpoint) {
+        let denied = setup.fence.check(target.unwrap(), &FailClosed).await.unwrap_err();
         assert_eq!(denied.reason(), &DenyReason::NotOwnAccount);
     }
     // a permit for a's availability doesn't cover b's
     let permit = setup.fence.check(own_target(LAB_A), &FailClosed).await.unwrap();
-    let error = Client::new(setup.transport)
-        .write(SetEndpointAvailability::available(Mri::new(LAB_B), &endpoint), permit)
-        .await
-        .unwrap_err();
+    let b_write = SetEndpointAvailability::available(Mri::new(LAB_B), &b_endpoint).unwrap();
+    let error = Client::new(setup.transport).write(b_write, permit).await.unwrap_err();
     assert!(matches!(error, WriteError::TargetMismatch(_)), "{error:?}");
-    let received = setup.server.received_requests().await.unwrap();
-    assert!(received.iter().all(|request| request.method.as_str() != "PUT"));
+    for server in [&setup.server, &b.server] {
+        let received = server.received_requests().await.unwrap();
+        assert!(received.iter().all(|request| request.method.as_str() != "PUT"));
+    }
 }
 
 #[tokio::test]
@@ -408,7 +470,7 @@ async fn without_the_presence_base_nothing_reaches_ups() {
     let with = setup(true).await;
     let endpoint = registered(&with).await;
     let setup = setup(false).await;
-    let request = SetEndpointAvailability::available(Mri::new(LAB_A), &endpoint);
+    let request = SetEndpointAvailability::available(Mri::new(LAB_A), &endpoint).unwrap();
     let permit = setup.fence.check(request.target(), &FailClosed).await.unwrap();
 
     let error = Client::new(setup.transport).write(request, permit).await.unwrap_err();
@@ -431,7 +493,7 @@ async fn a_refused_token_is_renewed_and_the_write_not_sent_again() {
         .expect(1)
         .mount(&setup.server)
         .await;
-    let request = ForceAvailability::set(Mri::new(LAB_A), &endpoint, ManualAvailability::Busy);
+    let request = ForceAvailability::set(Mri::new(LAB_A), &endpoint, ManualAvailability::Busy).unwrap();
     let permit = setup.fence.check(request.target(), &FailClosed).await.unwrap();
     let tokens = Arc::clone(&setup.tokens);
 

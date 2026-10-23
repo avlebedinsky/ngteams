@@ -1,8 +1,9 @@
 //! The account's own availability (M2 Task 19) through a running engine, against the mock chat service, its registrar,
 //! its UPS and its Trouter: the endpoint's `PUT` and the manual status (set, cleared) go out as transient writes of the
 //! outbox, each under the fence's permit for its own account (logged to `fence.log`, no member read), naming the
-//! endpoint the push channel registered in this run; nothing goes out before a registration went through, and a fence
-//! that isn't the account's own denies it with nothing sent.
+//! endpoint the push channel registered in this run for the account; nothing goes out before a registration went
+//! through, and nothing from an endpoint registered for another account (or for none: a fence that isn't the
+//! account's own).
 //!
 //! Tokens and ids here are the mock's, made up.
 
@@ -21,7 +22,7 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{EngineError, Outbox, OwnStatus, Transient, TransientSent};
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
+use teams_fence::{FailClosed, Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
 use teams_mock::{
     AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OwnAvailability, PRESENCE_BASE, TrouterMock,
 };
@@ -341,28 +342,121 @@ async fn nothing_goes_out_without_an_endpoint_registered_in_this_run() {
 }
 
 #[tokio::test]
-async fn a_fence_that_isnt_the_accounts_own_denies_it_and_nothing_goes_out() {
+async fn a_fence_that_isnt_the_accounts_own_registers_no_endpoint_of_its_and_nothing_goes_out() {
     let mock = ChatServiceMock::start().await.unwrap();
     let trouter = mock.start_trouter().unwrap();
+    // a's engine whose fence owns no account, or b: its push channel registers an endpoint for that fence's account
+    // (none, or b), never a's
     for own in [None, Some(LAB_B)] {
         let mut rig = rig(&mock, &trouter, own, true);
         registered(&mut rig.handle).await;
-        let sent = rig
-            .handle
-            .requests()
-            .own_availability(OwnStatus::Available)
-            .await
-            .unwrap();
+        let requests = rig.handle.requests();
+        for status in [
+            OwnStatus::Available,
+            OwnStatus::Manual(ManualAvailability::Busy),
+            OwnStatus::ClearManual,
+        ] {
+            let sent = requests.own_availability(status).await.unwrap();
+            assert!(
+                matches!(&sent, TransientSent::Dropped { reason } if reason.contains("wasn't registered for this account")),
+                "{own:?} {status:?}: {sent:?}"
+            );
+        }
         assert!(
-            matches!(&sent, TransientSent::Denied { reason } if reason.contains("not the fence's own account")),
-            "{own:?}: {sent:?}"
+            rig.log.decisions().is_empty(),
+            "{own:?}: nothing was even asked of the fence"
         );
-        let decisions = rig.log.decisions();
-        assert_eq!(decisions.len(), 1);
-        assert_eq!(decisions[0]["reason"], "not_own_account");
         rig.handle.shutdown();
     }
     assert!(mock.own_availability().is_empty(), "UPS was told nothing");
+}
+
+/// `account`'s HTTP transport against the mock, given the presence base, its fence owning `account` and logging to
+/// `log`; with that fence.
+fn owning_transport(mock: &ChatServiceMock, account: &str, log: SharedLog) -> (HttpTransport<Tokens>, Arc<Fence>) {
+    let tokens = Arc::new(Tokens {
+        token: mock.token(account).unwrap(),
+        renewals: broadcast::channel(4).0,
+    });
+    let fence = Arc::new(
+        Fence::new(
+            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
+            FenceLog::from_writer(log),
+        )
+        .with_own_account(Mri::new(account)),
+    );
+    let transport = HttpTransport::with_mock_origin(tokens, Arc::clone(&fence), CHAT_BASE, &mock.origin())
+        .unwrap()
+        .with_presence(PRESENCE_BASE)
+        .unwrap();
+    (transport, fence)
+}
+
+#[tokio::test]
+async fn an_outbox_sends_no_availability_from_an_endpoint_registered_for_another_account() {
+    let mock = ChatServiceMock::start().await.unwrap();
+    let log = SharedLog::default();
+    let (a_transport, a_fence) = owning_transport(&mock, LAB_A, log.clone());
+    let (b_transport, _) = owning_transport(&mock, LAB_B, SharedLog::default());
+    let registration = |epid: &str| {
+        EndpointRegistration::messaging(
+            epid,
+            "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/",
+        )
+        .unwrap()
+    };
+    // each account registers an endpoint through its own transport, as each account's process would
+    let (_, a_endpoint) = register(&a_transport, &registration("00000000-0000-4000-8000-0000000000e1"))
+        .await
+        .unwrap();
+    let (_, b_endpoint) = register(&b_transport, &registration("00000000-0000-4000-8000-0000000000e2"))
+        .await
+        .unwrap();
+    let a_endpoint = a_endpoint.expect("the mock's registrar took a's");
+    let b_endpoint = b_endpoint.expect("the mock's registrar took b's");
+    assert_eq!(a_endpoint.account(), Some(&Mri::new(LAB_A)));
+    assert_eq!(b_endpoint.account(), Some(&Mri::new(LAB_B)));
+
+    // a's outbox, under a's fence and over a's transport, handed b's endpoint
+    let membership: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
+    let outbox = Outbox::new(
+        Arc::new(a_transport),
+        a_fence,
+        membership,
+        Author::new(Mri::new(LAB_A), "Lab A"),
+    );
+    for transient in [
+        Transient::EndpointAvailable {
+            endpoint: b_endpoint.clone(),
+        },
+        Transient::ManualStatus {
+            endpoint: b_endpoint.clone(),
+            status: Some(ManualAvailability::Busy),
+        },
+        Transient::ManualStatus {
+            endpoint: b_endpoint,
+            status: None,
+        },
+    ] {
+        let sent = outbox.send_transient(transient.clone()).await;
+        assert!(
+            matches!(&sent, TransientSent::Dropped { reason } if reason.contains("wasn't registered for this account")),
+            "{transient:?}: {sent:?}"
+        );
+    }
+    assert!(mock.own_availability().is_empty(), "UPS was told nothing");
+    assert!(log.decisions().is_empty(), "nothing was even asked of a's fence");
+
+    // a's own endpoint goes out, under a's fence's permit
+    let sent = outbox
+        .send_transient(Transient::EndpointAvailable { endpoint: a_endpoint })
+        .await;
+    assert_eq!(sent, TransientSent::Sent);
+    let told = mock.own_availability();
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].account, LAB_A);
+    assert_eq!(told[0].endpoint, "00000000-0000-4000-8000-0000000000e1");
+    assert_eq!(log.decisions().len(), 1);
 }
 
 #[tokio::test]
@@ -372,10 +466,13 @@ async fn an_availability_writes_to_no_chat_and_only_the_newer_of_its_kind_replac
         token: mock.token(LAB_A).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(io::sink()),
-    ));
+    let fence = Arc::new(
+        Fence::new(
+            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
+            FenceLog::from_writer(io::sink()),
+        )
+        .with_own_account(Mri::new(LAB_A)),
+    );
     let transport = HttpTransport::with_mock_origin(tokens, fence, CHAT_BASE, &mock.origin()).unwrap();
     let registration = EndpointRegistration::messaging(
         "00000000-0000-4000-8000-0000000000e1",
@@ -474,10 +571,13 @@ async fn a_transient_availability_names_only_the_endpoint_the_engine_keeps() {
         token: mock.token(LAB_A).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(io::sink()),
-    ));
+    let fence = Arc::new(
+        Fence::new(
+            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
+            FenceLog::from_writer(io::sink()),
+        )
+        .with_own_account(Mri::new(LAB_A)),
+    );
     let transport = HttpTransport::with_mock_origin(tokens, fence, CHAT_BASE, &mock.origin()).unwrap();
     let registration = EndpointRegistration::messaging(
         "00000000-0000-4000-8000-0000000000e2",
