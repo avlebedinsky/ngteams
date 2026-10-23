@@ -1,7 +1,8 @@
 //! The browser fence's own-availability check (`proto_lab::availability`, M2 Task 18): UPS's presence endpoint `PUT`
 //! and the manual status pass only in their captured shape, only with a classifier that opts in
-//! (`Classifier::with_own_availability`), and only for an endpoint the session's fence let this account register in
-//! this run (the messaging stack's `registrationId`), logged to `fence.log` as own state.
+//! (`Classifier::with_own_availability`; `Classifier::with_own_endpoint_put` for the endpoint `PUT` alone), and only
+//! for an endpoint the session's fence let this account register in this run (the messaging stack's `registrationId`),
+//! logged to `fence.log` as own state.
 //!
 //! The allowed shapes are the synthetic fixtures `tests/fixtures/ups/endpoint-requests.json` and
 //! `tests/fixtures/ups/manual-status-requests.json`; the registration is the messaging stack's of
@@ -16,6 +17,7 @@ use proto_lab::availability::OwnEndpoints;
 use proto_lab::classify::{Classification, Classifier, OwnKind};
 use proto_lab::fence_http::{DenyCause, HttpFence, MalformedPause, PausedRequest, Verdict};
 use proto_lab::post_read::HEADER_VALUES_READ;
+use proto_lab::scenario::own_presence::Report;
 use serde_json::{Value, json};
 use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
 
@@ -805,6 +807,83 @@ async fn a_manual_status_on_the_endpoint_this_session_registered_passes_logged_a
         .collect();
     assert_eq!(allowed.len(), 5);
     assert!(allowed.iter().all(|entry| entry["method"] == "PUT"), "{allowed:?}");
+    Ok(())
+}
+
+// the endpoint PUT alone: the manual status held back
+
+fn endpoint_only() -> Classifier {
+    Classifier::messaging().with_own_endpoint_put()
+}
+
+#[test]
+fn the_endpoint_put_alone_leaves_the_manual_status_unknown() -> TestResult {
+    for put in puts()? {
+        assert_eq!(put.classify(&endpoint_only()), availability(ENDPOINT), "{}", put.name);
+    }
+    for request in manual()? {
+        assert_eq!(
+            request.classify(&endpoint_only()),
+            Classification::Unknown,
+            "{}",
+            request.name
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn with_the_endpoint_put_alone_a_manual_status_on_a_registered_endpoint_is_denied() -> TestResult {
+    let lab = lab(endpoint_only())?;
+    assert_eq!(
+        lab.http.decide(&registration(ENDPOINT, MESSAGING)?).await,
+        Verdict::Allow
+    );
+    for put in puts()? {
+        assert_eq!(lab.http.decide(&put.paused()?).await, Verdict::Allow, "{}", put.name);
+    }
+    for request in manual()? {
+        assert_eq!(
+            lab.http.decide(&request.paused()?).await,
+            Verdict::Deny(DenyCause::Unclassified),
+            "{}",
+            request.name
+        );
+    }
+    Ok(())
+}
+
+/// The `own-presence-*` runs' classifiers (`Report::classifier`): the endpoint `PUT` recognized in every run but the
+/// activity one, the manual status only in `own-presence-manual`; `own-presence-manual-held` holds it back to capture
+/// it, so it must stay unknown there.
+#[test]
+fn only_the_manual_run_recognizes_the_manual_status() -> TestResult {
+    let reports = [
+        Report::Activity,
+        Report::Endpoint,
+        Report::Both,
+        Report::ManualHeld,
+        Report::Manual,
+    ];
+    for report in reports {
+        let classifier = report.classifier();
+        for put in puts()? {
+            let expected = if report == Report::Activity {
+                Classification::Unknown
+            } else {
+                availability(ENDPOINT)
+            };
+            assert_eq!(put.classify(&classifier), expected, "{report:?}: {}", put.name);
+        }
+        for request in manual()? {
+            let expected = if report == Report::Manual {
+                availability(ENDPOINT)
+            } else {
+                Classification::Unknown
+            };
+            assert_eq!(request.classify(&classifier), expected, "{report:?}: {}", request.name);
+        }
+    }
     Ok(())
 }
 

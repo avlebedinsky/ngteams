@@ -53,6 +53,8 @@ fn only_the_activity_run_holds_the_endpoint_back_and_only_the_endpoint_run_the_a
     }
 }
 
+/// The policy side; that the held run's classifier really denies the manual status is
+/// `own_availability.rs`'s `only_the_manual_run_recognizes_the_manual_status`.
 #[test]
 fn only_the_held_manual_run_expects_the_manual_status_denied() -> Result<(), regex::Error> {
     for report in REPORTS {

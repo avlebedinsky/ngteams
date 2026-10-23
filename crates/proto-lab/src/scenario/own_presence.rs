@@ -14,8 +14,10 @@
 //!   every `user.activity` held back (as in `ab-trouter-quiet`).
 //! - `own-presence-both`: both.
 //! - `own-presence-manual-held`: both, and a sets its status by hand (Busy, Do not disturb, Away, Available, then a
-//!   reset) with the request each sends denied, to capture it.
-//! - `own-presence-manual`: as `own-presence-manual-held`, the manual status let through once it is mapped.
+//!   reset) with the request each sends denied, to capture it: its classifier recognizes the endpoint `PUT` alone
+//!   ([`Classifier::with_own_endpoint_put`]), so the manual status stays unknown.
+//! - `own-presence-manual`: as `own-presence-manual-held`, the manual status let through once it is mapped
+//!   ([`Classifier::with_own_availability`]): the only run that recognizes it.
 //!
 //! The steps:
 //! 1. Before anything loads, a's fence force-denies every write carrying the probe marker, as in `ab-chat`.
@@ -93,12 +95,14 @@ impl Report {
         .find(|report| report.scenario() == name)
     }
 
-    /// The request classifier: the messaging set, and the own availability but for [`Report::Activity`].
+    /// The request classifier: the messaging set; the endpoint `PUT` too but for [`Report::Activity`]; the manual
+    /// status too for [`Report::Manual`] alone (every other run, [`Report::ManualHeld`] among them, denies it).
     #[must_use]
     pub fn classifier(self) -> Classifier {
         match self {
             Self::Activity => Classifier::messaging(),
-            _ => Classifier::messaging().with_own_availability(),
+            Self::Endpoint | Self::Both | Self::ManualHeld => Classifier::messaging().with_own_endpoint_put(),
+            Self::Manual => Classifier::messaging().with_own_availability(),
         }
     }
 

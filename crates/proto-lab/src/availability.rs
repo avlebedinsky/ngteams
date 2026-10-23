@@ -24,8 +24,10 @@
 //! body the fence can't read with certainty, makes it [`Classification::Unknown`]. The Trouter `user.activity` frame
 //! is `crate::calling::trouter_frame`'s (`active` or `inactive` only), as before.
 //!
-//! Only a classifier built with [`crate::classify::Classifier::with_own_availability`] asks: the `own-presence`
-//! scenarios. Every other run denies these requests as it did. Not recognized, and so denied everywhere: "Be right
+//! Only a classifier built with [`crate::classify::Classifier::with_own_availability`] asks for both: the
+//! `own-presence-manual` scenario. One built with [`crate::classify::Classifier::with_own_endpoint_put`] asks for the
+//! endpoint `PUT` alone, the manual status denied: the other `own-presence` scenarios but `own-presence-activity`
+//! (which asks for neither), `own-presence-manual-held` among them. Every other run denies these requests as it did. Not recognized, and so denied everywhere: "Be right
 //! back", "Appear offline", a status with a duration, a status note (`publishnote`), a work location, out-of-office,
 //! the presence subscriptions, and any other shape of these two requests.
 

@@ -335,7 +335,9 @@ values only, every id it names the account itself or its own registered endpoint
 opens the a–b chat (the probe force-denied first, as `ab-chat`). b's view is b's native client reading a's presence,
 `teams-headless b presence` (the read of [Others' presence](#others-presence), under b's own fence), about every
 16 s, from before a's browser starts until minutes after it closed (`scripts/own-presence-run.sh`, under the live
-lock). The fence mapping is `crates/proto-lab/src/availability.rs`, behind `Classifier::with_own_availability`.
+lock). The fence mapping is `crates/proto-lab/src/availability.rs`, behind `Classifier::with_own_availability` (the
+endpoint `PUT` and the manual status: `own-presence-manual`) or `Classifier::with_own_endpoint_put` (the endpoint `PUT`
+alone, the manual status denied: `-endpoint`, `-both`, `-manual-held`).
 
 ### What the web client sends
 
@@ -406,8 +408,10 @@ So:
 
 ### The browser fence's mapping
 
-`availability.rs`, asked only by a classifier built with `Classifier::with_own_availability` (the `own-presence`
-scenarios); every other run denies these requests as before.
+`availability.rs`, asked only by a classifier built with `Classifier::with_own_availability` (both requests:
+`own-presence-manual`) or `Classifier::with_own_endpoint_put` (the endpoint `PUT` alone: `own-presence-endpoint`,
+`-both`, `-manual-held`, so the held run's manual status stays denied); every other run denies these requests as
+before.
 
 - `endpoint_put` and `manual_status` recognize exactly the shapes above: either Teams origin, `/ups/<lowercase
   geo>/v1/me/endpoints/` or `…/forceavailability/` with the trailing slash, no query, no fragment, no user info;
