@@ -62,6 +62,7 @@ fn message_post_of(text: &str) -> PausedRequest {
         url: format!("{BASE}/users/ME/conversations/{GROUP_ENCODED}/messages"),
         headers: Vec::new(),
         body: Some(format!(r#"{{"content":"<p>{text}</p>","messagetype":"RichText/Html"}}"#).into_bytes()),
+        body_unread: false,
         network_id: Some("network-1".to_owned()),
     }
 }
@@ -278,6 +279,18 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
         ScenarioName::AbcChat => (forced_denies(nonce), policy(Some(GROUP))?),
         ScenarioName::ChatShapes => (forced_denies(nonce), chat_shapes::policy(ab, Some(GROUP))?),
         ScenarioName::EchoCall => (echo_call::forced_rules()?, echo_call::policy()),
+        ScenarioName::OwnPresenceActivity
+        | ScenarioName::OwnPresenceEndpoint
+        | ScenarioName::OwnPresenceBoth
+        | ScenarioName::OwnPresenceManualHeld
+        | ScenarioName::OwnPresenceManual => {
+            let report = proto_lab::scenario::own_presence::Report::of(name)
+                .unwrap_or(proto_lab::scenario::own_presence::Report::Both);
+            (
+                probe_rules(Some(&probe))?,
+                proto_lab::scenario::own_presence::policy(report, ab)?,
+            )
+        }
     }))
 }
 

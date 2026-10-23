@@ -1,0 +1,58 @@
+{
+  "_synthetic": "Made up, in the shape of the web client's manual status requests that the capture of own-presence-manual-held of 2026-10-23 shows (15 of them, read locally, all denied then; M2 Task 18): PUT /ups/<geo>/v1/me/forceavailability/ with no query, the same headers as the presence endpoint PUT (their values made up but those the check reads, as captured: Content-Type's, behavioroverride's, Origin's (the request's own), x-ms-object-id's and x-ms-request-id's (always empty), x-ms-client-type's and x-ms-client-user-agent's; x-ms-endpoint-id the client's current endpoint, the registrationId of its messaging registration), one per status the account menu offered and was chosen (Busy, Do not disturb, Appear away, Available), each a body of exactly availability, and the reset: the same PUT with no body at all (the event carried no postData, hasPostData or postDataEntries) and its own caller. These are the shapes the browser fence lets through as the account's own availability (crates/proto-lab/src/availability.rs), and only for an endpoint the session registered. <endpoint> is a made-up lower-case GUID tests fill in; a body of null means none.",
+  "headers": {
+    "Accept": "*/*",
+    "Cookie": "<the account's own cookies>",
+    "Origin": "<the request's own origin>",
+    "Referer": "https://teams.microsoft.com/v2/worker/made-up-worker.js",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) made-up",
+    "authorization": "Bearer <the account's own presence token>",
+    "behavioroverride": "redirectAs404",
+    "content-type": "application/json",
+    "x-ms-client-type": "cdlworker",
+    "x-ms-client-user-agent": "Teams-V2-Web",
+    "x-ms-client-version": "1415/26100212011",
+    "x-ms-correlation-id": "made-up-correlation-id",
+    "x-ms-endpoint-id": "<endpoint>",
+    "x-ms-object-id": "",
+    "x-ms-request-id": "",
+    "x-ms-session-id": "made-up-session-id"
+  },
+  "requests": [
+    {
+      "name": "busy",
+      "origin": "https://teams.microsoft.com",
+      "path": "/ups/noam/v1/me/forceavailability/",
+      "caller": "TeamsClient:setPresenceAvailability",
+      "body": {"availability": "Busy"}
+    },
+    {
+      "name": "do not disturb",
+      "origin": "https://teams.microsoft.com",
+      "path": "/ups/noam/v1/me/forceavailability/",
+      "caller": "TeamsClient:setPresenceAvailability",
+      "body": {"availability": "DoNotDisturb"}
+    },
+    {
+      "name": "appear away",
+      "origin": "https://teams.cloud.microsoft",
+      "path": "/ups/noam/v1/me/forceavailability/",
+      "caller": "TeamsClient:setPresenceAvailability",
+      "body": {"availability": "Away"}
+    },
+    {
+      "name": "available",
+      "origin": "https://teams.microsoft.com",
+      "path": "/ups/noam/v1/me/forceavailability/",
+      "caller": "TeamsClient:setPresenceAvailability",
+      "body": {"availability": "Available"}
+    },
+    {
+      "name": "reset",
+      "origin": "https://teams.microsoft.com",
+      "path": "/ups/noam/v1/me/forceavailability/",
+      "caller": "TeamsClient:setPresenceAvailability-reset",
+      "body": null
+    }
+  ]
+}

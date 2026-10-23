@@ -9,6 +9,10 @@
 //!   ([`crate::post_read`]; [`Classifier::mapped`] and the classifiers built on it, [`Classifier::calling`] and
 //!   [`Classifier::messaging`], only), with the MRIs it names: the fence lets it through only when every one is a lab
 //!   account;
+//! - [`Classification::OwnAvailability`]: a request setting the account's own availability ([`crate::availability`],
+//!   [`Classifier::with_own_availability`] or, the endpoint `PUT` alone, [`Classifier::with_own_endpoint_put`] only,
+//!   the user's exception of 2026-10-21), naming its endpoint: the
+//!   session's fence lets it through as own state only when that endpoint is one it let the account register;
 //! - [`Classification::Write`]: a mapped write with its [`Target`], judged by [`teams_fence::Fence::check`];
 //! - [`Classification::Unknown`]: everything else, denied.
 //!
@@ -66,6 +70,12 @@ pub enum OwnKind {
     /// `POST` body. The calling stack stays off until it knows the calling policy. Only a run that calls allows it
     /// ([`Classifier::calling`], `crate::calling`).
     SettingsRead,
+    /// Setting the account's own availability (`crate::availability`): UPS's presence endpoint `PUT` or the manual
+    /// status (`forceavailability`, a set or its reset), naming an endpoint this session registered for the account,
+    /// under the user's exception of 2026-10-21 (CLAUDE.md). Only a run whose classifier has
+    /// [`Classifier::with_own_availability`] allows both; one with [`Classifier::with_own_endpoint_put`], the endpoint
+    /// `PUT` alone.
+    OwnAvailability,
 }
 
 impl OwnKind {
@@ -79,6 +89,7 @@ impl OwnKind {
             Self::TrouterSession => "trouter_session",
             Self::EndpointRegistration => "endpoint_registration",
             Self::SettingsRead => "settings_read",
+            Self::OwnAvailability => "own_availability",
         }
     }
 }
@@ -93,6 +104,11 @@ pub enum Classification {
     /// A read by `POST` on the reviewed list ([`crate::post_read`]), naming `names`: let through only when every one
     /// is a lab account ([`teams_fence::Fence::lab_accounts_only`]), else denied as unknown.
     PostRead { kind: PostReadKind, names: Vec<Mri> },
+    /// A request setting the account's own availability on `endpoint` (`crate::availability`): the session's fence
+    /// makes it [`Classification::Own`] ([`OwnKind::OwnAvailability`]) when `endpoint` is one it let this account
+    /// register in this run, [`Classification::Unknown`] otherwise ([`crate::availability::OwnEndpoints`]); judged as it
+    /// comes, it is denied.
+    OwnAvailability { endpoint: String },
     /// A mapped write: let through only with a permit from the fence.
     Write(Target),
     /// A mutating request nothing classifies: denied.
@@ -209,7 +225,7 @@ fn set_matches(set: &[(&str, ValueRule)], pairs: &[(String, String)]) -> bool {
 }
 
 /// A GUID as `8-4-4-4-12` lower-case hex digits.
-fn is_lower_guid(value: &str) -> bool {
+pub(crate) fn is_lower_guid(value: &str) -> bool {
     let groups: Vec<&str> = value.split('-').collect();
     groups.len() == 5
         && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, len)| {
@@ -305,6 +321,22 @@ pub struct Classifier {
     messaging: bool,
     /// The participant the web client's test call is for: the echo service `lab.toml` approves.
     test_call_callee: Option<Mri>,
+    /// Which requests setting the account's own availability are recognized ([`Classifier::with_own_availability`],
+    /// [`Classifier::with_own_endpoint_put`]).
+    availability: Availability,
+}
+
+/// Which of the requests that set the account's own availability (`crate::availability`) a classifier recognizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Availability {
+    /// None: they stay unknown, as every run but the `own-presence` ones has them.
+    Unknown,
+    /// The endpoint `PUT` alone ([`Classifier::with_own_endpoint_put`]), as [`Classification::OwnAvailability`]; the
+    /// manual status stays unknown.
+    EndpointPut,
+    /// The endpoint `PUT` and the manual status ([`Classifier::with_own_availability`]), as
+    /// [`Classification::OwnAvailability`].
+    EndpointPutAndManual,
 }
 
 impl Classifier {
@@ -332,6 +364,7 @@ impl Classifier {
             calling: false,
             messaging: false,
             test_call_callee: None,
+            availability: Availability::Unknown,
         }
     }
 
@@ -368,6 +401,28 @@ impl Classifier {
             messaging: true,
             ..Self::mapped()
         }
+    }
+
+    /// The same classifier, recognizing the requests that set the account's own availability (`crate::availability`,
+    /// the user's exception of 2026-10-21): UPS's presence endpoint `PUT` and the manual status, as
+    /// [`Classification::OwnAvailability`].
+    /// Only an endpoint the session registered for the account lets one through, so it is of use only with
+    /// [`Classifier::messaging`], which lets the messaging stack's registration out. What the `own-presence` scenarios
+    /// use.
+    #[must_use]
+    pub fn with_own_availability(mut self) -> Self {
+        self.availability = Availability::EndpointPutAndManual;
+        self
+    }
+
+    /// The same classifier, recognizing UPS's presence endpoint `PUT` alone as [`Classification::OwnAvailability`]
+    /// (`crate::availability::endpoint_put`): the manual status stays [`Classification::Unknown`], denied. As
+    /// [`Classifier::with_own_availability`], of use only with [`Classifier::messaging`]. What the `own-presence` runs
+    /// that set no manual status use, and the one that holds it back to capture it (`own-presence-manual-held`).
+    #[must_use]
+    pub fn with_own_endpoint_put(mut self) -> Self {
+        self.availability = Availability::EndpointPut;
+        self
     }
 
     /// The participant the web client's test call is for, which its start doesn't name (`crate::calling::call_start`):
@@ -432,6 +487,15 @@ impl Classifier {
             && let Some(kind) = crate::calling::messaging_request(&method, &url, body)
         {
             return Classification::Own(kind);
+        }
+        if self.availability != Availability::Unknown
+            && let Some(endpoint) = crate::availability::endpoint_put(&method, &url, headers, body).or_else(|| {
+                (self.availability == Availability::EndpointPutAndManual)
+                    .then(|| crate::availability::manual_status(&method, &url, headers, body))
+                    .flatten()
+            })
+        {
+            return Classification::OwnAvailability { endpoint };
         }
         if self.calling {
             if let Some(kind) = crate::calling::own_request(&method, &url, body) {

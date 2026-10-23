@@ -439,6 +439,7 @@ fn message_to(chat: &str) -> PausedRequest {
         method: "POST".to_owned(),
         url: format!("https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{chat}/messages"),
         body: Some(br#"{"messagetype":"RichText/Html","content":"<p>hi</p>"}"#.to_vec()),
+        body_unread: false,
         network_id: None,
     }
 }
@@ -534,6 +535,7 @@ async fn a_new_chat_is_judged_by_its_members_without_a_read() -> TestResult {
                 .to_string()
                 .into_bytes(),
         ),
+        body_unread: false,
         network_id: None,
     }
     };
@@ -607,6 +609,7 @@ fn a_forced_deny_matches_method_url_and_body_text() -> TestResult {
         method: method.to_owned(),
         url: url.to_owned(),
         body: body.map(|body| body.as_bytes().to_vec()),
+        body_unread: false,
         network_id: None,
     };
     assert!(rule.matches(&request(
@@ -637,6 +640,7 @@ async fn a_forced_deny_comes_before_classification_and_is_logged() -> TestResult
         method: "POST".to_owned(),
         url: "http://127.0.0.1:9/api/send?x=1".to_owned(),
         body: Some(body.as_bytes().to_vec()),
+        body_unread: false,
         network_id: Some("net-1".to_owned()),
     };
     assert_eq!(http.decide(&send("probe")).await, Verdict::Allow);

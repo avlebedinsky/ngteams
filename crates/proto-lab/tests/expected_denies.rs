@@ -538,6 +538,7 @@ fn paused(method: &str, url: &str, body: Option<&str>) -> PausedRequest {
         method: method.to_owned(),
         url: url.to_owned(),
         body: body.map(|body| body.as_bytes().to_vec()),
+        body_unread: false,
         network_id: None,
     }
 }

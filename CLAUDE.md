@@ -34,6 +34,15 @@ These hold for every agent and every change, with no exceptions.
   `Unknown`. Its captured response shape can hold only the accounts it names or that conversation's members: a
   request whose results can list anyone else (a search, suggestions, the org chart) is never allowed. It hands no
   token or credential to a third party (a bot, an app's backend). It never covers calls.
+- **A lab account may set its own availability, and nothing else of its presence.** The user set this on 2026-10-21.
+  A lab account's own availability is seen across the tenant, so no participant check can pass for it; this is the
+  one narrow exception to the write rule above. It covers only UPS's presence endpoint `PUT …/v1/me/endpoints/`, the
+  Trouter `user.activity` frame and the manual status request (`PUT …/v1/me/forceavailability/`, captured in M2 Task
+  18: a set and its reset), each in its captured shape, with availability values only, and only the values a capture
+  showed. Every id it names must be the account itself or its
+  own registered endpoint (one this run registered for this account); any other id makes it `Unknown`. It never
+  covers a status note, out-of-office, a work location or a profile field, never another account's presence, and
+  never anything else the presence service offers: those stay writes under the rule above.
 - **An allowance matches the request's exact captured shape, query included.** It is added only after a review, with
   its reason and tests first. Its shape is the host, the method, the path, every query parameter and its value, the
   headers that change what the request does, and the body schema. A query parameter or body field the capture didn't
@@ -172,8 +181,8 @@ What the code does and why. A change that undoes one of these needs a new reason
   never settle a row.
 - **Deliveries are never answered** (M1 Task 14: no harm shown; on a reconnect the service replays up to ~15 min of
   unanswered events, which the catch-up and the versioned store absorb). An incoming call is ignored, and the native
-  client sends no `user.activity` and sets no presence; which request makes an account show online is open
-  (`docs/protocol/trouter.md`). A message-loss report means: catch up, then acknowledge it. A token renewal reconnects
+  client sends no `user.activity` and sets no presence yet; what makes an account show online is UPS's endpoint `PUT`,
+  not `user.activity` (M2 Task 18, `docs/protocol/trouter.md`, "Own presence"). A message-loss report means: catch up, then acknowledge it. A token renewal reconnects
   the socket (5 min before expiry, and on the session's renewal); an open socket is never re-authenticated.
 - **Read a field's whole captured range, not the mock's.** Two bugs passed every offline test in M1 and lost
   messages live, because the fixtures held only the common form: a delivery's socket.io `id` is a signed 32-bit
