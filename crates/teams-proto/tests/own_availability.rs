@@ -239,7 +239,9 @@ async fn only_a_registration_the_registrar_took_registers_an_endpoint() {
     let refused = register(&setup.transport, &registration).await.unwrap_err();
     assert!(matches!(refused, HttpError::Status(_)), "{refused:?}");
 
-    // a transport that answers a failure without an error registers nothing either
+    // a transport that answers a failure without an error registers nothing either (a fake transport registers at all
+    // only under `test-support`: outside it `register` takes only the native transport, an `EndpointRegistrar`, as
+    // fence-seal's `proto_register_fake_transport` case shows)
     let (answer, endpoint) = register(&Answering(503), &registration).await.unwrap();
     assert_eq!(answer.status(), 503);
     assert_eq!(endpoint, None);

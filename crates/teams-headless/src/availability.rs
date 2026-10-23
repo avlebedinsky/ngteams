@@ -36,7 +36,8 @@ pub struct Plan {
 /// How the command ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum End {
-    /// Every step went out; `all_sent` when the service took each.
+    /// Every step was asked for; `all_sent` when the service took each (a throttled one once its wait was over, within
+    /// the hold: one still waiting when the hold ended wasn't sent).
     Done { all_sent: bool },
     /// Its owner stopped it (a signal).
     Stopped,
@@ -72,13 +73,13 @@ pub async fn run(
         steps.push((after, OwnStatus::ClearManual));
     }
     steps.sort_by_key(|(after, _)| *after);
-    let mut all_sent = true;
+    let mut tally = Tally::default();
     for (after, status) in steps {
-        if let Some(end) = drain_until(handle, start + after, out, &mut stop).await? {
+        if let Some(end) = drain_until(handle, start + after, out, &mut tally, &mut stop).await? {
             return Ok(end);
         }
         let sent = handle.own_availability(status).await;
-        all_sent &= matches!(sent, Ok(TransientSent::Sent));
+        tally.asked(status, sent.as_ref().ok());
         let outcome = match sent {
             Ok(sent) => sent_word(&sent),
             Err(error) => format!("refused: {}", visible(&error.to_string())),
@@ -86,10 +87,60 @@ pub async fn run(
         writeln!(out, "availability {} {outcome} at_ms={}", step_word(status), now_ms())?;
         out.flush()?;
     }
-    if let Some(end) = drain_until(handle, start + plan.hold, out, &mut stop).await? {
+    if let Some(end) = drain_until(handle, start + plan.hold, out, &mut tally, &mut stop).await? {
         return Ok(end);
     }
-    Ok(End::Done { all_sent })
+    Ok(End::Done {
+        all_sent: tally.all_sent(),
+    })
+}
+
+/// How the steps went so far: whether one didn't go through, and the kinds ([`teams_core::Transient::kind`]) of those
+/// still waiting out a `Retry-After`.
+#[derive(Debug, Default)]
+struct Tally {
+    failed: bool,
+    waiting: Vec<&'static str>,
+}
+
+impl Tally {
+    /// A step asked for, and its answer (`None`: the engine refused it).
+    fn asked(&mut self, status: OwnStatus, sent: Option<&TransientSent>) {
+        match sent {
+            Some(TransientSent::Sent) => {}
+            // a newer one of its kind waiting takes the older one's place: the newer settles both
+            Some(TransientSent::Waiting { .. }) => {
+                let kind = kind_of(status);
+                if !self.waiting.contains(&kind) {
+                    self.waiting.push(kind);
+                }
+            }
+            Some(TransientSent::Denied { .. } | TransientSent::Dropped { .. }) | None => self.failed = true,
+        }
+    }
+
+    /// A waiting step of `kind` gone out from the engine's tick (or dropped), as `sent`.
+    fn settled(&mut self, kind: &str, sent: &TransientSent) {
+        if let Some(at) = self.waiting.iter().position(|waiting| *waiting == kind) {
+            self.waiting.remove(at);
+            if *sent != TransientSent::Sent {
+                self.failed = true;
+            }
+        }
+    }
+
+    /// Whether the service took every step: none failed and none still waits.
+    fn all_sent(&self) -> bool {
+        !self.failed && self.waiting.is_empty()
+    }
+}
+
+/// The transient kind a step goes out as.
+fn kind_of(status: OwnStatus) -> &'static str {
+    match status {
+        OwnStatus::Available => "endpoint_available",
+        OwnStatus::Manual(_) | OwnStatus::ClearManual => "manual_status",
+    }
 }
 
 /// Waits for the push channel's registration to go through, printing it; `Some` when the command ends first.
@@ -126,12 +177,13 @@ async fn registered(
     }
 }
 
-/// Takes the engine's events until `deadline`, printing how a step that waited out a `Retry-After` went; `Some` when
-/// the command ends first.
+/// Takes the engine's events until `deadline`, printing how a step that waited out a `Retry-After` went and settling it
+/// in `tally`; `Some` when the command ends first.
 async fn drain_until(
     handle: &mut EngineHandle,
     deadline: Instant,
     out: &mut impl Write,
+    tally: &mut Tally,
     stop: &mut (impl Future<Output = ()> + Unpin),
 ) -> Result<Option<End>, CommandError> {
     loop {
@@ -144,8 +196,14 @@ async fn drain_until(
             None => return Ok(Some(End::EngineStopped)),
             Some(Event::PushStopped(why)) => return Ok(Some(End::PushStopped(why))),
             Some(Event::Transient(transient, sent)) => {
-                let (kind, sent) = (transient.kind(), sent_word(&sent));
-                writeln!(out, "availability {kind} {sent} after_its_wait at_ms={}", now_ms())?;
+                let kind = transient.kind();
+                tally.settled(kind, &sent);
+                writeln!(
+                    out,
+                    "availability {kind} {} after_its_wait at_ms={}",
+                    sent_word(&sent),
+                    now_ms()
+                )?;
             }
             Some(_) => {}
         }

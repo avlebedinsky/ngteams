@@ -305,6 +305,11 @@ impl Lab {
         self.build(me, true, false, true)
     }
 
+    /// As [`Self::engine_owning`], its first write answered 429 with a short `Retry-After`.
+    fn engine_owning_throttled(&self, me: &str) -> EngineHandle {
+        self.build(me, true, true, true)
+    }
+
     fn build(&self, me: &str, push: bool, throttle_first_write: bool, own: bool) -> EngineHandle {
         let tokens = Arc::new(Tokens {
             token: self.mock.token(me).unwrap(),
@@ -850,6 +855,64 @@ async fn availability_without_its_own_account_prints_the_denial_and_sets_nothing
         "{printed}"
     );
     assert!(lab.mock.own_availability().is_empty());
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_counts_a_throttled_step_sent_once_it_went_out_after_its_wait() {
+    let lab = Lab::start().await;
+    // the endpoint's `PUT` is answered 429 with a `Retry-After` of 300 ms, and goes out from the engine's tick after it
+    let mut a = lab.engine_owning_throttled(LAB_A);
+    let mut out = Vec::new();
+    let plan = availability::Plan {
+        manual: None,
+        reset_after: None,
+        hold: Duration::from_secs(3),
+        register_wait: WAIT,
+    };
+
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert_eq!(end, availability::End::Done { all_sent: true }, "{printed}");
+    assert!(
+        printed.contains("availability available waiting not_before_ms="),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("availability endpoint_available sent after_its_wait"),
+        "{printed}"
+    );
+    assert_eq!(lab.mock.own_availability().len(), 1, "UPS took the `PUT` once");
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_counts_a_step_still_waiting_when_the_hold_ends_as_not_sent() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine_owning_throttled(LAB_A);
+    let mut out = Vec::new();
+    // the hold ends before the `PUT`'s 300 ms `Retry-After` does
+    let plan = availability::Plan {
+        manual: None,
+        reset_after: None,
+        hold: Duration::ZERO,
+        register_wait: WAIT,
+    };
+
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert_eq!(end, availability::End::Done { all_sent: false }, "{printed}");
+    assert!(
+        printed.contains("availability available waiting not_before_ms="),
+        "{printed}"
+    );
+    assert!(!printed.contains("after_its_wait"), "{printed}");
     a.shutdown();
 }
 

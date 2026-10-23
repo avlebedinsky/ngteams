@@ -61,8 +61,9 @@
 //! - **The account's own availability** (M2 Task 19, [`EngineRequests::own_availability`]): its endpoint's `PUT`
 //!   (available) and its manual status (set or cleared), transient writes naming the endpoint the push channel
 //!   registered in this run ([`PushEvent::Registered`]); refused before a registration went through and after the push
-//!   channel stopped. The fence permits it for its own account only, without a member read. When to send what is the
-//!   app's policy (Task 20), not the engine's.
+//!   channel stopped, when one still waiting out a `Retry-After` is dropped too (told as [`Event::Transient`]). The
+//!   fence permits it for its own account only, without a member read. When to send what is the app's policy (Task
+//!   20), not the engine's.
 //! - **Its handles**: [`EngineRequests`], the request side (writes and queries, each a [`Reply`]), is cloneable, for a
 //!   UI's views to share; [`EngineHandle`] owns the engine: its events, its thread and its shutdown.
 //! - **One engine per account** ([`teams_store::Store::engine_lock`]): [`start`] takes the account's engine lock
@@ -91,7 +92,9 @@ use std::time::{Duration, SystemTime};
 
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
-use teams_proto::{Client, Credentials, HttpError, HttpTransport, ManualAvailability, RegisteredEndpoint, Transport};
+use teams_proto::{
+    Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, ManualAvailability, RegisteredEndpoint, Transport,
+};
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
     ReadHorizon, SearchHit, Store, StoreError, Team,
@@ -152,7 +155,7 @@ impl Push {
     #[must_use]
     pub fn new<T, K>(trouter: Trouter<T, K>) -> Self
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         Self(Box::new(move || trouter.spawn()))
@@ -556,7 +559,9 @@ impl EngineRequests {
     }
 
     /// Sends a transient write (typing) through the outbox, as no row ([`Transient`]); the reply is how its send went.
-    /// A typing in a conversation the store doesn't know is refused.
+    /// A typing in a conversation the store doesn't know is refused, and an availability naming an endpoint other than
+    /// the one the push channel registered and keeps ([`EngineError::NoEndpoint`], as
+    /// [`EngineRequests::own_availability`]).
     pub fn transient(&self, transient: Transient) -> Reply<TransientSent> {
         self.ask(|reply| Request::Transient(transient, reply))
     }
@@ -1251,8 +1256,14 @@ where
         self.send_row(row.id).await
     }
 
-    /// A transient write ([`EngineRequests::transient`]), to a conversation the store knows.
+    /// A transient write ([`EngineRequests::transient`]), to a conversation the store knows; an availability only
+    /// from the endpoint the push channel registered and still keeps ([`EngineRequests::own_availability`]'s rule).
     async fn transient(&mut self, transient: Transient) -> Result<TransientSent, EngineError> {
+        if let Some(endpoint) = transient.endpoint()
+            && self.endpoint.as_ref() != Some(endpoint)
+        {
+            return Err(EngineError::NoEndpoint);
+        }
         if let Some(conversation) = transient.conversation()
             && self.store.conversation(conversation)?.is_none()
         {
@@ -1520,8 +1531,12 @@ where
             }
             PushEvent::Stopped(stop) => {
                 self.up = false;
-                // no registration is renewed any more: the endpoint it kept is no longer the account's live one
+                // no registration is renewed any more: the endpoint it kept is no longer the account's live one, and
+                // an availability waiting out a `Retry-After` doesn't go out from the tick after it
                 self.endpoint = None;
+                for (transient, dropped) in self.outbox.drop_own_availability() {
+                    self.emit(Event::Transient(transient, dropped));
+                }
                 self.gaps.disconnected();
                 self.emit(Event::PushStopped(stop));
             }

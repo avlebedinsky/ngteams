@@ -44,8 +44,8 @@ use teams_auth::session::{AccessToken, Clock, REFRESH_MARGIN, Renewal, SystemClo
 use teams_auth::token::TokenError;
 use teams_fence::Fence;
 use teams_proto::{
-    Authenticate, ConnectParams, Disconnect, DroppedIndicator, EndpointRegistration, FrameError, FrameSink,
-    IC3_AUDIENCE, MessageLossAck, OwnFrame, Ping, RegisteredEndpoint, Sent, Transport,
+    Authenticate, ConnectParams, Disconnect, DroppedIndicator, EndpointRegistrar, EndpointRegistration, FrameError,
+    FrameSink, IC3_AUDIENCE, MessageLossAck, OwnFrame, Ping, RegisteredEndpoint, Sent,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -233,7 +233,7 @@ impl<T, K> std::fmt::Debug for Trouter<T, K> {
 
 impl<T, K> Trouter<T, K>
 where
-    T: Transport + Send + 'static,
+    T: EndpointRegistrar + Send + 'static,
     K: TrouterCredentials + 'static,
 {
     /// The push channel of the account whose registrations go through `transport` and whose tokens `credentials`
@@ -411,7 +411,7 @@ impl<T, K> Run<T, K> {
 
 impl<T, K> Run<T, K>
 where
-    T: Transport + Send + 'static,
+    T: EndpointRegistrar + Send + 'static,
     K: TrouterCredentials + 'static,
 {
     async fn run(mut self) {
@@ -665,7 +665,7 @@ impl Link {
 
     async fn serve<T, K>(&mut self, run: &mut Run<T, K>) -> End
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         loop {
@@ -695,7 +695,7 @@ impl Link {
 
     async fn take<T, K>(&mut self, step: Step, run: &mut Run<T, K>) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         match step {
@@ -757,7 +757,7 @@ impl Link {
         run: &mut Run<T, K>,
     ) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         match frame {
@@ -780,7 +780,7 @@ impl Link {
 
     async fn on_text<T, K>(&mut self, text: &str, run: &mut Run<T, K>) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         match frames::decode(text) {
@@ -816,7 +816,7 @@ impl Link {
     /// connection, nothing sent either way; a stop while it is asked ends it at once.
     async fn authenticate<T, K>(&mut self, run: &mut Run<T, K>) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         let asked = tokio::select! {
@@ -839,7 +839,7 @@ impl Link {
 
     fn on_event<T, K>(&mut self, event: &Event, run: &mut Run<T, K>)
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         if let Some(connected) = Connected::from_event(event) {
@@ -863,7 +863,7 @@ impl Link {
     /// Registers the endpoint's push URL (the messaging stack's registration), replacing the last loop.
     fn register<T, K>(&mut self, connected: &Connected, run: &Run<T, K>)
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
     {
         self.registrar = None;
         match EndpointRegistration::messaging(&run.trouter.epid, &connected.push_url) {
@@ -930,7 +930,7 @@ impl Link {
     /// Reconnects with a new token once the held one is within the lead of its expiry.
     async fn renew_check<T, K>(&mut self, run: &mut Run<T, K>) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         let due = self
@@ -953,7 +953,7 @@ impl Link {
         run: &mut Run<T, K>,
     ) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         let ask = match renewal {

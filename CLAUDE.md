@@ -186,8 +186,10 @@ What the code does and why. A change that undoes one of these needs a new reason
   `SetEndpointAvailability` and `ForceAvailability` (M2 Task 19), transient writes of the outbox on `Scope::Account`,
   which the fence permits without a member read only for its own account (`Fence::open_lab_account`), each naming
   only a `RegisteredEndpoint` (only `teams_proto::register` makes one, from a registration of this run the registrar
-  took). A message-loss report means: catch up, then acknowledge it. A token renewal reconnects the socket (5 min
-  before expiry, and on the session's renewal); an open socket is never re-authenticated.
+  took, sent over the native `HttpTransport`: `register` and the push channel take only an `EndpointRegistrar`, sealed,
+  which a fake transport is only under `test-support`). A waiting availability is dropped when the push channel stops.
+  A message-loss report means: catch up, then acknowledge it. A token renewal reconnects the socket (5 min before
+  expiry, and on the session's renewal); an open socket is never re-authenticated.
 - **Read a field's whole captured range, not the mock's.** Two bugs passed every offline test in M1 and lost
   messages live, because the fixtures held only the common form: a delivery's socket.io `id` is a signed 32-bit
   number (about one in ten negative), and the push URL's endpoint id is base64url (`-` and `_`). A fixture of a

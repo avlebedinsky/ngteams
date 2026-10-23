@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use teams_proto::{EndpointRegistration, REGISTRATION_TTL, RegisteredEndpoint, Transport, register};
+use teams_proto::{EndpointRegistrar, EndpointRegistration, REGISTRATION_TTL, RegisteredEndpoint, register};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -71,7 +71,7 @@ impl Registrar {
         reports: mpsc::UnboundedSender<Outcome>,
     ) -> Self
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
     {
         let task = tokio::spawn(async move {
             loop {

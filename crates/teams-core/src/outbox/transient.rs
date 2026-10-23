@@ -12,7 +12,8 @@
 //! - **A transient waits once, and briefly**: it is worth sending only near the moment it was asked for, so one whose
 //!   `Retry-After` is longer than [`MAX_TRANSIENT_WAIT`], or that is throttled again after its wait, is dropped; and a
 //!   waiting one is dropped when what it announced has gone first ([`Outbox::drop_waiting`]: the engine calls it
-//!   before a message post to its conversation).
+//!   before a message post to its conversation), and a waiting availability when the push channel stopped
+//!   ([`Outbox::drop_own_availability`]: its endpoint is no longer the account's live one).
 //! - **Latest wins while one waits**: a transient asked for while one of the same ([`Transient::replaces`]) waits takes
 //!   its place, and waits as long; only the newest goes out.
 
@@ -78,6 +79,15 @@ impl Transient {
             Self::EndpointAvailable { .. } | Self::ManualStatus { .. } => None,
         }
     }
+
+    /// The endpoint it names: the account's own availability's; `None` for a typing.
+    #[must_use]
+    pub fn endpoint(&self) -> Option<&RegisteredEndpoint> {
+        match self {
+            Self::Typing { .. } => None,
+            Self::EndpointAvailable { endpoint } | Self::ManualStatus { endpoint, .. } => Some(endpoint),
+        }
+    }
 }
 
 /// How a transient's send went.
@@ -134,15 +144,33 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     /// Drops every transient waiting in `conversation`, each returned with its drop: what it announced has gone first
     /// (the engine calls this before a message post to the conversation, so no typing follows the message).
     pub fn drop_waiting(&self, conversation: &str) -> Vec<(Transient, TransientSent)> {
+        self.drop_where(
+            |transient| transient.conversation() == Some(conversation),
+            "a message to its conversation went first",
+        )
+    }
+
+    /// Drops every waiting write of the account's own availability, each returned with its drop: the endpoint it
+    /// names is no longer the account's live one (the engine calls this when the push channel stops, so no
+    /// availability goes out from the tick after it).
+    pub fn drop_own_availability(&self) -> Vec<(Transient, TransientSent)> {
+        self.drop_where(
+            |transient| transient.endpoint().is_some(),
+            "the push channel stopped: the endpoint it names is no longer the account's live one",
+        )
+    }
+
+    /// Drops every waiting transient `drop` picks, each returned with its drop for `reason`.
+    fn drop_where(&self, drop: impl Fn(&Transient) -> bool, reason: &str) -> Vec<(Transient, TransientSent)> {
         let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
         let (dropped, kept): (Vec<Waiting>, Vec<Waiting>) = std::mem::take(&mut *waiting)
             .into_iter()
-            .partition(|waiting| waiting.transient.conversation() == Some(conversation));
+            .partition(|waiting| drop(&waiting.transient));
         *waiting = kept;
         dropped
             .into_iter()
             .map(|waiting| {
-                let reason = "a message to its conversation went first".to_owned();
+                let reason = reason.to_owned();
                 (waiting.transient, TransientSent::Dropped { reason })
             })
             .collect()

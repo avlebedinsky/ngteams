@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use teams_fence::Fence;
-use teams_proto::Transport;
+use teams_proto::EndpointRegistrar;
 use teams_trouter::{Trouter, TrouterCredentials};
 
-fn mock<T: Transport + Send + 'static, K: TrouterCredentials + 'static>(
+fn mock<T: EndpointRegistrar + Send + 'static, K: TrouterCredentials + 'static>(
     transport: Arc<T>,
     credentials: Arc<K>,
     fence: Arc<Fence>,

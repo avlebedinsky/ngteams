@@ -14,7 +14,8 @@
 //!
 //! [`register`] sends the registration and, once the registrar took it, gives the endpoint it registered as a
 //! [`RegisteredEndpoint`]: the only way to get one, and the only id the account's own availability may name (M2 Task
-//! 19, `crate::SetEndpointAvailability`, `crate::ForceAvailability`).
+//! 19, `crate::SetEndpointAvailability`, `crate::ForceAvailability`). It takes only an [`EndpointRegistrar`], the
+//! native HTTP transport (any transport under `test-support`), so a fake transport's made-up answer can't mint one.
 
 use std::fmt;
 
@@ -134,8 +135,9 @@ impl OwnState for EndpointRegistration {
 /// The account's own Trouter endpoint, as a registration of this run registered it for the messaging stack: the
 /// `registrationId` of an [`EndpointRegistration`] the account's transport sent and the registrar took (a 2xx). It is
 /// the one endpoint id the account's own availability names (CLAUDE.md: "every id it names must be the account itself
-/// or its own registered endpoint (one this run registered for this account)"), and only [`register`] makes one: it
-/// has no public constructor, isn't deserialized from anything, and lives only in memory, so it is always this run's.
+/// or its own registered endpoint (one this run registered for this account)"), and only [`register`] makes one, over
+/// the native HTTP transport ([`EndpointRegistrar`]): it has no public constructor, isn't deserialized from anything,
+/// and lives only in memory, so it is always this run's.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RegisteredEndpoint {
     id: String,
@@ -155,13 +157,35 @@ impl fmt::Debug for RegisteredEndpoint {
     }
 }
 
+/// A transport whose registration may give a [`RegisteredEndpoint`]: the native [`HttpTransport`](crate::HttpTransport)
+/// only, which sends to its allowlisted hosts and logs every own-state request to `fence.log` before it goes. Sealed:
+/// [`Transport`] is open (a test's fake implements it, and its answer is whatever the fake says), so a registration
+/// "taken" by another transport proves nothing was registered, and no other crate can make a transport one. Under
+/// `test-support` (tests only, which a lab binary refuses to run with) every transport is one, so a test's fake can
+/// register.
+pub trait EndpointRegistrar: Transport + registrar::Sealed {}
+
+impl<T: Transport + registrar::Sealed> EndpointRegistrar for T {}
+
+mod registrar {
+    /// The seal on [`EndpointRegistrar`](super::EndpointRegistrar): a public trait no other crate can name.
+    pub trait Sealed {}
+
+    #[cfg(not(feature = "test-support"))]
+    impl<C: crate::Credentials> Sealed for crate::HttpTransport<C> {}
+
+    #[cfg(feature = "test-support")]
+    impl<T: crate::Transport> Sealed for T {}
+}
+
 /// Sends `registration` through `transport` (the reviewed own-state request: the transport logs it to `fence.log`
 /// before it goes) and returns the answer, with the endpoint it registered when the answer is a success. A refusal or
-/// a failure registers nothing.
+/// a failure registers nothing. Only an [`EndpointRegistrar`] (the native HTTP transport) registers: a fake transport
+/// answering a success can't make a [`RegisteredEndpoint`] outside `test-support`.
 ///
 /// # Errors
 /// The transport's.
-pub async fn register<T: Transport>(
+pub async fn register<T: EndpointRegistrar>(
     transport: &T,
     registration: &EndpointRegistration,
 ) -> Result<(Response, Option<RegisteredEndpoint>), T::Error> {

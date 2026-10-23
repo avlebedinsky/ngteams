@@ -8,8 +8,10 @@
 //! service request) are usable, so a lab binary can arm the browser fence; the live source's local-mock origin is not
 //! (`tests/ui/live_mock_origin.rs`). A fence's own account (whose own availability it permits) comes only from
 //! `lab.toml` (`Fence::open_lab_account`), and the account's own availability names only a `RegisteredEndpoint` that a
-//! registration gave (`tests/ui/fence_own_account.rs`, `proto_registered_endpoint.rs`, M2 Task 19). This library is
-//! empty.
+//! registration over the native HTTP transport gave: none written out by hand, none from a transport of another
+//! crate's making, directly or through the push channel (`tests/ui/fence_own_account.rs`,
+//! `proto_registered_endpoint.rs`, `proto_register_fake_transport.rs`, `trouter_fake_transport.rs`, M2 Task 19). This
+//! library is empty.
 //!
 //! They live in a crate of their own because trybuild builds each case with the dev-dependencies and features of the
 //! crate that runs it, and the crates whose tests mint permits or reach a mock (`teams-fence`, `teams-proto`,

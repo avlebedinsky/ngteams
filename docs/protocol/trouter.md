@@ -417,12 +417,14 @@ So:
   without a member read, and only for the fence's own account (`Fence::open_lab_account`, the MRI `lab.toml` gives the
   account the binary runs as). The endpoint each names (the body's `id`, and `x-ms-endpoint-id` on both) is a
   `RegisteredEndpoint`, which only `teams_proto::register` gives, once a registration of this run that the account's
-  transport sent was answered with a success: the push channel hands it on (`PushEvent::Registered`) and the engine
-  keeps it while the channel runs. They go out as transient writes of the outbox (`EngineRequests::own_availability`),
-  under the presence token and the presence read's header values, without the web client's caller, session ids or
-  cookies, which UPS took. No `user.activity` (above: not needed to show online).
-- **Live** (`scripts/own-availability-native-run.sh busy 120 240 360 12`, 2026-10-23 07:26–07:35 UTC, under the live
-  lock, from a normal lab build; a's `teams-headless a availability --manual busy --manual-after 120 --reset-after 240
+  native HTTP transport sent was answered with a success (a sealed `EndpointRegistrar`: no fake transport outside
+  `test-support`): the push channel hands it on (`PushEvent::Registered`) and the engine keeps it while the channel
+  runs; once the channel stopped, an availability still waiting out a `Retry-After` is dropped and no other is sent.
+  They go out as transient writes of the outbox (`EngineRequests::own_availability`), under the presence token and
+  the presence read's header values, without the web client's caller, session ids or cookies, which UPS took. No `user.activity` (above: not needed to show online).
+- **Live** (`scripts/own-availability-native-run.sh busy 120 240 360 12
+  ~/.local/share/teams-lab/runs/own-availability-native-2.txt`, 2026-10-23 07:26–07:35 UTC, under the live lock, from
+  a normal lab build; a's `teams-headless a availability --manual busy --manual-after 120 --reset-after 240
   --hold 360`, b's `teams-headless b presence` about every 16 s). The first attempt (run 1, 07:15) sent nothing: the
   fence permitted each of its three steps, but the outbox's transport hadn't been given UPS's base, so the transport
   refused them before sending (`no presence base`); b read `Offline` throughout. Fixed in `teams-core`'s `lab.rs`

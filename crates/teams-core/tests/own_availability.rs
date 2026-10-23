@@ -11,6 +11,7 @@
 
 use std::future::{self, Future};
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -24,9 +25,12 @@ use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, 
 use teams_mock::{
     AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OwnAvailability, PRESENCE_BASE, TrouterMock,
 };
-use teams_proto::{Author, Client, Credentials, EndpointRegistration, HttpTransport, ManualAvailability, register};
+use teams_proto::{
+    Author, Authorized, AuthorizedPostRead, Client, Credentials, EndpointRegistration, HttpError, HttpTransport,
+    ManualAvailability, Mutating, OwnState, PostRead, Read, Response, Transport, register,
+};
 use teams_store::Store;
-use teams_trouter::{Options, RegistrationReport, Trouter, TrouterCredentials};
+use teams_trouter::{Options, RegistrationReport, Stop, Trouter, TrouterCredentials};
 use tokio::sync::broadcast;
 
 /// How long a test waits for an event.
@@ -106,6 +110,17 @@ struct Rig {
 /// Lab account a's engine against the mocks, its fence's own account `own` (none for `None`), its transport given the
 /// presence base, with a push channel when `push`.
 fn rig(mock: &ChatServiceMock, trouter: &TrouterMock, own: Option<&str>, push: bool) -> Rig {
+    rig_with(mock, trouter, own, push, None)
+}
+
+/// As [`rig`], the outbox's first write answered 429 with `throttle_first` as its `Retry-After` when it is given.
+fn rig_with(
+    mock: &ChatServiceMock,
+    trouter: &TrouterMock,
+    own: Option<&str>,
+    push: bool,
+    throttle_first: Option<Duration>,
+) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let log = SharedLog::default();
     let tokens = Arc::new(Tokens {
@@ -148,20 +163,83 @@ fn rig(mock: &ChatServiceMock, trouter: &TrouterMock, own: Option<&str>, push: b
         Push::new(trouter)
     });
     let client = Arc::new(Client::new(http()));
-    let outbox = Outbox::new(transport, fence, membership, Author::new(Mri::new(LAB_A), "Lab A"));
-    let handle = engine::start(Parts {
-        store: Store::open(&dir.path().join("store.sqlite")).unwrap(),
+    let author = Author::new(Mri::new(LAB_A), "Lab A");
+    let store = Store::open(&dir.path().join("store.sqlite")).unwrap();
+    let handle = match throttle_first {
+        Some(wait) => {
+            let throttled = Arc::new(ThrottledOnce {
+                inner: transport,
+                wait,
+                throttled: AtomicBool::new(false),
+            });
+            start(
+                store,
+                client,
+                Outbox::new(throttled, fence, membership, author),
+                channel,
+            )
+        }
+        None => start(
+            store,
+            client,
+            Outbox::new(transport, fence, membership, author),
+            channel,
+        ),
+    };
+    Rig { handle, log, _dir: dir }
+}
+
+fn start<T: Transport<Error = HttpError> + Send + 'static>(
+    store: Store,
+    client: Arc<Client<HttpTransport<Tokens>>>,
+    outbox: Outbox<T>,
+    push: Option<Push>,
+) -> EngineHandle {
+    engine::start(Parts {
+        store,
         client,
         outbox,
-        push: channel,
+        push,
         options: EngineOptions {
             tick: Duration::from_millis(50),
             ..EngineOptions::default()
         },
         known_names: Vec::new(),
     })
-    .unwrap();
-    Rig { handle, log, _dir: dir }
+    .unwrap()
+}
+
+/// The HTTP transport, whose first write is answered 429 with a `Retry-After` of `wait` before it reaches the service.
+struct ThrottledOnce {
+    inner: Arc<HttpTransport<Tokens>>,
+    wait: Duration,
+    throttled: AtomicBool,
+}
+
+impl Transport for ThrottledOnce {
+    type Error = HttpError;
+
+    fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.read(request)
+    }
+
+    fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.own_state(request)
+    }
+
+    fn post_read<R: PostRead + Send>(
+        &self,
+        read: AuthorizedPostRead<R>,
+    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.post_read(read)
+    }
+
+    async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
+        if !self.throttled.swap(true, Ordering::SeqCst) {
+            return Ok(Response::new(429, Vec::new()).with_retry_after(self.wait));
+        }
+        self.inner.deliver(write).await
+    }
 }
 
 /// Waits until the push channel's registration went through.
@@ -328,4 +406,101 @@ async fn an_availability_writes_to_no_chat_and_only_the_newer_of_its_kind_replac
     );
     assert!(available.replaces(&available));
     assert!(!available.replaces(&busy) && !busy.replaces(&available));
+}
+
+#[tokio::test]
+async fn once_the_push_channel_stopped_a_waiting_availability_is_dropped_and_no_other_goes_out() {
+    let mock = ChatServiceMock::start().await.unwrap();
+    let trouter = mock.start_trouter().unwrap();
+    // the endpoint's `PUT` is throttled for 2 s: it waits to go out from the tick
+    let mut rig = rig_with(&mock, &trouter, Some(LAB_A), true, Some(Duration::from_secs(2)));
+    registered(&mut rig.handle).await;
+    let requests = rig.handle.requests();
+    let waiting = requests.own_availability(OwnStatus::Available).await.unwrap();
+    assert!(matches!(waiting, TransientSent::Waiting { .. }), "{waiting:?}");
+
+    // the service ends the push channel for good: its endpoint is no longer the account's live one
+    trouter.disconnect(LAB_A, "skypetoken-deprecated");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut dropped = None;
+    loop {
+        let event = tokio::time::timeout_at(deadline, rig.handle.next_event())
+            .await
+            .expect("the push channel stopped in time")
+            .expect("the engine runs");
+        match event {
+            Event::Transient(transient, sent) => dropped = Some((transient, sent)),
+            Event::PushStopped(stop) => {
+                assert_eq!(stop, Stop::Deprecated);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let (transient, sent) = dropped.expect("the waiting `PUT` was told dropped before the stop");
+    assert_eq!(transient.kind(), "endpoint_available");
+    assert!(
+        matches!(&sent, TransientSent::Dropped { reason } if reason.contains("push channel stopped")),
+        "{sent:?}"
+    );
+
+    // nothing more can be asked of it: neither through `own_availability` nor as a transient naming the old endpoint
+    for status in [OwnStatus::Available, OwnStatus::Manual(ManualAvailability::Busy)] {
+        let error = requests.own_availability(status).await.unwrap_err();
+        assert!(matches!(error, EngineError::NoEndpoint), "{status:?}: {error:?}");
+    }
+    let error = requests.transient(transient).await.unwrap_err();
+    assert!(matches!(error, EngineError::NoEndpoint), "{error:?}");
+
+    // and the throttled `PUT` never goes out from the tick, its `Retry-After` long over
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(mock.own_availability().is_empty(), "UPS was told nothing");
+    assert_eq!(
+        rig.log.decisions().len(),
+        1,
+        "only the first, throttled attempt was asked of the fence"
+    );
+    rig.handle.shutdown();
+}
+
+#[tokio::test]
+async fn a_transient_availability_names_only_the_endpoint_the_engine_keeps() {
+    let mock = ChatServiceMock::start().await.unwrap();
+    let trouter = mock.start_trouter().unwrap();
+    let mut rig = rig(&mock, &trouter, Some(LAB_A), true);
+    registered(&mut rig.handle).await;
+    // an endpoint registered in this process, but not by the engine's push channel
+    let tokens = Arc::new(Tokens {
+        token: mock.token(LAB_A).unwrap(),
+        renewals: broadcast::channel(4).0,
+    });
+    let fence = Arc::new(Fence::new(
+        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
+        FenceLog::from_writer(io::sink()),
+    ));
+    let transport = HttpTransport::with_mock_origin(tokens, fence, CHAT_BASE, &mock.origin()).unwrap();
+    let registration = EndpointRegistration::messaging(
+        "00000000-0000-4000-8000-0000000000e2",
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000B/",
+    )
+    .unwrap();
+    let (_, other) = register(&transport, &registration).await.unwrap();
+    let other = other.expect("the mock's registrar took it");
+
+    let requests = rig.handle.requests();
+    for transient in [
+        Transient::EndpointAvailable {
+            endpoint: other.clone(),
+        },
+        Transient::ManualStatus {
+            endpoint: other,
+            status: Some(ManualAvailability::Busy),
+        },
+    ] {
+        let error = requests.transient(transient.clone()).await.unwrap_err();
+        assert!(matches!(error, EngineError::NoEndpoint), "{transient:?}: {error:?}");
+    }
+    assert!(mock.own_availability().is_empty());
+    assert!(rig.log.decisions().is_empty(), "nothing was even asked of the fence");
+    rig.handle.shutdown();
 }
