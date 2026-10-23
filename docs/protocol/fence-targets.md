@@ -24,10 +24,10 @@ and the chat service's in `tests/fixtures/chatsvc/`. The lab browser's fence ask
 `contacting` answers one of three:
 
 - **`Contact::None`**: the request reaches nobody and is let through. Every request that only reads (`GET`, `HEAD` or
-  `OPTIONS` with no body and no method override), every request to a host that is no contacting service, and the
-  carve-outs on one. A mutating one is logged to `fence.log` as `allowed`, by its method, host and path shape (ids
-  replaced by their kind: `<chat>`, `<message>`, `<mri>`, `<guid>`, `<id>`), never a query value, a header or a body;
-  one that can't be logged isn't let through.
+  `OPTIONS` with no body and no method override), every request to a host that is no contacting service, the
+  carve-outs on one, and the middle tier's paths that its rule doesn't count as contacting. A mutating one is logged
+  to `fence.log` as `allowed`, by its method, host and path shape (ids replaced by their kind: `<chat>`, `<message>`,
+  `<mri>`, `<guid>`, `<id>`), never a query value, a header or a body; one that can't be logged isn't let through.
 - **`Contact::Write(Target)`**: a mapped write, let through only with a permit from `Fence::check` for that target:
   an existing chat after a fresh, complete member read whose every member is a lab account (`lab.toml`'s MRIs) or an
   approved service participant (the echo service), a new target (`Scope::New`: a chat's creation, the test call's
@@ -70,11 +70,12 @@ segments can't be read (one empty with more path after it, as `//api/chatsvc/…
 merging slashes would read as the service; not UTF-8 once decoded; or holding `/ \ ; ? #` once decoded, as
 `/api/chatsvc%2Femea/…`) is unreadable.
 
+The middle tier's settings and profile lookups are requests on a contacting service that its rule doesn't count as
+contacting (no people segment), and Substrate's search reads are a carve-out on Outlook's: both `Contact::None`.
 **Everything else** is no contacting service, and every request to it is `Contact::None`: telemetry and logging,
-middle-tier settings and profile lookups, searches, presence (`/ups/…`, the endpoint `PUT` and the manual status
-included), the registrar, Entra and authz, the push service `/api/tps/…` (whose `pushupdates` `POST` is the account's
-own subscription), Trouter's HTTP side, the page and its static hosts. [endpoints.md](endpoints.md) lists every
-endpoint seen with its verdict.
+presence (`/ups/…`, the endpoint `PUT` and the manual status included), the registrar, Entra and authz, the push
+service `/api/tps/…` (whose `pushupdates` `POST` is the account's own subscription), Trouter's HTTP side, the page and
+its static hosts. [endpoints.md](endpoints.md) lists every endpoint seen with its verdict.
 
 A WebSocket's URL is read the same way (`teams_fence::on_contacting_service`, any scheme): the lab browser denies
 every frame on a contacting service's socket, and on a Trouter socket judges each frame by its socket.io type (`0`,
@@ -355,11 +356,11 @@ its member list alone ([above](#group-and-meeting-chats)).
 ## Reads by POST
 
 Requests the web client sends as a `POST` although they only read. Under the lab rule they reach nobody, whoever they
-name: the middle tier's profile lookups and UPS's presence read go to no contacting service, and CSA's
-`chatsAndChannelsByIds` and Substrate's search are carve-outs, so the lab browser and the native client let them
-through ([the contacting services](#the-contacting-services)). Until 2026-10-23 the browser fence let the first three
-through only in their captured shape and only when every MRI they named was a lab account; the personal build's
-sealed `PostRead` list keeps those shapes ([below](#the-native-clients-reads-by-post)).
+name: the middle tier's profile lookups are on none of its people paths, UPS's presence read goes to no contacting
+service, and CSA's `chatsAndChannelsByIds` and Substrate's search are carve-outs, so the lab browser and the native
+client let them through ([the contacting services](#the-contacting-services)). Until 2026-10-23 the browser fence let
+the first three through only in their captured shape and only when every MRI they named was a lab account; the
+personal build's sealed `PostRead` list keeps those shapes ([below](#the-native-clients-reads-by-post)).
 
 | Request | Body |
 |---|---|
@@ -527,7 +528,8 @@ services](#the-contacting-services) give today's.
       partner showed as "Unknown User". `ab-chat-full`'s runs of 2026-10-20 added the bot invokes an opening editor
       sends (`POST v1/agents/<bot>/invoke`, `composeExtension/fetchCommands`) and the own activity feed's item read
       (`PUT v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread`). Under the lab rule
-      all of these pass but the bot invokes.
+      all of these pass but the bot invokes and, on the Trouter socket, every frame but socket.io types `0`, `1`, `2`
+      and `5`: an answer to a delivery (`3:::`) stays denied.
 
 The synthetic fixtures in `tests/fixtures/chatsvc/` stay until they are rewritten synthetic-from-capture: written by
 hand from a local reference copy of these captures, with the same shape and made-up values. Captures never enter the
