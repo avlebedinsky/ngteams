@@ -229,9 +229,182 @@ fn sign_in_s_names_and_redirect_are_redacted_in_json() {
     let shown = redact::body(None, answer.as_bytes());
     assert!(!shown.contains(short_code), "{shown}");
     assert!(shown.contains("nativeclient?code=[redacted]&state=s1"), "{shown}");
-    // a string that isn't a URL is left as it is
-    let text = r#"{"content":"a question? yes # and code=1"}"#;
-    assert_eq!(redact::body(Some("application/json"), text.as_bytes()), text);
+    // a string that isn't a URL keeps its text, but a credential's `<name>=` in it goes: the redactor can't tell a
+    // link from prose, and redacts more, never less
+    let text = r#"{"content":"a question? yes # and code=1, a decode=2"}"#;
+    assert_eq!(
+        redact::body(Some("application/json"), text.as_bytes()),
+        r#"{"content":"a question? yes # and code=[redacted] a decode=2"}"#
+    );
+}
+
+/// One way a SAS link's query is written: its separator, its `=` and its signature's encoding, as a message's HTML, a
+/// link nested in another's query, or JSON escapes them.
+struct Form {
+    name: &'static str,
+    separator: &'static str,
+    equals: &'static str,
+    encode: fn(&str) -> String,
+}
+
+fn percent(sig: &str) -> String {
+    sig.replace('/', "%2F").replace('+', "%2B").replace('=', "%3D")
+}
+
+fn percent_twice(sig: &str) -> String {
+    percent(sig).replace('%', "%25")
+}
+
+/// Every form a SAS link's `&sig=` takes in the text the log meets.
+const FORMS: [Form; 10] = [
+    Form {
+        name: "html &amp;",
+        separator: "&amp;",
+        equals: "=",
+        encode: str::to_owned,
+    },
+    Form {
+        name: "html &AMP;",
+        separator: "&AMP;",
+        equals: "=",
+        encode: str::to_owned,
+    },
+    Form {
+        name: "html &#38;",
+        separator: "&#38;",
+        equals: "=",
+        encode: str::to_owned,
+    },
+    Form {
+        name: "html &#x26;",
+        separator: "&#x26;",
+        equals: "=",
+        encode: str::to_owned,
+    },
+    Form {
+        name: "html &amp; and &#61;",
+        separator: "&amp;",
+        equals: "&#61;",
+        encode: str::to_owned,
+    },
+    Form {
+        name: "percent %26",
+        separator: "%26",
+        equals: "%3D",
+        encode: percent,
+    },
+    Form {
+        name: "percent twice %2526",
+        separator: "%2526",
+        equals: "%253D",
+        encode: percent_twice,
+    },
+    Form {
+        name: "json \\u0026",
+        separator: "\\u0026",
+        equals: "=",
+        encode: str::to_owned,
+    },
+    Form {
+        name: "json \\u0026 and \\u003d",
+        separator: "\\u0026",
+        equals: "\\u003d",
+        encode: str::to_owned,
+    },
+    Form {
+        name: "plain &",
+        separator: "&",
+        equals: "=",
+        encode: str::to_owned,
+    },
+];
+
+impl Form {
+    fn link(&self, sig: &str) -> String {
+        format!(
+            "https://example.blob.core.windows.net/c/f.png?sv=2024-01-01{0}se=2026-10-30{0}sp=r{0}sig{1}{2}",
+            self.separator,
+            self.equals,
+            (self.encode)(sig)
+        )
+    }
+}
+
+/// `text` holds no form of `sig`: raw, percent-encoded once or twice, nor its first 20 characters.
+fn holds_no_signature(text: &str, sig: &str) -> bool {
+    [sig.to_owned(), percent(sig), percent_twice(sig), sig[..20].to_owned()]
+        .iter()
+        .all(|form| !text.contains(form.as_str()))
+}
+
+#[test]
+fn a_signed_link_s_sig_is_redacted_in_every_escaped_form() {
+    for (at, form) in FORMS.iter().enumerate() {
+        let sig = signature(&format!("{at}f"));
+        let link = form.link(&sig);
+        let html = format!(r#"<p>the file: <a href="{link}" title="x">{link}</a> ok</p>"#);
+        // a message's HTML in a post's JSON body, its answer, a page of a text type, a line of any record
+        let body = serde_json::json!({ "content": html, "messagetype": "RichText/Html" }).to_string();
+        let shown = [
+            redact::body(Some("application/json"), body.as_bytes()),
+            redact::body(Some("text/html"), html.as_bytes()),
+            redact::line(&html),
+            redact::line(&body),
+            redact::url(&link),
+            redact::header_value("Link", &format!("<{link}>; rel=next")).into_owned(),
+        ];
+        for shown in shown {
+            assert!(holds_no_signature(&shown, &sig), "{}: {shown}", form.name);
+            assert!(
+                shown.contains("sv=2024-01-01"),
+                "{}: the rest stays: {shown}",
+                form.name
+            );
+            // in a JSON body's text, a `\` of the `=`'s escape is escaped once more
+            let equals = [form.equals.to_owned(), form.equals.replace('\\', "\\\\")];
+            assert!(
+                equals
+                    .iter()
+                    .any(|equals| shown.contains(&format!("sig{equals}{REDACTED}"))),
+                "{}: {shown}",
+                form.name
+            );
+        }
+    }
+}
+
+#[test]
+fn a_link_nested_in_another_s_query_and_a_delivery_s_body_are_redacted() {
+    let sig = signature("n");
+    // a safe-links wrapper: the SAS link percent-encoded in its `url`
+    let inner = FORMS[5]
+        .link(&sig)
+        .replace(':', "%3A")
+        .replace('/', "%2F")
+        .replace('?', "%3F");
+    let wrapped = format!("https://safelinks.example.com/?url={inner}&data=05%7C02&reserved=0");
+    let shown = redact::url(&wrapped);
+    assert!(holds_no_signature(&shown, &sig), "{shown}");
+    assert!(shown.contains("&data=05%7C02&reserved=0"), "{shown}");
+    // a Trouter delivery: its body a string of JSON, the message's HTML in it with its `&` escaped as `\u0026`, and a
+    // token field by name
+    let token = skypetoken("d");
+    let message = format!(
+        r#"{{"content":"<a href=\"{}\">f</a>","skypetoken":"{token}"}}"#,
+        FORMS[7].link(&sig)
+    );
+    let delivery = serde_json::json!({
+        "id": 7, "method": "POST", "url": "/v4/f/AbC-dE_1/messaging", "headers": {}, "body": message,
+    });
+    let frame = format!("3:::{delivery}");
+    let shown = redact::frame(&frame);
+    assert!(holds_no_signature(&shown, &sig), "{shown}");
+    assert!(!shown.contains(&token), "{shown}");
+    assert!(
+        shown.contains("sv=2024-01-01&se=2026-10-30&sp=r&sig=[redacted]"),
+        "{shown}"
+    );
+    assert!(shown.contains(r#"\"skypetoken\":\"[redacted]\""#), "{shown}");
 }
 
 #[test]

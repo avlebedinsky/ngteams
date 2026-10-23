@@ -297,8 +297,9 @@ text or name) and `debug` (every request and response in full, method, URL with 
 every Trouter frame both ways). The level is the settings' `log_level`, changed live in the settings view;
 `TEAMS_APP_LOG=<level>` overrides it for the run (`trace` is taken as `debug`). The logger redacts every credential
 itself (the `Authorization`, cookie and token headers, token, secret and signature fields, sign-in's codes,
-`user.authenticate`, Trouter's `connectparams` signature, URLs inside JSON by their query, then any
-JWT-shaped string, `skypetoken=` or `Bearer ` value on any line). A log that can't be opened is printed and shown in
+`user.authenticate`, Trouter's `connectparams` signature, URLs inside JSON by their query, then a credential's
+`name=` value on any line in any escaped form, a SAS link's `sig` in a message's HTML say, then any JWT-shaped string,
+`skypetoken=` or `Bearer ` value). A log that can't be opened is printed and shown in
 the settings view, and the app runs without it. "Copy diagnostics" (the settings view, or "Copy diagnostics" in the
 Ctrl+K palette) puts the app's version and build profile, the level, the log's last 200 lines (at most 128 KiB of
 them, the newest kept; a newest line longer than that keeps its start, one over 1 MiB is left out and said so) and

@@ -188,7 +188,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   payload-free. The hard rule "Tokens never reach logs" is unchanged: credentials are redacted by the logger itself
   (`Authorization`, `Cookie`/`Set-Cookie`, the skypetoken and every other token header, the token fields of sign-in
   and renewal answers, sign-in's code and verifier wherever they are written, Trouter's `user.authenticate` and the
-  `connectparams` signature (`sig`) of `trouter.connected`), never left to call sites. A lab run's debug log is lab
+  `connectparams` signature (`sig`) of `trouter.connected`, a credential's `name=` value anywhere on a line in any
+  escaped form: a SAS link's `sig` in a message's HTML as `&amp;sig=`, `%26sig%3D`, `\u0026sig=`), never left to
+  call sites. A lab run's debug log is lab
   data like a capture (never in the repo, never sanitized into it); the personal build's is the user's data, which
   agents never read.
 - **The store** (`teams-store`): one SQLite file per account (`0600`, its dir `0700`), WAL, migrations by
