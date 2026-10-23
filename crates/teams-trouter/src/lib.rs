@@ -2,7 +2,7 @@
 //! records it from M1 Task 14's captures.
 //!
 //! ```text
-//! let trouter = Trouter::new(transport, session, fence)?;  // the account's HTTP transport, its session, its fence
+//! let trouter = Trouter::new(transport, session)?;  // the account's HTTP transport, its session
 //! let mut push = trouter.spawn();
 //! while let Some(event) = push.next().await {
 //!     match event {
@@ -14,13 +14,13 @@
 //! }
 //! ```
 //!
-//! **What it sends.** The socket sends only `teams_proto`'s reviewed own frames ([`teams_proto::OwnFrame`]:
+//! **What it sends.** The socket sends only `teams_proto`'s typed frames ([`teams_proto::OwnFrame`]:
 //! `user.authenticate`, the keep-alive ping, the message-loss acknowledgement, the disconnect), each through the
-//! connection's [`teams_proto::FrameSink`], which logs it to `fence.log` before it goes out and sends nothing it
-//! couldn't log. The socket's write half goes to that sink when the socket opens, and nothing else holds it
-//! ([`socket`]): there is no other way to send on it. No `user.activity` (Task 14: deliveries come without it), and
-//! **no answer to any delivery**: deliveries stay unanswered (Task 14, decided with Codex), an incoming call's
-//! included (it is never answered; the calling stack's registration isn't made either).
+//! connection's [`teams_proto::FrameSink`], never raw text; none is written to `fence.log` (a frame isn't a contacting
+//! write). The socket's write half goes to that sink when the socket opens, and nothing else holds it ([`socket`]):
+//! there is no other way to send on it. No `user.activity` (deliveries come without it), and **no answer to any
+//! delivery**: deliveries stay unanswered, an incoming call's included (it is never answered; the calling stack's
+//! registration isn't made either).
 //!
 //! **What it requests over HTTP.** The registrar registration of the endpoint for the messaging stack and its
 //! renewal ([`registration`]), the plain request `teams_proto::EndpointRegistration` (the account's own state: it

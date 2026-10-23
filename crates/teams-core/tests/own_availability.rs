@@ -148,19 +148,14 @@ fn rig_with(
     live.set_credential_source(transport.clone());
     let membership: Arc<dyn MembershipSource + Send> = Arc::new(live);
     let channel = push.then(|| {
-        let trouter = Trouter::with_mock_origin(
-            Arc::clone(&transport),
-            Arc::clone(&tokens),
-            Arc::clone(&fence),
-            trouter.origin(),
-        )
-        .unwrap()
-        .with_options(Options {
-            backoff_base: Duration::from_millis(50),
-            backoff_cap: Duration::from_millis(50),
-            backoff_jitter_percent: 0,
-            ..Options::default()
-        });
+        let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())
+            .unwrap()
+            .with_options(Options {
+                backoff_base: Duration::from_millis(50),
+                backoff_cap: Duration::from_millis(50),
+                backoff_jitter_percent: 0,
+                ..Options::default()
+            });
         Push::new(trouter)
     });
     let client = Arc::new(Client::new(http()));

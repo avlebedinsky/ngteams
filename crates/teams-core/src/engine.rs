@@ -71,7 +71,7 @@
 //!   or another; the lock goes when the engine's thread ends.
 //!
 //! The engine sends nothing of its own: every write goes out through the outbox, every read through the catch-up's
-//! client, and the push channel sends only its reviewed own frames. Without a push channel ([`Parts::push`] `None`:
+//! client, and the push channel sends only its own typed frames. Without a push channel ([`Parts::push`] `None`:
 //! a one-shot command of the lab binary) nothing is caught up but on [`EngineRequests::sync`]. The store stays open
 //! until the engine stops, after every attempt it began has finished.
 //!

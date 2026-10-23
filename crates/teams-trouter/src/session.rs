@@ -27,8 +27,8 @@
 //!   [`PushEvent::Ignored`] and never answered either. A message-loss report becomes [`PushEvent::MessageLoss`]: catch
 //!   up, then [`MessageLoss::caught_up`] acknowledges it.
 //!
-//! Every frame goes out through the connection's [`FrameSink`], which logs it to `fence.log` first; a frame that can't
-//! be logged isn't sent, and the client stops ([`Stop::LogUnavailable`]).
+//! Every frame goes out through the connection's [`FrameSink`]; none is written to `fence.log` (a frame isn't a
+//! contacting write).
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -42,7 +42,6 @@ use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Clock, REFRESH_MARGIN, Renewal, SystemClock};
 use teams_auth::token::TokenError;
-use teams_fence::Fence;
 use teams_proto::{
     Authenticate, ConnectParams, Disconnect, DroppedIndicator, EndpointRegistrar, EndpointRegistration, FrameError,
     FrameSink, IC3_AUDIENCE, MessageLossAck, OwnFrame, Ping, RegisteredEndpoint, Sent,
@@ -191,8 +190,6 @@ pub enum Down {
 pub enum Stop {
     /// Its owner asked ([`TrouterHandle::stop`], or the handle dropped).
     Requested,
-    /// `fence.log` can't be written, so no frame can be sent.
-    LogUnavailable,
     /// The account isn't signed in.
     SignedOut,
     /// The service disconnected with `skypetoken-deprecated`.
@@ -214,7 +211,6 @@ pub enum BuildError {
 pub struct Trouter<T, K> {
     transport: Arc<T>,
     credentials: Arc<K>,
-    fence: Arc<Fence>,
     clock: Arc<dyn Clock>,
     opener: Opener,
     /// The endpoint's id on every connect (`epid`) and its registration's `registrationId`.
@@ -237,16 +233,15 @@ where
     K: TrouterCredentials + 'static,
 {
     /// The push channel of the account whose registrations go through `transport` and whose tokens `credentials`
-    /// gives, logging its frames to `fence`'s log, with a fresh endpoint id.
+    /// gives, with a fresh endpoint id.
     ///
     /// # Errors
     /// [`BuildError::Tls`] when the system's certificate verifier can't be set up, [`BuildError::Random`] when no
     /// endpoint id can be made.
-    pub fn new(transport: Arc<T>, credentials: Arc<K>, fence: Arc<Fence>) -> Result<Self, BuildError> {
+    pub fn new(transport: Arc<T>, credentials: Arc<K>) -> Result<Self, BuildError> {
         Ok(Self {
             transport,
             credentials,
-            fence,
             clock: Arc::new(SystemClock),
             opener: Opener::new(socket::tls_config().map_err(BuildError::Tls)?),
             epid: guid().ok_or(BuildError::Random)?,
@@ -261,19 +256,14 @@ where
     /// [`BuildError::MockOrigin`] unless `origin` is `ws` on a loopback host with a port and nothing after it;
     /// otherwise as [`Self::new`].
     #[cfg(feature = "test-support")]
-    pub fn with_mock_origin(
-        transport: Arc<T>,
-        credentials: Arc<K>,
-        fence: Arc<Fence>,
-        origin: &str,
-    ) -> Result<Self, BuildError> {
+    pub fn with_mock_origin(transport: Arc<T>, credentials: Arc<K>, origin: &str) -> Result<Self, BuildError> {
         let url = url::Url::parse(origin).map_err(|_| BuildError::MockOrigin)?;
         let loopback = matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"));
         let bare = url.path() == "/" && url.query().is_none() && url.fragment().is_none() && url.username().is_empty();
         if url.scheme() != "ws" || !loopback || url.port().is_none() || !bare || url.password().is_some() {
             return Err(BuildError::MockOrigin);
         }
-        let mut trouter = Self::new(transport, credentials, fence)?;
+        let mut trouter = Self::new(transport, credentials)?;
         trouter.opener = trouter.opener.with_mock_origin(url);
         Ok(trouter)
     }
@@ -503,7 +493,7 @@ where
             }
         };
         let (writer, read) = socket::split(socket);
-        let sink = FrameSink::new(writer, Arc::clone(&self.trouter.fence), url.as_str());
+        let sink = FrameSink::new(writer);
         let mut link = Link::new(sink, read, token, params, &options, self.trouter.clock.now());
         let end = link.serve(self).await;
         // a connect that ended before its `trouter.connected` failed, whatever ended it (the socket closed, the
@@ -732,11 +722,9 @@ impl Link {
         }
     }
 
-    /// Sends one own frame through the sink; a frame that can't be logged stops the client, one the socket couldn't
-    /// send ends the connection.
+    /// Sends one own frame through the sink; one the socket couldn't send ends the connection.
     async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, End> {
         self.sink.send(frame).await.map_err(|error| match error {
-            FrameError::LogUnavailable(_) => End::Stop(Stop::LogUnavailable),
             FrameError::Write(failed) => End::Again(Down::SendFailed(failed), Wait::Backoff),
         })
     }

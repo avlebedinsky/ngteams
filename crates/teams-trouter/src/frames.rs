@@ -1,7 +1,7 @@
 //! What the service sends on a Trouter socket, read: socket.io 0.9 packets (`<type>:<id>:<endpoint>:<data>`) and the
 //! events, acknowledgements and deliveries M1 Task 14 captured (`docs/protocol/trouter.md`).
 //!
-//! Only reading lives here. What the client sends is `teams_proto`'s reviewed own frames, written by its
+//! Only reading lives here. What the client sends is `teams_proto`'s typed frames, written by its
 //! [`FrameSink`](teams_proto::FrameSink): this module has nothing that makes frame text.
 
 use serde_json::{Map, Value};

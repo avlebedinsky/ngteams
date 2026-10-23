@@ -26,10 +26,10 @@
 //! The sign-in window (`teams-signin`) logs every request it decides the same way, its reads too (`"read": true`), and
 //! the redirect that carries the authorization code as a deny with the reason `sign_in_redirect` (never its query).
 //!
-//! The native client's own Trouter frames ([`FrameRecord`]) are logged before each is sent, by the one socket sink
-//! that can send them (`teams_proto::FrameSink`): the channel, the socket's URL without its query, fragment or user
-//! info, and the frame's kind from the reviewed list, never its text (the authentication frame carries the account's
-//! token):
+//! A frame record ([`FrameRecord`]) is the personal build's (`docs/personal-build.md`: it logs its Trouter frames
+//! before each is sent); the lab's frame sink (`teams_proto::FrameSink`) writes none, a frame being no contacting
+//! write. It holds the channel, the socket's URL without its query, fragment or user info, and the frame's kind
+//! (`teams_proto::OwnFrame::KIND`), never its text (the authentication frame carries the account's token):
 //!
 //! ```json
 //! {"ts_ms":1760000000000,"verdict":"allow","event":"frame","channel":"web_socket","url":"wss://host/v4/c",
@@ -187,8 +187,8 @@ struct RequestEntry<'a> {
     message: Option<&'static str>,
 }
 
-/// An own frame the native client is about to send on a WebSocket: the socket's URL (logged without its query,
-/// fragment or user info) and the frame's kind on the reviewed list. Never the frame's text.
+/// A frame the personal build is about to send on a WebSocket: the socket's URL (logged without its query, fragment or
+/// user info) and the frame's kind. Never the frame's text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameRecord<'a> {
     pub url: &'a str,
@@ -480,7 +480,7 @@ impl FenceLog {
         })
     }
 
-    /// Appends one own frame the native client is about to send, as a single line, and flushes it: the sink calls it
+    /// Appends one frame the personal build is about to send, as a single line, and flushes it: its sink calls it
     /// before the frame goes out and sends nothing it couldn't log. Once an append has failed, every later one fails
     /// too.
     ///

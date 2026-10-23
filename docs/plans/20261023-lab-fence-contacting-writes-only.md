@@ -514,12 +514,17 @@ and tokens, the personal build and protocol notes stay as they are:
   `crates/teams-fence/tests/{fence_core,log_processes}.rs`, `crates/teams-headless/tests/chat_live.rs`,
   `crates/teams-app/tests/ui_live.rs`, `crates/fence-seal/tests/ui/proto_own_frame.*`
 
-- [ ] write tests first: the sink sends every typed frame without a `fence.log` record; no constructor takes raw
+- [x] write tests first: the sink sends every typed frame without a `fence.log` record; no constructor takes raw
       text (`proto_raw_frame` stays) and none makes a delivery response yet (M3 adds a typed one for a registered
       call)
-- [ ] drop `FrameRecord` (unless the personal build uses it) and the "reviewed list" rule; the trait stays sealed only
+- [x] drop `FrameRecord` (unless the personal build uses it) and the "reviewed list" rule; the trait stays sealed only
       to keep raw text out, so adding a frame (e.g. `user.activity`) is an ordinary change
-- [ ] tests pass
+- [x] tests pass
+- ➕ note (Task 6 as built): `FrameSink::new(writer)` takes no fence and logs nothing; `FrameError::LogUnavailable`
+      and `Stop::LogUnavailable` are gone, and `Trouter::new`/`with_mock_origin` no longer take a `Fence` (it was only
+      the sink's). `FrameRecord`, `FenceLog::record_frame` and `OwnFrame::KIND` stay for the personal build's frame
+      log (Task 2 note), with no lab caller; the personal build adds its logging sink when it is built. The live tests
+      (`chat_live.rs`, `ui_live.rs`) now fail on any frame entry in `fence.log`.
 - ➕ note (Task 2 discovery): the personal build logs its sealed `OwnFrame` list to the personal `fence.log`
       (`docs/personal-build.md` lines 146-147), so `FrameRecord` stays; only the lab's per-frame review rule goes.
       `FrameSink` and `OwnFrame` are `teams-trouter/src/session.rs`'s only way to send a frame.

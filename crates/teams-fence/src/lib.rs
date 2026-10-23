@@ -10,7 +10,7 @@
 //! ([`Fence::open_lab_account`], [`Fence::own_account`]). Every decision goes to `fence.log` ([`FenceLog`]), and so do
 //! the mutating requests let through because they reach nobody ([`AllowedRecord`]), the browser requests the browser
 //! fence decides without a membership check ([`RequestRecord`]), the targets it couldn't arm ([`ArmingRecord`]) and the
-//! native client's own WebSocket frames ([`FrameRecord`]).
+//! personal build's WebSocket frames ([`FrameRecord`]; the lab's frame sink logs none).
 //!
 //! Which requests are writes at all is [`contacting`]'s to say: the one classifier of the lab rule, for the browser
 //! fence and the native transport alike, telling a request that reaches nobody ([`Contact::None`]) from a mapped write

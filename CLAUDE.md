@@ -8,10 +8,9 @@ and layout are in [README.md](README.md).
 ## Hard rules
 
 These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
-else is allowed.** The lab browser's fence and the native HTTP transport follow this rule; the native client's Trouter
-frames are still a sealed, reviewed list (as Patterns describes), and
-`docs/plans/20261023-lab-fence-contacting-writes-only.md` brings them to this rule, each of its tasks updating this
-file as its code lands.
+else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
+this rule; `docs/plans/20261023-lab-fence-contacting-writes-only.md` finishes the move, each of its tasks updating
+this file as its code lands.
 
 - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
@@ -161,13 +160,16 @@ What the code does and why. A change that undoes one of these needs a new reason
 - **What the native client sends** (`teams-proto`): a read (`Read`: `GET`, no body), a plain request (`Request`, an
   open trait: any method and body, sent by `Transport::send` only when `teams_fence::contacting` calls it `None`,
   logged `allowed` before it goes: the registration, profile lookups and presence reads whoever they name, the
-  account's own settings), or a sealed `Mutating` write as `Authorized<_>`; a Trouter frame only as an entry of the
-  sealed `OwnFrame` list, through `FrameSink`, logged to `fence.log` before it is sent. A request or frame that can't
-  be logged isn't sent. Each service has one base (`Service`; a new one is a code change: its base and its token's
-  audience), and every URL is built on it and checked against it. The personal build's sealed `OwnState` and
-  `PostRead` lists stay beside them (`HttpTransport::own_state`, `HttpTransport::post_read` under a
-  `Fence::check_post_read` permit); a lab binary sends their entries as plain requests. There is no raw frame, no
-  answer to a delivery, and no retry the transport didn't decide.
+  account's own settings), or a sealed `Mutating` write as `Authorized<_>`; a Trouter frame only as a typed
+  `OwnFrame`, through `FrameSink`, which writes nothing to `fence.log` (a frame isn't a contacting write). `OwnFrame`
+  is sealed only to keep raw text out: no other crate makes frame text, and a new frame type in `teams-proto` (say
+  `user.activity`) is an ordinary change. A request that can't be logged isn't sent. Each service has one base
+  (`Service`; a new one is a code change: its base and its token's audience), and every URL is built on it and
+  checked against it. The personal build's sealed `OwnState` and `PostRead` lists stay beside them
+  (`HttpTransport::own_state`, `HttpTransport::post_read` under a `Fence::check_post_read` permit), and so does
+  `teams_fence::FrameRecord` for its frame log; a lab binary sends their entries as plain requests. There is no raw
+  frame, no answer to a delivery (one may come only as a typed response for a call the fence permitted), and no retry
+  the transport didn't decide.
 - **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The

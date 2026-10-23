@@ -106,11 +106,7 @@ pub fn start<S: SecretStore + 'static>(
     let reads = with_presence(reads, presence.as_deref())?;
     let client = Arc::new(Client::new(reads));
     let push = if push {
-        Some(Push::new(Trouter::new(
-            Arc::clone(&transport),
-            Arc::clone(&session),
-            Arc::clone(&fence),
-        )?))
+        Some(Push::new(Trouter::new(Arc::clone(&transport), Arc::clone(&session))?))
     } else {
         None
     };

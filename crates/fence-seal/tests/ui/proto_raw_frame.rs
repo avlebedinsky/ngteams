@@ -1,6 +1,6 @@
-// A Trouter socket's sink sends only the reviewed own frames: raw text, the web client's `user.activity` and an answer
-// to a delivery built by hand don't compile, and neither does a frame's text made outside the sink (a reviewed frame
-// built from fields of the caller's choosing is in `proto_frame_literal`).
+// A Trouter socket's sink sends only `teams-proto`'s typed frames: raw text, frames it has no type for (no
+// `user.activity` yet, no delivery response) and an answer to a delivery built by hand don't compile, and neither does
+// a frame's text made outside the sink (a frame built from fields of the caller's choosing is in `proto_frame_literal`).
 use teams_proto::{FrameSink, FrameText, FrameWriter};
 
 /// An answer to a delivery (`3:::{"id":…,"status":200,…}`), built by hand.

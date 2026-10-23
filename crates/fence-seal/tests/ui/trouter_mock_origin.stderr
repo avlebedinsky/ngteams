@@ -1,11 +1,11 @@
 error[E0599]: no associated function or constant named `with_mock_origin` found for struct `teams_trouter::Trouter<T, K>` in the current scope
-  --> tests/ui/trouter_mock_origin.rs:14:22
+  --> tests/ui/trouter_mock_origin.rs:12:22
    |
-14 |     let _ = Trouter::with_mock_origin(transport, credentials, fence, "ws://127.0.0.1:9");
+12 |     let _ = Trouter::with_mock_origin(transport, credentials, "ws://127.0.0.1:9");
    |                      ^^^^^^^^^^^^^^^^ associated function or constant not found in `teams_trouter::Trouter<_, _>`
    |
 note: if you're trying to build a new `teams_trouter::Trouter<_, _>`, consider using `teams_trouter::Trouter::<T, K>::new` which returns `Result<teams_trouter::Trouter<_, _>, teams_trouter::BuildError>`
   --> $WORKSPACE/crates/teams-trouter/src/session.rs
    |
-   |     pub fn new(transport: Arc<T>, credentials: Arc<K>, fence: Arc<Fence>) -> Result<Self, BuildError> {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     pub fn new(transport: Arc<T>, credentials: Arc<K>) -> Result<Self, BuildError> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

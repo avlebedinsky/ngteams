@@ -20,8 +20,8 @@
 //! - b's store holds every group message exactly once, and so does c's.
 //! - `fence.log` over the run: whole lines; allows only on the a–b chat (message, edit, reaction, read receipt) and
 //!   messages on the recorded group chat; no deny at all, so none of a mapped write; requests let through because they
-//!   reach nobody (logged `allowed`) and own Trouter frames; nothing else (no write on any other chat, no breach, no
-//!   delivery response).
+//!   reach nobody (logged `allowed`); nothing else (no write on any other chat, no breach, and no frame: the native
+//!   sink writes none to `fence.log`).
 //!
 //! Built only with `--features live`, and even then it skips unless `PROTO_LAB_LIVE=1`, so
 //! `cargo test --all-features` stays offline. Run it under the lab's live lock (`flock
@@ -41,7 +41,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use teams_fence::lab::{Alias, LabChats, LabConfig, LabLocations, LabPaths};
 use teams_fence::one_to_one_id;
-use teams_proto::{Authenticate, Disconnect, MessageLossAck, OwnFrame, Ping};
 
 /// How many messages a sends to b while b watches.
 const MESSAGES: usize = 50;
@@ -535,12 +534,11 @@ struct FenceCounts {
     group_writes: BTreeMap<String, usize>,
     /// Mutating requests let through because they reach nobody, by method, host and path shape.
     allowed: BTreeMap<String, usize>,
-    own_frames: BTreeMap<String, usize>,
 }
 
 /// `fence.log`'s lines since `start` (a byte offset): whole JSON lines; allows only for the a–b chat's message,
 /// edit, reaction and read receipt and the recorded group chat's messages; no deny; the requests let through because
-/// they reach nobody, counted by their shape; frames only of the sealed kinds.
+/// they reach nobody, counted by their shape; no frame (the native sink logs none).
 fn fence_log_holds(live: &Live, start: u64) -> Value {
     let log = fs::read(&live.fence_log).unwrap();
     let run = &log[usize::try_from(start).unwrap()..];
@@ -565,7 +563,6 @@ fn fence_log_holds(live: &Live, start: u64) -> Value {
         "allowed_writes": counts.writes,
         "allowed_group_writes": counts.group_writes,
         "allowed": counts.allowed,
-        "own_frames": counts.own_frames,
     })
 }
 
@@ -597,17 +594,10 @@ impl FenceCounts {
             return;
         }
         assert_eq!(verdict, "allow", "a line that is no allow: {}", entry["event"]);
-        if entry["event"] == "frame" {
-            let own = entry["own"].as_str().unwrap_or_default().to_owned();
-            let frames = [Authenticate::KIND, Ping::KIND, MessageLossAck::KIND, Disconnect::KIND];
-            assert!(frames.contains(&own.as_str()), "a frame off the list: {own}");
-            *self.own_frames.entry(own).or_default() += 1;
-        } else {
-            assert_eq!(entry["event"], "allowed", "a line of another kind");
-            let text = |key: &str| entry[key].as_str().unwrap_or_default().to_owned();
-            let shape = format!("{} {}{}", text("method"), text("host"), text("path"));
-            *self.allowed.entry(shape).or_default() += 1;
-        }
+        assert_eq!(entry["event"], "allowed", "a line of another kind");
+        let text = |key: &str| entry[key].as_str().unwrap_or_default().to_owned();
+        let shape = format!("{} {}{}", text("method"), text("host"), text("path"));
+        *self.allowed.entry(shape).or_default() += 1;
     }
 }
 

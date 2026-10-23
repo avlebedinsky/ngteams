@@ -332,19 +332,14 @@ impl Lab {
         let membership = LiveMembershipSource::with_mock_origin(&origin).unwrap();
         membership.set_credential_source(transport.clone());
         let push = push.then(|| {
-            let trouter = Trouter::with_mock_origin(
-                Arc::clone(&transport),
-                Arc::clone(&tokens),
-                Arc::clone(&fence),
-                self.trouter.origin(),
-            )
-            .unwrap()
-            .with_options(Options {
-                backoff_base: Duration::from_millis(50),
-                backoff_cap: Duration::from_millis(50),
-                backoff_jitter_percent: 0,
-                ..Options::default()
-            });
+            let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), self.trouter.origin())
+                .unwrap()
+                .with_options(Options {
+                    backoff_base: Duration::from_millis(50),
+                    backoff_cap: Duration::from_millis(50),
+                    backoff_jitter_percent: 0,
+                    ..Options::default()
+                });
             Push::new(trouter)
         });
         let author = Author::new(Mri::new(me), display_name("lab@example.invalid"));

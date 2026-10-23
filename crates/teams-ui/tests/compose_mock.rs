@@ -190,19 +190,14 @@ fn engine(lab: &Lab, me: &str) -> (EngineHandle, SharedLog, tempfile::TempDir) {
     let transport = Arc::new(http());
     let membership = LiveMembershipSource::with_mock_origin(&origin).unwrap();
     membership.set_credential_source(transport.clone());
-    let trouter = Trouter::with_mock_origin(
-        Arc::clone(&transport),
-        Arc::clone(&tokens),
-        Arc::clone(&fence),
-        lab.trouter.origin(),
-    )
-    .unwrap()
-    .with_options(Options {
-        backoff_base: Duration::from_millis(50),
-        backoff_cap: Duration::from_millis(50),
-        backoff_jitter_percent: 0,
-        ..Options::default()
-    });
+    let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())
+        .unwrap()
+        .with_options(Options {
+            backoff_base: Duration::from_millis(50),
+            backoff_cap: Duration::from_millis(50),
+            backoff_jitter_percent: 0,
+            ..Options::default()
+        });
     let dir = tempfile::tempdir().unwrap();
     let handle = engine::start(Parts {
         store: Store::open(&dir.path().join("store").join("lab.sqlite")).unwrap(),

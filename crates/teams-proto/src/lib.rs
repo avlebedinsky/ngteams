@@ -27,10 +27,10 @@
 //! [`AuthorizedPostRead`] with the [`PostReadPermit`](teams_fence::PostReadPermit) `Fence::check_post_read` gave for its
 //! exact MRIs, in its entry's captured shape, once).
 //!
-//! On the push channel's socket the same holds for frames: a [`FrameSink`] sends only an [`OwnFrame`], the sealed,
-//! reviewed list of the Trouter session's own frames (authentication, keep-alive, the message-loss acknowledgement,
-//! the disconnect), each logged to `fence.log` before it is sent; there is no answer to a delivery and no
-//! `user.activity`.
+//! On the push channel's socket a [`FrameSink`] sends only an [`OwnFrame`], a typed frame this crate builds (today the
+//! Trouter session's own: authentication, keep-alive, the message-loss acknowledgement, the disconnect), never raw
+//! text, and none of them is written to `fence.log` (a frame isn't a contacting write). There is no answer to a
+//! delivery.
 //!
 //! [`HttpTransport`] is the live transport: one base per service, `https` only, no proxy, no redirects, each of the
 //! account's tokens (from its `teams-auth` session) only to its own service's host. Only the `test-support` feature

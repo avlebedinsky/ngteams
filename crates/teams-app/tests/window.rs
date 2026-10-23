@@ -646,18 +646,13 @@ impl MockLab {
         let transport = Arc::new(http()?);
         let membership = LiveMembershipSource::with_mock_origin(&origin)?;
         membership.set_credential_source(transport.clone());
-        let trouter_client = Trouter::with_mock_origin(
-            Arc::clone(&transport),
-            Arc::clone(&tokens),
-            Arc::clone(&fence),
-            trouter.origin(),
-        )?
-        .with_options(Options {
-            backoff_base: Duration::from_millis(50),
-            backoff_cap: Duration::from_millis(50),
-            backoff_jitter_percent: 0,
-            ..Options::default()
-        });
+        let trouter_client = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())?
+            .with_options(Options {
+                backoff_base: Duration::from_millis(50),
+                backoff_cap: Duration::from_millis(50),
+                backoff_jitter_percent: 0,
+                ..Options::default()
+            });
         let author = Author::new(Mri::new(LAB_A), display_name("bot-a@lab.example.test"));
         let engine = engine::start(Parts {
             store: Store::open(&config.paths().store_file(Alias::A))?,
