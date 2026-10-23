@@ -152,8 +152,11 @@ Task 2 settled the host list from `docs/protocol/endpoints.md`, `calling-echo.md
 service below, a mutating request is `Unreadable` unless a row maps it or carves it out. Hosts are matched in lower
 case on a dot boundary (the host or any host under it), a trailing dot dropped, any scheme and port; on a Teams origin
 (`teams.microsoft.com`, `teams.cloud.microsoft`, `teams.live.com` and the hosts under them) the service is told by the
-path's first two segments, decoded and in any case. A method override on a contacting service is `Unreadable` (the
-fence can't tell which method the service acts on); a mutating request whose URL doesn't parse is `Unreadable`.
+path's first two segments, each decoded on its own and in any case (a later segment that doesn't decode leaves the
+service to its row, which refuses it); a mutating request whose first two segments can't be read (one empty with more
+path after it, not UTF-8 once decoded, or holding `/ \ ; ? #` once decoded) is `Unreadable`. A method override on a
+contacting service is `Unreadable` (the fence can't tell which method the service acts on); a mutating request whose
+URL doesn't parse is `Unreadable`.
 
 **Chat service** (a Teams origin's `/api/chatsvc/…`, `*.msg.teams.microsoft.com`): any version, any case of `ME`
 (`ME`, `me`, the account's own MRI, which `Policy::with_own_account` names), any path `chat_service_path` can read or
@@ -187,7 +190,8 @@ rest (Technical Details, "Calls"), a call to a lab account, the `acceptance` lin
 
 **Graph** (`*.graph.microsoft.com`, every version, `$batch` included): every mutating request `Unreadable`.
 
-**Outlook, OWA and Substrate** (`*.outlook.office.com`, `*.outlook.office365.com`, `*.substrate.office.com`): every
+**Outlook, OWA and Substrate** (`*.outlook.office.com`, `*.outlook.office365.com`, `*.outlook.cloud.microsoft`,
+`*.outlook.live.com`, `*.substrate.office.com`): every
 mutating request `Unreadable` except `POST /search/api/<version>/suggestions` (the one `endpoints.md` lists) and
 `…/query` on Substrate: search reads.
 
@@ -202,10 +206,11 @@ object); the token exchanges (`POST …/v1/skypetokenauth`, `POST …/v1/<id>/aa
 own token for the media service's cookie, are `None`.
 
 **Middle tier and apps** (a Teams origin's `/api/mt/…` and `/api/apps/…`): a mutating request with a segment (in any
-case) `team(s)`, `chat(s)`, `channel(s)`, `conversation(s)`, `thread(s)` or `group(s)`, or a segment holding
-`meeting` or `invite`, is `Unreadable`, except `POST …/beta/teams/apps/aggregatedEntitlements` (the app catalogue of
-the account's teams, a read); the rest of the middle tier is `None`, out-of-office with automatic replies
-(`…/automaticRepliesSetting`) included: the user counted it as own settings on 2026-10-23.
+case) `team(s)`, `chat(s)`, `channel(s)`, `conversation(s)`, `thread(s)` or `group(s)`, a segment of its Outlook REST
+proxy (`v2.0`, `event(s)`, `message(s)`; `v2.0/me/calendars/default/calendarView` is read through it), or a segment
+holding `meeting`, `invite`, `calendar` or `mail`, is `Unreadable`, except `POST …/beta/teams/apps/aggregatedEntitlements`
+(the app catalogue of the account's teams, a read); the rest of the middle tier is `None`, out-of-office with automatic
+replies (`…/automaticRepliesSetting`) included: the user counted it as own settings on 2026-10-23.
 
 **CSA** (a Teams origin's `/api/csa/…`, `*.chatsvcagg.teams.microsoft.com`): mutating requests `Unreadable` except
 `POST …/api/<version>/teams/users/me/chatsAndChannelsByIds`, the read by `POST` `endpoints.md` lists.

@@ -114,8 +114,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   nobody), `Write(Target)` (judged by `Fence::check`) or `Unreadable` (denied). Only a mutating request (a method
   other than `GET`/`HEAD`/`OPTIONS`, a body, or a method override) on a contacting service (`Service`, told by host
   and, on a Teams origin, by path) is looked at further; there it is unreadable unless a row of its
-  table (`crates/teams-fence/src/contacting.rs`, `contacting/chat.rs`) maps or carves it out. A row is code plus a
-  case in `crates/teams-fence/tests/fixtures/contacting/`. Neither the browser fence nor the native transport calls it
+  table (`crates/teams-fence/src/contacting.rs`, `contacting/chat.rs`, `contacting/call.rs`) maps or carves it out. A
+  row is code plus a case in `crates/teams-fence/tests/contacting.rs` or its fixtures under
+  `crates/teams-fence/tests/fixtures/contacting/`. Neither the browser fence nor the native transport calls it
   yet: `proto-lab`'s `map_write` and `calling::call_start` still decide the lab browser's writes.
 - Writes on an existing call are denied: the follow-ups aren't mapped, and the native `add` (`AddToCall`, an `Invite`
   on `Scope::Call`) is `Partial`, since no membership source reads a call's members

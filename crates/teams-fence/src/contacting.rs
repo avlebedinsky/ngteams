@@ -10,15 +10,20 @@
 //!
 //! The contacting services are the ones whose purpose is reaching people ([`Service`], [`service_of`]): the chat
 //! service, calling, Microsoft Graph, Outlook and Substrate, `SharePoint` and `OneDrive`, AMS, the middle tier's team,
-//! meeting and invite paths, and CSA. A request is mutating ([`Request::is_mutating`]) when its method isn't `GET`,
-//! `HEAD` or `OPTIONS`, when it carries a body anyway, or when a method-override header names another method; on a
-//! contacting service an overridden method is unreadable, since the fence can't tell which method the service acts
-//! on. Bodies are read by a strict JSON reader (two keys alike in any case make a body unreadable), path segments
-//! percent-decoded, query values exact, and a query key twice (in any case) makes a chat service request unreadable.
+//! meeting and invite paths (its Outlook calendar and mail proxy among them), and CSA. On a Teams origin a mutating
+//! request whose service-naming segments can't be read (empty with more path after them, not UTF-8 once decoded, or
+//! holding `/ \ ; ? #` once decoded) is unreadable too. A request is mutating ([`Request::is_mutating`]) when its
+//! method isn't `GET`, `HEAD` or `OPTIONS`, when it carries a body anyway, or when a method-override header names
+//! another method; on a contacting service an overridden method is unreadable, since the fence can't tell which
+//! method the service acts on. Bodies are read by a strict JSON reader (two keys alike in any case make a body
+//! unreadable), path segments percent-decoded, query values exact, and a query key twice (in any case) makes a chat
+//! service request unreadable.
 
 mod call;
 mod chat;
 mod json;
+
+use std::fmt;
 
 use url::{Host, Url};
 
@@ -57,7 +62,7 @@ pub enum Service {
     /// AMS and the async gateway: objects others can read.
     Ams,
     /// The middle tier (`/api/mt/…`) and the apps service (`/api/apps/…`): only its team, chat, channel, group,
-    /// meeting and invite paths are contacting.
+    /// meeting and invite paths, and its Outlook calendar and mail proxy (`v2.0/me/…`), are contacting.
     MiddleTier,
     /// The chat service aggregator: an AFD host's `/api/csa/…`, `chatsvcagg.teams.microsoft.com`.
     Csa,
@@ -117,13 +122,40 @@ const OVERRIDE_HEADERS: [&str; 3] = ["x-http-method-override", "x-http-method", 
 /// The methods that only read.
 const READING: [&str; 3] = ["GET", "HEAD", "OPTIONS"];
 
-/// One request as the fence sees it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One request as the fence sees it. `Debug` shows the method, the URL without its credentials, query or fragment,
+/// the header names and the body's length: never a header value, a query value or the body.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Request<'a> {
     method: &'a str,
     url: &'a str,
     headers: Vec<(&'a str, &'a str)>,
     body: Option<&'a [u8]>,
+}
+
+impl fmt::Debug for Request<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let url = Url::parse(self.url).map_or_else(
+            |_| "<unparsable>".to_owned(),
+            |url| {
+                let port = url.port().map(|port| format!(":{port}")).unwrap_or_default();
+                format!(
+                    "{}://{}{port}{}",
+                    url.scheme(),
+                    url.host_str().unwrap_or_default(),
+                    url.path()
+                )
+            },
+        );
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("url", &url)
+            .field(
+                "headers",
+                &self.headers.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            )
+            .field("body_len", &self.body.map(<[u8]>::len))
+            .finish()
+    }
 }
 
 impl<'a> Request<'a> {
@@ -207,8 +239,10 @@ pub fn contacting(request: &Request<'_>, policy: &Policy) -> Contact {
         // a mutating request whose host can't be told
         return Contact::Unreadable;
     };
-    let Some(service) = service_of(&url) else {
-        return Contact::None;
+    let service = match route(&url) {
+        Route::Service(service) => service,
+        Route::Other => return Contact::None,
+        Route::Unreadable => return Contact::Unreadable,
     };
     if request.is_overridden() {
         return Contact::Unreadable;
@@ -240,21 +274,49 @@ fn none_if(allowed: bool) -> Contact {
     if allowed { Contact::None } else { Contact::Unreadable }
 }
 
+/// Where a URL goes, as [`contacting`] reads it.
+enum Route {
+    /// A contacting service.
+    Service(Service),
+    /// A host or a Teams origin path that isn't a contacting service.
+    Other,
+    /// A Teams origin path whose service-naming segments can't be read ([`service_by_path`]).
+    Unreadable,
+}
+
 /// The contacting service `url` goes to, if any (see [`Service`]). Hosts are matched in lower case, a trailing dot
-/// dropped, any scheme and port; an AFD host's paths by their first segments, decoded and in any case.
+/// dropped, any scheme and port; a Teams origin's paths by their first two segments, each decoded on its own and in
+/// any case. `None` also for a Teams origin path whose first segments can't be read, which [`contacting`] counts as
+/// unreadable when the request is mutating.
 #[must_use]
 pub fn service_of(url: &Url) -> Option<Service> {
+    match route(url) {
+        Route::Service(service) => Some(service),
+        Route::Other | Route::Unreadable => None,
+    }
+}
+
+/// [`service_of`], with a Teams origin path whose first segments can't be read told apart.
+fn route(url: &Url) -> Route {
+    const TEAMS_ORIGINS: [&str; 3] = ["teams.microsoft.com", "teams.cloud.microsoft", "teams.live.com"];
     let Some(Host::Domain(host)) = url.host() else {
-        return None;
+        return Route::Other;
     };
     let host = host.to_ascii_lowercase();
     let host = host.strip_suffix('.').unwrap_or(&host);
-    service_by_host(host).or_else(|| service_by_path(host, url))
+    if let Some(service) = service_by_host(host) {
+        return Route::Service(service);
+    }
+    if TEAMS_ORIGINS.iter().any(|origin| under(host, origin)) {
+        service_by_path(url)
+    } else {
+        Route::Other
+    }
 }
 
 /// A contacting service told by its host alone.
 fn service_by_host(host: &str) -> Option<Service> {
-    const BY_HOST: [(&str, Service); 17] = [
+    const BY_HOST: [(&str, Service); 19] = [
         ("msg.teams.microsoft.com", Service::ChatService),
         ("chatsvcagg.teams.microsoft.com", Service::Csa),
         ("asyncgw.teams.microsoft.com", Service::Ams),
@@ -265,6 +327,8 @@ fn service_by_host(host: &str) -> Option<Service> {
         ("graph.microsoft.com", Service::Graph),
         ("outlook.office.com", Service::Outlook),
         ("outlook.office365.com", Service::Outlook),
+        ("outlook.cloud.microsoft", Service::Outlook),
+        ("outlook.live.com", Service::Outlook),
         ("substrate.office.com", Service::Outlook),
         ("sharepoint.com", Service::SharePoint),
         ("sharepoint-df.com", Service::SharePoint),
@@ -280,24 +344,31 @@ fn service_by_host(host: &str) -> Option<Service> {
 }
 
 /// A contacting service on a Teams origin (`teams.microsoft.com`, `teams.cloud.microsoft`, `teams.live.com` and the
-/// hosts under them), told by the path's first segments.
-fn service_by_path(host: &str, url: &Url) -> Option<Service> {
-    const TEAMS_ORIGINS: [&str; 3] = ["teams.microsoft.com", "teams.cloud.microsoft", "teams.live.com"];
-    if !TEAMS_ORIGINS.iter().any(|origin| under(host, origin)) {
-        return None;
+/// hosts under them), told by the path's first two segments, each decoded on its own: a later segment that doesn't
+/// decode leaves the service to its row, which refuses it. [`Route::Unreadable`] when one of the two is empty with
+/// more path after it (`//api/chatsvc/…`, `/api//chatsvc/…`, which a server merging slashes reads as the service),
+/// isn't UTF-8 once decoded, or holds `/ \ ; ? #` once decoded (`/api/chatsvc%2Femea/…`).
+fn service_by_path(url: &Url) -> Route {
+    let raw: Vec<&str> = url.path_segments().map(Iterator::collect).unwrap_or_default();
+    let mut leading = Vec::with_capacity(2);
+    for (at, segment) in raw.iter().take(2).enumerate() {
+        let Ok(decoded) = percent_encoding::percent_decode_str(segment).decode_utf8() else {
+            return Route::Unreadable;
+        };
+        let empty_mid_path = decoded.is_empty() && at + 1 < raw.len();
+        if empty_mid_path || decoded.contains(['/', '\\', ';', '?', '#']) {
+            return Route::Unreadable;
+        }
+        leading.push(decoded.to_ascii_lowercase());
     }
-    let segments: Vec<String> = decoded_segments(url)?
-        .into_iter()
-        .take(2)
-        .map(|segment| segment.to_ascii_lowercase())
-        .collect();
-    match segments.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["api", "chatsvc"] => Some(Service::ChatService),
-        ["api", "mt" | "apps"] => Some(Service::MiddleTier),
-        ["api", "csa"] => Some(Service::Csa),
-        ["asm" | "ams", ..] => Some(Service::Ams),
-        _ => None,
-    }
+    let service = match leading.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["api", "chatsvc"] => Service::ChatService,
+        ["api", "mt" | "apps"] => Service::MiddleTier,
+        ["api", "csa"] => Service::Csa,
+        ["asm" | "ams", ..] => Service::Ams,
+        _ => return Route::Other,
+    };
+    Route::Service(service)
 }
 
 /// Whether `host` is `domain` or a host under it, on a dot boundary.
@@ -355,9 +426,10 @@ fn is_token_exchange(request: &Parsed<'_>) -> bool {
         && (path_ends_with(request, &["v1", "skypetokenauth"]) || path_ends_with(request, &["v1", "*", "aadtokenauth"]))
 }
 
-/// The middle tier's segments that name something other people are in: a team, chat, channel, conversation, thread
-/// or group, a meeting (any segment holding `meeting`), or an invite (any segment holding `invite`).
-const MIDDLE_TIER_PEOPLE: [&str; 12] = [
+/// The middle tier's segments that name something other people are in or get: a team, chat, channel, conversation,
+/// thread or group; and its Outlook REST proxy (`v2.0/me/calendars/…` is read through it), where an event or a message
+/// reaches its attendees or recipients.
+const MIDDLE_TIER_PEOPLE: [&str; 17] = [
     "team",
     "teams",
     "chat",
@@ -370,10 +442,19 @@ const MIDDLE_TIER_PEOPLE: [&str; 12] = [
     "threads",
     "group",
     "groups",
+    "v2.0",
+    "event",
+    "events",
+    "message",
+    "messages",
 ];
 
-/// Whether a mutating middle tier request is contacting: a segment of [`MIDDLE_TIER_PEOPLE`], or one holding
-/// `meeting` or `invite`. The app catalogue's entitlements of the account's teams (`POST
+/// What a middle tier segment holding any of these names (in lower case) is about: a meeting, an invite, a calendar
+/// (`calendars`, `calendarView`) or a mail (`sendmail`, `mailFolders`).
+const MIDDLE_TIER_PEOPLE_WORDS: [&str; 4] = ["meeting", "invite", "calendar", "mail"];
+
+/// Whether a mutating middle tier request is contacting: a segment of [`MIDDLE_TIER_PEOPLE`], or one holding a word of
+/// [`MIDDLE_TIER_PEOPLE_WORDS`]. The app catalogue's entitlements of the account's teams (`POST
 /// …/beta/teams/apps/aggregatedEntitlements`), a read, is carved out.
 fn is_middle_tier_contacting(request: &Parsed<'_>) -> bool {
     if request.method == "POST" && path_ends_with(request, &["beta", "teams", "apps", "aggregatedEntitlements"]) {
@@ -386,7 +467,8 @@ fn is_middle_tier_contacting(request: &Parsed<'_>) -> bool {
         .iter()
         .map(|segment| segment.to_ascii_lowercase())
         .any(|segment| {
-            MIDDLE_TIER_PEOPLE.contains(&segment.as_str()) || segment.contains("meeting") || segment.contains("invite")
+            MIDDLE_TIER_PEOPLE.contains(&segment.as_str())
+                || MIDDLE_TIER_PEOPLE_WORDS.iter().any(|word| segment.contains(word))
         })
 }
 

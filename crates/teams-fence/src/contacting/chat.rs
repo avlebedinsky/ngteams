@@ -25,12 +25,6 @@ pub(super) fn classify(request: &Parsed<'_>, policy: &Policy) -> Contact {
     let Some((version, path)) = chat_parts(request.url) else {
         return Contact::Unreadable;
     };
-    if path
-        .iter()
-        .any(|segment| segment.is_empty() || segment.contains(['/', ';', '?', '#']))
-    {
-        return Contact::Unreadable;
-    }
     let mut path: Vec<&str> = path.iter().map(String::as_str).collect();
     // `ME` in any case, or the account's own MRI, is the account itself
     if let ["users", user, ..] = path.as_mut_slice()
@@ -49,10 +43,16 @@ pub(super) fn classify(request: &Parsed<'_>, policy: &Policy) -> Contact {
 }
 
 /// The version segment and the decoded segments after it, for a URL on the chat service: an AFD host's
-/// `/api/chatsvc/<region>/<version>/…` or a regional host's `/<version>/…`. `None` when it has no version segment or a
-/// segment isn't UTF-8 once decoded.
+/// `/api/chatsvc/<region>/<version>/…` or a regional host's `/<version>/…`. `None` when it has no version segment, or
+/// any segment (the base's too) isn't UTF-8 once decoded, is empty or holds `/ ; ? #` once decoded.
 fn chat_parts(url: &Url) -> Option<(String, Vec<String>)> {
     let mut segments = super::decoded_segments(url)?;
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || segment.contains(['/', ';', '?', '#']))
+    {
+        return None;
+    }
     if segments.first().is_some_and(|first| first.eq_ignore_ascii_case("api")) {
         // `api`, `chatsvc` and the region
         segments.drain(..3.min(segments.len()));

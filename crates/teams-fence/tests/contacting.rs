@@ -246,6 +246,146 @@ fn every_own_view_property_is_carved_out_on_a_chat() {
     }
 }
 
+/// The bodies `proto-lab`'s `fence_targets.rs` pins as ones the chat service could read differently from the fence:
+/// a thread's members (`POST threads`, `PUT threads/<chat>/members`), each unreadable.
+fn ambiguous_members() -> Vec<String> {
+    let lab = lab_mri(GUID_A);
+    let lab = lab.as_str();
+    let outsider = lab_mri(GUID_X);
+    let outsider = outsider.as_str();
+    vec![
+        // a key in another case beside it: a case-insensitive reader could bind either
+        format!(r#"{{"members":[{{"id":"{lab}"}}],"Members":[{{"id":"{outsider}"}}]}}"#),
+        format!(r#"{{"Members":[{{"id":"{outsider}"}}],"members":[{{"id":"{lab}"}}]}}"#),
+        format!(r#"{{"members":[{{"id":"{lab}","Id":"{outsider}"}}]}}"#),
+        format!(r#"{{"members":[{{"ID":"{outsider}","id":"{lab}"}}]}}"#),
+        // the same key twice: a reader could keep either
+        format!(r#"{{"members":[{{"id":"{lab}"}}],"members":[{{"id":"{outsider}"}}]}}"#),
+        format!(r#"{{"members":[{{"id":"{outsider}","id":"{lab}"}}]}}"#),
+        // a case-insensitive key alone, which the fence would miss
+        format!(r#"{{"Members":[{{"id":"{outsider}"}}]}}"#),
+        format!(r#"{{"members":[{{"ID":"{outsider}"}}]}}"#),
+        // `ſ` folds to `s` in a case-insensitive comparison
+        format!(r#"{{"members":[{{"id":"{lab}"}}],"memberſ":[{{"id":"{outsider}"}}]}}"#),
+        // a duplicate anywhere, even off the read path
+        format!(r#"{{"members":[{{"id":"{lab}","properties":{{"x":1,"X":2}}}}]}}"#),
+        // unexpected shapes
+        format!(r#"{{"members":{{"id":"{lab}"}}}}"#),
+        format!(r#"{{"members":["{lab}"]}}"#),
+        format!(r#"{{"members":[{{"id":"{lab}"}},null]}}"#),
+        format!(r#"{{"members":[{{"id":["{lab}"]}}]}}"#),
+        format!(r#"[{{"members":[{{"id":"{lab}"}}]}}]"#),
+        format!(r#"{{"members":[{{"id":"{lab}"}}]}} {{"members":[{{"id":"{outsider}"}}]}}"#),
+        format!(r#"{{"members":[{{"id":"{lab}"}}],}}"#),
+        r#"{"members":[]}"#.to_owned(),
+    ]
+}
+
+#[test]
+fn a_body_the_chat_service_could_read_differently_is_unreadable() {
+    let threads = "https://teams.microsoft.com/api/chatsvc/emea/v1/threads";
+    let members = format!("https://teams.microsoft.com/api/chatsvc/emea/v1/threads/19%3A{GROUP}%40thread.v2/members");
+    let messages = format!(
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{}/messages",
+        one_to_one()
+    );
+    // the clean shapes map
+    let clean = format!(
+        r#"{{"members":[{{"id":"{}","role":"Admin"}}]}}"#,
+        lab_mri(GUID_A).as_str()
+    );
+    assert!(matches!(
+        verdict("POST", threads, Some(clean.as_bytes())),
+        Contact::Write(_)
+    ));
+    assert!(matches!(
+        verdict("PUT", &members, Some(clean.as_bytes())),
+        Contact::Write(_)
+    ));
+    let message = br#"{"messagetype":"Text","content":"hi"}"#;
+    assert!(matches!(verdict("POST", &messages, Some(message)), Contact::Write(_)));
+
+    for body in ambiguous_members() {
+        assert_eq!(
+            verdict("POST", threads, Some(body.as_bytes())),
+            Contact::Unreadable,
+            "{body}"
+        );
+        assert_eq!(
+            verdict("PUT", &members, Some(body.as_bytes())),
+            Contact::Unreadable,
+            "{body}"
+        );
+    }
+    let ambiguous_messages = [
+        r#"{"messagetype":"Text","MessageType":"Control/Typing"}"#,
+        r#"{"messagetype":"Control/Typing","messagetype":"Text"}"#,
+        r#"{"MessageType":"Text"}"#,
+        r#"{"messagetype":"Text","content":"hi","properties":{"a":1,"A":2}}"#,
+        r#"{"messagetype":"Text"} {"messagetype":"Text"}"#,
+        r#"["messagetype","Text"]"#,
+    ];
+    for body in ambiguous_messages {
+        assert_eq!(
+            verdict("POST", &messages, Some(body.as_bytes())),
+            Contact::Unreadable,
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_write_is_mapped_only_on_the_chat_service_hosts() {
+    let body = br#"{"messagetype": "Text", "content": "hi"}"#;
+    let chat = format!("19%3A{GUID_A}_{GUID_B}%40unq.gbl.spaces");
+    let path = format!("v1/users/ME/conversations/{chat}/messages");
+    for url in [
+        format!("https://teams.microsoft.com/api/chatsvc/emea/{path}"),
+        format!("https://teams.cloud.microsoft/api/chatsvc/amer/{path}"),
+        format!("https://emea.ng.msg.teams.microsoft.com/{path}"),
+    ] {
+        assert!(matches!(verdict("POST", &url, Some(body)), Contact::Write(_)), "{url}");
+    }
+    let unreadable = [
+        format!("http://teams.microsoft.com/api/chatsvc/emea/{path}"),
+        format!("https://teams.microsoft.com:444/api/chatsvc/emea/{path}"),
+        format!("https://teams.microsoft.com/api/mt/emea/{path}"),
+        format!("https://msg.teams.microsoft.com/{path}"),
+        format!("https://emea.ng.msg.teams.microsoft.com/api/{path}"),
+        format!("https://chatsvcagg.teams.microsoft.com/{path}"),
+        format!("https://graph.microsoft.com/v1.0/chats/{chat}/messages"),
+        // the live read's checks: a region of lowercase letters, digits and `-`, every regional host label sound
+        format!("https://teams.microsoft.com/api/chatsvc/EMEA/{path}"),
+        format!("https://teams.microsoft.com/api/chatsvc/x%20y/{path}"),
+        format!("https://teams.microsoft.com/api/chatsvc//{path}"),
+        format!("https://a_b.msg.teams.microsoft.com/{path}"),
+        format!("https://a..b.msg.teams.microsoft.com/{path}"),
+    ];
+    for url in &unreadable {
+        assert_eq!(verdict("POST", url, Some(body)), Contact::Unreadable, "{url}");
+    }
+    // a lookalike under another domain is no contacting service at all
+    let lookalike = format!("https://teams.microsoft.com.example.com/api/chatsvc/emea/{path}");
+    assert_eq!(verdict("POST", &lookalike, Some(body)), Contact::None);
+}
+
+#[test]
+fn a_request_s_debug_shows_no_header_value_query_or_body() {
+    let request = Request::new(
+        "POST",
+        "https://user:pass@teams.microsoft.com:8443/api/x?sig=query-secret#frag",
+    )
+    .with_header("Authorization", "Bearer header-secret")
+    .with_body(Some(b"body-secret"));
+    let shown = format!("{request:?}");
+    for secret in ["pass", "header-secret", "query-secret", "sig", "frag", "body-secret"] {
+        assert!(!shown.contains(secret), "{secret} in {shown}");
+    }
+    for kept in ["POST", "https://teams.microsoft.com:8443/api/x", "Authorization", "11"] {
+        assert!(shown.contains(kept), "{kept} not in {shown}");
+    }
+}
+
 // --- the test call start ---
 
 const CALLER: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -362,6 +502,11 @@ const SERVICES_BY_URL: &[(&str, Option<Service>)] = &[
     ),
     ("https://outlook.office365.com/owa/", Some(Service::Outlook)),
     (
+        "https://outlook.cloud.microsoft/owa/service.svc",
+        Some(Service::Outlook),
+    ),
+    ("https://outlook.live.com/owa/", Some(Service::Outlook)),
+    (
         "https://substrate.office.com/search/api/v1/suggestions",
         Some(Service::Outlook),
     ),
@@ -402,6 +547,20 @@ const SERVICES_BY_URL: &[(&str, Option<Service>)] = &[
     ("https://graph.microsoft.com.example.com/v1.0/$batch", None),
     ("https://evilskype.com/x", None),
     ("https://127.0.0.1/api/chatsvc/amer/v1/threads", None),
+    // a Teams origin path is told by its first two segments, each decoded on its own: a later one that doesn't
+    // decode leaves the service to its row
+    (
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/threads/%FF",
+        Some(Service::ChatService),
+    ),
+    (
+        "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/%C0",
+        Some(Service::MiddleTier),
+    ),
+    // first segments that can't be read name no service (and a mutating request there is unreadable)
+    ("https://teams.microsoft.com//api/chatsvc/emea/v1/threads", None),
+    ("https://teams.microsoft.com/api/chatsvc%2Femea/v1/threads", None),
+    ("https://teams.microsoft.com/%FF/chatsvc/emea/v1/threads", None),
 ];
 
 #[test]
