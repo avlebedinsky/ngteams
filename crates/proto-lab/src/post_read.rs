@@ -124,11 +124,11 @@ pub const POST_READS: &[PostRead] = &[
 ];
 
 /// What a listed request's headers may be (see [`are_listed_headers`]).
-struct HeaderRules {
+pub(crate) struct HeaderRules {
     /// Every header it may carry, by name in any case; any other makes it unknown.
-    names: &'static [&'static str],
+    pub(crate) names: &'static [&'static str],
     /// The headers it may carry only with the one value every capture showed, by lower-cased name.
-    pinned: &'static [(&'static str, &'static str)],
+    pub(crate) pinned: &'static [(&'static str, &'static str)],
 }
 
 /// The headers every captured profile lookup carried as the fence paused it (the denied lookups of 2026-10-20), by name
@@ -234,9 +234,11 @@ const PRESENCE_RULES: HeaderRules = HeaderRules {
 /// queries); no other was seen.
 const PRESENCE_SOURCE: &str = "ups";
 
-/// The headers whose values the list reads, by lower-cased name. A paused request keeps the value of these alone
-/// ([`crate::fence_http::PausedRequest`]): of every other header only the name, so no credential is held.
-pub const HEADER_VALUES_READ: [&str; 10] = [
+/// The headers whose values the list reads, by lower-cased name, and with them those the own-availability check reads
+/// (`crate::availability`: `x-ms-endpoint-id`, the client's own endpoint id, and `x-ms-request-id`, always empty
+/// there). A paused request keeps the value of these alone ([`crate::fence_http::PausedRequest`]): of every other
+/// header only the name, so no credential is held.
+pub const HEADER_VALUES_READ: [&str; 12] = [
     "behavioroverride",
     "content-type",
     "origin",
@@ -244,8 +246,10 @@ pub const HEADER_VALUES_READ: [&str; 10] = [
     "x-ms-client-request-type",
     "x-ms-client-type",
     "x-ms-client-user-agent",
+    "x-ms-endpoint-id",
     "x-ms-migration",
     "x-ms-object-id",
+    "x-ms-request-id",
     "x-ms-test-user",
 ];
 
@@ -290,7 +294,7 @@ fn entry(service: PostReadService, name: &str) -> Option<&'static PostRead> {
 /// pinned headers that is there has exactly its value; `Origin`, if there, is `url`'s own origin; and
 /// `x-ms-client-caller`, if there, is a client component's name ([`is_client_caller`]). A header whose value isn't
 /// known (`None`) has none of these values.
-fn are_listed_headers(url: &Url, headers: &[(String, Option<String>)], rules: &HeaderRules) -> bool {
+pub(crate) fn are_listed_headers(url: &Url, headers: &[(String, Option<String>)], rules: &HeaderRules) -> bool {
     let mut seen = Vec::new();
     for (name, _) in headers {
         let name = name.to_ascii_lowercase();

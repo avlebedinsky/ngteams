@@ -1116,16 +1116,33 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
 - Modify: `CLAUDE.md` (the exception, first), `crates/proto-lab/src/{classify.rs,scenario/*}`,
   `docs/protocol/{trouter.md,endpoints.md}`
 
-- [ ] CLAUDE.md first, in the words of the user's decision of 2026-10-21: a lab account may set its own availability
+- [x] CLAUDE.md first, in the words of the user's decision of 2026-10-21: a lab account may set its own availability
       (UPS's presence endpoint `PUT …/v1/me/endpoints/`, the `user.activity` frame and, once captured, the manual
       status request), in their captured shapes and availability values only; never a status note, out-of-office or
       a profile field; every id it names must be the account itself or its own registered endpoint
-- [ ] live, under the fence, step by step: (1) what makes a show online as b sees it (b's `getpresence`, Task 17):
+- [x] live, under the fence, step by step: (1) what makes a show online as b sees it (b's `getpresence`, Task 17):
       `user.activity` alone, the endpoint `PUT` alone, both, each mapped in its captured shape before it is allowed;
       (2) a's status set by hand in the web client (Busy, Do not disturb, Away, Available) with that request denied,
       to capture it; then mapped in its captured shape and allowed in a later run; how a manual status is cleared;
       written up in `trouter.md`; a breached run as CLAUDE.md says
-- [ ] `cargo test -p proto-lab` and the gate pass
+- [x] `cargo test -p proto-lab` and the gate pass
+- Done (2026-10-23), where it differs from the lines above:
+  - The browser fence's mapping is a module of its own, `crates/proto-lab/src/availability.rs` (not in the Files
+    list), behind `Classifier::with_own_availability` (the `own-presence` scenarios only): the endpoint `PUT` and the
+    manual status (`PUT …/v1/me/forceavailability/`: a set of `Busy`, `DoNotDisturb`, `Away` or `Available`, or the
+    reset, the same `PUT` with no body) in their captured shapes, let through as own state `own_availability` only on
+    an endpoint this browser's fence let the account register (enrolled after the registration's `Allow`), a reset
+    only when Chrome's event shows no body at all (`PausedRequest::body_unread`). Settled with Codex (transcript
+    `discussions/task-18-availability-mapping`). `teams-signin`'s guard gained the new classification (unclassified).
+  - Live (ten runs of the `own-presence-*` scenarios, b's view sampled by `teams-headless b presence` through
+    `scripts/own-presence-run.sh`, not in the Files list): **the endpoint `PUT` makes a show online to b;
+    `user.activity` alone does not**. Without `user.activity` a went offline 10–25 s after its browser closed, with
+    it about 6 min after. The manual status was captured denied (run 7) and let through (runs 8–10, each answered
+    `200`); the reset clears it. In every run that let it through the web client sent no endpoint `PUT`, and with no
+    live endpoint b read `Offline` throughout, Busy included: whether a manual status overrides an endpoint's
+    `Available` as b sees it is left to Task 19's native runs, which send the endpoint `PUT` themselves. Run 8's b
+    samples were lost with `/tmp` in the reboot. No run was breached. Written up in `trouter.md` ("Own presence"),
+    rows in `endpoints.md`, the scenarios in the README.
 
 ### Task 19: Own presence (2/3): the fenced write
 **Files:**

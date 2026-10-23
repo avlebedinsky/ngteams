@@ -139,10 +139,11 @@ impl Guard {
         let outcome = match self.classifier.classify(method, url, None) {
             Classification::Read => RequestOutcome::Read,
             Classification::Own(kind) => RequestOutcome::Own(kind.as_str()),
-            // the sign-in classifier maps no writes and no read by POST
-            Classification::PostRead { .. } | Classification::Write(_) | Classification::Unknown => {
-                RequestOutcome::Unclassified
-            }
+            // the sign-in classifier maps no writes, no read by POST and no own availability
+            Classification::PostRead { .. }
+            | Classification::OwnAvailability { .. }
+            | Classification::Write(_)
+            | Classification::Unknown => RequestOutcome::Unclassified,
         };
         let allow = matches!(outcome, RequestOutcome::Read | RequestOutcome::Own(_));
         if self.record(method, url, outcome) && allow {

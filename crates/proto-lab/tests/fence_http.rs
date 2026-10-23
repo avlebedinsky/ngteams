@@ -396,6 +396,7 @@ fn paused(method: &str, url: &str) -> PausedRequest {
         method: method.to_owned(),
         url: url.to_owned(),
         body: None,
+        body_unread: false,
         network_id: None,
     }
 }

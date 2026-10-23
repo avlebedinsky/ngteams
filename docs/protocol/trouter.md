@@ -1,6 +1,6 @@
 # Trouter: the push channel for messaging
 
-Status: 2026-10-20, M1 Task 14; the native client's part (below) 2026-10-21, M1 Task 16. Written from live runs of `proto-lab run ab-trouter --headless` (accounts a and b,
+Status: 2026-10-20, M1 Task 14; the native client's part (below) 2026-10-21, M1 Task 16; others' and own presence 2026-10-23, M2 Tasks 17–18. Written from live runs of `proto-lab run ab-trouter --headless` (accounts a and b,
 Chrome for Testing 155 headless, the fence armed with the **messaging set**, below), from M0's `echo-call` runs
 (`calling-echo.md`), and from the web bundle `26260.1717.5229.7049` (read locally, notes in our own words). The
 captures stay outside the repository; the fixtures in `tests/fixtures/trouter/` are synthetic, shaped like them
@@ -290,7 +290,8 @@ newly found offline messages are notified is M2's.
   (`POST …/ups/<geo>/v1/pubsub/subscriptions/<epid>`). The fence denied both in every run (they are on the run's
   expected list), and other people's presence reads were denied too, so what makes an account show online (the PUT,
   the activity, or both) was not tested. Others' presence is read since M2 Task 17 ([below](#others-presence)); the
-  account's own is Tasks 18–20.
+  account's own was measured in M2 Task 18 ([Own presence](#own-presence-m2-task-18)): the endpoint `PUT` is what
+  makes it show online, `user.activity` alone does nothing others see.
 
 ## Others' presence
 
@@ -323,6 +324,112 @@ v1/presence/getpresence/`, a read the web client sends as a `POST`.
   v1/pubsub/subscriptions/<epid>`), which changes UPS's state, so it is no read and stays denied; the native client's
   presence is only as fresh as its last poll. If a minute proves too stale, that is a backlog item, not a subscription
   under the read rules.
+
+## Own presence (M2 Task 18)
+
+What makes a lab account show online to another, and what a manual status sends, measured under the user's
+exception of 2026-10-21 (CLAUDE.md: a lab account may set its own availability, in its captured shapes, availability
+values only, every id it names the account itself or its own registered endpoint). The scenarios are
+`crates/proto-lab/src/scenario/own_presence.rs` (`own-presence-activity`, `-endpoint`, `-both`, `-manual-held`,
+`-manual`): only a's browser runs, under the messaging set ([above](#the-messaging-set-what-the-fence-lets-out)), and
+opens the a–b chat (the probe force-denied first, as `ab-chat`). b's view is b's native client reading a's presence,
+`teams-headless b presence` (the read of [Others' presence](#others-presence), under b's own fence), about every
+16 s, from before a's browser starts until minutes after it closed (`scripts/own-presence-run.sh`, under the live
+lock). The fence mapping is `crates/proto-lab/src/availability.rs`, behind `Classifier::with_own_availability`.
+
+### What the web client sends
+
+- **The endpoint `PUT`**: `PUT <teams origin>/ups/<geo>/v1/me/endpoints/`, no query, a body of exactly
+  `{"id","availability","activity","activityReporting":"Transport","deviceType":"Web"}`. `id` is the client's Trouter
+  endpoint id: the messaging stack's registration's `registrationId`, its socket's `epid`, and the request's
+  `x-ms-endpoint-id`, a lower-case GUID. The pairs seen (403 in the captures of 2026-10-20 to 2026-10-21):
+  `Available`/`Available` while the client runs (388) and `Busy`/`InACall` in a call (15, `echo-call`). Its callers
+  (`x-ms-client-caller`): `presence-sync-strategy:TrouterStateChanged` (the push channel's state changed),
+  `presence-sync-strategy-client` and the two `set-callstate-presence-worker-resolver:setCallStatePresence…`.
+  Answered `201` with no body when let through. The web client sends it a few seconds after a Trouter connect, after
+  its presence subscriptions (denied) were tried: 11–60 s after the page began in runs 1, 2, 4 and 5 below, and not
+  at all in runs 3 (within the 79 s its page was open) and 6–10, the same client version (`1415/26100212011`)
+  throughout; what decides it is not known.
+- **The manual status** (the account menu's status list, captured with it denied in run 7): `PUT
+  <teams origin>/ups/<geo>/v1/me/forceavailability/`, no query, the same headers as the endpoint `PUT` (its
+  `x-ms-endpoint-id` the current messaging endpoint), the caller `TeamsClient:setPresenceAvailability` and a body of
+  exactly `{"availability": <Busy | DoNotDisturb | Away | Available>}` (the menu's "Busy", "Do not disturb", "Appear
+  away", "Available"; three tries each when denied). **"Reset status"** clears it with the same `PUT` and **no body
+  at all** (no `postData`, no `hasPostData` in Chrome's event), the caller `TeamsClient:setPresenceAvailability-reset`,
+  `Content-Type: application/json` still sent. Each was answered `200` with no body when let through (runs 8–10).
+  Choosing "Available" by hand is a set like the others (it forces Available); only the reset clears. In runs 9 and
+  10 the client sent nothing for the choices after Busy (Do not disturb, Away, Available) within 20 s of each, while
+  run 8 sent all five; its own presence reads, denied (they carry `x-ms-endpoint-id`, [above](#others-presence)),
+  may be why. Not driven, so not captured: "Be right back", "Appear offline", a duration
+  (`set-availability-duration`), and a status note.
+- **`user.activity`** (`active`) on each Trouter socket, as [above](#useractivity-and-presence); the browser fence's
+  messaging set already allows it (the user's decision of 2026-10-19).
+- When the account menu opens, the client also sends `PUT …/api/mt/part/<partition>/beta/me/engagementSurfaces/
+  displayed` (which of its prompts it showed); it stays denied (the runs' `OWN_PRESENCE_REQUESTS`).
+
+### What b saw
+
+All `proto-lab run <scenario> --headless` from a normal lab build, under the live lock, 2026-10-22 23:31 to
+2026-10-23 05:28 UTC, the machine otherwise idle. Every run's probe was force-denied and failed in a's page; the only
+writes the fence let through were a's typing on the a–b chat (2 permits a run) and the own availability below; no
+target failed to arm, **no run was breached**.
+
+| run | start (UTC) | scenario | what reported a | b's reads of a |
+|---|---|---|---|---|
+| 1 | 23:31 | `own-presence-activity` (ok) | `user.activity` (2 sent); the endpoint `PUT` denied (3) | `Offline` throughout: before, during the 5 min the page was open, after |
+| 2 | 23:48 | `own-presence-endpoint` (ok) | the endpoint `PUT` (2 answered `201`, two endpoints after a reconnect); every `user.activity` held back (the client reconnected about every 10 s, as in `ab-trouter-quiet`) | `Available` from 4 s after the `PUT` until the page closed; `Offline` 10–25 s after the browser closed |
+| 3 | 00:09 | `own-presence-both` (failed: no endpoint `PUT` within the 60 s it then waited) | `user.activity` (2) | `Offline` throughout |
+| 4 | 00:25 | `own-presence-both` (ok) | both (`user.activity` 2, the `PUT` 1 answered `201`) | `Available` from 7 s after the `PUT`; still `Available` 5 min 37 s after the browser closed, `Offline` by 5 min 55 s |
+| 5 | 00:44 | `own-presence-manual-held` (failed: the status entries' `data-tid`s had changed, no status chosen) | both (the `PUT` answered `201`) | `Available`, then `Offline` about 5 min 50 s after the browser closed |
+| 6 | 01:04 | `own-presence-manual-held` (failed: no endpoint `PUT` within 180 s) | `user.activity` | `Offline` throughout |
+| 7 | 01:26 | `own-presence-manual-held` (failed on one unexpected deny, `engagementSurfaces/displayed`, since listed) | `user.activity`; no endpoint `PUT` sent; the five manual requests denied (15 with retries: the capture of their shape) | `Offline` throughout |
+| 8 | 02:01 | `own-presence-manual` (its exit not kept) | `user.activity`; no endpoint `PUT` sent; the five manual requests let through, each answered `200` | not kept: the run's printed report and b's samples were in `/tmp`, lost in the machine's reboot of 2026-10-23; `fence.log` holds b's 92 reads, let through, without their answers |
+| 9 | 05:04 | `own-presence-manual` (ok) | `user.activity`; no endpoint `PUT`; Busy let through (`200`), nothing sent for the next three choices, the reset let through (`200`) 6 min after Busy | `Offline` throughout, Busy included |
+| 10 | 05:28 | `own-presence-manual` (ok) | as run 9 | `Offline` throughout, Busy included |
+
+So:
+
+- **The endpoint `PUT` makes an account show online; `user.activity` alone does not** (run 1). One `PUT` held it
+  `Available` for the whole 5 minutes the page stayed open (runs 2, 4): no refresh was needed within that time.
+- **Going offline** follows the browser's close: within 25 s when no `user.activity` was sent (run 2), about 6 minutes
+  when it was (runs 4, 5). Run 2's socket also reconnected every 10 s, so which of the two (the frame or a steady
+  socket) holds the endpoint open after its socket closes is not separated. No explicit "offline" request was seen:
+  the web client sent none when its page closed.
+- **A manual status shows nothing while the account has no live endpoint**: in runs 9 and 10 UPS took Busy (`200`)
+  and, 6 minutes later, its reset, and b read `Offline` before, during and after. Whether a manual status overrides
+  an endpoint's `Available` as b sees it (what the menu promises) was not observed: the web client sent no endpoint
+  `PUT` in any run that let the manual status through. The native client sends its endpoint `PUT` itself (Task 19),
+  so its first live runs settle it: Busy set beside a live endpoint, then the reset, each read by b.
+- **A manual status is cleared** by the reset (the bodiless `PUT`, answered `200`); no other request clears it.
+- For the native client (Tasks 19–20): the endpoint `PUT` is needed and enough to show online; `user.activity` isn't
+  needed for it, and without it the account went offline within seconds of the client's end rather than minutes.
+
+### The browser fence's mapping
+
+`availability.rs`, asked only by a classifier built with `Classifier::with_own_availability` (the `own-presence`
+scenarios); every other run denies these requests as before.
+
+- `endpoint_put` and `manual_status` recognize exactly the shapes above: either Teams origin, `/ups/<lowercase
+  geo>/v1/me/endpoints/` or `…/forceavailability/` with the trailing slash, no query, no fragment, no user info;
+  only the captured header names, each pinned header present with its one captured value (`content-type`,
+  `behavioroverride`, `x-ms-client-type`, `x-ms-client-user-agent`, an empty `x-ms-object-id` and `x-ms-request-id`),
+  `Origin` the request's own, `x-ms-endpoint-id` present and a lower-case GUID, the caller one of the captured ones
+  for that request; a body read strictly (case-folded duplicate keys make it unknown). The endpoint `PUT`'s `id` must
+  equal its `x-ms-endpoint-id`, with one of the two captured pairs; a manual set only with its caller and one of the
+  four values; a reset only with its caller and no body. A caller of one with the body of the other is unknown.
+- Each is `Classification::OwnAvailability { endpoint }`; the session's HTTP fence (`HttpFence::decide`) makes it own
+  state (`own_availability` in `fence.log`) only when that endpoint is one **this browser's fence let this account
+  register in this run**: a messaging-stack registration (`calling::messaging_request`) whose verdict was `Allow`
+  enrols its `registrationId` (`OwnEndpoints::enrol`, after the verdict: a registration the log refused enrols
+  nothing). It says the fence let the registration out, not that the registrar took it. Each lab session has its own
+  set, so b's endpoint never counts for a; the calling stack's registration never enrols.
+- A reset is recognized only when Chrome's event says nothing of a body: `PausedRequest::body_unread` is set when
+  `postData` isn't a string while any of `postData`, `hasPostData`, `postDataEntries` is there (of any value, `null`
+  and `false` included), and then the request is unknown. An empty, blank, `{}` or `null` body is no reset.
+- Anything else (another endpoint, another value, "Be right back", "Appear offline", a duration, a status note
+  (`publishnote`), a work location, out-of-office, the presence subscriptions) stays unknown and denied. The design
+  was settled with Codex (2026-10-23): enrolment only after the registration's `Allow`, every pinned header required,
+  the callers pinned, the reset's body positively absent.
 
 ## Reconnect parameters and backoff (from the bundle)
 
@@ -387,4 +494,8 @@ place.
   denied). Revisit only if the replay measurably impairs the native client.
 - Whether a long-lived native session without `user.activity` is treated differently (the sockets that never sent
   one here lived seconds to minutes).
-- What makes an account show online ([presence](#useractivity-and-presence)).
+- ~~What makes an account show online ([presence](#useractivity-and-presence)).~~ **Answered (live, M2 Task 18,
+  2026-10-23)**: UPS's presence endpoint `PUT`; `user.activity` alone doesn't
+  ([Own presence](#own-presence-m2-task-18)).
+- Why a closed browser that had sent `user.activity` stayed online about 6 minutes, and one that hadn't only seconds
+  ([Own presence](#own-presence-m2-task-18)); and why the web client sent no endpoint `PUT` at all in some runs.

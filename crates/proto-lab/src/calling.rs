@@ -308,6 +308,17 @@ pub fn messaging_request(method: &str, url: &Url, body: Option<&[u8]>) -> Option
     (is_registration(body) && registers_messaging(body)).then_some(OwnKind::EndpointRegistration)
 }
 
+/// The endpoint a messaging registration ([`messaging_request`]) registers: its `registrationId`, the client's Trouter
+/// endpoint id (its socket's `epid`), which UPS's presence endpoint `PUT` names as the account's own
+/// (`crate::availability`). `None` for anything [`messaging_request`] doesn't take, and for an id that isn't a
+/// lower-case GUID (every capture's was).
+#[must_use]
+pub fn messaging_endpoint(method: &str, url: &Url, body: Option<&[u8]>) -> Option<String> {
+    messaging_request(method, url, body)?;
+    let id = strict_json(body?)?.get("registrationId")?.as_str()?.to_owned();
+    crate::classify::is_lower_guid(&id).then_some(id)
+}
+
 /// Whether a registration ([`is_registration`]) describes the messaging stack: its app exactly [`MESSAGING_APP`], its
 /// template [`MESSAGING_APP`], `_` and a version of digits and dots.
 fn registers_messaging(body: &[u8]) -> bool {

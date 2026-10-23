@@ -47,6 +47,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `docs/plans/` | milestone plans; finished ones in `docs/plans/completed/` |
 | `build/patches/`, `vendor/`, `scripts/vendor-gpui.sh` | GPUI (`gpui-pre` 0.3.9) vendored with agterm-rs's external-surfaces patches, used through `[patch.crates-io]`; `scripts/vendor-gpui.sh --check` verifies it |
 | `scripts/lint-report.sh` | refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s |
+| `scripts/own-presence-run.sh` | one `own-presence-*` live run with b's presence reads of a sampled beside it (M2 Task 18) |
 | `tools/` | interim Node tools: `ca-probe` (the Conditional Access probe), `lab-login` (the first sign-in of the profiles) |
 
 ## Third-party UI code
@@ -192,6 +193,12 @@ the run.
   (`TYPE_FOR`, `PAUSE`, `AFTER_EMPTYING`) while b's open chat records its typing
   indicator, sends a message of three lines with a link, and mentions b in the recorded group chat
   (`docs/protocol/chat.md`).
+- `own-presence-activity`, `-endpoint`, `-both`, `-manual-held`, `-manual`: account a alone, under the messaging
+  classifier, with its own availability let through in its captured shapes only (the user's exception in
+  [CLAUDE.md](CLAUDE.md), `crates/proto-lab/src/availability.rs`): `user.activity` alone, UPS's endpoint `PUT` alone,
+  both, then a manual status (Busy, Do not disturb, Away, Available, reset) denied to capture it and let through.
+  b's view is read outside the run: `scripts/own-presence-run.sh <scenario> <samples> <report file>`, under the live
+  lock, samples `teams-headless b presence` beside the run (`docs/protocol/trouter.md`, "Own presence").
 - `echo-call`: account a places the web client's test call to the echo service, with a fake microphone playing a
   440 Hz tone. The calling classifiers allow the account's reviewed own-state (its settings and policy reads, the
   Trouter session, the endpoint registration) and the call start in exactly its captured shape, a new call of a and

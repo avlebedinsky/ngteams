@@ -19,6 +19,9 @@
 //! - [`chat_shapes`] (accounts a and b, as `ab-trouter`, plus the lab's group chat): the chat shapes the native UI
 //!   still needs, recorded: each quick reaction set and taken back, typing as a types, pauses and empties its box
 //!   (and how long b's open chat shows it), a message with line breaks and a link, a mention of b in the group chat.
+//! - [`own_presence`] (account a, the messaging set of `ab-trouter`, its own availability under the user's exception of
+//!   2026-10-21): what makes a show online as b reads it (`own-presence-activity`, `-endpoint`, `-both`) and what a
+//!   manual status sends (`own-presence-manual-held`, `own-presence-manual`); recorded.
 //! - [`echo_call`] (account a, writes mapped, members read live, fake microphone): a places the web client's test call
 //!   to the echo service, the one approved participant outside the lab, stays in it a while and hangs up; recorded.
 //!
@@ -36,6 +39,7 @@ pub mod dsl;
 pub mod echo_call;
 pub mod expected;
 pub mod load;
+pub mod own_presence;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -77,6 +81,16 @@ pub enum ScenarioName {
     ChatShapes,
     /// Account a places the test call to the echo service with a fake microphone playing a tone; recorded.
     EchoCall,
+    /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
+    OwnPresenceActivity,
+    /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
+    OwnPresenceEndpoint,
+    /// Account a's availability reported by both; recorded.
+    OwnPresenceBoth,
+    /// As `own-presence-both`, and a sets its status by hand with each request denied, to capture it.
+    OwnPresenceManualHeld,
+    /// As `own-presence-both`, and a sets its status by hand, the mapped request let through.
+    OwnPresenceManual,
 }
 
 impl ScenarioName {
@@ -93,6 +107,11 @@ impl ScenarioName {
             Self::AbTrouterQuiet => "ab-trouter-quiet",
             Self::ChatShapes => "chat-shapes",
             Self::EchoCall => "echo-call",
+            Self::OwnPresenceActivity => "own-presence-activity",
+            Self::OwnPresenceEndpoint => "own-presence-endpoint",
+            Self::OwnPresenceBoth => "own-presence-both",
+            Self::OwnPresenceManualHeld => "own-presence-manual-held",
+            Self::OwnPresenceManual => "own-presence-manual",
         }
     }
 }
@@ -298,5 +317,10 @@ pub async fn run(
         ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,
         ScenarioName::ChatShapes => chat_shapes::run(paths, options).await,
         ScenarioName::EchoCall => echo_call::run(paths, options).await,
+        ScenarioName::OwnPresenceActivity
+        | ScenarioName::OwnPresenceEndpoint
+        | ScenarioName::OwnPresenceBoth
+        | ScenarioName::OwnPresenceManualHeld
+        | ScenarioName::OwnPresenceManual => own_presence::run_named(paths, options, scenario).await,
     }
 }

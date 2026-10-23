@@ -3,6 +3,7 @@
 
 pub mod accounts;
 pub mod arming;
+pub mod availability;
 pub mod browser;
 pub mod bundles;
 pub mod calling;

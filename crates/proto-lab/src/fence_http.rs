@@ -44,8 +44,9 @@ use teams_fence::{
 use tokio::sync::mpsc;
 use url::Url;
 
+use crate::availability::OwnEndpoints;
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
-use crate::classify::{Classification, Classifier};
+use crate::classify::{Classification, Classifier, OwnKind};
 
 /// One request as `Fetch.requestPaused` shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +61,10 @@ pub struct PausedRequest {
     pub headers: Vec<(String, Option<String>)>,
     /// The body as `postData` carries it. Missing when the request has none, or when Chrome didn't inline it.
     pub body: Option<Vec<u8>>,
+    /// Whether the event says something of a body that `body` doesn't hold: a `postData` that isn't a string, or
+    /// `hasPostData` or `postDataEntries` (of any value) without a string `postData`. Only with it false does a missing
+    /// `body` mean the request has none (`crate::availability`: the manual status's reset has no body).
+    pub body_unread: bool,
     /// The request's `Network` id (`networkId`), the one the page's `Network` events know it by. Missing when the event
     /// doesn't give one.
     pub network_id: Option<String>,
@@ -93,6 +98,10 @@ impl PausedRequest {
                 })
                 .unwrap_or_default(),
             body: request["postData"].as_str().map(|body| body.as_bytes().to_vec()),
+            body_unread: !request["postData"].is_string()
+                && ["postData", "hasPostData", "postDataEntries"]
+                    .iter()
+                    .any(|key| request.get(key).is_some()),
             network_id: text(&params["networkId"]),
         })
     }
@@ -318,6 +327,9 @@ pub struct HttpFence {
     forced: Mutex<Vec<ForcedDeny>>,
     denials: Mutex<Vec<Denial>>,
     catch: Option<RedirectCatch>,
+    /// The endpoints this browser's fence let the account register, which a request setting its own availability must
+    /// name (`crate::availability`).
+    endpoints: OwnEndpoints,
 }
 
 impl HttpFence {
@@ -332,6 +344,7 @@ impl HttpFence {
             forced: Mutex::new(Vec::new()),
             denials: Mutex::new(Vec::new()),
             catch: None,
+            endpoints: OwnEndpoints::new(),
         }
     }
 
@@ -426,7 +439,16 @@ impl HttpFence {
             &request.headers,
             request.body.as_deref(),
         );
-        self.judge(classification, &request.method, &request.url).await
+        // an own-availability request passes only on an endpoint this browser let the account register, and only when
+        // its body was read with certainty
+        let classification = self.endpoints.resolve(classification, request.body_unread);
+        let registration = classification == Classification::Own(OwnKind::EndpointRegistration);
+        let verdict = self.judge(classification, &request.method, &request.url).await;
+        if registration && verdict == Verdict::Allow {
+            self.endpoints
+                .enrol(&request.method, &request.url, request.body.as_deref());
+        }
+        verdict
     }
 
     /// Decides a request already classified. Every deny is logged and kept.
@@ -557,8 +579,9 @@ pub(crate) async fn judge(
             Ok(_permit) => Verdict::Allow,
             Err(denied) => Verdict::Deny(DenyCause::Fenced(*denied.reason())),
         },
-        // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
-        Classification::PostRead { .. } | Classification::Unknown => {
+        // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it. An
+        // own-availability request comes here only unresolved (`HttpFence::decide` resolves it): denied
+        Classification::PostRead { .. } | Classification::OwnAvailability { .. } | Classification::Unknown => {
             match fence.log().record_request(&record(RequestOutcome::Unclassified)) {
                 Ok(()) => Verdict::Deny(DenyCause::Unclassified),
                 Err(_) => Verdict::Deny(DenyCause::LogUnavailable),

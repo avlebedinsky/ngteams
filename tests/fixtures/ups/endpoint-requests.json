@@ -1,0 +1,42 @@
+{
+  "_synthetic": "Made up, in the shape of the web client's UPS presence endpoint PUTs that the captures of 2026-10-20 to 2026-10-21 show (403 of them, read locally, all denied then; M2 Task 18): PUT /ups/<geo>/v1/me/endpoints/ with no query, on either Teams origin, the headers the client sent as the fence paused them (their values made up but those the check reads, as captured: Content-Type's, behavioroverride's, Origin's (the request's own), x-ms-object-id's and x-ms-request-id's (always empty), x-ms-client-type's and x-ms-client-user-agent's; x-ms-endpoint-id the body's id), and a body of exactly id (the client's Trouter endpoint id, which its messaging registration gave as registrationId), availability, activity, activityReporting and deviceType. The two availability/activity pairs are the two the captures showed. These are the shapes the browser fence lets through as the account's own availability (crates/proto-lab/src/availability.rs), and only for an endpoint the session registered. <endpoint> is a made-up lower-case GUID tests fill in.",
+  "headers": {
+    "Accept": "*/*",
+    "Cookie": "<the account's own cookies>",
+    "Origin": "<the request's own origin>",
+    "Referer": "https://teams.microsoft.com/v2/worker/made-up-worker.js",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) made-up",
+    "authorization": "Bearer <the account's own presence token>",
+    "behavioroverride": "redirectAs404",
+    "content-type": "application/json",
+    "x-ms-client-caller": "presence-sync-strategy:TrouterStateChanged",
+    "x-ms-client-type": "cdlworker",
+    "x-ms-client-user-agent": "Teams-V2-Web",
+    "x-ms-client-version": "1415/26100212011",
+    "x-ms-correlation-id": "made-up-correlation-id",
+    "x-ms-endpoint-id": "<endpoint>",
+    "x-ms-object-id": "",
+    "x-ms-request-id": "",
+    "x-ms-session-id": "made-up-session-id"
+  },
+  "requests": [
+    {
+      "name": "the endpoint available, on the classic origin",
+      "origin": "https://teams.microsoft.com",
+      "path": "/ups/noam/v1/me/endpoints/",
+      "body": {"id": "<endpoint>", "availability": "Available", "activity": "Available", "activityReporting": "Transport", "deviceType": "Web"}
+    },
+    {
+      "name": "the endpoint available, on the cloud origin",
+      "origin": "https://teams.cloud.microsoft",
+      "path": "/ups/noam/v1/me/endpoints/",
+      "body": {"id": "<endpoint>", "availability": "Available", "activity": "Available", "activityReporting": "Transport", "deviceType": "Web"}
+    },
+    {
+      "name": "the endpoint in a call",
+      "origin": "https://teams.microsoft.com",
+      "path": "/ups/noam/v1/me/endpoints/",
+      "body": {"id": "<endpoint>", "availability": "Busy", "activity": "InACall", "activityReporting": "Transport", "deviceType": "Web"}
+    }
+  ]
+}
