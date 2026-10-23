@@ -1492,27 +1492,46 @@ task replaces that with one logger of our own. `teams-headless`'s `TEAMS_HEADLES
 **Files:**
 - Create: `crates/teams-app/tests/ui_live.rs` (`required-features = ["live"]`), `docs/m2-acceptance.md`
 
-- [ ] the live test is an orchestrator only: it starts the UI sandbox, spawns the app built by `cargo build -p
+- [x] the live test is an orchestrator only: it starts the UI sandbox, spawns the app built by `cargo build -p
       teams-app --target-dir target/lab` (path from `TEAMS_APP_BIN`) for a, b and c, one app process each, drives them
       by keyboard through the sandbox's input, reads their view traces and `fence.log`; it opens no fence, holds no
       token and sends nothing itself
-- [ ] credentials: for each account the orchestrator starts that binary's broker (`teams-app secrets --lab <alias>`)
+- [x] credentials: for each account the orchestrator starts that binary's broker (`teams-app secrets --lab <alias>`)
       outside the sandbox, with the user's session bus, and hands the socket's other end to the app it spawns in the
       sandbox (`--secrets-fd`). It never reads or writes the socket itself, and the app's environment carries only the
       sandbox's bus. Every broker has exited when the run ends (checked); no token in the orchestrator's, the
       brokers' or the apps' output
-- [ ] (`PROTO_LAB_LIVE=1`): a types and sends N = 20 messages to b; each is shown in b's chat view; **send → shown
+- [x] (`PROTO_LAB_LIVE=1`): a types and sends N = 20 messages to b; each is shown in b's chat view; **send → shown
       p95 under 2 s** (p50/p95/max reported); an edit, a reply and a reaction shown; a message to the group chat shown
       by b and c; b's notification raised on the sandbox's bus for a chat it isn't viewing; names and presence shown
       (b sees a online, then Busy when a sets it); a search in b finds a's message; a channel shown read-only; b's app
       closed, a sends, b's app reopened shows every message once and notifies once. Images and files only as far as
       Tasks 21–23 got
-- [ ] `fence.log` for the run: allows only on the lab chats and the lab accounts' own presence, no deny of a mapped
+- [x] `fence.log` for the run: allows only on the lab chats and the lab accounts' own presence, no deny of a mapped
       write, own-state, `PostRead` and frames only from the reviewed lists; screenshots of each step under
       `<data_dir>/screenshots/<time>/`, never the repo
-- [ ] `proto-lab run ab-chat --headless` and `abc-chat` still exit 0; `teams-headless`'s `chat_live` still passes
-- [ ] the gate passes; write `docs/m2-acceptance.md` (numbers, fence summary, flakes, any breached run next to its
+- [x] `proto-lab run ab-chat --headless` and `abc-chat` still exit 0; `teams-headless`'s `chat_live` still passes
+- [x] the gate passes; write `docs/m2-acceptance.md` (numbers, fence summary, flakes, any breached run next to its
       clean rerun)
+- Done (2026-10-23, `docs/m2-acceptance.md`), where it differs from the lines above:
+  - Each app runs in a UI sandbox of its own (three sandboxes, at 20 Hz), so each window is its compositor's focused
+    one and each virtual keyboard reaches only its app. Credentials as written: a broker per account outside, its
+    socket's other end to the app; the apps' environments checked from `/proc` (their sandbox's bus and compositor,
+    no `DISPLAY`); every broker exited cleanly, the restarted b's included; no token in any output.
+  - The app needed keyboard paths and trace lines the run reads (a commit of their own, with tests): Escape from an
+    empty compose box to the message list and back; the switcher's channels and "Set status: …" commands; the trace's
+    `reacted`/`replies` on `chat-view shown`, `header shown` (presence by key, named, picture) and `compose changed`
+    (no text). The trace now holds the header's presence as a key (Task 17's test said it held none).
+  - Send → shown is from a's Enter, pressed once the app's `compose changed` lines went quiet: the debug build takes
+    in the virtual keyboard's keystrokes more slowly than it types them (`docs/backlog/debug-build-keystroke-lag.md`).
+    Run 5: p50 1326, p95 1850, max 1959 ms. Runs 3 and 4 were over (2030, 2345 ms; run 4 under the 4-CPU cap).
+  - `fence.log`: the one deny accepted is the fence refusing the profile lookup (`PostRead` `short_profile`) of a
+    channel's member outside the lab, nothing sent (Task 12's design: run 3 had 36, run 5 none).
+  - "b's app closed … notifies once": the window closed into the tray notified once and showed the message when opened
+    again; the app quit and restarted showed every message once and, by Task 14's rule, notified nothing for messages
+    from before its start.
+  - Five live runs, none a breach; runs 1–4 failed on the orchestrator (two), the refused lookups, the latency.
+
 
 ### Task 26: The personal build's rules: design, then the user decides
 **Files:**

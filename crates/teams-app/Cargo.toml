@@ -59,5 +59,16 @@ zbus.workspace = true
 name = "window"
 harness = false
 
+[[test]]
+# the live acceptance run (M2 Task 25): an orchestrator that spawns the lab build of the app in UI sandboxes for a, b
+# and c; built only with `--features live`, run only with PROTO_LAB_LIVE=1
+name = "ui_live"
+required-features = ["live"]
+
+[features]
+# builds the live acceptance test (`tests/ui_live.rs`); it still runs only with PROTO_LAB_LIVE=1, so `--all-features`
+# stays offline
+live = []
+
 [lints]
 workspace = true
