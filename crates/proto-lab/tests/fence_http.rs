@@ -26,7 +26,7 @@ use proto_lab::arming::{
 use proto_lab::browser::{Browser, BrowserError, LaunchOptions};
 use proto_lab::capture::{Capture, Recorder, RtcHooks};
 use proto_lab::cdp::{Cdp, CdpError, SessionId};
-use proto_lab::classify::{Classification, Classifier, classify, is_mutating};
+use proto_lab::classify::{Classification, Classifier, classify};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{DenyCause, ForcedDeny, HttpFence, MalformedPause, PausedRequest, Verdict};
 use proto_lab::fence_ws::{GuardScript, WsFence};
@@ -35,7 +35,7 @@ use proto_lab::session::FenceReport;
 use serde_json::{Value, json};
 use teams_fence::{
     ArmingCause, CloseOutcome, Containment, DenyReason, Fence, FenceLog, Membership, MembershipFuture,
-    MembershipSource, Mri, Roster, Scope, Target, WriteKind,
+    MembershipSource, Mri, Request, Roster, Scope, Target, WriteKind,
 };
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
@@ -63,7 +63,7 @@ fn reading_methods_are_reads_whatever_the_url() {
     for method in ["GET", "HEAD", "OPTIONS", "get", "Options"] {
         assert_eq!(classify(method, CHAT, None), Classification::Read, "{method}");
         assert_eq!(classify(method, "not a url", None), Classification::Read, "{method}");
-        assert!(!is_mutating(method));
+        assert!(!Request::new(method, CHAT).is_mutating());
     }
 }
 
@@ -72,7 +72,7 @@ fn every_other_method_is_mutating_and_judged_by_the_table() {
     for method in [
         "POST", "PUT", "PATCH", "DELETE", "post", "PROPFIND", "CONNECT", "TRACE", "",
     ] {
-        assert!(is_mutating(method), "{method}");
+        assert!(Request::new(method, CHAT).is_mutating(), "{method}");
         // the chat service reads no such body: unknown, whatever the method
         assert_eq!(classify(method, CHAT, Some(b"{}")), Classification::Unknown, "{method}");
         // a host that is no contacting service: it reaches nobody

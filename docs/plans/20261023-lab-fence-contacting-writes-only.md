@@ -564,14 +564,40 @@ and tokens, the personal build and protocol notes stay as they are:
 - Modify: whatever is left of `OwnKind`, `OwnRule`, `UrlPattern`, `RequestOutcome::Own`, the `post_read` log record
   and the `chats_file` readers
 
-- [ ] grep for each piece Context names; delete the ones with no caller left and no personal-build user; list the
+- [x] grep for each piece Context names; delete the ones with no caller left and no personal-build user; list the
       ones kept and why in this plan
+- ➕ note (Task 8 as built): Tasks 3–7 had already deleted most pieces with their last caller (Tasks 3–7's notes).
+      Deleted here, each with no caller left: `proto_lab::classify::is_mutating` (its last src caller went in Task 4;
+      its test now asks `teams_fence::Request::is_mutating`), `teams-fence`'s tokio `fs` feature (the `chats.toml`
+      lookup inside the group read went in Task 3), and the fixtures `tests/fixtures/mt/profile-lookups.json` and
+      `tests/fixtures/ups/getpresence-requests.json` (the browser fence's read-by-`POST` shapes; their only reader,
+      `proto-lab/tests/post_reads.rs`, went in Task 4). Docs of kept pieces that still named the deleted browser lists
+      were reworded (`lab_accounts_only`, `teams-fence`'s `post_read.rs`, `RequestOutcome`, `teams-proto`'s `post_read.rs`,
+      `login`'s `MfaCode` message). Kept, and why:
+      - for the personal build (`docs/personal-build.md`, Task 2's notes on Tasks 5 and 6): `teams-proto`'s sealed
+        `OwnState` and `PostRead` lists (`own.rs`, `post_read.rs`, `HttpTransport::{own_state, post_read}`,
+        `AuthorizedPostRead`, `PostReadError`), `Fence::check_post_read`, `PostReadPermit`, `PostReadDenied`,
+        `Fence::lab_accounts_only`, `FenceLog`'s `post_read_decision` record, `RequestOutcome::PostRead`, `FrameRecord`,
+        `FenceLog::record_frame`, `OwnFrame::KIND`, and their `fence-seal` cases (`proto_own_state`, `proto_post_read*`,
+        `post_read_permit*`); none has a lab caller now;
+      - for the sign-in window (lab and personal): `teams_signin::classify` (`OwnKind`, `OwnRule`, `UrlPattern`,
+        `QueryRule`, `ValueRule`, `TOKEN_QUERY`, `AUTHZ`, `Classifier::{seeded, sign_in, with_own}`; `seeded` is
+        `sign_in`'s base) and `RequestOutcome::Own` (also the native `own_state` record);
+      - in lab use: `WriteKind::OwnAvailability` and its own-account check, `RegisteredEndpoint`, `EndpointRegistrar`
+        and `register` (`teams-trouter`, `teams-core`); the per-service bases' `accepts_csa_base`/`accepts_presence_base`
+        (`teams-core/src/lab.rs`); the `chats.toml` readers `LabChats`, `record_abc_chat`, `LabPaths::chats_file` (lab
+        data for `proto-lab`'s scenarios and probes and the clients' tests, per the note below); `is_group_chat_id`
+        (`teams-proto/src/chat/model.rs`, the membership read); `RequestOutcome::{Unclassified, SentWithoutAllow,
+        Forced}` and `Channel::WebSocket` (the browser fence's denies and frame audit); `proto_lab::classify::classify`
+        and `strict_json` (the fence tests' and `ab-chat-full`'s readers); `ForcedFrameDeny::except_text_starting_with`
+        (the Chrome tests' local sockets);
+      - for M3: `WriteKind::{Call, CallAnswer, Invite, Meeting, ChannelPost, BotReply}`, `Scope::Call`.
 - ➕ note (Task 2 discovery): the `chats.toml` readers (`LabChats`, `record_abc_chat`, `chats_file`) have callers
       beyond the fence (`teams-headless/src/lab.rs`, `proto-lab`'s `abc_chat.rs`, `chat_shapes.rs`, `thread_probe.rs`,
       and the tests of `teams-headless`, `teams-app`, `teams-core`, `proto-lab`), so they stay as lab data; `LabGroup`
       and `PartialReason::UnrecordedGroupChat` have no caller outside `teams-fence`. `is_group_chat_id` stays
       (`teams-proto/src/chat/model.rs`); `Fence::open_lab_account` stays (`teams-headless`, `teams-app`).
-- [ ] tests pass
+- [x] tests pass
 
 ### Task 9: Live check under the new fence
 

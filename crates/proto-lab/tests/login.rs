@@ -875,7 +875,7 @@ fn every_mfa_prompt_stops_the_run() {
         next_action(&registration, after),
         Action::Stop(SignInStop::MfaRegistration)
     );
-    // a one-time code can't be submitted under the fence (its requests aren't on the list): stop, don't ask for one
+    // `login` has no step that types a one-time code in: stop, don't ask for one
     let code = probe_of(&json!({"otc": r#"input[name="otc"]"#, "next": true}));
     assert_eq!(next_action(&code, after), Action::Stop(SignInStop::MfaCode));
     assert_eq!(

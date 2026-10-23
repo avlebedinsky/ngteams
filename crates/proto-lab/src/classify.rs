@@ -88,14 +88,6 @@ impl Classifier {
     }
 }
 
-/// Whether a method can change anything: every method but `GET`, `HEAD` and `OPTIONS` (in any case).
-#[must_use]
-pub fn is_mutating(method: &str) -> bool {
-    !["GET", "HEAD", "OPTIONS"]
-        .iter()
-        .any(|reading| reading.eq_ignore_ascii_case(method))
-}
-
 /// Classifies one request with no headers ([`Classifier::new`]).
 #[must_use]
 pub fn classify(method: &str, url: &str, body: Option<&[u8]>) -> Classification {

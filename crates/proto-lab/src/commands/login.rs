@@ -134,7 +134,7 @@ pub enum SignInStop {
     MfaChoice,
     #[error("Microsoft asks to approve the sign-in in an app; not proceeding")]
     MfaApproval,
-    #[error("Microsoft asks for a one-time code; not proceeding (MFA requests aren't on the fence's reviewed list)")]
+    #[error("Microsoft asks for a one-time code; not proceeding")]
     MfaCode,
 }
 

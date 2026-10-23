@@ -133,14 +133,16 @@ pub enum Channel {
     WebSocket,
 }
 
-/// How the browser fence decided a request it didn't need a membership check for.
+/// How a request was decided without a membership check: by the browser fence, the sign-in window's guard or the native
+/// transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestOutcome {
-    /// An own-state request on the reviewed list (its kind's name), let through.
+    /// A request on the sign-in window's own-state list (`teams-signin`'s sign-in rules; its kind's name), or an entry
+    /// of the personal build's sealed `OwnState` list: let through.
     Own(&'static str),
-    /// A read sent as a `POST`, on the browser fence's reviewed list or the native client's sealed `PostRead` list (its
-    /// kind's name), whose body names only lab accounts ([`crate::Fence::lab_accounts_only`]): let through. Not
-    /// own-state and not a write.
+    /// A read sent as a `POST`, an entry of the personal build's sealed `PostRead` list (its kind's name), sent under
+    /// its [`crate::PostReadPermit`] (in a lab build, naming only lab accounts: [`crate::Fence::lab_accounts_only`]):
+    /// let through. Not own-state and not a write.
     PostRead(&'static str),
     /// Nothing classifies it: denied.
     Unclassified,

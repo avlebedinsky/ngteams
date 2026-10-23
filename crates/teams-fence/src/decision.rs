@@ -356,8 +356,9 @@ impl Fence {
     }
 
     /// Whether `names` names someone and only the lab accounts, each by its exact MRI: no approved service, nobody
-    /// else. The browser fence lets a reviewed read by `POST` through only then (a profile lookup of the lab's own
-    /// accounts), so that nothing such a read names is outside the lab. It mints no permit and logs nothing.
+    /// else. [`Fence::check_post_read`] permits an entry of the personal build's sealed `PostRead` list only then in a
+    /// lab build (`docs/personal-build.md`); the lab's own reads by `POST` go out as plain requests, whoever they name.
+    /// It mints no permit and logs nothing.
     #[must_use]
     pub fn lab_accounts_only(&self, names: &[Mri]) -> bool {
         !names.is_empty() && names.iter().all(|mri| self.roster.is_lab_account(mri))

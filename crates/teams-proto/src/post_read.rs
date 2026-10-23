@@ -20,10 +20,9 @@
 //!
 //! The entries:
 //! - [`ShortProfileLookup`]: the middle tier's `users/fetchShortProfile` by MRI, in the query the web client always
-//!   sent (`isMailAddress=false&…`), the browser fence's `short_profile` (`crates/proto-lab/src/post_read.rs`).
-//! - [`PresenceRead`]: UPS's `v1/presence/getpresence/` by MRI (M2 Task 17), the browser fence's `presence`: its
-//!   answers in the first run that let it through (ab-chat of 2026-10-22, 14 reads) each named only the accounts asked
-//!   for.
+//!   sent (`isMailAddress=false&…`).
+//! - [`PresenceRead`]: UPS's `v1/presence/getpresence/` by MRI: its answers in the first run that let it through each
+//!   named only the accounts asked for.
 
 use std::fmt;
 

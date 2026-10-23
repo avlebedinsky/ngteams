@@ -21,8 +21,8 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# the lab's group chat read: one deadline over the whole of it, and its chats.toml lookup inside that deadline
-tokio = { workspace = true, features = ["fs", "time"] }
+# a group or meeting chat's member read: one deadline over the whole of it
+tokio = { workspace = true, features = ["time"] }
 toml.workspace = true
 toml_edit.workspace = true
 url.workspace = true

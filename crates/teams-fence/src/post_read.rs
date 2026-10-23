@@ -1,12 +1,12 @@
-//! The fence's decision on a native read by `POST` (M2 Task 11): [`Fence::check_post_read`] gives a
-//! [`PostReadPermit`] for one entry of `teams-proto`'s sealed `PostRead` list and its exact list of MRIs, or
-//! [`PostReadDenied`].
+//! The fence's decision on a native read by `POST` of the personal build's sealed list: [`Fence::check_post_read`]
+//! gives a [`PostReadPermit`] for one entry of `teams-proto`'s sealed `PostRead` list and its exact list of MRIs, or
+//! [`PostReadDenied`]. The lab's native client sends its reads by `POST` as plain requests (they reach nobody); this
+//! decision stays for the personal build (`docs/personal-build.md`), which keeps the sealed list and, in a lab build,
+//! its limit to the lab's own accounts.
 //!
-//! A read by `POST` changes nothing, but it names people, and its answer tells about them: the user decided on
-//! 2026-10-21 that the native client may send one only when every MRI it names is a lab account at the moment the
-//! fence decides (CLAUDE.md, "The native client's fourth list"). So the lab fence denies a list that is empty, that
-//! names an MRI twice, or that names anyone but the lab accounts of its roster, an approved service participant
-//! included ([`Fence::lab_accounts_only`]). It fetches nothing.
+//! The limit: the fence denies a list that is empty, that names an MRI twice, or that names anyone but the lab
+//! accounts of its roster, an approved service participant included ([`Fence::lab_accounts_only`]). It fetches
+//! nothing.
 //!
 //! Every decision is appended to `fence.log` (the entry's kind, how many MRIs it names, the verdict and the reason;
 //! never the MRIs), and an allow that can't be logged is denied. What the request looks like on the wire (its

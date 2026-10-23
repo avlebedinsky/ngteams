@@ -16,8 +16,9 @@
 //! fence and the native transport alike, telling a request that reaches nobody ([`Contact::None`]) from a mapped write
 //! ([`Contact::Write`]) and from a mutating request on a contacting service that no row reads ([`Contact::Unreadable`]).
 //!
-//! A native read by `POST` (`teams-proto`'s sealed `PostRead` list) is decided by [`Fence::check_post_read`]: a
-//! [`PostReadPermit`] for its exact list of MRIs when every one is a lab account, none twice, the decision logged.
+//! A native read by `POST` of the personal build's sealed list (`teams-proto`'s `PostRead`) is decided by
+//! [`Fence::check_post_read`]: a [`PostReadPermit`] for its exact list of MRIs when every one is a lab account, none
+//! twice, the decision logged. The lab's native client sends its reads by `POST` as plain requests instead.
 //!
 //! Nothing outside this crate can bend a decision: a lab binary builds its fence only with [`Fence::open_lab`] (the
 //! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed, so its sources are
