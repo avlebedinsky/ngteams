@@ -21,6 +21,7 @@ fn request(method: &str, url: &str, body: &str) -> PausedRequest {
         url: url.to_owned(),
         headers: Vec::new(),
         body: Some(body.as_bytes().to_vec()),
+        body_unread: false,
         network_id: None,
     }
 }
