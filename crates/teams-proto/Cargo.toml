@@ -1,6 +1,6 @@
 [package]
 name = "teams-proto"
-description = "Teams internal API requests and the native HTTP transport; every mutating request takes a WritePermit from teams-fence"
+description = "Teams internal API requests and the native HTTP transport; every contacting write takes a WritePermit from teams-fence"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,9 +24,9 @@ teams-log.workspace = true
 # the requests in the app's diagnostic log: by method, host, path, status and latency at `info`; capped at `debug` at
 # compile time like teams-trouter's
 log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
-# the allowlist compares a built URL's decoded path with the endpoint's segments
+# a built URL's decoded path is compared with its service's base and the endpoint's segments
 percent-encoding.workspace = true
-# the transport's own HTTPS client: no proxy, no redirects, a fixed host allowlist
+# the transport's own HTTPS client: no proxy, no redirects, its services' bases
 reqwest.workspace = true
 # the chat service's message HTML, read into the typed rich-text model
 scraper.workspace = true
@@ -36,7 +36,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 # a message's ISO times as milliseconds
 time.workspace = true
-# the wait before a throttled read or own-state request is sent again
+# the wait before a throttled read, plain or own-state request is sent again
 tokio = { workspace = true, features = ["time"] }
 url.workspace = true
 

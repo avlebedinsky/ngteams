@@ -206,7 +206,7 @@ pub enum Refusal {
     Unreadable,
     /// The URL built isn't on its service's base: another host, scheme or port, or a path or query other than the
     /// base's and the endpoint's exactly.
-    #[error("the URL isn't on the transport's allowlist")]
+    #[error("the URL isn't on its service's base")]
     NotAllowed,
     /// A token that can't be sent as a header value.
     #[error("a token that can't be sent in a header")]
@@ -701,8 +701,8 @@ impl<C: Credentials> HttpTransport<C> {
         answered.map(|(answer, _)| answer)
     }
 
-    /// Sends a read by `POST` (see [`Transport::post_read`]): the request built from the entry, read back against the
-    /// entry's captured shape and the permit's MRIs, its token, its `fence.log` record, then one send.
+    /// Sends a read by `POST` (see [`HttpTransport::post_read`]): the request built from the entry, read back against
+    /// the entry's captured shape and the permit's MRIs, its token, its `fence.log` record, then one send.
     async fn send_post_read<R: PostRead + Send>(&self, read: AuthorizedPostRead<R>) -> Result<Response, HttpError> {
         let shape = read.shape();
         let wire = read.wire();

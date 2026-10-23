@@ -1,6 +1,6 @@
-//! The client: every mutating call takes a [`WritePermit`] and goes through [`Authorized::new`] before it reaches the
-//! [`Transport`]. A transport takes requests of three classes only: a [`Read`] (always a `GET`), a plain [`Request`]
-//! (sent only when [`teams_fence::contacting`] says it reaches nobody), or an [`Authorized`] write.
+//! The client: every contacting write takes a [`WritePermit`] and goes through [`Authorized::new`] before it reaches
+//! the [`Transport`]. A transport takes requests of three classes only: a [`Read`] (always a `GET`), a plain
+//! [`Request`] (sent only when [`teams_fence::contacting`] says it reaches nobody), or an [`Authorized`] write.
 
 use std::error::Error;
 use std::fmt;

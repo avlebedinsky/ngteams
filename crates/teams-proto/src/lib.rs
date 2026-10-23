@@ -1,4 +1,4 @@
-//! Teams internal API requests and the native request policy. Every mutating request takes a `WritePermit` that only
+//! Teams internal API requests and the native request policy. Every contacting write takes a `WritePermit` that only
 //! `teams-fence` can issue.
 //!
 //! A request comes in one of three classes, and a [`Transport`] takes nothing else:
@@ -33,10 +33,10 @@
 //! `user.activity`.
 //!
 //! [`HttpTransport`] is the live transport: one base per service, `https` only, no proxy, no redirects, each of the
-//! account's tokens (from its `teams-auth` session) only to its own service's host. Only the `test-support` feature (tests, never a lab binary) points it at a
-//! local mock ([`HttpTransport::with_mock_origin`]). It is also where the fence's live membership read takes the
-//! native client's own credential from ([`teams_fence::CredentialSource`]): the account's `ic3` token and the
-//! transport's chat base.
+//! account's tokens (from its `teams-auth` session) only to its own service's host. Only the `test-support` feature
+//! (tests, never a lab binary) points it at a local mock (`HttpTransport::with_mock_origin`). It is also where the
+//! fence's live membership read takes the native client's own credential from ([`teams_fence::CredentialSource`]):
+//! the account's `ic3` token and the transport's chat base.
 
 pub mod chat;
 mod client;

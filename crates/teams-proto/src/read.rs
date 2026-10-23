@@ -3,13 +3,14 @@
 //! Besides the chat service's reads (in [`crate::chat`]), the reads of Microsoft Graph a person's name and picture come
 //! from (M2 Task 12): [`GraphUser`] and [`GraphPicture`], in the shapes `proto-lab probe profile` read live
 //! (`docs/protocol/graph.md`). Graph is our own reach, not the web client's (it names people through the middle
-//! tier's profile lookups, `crate::ShortProfileLookup`), so the probe's answers are the reviewed shape; the transport
-//! takes no other Graph endpoint ([`Service::Graph`]).
+//! tier's profile lookups, `crate::ShortProfileLookup`), so the probe's answers are the reviewed shape.
 //!
 //! And CSA's read of the account's teams and their channels (M2 Task 16): [`CsaTeams`], in the shape the web client
-//! sent it and `proto-lab probe teams` read live with our own `chatsvcagg` token (`docs/protocol/channels.md`); the
-//! transport takes no other CSA endpoint ([`Service::Csa`]). A channel's posts are read from the chat service like a
-//! chat's messages.
+//! sent it and `proto-lab probe teams` read live with our own `chatsvcagg` token (`docs/protocol/channels.md`). A
+//! channel's posts are read from the chat service like a chat's messages.
+//!
+//! Any other read on Graph ([`Service::Graph`]) or CSA ([`Service::Csa`]) goes to that service's base too; a mutating
+//! request to either is a plain [`Request`](crate::Request), judged by [`teams_fence::contacting`].
 
 use std::fmt;
 
