@@ -83,6 +83,9 @@
   API lands next to the old one, callers move, and the old one is deleted in the task that moves its last caller (or
   in Task 8, after a check that nothing uses it).
 - **CRITICAL: update this plan file when scope changes during implementation**
+- **every task updates `CLAUDE.md` for what its code changed, in the same change** (the user's rule of 2026-10-23:
+  `CLAUDE.md` reflects the current state, with no history): the hard rules reach the quoted text of Technical Details,
+  minus its history notes, as the code that backs each part lands; Patterns lines change as their code does
 - each task passes the gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D
   warnings`, `scripts/lint-report.sh`, `cargo test --workspace`; `cargo test -p fixture-guard` after touching any
   `tests/fixtures/` or `docs/`
@@ -296,14 +299,17 @@ and tokens, the personal build and protocol notes stay as they are:
 **Files:**
 - Modify: `CLAUDE.md`
 
-- [ ] replace the hard-rules block named in Technical Details with the quoted text, word for word
-- [ ] mark the Patterns lines that describe the old rules (the read-by-`POST` list, the group chat's enrolment and
-      `chats.toml` admission, own presence's exception, the expected-deny list's review, "Own-state is added only after
-      a review", the native client's sealed lists, "Don't stand in a registry of what the fence permitted", the
-      "Never answer a call" lines under Live runs and the native client) with "(being removed: 2026-10-23 rule)" until Task 11 rewrites them
-- [ ] ⚠️ the auto-mode classifier refused this edit on 2026-10-23 as self-modification: if it refuses again, stop and
+- [x] ➕ scope changed by the user on 2026-10-23: `CLAUDE.md` states only the project's current state, with no
+      history (no dates, decision records, milestone or task numbers, war stories). So Task 1 doesn't paste the quote
+      word for word or mark lines "(being removed)": it states the new rule as policy, without the parts that name
+      code not yet written (`teams_fence::contacting`, the `allowed` log, the call registry's keys), and says the code
+      is still stricter, pointing at this plan; the Patterns keep describing today's code, the process rules the new
+      rule voids ("Own-state is added only after a review", the expected-deny review, "Don't stand in a registry")
+      reworded or dropped, and all history removed from the file
+- [x] replace the hard-rules block named in Technical Details with the new rule, as above
+- [x] ⚠️ the auto-mode classifier refused this edit on 2026-10-23 as self-modification: if it refuses again, stop and
       ask the user to apply it (or to allow the edit); don't work around the refusal
-- [ ] `cargo test -p fixture-guard` passes
+- [x] `cargo test -p fixture-guard` passes
 
 ### Task 2: Discovery, the endpoint sweep, and `teams_fence::contacting` (additive)
 
@@ -480,7 +486,8 @@ run in the background.
 
 ### Task 11: [Final] Update documentation
 
-- [ ] `CLAUDE.md` Patterns: rewrite the lines Task 1 marked to what the code now does (same refusal note as Task 1)
+- [ ] `CLAUDE.md`: check that the hard rules and Patterns match what the code now does, with no history, and drop the
+      hard rules' note that the code is stricter than the rule (same refusal note as Task 1)
 - [ ] `README.md`, if it names the removed lists or classifiers
 - [ ] move this plan to `docs/plans/completed/`
 
