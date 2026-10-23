@@ -1,11 +1,9 @@
 # ms-teams
 
 A native Microsoft Teams client for Linux in Rust + GPUI, written against Teams' internal APIs with the web client as
-the reference. M0 (the protocol lab with its write fence, and risk spikes) and M1 (the headless chat core:
-`teams-store`, `teams-trouter`, `teams-core`, the `teams-headless` lab binary) are done; their outcomes are
-`docs/m0-acceptance.md` and `docs/m1-acceptance.md`. M2, the GPUI daily driver
-(`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`), is in progress. Commands and layout are in
-[README.md](README.md).
+the reference. The work in progress is the GPUI daily driver
+(`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`); finished plans are in `docs/plans/completed/`. Commands
+and layout are in [README.md](README.md).
 
 ## Hard rules
 
@@ -112,7 +110,9 @@ What the code does and why. A change that undoes one of these needs a new reason
 - One permit covers one write to one exact `Target` (kind, scope, added participants); `Authorized::new` checks it. A
   request the fence can't read with certainty is `Unknown` and denied: bodies are read strictly (case-folded duplicate
   keys make it `Unknown`), and the echo call start is matched in its captured shape.
-- Writes on an existing call aren't mapped, so they are denied (`docs/backlog/fence-call-follow-ups.md`).
+- Writes on an existing call are denied: the follow-ups aren't mapped, and the native `add` (`AddToCall`, an `Invite`
+  on `Scope::Call`) is `Partial`, since no membership source reads a call's members
+  (`docs/backlog/fence-call-follow-ups.md`).
 - Every other group chat is `Partial` and its writes are denied, a group chat the native client creates included: it
   isn't in `chats.toml` (`docs/backlog/group-chat-member-read-completeness.md`). Only `abc-chat` records the lab's
   chat, once.
@@ -133,6 +133,12 @@ What the code does and why. A change that undoes one of these needs a new reason
   `clientmessageid`, never stored twice. **No resend across runs**: each open store is a run holding a lock; rows of
   an earlier run go out only after an explicit `Store::resend`, never a row of a run still open (the web client
   resends a failed send on a later load; this rules that out).
+- **What the native client sends** (`teams-proto`): a read (`GET`, no body), an entry of the sealed `OwnState` list,
+  an entry of the sealed `PostRead` list (every MRI it names checked by `Fence::lab_accounts_only`), or a sealed
+  `Mutating` write as `Authorized<_>`; a Trouter frame only as an entry of the sealed `OwnFrame` list, through
+  `FrameSink`. Each own-state request, read by `POST` and frame is logged to `fence.log` before it is sent, and one
+  that can't be logged isn't sent. There is no raw request or frame, no answer to a delivery, and no retry the
+  transport didn't decide.
 - **The retry table, by layer**: the transport retries a read or own-state request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The
@@ -218,10 +224,13 @@ What the code does and why. A change that undoes one of these needs a new reason
   they aren't on it.
 - Classifiers are chosen per run: `seeded` (status, load, auth), `sign_in` (login only), `mapped` (ab-chat,
   ab-chat-full, ab-image, abc-chat), `messaging` (ab-trouter: the messaging stack's registration and the Trouter
-  session frames), `calling` (echo-call, a superset of `mapped`). An own-state rule matches an exact shape, its query
-  included (`OwnRule` takes no query unless given its `QueryRule`). The seeded rules match their captured queries;
-  only `login`'s sign-in form still takes any query, a known gap until a `login` capture (`captures/login/`, recorded
-  without request bodies) shows its queries (`docs/backlog/seeded-own-rules-ignore-the-query.md`).
+  session frames), `calling` (echo-call, a superset of `mapped`). An own-state rule (`OwnRule`) matches the method,
+  the origin, the path and the query (none unless given its `QueryRule`), never the body or headers. `UrlPattern`
+  ignores the query, `QueryRule::Any` takes any query, and `classify` checks own rules before `map_write`: such a rule
+  on a chat-service path would pass a mapped write (a reaction, `?name=emotions`) unfenced, so an own rule never takes
+  a request the write mapping would classify. The seeded rules match their captured queries; only `login`'s sign-in
+  form still takes any query, a known gap until a `login` capture (`captures/login/`, recorded without request bodies)
+  shows its queries (`docs/backlog/seeded-own-rules-ignore-the-query.md`).
 - After native runs the web client opens a chat at its "last read" mark (a native read receipt moves the stored
   horizon but not that mark), so a scenario waiting for a new message clicks "Jump to newest" or the "New messages"
   pill (`ab_chat::wait_for_newest`).

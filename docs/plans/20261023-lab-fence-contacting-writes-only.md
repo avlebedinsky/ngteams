@@ -233,10 +233,10 @@ caller and whoever it adds.
 - **No roster watch**: the user decided on 2026-10-23 not to check later roster updates for non-lab participants.
 - **Media** (TURN, ICE, DTLS-SRTP, over UDP or TCP to the relay hosts) doesn't go through the HTTP transport and isn't
   classified: it carries a call the signaling fence already permitted. Audio and video are the same call.
-- What this plan does for it: the hard-rules text below says the above; Task 1 marks the Patterns line "Don't stand
-  in a registry of what the fence permitted" and the "Never answer a call" lines as superseded; the calling family is a
-  table M3 adds rows to; `Scope::Call` and `WriteKind::Call` stay; the frame rule keeps delivery responses denied until
-  M3 adds typed ones for a registered call; Task 7 rewrites `docs/backlog/fence-call-follow-ups.md` to this path.
+- What this plan does for it: the hard-rules text below says the above; Task 1 drops the Patterns line "Don't stand in
+  a registry of what the fence permitted" (see Task 1's scope note); the calling family is a table M3 adds rows to;
+  `Scope::Call` and `WriteKind::Call` stay; the frame rule keeps delivery responses denied until M3 adds typed ones
+  for a registered call; Task 7 rewrites `docs/backlog/fence-call-follow-ups.md` to this path.
 
 ### The new `CLAUDE.md` hard rules
 
@@ -501,7 +501,8 @@ fence. The M2 plan is not edited by this plan: if Task 27's text needs adjusting
 about that plan.
 
 **`CLAUDE.md`.** The agent's auto mode refused editing `CLAUDE.md` on 2026-10-23. If it refuses again in Tasks 1 or
-11, the user applies the text from Technical Details or allows the edit.
+11, the user applies the change (Technical Details' rule, stated as the current state without history) or allows the
+edit.
 
 **The personal build's rules** (`docs/personal-build.md`) are the user's and unchanged; whether to simplify them the
 same way is the user's call.
