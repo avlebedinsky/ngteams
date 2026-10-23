@@ -1,19 +1,85 @@
-# Fence targets: the chat service's member reads and writes
+# Fence targets: what reaches people, and whose members the fence reads
 
-Status: 2026-10-20, M0 Task 11. First written from static analysis of the web bundle `26260.1717.5229.7049` (imported
-with `proto-lab bundles import`, searched with `proto-lab bundles search` and read in the chat service's request
-builders), plus [auth.md](auth.md). Then checked the same day against live traffic, once the lab accounts had a Teams
-license: `proto-lab run load` (account a) and `proto-lab run ab-chat` (a and b, the a–b 1:1 chat), the web client as
-served then. [What the captures showed](#what-the-captures-showed) lists what they confirmed and what they corrected;
-the sections above it are already corrected. M1 Task 7's `proto-lab run ab-chat-full` (the same day) exercised the
-edit, the delete, the reactions and a quoted reply, and corrected the edit row ([chat.md](chat.md) has the shapes); on
-2026-10-21, with the mention picker's profile lookups let through ([Reads by POST](#reads-by-post)), a mention.
-M1 Task 8 (2026-10-20) added a group chat: [A group chat's reads](#a-group-chats-reads); since the user's decision of
-2026-10-21 the fence admits that one chat: [The lab's group chat](#the-labs-group-chat).
+Status: 2026-10-23, the lab rule: **lab accounts contact only each other; everything else is allowed**. Rewritten for
+it by Task 7 of `docs/plans/20261023-lab-fence-contacting-writes-only.md`. First written 2026-10-20 (M0 Task 11) from
+static analysis of the web bundle `26260.1717.5229.7049` (imported with `proto-lab bundles import`, searched with
+`proto-lab bundles search` and read in the chat service's request builders) and [auth.md](auth.md), then checked the
+same day against live traffic, once the lab accounts had a Teams license: `proto-lab run load` (account a) and
+`proto-lab run ab-chat` (a and b, the a–b 1:1 chat). [What the captures showed](#what-the-captures-showed) lists what
+they confirmed and what they corrected. M1 Task 7's `ab-chat-full` (the same day) exercised the edit, the delete, the
+reactions and a quoted reply ([chat.md](chat.md) has the shapes); on 2026-10-21, a mention. M1 Task 8 (2026-10-20)
+read a group chat: [A group chat's reads](#a-group-chats-reads).
 
-The code: the mapping is `Classifier::mapped` (`crates/proto-lab/src/classify.rs`), the member read is
-`LiveMembershipSource` (`crates/teams-fence/src/membership.rs`). Both are tested against synthetic fixtures in the
-sanitizer's form (`tests/fixtures/chatsvc/`).
+The code: the one classifier is `teams_fence::contacting` (`crates/teams-fence/src/contacting.rs`, the chat service's
+rows in `contacting/chat.rs`, the call start in `contacting/call.rs`), tested row by row in
+`crates/teams-fence/tests/contacting.rs` against the synthetic fixtures in `crates/teams-fence/tests/fixtures/contacting/`
+and the chat service's in `tests/fixtures/chatsvc/`. The lab browser's fence asks it for every request it pauses
+(`crates/proto-lab/src/classify.rs`), the native transport for every plain request it sends
+(`crates/teams-proto/src/http.rs`, `Transport::send`). A mapped write's target is judged by `Fence::check`
+(`crates/teams-fence/src/decision.rs`) against a fresh member read, `LiveMembershipSource`
+(`crates/teams-fence/src/membership.rs`).
+
+## The verdicts
+
+`contacting` answers one of three:
+
+- **`Contact::None`**: the request reaches nobody and is let through. Every request that only reads (`GET`, `HEAD` or
+  `OPTIONS` with no body and no method override), every request to a host that is no contacting service, and the
+  carve-outs on one. A mutating one is logged to `fence.log` as `allowed`, by its method, host and path shape (ids
+  replaced by their kind: `<chat>`, `<message>`, `<mri>`, `<guid>`, `<id>`), never a query value, a header or a body;
+  one that can't be logged isn't let through.
+- **`Contact::Write(Target)`**: a mapped write, let through only with a permit from `Fence::check` for that target:
+  an existing chat after a fresh, complete member read whose every member is a lab account (`lab.toml`'s MRIs) or an
+  approved service participant (the echo service), a new target (`Scope::New`: a chat's creation, the test call's
+  start) by the participants it proposes, and any participant it adds (a mention, a member added) judged the same
+  way. The decision is logged by `Fence::check`.
+- **`Contact::Unreadable`**: a mutating request on a contacting service that no row maps or carves out: denied, and
+  logged.
+
+A request is **mutating** when its method isn't `GET`, `HEAD` or `OPTIONS` (in any case), when it carries a body
+anyway, or when a method-override header (`X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override`) names
+another method. On a contacting service an overridden method is unreadable: the fence can't tell which method the
+service acts on. A mutating request whose URL doesn't parse is unreadable.
+
+`Fence::check` also takes the three kinds that reach nobody but stay in the native outbox, which orders writes on a
+chat's read horizon and on presence: typing and read receipts, permitted on a chat by its id (1:1, group or meeting)
+without a member read, and the account's own availability on `Scope::Account`, permitted without a member read only
+for the fence's own account (`Fence::open_lab_account`). The browser never needs them: there, typing and read receipts
+are carve-outs and presence is no contacting service.
+
+## The contacting services
+
+On these services a mutating request is contacting unless a row maps it or carves it out by name. Hosts are matched in
+lower case on a dot boundary (the host or any host under it), a trailing dot dropped, any scheme and port.
+
+| Service | Hosts | What isn't `Unreadable` there |
+|---|---|---|
+| Chat service | a Teams origin's `/api/chatsvc/…`; `*.msg.teams.microsoft.com` | [its rows](#the-chat-services-rows) |
+| Calling | `*.flightproxy.teams.microsoft.com` (whose `ep/<host>/…` forms reach the hosts behind it), `api.fl.teams.microsoft.com`, every `*.skype.com` host but AMS's (`*.conv.skype.com`, `*.cc.skype.com`, `*.broker.skype.com` and any other: a Skype host whose purpose is unknown counts as contacting) | the web client's test call start in its captured shape (`CALL_START_URL`, no query), `Write(Call)` to `New` with the caller and the echo service, only when the policy names the echo callee (`Policy::with_echo_callee`; the browser's `Classifier::with_test_call_callee`): [calling-echo.md](calling-echo.md) |
+| Graph | `*.graph.microsoft.com`, every version, `$batch` included | nothing |
+| Outlook, OWA and Substrate | `*.outlook.office.com`, `*.outlook.office365.com`, `*.outlook.cloud.microsoft`, `*.outlook.live.com`, `*.substrate.office.com` | `POST /search/api/<version>/suggestions` and `…/query` on Substrate: search reads |
+| SharePoint and OneDrive | `*.sharepoint.com`, `*.sharepoint-df.com`, `*.microsoftpersonalcontent.com`, `*.onedrive.com`, `onedrive.live.com`, the media hosts `*.svc.ms` | nothing |
+| AMS and the async gateway | `*.asyncgw.teams.microsoft.com`, `*.asm.skype.com`, a Teams origin's `/asm/…` and `/ams/…` | the token exchanges `POST …/v1/skypetokenauth` and `POST …/v1/<id>/aadtokenauth`, which trade the account's own token for the media service's cookie. An object's creation, its content upload and its `forward` stay unreadable: the fence can't tell whom an object reaches ([chat.md](chat.md#the-object-created-once-ab-image-object)) |
+| Middle tier and apps | a Teams origin's `/api/mt/…` and `/api/apps/…` | everything but a request with a segment (in any case) `team(s)`, `chat(s)`, `channel(s)`, `conversation(s)`, `thread(s)`, `group(s)`, a segment of its Outlook REST proxy (`v2.0`, `event(s)`, `message(s)`), or a segment holding `meeting`, `invite`, `calendar` or `mail`; of those, `POST …/beta/teams/apps/aggregatedEntitlements` (the app catalogue of the account's teams, a read) is carved out. Out-of-office with its automatic replies (`…/automaticRepliesSetting`) is the account's own settings |
+| CSA | a Teams origin's `/api/csa/…`, `*.chatsvcagg.teams.microsoft.com` | `POST …/api/<version>/teams/users/me/chatsAndChannelsByIds`, a read |
+
+A Teams origin is `teams.microsoft.com`, `teams.cloud.microsoft`, `teams.live.com` and the hosts under them. On one,
+the service is told by the path's first two segments, each percent-decoded on its own and compared in any case; a
+later segment that doesn't decode leaves the service to its row, which refuses it. A mutating request whose first two
+segments can't be read (one empty with more path after it, as `//api/chatsvc/…` or `/api//chatsvc/…`, which a server
+merging slashes would read as the service; not UTF-8 once decoded; or holding `/ \ ; ? #` once decoded, as
+`/api/chatsvc%2Femea/…`) is unreadable.
+
+**Everything else** is no contacting service, and every request to it is `Contact::None`: telemetry and logging,
+middle-tier settings and profile lookups, searches, presence (`/ups/…`, the endpoint `PUT` and the manual status
+included), the registrar, Entra and authz, the push service `/api/tps/…` (whose `pushupdates` `POST` is the account's
+own subscription), Trouter's HTTP side, the page and its static hosts. [endpoints.md](endpoints.md) lists every
+endpoint seen with its verdict.
+
+A WebSocket's URL is read the same way (`teams_fence::on_contacting_service`, any scheme): the lab browser denies
+every frame on a contacting service's socket, and on a Trouter socket judges each frame by its socket.io type (`0`,
+`1`, `2` and `5` pass; `3`, the answer to a delivery, `4`, `6`, a binary frame and anything that doesn't parse are
+denied: [trouter.md](trouter.md#answering-deliveries)). Frames on any other socket pass.
 
 ## The chat service
 
@@ -21,7 +87,7 @@ Chats live in the chat service ("chatsvc", the IC3 messaging service). Its base 
 `chatServiceAfd`, which prod prefers, or `chatService` (see auth.md). The web client recognizes the Front Door form by
 host: `teams.microsoft.com`, `teams.cloud.microsoft` (commercial), `teams.live.com` (consumer), `gov.teams.microsoft.us`
 and `dod.teams.microsoft.us`, with the path `/api/chatsvc/<region>/`. Every request below is relative to that base and
-starts with `v1/` (endpoint registration with `v2/`). Conversation and thread ids are percent-encoded as one path
+starts with `v1/` (endpoint registration also with `v2/`). Conversation and thread ids are percent-encoded as one path
 segment.
 
 For the lab tenant the client uses the Front Door form with the region `amer`, on whichever Teams origin the page is
@@ -36,14 +102,15 @@ skypetoken there. The bundle also names `Authentication: skypetoken=<skypetoken>
 (auth.md's service table); the fence's live read accepts either and sends back the form the page used. No
 `RegistrationToken` was sent: the client registered no endpoint.
 
-What the fence accepts as the chat service (the mapping and the live read share one check,
+Where a mapped write is read from (the mapping and the live member read share one check,
 `teams_fence::chat_service_path`): `https` only, no port, no user info, and either an AFD host of the commercial cloud
 (`teams.microsoft.com`, `teams.cloud.microsoft`) with `/api/chatsvc/<region>/v1/…`, the region 1–32 lowercase letters,
 digits or `-`, or a host ending in `.msg.teams.microsoft.com` with `/v1/…`, each label of its name before that suffix
 non-empty letters, digits or `-`. The `.msg` host form is the regional chat host: the bundle doesn't name it (the GTM
 value comes at runtime), but the captures did, as the `chatService` GTM and in `Location` answers (above), with `/v1/…`
 straight under the host. The web client never sent a request there, so the fence has only ever judged the AFD form
-live.
+live. A mutating request to the chat service in any other form (another version, `teams.live.com`, a path the check
+doesn't read) is unreadable unless it is a carve-out.
 
 ### Ids
 
@@ -53,151 +120,59 @@ live.
 | `19:<id>@thread.v2` | a group chat; `19:meeting_<id>@thread.v2` is a meeting's chat |
 | `19:<id>@thread.tacv2`, `19:<id>@thread.skype` | a team's channel (the team's General channel has the team's id) |
 | `<channel id>;messageid=<root id>` | a reply chain in a channel (the client joins the root message id to the conversation id) |
-| `48:notes`, `48:…` | the user's own streams (notes, notifications, call logs) |
+| `48:notes`, `48:…` | the user's own streams (notes, notifications, mentions, call logs) |
 | `8:orgid:<oid>` | a work account's MRI; `28:<id>` a bot |
 
-## Reading a chat's members
+A **chat by its id**, where typing, read receipts and `Fence::check`'s signals ask for one (`teams_fence::is_chat_id`),
+is a 1:1 chat's id naming two different object ids, or a group or meeting chat's `19:<id>@thread.v2` whose `<id>` is
+1–128 ASCII letters, digits, `_` or `-`.
 
-The client's member reads (all `GET`, relative to the base):
+## The chat service's rows
 
-| Request | apiName in the bundle | Notes |
-|---|---|---|
-| `v1/threads/<id>?view=msnp24Equivalent` | `thread` | the thread with its properties and a `members` array |
-| `v1/threads/<id>/members?view=msnp24Equivalent&pageSize=<n>` | `thread_members` | the member list, paged; extra filters `selectMemberRoles`, `state`, `filterOnIsModerator`, `filterExplicitlyAdded`, `filterInterest`; the next page is a full URL the client re-bases |
-| `v1/threads/<id>/filtered?view=msnp24Equivalent` | `filtered_thread` | a **filtered** view of the thread |
-| `v1/threads?view=msnp24Equivalent&threadIds=<id>,<id>` | `threads` | several threads at once |
-| `v1/threads/onetoone?view=msnp24Equivalent&userIds=<a>,<b>&threadType=<t>&isFederated=<b>` | `one_to_one_thread` | finds the 1:1 thread of two users |
-| `v1/threads/<id>/members/<mri>` | `getMemberProperty` | one member |
-| `v1/users/ME/conversations/<id>?view=msnp24Equivalent` | `myconversation` | the user's own view of a conversation (not a member list) |
+On the chat service a mutating request is one of these; anything else is `Unreadable`. `ME` is `ME` in any case or the
+account's own MRI (`Policy::with_own_account`). Any path segment that is empty or holds `/ ; ? #` once decoded, and any
+query key twice in any case, makes the request unreadable.
 
-Seen live: the client reads a chat's thread with the batch form, `GET v1/threads?view=msnp24Equivalent&threadIds=<id>`.
-The answer is a JSON array with one thread object per id: `id`, `type` `Thread`, `properties` (`threadType` `chat`,
-`fixedRoster`, `uniquerosterthread`, `creator`, `createdat`, `capabilities`, …), `members` (each with `id` (the
-`8:orgid:` MRI), `type` `ThreadMember`, `role`, `userLink`, `capabilities`, `hidden`, `isFollowing`, …), `version`,
-`rosterVersion`, `messages` (a link) and `eTag`. For the 1:1 chat it listed both members and carried no paging key and
-no member count. `GET v1/threads/<id>/consumptionhorizons` gives the members' read horizons. The user's view of the
-chat, `GET v1/users/ME/conversations/<id>`, answers 404 until the chat exists, and the client takes a 404 to mean the
-chat is one the user isn't in.
+| Request | Verdict |
+|---|---|
+| `POST v1/users/ME/conversations/<chat>/messages`, `messagetype` `Text`, `RichText`, `RichText/…` | `Write(Message)` on the chat, adding whoever `properties.mentions` names |
+| same path, `messagetype` `Control/Typing` or `Control/ClearTyping`, on a chat by its id, the body only `content` (empty or absent), `contenttype` and `messagetype`; a typing body in any other form or on any other id is unreadable | `None` (typing) |
+| `PUT v1/users/ME/conversations/<chat>/messages/<msg>` | `Write(Edit)`, adding whoever `properties.mentions` names |
+| `DELETE v1/users/ME/conversations/<chat>/messages/<msg>` | `Write(Delete)` |
+| `PUT`/`DELETE …/messages/<msg>/properties?name=emotions` (the only query key) | `Write(Reaction)` |
+| `PUT v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` (the only query key), on a chat by its id | `None` (read receipt) |
+| `PUT v1/users/ME/conversations/<id>/properties?name=<n>`, `<n>` one of `OWN_VIEW_PROPERTIES` (`lastTimeFavorited`, `favorite`), the only query key, `<id>` a `19:` chat or channel id | `None` (the account's own view of a conversation) |
+| `PUT v1/users/ME/conversations/48:notifications` or `48:mentions` `/messages/<id>/properties?name=isread`, the only query key, the body exactly `{"isread": <string>}` | `None` (the account's own feed) |
+| `PUT v1/users/ME/properties?name=<n>`, the only query key | `None` (the account's own settings) |
+| `PUT`, `POST`, `DELETE` on `v1` or `v2` `users/ME/endpoints`, `…/endpoints/<id>`, `…/endpoints/<id>/active`, `…/endpoints/<id>/activeendpoint`, `users/ME/activeendpoint` | `None` (the account's own session) |
+| `POST v1/threads` | `Write(ChatCreate)` to `New`, adding every member in the body |
+| `PUT v1/threads/<chat>/members` | `Write(MemberChange)`, adding the body's members |
+| `PUT v1/threads/<chat>/members/<mri>` | `Write(MemberChange)`, adding `<mri>` |
+| `DELETE v1/threads/<chat>/members/<mri>` | `Write(MemberChange)` |
+| anything else: other `48:` streams and their paths (notes, `sharedcalllogs`), forwarding and moving, live and targeted messages, drafts and scheduled sends, `PUT`/`DELETE` on a conversation itself, an `8:…` or `28:…` conversation, bot invokes (`v1/agents/…`), channel and team ids, reply chains, thread properties, `members/ALL` | `Unreadable` |
 
-The fence's live read of a 1:1 chat (`LiveMembershipSource`) makes exactly one request,
-`GET v1/threads/<id>?view=msnp24Equivalent` with the token the page used (bearer or skypetoken), from Rust with its own
-HTTPS client (no proxy, no redirects), on the host and region of a chat service request the armed lab page itself
-sent. Live, with the bearer token, it read the
-a–b chat as complete (the message and typing posts to it were allowed after the read). It accepts the answer as
-complete only when:
-
-- the status is 2xx and the body (at most 1 MiB) is a JSON object;
-- no key at the top level or under `_metadata` looks like pagination (`next…`, `…continuation…`, `skiptoken`,
-  `syncState`);
-- any member count (`memberCount`, `membercount`, `membersCount`, top level or under `properties`) equals the
-  number of listed members;
-- `id` is exactly the requested thread, and every member has a string `id`;
-- **and, for a 1:1 chat,** the members are exactly the two `8:orgid:<oid>` the chat's id names.
-
-That last check is what makes the answer evidence of the *full* membership rather than a view filtered by the
-caller's permissions: a 1:1 chat's membership is fixed by its id, and the read only confirms the thread exists with
-exactly those members. Meeting chats, channels, teams and calls are `Partial(Unsupported)` and so denied, answered
-without a read (`LiveMembershipSource::reads_in_full` tells a caller up front): the bundle shows paging
-(`thread_members`) and a separate filtered view (`filtered_thread`). Group chats are the same, with one exception the
-user accepted for the lab's own chat: [The lab's group chat](#the-labs-group-chat). Pagination and truncation are
-always `Partial`.
-
-### A group chat's reads
-
-Seen live (M1 Task 8, 2026-10-20): the a–b–c group chat, created by a in the web client (`proto-lab run abc-chat`, its
-id kept in the lab's `chats.toml`), read with each account's own `ic3` token (`proto-lab probe thread <alias>`; local
-reference copies `reference/chat/thread-group-{a,b,c}.jsonl`; synthetic fixtures `tests/fixtures/chatsvc/thread-group.json`,
-`thread-group-members.json`, `thread-group-filtered.json` written from them). A, b and c got the same answers:
-
-- The id: `19:<32 lowercase hex>@thread.v2`.
-- `GET v1/threads/<id>?view=msnp24Equivalent` (and the batch form, an array holding the same object): 200; `id`,
-  `type` `Thread`, `members` (a, b and c, each `role` `Admin`, `hidden` false, with `capabilities`, `rangeStart`,
-  `rangeEnd`, `meetingRole`, `userLink`, …), `properties` (`threadType` `chat`, `creator`, `createdat`,
-  `capabilities`, `historydisclosed`, `productContext` `TEAMS`, …), `rosterVersion`, `version` and `eTag` (all three the
-  creation time), `tenantId`, `messages` (a link), `fileReferences`, `encryptionType`, `copilotShareTokens`. No member
-  count, no paging key, no `_metadata`.
-- `GET v1/threads/<id>/members?view=msnp24Equivalent&pageSize=<n>`: 200; `members` (the same three, each with
-  `interest`), `totalMemberCount` 3, `eTag` (the thread's), `rosterVersion` **0**, `isDeleted` false. `pageSize=1` got
-  the same answer as `pageSize=100`: all members and no next link, so its paging form was never seen.
-- `GET v1/threads/<id>/filtered?view=msnp24Equivalent`: **403**, error 209 `AclCheckFailed`: a chat's `Admin` lacks
-  the `GetFilteredThread` capability.
-- `GET v1/users/ME/conversations/<id>?view=msnp24Equivalent`: the account's own view, no member list:
-  `memberProperties` (`role`, `interest`, `isReader`), `threadProperties` (`rosterVersion` as the thread's,
-  `threadType` `chat`, `productThreadType` `Chat`, `isCreator`, …), `properties.isemptyconversation`.
-
-**Decision (with Codex): not enough to call a group chat's member read complete; group chats stay
-`Partial(Unsupported)`.** The candidate was a paired read: the thread read and the member list unpaged and listing the
-same distinct members, `totalMemberCount` equal to that list, equal `eTag`s, `threadType` `chat`, not a meeting's id.
-It shows the two endpoints agree, not that what they agree on is the whole membership: both exposing, and the count
-counting, one caller-visible subset fits the same answers, and a 3-member roster that every viewer sees alike can't
-tell the two apart. Nor was any paging form seen, and the `eTag`s' meaning across the endpoints is unknown (the list's
-`rosterVersion` is 0). What would settle it is in `docs/backlog/group-chat-member-read-completeness.md`.
-
-### The lab's group chat
-
-**The user's decision (2026-10-21):** "No, we need to fix group chats. Loosen the fence if needed." The evidence above
-didn't change, so the fence doesn't claim a group chat's reads are complete in general. It accepts, for one chat only,
-that two fresh reads agreeing on exactly the lab's accounts show every participant. Designed with Codex (transcript
-`~/.local/state/plan-exec-revmux/20261020-native-teams-m1-headless-chat-core/discussions/group-chats-fence/`).
-
-`LiveMembershipSource` built with the lab's policy (`LiveMembershipSource::for_fence(&fence)`: a, b and c's MRIs
-from the `lab.toml` the fence's roster came from, three distinct ones, case folded, and the lab's `chats.toml`) reads a
-`19:<id>@thread.v2` chat as complete only when all of this holds on that check, the whole of it within one 10 s
-deadline (the record, the credential, a renewal, both reads and their bodies):
-
-1. `chats.toml` records exactly that id as `abc`. Any other group chat is `Partial(UnrecordedGroupChat)`, an
-   unreadable or invalid file `Partial(ChatsUnreadable)`; neither is read. A natively created group chat isn't
-   recorded, so it is denied too. Without the policy (`LiveMembershipSource::new`, a lab without three MRIs) every
-   group chat is `Partial(Unsupported)`.
-2. Both reads answer 2xx with one credential: `GET v1/threads/<id>?view=msnp24Equivalent`, then
-   `GET v1/threads/<id>/members?view=msnp24Equivalent&pageSize=100`, the thread read with the token alone (as the
-   1:1 read), the member list with `X-MS-Migration: True` and `BehaviorOverride: redirectAs404` too (the form
-   `proto-lab probe thread` read it in live). A 401 on either asks the credential source once for a renewed token,
-   and both are read again with it.
-3. No key that looks like paging (`next…`, `…continuation…`, `skiptoken`, `syncState`) at any depth of either body:
-   else `Paginated`.
-4. The thread read passes the 1:1 read's structural checks (its `id`, members with string ids, any member count equal
-   to them) and is a `Thread` of `threadType` `chat` with a non-empty `eTag`, an integer `rosterVersion` and a
-   `creator`.
-5. The member list has `isDeleted` `false`, a non-empty `eTag`, `rosterVersion` exactly `0` (the one relationship seen,
-   not known to mean anything) and `totalMemberCount` an integer equal to the members it lists, as any other member
-   count must be (else `Truncated`).
-6. Every member entry in both says `hidden` `false`, and neither lists anyone twice, case folded.
-7. Both list the same members with the same `eTag` (else `Inconsistent`).
-8. Those members are exactly a, b and c, and the chat's `creator` is a (else `UnexpectedRoster`).
-
-Any other shape is malformed. The fence then judges current and added participants against the roster as for every
-chat: a mention of an outsider is denied, a mention of an approved service passes as it does in the a–b chat. A member
-change that adds anyone passes or fails on its own; after it the chat is no longer exactly a, b and c, and every later
-write is denied. `reads_in_full` says yes only while the chat is the recorded one; it is eligibility, and every read
-checks everything again.
-
-**What stays at risk, which the user accepted.** For this one recorded lab chat, the fence assumes that the two
-matching fresh reads show every participant. That stays unproven: both endpoints and their count could leave out a
-participant the service doesn't show to members, and equal `eTag`s don't show otherwise. The chat allows member
-changes (`AddMember`), so having created it with a, b and c only doesn't keep it that way: an account of the lab
-signed in outside the fence, or a tenant admin, could add someone, and the next read would deny only what such a
-read shows. The members can also change between the read and the write. So a write the fence allows could, in those
-cases, be seen outside the lab. The recorded id limits where this assumption is made; it is not evidence of
-completeness.
+A mapped write's `<chat>` is a chat: `19:…@unq.gbl.spaces` or `19:…@thread.v2`, never a channel or team
+(`@thread.tacv2`, `@thread.skype`) or a reply chain (`;messageid=`). That is looser than a chat by its id on purpose:
+a mapped write is judged by its chat's live member read, which refuses an id it doesn't know; the carve-outs, which
+skip that read, take only a chat by its id.
 
 ## Writes
 
-Every mutating request the mapping recognizes, with its `WriteKind` and `Target` (all relative to the base; `<chat>`
-is a chat id, `1:1` or group, never a channel).
+The mapped writes as the web client sends them (all relative to the base):
 
 | Request | Body | WriteKind | Target |
 |---|---|---|---|
 | `POST v1/users/ME/conversations/<chat>/messages` | `messagetype` `Text`, `RichText`, `RichText/…` | `Message` | `Conversation(<chat>)`, adding whoever `properties.mentions` names |
-| same | `messagetype` `Control/Typing`, `Control/ClearTyping` | `Typing` | `Conversation(<chat>)` |
 | `PUT v1/users/ME/conversations/<chat>/messages/<msg>` | the whole message again, a message `messagetype` | `Edit` | `Conversation(<chat>)`, adding whoever `properties.mentions` names |
 | `DELETE v1/users/ME/conversations/<chat>/messages/<msg>?behavior=softDelete` | none | `Delete` | `Conversation(<chat>)` |
 | `PUT`/`DELETE v1/users/ME/conversations/<chat>/messages/<msg>/properties?name=emotions` | `{"emotions": {"key", "value"}}` / `{"emotions": {"key"}}` | `Reaction` | `Conversation(<chat>)` |
-| `PUT v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` | the read horizon | `ReadReceipt` | `Conversation(<chat>)` |
 | `POST v1/threads` | `{members: [{id, role}], properties}` | `ChatCreate` | `New`, adding every member in the body |
 | `PUT v1/threads/<chat>/members` | `{members: [{id, role}]}` | `MemberChange` | `Conversation(<chat>)`, adding the body's members |
 | `PUT v1/threads/<chat>/members/<mri>` | the member's role or property | `MemberChange` | `Conversation(<chat>)`, adding `<mri>` |
 | `DELETE v1/threads/<chat>/members/<mri>` | none | `MemberChange` | `Conversation(<chat>)` |
+
+The native client's own writes of the same requests carry their kind themselves (sealed `Mutating` types in
+`teams-proto`), with `Typing` and `ReadReceipt` beside them: [the verdicts](#the-verdicts).
 
 A message post's body is the message: `content`, `messagetype`, `contenttype`, `clientmessageid`, `imdisplayname`,
 `properties`. A reply in a reply chain posts to the chain's conversation id (`…;messageid=<root>`).
@@ -240,198 +215,250 @@ and how each change reads back, are in [chat.md](chat.md):
 
 Rules that keep the mapping fail-closed:
 
-- The kind of a message post comes from its body. A body the browser didn't inline, one that isn't JSON, or a
-  `messagetype` not in the table (`Control/…` other than typing, `Event/…`, …) is `Unknown` and denied. An edit needs
-  its body too, with a message `messagetype`.
+- Bodies are read by a strict JSON reader: one JSON value, and no object with two keys alike in any case (which a
+  service binding keys in any case might read either way); anything else makes the request unreadable.
+- The kind of a message post comes from its body. A body the browser didn't inline (the browser fence reads it as
+  empty), one that isn't JSON, or a `messagetype` not in the table (`Control/…` other than typing, `Event/…`, …) is
+  unreadable. An edit needs its body too, with a message `messagetype`.
 - Whoever a message or an edit mentions is an added participant of its target, so the fence judges them as it judges
   the chat's members, and a mention of an outsider is denied. The mentions are `properties.mentions`, a JSON string of
-  a list whose entries each name an `mri` (the form the mention of 2026-10-21 showed). No
-  `properties` or no `mentions` is no mention; `properties` that aren't an object, `mentions` in any other form, and
-  either key in another case (`Properties`, `Mentions`, which a service binding keys in any case may read) are
-  `Unknown`.
+  a list whose entries each name an `mri` (the form the mention of 2026-10-21 showed). No `properties` or no
+  `mentions` is no mention; `properties` that aren't an object, `mentions` in any other form, and either key in
+  another case (`Properties`, `Mentions`) are unreadable.
 - A message or an edit maps to its chat alone only in the forms the captures showed of the fields that could take it
   further: `crossPostChannels` (a post into channels too) left out or `[]`, and `properties.onbehalfof` (a message
-  sent for someone else) left out or `null`. Any other value of either, or either key in another case, is `Unknown`.
-- A new chat's participants are exactly the body's `members`; a body without them is `Unknown`. The fence judges a
-  `New` target by those participants without a read.
-- Only chat ids map: channels (`@thread.tacv2`, `@thread.skype`) and reply chains (`;messageid=`) are `Unknown`,
-  because a channel's target needs its team, which the URL doesn't carry. `ChannelPost` stays unmapped until a capture
-  shows how to find the team.
-- Anything the table doesn't list is `Unknown`, among them (all seen in the bundle):
-  - conversation properties other than `consumptionhorizon` (favourites, muting, …) and thread properties
-    (`PUT v1/threads/<id>/properties?name=<n>`, the topic and such, which other members see);
-  - `PUT v1/threads/<id>/members/ALL?…` (a property of every member), live messages
-    (`v1/threads/<id>/livemessages`), forwarding and moving messages (`…/messages/forward`, `…/messages/move`),
-    targeted messages, reply-chain metadata (`rcmetadata`, `rc2s`), file references (`v1/threads/<id>/files`), drafts
-    (`v1/users/ME/drafts`);
-  - bot invokes (`POST v1/agents/<bot mri>/invoke`), a `BotReply` candidate; seen live whenever an editor opened (the compose
-    box at the mention picker, an edit box): `composeExtension/fetchCommands` to two message extensions' bots, denied
-    (and expected by the scenarios' reviewed list, [chat.md](chat.md));
-  - the user's own properties (`PUT v1/users/ME/properties?name=<n>`), endpoint registration
-    (`PUT`/`DELETE v2/users/ME/endpoints/<id>`) and the active-endpoint post (`activeendpoint`). These change only the
-    account's own state and are **candidates for the own-state list**, but they are not on it: nothing is added there
-    without a review. Seen live: the own properties `messageDensity`, `favorites`, `firstLoginInformation`, `locale` and `readReceiptsEnabled`,
-    each a one-key JSON object, which the client retries more than a hundred times a run while they are denied; no
-    endpoint registration or active-endpoint post at all. Until reviewed a writing run sees them denied (`ab-chat`
-    fails on them, which is the honest outcome).
-  - writes on a team's threads, which the lab accounts belong to with people outside the lab: the user's own member
-    entry in a team channel (`PUT v1/threads/<channel>/members/<own MRI>`, `{"expiration": <n>}`) and a conversation
-    property (`PUT v1/users/ME/conversations/<channel>/properties?name=lastTimeFavorited`). They are `Unknown` because
-    channels aren't mapped, and denied; they would be denied by membership too.
-- Media objects (AMS) aren't mapped (M1 Task 20, decided with Codex): every write to `…/v1/objects…` is `Unknown` and
-  denied, on the async gateway (`*.asyncgw.teams.microsoft.com`, where the web client creates an image's object), on
-  the GTM `ams` host and on the Teams origin's `/asm/…` and `/ams/…` routes. An object's creation names its readers
-  (`permissions`, one key: the chat), so it could be mapped to `Conversation(<id>)`; but its upload
-  (`PUT v1/objects/<id>/content/<kind>`) names only the object, and binding it to that chat would take a registry of
-  what the fence permitted or an authoritative read of the object's current readers, which no capture has shown and
-  which `forward` could widen. So images aren't sent in M1 (`docs/backlog/ams-image-sending.md`, [chat.md](chat.md)).
-- Calls (`Call`, `CallAnswer`), meetings, invites and channel posts aren't mapped here: calling goes through other
-  services. A run that calls (`Classifier::calling`, Task 18) maps only a call's start, as a new call of its caller and
-  callees; every write on an existing call and any answer stay unknown ([calling-echo.md](calling-echo.md)). The middle tier (`/api/mt/…`, `/api/apps/…`) and CSA (`chatsvcagg`) mutating requests aren't
-  mapped either; live they were all lookups sent as `POST` (below), denied as `Unknown`, but for the two profile
-  lookups on the read-by-`POST` list when they name only lab accounts ([below](#reads-by-post)); UPS's presence read
-  (`/ups/…/getpresence/`) is on that list too (M2 Task 17).
+  sent for someone else) left out or `null`. Any other value of either, or either key in another case, is unreadable.
+- A new chat's participants are exactly the body's `members`, a non-empty list of objects each with a string `id`; a
+  body without them is unreadable. The fence judges a `New` target by those participants without a read.
+- Only chats map: channels (`@thread.tacv2`, `@thread.skype`) and reply chains (`;messageid=`) are unreadable,
+  because a channel's members are a team's, which the fence can't read complete
+  (`docs/backlog/channel-writes-need-a-lab-only-team.md`). The account's own view of a channel
+  (`lastTimeFavorited`) is a carve-out; its own member entry in a team channel (`PUT
+  v1/threads/<channel>/members/<own MRI>?returnThreadMetadata`, `{"expiration": <n>}`, sent as the client lists the
+  account's teams) and other channel properties stay unreadable: the writing scenarios' expected-deny list names
+  them, so a run isn't failed by them.
+- Bot invokes (`POST v1/agents/<bot mri>/invoke`, sent whenever an editor opens, `composeExtension/fetchCommands` to
+  two message extensions' bots) stay unreadable: their body hands the account's Entra token to the bot's own service
+  (`docs/backlog/bot-invokes-and-message-extensions.md`).
+- Media objects (AMS) aren't mapped (M1 Task 20, decided with Codex): an object's creation names its readers
+  (`permissions`, one key: the chat), but its upload (`PUT v1/objects/<id>/content/<kind>`) names only the object,
+  and binding it to that chat would take a registry of what the fence permitted or an authoritative read of the
+  object's current readers, which no capture has shown and which `forward` could widen. So images aren't sent
+  (`docs/backlog/ams-image-sending.md`, [chat.md](chat.md)).
+- Calls map only the test call's start, as a new call of its caller and the echo service; every write on an existing
+  call and any answer stay unreadable ([calling-echo.md](calling-echo.md), `docs/backlog/fence-call-follow-ups.md`
+  for what M3 maps). Meetings, invites, mail and channel posts aren't mapped.
+
+## Reading a chat's members
+
+The client's member reads (all `GET`, relative to the base):
+
+| Request | apiName in the bundle | Notes |
+|---|---|---|
+| `v1/threads/<id>?view=msnp24Equivalent` | `thread` | the thread with its properties and a `members` array |
+| `v1/threads/<id>/members?view=msnp24Equivalent&pageSize=<n>` | `thread_members` | the member list, paged; extra filters `selectMemberRoles`, `state`, `filterOnIsModerator`, `filterExplicitlyAdded`, `filterInterest`; the next page is a full URL the client re-bases |
+| `v1/threads/<id>/filtered?view=msnp24Equivalent` | `filtered_thread` | a **filtered** view of the thread |
+| `v1/threads?view=msnp24Equivalent&threadIds=<id>,<id>` | `threads` | several threads at once |
+| `v1/threads/onetoone?view=msnp24Equivalent&userIds=<a>,<b>&threadType=<t>&isFederated=<b>` | `one_to_one_thread` | finds the 1:1 thread of two users |
+| `v1/threads/<id>/members/<mri>` | `getMemberProperty` | one member |
+| `v1/users/ME/conversations/<id>?view=msnp24Equivalent` | `myconversation` | the user's own view of a conversation (not a member list) |
+
+Seen live: the client reads a chat's thread with the batch form, `GET v1/threads?view=msnp24Equivalent&threadIds=<id>`.
+The answer is a JSON array with one thread object per id: `id`, `type` `Thread`, `properties` (`threadType` `chat`,
+`fixedRoster`, `uniquerosterthread`, `creator`, `createdat`, `capabilities`, …), `members` (each with `id` (the
+`8:orgid:` MRI), `type` `ThreadMember`, `role`, `userLink`, `capabilities`, `hidden`, `isFollowing`, …), `version`,
+`rosterVersion`, `messages` (a link) and `eTag`. For the 1:1 chat it listed both members and carried no paging key and
+no member count. `GET v1/threads/<id>/consumptionhorizons` gives the members' read horizons. The user's view of the
+chat, `GET v1/users/ME/conversations/<id>`, answers 404 until the chat exists, and the client takes a 404 to mean the
+chat is one the user isn't in.
+
+The fence's live read (`LiveMembershipSource`) is made from Rust with its own HTTPS client (no proxy, no redirects),
+with the token the page used (bearer or skypetoken) on the host and region of a chat service request the armed lab
+page itself sent, or, for the native client, with its own credential (below). It reads at most 1 MiB of body (more is
+`Truncated`), within one 10 s deadline, and a 401 asks the credential source once for a renewed token and reads again
+with it. Channels, teams and calls are `Partial(Unsupported)` and so denied, answered without a read
+(`LiveMembershipSource::reads_in_full` tells a caller up front). Pagination and truncation are always `Partial`.
+
+### 1:1 chats
+
+One request, `GET v1/threads/<id>?view=msnp24Equivalent`. Live, with the bearer token, it read the a–b chat as complete
+(the message and typing posts to it were allowed after the read). The answer is complete only when:
+
+- the status is 2xx and the body is a JSON object;
+- no key at the top level or under `_metadata` looks like pagination (`next…`, `…continuation…`, `skiptoken`,
+  `syncState`);
+- any member count (`memberCount`, `membercount`, `membersCount`, top level or under `properties`) equals the
+  number of listed members;
+- `id` is exactly the requested thread, and every member has a string `id`;
+- **and** the members are exactly the two `8:orgid:<oid>` the chat's id names.
+
+That last check is what makes the answer evidence of the *full* membership rather than a view filtered by the
+caller's permissions: a 1:1 chat's membership is fixed by its id, and the read only confirms the thread exists with
+exactly those members.
+
+### Group and meeting chats
+
+Any group chat (`19:<id>@thread.v2`) and any meeting chat (`19:meeting_<id>@thread.v2`), the lab's a–b–c chat, one
+the native client created and any other alike: one request, `GET v1/threads/<id>/members?view=msnp24Equivalent&
+pageSize=100`, with the token and the web client's `X-MS-Migration: True` and `BehaviorOverride: redirectAs404`
+(`parse_members`). The answer is complete only when:
+
+- no key at any depth looks like pagination (else `Paginated`);
+- it is an object with `isDeleted` `false` and a `members` array;
+- its `totalMemberCount` is an integer equal to the members listed, and any other member count agrees (else
+  `Truncated`);
+- every member says `hidden` `false`, says `isDeleted` `false` or nothing about it, and has an `id` in a form the reads
+  showed: a work account's `8:orgid:<guid>` or a bot's `28:<guid>`;
+- nobody is listed twice, case folded.
+
+Any other shape is malformed, and a timeout or a failed read is `Partial` too: each denies the write. The fence then
+judges every listed member, and every participant the write adds, against the roster: a write passes only when all
+are lab accounts or the echo service. Whether a chat is in the lab's `chats.toml` plays no part: that file is the
+scenarios' record of the lab's own group chat, not the fence's.
+
+**What the rule accepts.** One fresh read can't prove that the service shows every participant to a member: the
+member list and its count could leave out one the service shows to nobody, and the members can change between the
+read and the write. [A group chat's reads](#a-group-chats-reads) records why that was once enough to deny every group
+chat; the lab rule (the user's, 2026-10-23) takes a complete, unpaged read whose members are all lab accounts as the
+chat's participants, for group and meeting chats as for 1:1 chats.
+
+### A group chat's reads
+
+Seen live (M1 Task 8, 2026-10-20): the a–b–c group chat, created by a in the web client (`proto-lab run abc-chat`, its
+id kept in the lab's `chats.toml`), read with each account's own `ic3` token (`proto-lab probe thread <alias>`; local
+reference copies `reference/chat/thread-group-{a,b,c}.jsonl`; synthetic fixtures `tests/fixtures/chatsvc/thread-group.json`,
+`thread-group-members.json`, `thread-group-filtered.json` written from them). A, b and c got the same answers:
+
+- The id: `19:<32 lowercase hex>@thread.v2`.
+- `GET v1/threads/<id>?view=msnp24Equivalent` (and the batch form, an array holding the same object): 200; `id`,
+  `type` `Thread`, `members` (a, b and c, each `role` `Admin`, `hidden` false, with `capabilities`, `rangeStart`,
+  `rangeEnd`, `meetingRole`, `userLink`, …), `properties` (`threadType` `chat`, `creator`, `createdat`,
+  `capabilities`, `historydisclosed`, `productContext` `TEAMS`, …), `rosterVersion`, `version` and `eTag` (all three the
+  creation time), `tenantId`, `messages` (a link), `fileReferences`, `encryptionType`, `copilotShareTokens`. No member
+  count, no paging key, no `_metadata`.
+- `GET v1/threads/<id>/members?view=msnp24Equivalent&pageSize=<n>`: 200; `members` (the same three, each with
+  `interest`), `totalMemberCount` 3, `eTag` (the thread's), `rosterVersion` **0**, `isDeleted` false. `pageSize=1` got
+  the same answer as `pageSize=100`: all members and no next link, so its paging form was never seen.
+- `GET v1/threads/<id>/filtered?view=msnp24Equivalent`: **403**, error 209 `AclCheckFailed`: a chat's `Admin` lacks
+  the `GetFilteredThread` capability.
+- `GET v1/users/ME/conversations/<id>?view=msnp24Equivalent`: the account's own view, no member list:
+  `memberProperties` (`role`, `interest`, `isReader`), `threadProperties` (`rosterVersion` as the thread's,
+  `threadType` `chat`, `productThreadType` `Chat`, `isCreator`, …), `properties.isemptyconversation`.
+
+Decided with Codex then: not enough to call a group chat's member read complete, so group chats stayed
+`Partial(Unsupported)`. Both endpoints exposing, and the count counting, one caller-visible subset fits the same
+answers, and a 3-member roster that every viewer sees alike can't tell the two apart; no paging form was seen, and
+the `eTag`s' meaning across the endpoints is unknown. From 2026-10-21 the fence admitted the lab's one recorded chat
+when two such reads agreed on exactly a, b and c; since 2026-10-23 the lab rule judges every group and meeting chat by
+its member list alone ([above](#group-and-meeting-chats)).
 
 ## Reads by POST
 
-A class of its own, neither a write nor own-state: requests the web client sends as a `POST` although they only read,
-let through in their captured shape when nothing they name, and nothing their answer can name, is outside the a–b–c
-lab. The user decided on 2026-10-21 to let the mention picker's people lookups through on that rule; without them the
-chat partner shows as "Unknown User" and the picker offers nobody. The list is `crate::post_read::POST_READS`
-(`crates/proto-lab/src/post_read.rs`), on `Classifier::mapped` and so on `Classifier::calling` and
-`Classifier::messaging`; `seeded` and `sign_in` (`load`, `status`, `login`) don't have it. The classifier asks it only after the write mapping, so a write is judged
-only by `Fence::check`.
+Requests the web client sends as a `POST` although they only read. Under the lab rule they reach nobody, whoever they
+name: the middle tier's profile lookups and UPS's presence read go to no contacting service, and CSA's
+`chatsAndChannelsByIds` and Substrate's search are carve-outs, so the lab browser and the native client let them
+through ([the contacting services](#the-contacting-services)). Until 2026-10-23 the browser fence let the first three
+through only in their captured shape and only when every MRI they named was a lab account; the personal build's
+sealed `PostRead` list keeps those shapes ([below](#the-native-clients-reads-by-post)).
 
-| Entry (`fence.log` `post_read`) | Request | Body |
-|---|---|---|
-| `short_profile` | `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetchShortProfile?<the lookup query>` | a non-empty JSON list of MRIs |
-| `user_fetch` | `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetch?<the lookup query>` | a non-empty JSON list of MRIs |
-| `presence` | `POST https://<teams origin>/ups/<geo>/v1/presence/getpresence/` (M2 Task 17) | a non-empty JSON list of `{"mri": …}`, each with at most `"source": "ups"` beside it, no MRI twice |
+| Request | Body |
+|---|---|
+| `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetchShortProfile?<the lookup query>` | a non-empty JSON list of MRIs |
+| `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetch?<the lookup query>` | a non-empty JSON list of MRIs |
+| `POST https://<teams origin>/ups/<geo>/v1/presence/getpresence/` (M2 Task 17) | a non-empty JSON list of `{"mri": …}`, each with at most `"source": "ups"` beside it, no MRI twice |
 
-A profile lookup matches only all of it (the presence read's own shape [below](#the-presence-read)):
+The profile lookups, as 5869 captured ones sent them:
 
-- `POST`, on `https://teams.microsoft.com` or `https://teams.cloud.microsoft` exactly (no port, no user info), the
-  partition a lowercase region, `-` and a number (`amer-03`), the path's last segment exactly;
-- the query every captured lookup sent, each pair once and nothing else, in any order: `isMailAddress=false`,
-  `enableGuest=true`, `skypeTeamsInfo=true`, `canBeSmtpAddress=false`, `includeIBBarredUsers=true`,
-  `includeDisabledAccounts=true` (the one lookup by address, `isMailAddress=true` with addresses in the body, isn't
-  on the list);
-- only the headers the fence saw on every lookup it paused (`Accept`, `Cookie`, `Origin`, `Referer`, `User-Agent`,
-  `authorization`, `content-type` and the client's `x-client-ui-language`, `x-ms-client-caller`,
-  `x-ms-client-request-type`, `x-ms-client-type`, `x-ms-client-version`, `x-ms-migration`, `x-ms-object-id`,
-  `x-ms-request-id`, `x-ms-session-id`, `x-ms-test-user`), none twice, `Content-Type` there, and the values that
-  could change what the request does or name someone checked:
-  - pinned, when there, to the one value all 5869 captured lookups carried: `Content-Type`
-    `application/json;charset=UTF-8`, `x-ms-object-id` empty (it would name an account by its object id; the
-    captures never filled it in, so a lookup naming anyone there is unknown rather than checked against the roster),
-    `x-ms-migration` `True`, `x-ms-test-user` `False`, `x-ms-client-request-type` `0`, `x-ms-client-type`
-    `cdlworker`;
-  - `Origin`, when there, the request's own origin;
-  - `x-ms-client-caller`, the client component that asked (dozens of names seen, `use-chat-hook`, `User.avatarUrl`),
-    only a short name of ASCII letters, digits, `-`, `:`, `.` and `_` with no run of 8 hex digits, so no object id;
-  - the rest free, as none names anyone but the signed-in account or changes what is read: `authorization` and
-    `Cookie` (the account's own middle-tier credentials, for the host the request goes to anyway), `Accept` and
-    `x-client-ui-language` (the answer's format and language), `Referer`, `User-Agent`, `x-ms-client-version` (the
-    page and the client), `x-ms-request-id`, `x-ms-session-id` (correlation ids);
-- a body read strictly (one JSON value, no two keys alike in any case) that is a non-empty list of strings;
-- and, decided by the fence at that moment, every string an exact MRI of a lab account in `lab.toml`'s roster
-  (`Fence::lab_accounts_only`; an approved service participant isn't a lab account).
+- `POST` on `https://teams.microsoft.com` or `https://teams.cloud.microsoft`, the partition a lowercase region, `-`
+  and a number (`amer-03`);
+- the query `isMailAddress=false`, `enableGuest=true`, `skypeTeamsInfo=true`, `canBeSmtpAddress=false`,
+  `includeIBBarredUsers=true`, `includeDisabledAccounts=true` (one lookup by address had `isMailAddress=true` with
+  addresses in the body);
+- the headers `Accept`, `Cookie`, `Origin`, `Referer`, `User-Agent`, `authorization`, `content-type` and the client's
+  `x-client-ui-language`, `x-ms-client-caller`, `x-ms-client-request-type`, `x-ms-client-type`,
+  `x-ms-client-version`, `x-ms-migration`, `x-ms-object-id`, `x-ms-request-id`, `x-ms-session-id`, each with one
+  value on every lookup where that matters: `Content-Type` `application/json;charset=UTF-8`, `x-ms-object-id` empty,
+  `x-ms-migration` `True`, `x-ms-test-user` `False`, `x-ms-client-request-type` `0`, `x-ms-client-type` `cdlworker`;
+  `x-ms-client-caller` names the client component that asked (dozens seen, `use-chat-hook`, `User.avatarUrl`);
+- a body that is a non-empty list of MRIs.
 
-A lookup naming anyone else (a tenant member the client shows in its chat list, a bot, the echo service), or off the
-shape in any way, is `Unknown` and denied; the writing scenarios' expected-deny list still expects those. The answers
-seen live name exactly the requested accounts: `{"type": …, "value": [one profile per requested MRI]}`, each profile
-with its `mri`, `objectId`, `displayName`, `givenName`, `surname`, `email`, `userPrincipalName`, `userType`,
-`tenantName`, `isShortProfile`, and for `users/fetch` also `alias`, `mail`, `smtpAddresses`, `sipProxyAddress`,
-`phones`, `accountEnabled`, `skypeTeamsInfo`, `featureSettings` and such; no other account's id or address.
+The answers seen live name exactly the requested accounts: `{"type": …, "value": [one profile per requested MRI]}`,
+each profile with its `mri`, `objectId`, `displayName`, `givenName`, `surname`, `email`, `userPrincipalName`,
+`userType`, `tenantName`, `isShortProfile`, and for `users/fetch` also `alias`, `mail`, `smtpAddresses`,
+`sipProxyAddress`, `phones`, `accountEnabled`, `skypeTeamsInfo`, `featureSettings` and such; no other account's id
+or address.
 
 ### The presence read
 
-UPS's `getpresence` (M2 Task 17) matches only all of it, from the 5461 presence reads of the captures of
-2026-10-19 to 2026-10-21 (all denied then):
+UPS's `getpresence` (M2 Task 17), as the 5461 presence reads of the captures of 2026-10-19 to 2026-10-21 sent it:
 
-- `POST` on either Teams origin exactly, the path `/ups/<geo>/v1/presence/getpresence/` with its trailing slash, the
-  geo lowercase letters (`noam`), and no query at all (not even an empty one);
-- only the headers those reads carried (`Accept`, `Cookie`, `Origin`, `Referer`, `User-Agent`, `authorization`,
-  `behavioroverride`, `content-type`, `x-ms-client-caller`, `x-ms-client-type`, `x-ms-client-user-agent`,
-  `x-ms-client-version`, `x-ms-correlation-id`, `x-ms-object-id`, `x-ms-request-id`, `x-ms-session-id`), none
-  twice, `Content-Type` there; pinned when there: `Content-Type` `application/json`, `behavioroverride`
-  `redirectAs404`, `x-ms-client-type` `cdlworker`, `x-ms-client-user-agent` `Teams-V2-Web`, `x-ms-object-id` empty;
-  `Origin` the request's own, `x-ms-client-caller` a component's name as for the lookups; the rest free.
-  `x-ms-endpoint-id` (on 2065 of them) names the client's own endpoint, an id the fence has no check for: a read
-  carrying it is `Unknown` (the other 3396 didn't carry it);
-- a body read strictly that is a non-empty list of objects, each `{"mri": <string>}` or `{"mri": <string>, "source":
-  "ups"}` (the keys exactly so; the client's own MRI came with `source`), no MRI twice;
-- and every MRI a lab account at that moment (`Fence::lab_accounts_only`).
+- `POST` on either Teams origin, the path `/ups/<geo>/v1/presence/getpresence/` with its trailing slash, the geo
+  lowercase letters (`noam`), and no query at all;
+- the headers `Accept`, `Cookie`, `Origin`, `Referer`, `User-Agent`, `authorization`, `behavioroverride`,
+  `content-type`, `x-ms-client-caller`, `x-ms-client-type`, `x-ms-client-user-agent`, `x-ms-client-version`,
+  `x-ms-correlation-id`, `x-ms-object-id`, `x-ms-request-id`, `x-ms-session-id`, with `Content-Type`
+  `application/json`, `behavioroverride` `redirectAs404`, `x-ms-client-type` `cdlworker`, `x-ms-client-user-agent`
+  `Teams-V2-Web`, `x-ms-object-id` empty; on 2065 of them also `x-ms-endpoint-id`, the client's own endpoint;
+- a body that is a non-empty list of objects, each `{"mri": <string>}` or `{"mri": <string>, "source": "ups"}` (the
+  client's own MRI came with `source`), no MRI twice.
 
-The first run that let it through (`ab-chat` of 2026-10-22) sent 14 of them, each naming only a, b or c, none
-carrying `x-ms-endpoint-id`; every answer was 200 and named only the accounts asked for: a list of one item per MRI
-(`mri`, `presence` with `sourceNetwork` (`Self` for the account's own, `SameEnterprise` for another), `calendarData`
-(`isOutOfOffice`), `capabilities`, `availability`, `activity`, `lastActiveTime`, and `source` when asked with it),
-`etagMatch`, `etag`, and the item's `status` `20000`) ([trouter.md](trouter.md#others-presence)).
-
-Not on the list, and denied: Substrate's search (`POST substrate.office.com/search/api/v1/suggestions`), whose answers
-list other people of the tenant (never allowed under the user's rule of 2026-10-21), and bot invokes, whose body hands the account's Entra
-token to the app (`docs/backlog/bot-invokes-and-message-extensions.md`).
+The first run that let it through (`ab-chat` of 2026-10-22) sent 14 of them, each naming only a, b or c; every answer
+was 200 and named only the accounts asked for: a list of one item per MRI (`mri`, `presence` with `sourceNetwork`
+(`Self` for the account's own, `SameEnterprise` for another), `calendarData` (`isOutOfOffice`), `capabilities`,
+`availability`, `activity`, `lastActiveTime`, and `source` when asked with it), `etagMatch`, `etag`, and the item's
+`status` `20000`) ([trouter.md](trouter.md#others-presence)).
 
 ### The native client's reads by POST
 
-The native client has a list of its own (M2 Task 11, CLAUDE.md's "fourth list"): `teams-proto`'s sealed `PostRead`,
-with two entries: `ShortProfileLookup` (`short_profile`, the same request as the browser's entry above, in the
-captured query) and `PresenceRead` (`presence`, M2 Task 17, UPS's read above). They go out only this way:
+A lab binary sends two of them, each a plain `Request` through `Transport::send` (judged by `contacting`, `None`, and
+logged `allowed` before it goes), whoever it names:
 
-- `Fence::check_post_read(kind, names)` decides on the entry's kind and its exact, ordered MRIs: denied when they are
-  none, when one is named twice, or when any is not a lab account of the roster (an approved service participant
-  included, `Fence::lab_accounts_only`). The decision goes to `fence.log` as `{"event": "post_read_decision",
-  "post_read": <kind>, "names": <count>, "verdict": …, "reason": …}`, never with the MRIs, and a `PostReadPermit` is
-  made only once it is logged. The permit isn't `Clone` and has no constructor (`fence-seal`'s cases).
-- `AuthorizedPostRead::new(request, permit)` pairs them only when the permit is for that entry and exactly its MRIs,
-  in that order; the transport takes nothing else.
-- The transport builds the request (the middle tier's base, the entry's path and query, `Accept: application/json`,
-  `Content-Type: application/json;charset=UTF-8`, `x-ms-client-request-type: 0`, `x-ms-client-type: cdlworker`,
-  `x-ms-migration: True`, an empty `x-ms-object-id`, `x-ms-test-user: False`, the body a JSON list of the MRIs) and
-  reads it back against the entry's captured shape before anything else: the path exactly, every query pair once and
-  nothing else, every header but the token once with its pinned value and nothing else (no cookie, no
-  `x-ms-client-caller`, no correlation ids), the body a non-empty list of strings naming exactly the permit's MRIs.
-  Anything else is `HttpError::Unknown`: no token is asked for, nothing is logged or sent.
-- Then the `api.spaces.skype.com` token, the request logged as the browser's are (`"post_read": <kind>`, the URL
-  without its query; not sent when that fails), and one send: a read by `POST` is never retried under its permit. A
-  401 makes the session refresh the refused token for a later lookup under a new permit.
-- `ShortProfileLookup::read_answer` reads the answer (`{"type": …, "value": [profile, …]}`, both keys required as
-  every captured answer has them) and drops it whole if any profile is of an MRI the lookup didn't ask for.
-- `PresenceRead` goes to UPS (`Service::Presence`, the base from the GTM `presenceUPS` only:
-  `HttpTransport::with_presence`, an AFD host and `/ups/<geo>` exactly) at `v1/presence/getpresence/` with its
-  trailing slash and no query, with `Accept: application/json`, `Content-Type: application/json`, `behavioroverride:
-  redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent: Teams-V2-Web` and an empty
-  `x-ms-object-id` (no `x-ms-endpoint-id`, no cookie, no caller or correlation ids), the body `[{"mri": …}, …]`
-  (never the web client's `source`), and the `https://presence.teams.microsoft.com/` token; read back the same way.
-  UPS takes nothing else from the native transport: a `Read` or an own-state request to it is refused.
-  `PresenceRead::read_answer` drops the answer whole if any item is of an MRI not asked for, and reads an item's
-  `availability` and `activity` only when its `status` is the captured `20000`.
+- `ShortProfileLookup` to the middle tier (the account's middle-tier base from the GTM `middleTier`), in the captured
+  query, with `Accept: application/json`, `Content-Type: application/json;charset=UTF-8`, `x-ms-client-request-type:
+  0`, `x-ms-client-type: cdlworker`, `x-ms-migration: True`, an empty `x-ms-object-id`, `x-ms-test-user: False`, the
+  body a JSON list of the MRIs, and the `api.spaces.skype.com` token. `read_answer` reads the answer
+  (`{"type": …, "value": [profile, …]}`, both keys required as every captured answer has them) and drops it whole if
+  any profile is of an MRI the lookup didn't ask for.
+- `PresenceRead` to UPS (the base from the GTM `presenceUPS`: `HttpTransport::with_presence`, an AFD host and
+  `/ups/<geo>` exactly) at `v1/presence/getpresence/` with its trailing slash and no query, with `Accept:
+  application/json`, `Content-Type: application/json`, `behavioroverride: redirectAs404`, `x-ms-client-type:
+  cdlworker`, `x-ms-client-user-agent: Teams-V2-Web` and an empty `x-ms-object-id` (no `x-ms-endpoint-id`, no cookie,
+  no caller or correlation ids), the body `[{"mri": …}, …]` (never the web client's `source`), and the
+  `https://presence.teams.microsoft.com/` token. `PresenceRead::read_answer` drops the answer whole if any item is of
+  an MRI not asked for, and reads an item's `availability` and `activity` only when its `status` is the captured
+  `20000`.
 
-Not on the native list: `users/fetch` (names come from Graph and `short_profile`).
+Not sent: `users/fetch` (names come from Graph and `short_profile`).
+
+The personal build keeps both as entries of `teams-proto`'s sealed `PostRead` list (`short_profile`, `presence`),
+sent by `HttpTransport::post_read` only as an `AuthorizedPostRead`: `Fence::check_post_read(kind, names)` decides on
+the entry's kind and its exact, ordered MRIs (logged as `post_read_decision`, never with the MRIs) and makes a
+`PostReadPermit`, which `AuthorizedPostRead::new` pairs with the request only for that entry and exactly those MRIs;
+the transport reads the request back against the entry's captured shape (the path, every query pair once, every
+header but the token once with its pinned value, the body naming exactly the permit's MRIs), logs it by its kind and
+sends it once. A lab binary doesn't use that path.
 
 ## How a run uses it
 
-- `load`, `status` and `login` stay fail-closed: the seeded classifier maps no write, and the membership source is
-  `FailClosed`.
-- `ab-chat` uses `Classifier::mapped` with `LiveMembershipSource`. The browser fence hands the source the account's
-  chat service token from the page's own chat service requests (`HttpFence::with_credentials`: `HttpFence::handle`
-  takes it from the raw `Fetch.requestPaused` event's headers). A `PausedRequest` keeps every header's name, and the
-  value only of those the read-by-`POST` list reads (`Content-Type`, `Origin`, `behavioroverride` and the pinned
-  `x-ms-*` ones), never a
-  token or a cookie; the write mapping reads none. The event itself, headers included, has already been handed
-  to the run's event watchers (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b 1:1 chat passes only when the read
-  confirms its two members are lab accounts.
-- The native client (M1 Task 12) sends each chat write as a sealed request whose target is the table's: the chat for
-  every write on it, a message's and an edit's mentioned MRIs added, a new chat `New` with its members. Its live
-  member read takes the client's own credential from the native transport on every read (`CredentialSource`: the
-  account's `ic3` token as its session has it now, and the region's chat base, as `ChatCredential::bearer`); with no
-  token the read is `Partial(NoCredential)` and the write denied. Its source is `LiveMembershipSource::for_fence`, so
-  it writes to the lab's recorded group chat under the rule above, and to no other group chat.
+- Every run's browser fence asks `contacting` the same way; only its membership source differs. `load`, `status` and
+  `login` read no members: their source is `FailClosed`, so every write whose target has to be fetched is denied
+  (`Partial(NoSource)`), while everything that reaches nobody passes.
+- `ab-chat` and the other writing scenarios read members live (`LiveMembershipSource::for_fence`). The browser fence
+  hands the source the account's chat service token from the page's own chat service requests
+  (`HttpFence::with_credentials`: `HttpFence::handle` takes it from the raw `Fetch.requestPaused` event's headers). A
+  `PausedRequest` keeps every header's name, and the value only of the method overrides `contacting` reads
+  (`teams_fence::OVERRIDE_HEADERS`), never a token or a cookie. The event itself, headers included, has already been
+  handed to the run's event watchers (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b
+  1:1 chat passes only when the read confirms its two members are lab accounts.
+- The native client sends each chat write as a sealed request whose target is the table's: the chat for every write
+  on it, a message's and an edit's mentioned MRIs added, a new chat `New` with its members. Its live member read takes
+  the client's own credential from the native transport on every read (`CredentialSource`: the account's `ic3` token
+  as its session has it now, and the region's chat base, as `ChatCredential::bearer`); with no token the read is
+  `Partial(NoCredential)` and the write denied. Its source is `LiveMembershipSource::for_fence`, so it writes to any
+  chat whose members are all lab accounts, a group chat it created included.
 - `ab-chat` opens the chat by b's MRI (`l/chat/0/0?users=<mri>`): by UPN the client first resolves the user with the
-  middle tier's `fetchShortProfile` by address (`isMailAddress=true`), a `POST` the fence denies, and never opens the
-  chat; by the chat's id a page that
-  loaded before the chat existed says the user isn't in it.
+  middle tier's `fetchShortProfile` by address (`isMailAddress=true`), which was denied when `ab-chat` was written; by
+  the chat's id a page that loaded before the chat existed says the user isn't in it.
 - `abc-chat` (M1 Task 8) creates the a–b–c group chat once, from account a: it opens the web client straight at the
   new-chat deep link for b and c (a deep link reloads the whole client), sends a first message carrying the marker
   `lab fence probe abc-chat first message ` and the run's nonce, force-denied under a label of this run's own (an
@@ -443,10 +470,10 @@ Not on the native list: `users/fetch` (names come from Graph and `short_profile`
   earlier-first-message label, `ab-chat`, `ab-chat-full`, `ab-image`, `ab-trouter`, `ab-trouter-quiet` and
   `echo-call` under the earlier-run-probe label, all from before a's page loads (`echo-call`, which has no probe of
   its own, installs only that rule). `load` reads no members, so its fence denies the resend as every write
-  (`Partial(NoSource)`).
-  Once the id is recorded, a run messages the chat (a's probe, then a real message that b and c must show). It
-  refuses to start, before any browser opens, while the lab's source (`for_fence`) says no in `reads_in_full` (not
-  the recorded chat, or no three MRIs): a denied message would be resent on every later load.
+  (`Partial(NoSource)`). Once the id is recorded, a run messages the chat (a's probe, then a real message that b and c
+  must show). It refuses to start, before any browser opens, when the lab's source says in `reads_in_full` that it
+  can't read the recorded id's members at all (not a 1:1, group or meeting chat's id): a denied message would be
+  resent on every later load.
 - `ab-chat`'s live enforcement test forces a deny (`ForcedDeny`) on every write carrying the probe marker, from before
   the page loads to the end of the run (so an earlier run's unsent probe, sent again on load, is denied too). This
   run's probe carries a run-unique nonce and has a labelled forced deny of its own ahead of the marker's, so the
@@ -457,23 +484,23 @@ Not on the native list: `users/fetch` (names come from Graph and `short_profile`
 ## What the captures showed
 
 `proto-lab run load` (account a, fail-closed) and `proto-lab run ab-chat` (a and b) on 2026-10-20, read locally; the
-captures stay outside the repository and no fixture was exported from them.
+captures stay outside the repository and no fixture was exported from them. The verdicts named here are those of the
+fence then (default deny, an own-state list, a reviewed expected-deny list); [the contacting
+services](#the-contacting-services) give today's.
 
 - [x] The chat service base: `https://<teams origin>/api/chatsvc/amer/` (AFD), on `teams.cloud.microsoft` or
       `teams.microsoft.com`, as the fence's URL check expects. **Corrected**: its requests carry
       `Authorization: Bearer` with an Entra token for `https://ic3.teams.office.com`, not a skypetoken. The
       skypetoken goes, as `Authorization: skype_token <token>`, to the async gateway and the media service
-      (`*.asyncgw.teams.microsoft.com`, `*.asm.skype.com`, `…/skypetokenauth`, posts the fence denies); CSA takes a
-      bearer token for `chatsvcagg.teams.microsoft.com`, the middle tier one for `api.spaces.skype.com`.
-      `ChatCredential` now accepts the bearer form and the live read sends it back as such.
+      (`*.asyncgw.teams.microsoft.com`, `*.asm.skype.com`, `…/skypetokenauth`); CSA takes a bearer token for
+      `chatsvcagg.teams.microsoft.com`, the middle tier one for `api.spaces.skype.com`. `ChatCredential` now accepts
+      the bearer form and the live read sends it back as such.
 - [x] The 1:1 thread read: the fence's `GET v1/threads/<1:1 id>?view=msnp24Equivalent` with the bearer token came back
       complete for the a–b chat (the writes it gated were allowed). The client itself reads the batch form
       (`threads?threadIds=`), whose thread object has `id`, both members in `members` and no paging or count field.
 - [x] A group chat's read and `thread_members` (M1 Task 8, [A group chat's reads](#a-group-chats-reads)): the thread
       read and the member list agree and the list carries `totalMemberCount`; no paging form was seen and the filtered
-      view is refused to members. Not enough to call the read complete (decided with Codex), so group chats stayed
-      `Partial(Unsupported)`; since 2026-10-21 the lab's recorded chat is admitted by the user's decision
-      ([The lab's group chat](#the-labs-group-chat)), not by new evidence.
+      view is refused to members.
 - [x] Writes as sent: chat create, message (`RichText/Html`), typing (`Control/Typing`) and read receipt
       (`consumptionhorizon`) match the table and the mapping (see [Writes](#writes)).
 - [x] Edit, delete, reaction (added and taken back) and quoted reply, exercised by `ab-chat-full` (2026-10-20, M1
@@ -483,23 +510,24 @@ captures stay outside the repository and no fixture was exported from them.
       the target and allowed. Member changes and reply chains weren't exercised.
 - [x] The 1:1 id: the two object ids, lowercase and sorted (the bundle builds it that way; the live chat's id matches).
       Federated and guest chats weren't seen.
-- [x] Own state: the own properties above; no endpoint registration (the client uses the push channel `trouter` and the
-      async gateway instead). Still not on the own-state list.
+- [x] Own state: the own properties `messageDensity`, `favorites`, `firstLoginInformation`, `locale` and
+      `readReceiptsEnabled`, each a one-key JSON object, which the client retried more than a hundred times a run
+      while they were denied; no endpoint registration (the client uses the push channel `trouter` and the async
+      gateway instead).
 - [x] `RegistrationToken`: never sent; reads work without it.
-- [x] Denied in every run, all `Unknown`, expected by `load` and, through the reviewed expected-deny list that keeps
-      them denied (`crates/proto-lab/src/scenario/expected.rs`), by `ab-chat`, `ab-chat-full` and `echo-call`: telemetry
-      (`*.events.data.microsoft.com`, `browser.pipe.aria.microsoft.com`, `admin.microsoft.com/api/instrument`), the
-      middle tier's lookups by `POST` (`users/fetchShortProfile` with a JSON array of MRIs and `users/fetch`, both
-      let through since 2026-10-21 when they name only lab accounts, [Reads by POST](#reads-by-post); `effectivePolicies`, `useraggregatesettings`, `fetchfeaturesettings`, `apps/aggregatedEntitlements`,
-      `apps/eligibilities`, `apps/batchedDefinitions`, `me/files/availability`, `users/<oid>/cookiev2`,
-      `mcps/initArtifactFolder`), CSA's `chatsAndChannelsByIds`, presence (`ups/<region>/v1/presence/getpresence`), the
-      team push updates (`api/tps/…/pushupdates`), the async gateway's and media service's token exchanges, the editor
-      service (`editor.svc.cloud.microsoft`), Substrate search suggestions, and every frame sent on the
-      `augloop.office.com` and `go.trouter.teams.microsoft.com` sockets. The chat works without them; without the
-      profile lookups a chat partner showed as "Unknown User". Two classes on the list were first seen in `ab-chat-full`'s
-      runs of 2026-10-20: the bot invokes an opening editor sends (`POST v1/agents/<bot>/invoke`,
-      `composeExtension/fetchCommands`) and the own activity feed's item read (`PUT
-      v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread`).
+- [x] Denied in every run then, all unknown: telemetry (`*.events.data.microsoft.com`,
+      `browser.pipe.aria.microsoft.com`, `admin.microsoft.com/api/instrument`), the middle tier's lookups by `POST`
+      (`users/fetchShortProfile` with a JSON array of MRIs and `users/fetch`, `effectivePolicies`,
+      `useraggregatesettings`, `fetchfeaturesettings`, `apps/aggregatedEntitlements`, `apps/eligibilities`,
+      `apps/batchedDefinitions`, `me/files/availability`, `users/<oid>/cookiev2`, `mcps/initArtifactFolder`), CSA's
+      `chatsAndChannelsByIds`, presence (`ups/<region>/v1/presence/getpresence`), the team push updates
+      (`api/tps/…/pushupdates`), the async gateway's and media service's token exchanges, the editor service
+      (`editor.svc.cloud.microsoft`), Substrate search suggestions, and every frame sent on the `augloop.office.com`
+      and `go.trouter.teams.microsoft.com` sockets. The chat worked without them; without the profile lookups a chat
+      partner showed as "Unknown User". `ab-chat-full`'s runs of 2026-10-20 added the bot invokes an opening editor
+      sends (`POST v1/agents/<bot>/invoke`, `composeExtension/fetchCommands`) and the own activity feed's item read
+      (`PUT v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread`). Under the lab rule
+      all of these pass but the bot invokes.
 
 The synthetic fixtures in `tests/fixtures/chatsvc/` stay until they are rewritten synthetic-from-capture: written by
 hand from a local reference copy of these captures, with the same shape and made-up values. Captures never enter the

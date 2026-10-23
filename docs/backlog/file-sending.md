@@ -15,8 +15,8 @@ denied") never got as far as a write of the file:
   said "Sorry, you need OneDrive to share files. See your admin about getting a license."
 - What came before it: the client asks the middle tier whether the account's own file storage is ready,
   `POST <middle tier>/beta/me/files/availability` (no body, the `api.spaces.skype.com` token, `x-ms-client-caller:
-  IsFluidSiteProvisioned`), on every load. The fence denies it (unmapped, on the reviewed expected-deny list as
-  "files availability"), so the client never learns the answer.
+  IsFluidSiteProvisioned`), on every load. The fence denied it then, so the client never learned the answer; under
+  the lab rule it passes (it reaches nobody), and the next `ab-file` run shows what follows it.
 - So nothing of a file went out, under any of the run's forced denies: no write to SharePoint or OneDrive, Graph or
   an AMS object, and no message post naming the file. The only post was the caption alone (`properties.files`
   `"[]"`), denied by the run's marker rule.
@@ -28,17 +28,15 @@ any allowance.
 
 ## What would settle sending, in order
 
-1. **The storage check.** `me/files/availability` changes nothing and names only the account (`me`), so CLAUDE.md's
-   rule for a denied request that leaves nothing of the lab could allow it: as a reviewed entry of the read-by-`POST`
-   list (`crates/proto-lab/src/post_read.rs`) in its exact captured shape (host, path, no query, no body, the
-   `x-ms-client-caller` value), tests first, logged to `fence.log`, once its answer's shape has been seen to name
-   nothing but the account's own storage (its answer was never seen: it was always denied). Then `ab-file` runs again;
-   if the account has no OneDrive, files stay out of the lab for good.
+1. **The storage check.** `me/files/availability` changes nothing and names only the account (`me`): under the lab
+   rule it passes, logged `allowed`. `ab-file` runs again to see its answer and what the client does next; if the
+   account has no OneDrive, files stay out of the lab for good.
 2. **The upload** (bundle only): into the account's own OneDrive, folder "Microsoft Teams Chat Files", by Graph or
    SharePoint's `…/drive/root:/<folder>/<name>:/createUploadSession` and the session's content `PUT`s, or a
-   `quickUpload`. A file in the account's own drive that nobody else can read is the account's own state, so it could
-   be allowed as own-state in its captured shape, if the capture shows that the folder grants nobody else access
-   (its permissions read fresh) and the request names nothing but the account's drive.
+   `quickUpload`. SharePoint, OneDrive and Graph are contacting services, so every write there is denied until a row
+   carves it out. A file in the account's own drive that nobody else can read reaches nobody, so the upload could
+   become such a row (with its test), if the capture shows that the folder grants nobody else access (its permissions
+   read fresh) and the request names nothing but the account's drive.
 3. **The share** (bundle only, `shareDriveItem`): the item shared with the chat's members. Unlike an AMS upload, the
    share names its readers, so `Fence::check` could judge it like a message: every recipient, fetched fresh, a lab
    account, and the link's scope "specific people" only. A link for "people in your organization" or "anyone" is

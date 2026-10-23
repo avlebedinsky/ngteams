@@ -536,19 +536,27 @@ and tokens, the personal build and protocol notes stay as they are:
 - Delete: `docs/backlog/seeded-own-rules-ignore-the-query.md`, `docs/backlog/group-chat-member-read-completeness.md`
 - Modify: `docs/backlog/bot-invokes-and-message-extensions.md`
 
-- [ ] `endpoints.md`: replace the Browser-fence column with "contacting?" (`yes: <service>`, `mapped: <kind>`,
+- [x] `endpoints.md`: replace the Browser-fence column with "contacting?" (`yes: <service>`, `mapped: <kind>`,
       `carve-out`, `no`); keep the Native column
-- [ ] `fence-targets.md`: the services, the table and the member read; the abc shape section goes
-- [ ] delete the two backlog items the rule settles; `bot-invokes…`: bot invokes stay denied (a token to a third
-      party), say so
-- [ ] rewrite `docs/backlog/fence-call-follow-ups.md` to the path in Technical Details, "Calls": the call registry
+- [x] `fence-targets.md`: the services, the table and the member read; the abc shape section goes
+- [x] delete the two backlog items the rule settles; `bot-invokes…`: bot invokes stay denied (a token to a third
+      party), say so (one deleted, the other narrowed to what the rule leaves: see the note below)
+- [x] rewrite `docs/backlog/fence-call-follow-ups.md` to the path in Technical Details, "Calls": the call registry
       instead of an authoritative read, starting and answering lab-only calls, no roster watch (the user's decisions
       of 2026-10-23), and the follow-ups to map in M3
-- [ ] `cargo test -p fixture-guard` passes
+- [x] `cargo test -p fixture-guard` passes
 - ➕ (found in Task 4) `docs/backlog/one-time-code-sign-in-under-the-fence.md` says `Classifier::sign_in` denies
       Entra's `SAS/*` requests; the lab browser now lets them through (they reach nobody) and `login` stops at a
       multi-factor prompt by itself, while `teams_signin::classify` still denies them: say so. `docs/spikes/echo-call.md`
       already names `teams_fence::contacting`.
+- ➕ note (Task 7 as built): `endpoints.md`'s Native column now reads `Read`, `Request`, `Authorized<Mutating>`,
+      `OwnFrame`, `teams-auth`, `teams-signin`, `teams-trouter`, `not used` (a host of one of the transport's services)
+      or `no service`; a row for Entra's `SAS/*` posts was added. `group-chat-member-read-completeness.md` is deleted;
+      `seeded-own-rules-ignore-the-query.md` is kept, narrowed to the sign-in window (`teams_signin::classify` still
+      takes the form's posts with any query, CLAUDE.md points at the item, and `docs/personal-build.md` asks both
+      builds for exact captured shapes), so only its lab-browser half is settled. Stale fence references were also
+      fixed in `calling-echo.md`, `chat.md`, `auth.md` and the backlog items `file-sending.md` and
+      `channel-writes-need-a-lab-only-team.md`; `README.md` and `CLAUDE.md` are left to Task 11.
 
 ### Task 8: Remove what nothing uses any more
 

@@ -200,8 +200,8 @@ tree has none of it.
 run): it names no reader at all, no conversation, MRI or permission, so it can't say who may read the object now. The
 200s and the 403 show that the service checks readers, and only for the accounts the lab holds; they can never show
 that nobody else can read it. Even with a complete reader list the race between that read and the upload (a `forward`
-from any client) would need evidence of its own. So images stay deferred: the upload stays unmapped, nothing of AMS is
-on the native allowlist, there is no `SendImage`, and the app shows an image as a placeholder followed by a link to
+from any client) would need evidence of its own. So images stay deferred: the upload stays unmapped, AMS is no
+service of the native transport, there is no `SendImage`, and the app shows an image as a placeholder followed by a link to
 its message in Teams on the web. What would reopen it is in `docs/backlog/ams-image-sending.md`.
 
 The first run was **breached**: 15 s after the creation the laptop's lid closed and the machine suspended for eight
@@ -228,8 +228,8 @@ the compose box of the a–b chat a made-up text file.
   opened no menu and asked for no file; the page said "Sorry, you need OneDrive to share files. See your admin about
   getting a license." Before that the client had asked `POST <middle tier>/beta/me/files/availability` (no body, the
   `api.spaces.skype.com` token, `x-ms-client-caller: IsFluidSiteProvisioned`), which it sends on every load and the
-  fence denies (unmapped, "files availability" on the reviewed expected-deny list). Its answer was never seen, so
-  whether the lab accounts have a OneDrive at all is open: the notice may be the client's reading of the denied check.
+  fence of the time denied (it passes under the lab rule). Its answer was never seen, so whether the lab accounts have
+  a OneDrive at all is open: the notice may be the client's reading of the denied check.
 - **Nothing of a file went out**: no write to SharePoint, OneDrive, Graph or an AMS object, and no message post with
   a file. The plain message before it (no marker) was sent and b showed it; b never showed the file's name (the
   first run; the later ones stopped at the notice).
@@ -384,13 +384,14 @@ Fixture: `tests/fixtures/chatsvc/mention-group.json`.
 
 ## Seen beside it
 
-- Own properties the client puts and the fence denies (unknown, not on the own-state list): `messageDensity` (hundreds
-  of retries a run), `favorites`, `locale`, `firstLoginInformation`, and `readReceiptsEnabled`, new in this run.
+- Own properties the client puts, denied by the fence of the time (a carve-out under the lab rule): `messageDensity`
+  (hundreds of retries a run), `favorites`, `locale`, `firstLoginInformation`, and `readReceiptsEnabled`, new in this run.
 - Whenever an editor opens (the compose box, the mention picker, an edit box), the client asks its message
   extensions' bots for their commands: `POST v1/agents/28:<id>/invoke` with `name` `composeExtension/fetchCommands`, to
-  two bots, denied as unknown (a bot invoke reaches the bot's own service). The reviewed expected-deny list
-  (`crates/proto-lab/src/scenario/expected.rs`) now expects them, so a run isn't failed by them; they stay denied.
+  two bots, denied as unknown (a bot invoke hands the account's token to the bot's own service). The reviewed
+  expected-deny list (`crates/proto-lab/src/scenario/expected.rs`) expects them, so a run isn't failed by them; they
+  stay denied.
 - Once b's reaction reached a's activity feed, a's client marked the feed item read: `PUT
   v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread` with `{"isread": "true"}`, retried
-  nine times while denied. Expected by the same list (the account's own feed), still denied.
+  nine times while denied. A carve-out under the lab rule (the account's own feed): it passes.
 - `GET v1/users/ME/properties` answers 404, and so does `v1/users/ME/conversations/48:calllogs` for the lab accounts.
