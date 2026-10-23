@@ -1,9 +1,10 @@
 //! The account's own presence as the app reports it (M2 Task 20), on GPUI's test context over the fake engine
 //! (`common`) and its fake clock: Available once the push channel registered and again every refresh while the window
 //! is used, nothing once idle (the idle time a setting) and Available again at the next use (the shell's mouse and key
-//! input); a manual status from the account menu (or the settings) sent at once, overriding until Automatic is chosen
-//! again; nothing on quit; a failed report shown in the account menu and never sent again, a fence denial ending the
-//! reports. Every id here is made up.
+//! input, a key a binding takes included); a manual status from the account menu (or the settings) sent at once,
+//! overriding until Automatic is chosen again; nothing on quit; a failed report shown in the account menu and never sent
+//! again on its own, a manual status or reset that failed shown as not set and sent again when chosen again in the
+//! menu, a fence denial ending the reports. Every id here is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -12,21 +13,27 @@ mod common;
 #[path = "common/parts.rs"]
 mod parts;
 
+use std::cell::Cell;
+use std::future::{self, Future};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::{LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
 use teams_core::{
-    AVAILABLE_REFRESH, Availability, EngineError, Event, OwnStatus, RegistrationReport, Reporting, Transient,
+    AVAILABLE_REFRESH, Availability, Choice, EngineError, Event, OwnStatus, RegistrationReport, Reporting, Transient,
     TransientSent,
 };
-use teams_proto::ManualAvailability;
+use teams_proto::{
+    Authorized, AuthorizedPostRead, EndpointRegistration, HttpError, ManualAvailability, Mutating, OwnState, PostRead,
+    Read, RegisteredEndpoint, Response, Transport, register,
+};
 use teams_trouter::Stop;
-use teams_ui::own_presence::{OwnPresence, POLICY_TICK};
-use teams_ui::settings::{ManualStatus, Settings, SettingsModel};
-use teams_ui::shell::Shell;
-use teams_ui::{FeedEvent, ShellParts, ViewTrace};
+use teams_ui::own_presence::{self, OwnPresence, POLICY_TICK};
+use teams_ui::settings::{ManualStatus, Notifications, Settings, SettingsModel};
+use teams_ui::shell::{self, Shell};
+use teams_ui::{ShellParts, ViewTrace};
 
 /// Two of the policy's ticks short of the refresh, and those two ticks.
 const JUST_BEFORE_REFRESH: Duration = Duration::from_secs(110);
@@ -288,21 +295,17 @@ fn a_report_that_waited_and_was_dropped_is_shown_and_a_typing_s_isn_t_its() {
         },
     ));
     assert!(rig.cx.read(|cx| own.read(cx).failure().is_none()));
-    // the engine telling how a waiting endpoint `PUT` went (the feed's `OwnReport`, from its `Event::Transient`)
-    let feed = rig.models.feed.clone();
-    rig.cx.update(|cx| {
-        feed.update(cx, |_, cx| {
-            cx.emit(FeedEvent::OwnReport {
-                status: OwnStatus::Available,
-                sent: TransientSent::Dropped {
-                    reason: "throttled again after waiting once".to_owned(),
-                },
-            });
-        });
-    });
-    rig.cx.run_until_parked();
+    // the engine telling how a waiting endpoint `PUT` went: its `Event::Transient`, which the models turn into the
+    // feed's `OwnReport`
+    rig.send(Event::Transient(
+        Transient::EndpointAvailable { endpoint: endpoint() },
+        TransientSent::Dropped {
+            reason: "throttled again after waiting once".to_owned(),
+        },
+    ));
     let failure = rig.cx.read(|cx| own.read(cx).failure().cloned()).expect("shown");
     assert_eq!(failure.status, OwnStatus::Available);
+    assert!(failure.why.contains("throttled again"), "{failure:?}");
     // not sent again sooner than the refresh; the refresh that goes through clears it
     wait(&rig, JUST_BEFORE_REFRESH);
     assert!(asked(&rig).is_empty());
@@ -310,6 +313,60 @@ fn a_report_that_waited_and_was_dropped_is_shown_and_a_typing_s_isn_t_its() {
     wait(&rig, TWO_TICKS);
     assert_eq!(asked(&rig), [OwnStatus::Available]);
     assert!(rig.cx.read(|cx| own.read(cx).failure().is_none()));
+}
+
+#[test]
+fn a_waiting_manual_status_dropped_later_is_shown_as_not_set() {
+    let (rig, own, settings, _) = reporting(Settings::default());
+    registered(&rig);
+    assert_eq!(asked(&rig), [OwnStatus::Available]);
+    rig.core
+        .own_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(TransientSent::Waiting { not_before: 0 }));
+    choose(&rig, &settings, ManualStatus::Busy);
+    assert_eq!(asked(&rig), [OwnStatus::Manual(ManualAvailability::Busy)]);
+    assert_eq!(reporting_of(&rig, &own), Reporting::Manual(ManualAvailability::Busy));
+    rig.send(Event::Transient(
+        Transient::ManualStatus {
+            endpoint: endpoint(),
+            status: Some(ManualAvailability::Busy),
+        },
+        TransientSent::Dropped {
+            reason: "throttled again after waiting once".to_owned(),
+        },
+    ));
+    assert_eq!(
+        reporting_of(&rig, &own),
+        Reporting::NotSet(Choice::Manual(ManualAvailability::Busy))
+    );
+    let failure = rig.cx.read(|cx| own.read(cx).failure().cloned()).expect("shown");
+    assert_eq!(failure.status, OwnStatus::Manual(ManualAvailability::Busy));
+}
+
+#[test]
+fn going_idle_tells_the_observers_without_any_other_input() {
+    let (rig, own, _, _) = reporting(Settings {
+        idle_minutes: 1,
+        ..Settings::default()
+    });
+    registered(&rig);
+    assert_eq!(reporting_of(&rig, &own), Reporting::Available);
+    let told = Rc::new(Cell::new(0_u32));
+    let counted = Rc::clone(&told);
+    let _observing = rig
+        .cx
+        .update(|cx| cx.observe(&own, move |_, _| counted.set(counted.get() + 1)));
+    // within the idle time: the ticks tell nothing
+    wait(&rig, Duration::from_secs(50));
+    assert_eq!(told.get(), 0);
+    // past it: told once, by the tick that noticed
+    wait(&rig, Duration::from_secs(20));
+    assert_eq!(reporting_of(&rig, &own), Reporting::Inactive);
+    assert_eq!(told.get(), 1);
+    wait(&rig, Duration::from_secs(60));
+    assert_eq!(told.get(), 1, "nothing changed since");
 }
 
 #[test]
@@ -441,9 +498,97 @@ fn the_account_menu_shows_a_failed_report() {
     assert!(bounds(cx, "status-menu-failure").is_some());
 }
 
+/// Opens the account menu and chooses `status` in it.
+fn choose_in_menu(cx: &mut VisualTestContext, status: ManualStatus) {
+    click(cx, "rail-status");
+    click(cx, &format!("status-menu-{}", status.key()));
+}
+
+fn shown(cx: &mut VisualTestContext, shell: &Entity<Shell>) -> Reporting {
+    cx.update(|_, cx| shell.read(cx).own_reporting(cx)).expect("handed in")
+}
+
+fn drop_next(rig: &Rig) {
+    rig.core
+        .own_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(TransientSent::Dropped {
+            reason: "HTTP 500; whether it arrived is unknown, so it isn't sent again".to_owned(),
+        }));
+}
+
+#[test]
+fn a_failed_manual_status_chosen_again_in_the_account_menu_is_sent_again() {
+    let (rig, shell, own, cx) = shell_with_own(Settings::default());
+    registered(&rig);
+    assert_eq!(asked(&rig), [OwnStatus::Available]);
+    drop_next(&rig);
+    choose_in_menu(cx, ManualStatus::Busy);
+    assert_eq!(asked(&rig), [OwnStatus::Manual(ManualAvailability::Busy)]);
+    // shown as not set, not as reported: the label, an empty ring for the dot, and the failure
+    let not_set = Reporting::NotSet(Choice::Manual(ManualAvailability::Busy));
+    assert_eq!(shown(cx, &shell), not_set);
+    assert!(own_presence::reporting_label(not_set).contains("not set"));
+    assert_eq!(shell::shown_as(not_set), Availability::Unknown);
+    click(cx, "rail-status");
+    assert!(bounds(cx, "status-menu-reported").is_some());
+    assert!(bounds(cx, "status-menu-failure").is_some());
+    // nothing goes out on its own, nor on a change of another setting
+    wait(&rig, AVAILABLE_REFRESH);
+    assert_eq!(asked(&rig), [OwnStatus::Available]);
+    let model = cx.update(|_, cx| shell.read(cx).settings().clone());
+    cx.update(|_, cx| {
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.notifications = Notifications::ALL[1], cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(asked(&rig).is_empty());
+
+    // Busy chosen again (the setting unchanged): sent again, once
+    click(cx, "status-menu-busy");
+    assert_eq!(asked(&rig), [OwnStatus::Manual(ManualAvailability::Busy)]);
+    assert_eq!(shown(cx, &shell), Reporting::Manual(ManualAvailability::Busy));
+    assert_eq!(
+        shell::shown_as(Reporting::Manual(ManualAvailability::Busy)),
+        Availability::Busy
+    );
+    assert!(
+        cx.update(|_, cx| own.read(cx).failure().is_none()),
+        "cleared once it went through"
+    );
+    // gone through: chosen again, nothing
+    choose_in_menu(cx, ManualStatus::Busy);
+    assert!(asked(&rig).is_empty());
+}
+
+#[test]
+fn a_failed_reset_chosen_again_in_the_account_menu_is_sent_again() {
+    let (rig, shell, _, cx) = shell_with_own(Settings::default());
+    registered(&rig);
+    assert_eq!(asked(&rig), [OwnStatus::Available]);
+    choose_in_menu(cx, ManualStatus::Busy);
+    assert_eq!(asked(&rig), [OwnStatus::Manual(ManualAvailability::Busy)]);
+    drop_next(&rig);
+    choose_in_menu(cx, ManualStatus::Automatic);
+    assert_eq!(asked(&rig), [OwnStatus::ClearManual]);
+    // the account may still be Busy on the server: not shown as Available
+    let not_set = Reporting::NotSet(Choice::Automatic);
+    assert_eq!(shown(cx, &shell), not_set);
+    assert!(own_presence::reporting_label(not_set).contains("not reset"));
+    assert_eq!(shell::shown_as(not_set), Availability::Unknown);
+    // Automatic chosen again: the reset again, once
+    choose_in_menu(cx, ManualStatus::Automatic);
+    assert_eq!(asked(&rig), [OwnStatus::ClearManual]);
+    assert_eq!(shown(cx, &shell), Reporting::Available);
+    choose_in_menu(cx, ManualStatus::Automatic);
+    assert!(asked(&rig).is_empty());
+}
+
 #[test]
 fn the_window_s_use_brings_available_back_after_idle() {
-    let (rig, _, own, cx) = shell_with_own(Settings {
+    let (rig, shell, own, cx) = shell_with_own(Settings {
         idle_minutes: 1,
         ..Settings::default()
     });
@@ -464,6 +609,16 @@ fn the_window_s_use_brings_available_back_after_idle() {
     cx.simulate_keystrokes("x");
     cx.run_until_parked();
     assert_eq!(asked(&rig), [OwnStatus::Available]);
+    // a key a binding takes (Ctrl+K opens the switcher), after idle again: a key listener never hears it
+    wait(&rig, Duration::from_secs(90));
+    assert_eq!(reporting_of(&rig, &own), Reporting::Inactive);
+    cx.simulate_keystrokes("ctrl-k");
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| shell.read(cx).switcher().is_some()),
+        "the binding took it"
+    );
+    assert_eq!(asked(&rig), [OwnStatus::Available]);
 }
 
 #[test]
@@ -474,4 +629,46 @@ fn the_account_s_own_dot_is_not_one_of_the_others_presence_dots() {
     // the shell's own chats are empty here: any `presence-…` dot would be the account's, and there is none
     assert!(bounds(cx, "presence-available").is_none());
     assert!(bounds(cx, "presence-unknown").is_none());
+}
+
+/// An endpoint a registration of this test registered: [`register`] over a fake transport that takes every own-state
+/// request (a fake registers at all only under `teams-proto`'s `test-support`), the only way to get one.
+fn endpoint() -> RegisteredEndpoint {
+    let registration = EndpointRegistration::messaging(
+        "00000000-0000-4000-8000-0000000000e1",
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/",
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let (_, endpoint) = runtime.block_on(register(&Accepting, &registration)).unwrap();
+    endpoint.expect("a registration the fake took")
+}
+
+/// A transport answering every own-state request 202; it is never asked anything else.
+struct Accepting;
+
+impl Transport for Accepting {
+    type Error = HttpError;
+
+    fn read<R: Read>(&self, _: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        future::ready(Err(HttpError::NoRoute))
+    }
+
+    fn own_state<R: OwnState>(&self, _: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        future::ready(Ok(Response::new(202, Vec::new())))
+    }
+
+    fn post_read<R: PostRead + Send>(
+        &self,
+        _: AuthorizedPostRead<R>,
+    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        future::ready(Err(HttpError::NoRoute))
+    }
+
+    fn deliver<R: Mutating + Send>(
+        &self,
+        _: Authorized<R>,
+    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        future::ready(Err(HttpError::NoRoute))
+    }
 }

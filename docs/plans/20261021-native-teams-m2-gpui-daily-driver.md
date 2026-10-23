@@ -1218,7 +1218,8 @@ reader now drops beside a paragraph or a quote (tests first). Fixtures `reaction
     right back" and "Appear offline" dropped: a file naming one is reported, Automatic kept). A manual status is sent
     when chosen and once at the run's first registration (Automatic at the start sends no reset), keeps the endpoint
     refreshed while idle, and Automatic sends the reset. A failed report is shown in the menu and traced
-    (`own-presence` `failed`), never sent again; a fence denial stops the reports for the run.
+    (`own-presence` `failed`), never sent again on its own; a manual status or reset that failed shows as not set
+    until the user chooses it again in the menu, which sends it again; a fence denial stops the reports for the run.
   - Not in the Files list: `docs/protocol/{trouter.md,endpoints.md}` (the policy written up), the backlog item, and
     `teams_core::RegistrationReport` re-exported for the feed's new `Registered`, `PushStopped` and `OwnReport` events.
 

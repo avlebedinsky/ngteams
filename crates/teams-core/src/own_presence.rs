@@ -25,10 +25,11 @@
 //!   kept reported meanwhile, idle or not (a manual status with no live endpoint was read `Offline`). The saved choice
 //!   is applied once, at the run's first registration (the local choice wins over one made elsewhere since); Automatic
 //!   at the start sends no reset. A choice made before a registration takes the saved one's place.
-//! - **A failed report** is never sent again: a manual status that failed waits for the user to choose again, and a
-//!   failed `PUT` doesn't bring the refresh forward (the refresh is a schedule, not a retry). A fence denial stops every
-//!   report for the run. A report the engine had no endpoint for (its push channel stopped for good) ends the reports
-//!   until a registration, and the choice it carried, if it still stands, goes out with it.
+//! - **A failed report** is never sent again on its own: a manual status (or reset) that failed waits for the user to
+//!   choose it again, which sends it again as a new choice ([`Reporting::NotSet`] meanwhile: what the account shows
+//!   is not known), and a failed `PUT` doesn't bring the refresh forward (the refresh is a schedule, not a retry). A
+//!   fence denial stops every report for the run. A report the engine had no endpoint for (its push channel stopped
+//!   for good) ends the reports until a registration, and the choice it carried, if it still stands, goes out with it.
 
 use std::time::{Duration, Instant};
 
@@ -59,6 +60,9 @@ pub enum Reporting {
     Available,
     /// A manual status, the endpoint kept up by the refresh.
     Manual(ManualAvailability),
+    /// The choice's manual status (or, for Automatic, its reset) failed: what the account shows is not known until the
+    /// user chooses it again, which sends it again. The endpoint is still kept up by the refresh when it should be.
+    NotSet(Choice),
     /// Idle: nothing is reported, and the endpoint lapses on its own.
     Inactive,
     /// The fence denied a report: nothing more is reported in this run.
@@ -88,6 +92,8 @@ pub struct OwnPresencePolicy {
     sent_at: Option<Instant>,
     /// The manual status (or its reset) waiting for a registration.
     pending: Option<OwnStatus>,
+    /// The choice's manual status (or its reset) failed: choosing it again sends it again.
+    failed: bool,
     ended: Option<Ended>,
 }
 
@@ -103,6 +109,7 @@ impl OwnPresencePolicy {
             reporting: false,
             sent_at: None,
             pending: manual(choice),
+            failed: false,
             ended: None,
         }
     }
@@ -123,6 +130,9 @@ impl OwnPresencePolicy {
         }
         if !self.live {
             return Reporting::Connecting;
+        }
+        if self.failed {
+            return Reporting::NotSet(self.choice);
         }
         match self.choice {
             Choice::Manual(status) => Reporting::Manual(status),
@@ -169,17 +179,16 @@ impl OwnPresencePolicy {
     }
 
     /// The user chose `choice`: the endpoint `PUT` if it now has to be reported and wasn't, then the manual status (or
-    /// the reset, when a manual status was chosen before); kept for the next registration when none is live.
+    /// the reset, when a manual status was chosen before); kept for the next registration when none is live. The
+    /// choice already made is sent again only when its own report failed: the user chose it again, a new choice.
     pub fn choose(&mut self, choice: Choice, now: Instant) -> Vec<OwnStatus> {
-        if self.ended.is_some() || choice == self.choice {
+        if self.ended.is_some() || (choice == self.choice && !self.failed) {
             return Vec::new();
         }
         self.choice = choice;
-        let status = match choice {
-            Choice::Manual(status) => OwnStatus::Manual(status),
-            // a change to Automatic comes from a manual status: the reset
-            Choice::Automatic => OwnStatus::ClearManual,
-        };
+        self.failed = false;
+        // a change to Automatic comes from a manual status (or is Automatic's failed reset chosen again): the reset
+        let status = manual_or_reset(choice);
         if !self.live {
             self.pending = Some(status);
             return Vec::new();
@@ -192,18 +201,31 @@ impl OwnPresencePolicy {
     /// How a report went (the engine's reply, or its later [`Event::Transient`](crate::Event::Transient)). Nothing is
     /// ever sent again for it: a fence denial ends the reports for the run, a stopped engine ends them too, and a report
     /// the engine had no endpoint for (its push channel stopped for good) ends them until a registration, the manual
-    /// status it carried kept for that one if it is still the choice.
+    /// status it carried kept for that one if it is still the choice. A manual status (or reset) of the choice that
+    /// failed otherwise makes it [`Reporting::NotSet`] until the user chooses again; one that went through clears that.
     pub fn reported(&mut self, status: OwnStatus, outcome: Result<&TransientSent, &EngineError>) {
+        let the_choice_s = status != OwnStatus::Available && manual_or_reset(self.choice) == status;
         match outcome {
             Ok(TransientSent::Denied { .. }) => self.end(Ended::Denied),
             Err(EngineError::Stopped) => self.end(Ended::Quit),
             Err(EngineError::NoEndpoint) => {
                 self.stopped();
-                if status != OwnStatus::Available && self.pending.is_none() && manual_or_reset(self.choice) == status {
+                if the_choice_s && self.pending.is_none() {
                     self.pending = Some(status);
                 }
             }
-            Ok(TransientSent::Sent | TransientSent::Waiting { .. } | TransientSent::Dropped { .. }) | Err(_) => {}
+            Ok(TransientSent::Sent) => {
+                if the_choice_s {
+                    self.failed = false;
+                }
+            }
+            Ok(TransientSent::Dropped { .. }) | Err(_) => {
+                if the_choice_s {
+                    self.failed = true;
+                }
+            }
+            // its outcome comes later, as another answer
+            Ok(TransientSent::Waiting { .. }) => {}
         }
     }
 

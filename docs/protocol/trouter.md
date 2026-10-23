@@ -472,8 +472,11 @@ captured requests are used; settled with Codex (2026-10-23, `discussions/task-20
   overrides Available until cleared, and the endpoint keeps being refreshed meanwhile, idle or not (a manual status
   with no live endpoint read `Offline`, runs 9–10). The saved choice is sent once at the run's first registration;
   Automatic at the start sends no reset.
-- **A failed report** is shown in the account menu and never sent again (the transient kind's own rules are the only
-  retries); a failed `PUT` doesn't bring the refresh forward. A fence denial stops the reports for the run.
+- **A failed report** is shown in the account menu and never sent again on its own (the transient kind's own rules
+  are the only retries); a failed `PUT` doesn't bring the refresh forward. A manual status or reset that failed is
+  shown as not set (what the account shows isn't known: a failed reset may leave it in its manual status), and the
+  user choosing it again in the menu sends it again, a new write of the user's through the engine's fenced path. A
+  fence denial stops the reports for the run.
 
 ### The browser fence's mapping
 

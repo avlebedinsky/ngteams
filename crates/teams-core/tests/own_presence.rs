@@ -3,7 +3,8 @@
 //! [`AVAILABLE_REFRESH`]; nothing once idle (the endpoint lapses on its own), the `PUT` again at once on the next
 //! use; a manual status overrides it until cleared and keeps the endpoint reported, idle or not; the saved manual
 //! status applied once at the run's first registration, Automatic at start sending no reset; nothing on quit; a failed
-//! report never sent again (a fence denial stops every report for the run), the refresh never brought forward by one.
+//! report never sent again on its own (a fence denial stops every report for the run), the refresh never brought
+//! forward by one; a manual status or reset that failed shown as not set and sent again when the user chooses it again.
 
 use std::time::{Duration, Instant};
 
@@ -255,6 +256,115 @@ fn a_dropped_report_is_never_sent_again_and_the_refresh_isn_t_brought_forward() 
     assert!(policy.tick(now + SECOND).is_empty());
     assert_eq!(policy.registered(now + SECOND * 2), [OwnStatus::Available]);
     assert!(policy.tick(now + AVAILABLE_REFRESH).is_empty());
+}
+
+#[test]
+fn a_failed_manual_status_is_shown_as_not_set_and_sent_again_when_chosen_again() {
+    let (mut policy, start) = started(Choice::Automatic);
+    assert_eq!(policy.registered(start), [OwnStatus::Available]);
+    let busy_choice = Choice::Manual(ManualAvailability::Busy);
+    let busy = OwnStatus::Manual(ManualAvailability::Busy);
+    assert_eq!(policy.choose(busy_choice, start), [busy]);
+    let dropped = TransientSent::Dropped {
+        reason: "HTTP 500".to_owned(),
+    };
+    policy.reported(busy, Ok(&dropped));
+    // not shown as reported: what the account shows isn't known
+    assert_eq!(policy.reporting(start + SECOND), Reporting::NotSet(busy_choice));
+    assert!(policy.tick(start + SECOND * 2).is_empty());
+    // the endpoint stays reported meanwhile
+    assert_eq!(policy.tick(start + AVAILABLE_REFRESH), [OwnStatus::Available]);
+    // the user chooses it again: sent again, once
+    let again = start + AVAILABLE_REFRESH + SECOND;
+    assert_eq!(policy.choose(busy_choice, again), [busy]);
+    assert_eq!(policy.reporting(again), Reporting::Manual(ManualAvailability::Busy));
+    policy.reported(busy, Ok(&sent()));
+    assert_eq!(policy.reporting(again), Reporting::Manual(ManualAvailability::Busy));
+    // gone through: choosing it again sends nothing
+    assert!(policy.choose(busy_choice, again + SECOND).is_empty());
+
+    // one that waited and was then dropped is not set either; an engine error too
+    assert_eq!(
+        policy.choose(Choice::Manual(ManualAvailability::Away), again + SECOND * 2),
+        [OwnStatus::Manual(ManualAvailability::Away)]
+    );
+    let away = OwnStatus::Manual(ManualAvailability::Away);
+    policy.reported(away, Ok(&TransientSent::Waiting { not_before: 0 }));
+    assert_eq!(
+        policy.reporting(again + SECOND * 2),
+        Reporting::Manual(ManualAvailability::Away)
+    );
+    policy.reported(away, Ok(&dropped));
+    assert_eq!(
+        policy.reporting(again + SECOND * 2),
+        Reporting::NotSet(Choice::Manual(ManualAvailability::Away))
+    );
+    assert_eq!(
+        policy.choose(Choice::Manual(ManualAvailability::Away), again + SECOND * 3),
+        [away]
+    );
+    policy.reported(away, Err(&EngineError::NotAChat));
+    assert_eq!(
+        policy.reporting(again + SECOND * 3),
+        Reporting::NotSet(Choice::Manual(ManualAvailability::Away))
+    );
+}
+
+#[test]
+fn a_failed_reset_is_shown_as_not_set_and_sent_again_when_automatic_is_chosen_again() {
+    let (mut policy, start) = started(Choice::Automatic);
+    assert_eq!(policy.registered(start), [OwnStatus::Available]);
+    let busy = OwnStatus::Manual(ManualAvailability::Busy);
+    assert_eq!(policy.choose(Choice::Manual(ManualAvailability::Busy), start), [busy]);
+    policy.reported(busy, Ok(&sent()));
+    assert_eq!(
+        policy.choose(Choice::Automatic, start + SECOND),
+        [OwnStatus::ClearManual]
+    );
+    policy.reported(
+        OwnStatus::ClearManual,
+        Ok(&TransientSent::Dropped {
+            reason: "HTTP 500".to_owned(),
+        }),
+    );
+    // the account may still be Busy on the server: not shown as Available
+    assert_eq!(
+        policy.reporting(start + SECOND * 2),
+        Reporting::NotSet(Choice::Automatic)
+    );
+    assert!(policy.tick(start + SECOND * 3).is_empty());
+    assert_eq!(
+        policy.choose(Choice::Automatic, start + SECOND * 4),
+        [OwnStatus::ClearManual]
+    );
+    assert_eq!(policy.reporting(start + SECOND * 4), Reporting::Available);
+    policy.reported(OwnStatus::ClearManual, Ok(&sent()));
+    assert!(policy.choose(Choice::Automatic, start + SECOND * 5).is_empty());
+    assert_eq!(policy.reporting(start + SECOND * 5), Reporting::Available);
+}
+
+#[test]
+fn a_failure_of_an_earlier_choice_doesn_t_mark_the_current_one_not_set() {
+    let (mut policy, start) = started(Choice::Automatic);
+    assert_eq!(policy.registered(start), [OwnStatus::Available]);
+    let busy = OwnStatus::Manual(ManualAvailability::Busy);
+    let away = Choice::Manual(ManualAvailability::Away);
+    assert_eq!(policy.choose(Choice::Manual(ManualAvailability::Busy), start), [busy]);
+    assert_eq!(
+        policy.choose(away, start + SECOND),
+        [OwnStatus::Manual(ManualAvailability::Away)]
+    );
+    let dropped = TransientSent::Dropped {
+        reason: "HTTP 500".to_owned(),
+    };
+    policy.reported(busy, Ok(&dropped));
+    // nor the endpoint's failure
+    policy.reported(OwnStatus::Available, Ok(&dropped));
+    assert_eq!(
+        policy.reporting(start + SECOND * 2),
+        Reporting::Manual(ManualAvailability::Away)
+    );
+    assert!(policy.choose(away, start + SECOND * 2).is_empty());
 }
 
 #[test]

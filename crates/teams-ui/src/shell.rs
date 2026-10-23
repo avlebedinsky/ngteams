@@ -6,8 +6,10 @@
 //!
 //! The account menu (M2 Task 20): the rail's status button, above Settings, shows what the account's own presence
 //! reports ([`OwnPresence`], handed in by the desktop) and opens a menu of the statuses the user may set (Automatic and
-//! the captured manual ones, the same setting the settings view changes) with the last failed report; the shell's
-//! mouse and key input tells the own presence the window is used.
+//! the captured manual ones, the same setting the settings view changes) with the last failed report; a status chosen
+//! there goes to the own presence too, so choosing again one whose report failed sends it again. The shell's mouse
+//! input and every keystroke in its window (the ones a key binding takes included) tell the own presence the window is
+//! used.
 //!
 //! The keyboard: Ctrl+K opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
@@ -20,8 +22,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, AnyView, App, AppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _,
-    IntoElement, KeyBinding, KeyDownEvent, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
+    IntoElement, KeyBinding, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -124,7 +126,7 @@ pub struct Shell {
     own_presence: Option<(Entity<OwnPresence>, Subscription)>,
     /// The account menu is open.
     status_menu: bool,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 5],
 }
 
 impl Shell {
@@ -159,6 +161,7 @@ impl Shell {
         let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx));
         // a presence the engine told: the chat's header draws its dot again
         let presence = cx.observe(&models.presence, |_: &mut Self, _, cx| cx.notify());
+        let typed = Self::keystrokes_are_use(window, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         if let Some(id) = &selected {
@@ -195,7 +198,7 @@ impl Shell {
             focus,
             own_presence: None,
             status_menu: false,
-            _subscriptions: [opened, channel_opened, kept_channel, presence],
+            _subscriptions: [opened, channel_opened, kept_channel, presence, typed],
         }
     }
 
@@ -226,15 +229,33 @@ impl Shell {
         cx.notify();
     }
 
-    /// The user chose `status` in the account menu: kept in the settings (the own presence sends it), the menu closed.
+    /// The user chose `status` in the account menu: handed to the own presence (which sends it, or sends it again when
+    /// it is the status already chosen and its report failed) and kept in the settings, the menu closed.
     pub fn choose_status(&mut self, status: ManualStatus, cx: &mut Context<Self>) {
         self.trace
             .record(&TraceLine::new("status-menu", "chosen").kind(status.key()));
+        if let Some((own, _)) = &self.own_presence {
+            own.update(cx, |own, cx| own.choose(status.choice(), cx));
+        }
+        // unchanged (the same status chosen again), the settings tell nobody: the own presence was told above
         self.settings.update(cx, |settings, cx| {
             settings.change(|settings| settings.manual_status = status, cx);
         });
         self.status_menu = false;
         cx.notify();
+    }
+
+    /// Every keystroke in the shell's window counts as its use. Seen before any key binding (an interceptor): a key
+    /// listener never hears a key a binding took (Ctrl+K, the chat view's keys), and keyboard-only use would go unseen.
+    fn keystrokes_are_use(window: &Window, cx: &mut Context<Self>) -> Subscription {
+        let shells_window = window.window_handle();
+        let shell = cx.weak_entity();
+        cx.intercept_keystrokes(move |_, window, cx| {
+            if window.window_handle() == shells_window {
+                // the shell gone: its window is going too
+                let _ = shell.update(cx, Self::used);
+            }
+        })
     }
 
     /// The window was used: the own presence is told (Available again at once after idle).
@@ -809,10 +830,9 @@ impl Render for Shell {
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
-            // the window's use, for the account's own presence
+            // the window's use, for the account's own presence (its keystrokes: `keystrokes_are_use`)
             .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.used(cx)))
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.used(cx)))
-            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| this.used(cx)))
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| this.toggle_search(window, cx)))
@@ -827,15 +847,17 @@ impl Render for Shell {
     }
 }
 
-/// The dot the account menu shows for what is reported: a manual status's own, Available's green, grey while nothing
-/// is reported.
-fn shown_as(reporting: Reporting) -> Availability {
+/// The dot the rail's status button shows for what is reported: a manual status's own, Available's green, grey while
+/// nothing is reported, none (an empty ring) while it isn't known.
+#[must_use]
+pub fn shown_as(reporting: Reporting) -> Availability {
     match reporting {
         Reporting::Available | Reporting::Manual(ManualAvailability::Available) => Availability::Available,
         Reporting::Manual(ManualAvailability::Busy) => Availability::Busy,
         Reporting::Manual(ManualAvailability::DoNotDisturb) => Availability::DoNotDisturb,
         Reporting::Manual(ManualAvailability::Away) => Availability::Away,
         Reporting::Inactive | Reporting::Halted | Reporting::Quit => Availability::Offline,
-        Reporting::Connecting => Availability::Unknown,
+        // a manual status (or reset) that failed: what the account shows isn't known
+        Reporting::Connecting | Reporting::NotSet(_) => Availability::Unknown,
     }
 }
