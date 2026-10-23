@@ -28,13 +28,14 @@
 //! - **Typing**: who is typing now ([`crate::Chats::typing`]), under the messages; it goes off with their end of
 //!   typing, their message, or [`crate::models::TYPING_TIMEOUT`] after their last signal.
 //! - **Actions** on a message, under the pointer or selected with the keyboard (Up and Down, once the list has the
-//!   focus: Escape in an empty compose box moves it there, and Escape in the list with nothing open or selected moves
-//!   it back): reply and react, and for the account's own message edit and delete. Each is told as
-//!   [`ChatViewEvent::Action`] and carried out (M2 Task 13): a reply and an edit go to the [`Compose`] box under the
-//!   messages; react opens the quick reactions M2 Task 10 captured ([`QUICK_REACTIONS`], keys 1–4), and a reaction
-//!   chip of one of them clicked sets or takes back the account's own (a chip of any other key only shows); react and
-//!   delete select the message they act on, and moving the selection closes them; delete asks first (Enter or the
-//!   button confirms, Escape cancels). Every write goes out through the engine ([`Core::write`]), never from the view.
+//!   focus: Escape in the compose box with nothing to cancel there (no reply, edit or open picker) moves it there,
+//!   whatever the box holds, and Escape in the list with nothing open or selected moves it back): reply and react, and
+//!   for the account's own message edit and delete. Each is told as [`ChatViewEvent::Action`] and carried out (M2 Task
+//!   13): a reply and an edit go to the [`Compose`] box under the messages; react opens the quick reactions M2 Task 10
+//!   captured ([`QUICK_REACTIONS`], keys 1–4), and a reaction chip of one of them clicked sets or takes back the
+//!   account's own (a chip of any other key only shows); react and delete select the message they act on, and moving
+//!   the selection closes them; delete asks first (Enter or the button confirms, Escape cancels). Every write goes out
+//!   through the engine ([`Core::write`]), never from the view.
 //! - **The account's writes as they go out** ([`crate::sending`]): a message post shows at once as a pending message of
 //!   its own (the engine tells its row as it is made, and the rows are built again then, before any store read),
 //!   with its state, until its message is held or found in the store ([`Core::message`], by the id the row was sent
@@ -1168,8 +1169,8 @@ impl ChatView {
         }
     }
 
-    /// Escape in an empty compose box, with nothing to cancel there (the box hands it on): the message list takes the
-    /// focus, so Up and Down select a message and its keys act on it.
+    /// Escape in the compose box with nothing to cancel there (no reply, edit or open picker; the box hands it on,
+    /// whatever it holds): the message list takes the focus, so Up and Down select a message and its keys act on it.
     fn focus_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
         cx.notify();
@@ -2526,8 +2527,6 @@ fn header_line(item: &MessageItem, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// A row's kind in the trace: `edited` once edited, `unshown` for a text with a part no capture showed, else its
-/// body's.
 /// A message as the trace last told it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Traced {
@@ -2549,6 +2548,8 @@ fn is_reply(item: &MessageItem) -> bool {
     }
 }
 
+/// A row's kind in the trace: `edited` once edited, `unshown` for a text with a part no capture showed, else its
+/// body's.
 fn trace_kind(item: &MessageItem) -> &'static str {
     if item.edited {
         "edited"

@@ -20,7 +20,7 @@ read in full: the lab's own").
 | 4 | b's notification on the sandbox's bus for a chat it isn't viewing | **met** (1725 ms, kind `message`, app name `Teams (lab b)`) |
 | 5 | names and presence: b sees a online, then Busy when a sets it | **met** (b's header: a named from people's names, a's Graph picture, `available`; `busy` 28 s after a chose it, `available` again 55 s after Automatic) |
 | 6 | a search in b finds a's message | **met** |
-| 7 | a channel shown read-only | **met** (200 posts and replies, no compose) |
+| 7 | a channel shown read-only | **met** (200 posts and replies; run 5's live "no compose" check couldn't fail, the offline tests carry it: §4) |
 | 8 | b's app closed, a sends, b's app reopened shows every message once and notifies once | **met**, in two parts (below): the window closed into the tray notified once (1006 ms) and showed the message when opened again; the app quit and started again showed every one of the run's 25 messages in the a–b chat exactly once |
 | 9 | images and files only as far as Tasks 21–23 got | **met**: none sent (sending stays deferred: `docs/backlog/ams-image-sending.md`, `file-sending.md`); a channel post with a part no capture showed is drawn as `unshown-post` |
 | 10 | `fence.log`: allows only on the lab chats and the accounts' own presence, no deny of a mapped write, own-state, `PostRead` and frames only from the reviewed lists | **met** (run 5: 171 lines, every one an allow) |
@@ -42,8 +42,11 @@ no fence, holds no token and sends nothing itself.
   the socket pair to the app (`--secrets-fd`); both ends are closed in the orchestrator once the two processes hold
   them. Each app's environment is read from `/proc` once it runs: its bus is its sandbox's, its `WAYLAND_DISPLAY` its
   sandbox's niri, no `DISPLAY`, no `NIRI_SOCKET`. Every broker exited cleanly once its app quit (checked, the restarted
-  b's included), and no output of the run (traces, the brokers' and apps' output) holds a JWT, a bearer header or a
-  skypetoken.
+  b's included). No file run 5 kept (the traces, the brokers' stdout and stderr, the apps' stderr) held a JWT, a bearer
+  header or a skypetoken; run 5 kept neither the apps' stdout nor `summary.json` when it checked, and its own stderr
+  isn't checked. Since the review the orchestrator also keeps each app's stdout (`<alias>-<n>-app.out`) and checks
+  after `summary.json` is written (which holds every step it prints), and an app's output on a failed run is printed
+  only when it holds none ("Since the review" below).
 - **The keyboard only**: the chat switcher (Ctrl+K, Down to the chat's row in the order the chat list's trace gives,
   Enter), the compose box (typing, Enter; Up in the empty box edits the last message), the message list (Escape from
   the empty box, Down to the newest, `r` reply, `a` then `1` like, Escape back), the search (Ctrl+Shift+F), the
@@ -66,7 +69,10 @@ said so); it now holds the header's presence as a key, nothing more.
 ## 1. Latency: met (run 5)
 
 Send is a's Enter, pressed once the app has taken in what was typed (its `compose changed` lines quiet for 1.5 s);
-shown is b's `chat-view shown` first naming the message. Both are this machine's clock.
+shown is b's `chat-view shown` first naming the message. Both are this machine's clock. Run 5 took the message as the
+first id new to b's view, which a message b caught up on late would also have been; its b trace, checked again after
+the review, rules that out: b's view loaded its 50 messages 13.8 s before the first send, and each of its lines during
+the 20 sends added exactly one id, the newest.
 
 | run 5 (10:19Z, 4 CPUs, load ~18–28), ms | p50 | p95 | max | min |
 |---|---|---|---|---|
@@ -116,14 +122,19 @@ Graph name), a's picture (`picture`: Graph's 96×96, the only lab account with o
 switcher; a's own presence sent the manual status (`own-presence sent busy`), and b's header showed `busy` 28 s later
 (run 3: 19 s, run 4: 13 s; the engine reads presence once a minute). a chose "Set status: Automatic"; the reset went
 (`own-presence sent reset`) and b's header showed `available` again 55 s later. No run ended with a account's manual
-status set: runs 1 and 2 stopped before it, runs 3–5 reset it.
+status set: runs 1 and 2 stopped before it, runs 3–5 reset it. Since the review the run first resets a manual status
+a's settings file keeps (a run stopped between Busy and the reset leaves it there).
 
 ## 4. Search, a channel
 
 b's search (Ctrl+Shift+F) for the run's nonce and `m07` found a's seventh message (1 hit; run 3's query found 22
 because its words were shorter). The switcher's channels, queried "General", opened a team's general channel
 read-only: 200 posts and replies, two of them `unshown-post` (a part no capture showed), and no compose line in the
-trace while it was shown.
+trace while it was shown. That check couldn't fail in run 5: the compose box traced only what happened to it
+(`changed`, `sent`, …), never its making, and nothing is typed in the channel. What shows no composer is drawn is the
+offline tests (`crates/teams-ui/tests/teams.rs`: no `compose` element in a shown channel, no write asked). Since the
+review the box traces its making (`compose opened`), so the live check counts any box made while the channel is
+shown.
 
 ## 5. Closed and reopened
 
@@ -175,6 +186,19 @@ under `<data_dir>/ui-live/`.
 - **Run 3** (09:51Z): every step passed; failed on `fence.log` (the 36 refused lookups above) and would have failed the
   latency (p95 2030).
 - **Run 4** (10:09Z): every step and `fence.log` passed; failed the latency (p95 2345) under the CPU cap.
+
+## Since the review
+
+The review of Task 25 changed the live test and two trace lines after run 5. These changes were compiled (`cargo
+clippy -p teams-app --features live --all-targets`) and their helpers unit-tested offline; the live run was not
+repeated for them.
+
+- Each app started has run its first catch-up before the run goes on (the root view now traces `status caught-up` for
+  each one that ended), and a sent message is the id new to both the watcher's view and a's since before the send.
+- The compose box traces its making (`compose opened`), so the channel's "no compose line" counts any box made for it.
+- A manual status a's settings file keeps is reset first ("Set status: Automatic").
+- Each app's stdout is kept in the run's dir, and the token check runs after `summary.json` is written; an app still
+  running on a failed run has its stderr printed only when neither its stdout nor its stderr holds a token.
 
 ## The gate
 

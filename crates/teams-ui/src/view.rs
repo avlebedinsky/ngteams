@@ -1,6 +1,7 @@
 //! The window's root view: the [`Shell`] (the rail, the chat list, the conversation) once it is given one, the
-//! account's status alone before that; signed out, only that and what to do. It traces the window's opening and each
-//! status it shows (connecting, connected, reconnecting, offline, signed out).
+//! account's status alone before that; signed out, only that and what to do. It traces the window's opening, each
+//! status it shows (connecting, connected, reconnecting, offline, signed out) and each catch-up that ended
+//! (`status caught-up`: a live test waits for the first one before it reads what a chat shows).
 
 use std::sync::Arc;
 
@@ -73,6 +74,8 @@ pub struct Root {
     models: Models,
     trace: Arc<ViewTrace>,
     shown: Shown,
+    /// The catch-ups the status counted when it was last traced.
+    catch_ups: u64,
     shell: Option<Entity<Shell>>,
     _observing: Subscription,
     /// The theme following the window's appearance, while the window is open ([`Root::following`]).
@@ -83,19 +86,26 @@ impl Root {
     /// The root view over `models`; traces its opening.
     pub fn new(models: Models, trace: Arc<ViewTrace>, cx: &mut Context<Self>) -> Self {
         let observing = cx.observe(&models.status, |this, status, cx| {
-            let shown = Shown::of(status.read(cx));
+            let status = status.read(cx);
+            let shown = Shown::of(status);
             if shown != this.shown {
                 this.shown = shown;
                 this.trace.record(&TraceLine::new("status", shown.name()));
             }
+            if status.catch_ups != this.catch_ups {
+                this.catch_ups = status.catch_ups;
+                this.trace.record(&TraceLine::new("status", "caught-up"));
+            }
             cx.notify();
         });
         let shown = Shown::of(models.status.read(cx));
+        let catch_ups = models.status.read(cx).catch_ups;
         trace.record(&TraceLine::new("window", "opened").kind(shown.name()));
         Self {
             models,
             trace,
             shown,
+            catch_ups,
             shell: None,
             _observing: observing,
             appearance: None,

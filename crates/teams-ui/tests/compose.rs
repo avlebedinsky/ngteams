@@ -422,6 +422,14 @@ fn each_change_of_what_the_box_holds_is_traced_without_its_text() {
     assert_eq!(changed.len(), 7, "{changed:?}");
     assert!(changed.iter().all(|line| line["conversation"] == AB));
     assert!(!written.text().contains("secret") && !written.text().contains("secre"));
+    // the box's making is traced once, naming its chat
+    let opened: Vec<serde_json::Value> = written
+        .lines()
+        .into_iter()
+        .filter(|line| line["view"] == "compose" && line["change"] == "opened")
+        .collect();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(opened[0]["conversation"], AB);
 }
 
 #[test]
@@ -444,7 +452,7 @@ fn enter_sends_and_shift_enter_breaks_the_line() {
     assert_eq!(conversation, AB);
     assert_eq!(text.html(), "<p>one</p><p>two https://example.test/a.</p>");
     assert_eq!(typed(&view, cx), "", "the box is emptied once the write is asked for");
-    assert_eq!(trace_changes(&written, "compose"), ["sent"]);
+    assert_eq!(trace_changes(&written, "compose"), ["opened", "sent"]);
     assert!(!written.text().contains("example.test"), "no text reaches the trace");
 }
 
@@ -523,7 +531,7 @@ fn a_reply_carries_its_quote_and_escape_cancels_it() {
     assert_eq!(mode(&view, cx), Mode::New);
     assert_eq!(
         trace_changes(&written, "compose"),
-        ["replying", "cancelled", "replying", "sent"]
+        ["opened", "replying", "cancelled", "replying", "sent"]
     );
 }
 
@@ -563,7 +571,7 @@ fn escape_moves_the_focus_from_an_empty_box_to_the_list_and_back_so_r_replies_to
     assert_eq!(focused(&view, cx), (false, true));
     keys(cx, "escape");
     assert_eq!(focused(&view, cx), (true, false));
-    assert_eq!(trace_changes(&written, "compose"), ["replying", "cancelled"]);
+    assert_eq!(trace_changes(&written, "compose"), ["opened", "replying", "cancelled"]);
 }
 
 #[test]

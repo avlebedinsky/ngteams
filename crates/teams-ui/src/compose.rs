@@ -25,8 +25,8 @@
 //!   doesn't start it over), never while editing, and only with the "send typing" setting on. Nothing is sent when
 //!   typing stops: the web client never sent `Control/ClearTyping`.
 //!
-//! What the box does is traced (`compose sent`, `replying`, `editing`, `cancelled`, and `changed` each time what it
-//! holds changes), never its text.
+//! What the box does is traced (`compose opened` when the box is made, `sent`, `replying`, `editing`, `cancelled`, and
+//! `changed` each time what it holds changes), never its text.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -510,8 +510,12 @@ async fn read_candidates(core: Arc<dyn Core>, conversation: String) -> Vec<Candi
 }
 
 impl Compose {
-    /// The box of `conversation`.
+    /// The box of `conversation`; traced as made (`compose opened`), so a live test can tell that no view it shows
+    /// made one (a channel's).
     pub fn new(parts: ComposeParts, conversation: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        parts
+            .trace
+            .record(&TraceLine::new("compose", "opened").conversation(&conversation));
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .submit_on_enter(true)

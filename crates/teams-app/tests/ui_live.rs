@@ -14,21 +14,24 @@
 //! socket itself: both ends are closed here once the two processes hold them. The app's environment is the sandbox's
 //! (checked from `/proc`: its bus and its compositor, no `DISPLAY`). Every broker has exited when the run ends.
 //!
-//! **The steps** (each app in a sandbox of its own, so each window is focused, as a user's would be):
+//! **The steps** (each app in a sandbox of its own, so each window is focused, as a user's would be; each app started
+//! has run its first catch-up, `status caught-up`, before the run goes on):
 //! - a and b open their 1:1 chat, c the a–b–c group chat (`chats.toml`'s `abc`), by the switcher (Ctrl+K, Down to the
 //!   chat's row as the chat list's trace orders them, Enter).
 //! - a types and sends [`MESSAGES`] messages to b; each is shown in b's chat view; send (a's Enter, pressed once the
 //!   app has taken in what was typed: its `compose changed` lines have gone quiet) → shown (b's `chat-view shown`
-//!   naming it) has a p95 under [`P95_LIMIT_MS`] (p50, p95 and max reported, with Enter → a's `compose sent` and
-//!   `compose sent` → shown apart).
+//!   naming it: the id new to b's view and to a's since before the send) has a p95 under [`P95_LIMIT_MS`] (p50, p95
+//!   and max reported, with Enter → a's `compose sent` and `compose sent` → shown apart).
 //! - a edits its last message (Up in the empty box), replies to it (Escape to the list, Down to the newest, `r`) and
 //!   reacts to the reply (`a`, `1`): b shows the edit, the reply and the reaction.
 //! - a sends to the group chat: c shows it; b, viewing the 1:1 chat, gets a notification on its sandbox's bus, whose
 //!   activation opens the group chat, where b shows the message.
-//! - names and presence: b's header for the 1:1 chat names a from people's names with a's picture, and shows a
-//!   available; a sets Busy from the switcher's "Set status: Busy", b's header shows busy; a sets Automatic again, b's
-//!   header shows available.
-//! - b's search (Ctrl+Shift+F) finds one of a's messages; a channel opens read-only from the switcher ("General").
+//! - names and presence: a manual status an earlier run left in a's settings is reset first ("Set status:
+//!   Automatic"); b's header for the 1:1 chat names a from people's names with a's picture, and shows a available;
+//!   a sets Busy from the switcher's "Set status: Busy", b's header shows busy; a sets Automatic again, b's header
+//!   shows available.
+//! - b's search (Ctrl+Shift+F) finds one of a's messages; a channel opens read-only from the switcher ("General"):
+//!   no compose box is made for it (no `compose` line, `opened` included, while it is shown); nothing is typed in it.
 //! - b's window closed into the tray: a sends, b notifies once, and the window opened again from the tray shows it.
 //! - b's app quit from the tray (its broker exits with it): a sends [`GAP_MESSAGES`], b's app started again shows every
 //!   message of the run in the 1:1 chat exactly once.
@@ -39,7 +42,9 @@
 //!   requests, `PostRead` and frames only from the reviewed lists.
 //!
 //! Screenshots of each step go to `<data_dir>/screenshots/<time>/` (`0700`), and the traces, the processes' output and
-//! `summary.json` to `<data_dir>/ui-live/<time>/`, never the repo. No output holds a token.
+//! `summary.json` to `<data_dir>/ui-live/<time>/`, never the repo. No file kept there holds a token (the apps' and the
+//! brokers' stdout and stderr, the traces, `summary.json`, which holds every step this process printed); an app still
+//! running when the run fails has its stderr printed only when neither its stdout nor its stderr holds one.
 //!
 //! Built only with `--features live`, and even then it skips unless `PROTO_LAB_LIVE=1`, so
 //! `cargo test --all-features` stays offline. Run it under the lab's live lock (`flock
@@ -65,6 +70,7 @@ use serde_json::{Value, json};
 use teams_fence::lab::{Alias, LabChats, LabConfig, LabLocations};
 use teams_fence::one_to_one_id;
 use teams_proto::{Authenticate, Disconnect, EndpointRegistration, MessageLossAck, OwnFrame, OwnState, Ping};
+use teams_ui::settings::{ManualStatus, SettingsFile};
 use teams_ui::tray::{ITEM_PATH, MENU_PATH, MENU_QUIT};
 use ui_sandbox::input::{Modifier, VirtualInput, keys};
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, Tools, wait_until};
@@ -105,6 +111,8 @@ struct Lab {
     ab_chat: String,
     group_chat: String,
     accounts: Vec<String>,
+    /// a's settings file, where its manual status is kept across runs.
+    a_settings: PathBuf,
     fence_log: PathBuf,
     out: PathBuf,
     shots: PathBuf,
@@ -134,6 +142,7 @@ fn lab() -> Option<Lab> {
         ab_chat,
         group_chat,
         accounts: [Alias::A, Alias::B, Alias::C].map(mri).to_vec(),
+        a_settings: config.paths().ui_settings_file(Alias::A),
         fence_log: config.paths().fence_log(),
         out: private_dir(&config.paths().data_dir().join("ui-live").join(&stamp)),
         shots: private_dir(&config.paths().data_dir().join("screenshots").join(&stamp)),
@@ -307,6 +316,8 @@ struct Run {
 /// A lab account's app: its sandbox (kept across a restart), its keyboard, its current run.
 struct App {
     alias: &'static str,
+    /// The run's dir, where the app's output is kept.
+    out: PathBuf,
     sandbox: Sandbox,
     input: VirtualInput,
     run: Option<Run>,
@@ -337,6 +348,7 @@ impl App {
         let input = sandbox.input().unwrap();
         let mut app = Self {
             alias,
+            out: lab.out.clone(),
             sandbox,
             input,
             run: None,
@@ -358,7 +370,8 @@ impl App {
     }
 
     /// Starts the broker outside the sandbox and the app inside it, the socket pair between them, the trace on a pipe;
-    /// then waits for the window, the push channel and the chat list.
+    /// then waits for the window, the push channel and its first catch-up (so what the app missed while it wasn't
+    /// running is in its store before a chat is opened, and can't land in the middle of a step).
     fn start(&mut self, lab: &Lab) {
         self.starts += 1;
         let name = format!("{}-{}", self.alias, self.starts);
@@ -419,6 +432,8 @@ impl App {
         self.environment_is_the_sandbox_s(pid);
         self.trace()
             .wait_from(0, STARTUP, "status connected", |line| is(line, "status", "connected"));
+        self.trace()
+            .wait_from(0, STARTUP, "the first catch-up", |line| is(line, "status", "caught-up"));
     }
 
     /// The app's environment (from `/proc`) names the sandbox's bus and compositor and no display of the desktop's.
@@ -551,17 +566,27 @@ impl App {
         (self.sandbox.bus().connect().unwrap(), name)
     }
 
+    /// Keeps the current run's stdout and stderr in the run's dir (`<alias>-<n>-app.out`, `.err`), which the token
+    /// check reads.
+    fn keep_output(&self, stdout: &str, stderr: &str) {
+        let name = format!("{}-{}-app", self.alias, self.starts);
+        fs::write(self.out.join(format!("{name}.out")), stdout).unwrap();
+        fs::write(self.out.join(format!("{name}.err")), stderr).unwrap();
+    }
+
     /// The tray menu's "Quit": the app quits and its broker exits once the socket closes. Both exit cleanly; the
-    /// app's stderr is kept in the run's dir.
-    fn quit(&mut self, lab: &Lab) {
+    /// app's stdout and stderr are kept in the run's dir.
+    fn quit(&mut self) {
         let (host, name) = self.tray();
         let menu = zbus::blocking::Proxy::new(&host, name.as_str(), MENU_PATH, "com.canonical.dbusmenu").unwrap();
         menu.call_method("Event", &(MENU_QUIT, "clicked", zbus::zvariant::Value::from(""), 0_u32))
             .unwrap();
         let alias = self.alias;
         let mut run = self.run.take().unwrap();
-        let (status, stderr) = run.app.take().unwrap().finish(EXIT).unwrap();
-        fs::write(lab.out.join(format!("{alias}-{}-app.err", self.starts)), &stderr).unwrap();
+        let app = run.app.take().unwrap();
+        let stdout = stdout_until_closed(&app, EXIT);
+        let (status, stderr) = app.finish(EXIT).unwrap();
+        self.keep_output(&stdout, &stderr);
         assert!(status.success(), "{alias}'s app exited {status}: {stderr}");
         let broker = run.broker.exit_within(EXIT);
         assert!(
@@ -571,14 +596,34 @@ impl App {
     }
 }
 
+/// What `app` writes to stdout until it closes it (the app exited) or `limit` passed, a line each.
+fn stdout_until_closed(app: &Running, limit: Duration) -> String {
+    let deadline = Instant::now() + limit;
+    let mut text = String::new();
+    while let Ok(line) = app.line(deadline.saturating_duration_since(Instant::now())) {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
 impl Drop for App {
-    /// An app still running when the run fails: its stderr kept beside the trace, then killed with its broker.
+    /// An app still running when the run fails: killed with its broker, its stdout and stderr kept beside the trace,
+    /// and its stderr printed only when it holds no token.
     fn drop(&mut self) {
         if let Some(run) = self.run.as_mut()
             && let Some(mut app) = run.app.take()
         {
-            let stderr = app.fail(&"the run ended with the app running");
-            eprintln!("{}: {stderr}", self.alias);
+            let stderr = app.fail(&"the run ended with the app running").to_string();
+            let stdout = stdout_until_closed(&app, Duration::from_secs(2));
+            self.keep_output(&stdout, &stderr);
+            match token_marker(&stdout).or_else(|| token_marker(&stderr)) {
+                None => eprintln!("{}: {stderr}", self.alias),
+                Some(marker) => eprintln!(
+                    "{}: the app's output holds {marker}: not printed, kept in the run's dir",
+                    self.alias
+                ),
+            }
         }
     }
 }
@@ -651,11 +696,10 @@ fn the_app_reaches_b_and_c_through_the_ui_and_the_fence_holds() {
     every_message_once(&mut apps.b, &lab.ab_chat, &sent, &mut found);
     for app in [&mut apps.a, &mut apps.b, &mut apps.c] {
         app.shot(&lab, "end");
-        app.quit(&lab);
+        app.quit();
     }
     drop(apps);
     let fence = fence_log_holds(&lab, log_start);
-    no_token_printed(&lab.out);
     let summary = json!({
         "started_ms": started_ms,
         "ended_ms": now_ms(),
@@ -666,6 +710,8 @@ fn the_app_reaches_b_and_c_through_the_ui_and_the_fence_holds() {
         "screenshots": lab.shots,
     });
     fs::write(lab.out.join("summary.json"), format!("{summary:#}\n")).unwrap();
+    // the summary holds every step this process printed
+    no_token_printed(&lab.out);
     eprintln!("{summary:#}");
     let p95 = summary["steps"]["latency"]["send_to_shown_ms"]["p95"].as_i64().unwrap();
     assert!(
@@ -693,15 +739,28 @@ struct Sent {
     taken_ms: i64,
 }
 
-/// a types `text` in the chat it shows and presses Enter; `watcher` shows the message in `chat`. The message's id (a
-/// new one in the watcher's `chat-view shown`, which a's view shows too), when Enter was pressed and when the watcher
-/// showed it.
-fn send_and_watch(a: &mut App, watcher: &mut App, chat: &str, text: &str) -> (Sent, i64) {
-    let known: HashSet<String> = watcher
-        .trace()
+/// The ids `app`'s view of `chat` showed last.
+fn shown_ids(app: &mut App, chat: &str) -> HashSet<String> {
+    app.trace()
         .last(|line| chat_view_of(line, chat))
         .map(|line| strings(&line, "messages").into_iter().collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// The message a `chat-view shown` line holds that neither side showed before the send: new to the watcher
+/// (`known`) and to the sender (`sender_known`), so a message an app caught up on late can't pass for it.
+fn new_to_both(line: &Value, known: &HashSet<String>, sender_known: &HashSet<String>) -> Option<String> {
+    strings(line, "messages")
+        .into_iter()
+        .find(|id| !known.contains(id) && !sender_known.contains(id))
+}
+
+/// a types `text` in the chat it shows and presses Enter; `watcher` shows the message in `chat`. The message's id (a
+/// new one in the watcher's `chat-view shown` that a's view didn't show before either, and shows once it came back),
+/// when Enter was pressed and when the watcher showed it.
+fn send_and_watch(a: &mut App, watcher: &mut App, chat: &str, text: &str) -> (Sent, i64) {
+    let known = shown_ids(watcher, chat);
+    let a_known = shown_ids(a, chat);
     let from = watcher.trace().mark();
     let a_from = a.trace().mark();
     a.type_into_compose(text);
@@ -712,12 +771,9 @@ fn send_and_watch(a: &mut App, watcher: &mut App, chat: &str, text: &str) -> (Se
         .wait_from(a_from, STEP, "compose sent", |line| is(line, "compose", "sent"));
     let taken_ms = sent["at_ms"].as_i64().unwrap();
     let shown = watcher.trace().wait_from(from, ARRIVAL, "a's message shown", |line| {
-        chat_view_of(line, chat) && strings(line, "messages").iter().any(|id| !known.contains(id))
+        chat_view_of(line, chat) && new_to_both(line, &known, &a_known).is_some()
     });
-    let id = strings(&shown, "messages")
-        .into_iter()
-        .find(|id| !known.contains(id))
-        .unwrap();
+    let id = new_to_both(&shown, &known, &a_known).unwrap();
     let shown_ms = shown["at_ms"].as_i64().unwrap();
     // the message a sent, as a's own view shows it once it came back
     a.trace().wait_from(a_from, ARRIVAL, "a's own message shown", |line| {
@@ -752,8 +808,8 @@ fn latency(lab: &Lab, apps: &mut Apps, nonce: i64, found: &mut Found) -> Vec<Sen
     sent
 }
 
-/// a edits its last message (Up in the empty box), replies to it and reacts to the reply (Escape to the list, Down), all by the keyboard; b
-/// shows each. The reply, as sent.
+/// a edits its last message (Up in the empty box), replies to it and reacts to the reply (Escape to the list, Down),
+/// all by the keyboard; b shows each. The reply, as sent.
 fn edit_reply_react(lab: &Lab, apps: &mut Apps, nonce: i64, found: &mut Found) -> Vec<Sent> {
     let chat = lab.ab_chat.clone();
     let last = apps.b.trace().last(|line| chat_view_of(line, &chat)).unwrap();
@@ -904,12 +960,25 @@ fn set_status(a: &mut App, query: &str, reported: &str) -> i64 {
     start
 }
 
+/// Whether the settings `file` keeps a manual status other than Automatic (an earlier run that stopped between its
+/// Busy and its reset left Busy there).
+fn saved_status_is_manual(file: &Path) -> bool {
+    SettingsFile::new(file).load().settings.manual_status != ManualStatus::Automatic
+}
+
 /// b's header for the 1:1 chat names a from people's names with a's picture and shows a available; a sets Busy,
-/// b's header shows busy; a sets Automatic (the reset), b's header shows available again.
+/// b's header shows busy; a sets Automatic (the reset), b's header shows available again. A manual status an earlier
+/// run left in a's settings is reset first, so the run doesn't depend on how the last one ended.
 fn names_and_presence(lab: &Lab, apps: &mut Apps, found: &mut Found) {
     let chat = lab.ab_chat.clone();
+    let reset_first = saved_status_is_manual(&lab.a_settings);
+    // b's header from before the reset doesn't count
+    let from = if reset_first { apps.b.trace().mark() } else { 0 };
+    if reset_first {
+        set_status(&mut apps.a, "set status automatic", "reset");
+    }
     apps.b.open_chat(&chat);
-    let available = b_header(apps, &chat, 0, "available");
+    let available = b_header(apps, &chat, from, "available");
     assert_eq!(available[1], "named", "b's header doesn't name a: {available}");
     assert_eq!(
         available[2], "picture",
@@ -927,6 +996,7 @@ fn names_and_presence(lab: &Lab, apps: &mut Apps, found: &mut Found) {
         "names_and_presence",
         json!({
             "header": available,
+            "status_reset_first": reset_first,
             "busy_shown_ms": busy["at_ms"].as_i64().unwrap() - busy_start,
             "available_again_ms": back["at_ms"].as_i64().unwrap() - reset_start,
         }),
@@ -968,9 +1038,11 @@ fn search_and_channel(lab: &Lab, apps: &mut Apps, nonce: i64, target: &Sent, fou
     let shown = b.trace().wait_from(from, ARRIVAL, "the channel's view shown", |line| {
         is(line, "channel-view", "shown") && line["conversation"] == channel.as_str()
     });
-    // nothing to write in it: no compose line came while it was shown
-    assert_eq!(b.trace().count_from(from, |line| line["view"] == "compose"), 0);
     b.shot(lab, "channel");
+    // nothing to write in it: no compose box was made for it (`compose opened`) and none changed since the switcher
+    // opened; the run types nothing into the channel, so no channel write is ever tried
+    let composes = b.trace().count_from(from, |line| line["view"] == "compose");
+    assert_eq!(composes, 0, "b: a compose line while the channel was shown");
     b.open_chat(&lab.ab_chat);
     found.step(
         "search_and_channel",
@@ -1054,7 +1126,7 @@ fn closed_into_the_tray(lab: &Lab, apps: &mut Apps, nonce: i64, found: &mut Foun
 /// b's app quit from the tray (its broker exits with it); a sends [`GAP_MESSAGES`]; b's app started again shows them.
 fn quit_and_reopened(lab: &Lab, apps: &mut Apps, nonce: i64, found: &mut Found) -> Vec<Sent> {
     let chat = lab.ab_chat.clone();
-    apps.b.quit(lab);
+    apps.b.quit();
     let gap: Vec<Sent> = (1..=GAP_MESSAGES)
         .map(|n| a_sends(&mut apps.a, &chat, &format!("M2 live {nonce} gap{n}")))
         .collect();
@@ -1105,8 +1177,8 @@ struct FenceCounts {
 }
 
 /// `fence.log`'s lines since `start` (a byte offset): whole JSON lines; allows only on the a–b chat, the recorded
-/// group chat and the lab accounts' own availability; no deny; `PostRead`, own-state requests and frames only of the
-/// reviewed kinds.
+/// group chat and the lab accounts' own availability; no deny but the fence refusing a profile lookup of someone
+/// outside the lab ([`FenceCounts::deny`]); `PostRead`, own-state requests and frames only of the reviewed kinds.
 fn fence_log_holds(lab: &Lab, start: u64) -> Value {
     let log = fs::read(&lab.fence_log).unwrap();
     let run = &log[usize::try_from(start).unwrap()..];
@@ -1216,13 +1288,61 @@ impl FenceCounts {
     }
 }
 
-/// No output of the run holds a token: no JWT (`eyJ…`), no bearer or skypetoken header.
+/// What marks a token in text: a JWT (`eyJ…`), a bearer or skypetoken header.
+const TOKEN_MARKERS: [&str; 3] = ["eyJ", "Bearer ", "skypetoken="];
+
+/// The first token marker `text` holds.
+fn token_marker(text: &str) -> Option<&'static str> {
+    TOKEN_MARKERS.into_iter().find(|marker| text.contains(marker))
+}
+
+/// No file the run kept holds a token: the apps' stdout and stderr, the brokers', the traces and `summary.json`.
 fn no_token_printed(out: &Path) {
     for entry in fs::read_dir(out).unwrap() {
         let path = entry.unwrap().path();
         let text = fs::read_to_string(&path).unwrap();
-        for marker in ["eyJ", "Bearer ", "skypetoken="] {
-            assert!(!text.contains(marker), "{} holds {marker}", path.display());
+        if let Some(marker) = token_marker(&text) {
+            panic!("{} holds {marker}", path.display());
         }
+    }
+}
+
+// --- the helpers' own tests (offline: they run without PROTO_LAB_LIVE) ---
+
+#[test]
+fn each_token_marker_is_found_and_plain_output_passes() {
+    assert_eq!(token_marker("app started, 3 chats"), None);
+    assert_eq!(
+        token_marker("{\"aud\":\"https://ic3.teams.office.com\",\"exp\":1}"),
+        None
+    );
+    assert_eq!(token_marker("token eyJhbGciOi.synthetic"), Some("eyJ"));
+    assert_eq!(token_marker("Authorization: Bearer synthetic"), Some("Bearer "));
+    assert_eq!(token_marker("X-Skypetoken: skypetoken=synthetic"), Some("skypetoken="));
+}
+
+#[test]
+fn the_sent_message_is_the_one_new_to_both_sides() {
+    let ids = |list: &[&str]| -> HashSet<String> { list.iter().map(|id| (*id).to_owned()).collect() };
+    let line = json!({"view": "chat-view", "change": "shown", "messages": ["100", "150", "200", "300"]});
+    // the watcher caught up late on 150 and 200, which a held already: the sent one is 300
+    assert_eq!(
+        new_to_both(&line, &ids(&["100"]), &ids(&["100", "150", "200"])).as_deref(),
+        Some("300")
+    );
+    // only messages a caught up on came yet: none is the sent one
+    let early = json!({"view": "chat-view", "change": "shown", "messages": ["100", "150", "200"]});
+    assert_eq!(new_to_both(&early, &ids(&["100"]), &ids(&["100", "150", "200"])), None);
+    assert_eq!(new_to_both(&line, &ids(&[]), &ids(&[])).as_deref(), Some("100"));
+}
+
+#[test]
+fn only_a_status_other_than_automatic_is_reset_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("settings.toml");
+    assert!(!saved_status_is_manual(&file), "no file: Automatic");
+    for (status, manual) in [("automatic", false), ("busy", true), ("do-not-disturb", true)] {
+        fs::write(&file, format!("manual_status = \"{status}\"\n")).unwrap();
+        assert_eq!(saved_status_is_manual(&file), manual, "{status}");
     }
 }

@@ -14,7 +14,8 @@ use std::sync::Arc;
 use common::{LAB_B, Rig, Written};
 use futures_util::FutureExt as _;
 use gpui::{AppContext as _, Context, Entity, TestAppContext};
-use teams_core::{Event, MessageChange, Source};
+use teams_core::sync::CatchUpReport;
+use teams_core::{Cause, Event, MessageChange, Source};
 use teams_store::{Applied, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState};
 use teams_trouter::Down;
 use teams_ui::trace::TraceLine;
@@ -331,7 +332,7 @@ fn sign_out_shows_the_hint_and_stops_the_engine() {
 }
 
 #[test]
-fn the_root_view_traces_its_opening_and_each_status_it_shows() {
+fn the_root_view_traces_its_opening_each_status_it_shows_and_each_catch_up() {
     let mut rig = Rig::start();
     let (trace, written) = trace();
     let models = rig.models.clone();
@@ -342,6 +343,19 @@ fn the_root_view_traces_its_opening_and_each_status_it_shows() {
     });
     // a status change that shows nothing new traces nothing
     rig.send(Event::Registration(teams_trouter::RegistrationReport::Registered));
+    // each catch-up that ended is traced, a failed one isn't
+    rig.send(Event::CaughtUp {
+        cause: Cause::Connected,
+        report: CatchUpReport::default(),
+    });
+    rig.send(Event::CatchUpFailed {
+        cause: Cause::Retry,
+        error: teams_core::sync::CatchUpError::TooManyPages,
+    });
+    rig.send(Event::CaughtUp {
+        cause: Cause::Retry,
+        report: CatchUpReport::default(),
+    });
     rig.send(Event::Disconnected {
         down: Down::Closed,
         heard: None,
@@ -362,6 +376,8 @@ fn the_root_view_traces_its_opening_and_each_status_it_shows() {
         [
             ("window", "opened"),
             ("status", "connected"),
+            ("status", "caught-up"),
+            ("status", "caught-up"),
             ("status", "reconnecting")
         ]
     );
