@@ -1,0 +1,452 @@
+# The lab fence guards contacting writes only
+
+## Overview
+
+- The user's rule of 2026-10-23 replaces the M0–M2 default-deny fence: **lab accounts may contact only each other;
+  everything else is allowed.** In the user's words: "lab accounts can't send messages or make calls to other accounts
+  or common chats/channels. They can do that only with each other", "lab accounts may leave reaction only to each
+  other", and typing, read receipts and presence are fine "if other will see it". The lab browser is default-allow
+  too.
+- The problem it solves: every new feature that touched a new endpoint first paid for a capture, an exact-shape
+  allowlist entry, a review, tests, an `endpoints.md` row and an expected-deny review. The team spent more time getting
+  around its own fence than building Teams features.
+- What stays: the fence still sees every request (the browser stays armed, the native transport checks every request),
+  still judges every contacting write by its target's fresh, complete member list, and still never answers a call.
+  What goes: the own-state lists, the read-by-`POST` lists, the own-availability exception, most of the expected-deny
+  list, and the single-enrolled group chat.
+- **Where "default allow" stops**: on the few services whose purpose is reaching people (the chat service, calling,
+  Graph, Outlook, SharePoint sharing, AMS, the middle tier's team, meeting and invite paths, CSA writes), a mutating
+  request is treated as contacting unless it's a mapped write or a named carve-out. Everywhere else every request is
+  allowed. A carve-out is a table row and a test, added as needed, with no capture review.
+
+## Context (from discovery)
+
+- **Base: `main` after M2 merges** (the user's decision of 2026-10-23). When this plan was written, M2 was on its
+  branch (`native-teams-m2-gpui-daily-driver`): 75 commits, Tasks 1–24 and 26 done, Task 25 running, Tasks 27 (the
+  personal build) and 28 open. Every path below is as it was on that branch; Task 27 adds more (the `teams` personal
+  binary, a personal fence). Task 2 re-runs discovery on merged `main` before any code changes.
+- **The personal build keeps its own rules** (`docs/personal-build.md`, approved 2026-10-23). Where it relies on a
+  piece this plan removes for the lab (`PostRead`, `OwnState`, `check_post_read`, `OwnAvailability`, the host
+  allowlist, `OwnFrame`, `FrameRecord`, `Classifier::sign_in`, `OwnRule`, `RequestOutcome::Own`), the piece stays for
+  the personal build, or moves into the personal fence or `teams-signin`; its rules don't change. Every "delete" below
+  means "delete unless Task 2 found a personal-build user".
+- **Browser fence** (`crates/proto-lab`): `src/classify.rs` (`Classification::{Read, Own, PostRead, Write, Unknown}`,
+  `OwnKind`, `OwnRule`, `UrlPattern`, the per-run classifier sets, `map_write`), `src/post_read.rs`,
+  `src/availability.rs`, `src/fence_http.rs`, `src/fence_ws.rs` (`FrameClassifier`, `FrameRule`), `src/calling.rs`
+  (`call_start`, `CALL_START_URL`, the Trouter host check), `src/session.rs`, `src/scenario/expected.rs` (~40 classes),
+  `src/scenario/*` (each picks a classifier and a `DenyPolicy`; on M2 also `ab_file.rs`, `chat_shapes.rs`,
+  `own_presence.rs`). Tests: `tests/{fence_http,fence_targets,fence_ws,expected_denies,post_reads,own_availability,
+  capture,calling,login,auth_redirect,scenario_dsl,abc_chat,ab_trouter}.rs`. `spikes/echo-call/tests/signaling.rs`
+  calls `proto_lab::calling::call_start`.
+- **Sign-in window** (`crates/teams-signin`): `src/guard.rs` and `tests/window.rs` use `Classifier::sign_in()`,
+  `OwnRule` and `Classification::{Own, PostRead, OwnAvailability}`; `docs/personal-build.md` says the personal sign-in
+  window keeps the lab's `sign_in` rules.
+- **Fence core** (`crates/teams-fence`): `src/decision.rs` (`Fence::check`, `Fence::lab_accounts_only`, the
+  own-account check for `OwnAvailability`, the `AccountScope` deny), `src/post_read.rs`, `src/membership.rs`
+  (`LiveMembershipSource`, `LabGroup`, `chats.toml`, the abc shape check, `is_group_chat_id`, `reads_in_full`, the
+  member-list checks: `totalMemberCount`, `counts_match`, `hidden`, duplicates, `isDeleted`), `src/target.rs`
+  (`WriteKind::{Message, Edit, Delete, Reaction, Typing, ReadReceipt, ChatCreate, MemberChange, Call,
+  OwnAvailability}`, `Scope`), `src/log.rs` and `src/lib.rs` (`FrameRecord`). Tests:
+  `tests/{fence_core,group_chat,lab_config,post_read,own_availability,membership,log_processes}.rs`.
+- **Native client** (`crates/teams-proto`): `src/own.rs` (sealed `OwnState`), `src/post_read.rs` (sealed `PostRead`,
+  `AuthorizedPostRead`), `src/write/availability.rs`, `src/frame.rs` (sealed `OwnFrame`, `FrameSink`), `src/http.rs`
+  (host allowlist), `src/client.rs` (`Transport::{read, own_state, deliver}`), `src/endpoint.rs` (`Service`, incl.
+  `Graph`). Users: `teams-trouter`, `teams-core` (`profiles.rs`, `presence.rs`, `own_presence.rs`,
+  `outbox/transient.rs`, `engine.rs`), `teams-headless`, `teams-mock`, `teams-ui`, `teams-app`. `Transport` fakes:
+  `teams-ui/tests/own_presence.rs`, `teams-headless/tests/cli.rs`, `teams-trouter/tests/session.rs`,
+  `teams-proto/tests/own_availability.rs`, `teams-core/tests/{engine,outbox,sync,own_availability}.rs`,
+  `fence-seal/tests/ui/proto_register_fake_transport.rs`.
+- **Seal proofs** (`crates/fence-seal/tests/ui/`): `proto_own_state`, `proto_own_frame`, `proto_raw_request`,
+  `proto_raw_frame`, `proto_post_read*`, `post_read_permit*`, `proto_availability_literal`,
+  `proto_registered_endpoint`, `proto_presence_read_literal`, `proto_register_fake_transport`.
+- **Docs and rules**: `CLAUDE.md` hard rules and Patterns; `docs/protocol/{endpoints,fence-targets,trouter,
+  calling-echo,auth}.md`; backlog `seeded-own-rules-ignore-the-query.md`, `group-chat-member-read-completeness.md`,
+  `bot-invokes-and-message-extensions.md`.
+- **Out of scope**: the personal build's rules; writes on an existing call (`docs/backlog/fence-call-follow-ups.md`).
+
+## Development Approach
+
+- **testing approach**: TDD (tests first). Each task writes its failing tests first, then the code.
+- complete each task fully before moving to the next; small, focused changes
+- **CRITICAL: every task MUST include new/updated tests** for code changes in that task, success and error cases
+- **CRITICAL: all tests must pass before starting next task** - no exceptions. So the order is additive first: a new
+  API lands next to the old one, callers move, and the old one is deleted in the task that moves its last caller (or
+  in Task 8, after a check that nothing uses it).
+- **CRITICAL: update this plan file when scope changes during implementation**
+- each task passes the gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D
+  warnings`, `scripts/lint-report.sh`, `cargo test --workspace`; `cargo test -p fixture-guard` after touching any
+  `tests/fixtures/` or `docs/`
+- a test that pinned an old deny is rewritten to pin the new verdict, never just removed while the request is still
+  contacting
+
+## Testing Strategy
+
+- **unit tests**: `teams_fence::contacting` gets a table test with a row per family, mapped write, carve-out and
+  `Unreadable` form, from its own synthetic fixtures (`crates/teams-fence/tests/fixtures/`, written from the other
+  crates' synthetic fixtures and the reference copies, never from captures directly). Membership tests for 1:1, group
+  and meeting chats.
+- **fence suite**: `fence-seal` still proves only `Fence::check` mints a `WritePermit` and only `teams-proto`
+  implements `Mutating`; a runtime test proves the native transport refuses a plain request `contacting` doesn't call
+  `None`, without sending it (the mock origin sees nothing).
+- **browser tests**: `proto-lab`'s fence tests rewritten to the new verdicts; arming tests untouched.
+- **live**: Task 10 (lab accounts only).
+- M2's GPUI UI tests stay green throughout.
+
+## Progress Tracking
+
+- mark completed items with `[x]` immediately when done
+- add newly discovered tasks with ➕ prefix
+- document issues/blockers with ⚠️ prefix
+- update plan if implementation deviates from original scope
+
+## Solution Overview
+
+- **One classifier for both sides**: `teams_fence::contacting(&Request) -> Contact`, pure (no IO). `Request` holds the
+  method, the URL, the headers that change what a request does, and the body; a `Policy` value carries the echo call's
+  callee. The browser fence and the native transport both call it.
+- **Three verdicts**: `Contact::None` (allowed), `Contact::Write(Target)` (judged by `Fence::check` against the
+  target's fresh member list), `Contact::Unreadable` (a mutating request on a contacting service that is neither a
+  mapped write nor a carve-out: denied). A request counts as mutating when its method isn't `GET`/`HEAD`/`OPTIONS`,
+  when a `GET` has a body, or when it carries `X-HTTP-Method-Override` or `X-HTTP-Method` naming another method.
+- **Contacting services by host, default `Unreadable`** (Technical Details): on those hosts every mutating request is
+  contacting unless the table maps or carves it out. A chat-service host whose path the classifier can't read is
+  `Unreadable`, never `None`. Every other host is `None`.
+- **Every allowed mutating request is logged** to `fence.log` as `allowed` with its method, host and path shape (ids
+  replaced by their kind: `<chat>`, `<message>`, `<mri>`, `<guid>`), never a query value, header or body. That's the
+  record that shows a family is missing, and the data Task 9's catalog review works from.
+- **Non-contacting `WriteKind`s** (`Typing`, `ReadReceipt`, `OwnAvailability`) stay in the outbox (it orders writes on a
+  chat's read horizon and on presence), and `Fence::check` permits them without a member read, logged. `Typing` and
+  `ReadReceipt` on any chat; `OwnAvailability` keeps its own-account check (the account's own scope only) and
+  `RegisteredEndpoint`, which cost nothing and keep a lab account from setting another's presence. The `AccountScope`
+  deny for contacting kinds stays.
+- **Group chats** are judged like 1:1 chats: one fresh member-list read, complete and all lab accounts (or the echo
+  service). `chats.toml` stays lab data for the scenarios; the fence no longer reads it.
+- **The native transport** gains a plain `Request` class (any method, an unsealed trait), checked by `contacting` and
+  refused unless `None`, next to `Read` and `Authorized`. `https` only, no proxy, no redirects, each token only to its
+  own service's host; a new service is a code change with no review.
+- **Frames**: on a Trouter socket the guard parses the socket.io 0.9 type and allows `0` (disconnect), `1` (connect),
+  `2` (heartbeat) and `5` (event) only; `3` (message, the delivery response), `4` (JSON message), `6` (ack), binary
+  frames and anything that doesn't parse are denied. Frames on calling-host sockets stay as today's `calling` frame
+  rules have them. Other sockets: allowed. The native `FrameSink` keeps typed frames (no raw text, no delivery
+  response) but drops the per-frame `fence.log` record and the review rule.
+
+## Technical Details
+
+### The contacting services and their table
+
+Task 2 settles the exact host list from `docs/protocol/endpoints.md`, `calling-echo.md` and `auth.md` and writes it
+into `contacting.rs` and this section. On each service below, a mutating request is `Unreadable` unless a row maps it
+or carves it out.
+
+**Chat service** (an AFD host's `/api/chatsvc/<region>/…`, the regional chat hosts): any version, any case of `ME`
+(`ME`, `me`, the account's own MRI), any path `chat_service_path` can read or not.
+
+| Request | Verdict |
+|---|---|
+| `POST v1/users/ME/conversations/{chat}/messages`, `Text`, `RichText`, `RichText/*` | `Write(Message)` on the chat, mentions added (today's `message_write`, `chat_only`, `mentioned`) |
+| same path, `Control/Typing`, `Control/ClearTyping`, the body passing `strict_json` and `chat_only`, no `mentions`, `{chat}` a chat id by `chat_scope` | `None` (typing) |
+| `PUT …/messages/{id}`, `DELETE …/messages/{id}` | `Write(Edit)`, `Write(Delete)` |
+| `PUT`/`DELETE …/messages/{id}/properties?name=emotions` (exactly one query key) | `Write(Reaction)` |
+| `PUT v1/users/ME/conversations/{chat}/properties?name=consumptionhorizon` (exactly one query key, `{chat}` a chat id) | `None` (read receipt) |
+| `PUT v1/users/ME/conversations/{chat}/properties?name=<n>`, `<n>` in the own-view set Task 2 lists from `endpoints.md` (e.g. `lastTimeFavorited`, favourite, mute), exactly one query key | `None` (the account's own view of a chat) |
+| `PUT v1/users/ME/conversations/48:{notifications,mentions}/messages/{id}/properties?name=isread`, exactly one query key, body exactly `{"isread": <string>}` | `None` (own feed) |
+| `PUT v1/users/ME/properties?name=<n>` | `None` (own settings) |
+| `v2/users/ME/endpoints/<id>`, `…/endpoints/<id>/active` and the other own-endpoint paths `endpoints.md` lists | `None` (own session) |
+| `POST v1/threads` | `Write(ChatCreate)` with the body's members |
+| `PUT v1/threads/{chat}/members[/{m}]`, `DELETE v1/threads/{chat}/members/{m}` | `Write(MemberChange)` |
+| anything else: other `48:` streams and paths (notes, `sharedcalllogs`, forward, move), `8:…`/`28:…` conversation ids, drafts and scheduled sends, `PUT`/`DELETE` on a conversation itself, bot invokes (`agents/…`), channel and team ids, reply chains, any id segment holding `/ ; ? #`, any duplicate query key | `Unreadable` |
+
+**Calling** (`api.flightproxy.teams.microsoft.com`, `api.fl.teams.microsoft.com`, `*.conv.skype.com`, `*.cc.skype.com`,
+`*.broker.skype.com`, and their `ep/<host>/…` forms; Task 2 checks the list): every mutating request is `Unreadable`
+except the echo call start that `calling.rs` maps today, `Write(Call)` to the policy's echo callee. A call's
+`acceptance` link falls in this service, so it's always denied.
+
+**Graph** (`graph.microsoft.com`, every version, `$batch` included): every mutating request `Unreadable`.
+
+**Outlook, OWA and Substrate** (`outlook.office.com`, `outlook.office365.com`, `substrate.office.com`): every mutating
+request `Unreadable` except the search and suggestion `POST`s `endpoints.md` lists.
+
+**SharePoint and OneDrive** (`*.sharepoint.com`, the OneDrive API hosts): every mutating request `Unreadable`.
+
+**AMS and the async gateway**: object creation and `…/objects/<id>/forward` (they name who can read an object) are
+`Unreadable` unless today's mapping (`fence-targets.md`, AMS) maps them to a chat target, which `Fence::check` then
+judges; the rest of AMS `None` only where `endpoints.md` shows it is the account's own (an upload to an object it
+created).
+
+**Middle tier** (`teams.microsoft.com/api/mt/…`): mutating requests under `…/teams/…`, `…/meetings…`, anything with
+`invite` in a segment are `Unreadable`; the rest of the middle tier is `None`, out-of-office with automatic replies
+(`…/automaticRepliesSetting`) included: the user counted it as own settings on 2026-10-23.
+
+**CSA** (`/api/csa/…`): mutating requests `Unreadable` except the reads by `POST` `endpoints.md` lists
+(`chatsAndChannelsByIds` and the like).
+
+**Everything else**: `None` (telemetry, logging, apps, middle-tier settings and profile lookups, searches, presence and
+`forceavailability`, the registrar, Entra and authz).
+
+Bodies are read by the strict JSON reader (case-folded duplicate keys → `Unreadable`), path segments percent-decoded,
+query values exact.
+
+### Membership (`teams-fence/src/membership.rs`)
+
+- 1:1 chats: unchanged.
+- Group chats (`19:…@thread.v2` by `is_group_chat_id`) and meeting chats (`19:meeting_…@thread.v2`, by a new
+  `is_meeting_chat_id` predicate, so `is_group_chat_id`'s other users, `teams-proto/src/chat/model.rs` among them,
+  don't change): one fresh member-list read, `Complete` when there's no paging key, `totalMemberCount` equals the
+  members listed (`counts_match`), no member is `hidden` or `isDeleted`, no MRI appears twice, every MRI is in a form
+  the captures showed, and every member is a lab account or an approved service. Otherwise the existing reasons:
+  `Partial(Paginated)`, `Partial(Truncated)`, `Partial(FetchFailed(Timeout))`, and a non-lab member denies.
+- Deleted: `LabGroup`, the `chats.toml` reading, `PartialReason::UnrecordedGroupChat`, the thread read, the `eTag`
+  comparison and the two-read budget. The thread read's `threadType` check goes because the chat id already says what
+  the chat is, and the member list carries everything the fence judges; the other checks stay.
+- `LiveMembershipSource::new` and `for_fence` both admit group and meeting chats; `for_fence` stays the lab constructor.
+
+### The new `CLAUDE.md` hard rules
+
+They replace, on merged `main`'s `CLAUDE.md`, everything from "These hold for every agent and every change…" through
+the end of the bullet "The native client's fourth list, `teams-proto`'s sealed `PostRead`…"; the bullets on captures
+and tokens, the personal build and protocol notes stay as they are:
+
+> These hold for every agent and every change, with no exceptions. The fence's scope is the user's rule of 2026-10-23,
+> which replaced M0–M2's default-deny model: **lab accounts contact only each other; everything else is allowed.**
+>
+> - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
+>   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
+>   joining or answering one), a chat created, a member added or removed, an invite, a meeting, a mail, a share. It is
+>   allowed only when every participant of its target, read fresh and complete (no paging key), is one of the 3 lab
+>   accounts (`lab.toml`'s MRIs) or an approved service participant (the echo service, by its MRI). That holds for any
+>   chat whose members are only lab accounts, group and meeting chats included, a natively created one too. A target
+>   whose members can't be read in full, or a write the fence can't tie to a target with certainty, is denied.
+> - **Everything else is allowed by default**, in the lab browser and in the native client, with no capture, review or
+>   allowlist entry needed: reads by any method (a `POST` search or people lookup too, whoever its results list), the
+>   account's own session, tokens and settings (out-of-office with automatic replies included), presence, a status
+>   note, typing and read receipts (others may see these; that is fine).
+> - **Contacting writes are classified first, by service** (`teams_fence::contacting`, shared by the browser fence and
+>   the native transport). On a service whose purpose is reaching people (the chat service, calling, Graph, Outlook,
+>   SharePoint, AMS, the middle tier's team, meeting and invite paths, CSA), a mutating request is contacting unless
+>   the table maps it to a target or carves it out by name (typing, read receipts, the account's own feed, settings and
+>   endpoints); one it can't read is denied, never let through. A carve-out or a new service is a table row and a test,
+>   no capture review. Nothing allows a request before this classification runs. Every allowed mutating request is
+>   logged to `fence.log` by its method, host and path shape. When unsure whether something reaches people, treat it
+>   as contacting.
+> - **No token or credential goes to a third party** (a bot, an app's backend): a bot invoke stays denied. Sign-in and
+>   token renewal stay in `teams-auth`'s own clients and touch only the account's own credentials.
+> - **Never answer a call.** No scenario clicks answer, the fence doesn't map `acceptance`, a Trouter delivery
+>   response is never sent (browser or native), and the native client ignores incoming calls.
+> - **Live browser runs are armed** (M0 Tasks 6–7): HTTP interception on every host and target, the WebSocket guard,
+>   the service worker neutralized. The arming is what lets the fence deny a contacting write; it lets the rest
+>   through.
+> - **The native client sends a contacting write only as `Authorized<_>`** with a `WritePermit` from `Fence::check`
+>   for its exact target, logged to `fence.log` by `Fence::check`; a sealed `Mutating` type in `teams-proto` is the
+>   only way to build one, and the transport refuses any other request `teams_fence::contacting` doesn't call `None`.
+>   The transport is `https` only, with no proxy and no redirects, and hands each token only to its own service's
+>   host. A write is never resent by the transport (the HTTP client's own retries stay off: an HTTP/2 retry could post
+>   twice). A mock origin (HTTP or socket) exists only under a `test-support` feature, which a lab binary refuses to
+>   run with. No write ever comes from a `cargo test` process: a live test spawns a normally built lab binary (built
+>   with `--target-dir target/lab`) and reads its output and `fence.log`.
+
+## What Goes Where
+
+- **Implementation Steps**: code, tests and docs in this repo, on `main` after M2 merges.
+- **Post-Completion**: the `CLAUDE.md` edit if the agent's auto mode refuses it.
+
+## Implementation Steps
+
+### Task 1: The new hard rules in `CLAUDE.md`
+
+**Files:**
+- Modify: `CLAUDE.md`
+
+- [ ] replace the hard-rules block named in Technical Details with the quoted text, word for word
+- [ ] mark the Patterns lines that describe the old rules (the read-by-`POST` list, the group chat's enrolment and
+      `chats.toml` admission, own presence's exception, the expected-deny list's review, "Own-state is added only after
+      a review", the native client's sealed lists) with "(being removed: 2026-10-23 rule)" until Task 11 rewrites them
+- [ ] ⚠️ the auto-mode classifier refused this edit on 2026-10-23 as self-modification: if it refuses again, stop and
+      ask the user to apply it (or to allow the edit); don't work around the refusal
+- [ ] `cargo test -p fixture-guard` passes
+
+### Task 2: Discovery, the endpoint sweep, and `teams_fence::contacting` (additive)
+
+**Files:**
+- Create: `crates/teams-fence/src/contacting.rs`, `crates/teams-fence/tests/contacting.rs`,
+  `crates/teams-fence/tests/fixtures/contacting/*` (synthetic, marked)
+- Modify: `crates/teams-fence/src/lib.rs`, `crates/teams-fence/src/target.rs`, `crates/teams-fence/Cargo.toml`
+- Modify: this plan (Technical Details' host list, own-view property names, carve-outs; ➕ tasks)
+
+- [ ] on merged `main`, list every use of the pieces Context names (personal build, `teams-signin`, M2's later code)
+      and add a ➕ task, or a note on the task that deletes it, for each
+- [ ] go through every row of `docs/protocol/endpoints.md`, `calling-echo.md` and `auth.md`: settle each contacting
+      service's hosts, the carve-outs and the own-view property names, and write them into Technical Details
+- [ ] write the table test first: a row per mapped write, carve-out and `Unreadable` form of Technical Details,
+      including every shape `proto-lab/tests/fence_targets.rs` pins, method overrides and `GET` with a body, an
+      unreadable chat-service path, `8:`/`28:`/`48:notes` conversations, a duplicate `name`, a Graph `$batch`, an
+      Outlook `sendmail`, a bot invoke, a calling-host `acceptance`
+- [ ] add `contacting.rs` next to `proto-lab`'s `map_write` (copied in, not moved yet: `proto-lab` keeps building
+      unchanged), with the families, carve-outs and the echo call start (the callee in `Policy`)
+- [ ] `WriteKind::is_contacting()`: false for `Typing`, `ReadReceipt`, `OwnAvailability`
+- [ ] tests pass
+
+### Task 3: `Fence::check` and group chats under the new rule
+
+**Files:**
+- Modify: `crates/teams-fence/src/{decision,membership,lab,log,lib}.rs`
+- Modify: `crates/teams-fence/tests/{fence_core,group_chat,lab_config,membership,own_availability}.rs`
+- Modify: `crates/proto-lab/src/scenario/abc_chat.rs` (`reads_in_full`), `crates/proto-lab/tests/abc_chat.rs`
+
+- [ ] write tests first: `Typing` and `ReadReceipt` permitted on any chat with no member read, logged;
+      `OwnAvailability` still only on the account's own scope; a lab-only group chat not in `chats.toml` is
+      `Complete`; a lab-only meeting chat is `Complete`; a paged read, a count mismatch, a `hidden` or `isDeleted`
+      member, a duplicate MRI, a non-lab member and a timeout deny with the existing reasons; 1:1 unchanged
+- [ ] `Fence::check`: non-contacting kinds without a member read
+- [ ] `membership.rs` as in Technical Details; `is_meeting_chat_id` added, `is_group_chat_id` unchanged
+- [ ] add the `allowed` `fence.log` record (method, host, path shape) for Tasks 4 and 5 to use
+- [ ] `lab_accounts_only`, `check_post_read` and `PostReadPermit` stay for now (callers move in Tasks 4–5)
+- [ ] tests pass
+
+### Task 4: The lab browser fence: HTTP, frames and scenarios together
+
+**Files:**
+- Modify: `crates/proto-lab/src/{classify,fence_http,fence_ws,calling,session,lib}.rs`,
+  `crates/proto-lab/src/commands/{auth,login,status}.rs`
+- Modify: `crates/proto-lab/src/scenario/{mod,expected,load,ab_chat,ab_chat_full,ab_image,ab_file,ab_trouter,abc_chat,chat_shapes,echo_call,own_presence}.rs`
+  (and any other scenario on merged `main`)
+- Delete: `crates/proto-lab/src/post_read.rs`, `crates/proto-lab/src/availability.rs`
+- Modify: `crates/proto-lab/tests/{fence_http,fence_targets,fence_ws,expected_denies,calling,login,auth_redirect,capture,scenario_dsl,ab_trouter}.rs`
+- Delete or rewrite: `crates/proto-lab/tests/{post_reads,own_availability}.rs`
+- Modify: `crates/teams-signin/src/guard.rs`, `crates/teams-signin/tests/window.rs` (they keep `sign_in` and `OwnRule`,
+  moved into `teams-signin` if `proto-lab` no longer needs them)
+- Modify: `spikes/echo-call/tests/signaling.rs` (or keep `proto_lab::calling::call_start` as a re-export)
+
+- [ ] rewrite the tests first:
+      - HTTP: requests the old fence denied (off-list own state, `PostRead` naming a non-lab MRI, settings, apps,
+        presence) are let through and logged `allowed`; every contacting shape is `Write` and judged; `Unreadable` is
+        denied; a forced deny still wins before classification
+      - frames: socket.io types `0`, `1`, `2`, `5` allowed on Trouter sockets; `3`, `4`, `6`, binary and unparsable
+        denied; calling-host frames as today; foreign-realm refusal and the token check unchanged
+      - scenarios: a run whose denies are only its forced denies and the reviewed expected list passes; any other
+        deny fails the run naming its class
+- [ ] `Classification` becomes `Read | Allow | Write(Target) | Unknown`, `classify` calls `teams_fence::contacting`,
+      `proto-lab`'s own `map_write` and its helpers are deleted; one `Classifier` with `with_test_call_callee`
+- [ ] `FrameClassifier` collapses to the frame rule; `FrameRule`, `seeded`/`calling`/`messaging`/`without_activity` go
+      (keeping what the calling-host frames need)
+- [ ] `expected.rs` shrinks to the contacting-service classes a run meets but doesn't need, each with its reason (no
+      capture review): bot invokes on editor open, the account's own channel entry
+      (`PUT v1/threads/<channel>/members/<own>?returnThreadMetadata`) and channel properties, delivery responses, and
+      `echo-call`'s call follow-ups (still exit 1); every scenario stops picking a classifier
+- [ ] tests pass; arming tests (`tests/browser.rs` and friends) untouched and green
+
+### Task 5: The native transport: plain requests, checked by `contacting`
+
+**Files:**
+- Modify: `crates/teams-proto/src/{client,http,lib,endpoint}.rs`
+- Create: `crates/teams-proto/src/request.rs` (the unsealed `Request` trait); `EndpointRegistration` and the
+  `PostRead` requests move onto it
+- Delete: `crates/teams-proto/src/own.rs`, `crates/teams-proto/src/post_read.rs` (unless Task 2 found a personal-build
+  user)
+- Modify: `crates/teams-proto/src/write/availability.rs` (stays `Mutating`, kind `OwnAvailability`; the
+  captured-values-only rule text goes, the values it builds stay)
+- Modify: `crates/teams-trouter/src/registration.rs`, `crates/teams-core/src/{profiles,presence,own_presence,engine}.rs`,
+  `crates/teams-core/src/outbox/transient.rs`, `crates/teams-headless/src/{availability,main}.rs`,
+  `crates/teams-mock/src/{chatsvc,ups,world,lib}.rs`
+- Modify (fakes and callers): `crates/teams-proto/tests/{policy,http,fence_types,csa,graph,presence,own_availability}.rs`,
+  `crates/teams-core/tests/{engine,outbox,sync,own_availability}.rs`, `crates/teams-ui/tests/own_presence.rs`,
+  `crates/teams-headless/tests/{cli,chat_live}.rs`, `crates/teams-app/tests/ui_live.rs`,
+  `crates/teams-mock/tests/mock.rs`, `crates/teams-trouter/tests/session.rs`
+- Modify: `crates/fence-seal/src/lib.rs`, `crates/fence-seal/tests/ui/*`
+- Modify: `crates/teams-fence/src/{decision,post_read,lib}.rs`, `crates/teams-fence/tests/post_read.rs` (delete
+  `check_post_read`, `PostReadPermit`, `lab_accounts_only` once their last caller is gone, unless the personal build
+  uses them)
+
+- [ ] write tests first: a `Request` that `contacting` calls `None` is sent (any method, any MRIs in its body) and
+      logged `allowed` when mutating; one it calls `Write` or `Unreadable` is refused with a typed error and never
+      reaches the mock origin; a profile lookup naming a non-lab MRI is sent; a Graph `POST` is refused
+- [ ] `Transport` becomes `read`, `send<R: Request>`, `deliver<R: Mutating>`; `send` builds the URL from the request's
+      `Service`, runs `teams_fence::contacting`, refuses anything but `None`; the host allowlist becomes the
+      per-`Service` base (`https`, no proxy, no redirects, each token only to its own service's host)
+- [ ] move every caller and fake onto `send`; M2's GPUI UI tests stay green
+- [ ] `fence-seal`: delete `proto_own_state`, `proto_post_read*`, `post_read_permit*`; update
+      `proto_register_fake_transport`, `proto_availability_literal`, `proto_registered_endpoint`,
+      `proto_presence_read_literal` to the new API; keep that `Mutating` and `WritePermit` can't be made outside their
+      crates; add a case that a `Request` can't be handed to `deliver`
+- [ ] tests pass
+
+### Task 6: Native frames: typed, unreviewed
+
+**Files:**
+- Modify: `crates/teams-proto/src/frame.rs`, `crates/teams-trouter/src/{lib,session}.rs`,
+  `crates/teams-fence/src/{log,lib}.rs` (`FrameRecord`)
+- Modify: `crates/teams-proto/tests/frame.rs`, `crates/teams-trouter/tests/session.rs`,
+  `crates/teams-fence/tests/{fence_core,log_processes}.rs`, `crates/teams-headless/tests/chat_live.rs`,
+  `crates/teams-app/tests/ui_live.rs`, `crates/fence-seal/tests/ui/proto_own_frame.*`
+
+- [ ] write tests first: the sink sends every typed frame without a `fence.log` record; no constructor makes a
+      delivery response or takes raw text (`proto_raw_frame` stays)
+- [ ] drop `FrameRecord` (unless the personal build uses it) and the "reviewed list" rule; the trait stays sealed only
+      to keep raw text out, so adding a frame (e.g. `user.activity`) is an ordinary change
+- [ ] tests pass
+
+### Task 7: The endpoint catalog and protocol notes
+
+**Files:**
+- Modify: `docs/protocol/endpoints.md`, `docs/protocol/fence-targets.md`, `docs/protocol/trouter.md`
+- Delete: `docs/backlog/seeded-own-rules-ignore-the-query.md`, `docs/backlog/group-chat-member-read-completeness.md`
+- Modify: `docs/backlog/bot-invokes-and-message-extensions.md`
+
+- [ ] `endpoints.md`: replace the Browser-fence column with "contacting?" (`yes: <service>`, `mapped: <kind>`,
+      `carve-out`, `no`); keep the Native column
+- [ ] `fence-targets.md`: the services, the table and the member read; the abc shape section goes
+- [ ] delete the two backlog items the rule settles; `bot-invokes…`: bot invokes stay denied (a token to a third
+      party), say so
+- [ ] `cargo test -p fixture-guard` passes
+
+### Task 8: Remove what nothing uses any more
+
+**Files:**
+- Modify: whatever is left of `OwnKind`, `OwnRule`, `UrlPattern`, `RequestOutcome::Own`, the `post_read` log record
+  and the `chats_file` readers
+
+- [ ] grep for each piece Context names; delete the ones with no caller left and no personal-build user; list the
+      ones kept and why in this plan
+- [ ] tests pass
+
+### Task 9: Live check under the new fence
+
+Every command under `flock ~/.local/share/teams-lab/live.lock` and `timeout --signal=INT`, `--headless`, one browser
+per lab profile, from a normal build (`cargo build -p proto-lab`, the lab binaries with `--target-dir target/lab`),
+run in the background.
+
+- [ ] `proto-lab scenario load`, `ab-chat`, `ab-chat-full`, `ab-trouter`: each passes with only its forced denies and
+      the reviewed expected list; read `fence.log`'s `allowed` lines and check every mutating one against the table —
+      one that reaches people is a missing family: stop, add it (Task 2's file) and rerun
+- [ ] `abc-chat`: passes; the group chat's write permitted through the new member read
+- [ ] `teams-headless` (or `teams-app --lab`): a message, a reaction, typing and a read receipt in the a–b chat; a
+      profile lookup and a presence read of a non-lab colleague go out and come back (reads only)
+- [ ] the forced-deny probe of every writing scenario still fails in the page and never reaches the other account
+- [ ] a breached run is reported as breached (CLAUDE.md, "A fence breach is never a flake"), never rerun into a pass
+
+### Task 10: Verify acceptance criteria
+
+- [ ] every row of Technical Details' table has a table-test row, and both sides call the one classifier
+- [ ] every mutating request the live runs logged `allowed` was checked against the table (Task 9)
+- [ ] a natively created lab-only group chat is writable (mock test)
+- [ ] no delivery response can be sent from either side (frame tests)
+- [ ] the full gate passes: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D
+      warnings`, `scripts/lint-report.sh`, `cargo test --workspace`
+
+### Task 11: [Final] Update documentation
+
+- [ ] `CLAUDE.md` Patterns: rewrite the lines Task 1 marked to what the code now does (same refusal note as Task 1)
+- [ ] `README.md`, if it names the removed lists or classifiers
+- [ ] move this plan to `docs/plans/completed/`
+
+## Post-Completion
+
+*Items requiring the user's decision or action - informational only*
+
+**Order against M2.** The user decided on 2026-10-23 that this plan runs after M2 merges to `main`; M2 finishes on
+the old fence, untouched. The M2 plan is not edited by this plan.
+
+**`CLAUDE.md`.** The agent's auto mode refused editing `CLAUDE.md` on 2026-10-23. If it refuses again in Tasks 1 or
+11, the user applies the text from Technical Details or allows the edit.
+
+**The personal build's rules** (`docs/personal-build.md`) are the user's and unchanged; whether to simplify them the
+same way is the user's call.
