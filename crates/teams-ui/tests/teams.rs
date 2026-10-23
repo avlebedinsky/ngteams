@@ -417,6 +417,7 @@ fn a_channel_shows_a_profile_read_after_it_was_shown() {
             name: Some("Profile Bee".to_owned()),
             from: Some(NameFrom::Graph),
             picture: None,
+            looking: false,
         },
     );
     rig.send(Event::Profile { mri: LAB_B.to_owned() });

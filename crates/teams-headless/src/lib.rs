@@ -1,5 +1,5 @@
 //! `teams-headless`: one lab account's native Teams client from the command line, the M1 core (`teams-core`) without a
-//! UI. `teams-headless <alias> sync|list|show|send|edit|delete|react|read|watch|presence|availability`.
+//! UI. `teams-headless <alias> sync|list|show|send|edit|delete|react|read|watch|presence|profile|availability`.
 //!
 //! - The fence is [`teams_fence::Fence::open_lab_account`]'s: the roster from `lab.toml` (and the account's own MRI,
 //!   whose own availability alone it permits), every decision in the lab's

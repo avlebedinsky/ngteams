@@ -234,6 +234,7 @@ impl FakeCore {
             from: name.as_ref().map(|_| NameFrom::Message),
             name,
             picture: None,
+            looking: false,
             mri,
         }
     }

@@ -59,6 +59,10 @@ pub struct Person {
     pub from: Option<NameFrom>,
     /// Their picture's bytes, undecoded; `None` when they have none or it wasn't read yet.
     pub picture: Option<StoredPicture>,
+    /// Whether a lookup of them is queued or running (this ask's or an earlier one's): its change, when it brings one,
+    /// comes as [`Event::Profile`](crate::Event::Profile). `false` when their stored profile is fresh or a failed
+    /// lookup's retry wait runs: no lookup is under way, and none is told.
+    pub looking: bool,
 }
 
 impl fmt::Debug for Person {
@@ -67,6 +71,7 @@ impl fmt::Debug for Person {
             .field("mri", &self.mri)
             .field("from", &self.from)
             .field("picture", &self.picture)
+            .field("looking", &self.looking)
             .finish_non_exhaustive()
     }
 }
@@ -137,6 +142,7 @@ impl<C: Credentials + 'static> Profiles<C> {
             name: None,
             from: None,
             picture: None,
+            looking: self.under_way.contains(mri),
         };
         if let Some(profile) = stored {
             if let PictureState::Some(picture) = profile.picture {

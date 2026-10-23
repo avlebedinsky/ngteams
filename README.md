@@ -262,9 +262,11 @@ recorded in `chats.toml`), or a conversation id. Each write first catches up (it
 through. `watch` answers no delivery and no call; it exits 0 on SIGINT or SIGTERM, non-zero when the push channel
 stopped on its own. `presence` reads only (a read sent as a `POST`, which reaches nobody whoever it names); it waits up to
 `--wait` seconds (30) for each person's presence to be told, then prints one `presence <alias or MRI> <availability>`
-line per person, `Unknown` for one not told in time or whose read failed. `profile` reads only too: it asks the
+line per person, `Unknown` for one not told in time or whose read failed; it refuses more people (the other lab accounts
+and each `--mri` together) than the engine watches at once (20). `profile` reads only too: it asks the
 engine for each person, which looks them up (Graph's user record, then the middle tier's profile lookup for a name
-Graph doesn't give) unless its store has them fresh, waits up to `--wait` seconds for each lookup, and prints
+Graph doesn't give) unless its store has them fresh or a failed lookup's retry wait runs, waits up to `--wait` seconds
+for the lookups it started (none when it started none), and prints
 `profile <alias or MRI> <graph|short_profile|message|known|none>`, never the name. `availability` is a write others see (the
 account's own availability, the user's exception of 2026-10-21): once its push channel's registration went through it
 sends the endpoint's presence `PUT` (available), then the manual status at `--manual-after` and its reset at

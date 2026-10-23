@@ -247,9 +247,11 @@ async fn a_name_and_a_picture_come_from_graph_and_are_kept_in_the_store() {
 
     // nothing stored yet: no name, and a lookup starts
     let first = rig.handle.person(mri(GUID_B)).await.unwrap();
+    assert!(first.looking, "a lookup is under way");
     assert_eq!((first.name, first.from, first.picture), (None, None, None));
     rig.profile_of(&mri(GUID_B)).await;
     let person = rig.handle.person(mri(GUID_B)).await.unwrap();
+    assert!(!person.looking, "fresh in the store: no lookup, and none to be told");
     assert_eq!(person.name.as_deref(), Some("Lab Account B"));
     assert_eq!(person.from, Some(NameFrom::Graph));
     let picture = person.picture.expect("a picture");

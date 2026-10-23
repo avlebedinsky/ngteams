@@ -24,7 +24,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Parts, Push};
-use teams_core::{EngineError, NameFrom, Outbox};
+use teams_core::{EngineError, MAX_WATCHED, NameFrom, Outbox};
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster, one_to_one_id};
 use teams_headless::availability;
@@ -812,6 +812,35 @@ async fn presence_and_profile_print_anyone_asked_about_by_mri_never_a_name() {
         String::from_utf8(out).unwrap(),
         format!("profile b none\nprofile {OUTSIDER} none\n")
     );
+
+    // asked again: the store has both fresh, no lookup starts, so nothing is waited for however long `--wait` is
+    let started = tokio::time::Instant::now();
+    let mut out = Vec::new();
+    commands::profile(&mut a, &whom, WAIT, &names(), &mut out)
+        .await
+        .unwrap();
+    assert!(started.elapsed() < WAIT / 2, "{:?}", started.elapsed());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("profile b none\nprofile {OUTSIDER} none\n")
+    );
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn presence_refuses_more_people_than_the_engine_watches_before_asking_anyone() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+    let whom: Vec<String> = (0..=MAX_WATCHED)
+        .map(|n| format!("8:orgid:00000000-0000-4000-8000-{n:012}"))
+        .collect();
+    let mut out = Vec::new();
+    let refused = commands::presence(&mut a, &whom, WAIT, &names(), &mut out).await;
+    assert!(
+        matches!(refused, Err(CommandError::TooMany { asked, most }) if asked == MAX_WATCHED + 1 && most == MAX_WATCHED),
+        "{refused:?}"
+    );
+    assert!(out.is_empty());
     a.shutdown();
 }
 

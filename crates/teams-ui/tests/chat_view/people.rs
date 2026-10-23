@@ -36,6 +36,7 @@ fn person(mri: &str, name: &str, from: NameFrom, picture: Option<StoredPicture>)
         name: Some(name.to_owned()),
         from: Some(from),
         picture,
+        looking: false,
     }
 }
 

@@ -5,7 +5,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::time::Duration;
 
-use teams_core::{Action, CatchUpReport, EngineError, EngineHandle, Event};
+use teams_core::{Action, CatchUpReport, EngineError, EngineHandle, Event, MAX_WATCHED};
 use teams_store::{OutboxEntry, OutboxState, Store, StoreError};
 use teams_trouter::Stop;
 
@@ -26,15 +26,23 @@ pub enum CommandError {
     Output(#[from] io::Error),
     #[error("the engine stopped before the write settled")]
     Stopped,
+    #[error("{asked} people asked about, more than the engine watches at once ({most})")]
+    TooMany { asked: usize, most: usize },
 }
+
+/// How often `profile` asks the engine again whether a lookup is still under way: a lookup that ends without a change
+/// (a failed part that left the stored profile as it was) is told by no event.
+const LOOKUP_POLL: Duration = Duration::from_millis(200);
 
 /// The presence of `whom` (MRIs), read once through the engine (M2 Task 17): each asked about, then their
 /// `Event::Presence`s waited for until each was told or `wait` is over, then one `presence <who> <availability>` line
 /// each as the engine has it then ([`availability_word`]: `Unknown` when the read failed, gave nothing for them, or
-/// can't be sent). Reads only: UPS's presence read is a read sent as a `POST`, which reaches nobody.
+/// can't be sent). Reads only: UPS's presence read is a read sent as a `POST`, which reaches nobody. At most
+/// [`MAX_WATCHED`] people: past it the engine drops the one asked about longest ago, and what was read of them.
 ///
 /// # Errors
-/// The engine's refusal, or when the output can't be written.
+/// [`CommandError::TooMany`] for more than [`MAX_WATCHED`] people, before anyone is asked about; the engine's refusal,
+/// or when the output can't be written.
 pub async fn presence(
     handle: &mut EngineHandle,
     whom: &[String],
@@ -42,6 +50,12 @@ pub async fn presence(
     names: &LabNames,
     out: &mut impl Write,
 ) -> Result<(), CommandError> {
+    if whom.len() > MAX_WATCHED {
+        return Err(CommandError::TooMany {
+            asked: whom.len(),
+            most: MAX_WATCHED,
+        });
+    }
     for mri in whom {
         handle.presence(mri.clone()).await?;
     }
@@ -62,10 +76,11 @@ pub async fn presence(
 }
 
 /// The names of `whom` (MRIs) as the engine looks them up (M2 Task 12: Graph's user record, then the middle tier's
-/// profile lookup for a name Graph doesn't give): each asked about, then their `Event::Profile`s waited for until each
-/// was told or `wait` is over, then one `profile <who> <source>` line each as the engine has it then
-/// ([`name_source_word`]: where the name came from, `none` without one), never the name. Reads only: a lookup reaches
-/// nobody, whoever it names.
+/// profile lookup for a name Graph doesn't give): each asked about, then, for those whose lookup is under way
+/// ([`Person::looking`](teams_core::Person::looking): none for one the store has fresh or whose failed lookup waits to be
+/// tried again), waited until none is or `wait` is over, then one `profile <who> <source>` line each as the engine has
+/// it then ([`name_source_word`]: where the name came from, `none` without one), never the name. Reads only: a lookup
+/// reaches nobody, whoever it names.
 ///
 /// # Errors
 /// The engine's refusal, or when the output can't be written.
@@ -76,17 +91,29 @@ pub async fn profile(
     names: &LabNames,
     out: &mut impl Write,
 ) -> Result<(), CommandError> {
+    let mut looking: Vec<&String> = Vec::new();
     for mri in whom {
-        handle.person(mri.clone()).await?;
-    }
-    let mut untold: Vec<&String> = whom.iter().collect();
-    let deadline = tokio::time::Instant::now() + wait;
-    while !untold.is_empty() {
-        match tokio::time::timeout_at(deadline, handle.next_event()).await {
-            Ok(Some(Event::Profile { mri })) => untold.retain(|asked| **asked != mri),
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => break,
+        if handle.person(mri.clone()).await?.looking {
+            looking.push(mri);
         }
+    }
+    let deadline = tokio::time::Instant::now() + wait;
+    while !looking.is_empty() {
+        let step = deadline.min(tokio::time::Instant::now() + LOOKUP_POLL);
+        // the events only wake the wait sooner: a lookup that ends without a change is told by none
+        if let Ok(None) = tokio::time::timeout_at(step, handle.next_event()).await {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let mut still = Vec::with_capacity(looking.len());
+        for mri in looking {
+            if handle.person(mri.clone()).await?.looking {
+                still.push(mri);
+            }
+        }
+        looking = still;
     }
     for mri in whom {
         let person = handle.person(mri.clone()).await?;

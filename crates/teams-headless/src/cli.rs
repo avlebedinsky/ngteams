@@ -103,7 +103,8 @@ pub enum Command {
         wait: u64,
     },
     /// The other lab accounts' presence, and anyone's `--mri` names, read once from UPS (a read sent as a `POST`,
-    /// which reaches nobody whoever it names); prints `presence <alias or MRI> <availability>` per person. Reads only.
+    /// which reaches nobody whoever it names); prints `presence <alias or MRI> <availability>` per person. Reads only;
+    /// refused for more people, all told, than the engine watches at once (`teams_core::MAX_WATCHED`).
     Presence {
         /// Seconds to wait for the read.
         #[arg(long, default_value_t = 30)]
