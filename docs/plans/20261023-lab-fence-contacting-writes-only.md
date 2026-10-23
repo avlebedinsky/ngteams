@@ -701,10 +701,20 @@ run in the background.
 
 ### Task 11: [Final] Update documentation
 
-- [ ] `CLAUDE.md`: check that the hard rules and Patterns match what the code now does, with no history, and drop the
-      hard rules' note that the code is stricter than the rule (same refusal note as Task 1)
-- [ ] `README.md`, if it names the removed lists or classifiers
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `CLAUDE.md`: check that the hard rules and Patterns match what the code now does, with no history, and drop the
+      hard rules' note that the code is stricter than the rule (same refusal note as Task 1) — the edit was accepted:
+      the note pointing at this plan is dropped; every name and path the file gives exists in the code, and the rules
+      and Patterns were checked against it (the contacting classifier, `Fence::check`'s signals, the membership read,
+      the frame rule, the expected-deny list, the native transport's classes and bases); the one fix: a native client's
+      fence is `Fence::open_lab_account`, named next to `Fence::open_lab`
+- [x] `README.md`, if it names the removed lists or classifiers — rewritten where it described the old fence: the
+      `teams-fence`, `fence-seal` and `teams-proto` layout rows (the classifier, the group-chat read, three request
+      classes, one base per service), `fence.log`'s `allowed` lines, `chats.toml` as lab data, `login` under the lab
+      rule, how every run classifies and the expected-deny list's classes, the `abc-chat`, `ab-trouter`,
+      `chat-shapes`, `own-presence-*` and `echo-call` entries, `availability`, the fixtures and protocol notes, and
+      the fence suite's test list (`post_reads` gone); also `docs/protocol/calling-echo.md`'s removed
+      `calling::call_start`
+- [x] move this plan to `docs/plans/completed/` (note: moved by the harness after the run)
 
 ## Post-Completion
 

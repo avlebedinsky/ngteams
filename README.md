@@ -22,10 +22,10 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
 | path | contents |
 |---|---|
-| `crates/teams-fence` | the write fence: a write is allowed only when every participant of its target, read fresh, is a lab account or an approved service; the lab config (`lab.toml`, `chats.toml`), `fence.log` (appends locked across processes), the membership sources (`FailClosed`; `LiveMembershipSource`: 1:1 chats, and the lab's recorded group chat when both member reads agree on exactly a, b and c), the native client's credential for them (`CredentialSource`) |
-| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, send a request outside the native request policy, send a Trouter frame that isn't one of `teams-proto`'s typed `OwnFrame`s, or reach a mock origin; a lab binary has its membership sources |
+| `crates/teams-fence` | the write fence of the lab rule: `contacting`, the one classifier the browser fence and the native transport share (a request reaches nobody and is allowed, is a mapped write with its target, or is a mutating request on a contacting service no row reads, denied); `Fence::check`, which permits a contacting write only when every participant of its target, read fresh and complete, is a lab account or an approved service (typing, read receipts and the account's own availability without a member read); the lab config (`lab.toml`, and `chats.toml`, lab data the fence doesn't read), `fence.log` (appends locked across processes), the membership sources (`FailClosed`; `LiveMembershipSource`: 1:1 chats, and group and meeting chats from one fresh member-list read), the native client's credential for them (`CredentialSource`) |
+| `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, send a request outside the native transport's three classes or hand a plain request over as a write, send a Trouter frame that isn't one of `teams-proto`'s typed `OwnFrame`s, or reach a mock origin; a lab binary has its membership sources |
 | `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`), the credential broker (`broker`: one account's secrets served on a socket, and the `BrokerSecretStore` a sandboxed process uses); the `Session`: an access token per audience refreshed before it expires, the skypetoken renewed after its Entra token, throttling shared by waiting callers, renewal notifications |
-| `crates/teams-proto` | Teams' internal API and the native HTTP transport. Four request classes only: reads (`GET`), a sealed own-state list logged to `fence.log` before it is sent (one entry: the messaging stack's endpoint registration), a sealed read-by-`POST` list (`PostRead`, one entry: the middle tier's `fetchShortProfile`, `ShortProfileLookup`) sent only as `AuthorizedPostRead` with the permit `Fence::check_post_read` gave for its exact MRIs, logged to `fence.log` first and sent once, and sealed writes sent only as `Authorized<_>` with a `WritePermit` for their exact target (`SendMessage`, `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`, `ReadReceipt`, `Typing`, `CreateChat`; `StartCall`/`AddToCall` have no route yet). The chat model (`chat`: conversations, messages, versions, reactions, mentions, quotes, a sanitized rich-text tree, paging and sync links) and `MessageText`, which builds a message's markup and its mentioned MRIs from one value. The Trouter frames: a `FrameSink` that sends only the typed `OwnFrame`s this crate builds, never raw text, none of them logged to `fence.log`. A fixed host allowlist (the chat service, the registrar, Trouter's HTTP side and, once given the account's middle-tier base, the middle tier's `beta/users/…`), `https` only, no proxy, no redirects, no hidden retries |
+| `crates/teams-proto` | Teams' internal API and the native HTTP transport. Three request classes only: reads (`GET`, no body: the chat service's, Graph's name and picture, CSA's teams), plain requests (`Request`, an open trait: any method and body, sent only when `teams_fence::contacting` says it reaches nobody, logged to `fence.log` as `allowed` first: the messaging stack's endpoint registration, the middle tier's profile lookup, UPS's presence read, whoever they name), and sealed writes sent only as `Authorized<_>` with a `WritePermit` for their exact target (`SendMessage`, `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`, `ReadReceipt`, `Typing`, `CreateChat`, the account's own availability `SetEndpointAvailability`/`ForceAvailability` naming a `RegisteredEndpoint`; `StartCall`/`AddToCall` have no route yet); a plain request the classifier calls a write or can't read is refused before anything is sent. Beside them the personal build's sealed lists (`OwnState`, `PostRead`), which no lab binary uses. The chat model (`chat`: conversations, messages, versions, reactions, mentions, quotes, a sanitized rich-text tree, paging and sync links) and `MessageText`, which builds a message's markup and its mentioned MRIs from one value. The Trouter frames: a `FrameSink` that sends only the typed `OwnFrame`s this crate builds, never raw text, none of them logged to `fence.log`. One base per service (the chat service, the registrar, Trouter's HTTP side, Graph and, once given the account's bases, the middle tier, CSA and UPS), each token only to its own service's host, `https` only, no proxy, no redirects, no hidden retries |
 | `crates/teams-store` | the account's SQLite store (`rusqlite`, bundled, WAL, `0600`): conversations, members, messages by version (edits, soft deletes), reactions per user, read horizons, sync state, the outbox; migrations; each open is a run, and a row of another open run is never taken over |
 | `crates/teams-trouter` | the native push channel: socket.io 0.9 over WSS to the Trouter hosts only, `user.authenticate` first, keep-alives, the registrar registration of the messaging stack, reconnects with backoff and on token renewal, deliveries turned into typed chat events and never answered (an incoming call included) |
 | `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out); a lab account's engine assembled as every lab binary builds it (`lab`) |
@@ -40,8 +40,8 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `spikes/gpui-video` | GPUI on niri (smoke window in a private weston + nested niri), then a 3×3 grid of 720p video (M0 Tasks 15–16) |
 | `spikes/media-loop` | two `str0m` peers on loopback carrying an Opus tone, checked with Goertzel (M0 Task 17) |
 | `spikes/echo-call` | the native echo call: a TURN client (RFC 8656), `str0m` through the relay, the test call's signaling from the capture, the call through the fence (M0 Task 19; the start sends nothing yet, see `docs/spikes/echo-call.md`) |
-| `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike: `chatsvc/` (the chat service), `trouter/` (the push channel), `mt/` (profile lookups) |
-| `docs/protocol/` | protocol notes in our own words: `auth.md`, `chat.md` (the chat service's reads and writes as captured), `fence-targets.md` (how the fence maps them, member reads, reads by `POST`), `trouter.md`, `calling-echo.md`, and `endpoints.md`, one row for every endpoint seen or used and how the browser fence and the native client treat it |
+| `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike: `auth/` (Entra and authz answers), `calling/` (the echo call's signaling), `chatsvc/` (the chat service), `csa/` (the account's teams), `graph/` (a profile), `mt/` (the profile lookup's answer), `trouter/` (the push channel), `ups/` (presence) |
+| `docs/protocol/` | protocol notes in our own words: `auth.md`, `chat.md` (the chat service's reads and writes as captured), `channels.md`, `graph.md`, `fence-targets.md` (the contacting services, the classifier's rows, member reads), `trouter.md`, `calling-echo.md`, and `endpoints.md`, one row for every endpoint seen or used, whether it is contacting and how the native client sends it |
 | `docs/m0-acceptance.md`, `docs/m1-acceptance.md` | each milestone's acceptance check: numbers, the fence's picture, every live run |
 | `docs/spikes/` | spike write-ups: `ca-probe.md`, `auth.md`, `gpui-video.md` (+ raw runs), `echo-call.md` |
 | `docs/backlog/` | deferred work, one file per item |
@@ -91,8 +91,8 @@ outside the repo:
 | `…/captures/<scenario>/<ts>/events.jsonl` | recorded runs (format in `crates/proto-lab/src/capture.rs`) |
 | `…/reference/<name>` | sanitized reference copies made by `export`, read locally to write synthetic fixtures |
 | `…/bundles/<version>/` | the unpacked web bundle and its `index.jsonl` |
-| `…/fence.log` | JSONL: every fence decision of every run (allows, denies, breaches, with reasons; no tokens, no participants' MRIs, scope ids verbatim), and every target the browser fence couldn't arm (its type, failed step, close and containment). Every lab process appends to it at once, each line under an advisory lock on the file |
-| `…/chats.toml` | the lab's group chat: the id of the a–b–c chat `abc-chat` created, recorded once as `abc` (`0600`); the only group chat the fence reads |
+| `…/fence.log` | JSONL: every fence decision of every run (allows, denies, breaches, with reasons; no tokens, no participants' MRIs, scope ids verbatim), every mutating request let through because it reaches nobody (`allowed`: method, host and path shape, never a query, header or body), and every target the browser fence couldn't arm (its type, failed step, close and containment). Every lab process appends to it at once, each line under an advisory lock on the file |
+| `…/chats.toml` | the lab's group chat: the id of the a–b–c chat `abc-chat` created, recorded once as `abc` (`0600`): lab data for the scenarios and clients, which the fence doesn't read |
 | `…/store/<alias>.sqlite` | the account's native store (`teams-headless`): conversations, messages, reactions, the outbox (`0600`, its dir `0700`); `<alias>.sqlite-runs/` holds a lock per open run |
 | `…/headless/<time>…/` | the native live runs' outputs (`teams-headless` and `chat_live`'s `summary.json`) |
 | `…/live.lock` | the live lock: every live run (a lab browser or a native client against the tenant) holds it with `flock` |
@@ -134,10 +134,10 @@ proto-lab bundles search <regex> [--kind url|host|route|method] [--version <v>]
 proto-lab service-mri echo <mri>          # record an approved service's MRI in lab.toml, once
 ```
 
-**`login`** loads the web client in the account's profile under the fail-closed fence (its writes denied and logged
-to `fence.log`, as expected). When the session has expired it signs in on Microsoft's page by itself, with the password
-from `lab-accounts.json`; the fence lets Entra's sign-in form through for `login` only. Any multi-factor prompt (a
-one-time code, a method to pick, an approval in an app, registering a method) stops it
+**`login`** loads the web client in the account's profile under the armed fence, fail-closed (its contacting writes
+denied and logged to `fence.log`, as expected). When the session has expired it signs in on Microsoft's page by itself,
+with the password from `lab-accounts.json`; Entra's sign-in form reaches nobody, so the fence lets it through. Any
+multi-factor prompt (a one-time code, a method to pick, an approval in an app, registering a method) stops it
 (`docs/backlog/one-time-code-sign-in-under-the-fence.md`). It records the account's MRI from its tokens' claims. Each
 step goes to `status-<alias>.json`.
 
@@ -167,18 +167,22 @@ could be neither closed nor killed is a breach. Each such target is in `fence.lo
 and navigation is bounded (a `beforeunload` dialog holding a navigation is accepted after 5 s), and SIGINT or SIGTERM
 stops the run, kills its browsers and lets the fence's decisions still running land in `fence.log` (exit 130 or 143).
 
-A writing scenario first proves enforcement live: a probe post to its chat is force-denied, must fail in the page and
-must never show on the other accounts. It maps the chat service's writes (`Classifier::mapped`), reads the target's
-members live (`LiveMembershipSource`, with the `ic3` bearer token the page itself sent), and lets the mention picker's
-profile lookups out only when every MRI they name is a lab account (the read-by-`POST` list,
-`crates/proto-lab/src/post_read.rs`). It expects only its probes' forced denies and the web client's requests and
-frames on the reviewed expected-deny list (`crates/proto-lab/src/scenario/expected.rs`: telemetry, lookups beyond the
-lab, presence, the account's own settings, marking its own feed items read, bot invokes, Trouter and AugLoop frames, …), each with the
-reason the scenario doesn't need it. The list only judges the run: everything on it stays denied. A deny on the
-scenario's own chat other than the probes, one for a partial or refused membership, or a class off the list fails
-the run.
+Every run uses the one classifier of the lab rule (`teams_fence::contacting`, through `proto-lab`'s `Classifier`): a
+read passes, a mutating request that reaches nobody passes and is logged `allowed`, a contacting write passes only with
+a permit from `Fence::check`, and a mutating request on a contacting service that no row reads is denied. On a Trouter
+socket only the session's own socket.io frames pass (a delivery's answer is denied), on a contacting service's socket
+no frame does, and anywhere else every frame passes (`fence_ws::classify_frame`). What a scenario holds back on purpose
+is a labelled forced deny.
 
-- `load`: account a loads the web client, fail-closed; every deny is expected.
+A writing scenario first proves enforcement live: a probe post to its chat is force-denied, must fail in the page and
+must never show on the other accounts. It reads the target's members live (`LiveMembershipSource`, with the `ic3`
+bearer token the page itself sent). It expects only its own forced denies and the web client's requests and frames on
+the reviewed expected-deny list (`crates/proto-lab/src/scenario/expected.rs`: bot invokes, the account's own channel
+entry and channel properties, the file browser's prewarm, Trouter delivery responses), each with the reason the
+scenario doesn't need it. The list only judges the run: everything on it stays denied. A deny on the scenario's own
+chat other than its forced denies, one for a partial or refused membership, or a class off the list fails the run.
+
+- `load`: account a loads the web client, fail-closed (every contacting write denied); every deny is expected.
 - `ab-chat`: a and b; a opens the a–b 1:1 chat by b's MRI and sends a message, and b must show it (clicking "Jump to
   newest" or "New messages" when the native runs left it unread).
 - `ab-chat-full`: the a–b chat beyond a message, as captured for `docs/protocol/chat.md`: a sends, edits, reacts and
@@ -190,27 +194,27 @@ the run.
   services, AMS objects, and any write naming a lab file), to capture what sending a file sends
   (`docs/backlog/file-sending.md`).
 - `abc-chat`: with no group chat recorded, a creates the a–b–c chat (its first message force-denied) and records it
-  in `chats.toml`, once; after that a messages it and b and c must show it, under the group-chat rule in
-  [CLAUDE.md](CLAUDE.md).
-- `ab-trouter`, `ab-trouter-quiet`: b's push channel while a sends, edits and reacts, under the messaging classifier
-  (the Trouter session frames and the messaging stack's registration only), observed for 16 minutes; the quiet one
-  holds back every `user.activity` (`docs/protocol/trouter.md`).
-- `chat-shapes`: a and b under the messaging classifier, as `ab-trouter`: a sets and takes back each quick reaction
+  in `chats.toml`, once; after that a messages it and b and c must show it, each write permitted by a fresh read of
+  the chat's member list, as for any chat.
+- `ab-trouter`, `ab-trouter-quiet`: b's push channel while a sends, edits and reacts (the Trouter session's own
+  frames and the endpoints' registrations pass, the answers to deliveries stay denied), observed for 16 minutes; the
+  quiet one holds back every `user.activity` with a forced deny (`docs/protocol/trouter.md`).
+- `chat-shapes`: a and b, as `ab-trouter`: a sets and takes back each quick reaction
   the hover bar offers, types for 45 s, leaves the text for 35 s, empties its compose box and waits 15 s more
   (`TYPE_FOR`, `PAUSE`, `AFTER_EMPTYING`) while b's open chat records its typing
   indicator, sends a message of three lines with a link, and mentions b in the recorded group chat
   (`docs/protocol/chat.md`).
-- `own-presence-activity`, `-endpoint`, `-both`, `-manual-held`, `-manual`: account a alone, under the messaging
-  classifier, with its own availability let through in its captured shapes only (the user's exception in
-  [CLAUDE.md](CLAUDE.md), `crates/proto-lab/src/availability.rs`): `user.activity` alone, UPS's endpoint `PUT` alone,
-  both, then a manual status (Busy, Do not disturb, Away, Available, reset) denied to capture it and let through.
+- `own-presence-activity`, `-endpoint`, `-both`, `-manual-held`, `-manual`: account a alone, as `ab-trouter`. Its
+  own availability reaches nobody, so it passes; each run holds back with a labelled forced deny what it leaves out:
+  `user.activity` alone, UPS's endpoint `PUT` alone, both, then a manual status (Busy, Do not disturb, Away,
+  Available, reset) held back to capture it and let through.
   b's view is read outside the run: `scripts/own-presence-run.sh <scenario> <samples> <report file>`, under the live
   lock, samples `teams-headless b presence` beside the run (`docs/protocol/trouter.md`, "Own presence").
 - `echo-call`: account a places the web client's test call to the echo service, with a fake microphone playing a
-  440 Hz tone. The calling classifiers allow the account's reviewed own-state (its settings and policy reads, the
-  Trouter session, the endpoint registration) and the call start in exactly its captured shape, a new call of a and
-  the echo (`crates/proto-lab/src/calling.rs`, `docs/protocol/calling-echo.md`). Every write on the started call is
-  still denied (no authoritative call-membership read: `docs/backlog/fence-call-follow-ups.md`), so the echo never
+  440 Hz tone. The run's classifier knows the echo service's MRI (`Classifier::with_test_call_callee`): what sets up
+  the account's own endpoint reaches nobody and passes, and the call start maps only in exactly its captured shape, a
+  new call of a and the echo (`teams_fence::contacting`'s calling row, `docs/protocol/calling-echo.md`), which
+  `Fence::check` permits. Every write on the started call is still denied (no authoritative call-membership read: `docs/backlog/fence-call-follow-ups.md`), so the echo never
   joins and the run exits 1: it is judged by the same expected-deny list, and the call's follow-ups are needed, so
   they are not on it. An incoming call is never answered.
 
@@ -267,8 +271,8 @@ and each `--mri` together) than the engine watches at once (20). `profile` reads
 engine for each person, which looks them up (Graph's user record, then the middle tier's profile lookup for a name
 Graph doesn't give) unless its store has them fresh or a failed lookup's retry wait runs, waits up to `--wait` seconds
 for the lookups it started (none when it started none), and prints
-`profile <alias or MRI> <graph|short_profile|message|known|none>`, never the name. `availability` is a write others see (the
-account's own availability, the user's exception of 2026-10-21): once its push channel's registration went through it
+`profile <alias or MRI> <graph|short_profile|message|known|none>`, never the name. `availability` sets the
+account's own availability (others see it, and it reaches nobody, so the lab rule allows it): once its push channel's registration went through it
 sends the endpoint's presence `PUT` (available), then the manual status at `--manual-after` and its reset at
 `--reset-after` seconds after the `PUT`, each under the fence's permit for the account's own availability; it prints
 each step with its time and ends `--hold` seconds after the `PUT`, which takes the endpoint down. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on stderr (Trouter's packets and
@@ -415,7 +419,7 @@ cargo test --workspace
 `cargo test --workspace` is offline: the native client is tested against `teams-mock` (two or three native clients
 talking through it), the browser fence against local pages in Chrome. The fence suite alone: `cargo test -p
 teams-fence -p teams-proto -p fence-seal -p teams-trouter` plus `cargo test -p proto-lab --test fence_http --test
-fence_ws --test fence_targets --test calling --test post_reads --test expected_denies`.
+fence_ws --test fence_targets --test calling --test expected_denies`.
 
 | variable / flag | effect |
 |---|---|

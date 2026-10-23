@@ -9,8 +9,7 @@ and layout are in [README.md](README.md).
 
 These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
 else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
-this rule; `docs/plans/20261023-lab-fence-contacting-writes-only.md` finishes the move, each of its tasks updating
-this file as its code lands.
+this rule.
 
 - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
@@ -56,9 +55,9 @@ this file as its code lands.
   defence in depth, not permission to commit its output. Tokens never reach logs or stdout: print only aud, exp,
   scopes and tenant.
 - **Agents never build or run a personal build and never receive the user's tokens.** Lab binaries get a
-  `WritePermit` only from `teams-fence`: their fence comes from `Fence::open_lab` (roster from `lab.toml`, the lab's
-  `fence.log`), and `teams-fence`'s `test-support` feature (any roster, any log, fake membership sources) is enabled
-  only under `[dev-dependencies]`, never as a normal dependency.
+  `WritePermit` only from `teams-fence`: their fence comes from `Fence::open_lab` or `Fence::open_lab_account`
+  (roster from `lab.toml`, the lab's `fence.log`), and `teams-fence`'s `test-support` feature (any roster, any log,
+  fake membership sources) is enabled only under `[dev-dependencies]`, never as a normal dependency.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
 
 ## Patterns
@@ -103,7 +102,8 @@ What the code does and why. A change that undoes one of these needs a new reason
 
 ### The sealed fence API (`crates/teams-fence`, `crates/fence-seal`)
 
-- A lab binary's fence is `Fence::open_lab()` (roster from `lab.toml`, the lab's `fence.log`); its membership source
+- A lab binary's fence is `Fence::open_lab()` (roster from `lab.toml`, the lab's `fence.log`), or for one account's
+  native client `Fence::open_lab_account(alias)`, the same with that account as its own; its membership source
   is `FailClosed` (every fetched scope `Partial(NoSource)`) or `LiveMembershipSource::for_fence(&fence)` (1:1 chats,
   complete only when the members are exactly the two the chat id names; group and meeting chats, any of them, from one
   fresh member-list read, complete only in the shape `parse_members` takes: no paging key, the count equal to the

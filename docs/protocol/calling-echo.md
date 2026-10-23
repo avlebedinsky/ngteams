@@ -118,13 +118,13 @@ each URL handed out by the service before it is used.
    The answer is the conversation: `conversationController` (its URL on the conversation service), `links` (`leave`,
    `addParticipant`, `removeParticipant`, `updateEndpointMetadata`, `getAllParticipants`, `searchParticipants`,
    `subscribe`, `brokerPublish`, …), `state`, `scenario`, `tenantId`, `region`, `conversationStartTime`.
-   **The fence maps it** (`calling::call_start`), and only this shape: `WriteKind::Call` on `Scope::New`, its
-   participants `from` and the echo service of `lab.toml`, which the start doesn't name and is counted in, so the call
-   passes only if the fence would admit the echo. The scenario must be `UserInitiatedTestCall`, `to` empty or exactly
-   the echo service, and every key at every level one the capture had, its value of the captured type (`null` where it
-   was `null`: `replaces`, `transferor`, `clientTransferContext`, the group, chat, meeting and content sharing). Any
-   other call (a named callee, another scenario, an unreviewed key anywhere) or a body that doesn't read strictly is
-   unknown.
+   **The fence maps it** (`teams_fence::contacting`'s calling row, `contacting/call.rs`), and only this shape:
+   `WriteKind::Call` on `Scope::New`, its participants `from` and the echo service of `lab.toml`, which the start
+   doesn't name and is counted in, so the call passes only if the fence would admit the echo. The scenario must be
+   `UserInitiatedTestCall`, `to` empty or exactly the echo service, and every key at every level one the capture had,
+   its value of the captured type (`null` where it was `null`: `replaces`, `transferor`, `clientTransferContext`, the
+   group, chat, meeting and content sharing). Any other call (a named callee, another scenario, an unreviewed key
+   anywhere) or a body that doesn't read strictly is unreadable, and denied.
 4. **Events.** `GET …/ep/broker-…/api/v1/subscribe/<id>/<n>` long-polls (reads): each answer has `message` (gzip,
    base64: a delivered HTTP request) and `nextSubscribeUrl`. The same callbacks also come over Trouter.
 5. **Acceptance.** The call controller calls back `…/call/acceptance/` with `callAcceptance.links`: the call leg
