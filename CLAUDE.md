@@ -129,8 +129,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   `None` passes logged, `Write` goes to `Fence::check`, `Unreadable` is denied), and so does the native transport for
   every plain request (`Transport::send`: `None` is sent, logged; `Write` and `Unreadable` are refused before anything
   is sent, `Refusal::Write` and `Refusal::Unreadable`).
-- `Fence::check` reads the target's members for every write except typing and read receipts on a chat and the
-  account's own availability (which keeps its own-account check). Typing and read receipts reach nobody: on a chat
+- `Fence::check` reads the target's members for every write except a new target (`Scope::New`, a chat or call
+  created, judged by its added participants alone), typing and read receipts on a chat, and the account's own
+  availability (which keeps its own-account check). Typing and read receipts reach nobody: on a chat
   id `is_chat_id` takes (1:1, group or meeting, the rule `contacting` carves them out by) they are permitted without a
   member read, judged only by the participants they name, and logged like every decision; anywhere else (a channel, a
   chat id in another form) they are judged like any write. So a caller hands it a `Typing` or `ReadReceipt` target

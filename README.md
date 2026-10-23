@@ -22,7 +22,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
 | path | contents |
 |---|---|
-| `crates/teams-fence` | the write fence of the lab rule: `contacting`, the one classifier the browser fence and the native transport share (a request reaches nobody and is allowed, is a mapped write with its target, or is a mutating request on a contacting service no row reads, denied); `Fence::check`, which permits a contacting write only when every participant of its target, read fresh and complete, is a lab account or an approved service (typing, read receipts and the account's own availability without a member read); the lab config (`lab.toml`, and `chats.toml`, lab data the fence doesn't read), `fence.log` (appends locked across processes), the membership sources (`FailClosed`; `LiveMembershipSource`: 1:1 chats, and group and meeting chats from one fresh member-list read), the native client's credential for them (`CredentialSource`) |
+| `crates/teams-fence` | the write fence of the lab rule: `contacting`, the one classifier the browser fence and the native transport share (a request reaches nobody and is allowed, is a mapped write with its target, or is a mutating request on a contacting service no row reads, denied); `Fence::check`, which permits a contacting write only when every participant of its target, read fresh and complete, is a lab account or an approved service (a new target, a chat or call created, judged by its added participants alone; typing, read receipts and the account's own availability without a member read); the lab config (`lab.toml`, and `chats.toml`, lab data the fence doesn't read), `fence.log` (appends locked across processes), the membership sources (`FailClosed`; `LiveMembershipSource`: 1:1 chats, and group and meeting chats from one fresh member-list read), the native client's credential for them (`CredentialSource`) |
 | `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, send a request outside the native transport's three classes or hand a plain request over as a write, send a Trouter frame that isn't one of `teams-proto`'s typed `OwnFrame`s, or reach a mock origin; a lab binary has its membership sources |
 | `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`), the credential broker (`broker`: one account's secrets served on a socket, and the `BrokerSecretStore` a sandboxed process uses); the `Session`: an access token per audience refreshed before it expires, the skypetoken renewed after its Entra token, throttling shared by waiting callers, renewal notifications |
 | `crates/teams-proto` | Teams' internal API and the native HTTP transport. Three request classes only: reads (`GET`, no body: the chat service's, Graph's name and picture, CSA's teams), plain requests (`Request`, an open trait: any method and body, sent only when `teams_fence::contacting` says it reaches nobody, logged to `fence.log` as `allowed` first: the messaging stack's endpoint registration, the middle tier's profile lookup, UPS's presence read, whoever they name), and sealed writes sent only as `Authorized<_>` with a `WritePermit` for their exact target (`SendMessage`, `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`, `ReadReceipt`, `Typing`, `CreateChat`, the account's own availability `SetEndpointAvailability`/`ForceAvailability` naming a `RegisteredEndpoint`; `StartCall`/`AddToCall` have no route yet); a plain request the classifier calls a write or can't read is refused before anything is sent. Beside them the personal build's sealed lists (`OwnState`, `PostRead`), which no lab binary uses. The chat model (`chat`: conversations, messages, versions, reactions, mentions, quotes, a sanitized rich-text tree, paging and sync links) and `MessageText`, which builds a message's markup and its mentioned MRIs from one value. The Trouter frames: a `FrameSink` that sends only the typed `OwnFrame`s this crate builds, never raw text, none of them logged to `fence.log`. One base per service (the chat service, the registrar, Trouter's HTTP side, Graph and, once given the account's bases, the middle tier, CSA and UPS), each token only to its own service's host, `https` only, no proxy, no redirects, no hidden retries |
@@ -134,12 +134,13 @@ proto-lab bundles search <regex> [--kind url|host|route|method] [--version <v>]
 proto-lab service-mri echo <mri>          # record an approved service's MRI in lab.toml, once
 ```
 
-**`login`** loads the web client in the account's profile under the armed fence, fail-closed (its contacting writes
-denied and logged to `fence.log`, as expected). When the session has expired it signs in on Microsoft's page by itself,
-with the password from `lab-accounts.json`; Entra's sign-in form reaches nobody, so the fence lets it through. Any
-multi-factor prompt (a one-time code, a method to pick, an approval in an app, registering a method) stops it
-(`docs/backlog/one-time-code-sign-in-under-the-fence.md`). It records the account's MRI from its tokens' claims. Each
-step goes to `status-<alias>.json`.
+**`login`** loads the web client in the account's profile under the armed fence, fail-closed (every write whose
+target's members have to be read is denied and logged to `fence.log`, as expected; a new chat naming only lab accounts
+is judged by its participants alone and can still pass). When the session has expired it signs in on Microsoft's page
+by itself, with the password from `lab-accounts.json`; Entra's sign-in form reaches nobody, so the fence lets it
+through. Any multi-factor prompt (a one-time code, a method to pick, an approval in an app, registering a method)
+stops it (`docs/backlog/one-time-code-sign-in-under-the-fence.md`). It records the account's MRI from its tokens'
+claims. Each step goes to `status-<alias>.json`.
 
 **`status`** prints, per account, `ok`, `login needed`, `signed in, but Teams refused the account (authz answered
 403)`, or `unknown (…)`; it signs nothing in.
@@ -182,7 +183,8 @@ entry and channel properties, the file browser's prewarm, Trouter delivery respo
 scenario doesn't need it. The list only judges the run: everything on it stays denied. A deny on the scenario's own
 chat other than its forced denies, one for a partial or refused membership, or a class off the list fails the run.
 
-- `load`: account a loads the web client, fail-closed (every contacting write denied); every deny is expected.
+- `load`: account a loads the web client, fail-closed (every write whose target's members have to be read is denied;
+  a new chat naming only lab accounts can still pass); every deny is expected.
 - `ab-chat`: a and b; a opens the a–b 1:1 chat by b's MRI and sends a message, and b must show it (clicking "Jump to
   newest" or "New messages" when the native runs left it unread).
 - `ab-chat-full`: the a–b chat beyond a message, as captured for `docs/protocol/chat.md`: a sends, edits, reacts and
