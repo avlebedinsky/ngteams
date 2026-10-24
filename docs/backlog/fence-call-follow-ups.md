@@ -6,7 +6,9 @@ added: 2026-10-20
 # M3 maps the call writes: lab-only calls started and answered, the follow-ups by a call registry
 
 Status: the echo call's follow-ups are mapped on the call registry and `echo-call` completes (the echo joins and plays
-the tone back, the run exits 0); starts to lab callees, answering, declining and joining are what is left.
+the tone back, the run exits 0); the start from a 1:1 or group chat to lab callees is mapped and registers its call
+(M3 Task 5, `docs/protocol/calling.md`); the callee's ring-time sends, answering, declining and joining are what is
+left.
 
 M0 Task 18: `proto-lab run echo-call` places the web client's test call and the fence allows the call start (a new
 call of lab account a and the approved echo service). Every later request lands on the call that now exists, is no
@@ -43,9 +45,11 @@ a contacting write whose participants are its callees, its caller and whoever it
 
 Done so far: the call registry in `teams-fence` and the echo call's follow-ups (`updateEndpointMetadata`,
 `applyChannelParameters`, `acknowledge`, `add` per invitee, `leave`, and the acceptance's acknowledgement over
-Trouter), fed by the browser fence ([fence-targets.md](../protocol/fence-targets.md#the-call-registry)). Still to map:
-the start to lab callees, answering, declining, joining and the ring-time sends, the other follow-ups, and the native
-side's feeding of the registry.
+Trouter), fed by the browser fence ([fence-targets.md](../protocol/fence-targets.md#the-call-registry)); the start to
+lab callees from a 1:1 or group chat (on the chat it carries, not `Scope::Call`), and the caller's `leave` while its
+callee still rings. Still to map: the callee's ring-time sends (the invitation's delivery response and its `attach`:
+without them the web client shows no incoming call, `docs/protocol/calling.md`), answering, declining, joining, the
+other follow-ups, and the native side's feeding of the registry.
 
 So M3 adds, each a row of the calling family and a test (no new mechanism): the call start to lab callees, the
 `acceptance` and its typed delivery response, the follow-ups above on a registered call, `add` per invitee, and the

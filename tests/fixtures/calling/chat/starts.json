@@ -1,0 +1,290 @@
+{
+ "_synthetic": "Made up, shaped like the ab-call and abc-call captures of 2026-10-24 (start-held: each start held back by a forced deny; read locally from the captures; docs/protocol/calling.md): the web client's call start from a 1:1 chat's header and from a group chat's header, each with the chat the lab rule ties it to and its participants (the caller and the callees). <guid:a>, <guid:b> and <guid:c> are lab accounts a, b and c, <group> the group chat's id, other <guid:N> made-up ids; tests fill in made-up GUIDs. The links, the SDP (documentation addresses, fewer lines) and the etag are made up and shortened.",
+ "cases": [
+  {
+   "name": "a 1:1 call from the a-b chat's header, audio or video (one shape: the modalities stay audio, the camera's video line receives only)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/epconv",
+   "body": {
+    "conversationRequest": {
+     "conversationType": null,
+     "subject": null,
+     "suppressDialout": false,
+     "roster": {
+      "type": "Delta",
+      "rosterUpdate": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0a0a0a0a/conversation/rosterUpdate/"
+     },
+     "properties": {
+      "allowConversationWithoutHost": true,
+      "enableGroupCallEventMessages": true,
+      "enableGroupCallUpgradeMessage": false,
+      "enableGroupCallMeetupGeneration": false
+     },
+     "links": {
+      "conversationEnd": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0b0b0b0b/conversation/conversationEnd/",
+      "conversationUpdate": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0c0c0c0c/conversation/conversationUpdate/",
+      "localParticipantUpdate": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0d0d0d0d/conversation/localParticipantUpdate/",
+      "addParticipantSuccess": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0e0e0e0e/conversation/addParticipantSuccess/",
+      "addParticipantFailure": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0f0f0f0f/conversation/addParticipantFailure/",
+      "addModalitySuccess": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/10101010/conversation/addModalitySuccess/",
+      "addModalityFailure": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/11111111/conversation/addModalityFailure/",
+      "confirmUnmute": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/12121212/conversation/confirmUnmute/",
+      "receiveMessage": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/13131313/conversation/receiveMessage/"
+     }
+    },
+    "contentSharing": null,
+    "participants": {
+     "from": {
+      "id": "8:orgid:<guid:a>",
+      "displayName": "Lab A",
+      "endpointId": "<guid:3>",
+      "participantId": "<guid:4>",
+      "languageId": "en-us"
+     },
+     "to": [
+      {
+       "id": "8:orgid:<guid:b>",
+       "participantId": "<guid:5>"
+      }
+     ]
+    },
+    "capabilities": null,
+    "endpointCapabilities": 73463,
+    "clientEndpointCapabilities": 114259690,
+    "endpointMetadata": {
+     "holographicCapabilities": 3
+    },
+    "groupContext": null,
+    "groupChat": null,
+    "meetingInfo": null,
+    "meetingData": null,
+    "endpointState": {
+     "endpointStateSequenceNumber": 1,
+     "endpointProperties": {
+      "additionalEndpointProperties": {
+       "infoShownInReportMode": "FullInformation"
+      }
+     }
+    },
+    "callInvitation": {
+     "callModalities": [
+      "Audio"
+     ],
+     "replaces": null,
+     "transferor": null,
+     "clientTransferContext": null,
+     "customContext": null,
+     "links": {
+      "progress": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/01010101/call/progress/",
+      "mediaAnswer": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/02020202/call/mediaAnswer/",
+      "acceptance": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/03030303/call/acceptance/",
+      "redirection": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/04040404/call/redirection/",
+      "end": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/05050505/call/end/"
+     },
+     "clientContentForMediaController": {
+      "controlVideoStreaming": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/06060606/call/controlVideoStreaming/",
+      "csrcInfo": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/07070707/call/csrcInfo/"
+     },
+     "pstnContent": {
+      "emergencyCallCountry": "",
+      "platformName": "SkypeSpaces/1/1/os=linux; browser=chrome",
+      "publicApiCall": false
+     },
+     "emergencyContent": null,
+     "mediaContent": {
+      "blob": "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0 1 2 3\r\nm=audio 50000 RTP/SAVP 111\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:111 opus/48000/2\r\na=rtcp:50000\r\na=label:main-audio\r\na=mid:0\r\na=sendrecv\r\na=candidate:1 1 udp 2122194687 192.0.2.10 50000 typ host\r\nm=video 50000 RTP/SAVP 102\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:102 H264/90000\r\na=rtcp:50000\r\na=label:main-video\r\na=mid:1\r\na=recvonly\r\nm=video 50000 RTP/SAVP 103\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:103 H264/90000\r\na=rtcp:50000\r\na=label:applicationsharing-video\r\na=mid:2\r\na=inactive\r\nm=x-data 50000 RTP/SAVP 127\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:127 x-data/90000\r\na=rtcp:50000\r\na=label:data\r\na=mid:3\r\na=sendrecv\r\n",
+      "contentType": "application/sdp-ngc-1.0",
+      "requiredFeatures": "nonByPass",
+      "clientLocation": "ZZ",
+      "applyChannelParameters": {
+       "multiChannelParameter": {
+        "mids": [
+         "0"
+        ],
+        "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":600000}}"
+       }
+      },
+      "mediaLegId": "0000000000000000000000000000000A"
+     },
+     "voicemailSettings": {},
+     "locationContent": null,
+     "networkContent": null,
+     "areaContent": null
+    },
+    "debugContent": {
+     "ecsEtag": "\"synthetic-etag\""
+    },
+    "participantPropertyBag": {
+     "aiVoiceConsent": {
+      "value": {
+       "aiVoiceConsentValue": "0"
+      },
+      "sequenceNumber": 0
+     }
+    }
+   },
+   "chat": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+   "added": [
+    "8:orgid:<guid:a>",
+    "8:orgid:<guid:b>"
+   ]
+  },
+  {
+   "name": "a group audio call from the a-b-c group chat's header (its options' audio call, confirmed)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/epconv",
+   "body": {
+    "conversationRequest": {
+     "conversationType": null,
+     "subject": null,
+     "suppressDialout": false,
+     "roster": {
+      "type": "Delta",
+      "rosterUpdate": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0a0a0a0a/conversation/rosterUpdate/"
+     },
+     "properties": {
+      "allowConversationWithoutHost": true,
+      "enableGroupCallEventMessages": true,
+      "enableGroupCallUpgradeMessage": false,
+      "enableGroupCallMeetupGeneration": false
+     },
+     "links": {
+      "conversationEnd": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0b0b0b0b/conversation/conversationEnd/",
+      "conversationUpdate": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0c0c0c0c/conversation/conversationUpdate/",
+      "localParticipantUpdate": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0d0d0d0d/conversation/localParticipantUpdate/",
+      "addParticipantSuccess": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0e0e0e0e/conversation/addParticipantSuccess/",
+      "addParticipantFailure": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/0f0f0f0f/conversation/addParticipantFailure/",
+      "addModalitySuccess": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/10101010/conversation/addModalitySuccess/",
+      "addModalityFailure": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/11111111/conversation/addModalityFailure/",
+      "confirmUnmute": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/12121212/conversation/confirmUnmute/",
+      "receiveMessage": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/13131313/conversation/receiveMessage/"
+     }
+    },
+    "contentSharing": null,
+    "participants": {
+     "from": {
+      "id": "8:orgid:<guid:a>",
+      "displayName": "Lab A",
+      "endpointId": "<guid:3>",
+      "participantId": "<guid:4>",
+      "languageId": "en-us"
+     },
+     "to": [
+      {
+       "id": "8:orgid:<guid:b>",
+       "participantId": "<guid:5>"
+      },
+      {
+       "id": "8:orgid:<guid:c>",
+       "participantId": "<guid:6>"
+      }
+     ]
+    },
+    "capabilities": null,
+    "endpointCapabilities": 73463,
+    "clientEndpointCapabilities": 114259690,
+    "endpointMetadata": {
+     "holographicCapabilities": 3
+    },
+    "groupContext": null,
+    "groupChat": {
+     "threadId": "19:<group>@thread.v2",
+     "messageId": null
+    },
+    "meetingInfo": null,
+    "meetingData": null,
+    "endpointState": {
+     "endpointStateSequenceNumber": 1,
+     "endpointProperties": {
+      "additionalEndpointProperties": {
+       "infoShownInReportMode": "FullInformation"
+      }
+     }
+    },
+    "callInvitation": {
+     "callModalities": [
+      "Audio",
+      "ScreenViewer"
+     ],
+     "replaces": null,
+     "transferor": null,
+     "clientTransferContext": null,
+     "customContext": null,
+     "links": {
+      "progress": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/01010101/call/progress/",
+      "mediaAnswer": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/02020202/call/mediaAnswer/",
+      "acceptance": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/03030303/call/acceptance/",
+      "redirection": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/04040404/call/redirection/",
+      "end": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/05050505/call/end/"
+     },
+     "clientContentForMediaController": {
+      "controlVideoStreaming": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/06060606/call/controlVideoStreaming/",
+      "csrcInfo": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/07070707/call/csrcInfo/"
+     },
+     "pstnContent": {
+      "emergencyCallCountry": "",
+      "platformName": "SkypeSpaces/1/1/os=linux; browser=chrome",
+      "publicApiCall": false
+     },
+     "emergencyContent": null,
+     "mediaContent": {
+      "blob": "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0 1 2 3 4 5 6\r\nm=audio 50000 RTP/SAVP 111\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:111 opus/48000/2\r\na=rtcp:50000\r\na=label:main-audio\r\na=mid:0\r\na=sendrecv\r\na=candidate:1 1 udp 2122194687 192.0.2.10 50000 typ host\r\nm=video 50000 RTP/SAVP 102\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:102 H264/90000\r\na=rtcp:50000\r\na=label:main-video\r\na=mid:1\r\na=sendrecv\r\nm=video 50000 RTP/SAVP 102\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:102 H264/90000\r\na=rtcp:50000\r\na=label:main-video\r\na=mid:2\r\na=sendrecv\r\nm=video 50000 RTP/SAVP 102\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:102 H264/90000\r\na=rtcp:50000\r\na=label:main-video\r\na=mid:3\r\na=recvonly\r\nm=video 50000 RTP/SAVP 102\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:102 H264/90000\r\na=rtcp:50000\r\na=label:main-video\r\na=mid:4\r\na=recvonly\r\nm=video 50000 RTP/SAVP 103\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:103 H264/90000\r\na=rtcp:50000\r\na=label:applicationsharing-video\r\na=mid:5\r\na=sendrecv\r\nm=x-data 50000 RTP/SAVP 127\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:127 x-data/90000\r\na=rtcp:50000\r\na=label:data\r\na=mid:6\r\na=sendrecv\r\n",
+      "contentType": "application/sdp-ngc-1.0",
+      "mediaDescriptions": {
+       "descriptions": [
+        {
+         "mid": "1",
+         "direction": "recvonly"
+        },
+        {
+         "mid": "2",
+         "direction": "recvonly"
+        },
+        {
+         "mid": "3",
+         "direction": "recvonly"
+        },
+        {
+         "mid": "4",
+         "direction": "recvonly"
+        }
+       ],
+       "requestId": 1
+      },
+      "clientLocation": "ZZ",
+      "applyChannelParameters": {
+       "multiChannelParameter": {
+        "mids": [
+         "0"
+        ],
+        "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":600000}}"
+       }
+      },
+      "mediaLegId": "0000000000000000000000000000000A"
+     },
+     "voicemailSettings": {},
+     "locationContent": null,
+     "networkContent": null,
+     "areaContent": null
+    },
+    "debugContent": {
+     "ecsEtag": "\"synthetic-etag\""
+    },
+    "participantPropertyBag": {
+     "aiVoiceConsent": {
+      "value": {
+       "aiVoiceConsentValue": "0"
+      },
+      "sequenceNumber": 0
+     }
+    }
+   },
+   "chat": "19:<group>@thread.v2",
+   "added": [
+    "8:orgid:<guid:a>",
+    "8:orgid:<guid:b>",
+    "8:orgid:<guid:c>"
+   ]
+  }
+ ]
+}

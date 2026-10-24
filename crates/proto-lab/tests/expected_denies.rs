@@ -1,7 +1,7 @@
 //! The reviewed expected-deny list of the writing scenarios (`proto_lab::scenario::expected`): it changes only how a
 //! run is judged, never a verdict; it holds only contacting-service classes the fence denies under the lab rule (bot
-//! invokes, the account's own channel entry and channel properties, the file browser's prewarm, Trouter delivery
-//! responses); and whatever it says, a deny on the scenario's mapped target, a deny that isn't `Unclassified`, a deny
+//! invokes, the account's own channel entry and channel properties, its call log's read horizon, the file browser's
+//! prewarm, Trouter delivery responses); and whatever it says, a deny on the scenario's mapped target, a deny that isn't `Unclassified`, a deny
 //! of what the lab rule lets through and any class off the list stay unexpected, the scenario's own labelled forced
 //! denies the only exception. All URLs and ids here are made up.
 
@@ -44,6 +44,12 @@ fn listed_classes() -> Vec<(&'static str, String)> {
             classes.push((
                 "PUT",
                 format!("{chat_service}/users/ME/conversations/{channel}/properties"),
+            ));
+        }
+        for call_log in ["48:calllogs", "48%3Acalllogs"] {
+            classes.push((
+                "PUT",
+                format!("{chat_service}/users/ME/conversations/{call_log}/properties"),
             ));
         }
     }

@@ -481,34 +481,64 @@ ui-sandbox (+ a private PipeWire: a tone source, a recorded sink, a fake camera)
 The fence maps only the echo call's start today, so a start to b or c is denied before anyone is invited: the starts
 are captured denied first, mapped, and only then can a rerun reach the invitations, the ring and the answers.
 
-- [ ] capture the starts: `ab-call` (a calls b from their 1:1 chat, audio, then video) and `abc-call` (a calls the
+- [x] capture the starts: `ab-call` (a calls b from their 1:1 chat, audio, then video) and `abc-call` (a calls the
       recorded group chat, audio, then video), each start held back by a labelled forced deny (nothing reaches b or
       c); the start to a lab callee (`to[]`) and the group start's shape captured, and what each names of its chat
-      (`groupChat.threadId` or only `to[]`)
-- [ ] tests first: the start to lab callees and in a lab-only group chat mapped from those captures (`Scope::Call` with
+      (`groupChat.threadId` or only `to[]`) (`proto-lab run ab-call|abc-call --call start-held`: a 1:1 start names
+      only `to[]`, `groupChat` `null`; the group start `groupChat.threadId` and `to[b, c]`; no `scenario`; the client
+      tries a held-back start twice more by itself). ⚠️ The 1:1 header's video call posts the same start as its audio
+      call (`callModalities` `["Audio"]`, the main video line `recvonly`): the camera comes on the running call. ⚠️ A
+      group chat's header offers only an audio call (and "Meet now", a meeting: M4), so `abc-call` captured no group
+      video start
+- [x] tests first: the start to lab callees and in a lab-only group chat mapped from those captures (`Scope::Call` with
       its `to[]`, the chat it names read fresh, Technical Details "A start is tied to its chat"), denied with any other
-      callee; a permitted start registers its call as the echo call's does
-- [ ] CLAUDE.md's "Live runs" line on answering rewritten before the scenarios click answer or decline, for what the
+      callee; a permitted start registers its call as the echo call's does. ⚠️ Deviation, decided with Codex (transcript
+      `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-5-start-target/transcript.md`):
+      the start is `WriteKind::Call` on the `Scope::Conversation` of the chat it carries (the group chat's id, or the
+      1:1 chat `one_to_one_id` names), the caller and every callee added, not `Scope::Call` (a call id no source
+      reads); `Fence::check` reads that chat fresh. ➕ The caller's `leave` while its callee rings carries
+      `callQualityDiagnosticsInformation.cancelationDuration`, mapped from the `cancel` capture so the cancel reaches
+      the service
+- [x] CLAUDE.md's "Live runs" line on answering rewritten before the scenarios click answer or decline, for what the
       code then does: a scenario clicks answer or decline only on an invitation naming only lab accounts or the echo
       service, and only in a scenario that exists to do it; the fence doesn't map `acceptance` or a decline and denies
       Trouter delivery responses, so such a click is held back by a labelled forced deny; every other incoming call is
       ignored, never clicked; the native Trouter client still has no path to answer any delivery
-- [ ] capture the ring: `ab-call` rerun with the start let through; b's page receives the invitation; everything b's
+- [x] capture the ring: `ab-call` rerun with the start let through; b's page receives the invitation; everything b's
       page sends between the invitation and an answer (delivery responses, progress posts) held back by labelled
       forced denies and captured; b clicks answer and the answer (the `acceptance` and its delivery response) is held
       back, so the call rings and ends unanswered; again with b clicking decline (held back); again with a hanging up
       while b rings (the caller's cancel as b receives it); again with nobody acting (the ring's timeout); `abc-call`
-      the same with b's and c's answers held back
-- [ ] the shapes written up in `docs/protocol/calling.md` (our own words): the start with callees and in a group, the
+      the same with b's and c's answers held back (the invitation, the held-back delivery response and `attach`, the
+      cancel and the ring's end captured for both scenarios: `--call cancel` and `--call timeout` exit 0; answer and
+      decline clicks moved to Task 6, decided with Codex, transcript
+      `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-5-ring-answer/transcript.md`).
+      ⚠️ With the callee's sends held back no incoming call showed in its page (1:1 and group, every call/ring/answer
+      control id recorded): there was nothing to click, so `--call answer|decline` stop at "shows the incoming call".
+      ⚠️ An unanswered 1:1 call goes to the callee's voicemail about 22 s after the start, which accepts it for the
+      callee (the registry binds it; a's tone is recorded into b's voicemail); an unanswered group call ends at about
+      25 s (`addParticipantFailure`: the callee's Trouter endpoint gave delivery errors). ⚠️ After a group call ends or
+      it hangs up, a's page joins the call's conversation again by itself; held back by its own label. ⚠️ Twice
+      `login.microsoftonline.com` and once the flight proxy's preflight timed out from this machine (network); those
+      runs were rerun
+- [x] the shapes written up in `docs/protocol/calling.md` (our own words): the start with callees and in a group, the
       invitation as delivered, what the callee sends while ringing, the answer, the decline, the ring's ends; fixtures
-      synthetic, covering every form the runs show
-- [ ] the gate passes
+      synthetic, covering every form the runs show (`tests/fixtures/calling/chat/`: the starts, the 1:1 and group
+      invitations, the voicemail's progress and acceptance, the cancel's `leave`, the callee's `attach`; the answer and
+      the decline aren't captured yet: Task 6)
+- [x] the gate passes
 
 ### Task 6: Answering, declining and joining lab-to-lab calls (map, then live)
 **Files:**
 - Modify: `crates/proto-lab/src/scenario/{ab_call.rs,abc_call.rs,expected.rs}`, `crates/teams-fence/src/*`,
   `crates/teams-fence/tests/*`, `docs/protocol/{calling.md,fence-targets.md,endpoints.md}`, CLAUDE.md
 
+- [ ] ➕ (moved from Task 5) capture the answer and the decline held back: first map and let through the callee's
+      ring-time sends on an offered invitation (the invitation's delivery response and its `attach`, Task 5's capture;
+      without them the page shows no incoming call), after settling whether `attach`'s `additionalActions` `join` joins
+      the call or only attaches the callee's signaling (CLAUDE.md's ring-time exception excludes anything that joins);
+      then `ab-call`/`abc-call --call answer|decline` click with the answer or decline held back, captured and written
+      into `docs/protocol/calling.md`, before the items below map them
 - [ ] tests first: answering judged by the invitation's caller and participants, permitted only when all are lab
       accounts or the echo service; the typed delivery responses for that call; a registered answered call's
       follow-ups; how the invitation and the acceptance carry media (the caller's offer, our answer, or as captured)

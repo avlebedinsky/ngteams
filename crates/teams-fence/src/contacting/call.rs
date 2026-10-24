@@ -1,5 +1,6 @@
-//! The calling family's rows (`docs/protocol/calling-echo.md`): the web client's test call start, a new call of the
-//! caller and the echo service, and the captured operations on a call that exists ([`follow_up`]: the endpoint's
+//! The calling family's rows (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`): the web client's test call
+//! start, a new call of the caller and the echo service; its call start from a 1:1 or group chat's header
+//! ([`chat_call_start`]), a call in the chat it carries; and the captured operations on a call that exists ([`follow_up`]: the endpoint's
 //! metadata, an `add`, the `leave`, the acceptance's acknowledgement and a media line's channel parameters), each a
 //! write on [`Scope::CallOperation`] that the call registry resolves (`crate::calls`). Only their captured shapes map;
 //! every other mutating request on a calling host is unreadable until a row maps it.
@@ -9,7 +10,7 @@ use url::{Position, Url};
 
 use super::decoded_segments;
 use super::json::strict_json;
-use crate::membership::{ONE_TO_ONE_SUFFIX, is_guid};
+use crate::membership::{ONE_TO_ONE_SUFFIX, is_group_chat_id, is_guid, one_to_one_id};
 use crate::{CallOperation, Mri, Scope, Target, WriteKind};
 
 /// The flight proxy every call request goes through: the call start, and every link the call's services hand out.
@@ -38,6 +39,8 @@ pub(crate) enum Shape {
     Object(&'static [Field]),
     /// An array of such objects.
     Objects(&'static [Field]),
+    /// `null`, or an object of reviewed fields: what a chat's call start says of a group chat it calls into.
+    NullOr(&'static [Field]),
 }
 
 /// A reviewed key of an object, the shape of its value, and whether it must be there.
@@ -74,17 +77,14 @@ const CALL_START: &[Field] = &[
     field("capabilities", Shape::Null),
     field("endpointCapabilities", Shape::Count),
     field("clientEndpointCapabilities", Shape::Count),
-    field(
-        "endpointMetadata",
-        Shape::Object(&[field("holographicCapabilities", Shape::Count)]),
-    ),
+    field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
     field("groupContext", Shape::Null),
     field("groupChat", Shape::Null),
     field("meetingInfo", Shape::Null),
     field("meetingData", Shape::Null),
     field("endpointState", Shape::Object(ENDPOINT_STATE)),
     required("callInvitation", Shape::Object(CALL_INVITATION)),
-    field("debugContent", Shape::Object(&[field("ecsEtag", Shape::Text)])),
+    field("debugContent", Shape::Object(DEBUG_CONTENT)),
     field("participantPropertyBag", Shape::Object(PROPERTY_BAG)),
 ];
 
@@ -93,53 +93,17 @@ const CONVERSATION_REQUEST: &[Field] = &[
     field("conversationType", Shape::Null),
     field("subject", Shape::Null),
     field("suppressDialout", Shape::Bool),
-    field(
-        "roster",
-        Shape::Object(&[field("type", Shape::Text), field("rosterUpdate", Shape::Text)]),
-    ),
-    field(
-        "properties",
-        Shape::Object(&[
-            field("allowConversationWithoutHost", Shape::Bool),
-            field("enableGroupCallEventMessages", Shape::Bool),
-            field("enableGroupCallUpgradeMessage", Shape::Bool),
-            field("enableGroupCallMeetupGeneration", Shape::Bool),
-        ]),
-    ),
-    field(
-        "links",
-        Shape::Object(&[
-            field("conversationEnd", Shape::Text),
-            field("conversationUpdate", Shape::Text),
-            field("localParticipantUpdate", Shape::Text),
-            field("addParticipantSuccess", Shape::Text),
-            field("addParticipantFailure", Shape::Text),
-            field("addModalitySuccess", Shape::Text),
-            field("addModalityFailure", Shape::Text),
-            field("confirmUnmute", Shape::Text),
-            field("receiveMessage", Shape::Text),
-        ]),
-    ),
+    field("roster", Shape::Object(ROSTER)),
+    field("properties", Shape::Object(CONVERSATION_PROPERTIES)),
+    field("links", Shape::Object(CONVERSATION_LINKS)),
     required("scenario", Shape::Text),
 ];
 
 /// The caller and the callees; nobody else.
 const PARTICIPANTS: &[Field] = &[
-    required(
-        "from",
-        Shape::Object(&[
-            required("id", Shape::Text),
-            field("displayName", Shape::Text),
-            field("endpointId", Shape::Text),
-            field("participantId", Shape::Text),
-            field("languageId", Shape::Text),
-        ]),
-    ),
+    required("from", Shape::Object(FROM)),
     // a callee as the client names the echo bot when it adds it (`docs/protocol/calling-echo.md`)
-    field(
-        "to",
-        Shape::Objects(&[required("id", Shape::Text), field("participantId", Shape::Text)]),
-    ),
+    field("to", Shape::Objects(INVITEE)),
 ];
 
 /// The call the start places: its modalities, the endpoint's callbacks, the client and its offer.
@@ -149,31 +113,12 @@ const CALL_INVITATION: &[Field] = &[
     field("transferor", Shape::Null),
     field("clientTransferContext", Shape::Null),
     field("customContext", Shape::Null),
-    field(
-        "links",
-        Shape::Object(&[
-            field("progress", Shape::Text),
-            field("mediaAnswer", Shape::Text),
-            field("acceptance", Shape::Text),
-            field("redirection", Shape::Text),
-            field("end", Shape::Text),
-        ]),
-    ),
+    field("links", Shape::Object(CALL_LINKS)),
     field(
         "clientContentForMediaController",
-        Shape::Object(&[
-            field("controlVideoStreaming", Shape::Text),
-            field("csrcInfo", Shape::Text),
-        ]),
+        Shape::Object(MEDIA_CONTROLLER_CONTENT),
     ),
-    field(
-        "pstnContent",
-        Shape::Object(&[
-            field("emergencyCallCountry", Shape::Text),
-            field("platformName", Shape::Text),
-            field("publicApiCall", Shape::Bool),
-        ]),
-    ),
+    field("pstnContent", Shape::Object(PSTN_CONTENT)),
     field("emergencyContent", Shape::Null),
     field("mediaContent", Shape::Object(MEDIA_CONTENT)),
     field("voicemailSettings", Shape::Object(&[])),
@@ -187,29 +132,84 @@ const MEDIA_CONTENT: &[Field] = &[
     field("blob", Shape::Text),
     field("contentType", Shape::Text),
     field("clientLocation", Shape::Text),
-    field(
-        "mediaDescriptions",
-        Shape::Object(&[
-            field(
-                "descriptions",
-                Shape::Objects(&[
-                    field("mid", Shape::Text),
-                    field("direction", Shape::Text),
-                    field("label", Shape::Text),
-                ]),
-            ),
-            field("requestId", Shape::Count),
-        ]),
-    ),
-    field(
-        "applyChannelParameters",
-        Shape::Object(&[field(
-            "multiChannelParameter",
-            Shape::Object(&[field("mediaParameter", Shape::Text), field("mids", Shape::Texts)]),
-        )]),
-    ),
+    field("mediaDescriptions", Shape::Object(MEDIA_DESCRIPTIONS)),
+    field("applyChannelParameters", Shape::Object(CHANNEL_PARAMETERS)),
     field("mediaLegId", Shape::Text),
 ];
+
+/// The endpoint's metadata, in a call start and in its update.
+const ENDPOINT_METADATA: &[Field] = &[field("holographicCapabilities", Shape::Count)];
+
+/// A call start's debug content.
+const DEBUG_CONTENT: &[Field] = &[field("ecsEtag", Shape::Text)];
+
+/// How the conversation a start opens sends its roster.
+const ROSTER: &[Field] = &[field("type", Shape::Text), field("rosterUpdate", Shape::Text)];
+
+/// The properties of the conversation a start opens.
+const CONVERSATION_PROPERTIES: &[Field] = &[
+    field("allowConversationWithoutHost", Shape::Bool),
+    field("enableGroupCallEventMessages", Shape::Bool),
+    field("enableGroupCallUpgradeMessage", Shape::Bool),
+    field("enableGroupCallMeetupGeneration", Shape::Bool),
+];
+
+/// The endpoint's callbacks for the conversation a start opens.
+const CONVERSATION_LINKS: &[Field] = &[
+    field("conversationEnd", Shape::Text),
+    field("conversationUpdate", Shape::Text),
+    field("localParticipantUpdate", Shape::Text),
+    field("addParticipantSuccess", Shape::Text),
+    field("addParticipantFailure", Shape::Text),
+    field("addModalitySuccess", Shape::Text),
+    field("addModalityFailure", Shape::Text),
+    field("confirmUnmute", Shape::Text),
+    field("receiveMessage", Shape::Text),
+];
+
+/// A participant a start calls or an `add` invites.
+const INVITEE: &[Field] = &[required("id", Shape::Text), field("participantId", Shape::Text)];
+
+/// The endpoint's callbacks for the call a start places.
+const CALL_LINKS: &[Field] = &[
+    field("progress", Shape::Text),
+    field("mediaAnswer", Shape::Text),
+    field("acceptance", Shape::Text),
+    field("redirection", Shape::Text),
+    field("end", Shape::Text),
+];
+
+/// The client's callbacks for the media controller.
+const MEDIA_CONTROLLER_CONTENT: &[Field] = &[
+    field("controlVideoStreaming", Shape::Text),
+    field("csrcInfo", Shape::Text),
+];
+
+/// What a start says of the phone network.
+const PSTN_CONTENT: &[Field] = &[
+    field("emergencyCallCountry", Shape::Text),
+    field("platformName", Shape::Text),
+    field("publicApiCall", Shape::Bool),
+];
+
+/// How the client describes an offer's media lines.
+const MEDIA_DESCRIPTIONS: &[Field] = &[
+    field(
+        "descriptions",
+        Shape::Objects(&[
+            field("mid", Shape::Text),
+            field("direction", Shape::Text),
+            field("label", Shape::Text),
+        ]),
+    ),
+    field("requestId", Shape::Count),
+];
+
+/// A media line's channel parameters, in an offer.
+const CHANNEL_PARAMETERS: &[Field] = &[field("multiChannelParameter", Shape::Object(MULTI_CHANNEL_PARAMETER))];
+
+/// The channel parameters of a media line.
+const MULTI_CHANNEL_PARAMETER: &[Field] = &[field("mediaParameter", Shape::Text), field("mids", Shape::Texts)];
 
 /// The endpoint's state as the client reports it.
 const ENDPOINT_STATE: &[Field] = &[
@@ -232,6 +232,79 @@ const PROPERTY_BAG: &[Field] = &[field(
     ]),
 )];
 
+/// A call start from a chat's header as the web client posts it (seen 2026-10-24, `ab-call` and `abc-call`): the test
+/// call's keys, with no conversation scenario, its callees named, and the group chat it calls into (`null` for a 1:1
+/// call, which names only its callee). A group context, a meeting, content to share and a call to replace or transfer
+/// are all `null`.
+const CHAT_CALL_START: &[Field] = &[
+    required("conversationRequest", Shape::Object(CHAT_CONVERSATION_REQUEST)),
+    field("contentSharing", Shape::Null),
+    required("participants", Shape::Object(CHAT_PARTICIPANTS)),
+    field("capabilities", Shape::Null),
+    field("endpointCapabilities", Shape::Count),
+    field("clientEndpointCapabilities", Shape::Count),
+    field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
+    field("groupContext", Shape::Null),
+    required(
+        "groupChat",
+        Shape::NullOr(&[required("threadId", Shape::Text), field("messageId", Shape::Null)]),
+    ),
+    field("meetingInfo", Shape::Null),
+    field("meetingData", Shape::Null),
+    field("endpointState", Shape::Object(ENDPOINT_STATE)),
+    required("callInvitation", Shape::Object(CHAT_CALL_INVITATION)),
+    field("debugContent", Shape::Object(DEBUG_CONTENT)),
+    field("participantPropertyBag", Shape::Object(PROPERTY_BAG)),
+];
+
+/// The conversation a chat's call start opens: as the test call's, with no scenario.
+const CHAT_CONVERSATION_REQUEST: &[Field] = &[
+    field("conversationType", Shape::Null),
+    field("subject", Shape::Null),
+    field("suppressDialout", Shape::Bool),
+    field("roster", Shape::Object(ROSTER)),
+    field("properties", Shape::Object(CONVERSATION_PROPERTIES)),
+    field("links", Shape::Object(CONVERSATION_LINKS)),
+];
+
+/// The caller and the callees it names, at least one.
+const CHAT_PARTICIPANTS: &[Field] = &[
+    required("from", Shape::Object(FROM)),
+    required("to", Shape::Objects(INVITEE)),
+];
+
+/// The call a chat's call start places: as the test call's, its media content as [`CHAT_MEDIA_CONTENT`].
+const CHAT_CALL_INVITATION: &[Field] = &[
+    field("callModalities", Shape::Texts),
+    field("replaces", Shape::Null),
+    field("transferor", Shape::Null),
+    field("clientTransferContext", Shape::Null),
+    field("customContext", Shape::Null),
+    field("links", Shape::Object(CALL_LINKS)),
+    field(
+        "clientContentForMediaController",
+        Shape::Object(MEDIA_CONTROLLER_CONTENT),
+    ),
+    field("pstnContent", Shape::Object(PSTN_CONTENT)),
+    field("emergencyContent", Shape::Null),
+    field("mediaContent", Shape::Object(CHAT_MEDIA_CONTENT)),
+    field("voicemailSettings", Shape::Object(&[])),
+    field("locationContent", Shape::Null),
+    field("networkContent", Shape::Null),
+    field("areaContent", Shape::Null),
+];
+
+/// A chat call's offer: the test call's media content, and the features it requires (a 1:1 call's).
+const CHAT_MEDIA_CONTENT: &[Field] = &[
+    field("blob", Shape::Text),
+    field("contentType", Shape::Text),
+    field("requiredFeatures", Shape::Text),
+    field("clientLocation", Shape::Text),
+    field("mediaDescriptions", Shape::Object(MEDIA_DESCRIPTIONS)),
+    field("applyChannelParameters", Shape::Object(CHANNEL_PARAMETERS)),
+    field("mediaLegId", Shape::Text),
+];
+
 /// Whether `value` has `shape`, all the way down.
 pub(crate) fn fits(value: &Value, shape: Shape) -> bool {
     match shape {
@@ -241,6 +314,7 @@ pub(crate) fn fits(value: &Value, shape: Shape) -> bool {
         Shape::Text => value.is_string(),
         Shape::Texts => value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
         Shape::Object(fields) => value.as_object().is_some_and(|object| fits_fields(object, fields)),
+        Shape::NullOr(fields) => value.is_null() || fits(value, Shape::Object(fields)),
         Shape::Objects(fields) => value
             .as_array()
             .is_some_and(|items| items.iter().all(|item| fits(item, Shape::Object(fields)))),
@@ -277,7 +351,7 @@ pub(crate) fn call_start(
     body: Option<&[u8]>,
     test_call_callee: Option<&Mri>,
 ) -> Option<Target> {
-    if method != "POST" || &url[..Position::AfterPath] != CALL_START_URL || url.query().is_some() {
+    if !is_start_request(method, url) {
         return None;
     }
     let start = strict_json(body?)?;
@@ -300,6 +374,86 @@ pub(crate) fn call_start(
     echo_only.then(|| Target::new(WriteKind::Call, Scope::New).with_added([caller, echo.clone()]))
 }
 
+/// Whether `method url` is where a call starts: `POST` [`CALL_START_URL`] with no query.
+fn is_start_request(method: &str, url: &Url) -> bool {
+    method == "POST" && &url[..Position::AfterPath] == CALL_START_URL && url.query().is_none()
+}
+
+/// The write the web client's call start from a 1:1 or group chat's header makes: [`WriteKind::Call`] on the chat it is
+/// tied to by what it carries ([`Scope::Conversation`], whose members the fence reads fresh), its added participants
+/// the caller (`participants.from.id`) and every callee it names (`participants.to`), so the fence permits it only
+/// when the chat is lab-only and every callee a lab account (`docs/protocol/calling.md`).
+///
+/// The chat: the group chat `groupChat.threadId` names (a group chat's id, [`is_group_chat_id`]); for a start whose
+/// `groupChat` is `null`, which names exactly one callee, the 1:1 chat of the caller and that callee as the chat
+/// service names it ([`one_to_one_id`]). Only the captured shape maps ([`CHAT_CALL_START`]: no conversation scenario,
+/// `groupChat` always there, every key one the captures had, its value of the type it had there): the caller and every
+/// callee a work account (`8:orgid:<guid>`), at least one callee, none twice and none the caller. Anything else is
+/// `None` (unreadable).
+#[must_use]
+pub(crate) fn chat_call_start(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
+    if !is_start_request(method, url) {
+        return None;
+    }
+    chat_start_target(&strict_json(body?)?)
+}
+
+/// The target of a chat's call start already read ([`chat_call_start`]).
+fn chat_start_target(start: &Value) -> Option<Target> {
+    if !fits(start, Shape::Object(CHAT_CALL_START)) {
+        return None;
+    }
+    let work_account = |id: &Value| {
+        let mri = id.as_str()?;
+        is_guid(mri.strip_prefix("8:orgid:")?).then(|| Mri::new(mri))
+    };
+    let caller = work_account(start.pointer("/participants/from/id")?)?;
+    let callees: Vec<Mri> = start
+        .pointer("/participants/to")?
+        .as_array()?
+        .iter()
+        .map(|callee| work_account(callee.get("id")?))
+        .collect::<Option<_>>()?;
+    let mut seen = std::collections::BTreeSet::new();
+    let distinct = callees
+        .iter()
+        .chain([&caller])
+        .all(|mri| seen.insert(mri.as_str().to_ascii_lowercase()));
+    if callees.is_empty() || !distinct {
+        return None;
+    }
+    let chat = match start.get("groupChat")? {
+        Value::Null => match callees.as_slice() {
+            [only] => one_to_one_id(caller.as_str(), only.as_str())?,
+            _ => return None,
+        },
+        group => {
+            let id = group.get("threadId")?.as_str()?;
+            is_group_chat_id(id).then(|| id.to_owned())?
+        }
+    };
+    let scope = Scope::Conversation { id: chat };
+    Some(Target::new(WriteKind::Call, scope).with_added(std::iter::once(caller).chain(callees)))
+}
+
+/// The target a call start's body gives, as the permit for it was given: the test call's row with the echo service
+/// for a new call ([`Scope::New`]: the start's one participant besides its caller), the chat's row for a call in a
+/// chat. `None` for a body that gives neither.
+pub(crate) fn start_target(target: &Target, body: &[u8], caller: &Mri) -> Option<Target> {
+    let url = Url::parse(CALL_START_URL).ok()?;
+    match target.scope() {
+        Scope::New => {
+            let mut others = target.added().iter().filter(|mri| *mri != caller);
+            let (Some(echo), None) = (others.next(), others.next()) else {
+                return None;
+            };
+            call_start("POST", &url, Some(body), Some(echo))
+        }
+        Scope::Conversation { .. } => chat_call_start("POST", &url, Some(body)),
+        _ => None,
+    }
+}
+
 /// What a permitted call start tells the call registry beyond its target: who places it (`participants.from.id`) and
 /// the endpoint's own callback links for the call, by name, as the start names them.
 pub(crate) struct StartEvidence {
@@ -310,10 +464,11 @@ pub(crate) struct StartEvidence {
     pub(crate) conversation_links: Map<String, Value>,
 }
 
-/// The evidence of a call start in its captured shape (as [`call_start`] reads it); `None` for anything else.
+/// The evidence of a call start in a captured shape (the test call's, as [`call_start`] reads it, or a chat's, as
+/// [`chat_call_start`] does); `None` for anything else.
 pub(crate) fn start_evidence(body: &[u8]) -> Option<StartEvidence> {
     let start = strict_json(body)?;
-    if !fits(&start, Shape::Object(CALL_START)) {
+    if !fits(&start, Shape::Object(CALL_START)) && !fits(&start, Shape::Object(CHAT_CALL_START)) {
         return None;
     }
     let links = |at: &str| {
@@ -345,13 +500,11 @@ const FROM_ONLY: &[Field] = &[required("from", Shape::Object(FROM))];
 /// `PUT …/conv/<id>/updateEndpointMetadata` (seen 2026-10-20).
 const UPDATE_ENDPOINT_METADATA: &[Field] = &[
     required("participants", Shape::Object(FROM_ONLY)),
-    field(
-        "endpointMetadata",
-        Shape::Object(&[field("holographicCapabilities", Shape::Count)]),
-    ),
+    field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
 ];
 
-/// `POST …/conv/<id>/leave` (seen 2026-10-20).
+/// `POST …/conv/<id>/leave` (seen 2026-10-20), and the caller's cancel of a call still ringing, which carries how
+/// long it rang in its call quality diagnostics (seen 2026-10-24, `ab-call --call cancel`).
 const LEAVE: &[Field] = &[
     required("participants", Shape::Object(FROM_ONLY)),
     field(
@@ -369,6 +522,10 @@ const LEAVE: &[Field] = &[
             field("subCode", Shape::Count),
             field("phrase", Shape::Text),
             field("resultCategories", Shape::Texts),
+            field(
+                "callQualityDiagnosticsInformation",
+                Shape::Object(&[field("cancelationDuration", Shape::Count)]),
+            ),
         ]),
     ),
 ];
@@ -381,10 +538,7 @@ const ADD: &[Field] = &[
         "participants",
         Shape::Object(&[
             required("from", Shape::Object(FROM)),
-            required(
-                "to",
-                Shape::Objects(&[required("id", Shape::Text), field("participantId", Shape::Text)]),
-            ),
+            required("to", Shape::Objects(INVITEE)),
         ]),
     ),
     field("disableUnmute", Shape::Bool),
@@ -437,7 +591,7 @@ const APPLY_CHANNEL_PARAMETERS: &[Field] = &[required(
     "applyChannelParameters",
     Shape::Object(&[required(
         "multiChannelParameter",
-        Shape::Object(&[field("mediaParameter", Shape::Text), field("mids", Shape::Texts)]),
+        Shape::Object(MULTI_CHANNEL_PARAMETER),
     )]),
 )];
 

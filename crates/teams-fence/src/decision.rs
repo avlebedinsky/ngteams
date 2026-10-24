@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 
 use crate::calls::{CallRegistry, Delivery, DeliveryDecision, DeliveryPermit, Observed, PendingStart, RegisterError};
-use crate::contacting::CALL_START_URL;
-use crate::contacting::call::{call_start, start_evidence};
+use crate::contacting::call::{start_evidence, start_target};
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
 use crate::membership::is_chat_id;
@@ -544,23 +543,19 @@ impl Fence {
         Ok(permit)
     }
 
-    /// Takes a permit this fence issued for a call start ([`WriteKind::Call`] on [`Scope::New`]), once, with the start's
-    /// body, which must read as the start the permit was issued for: the call is then pending, waiting for its answer
+    /// Takes a permit this fence issued for a call start ([`WriteKind::Call`]: the test call's on [`Scope::New`], or a
+    /// chat's call start on the chat it carries), once, with the start's body, which must read, by the same row, as
+    /// the start the permit was issued for: the call is then pending, waiting for its answer
     /// ([`Fence::register_start`]), and grants nothing yet ([`crate::calls`]). `None` for another fence's permit, one
     /// taken already, another kind of write, or a body that doesn't give the permit's target.
     #[must_use]
     pub fn pend_start(&self, permit: &WritePermit, start_body: &[u8]) -> Option<PendingStart> {
         let target = permit.target();
-        if permit.issuer != self.id || target.kind() != WriteKind::Call || target.scope() != &Scope::New {
+        if permit.issuer != self.id || target.kind() != WriteKind::Call {
             return None;
         }
         let evidence = start_evidence(start_body)?;
-        let mut others = target.added().iter().filter(|mri| **mri != evidence.caller);
-        let (Some(echo), None) = (others.next(), others.next()) else {
-            return None;
-        };
-        let url = url::Url::parse(CALL_START_URL).ok()?;
-        if call_start("POST", &url, Some(start_body), Some(echo)).as_ref() != Some(target) {
+        if start_target(target, start_body, &evidence.caller).as_ref() != Some(target) {
             return None;
         }
         self.calls.pend(self.id, permit.serial, target, evidence)

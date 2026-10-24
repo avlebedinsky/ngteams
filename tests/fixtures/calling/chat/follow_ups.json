@@ -1,0 +1,92 @@
+{
+ "_synthetic": "Made up, shaped like the ab-call captures of 2026-10-24 (read locally from the captures; docs/protocol/calling.md): the requests on a call from a chat that the echo call's capture didn't show: the caller's cancel, and the callee's attach while it rings (held back; no row maps it yet). <guid:a> and <guid:b> are lab accounts a and b, other <guid:\u2026> made-up ids; tests fill in made-up GUIDs. Hosts, ids, routes and callbacks are made up.",
+ "cases": [
+  {
+   "name": "the caller hangs up while the callee rings: the leave carries how long it rang",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation01/leave?i=10-0-0-1&e=1",
+   "body": {
+    "participants": {
+     "from": {
+      "id": "8:orgid:<guid:a>",
+      "displayName": "Lab A",
+      "endpointId": "<guid:3>",
+      "languageId": "en-us"
+     }
+    },
+    "conversationTransactionEnd": {
+     "reason": "noError",
+     "code": 0,
+     "phrase": "ConversationEndNoModalityConnected"
+    },
+    "callTransactionEnd": {
+     "code": 487,
+     "subCode": 0,
+     "phrase": "CallEndReasonLocalUserInitiated",
+     "resultCategories": [
+      "Success"
+     ],
+     "callQualityDiagnosticsInformation": {
+      "cancelationDuration": 9
+     }
+    }
+   }
+  },
+  {
+   "name": "the callee attaches to the call while it rings (the invitation's attach link)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall1/27/i1/1/attach?i=10-0-0-1",
+   "body": {
+    "attach": {
+     "requireMediaContent": false,
+     "links": {
+      "end": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/0a0a0a0a/call/end/"
+     },
+     "locationContent": null,
+     "networkContent": null,
+     "areaContent": null
+    },
+    "capabilities": null,
+    "endpointCapabilities": 73463,
+    "additionalActions": [
+     {
+      "input": {
+       "capabilities": null,
+       "endpointCapabilities": 73463,
+       "conversationRequest": {
+        "roster": {
+         "type": "Delta",
+         "rosterUpdate": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/0b0b0b0b/conversation/rosterUpdate/"
+        },
+        "links": {
+         "conversationEnd": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/0c0c0c0c/conversation/conversationEnd/",
+         "conversationUpdate": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/0d0d0d0d/conversation/conversationUpdate/",
+         "localParticipantUpdate": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/0e0e0e0e/conversation/localParticipantUpdate/",
+         "addParticipantSuccess": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/0f0f0f0f/conversation/addParticipantSuccess/",
+         "addParticipantFailure": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/10101010/conversation/addParticipantFailure/",
+         "receiveMessage": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/11111111/conversation/receiveMessage/"
+        }
+       },
+       "endpointMetadata": {},
+       "participants": {
+        "from": {
+         "id": "8:orgid:<guid:b>",
+         "displayName": "Lab B",
+         "endpointId": "<guid:4>",
+         "participantId": "<guid:bb>",
+         "languageId": "en-us"
+        }
+       }
+      },
+      "name": "join",
+      "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1?i=10-0-0-2&e=1",
+      "waitForResponse": true
+     }
+    ],
+    "debugContent": {
+     "ecsEtag": "\"synthetic-etag\""
+    }
+   }
+  }
+ ]
+}

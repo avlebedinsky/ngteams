@@ -24,6 +24,7 @@ use proto_lab::commands::teams_probe;
 use proto_lab::commands::thread_probe;
 use proto_lab::config::{Alias, ConfigError, LabConfig, LabLocations, LabPaths, MriRecord, record_service_mri};
 use proto_lab::sanitize::Identities;
+use proto_lab::scenario::ab_call::CallStep;
 use proto_lab::scenario::{self, RunOptions, ScenarioName};
 use proto_lab::stop::{after_stop, until_stopped};
 
@@ -120,6 +121,9 @@ enum Command {
         /// Seconds the web client may take to load, per account.
         #[arg(long, default_value_t = 180)]
         timeout: u64,
+        /// What a call scenario (`ab-call`, `abc-call`) does: hold back a's starts, or which end the ring comes to.
+        #[arg(long, value_enum, default_value_t = CallStep::Answer)]
+        call: CallStep,
     },
 }
 
@@ -281,7 +285,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             scenario,
             headless,
             timeout,
-        } => run_scenario(scenario, headless, timeout).await,
+            call,
+        } => run_scenario(scenario, headless, timeout, call).await,
         Command::ServiceMri { name, mri } => {
             let outcome = record_service_mri(&LabLocations::from_env()?, &name, &mri)?;
             match outcome {
@@ -519,11 +524,17 @@ async fn run_status(aliases: Vec<Alias>, timeout: u64) -> Result<(), Box<dyn std
     }
 }
 
-async fn run_scenario(scenario: ScenarioName, headless: bool, timeout: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_scenario(
+    scenario: ScenarioName,
+    headless: bool,
+    timeout: u64,
+    call: CallStep,
+) -> Result<(), Box<dyn std::error::Error>> {
     let paths = LabLocations::from_env()?.lab_paths()?;
     let options = RunOptions {
         display: if headless { Display::Headless } else { Display::Headed },
         load_timeout: Duration::from_secs(timeout),
+        call,
     };
     let report = scenario::run(scenario, &paths, options).await?;
     for note in &report.notes {

@@ -261,6 +261,7 @@ pub fn contacting(request: &Request<'_>, policy: &Policy) -> Contact {
         Service::ChatService if parsed.has_duplicate_key() => Contact::Unreadable,
         Service::ChatService => chat::classify(&parsed, policy),
         Service::Calling => call::call_start(&parsed.method, &url, parsed.body, policy.echo_callee.as_ref())
+            .or_else(|| call::chat_call_start(&parsed.method, &url, parsed.body))
             .or_else(|| call::follow_up(&parsed.method, &url, parsed.body))
             .map_or(Contact::Unreadable, Contact::Write),
         Service::Graph | Service::SharePoint => Contact::Unreadable,

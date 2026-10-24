@@ -13,7 +13,8 @@
 //! The one exception to both is a forced deny ([`DenyCause::Forced`]) whose rule's label the scenario names
 //! ([`Review::expecting_forced`]): the enforcement probes, an earlier run's probe sent again on load, `abc-chat`'s
 //! first messages, `ab-image`'s and `ab-file`'s media and file writes, and what a scenario holds back on purpose
-//! (`ab-trouter-quiet`'s and the `own-presence` runs'). Any other forced deny is unexpected.
+//! (`ab-trouter-quiet`'s, the `own-presence` runs', and `ab-call`'s and `abc-call`'s starts and callee sends). Any other
+//! forced deny is unexpected.
 //!
 //! What isn't here keeps failing the run until it is added with its reason: writes on a conversation other than the
 //! scenario's, and every request on a call (`echo-call` needs those: `docs/backlog/fence-call-follow-ups.md`, so they
@@ -171,6 +172,16 @@ pub const REQUESTS: &[ExpectedRequest] = &[
         path: "/api/chatsvc/*/v1/users/ME/conversations/*@thread.tacv2/properties",
         reason: "a property of a team channel the client sets as it lists the account's teams, beyond the account's \
                  own view of it (which passes): the scenario uses no channel",
+    },
+    ExpectedRequest {
+        class: "own call log's read horizon",
+        hosts: TEAMS,
+        method: "PUT",
+        path: "/api/chatsvc/*/v1/users/ME/conversations/*:calllogs/properties",
+        reason: "the read horizon (`?name=consumptionhorizon`) of the account's own call log stream (`48:calllogs`), \
+                 which the client moves when a call it placed or received ends: it reaches nobody, but the chat \
+                 service's rows carve a read receipt out only on a chat, and none carves out the horizon of the \
+                 account's own streams; the call scenarios read no call log",
     },
     ExpectedRequest {
         class: "file browser prewarm",

@@ -473,8 +473,7 @@ fn a_call_start_off_the_captured_shape_or_to_anyone_else_is_unreadable() {
     let scenario = format!(r#","scenario":"{TEST_CALL_SCENARIO}""#);
     let lab_b = r#"{"id":"8:orgid:00000000-0000-4000-8000-00000000000b"}"#;
     let off = [
-        // a call to a lab account: not mapped yet (the calling family's rows are M3's)
-        call_start(lab_b, ""),
+        // a call to a lab account in the test call's scenario, or with the echo service besides
         call_start(lab_b, &scenario),
         call_start(&format!(r#"{{"id":"{ECHO}"}},{lab_b}"#), &scenario),
         call_start("", r#","scenario":"SomethingElse""#),
@@ -502,6 +501,211 @@ fn a_call_start_off_the_captured_shape_or_to_anyone_else_is_unreadable() {
         ),
         Contact::Unreadable
     );
+}
+
+// --- a call start from a chat (`tests/fixtures/calling/chat/starts.json`) ---
+
+const CHAT_STARTS: &str = include_str!("../../../tests/fixtures/calling/chat/starts.json");
+const GUID_C: &str = "00000000-0000-4000-8000-00000000000c";
+
+/// The chat call start fixture's cases, its placeholders filled in.
+fn chat_start_cases() -> TestResult<Vec<Value>> {
+    let mut text = fill(CHAT_STARTS).replace("<guid:c>", GUID_C);
+    for n in 2..=7 {
+        text = text.replace(
+            &format!("<guid:{n}>"),
+            &format!("00000000-0000-4000-8000-00000000010{n}"),
+        );
+    }
+    let fixture: Value = serde_json::from_str(&text)?;
+    Ok(fixture["cases"].as_array().ok_or("cases")?.clone())
+}
+
+/// The 1:1 start of the fixture (a calls b), as JSON to change.
+fn one_to_one_start() -> TestResult<Value> {
+    Ok(chat_start_cases()?[0]["body"].clone())
+}
+
+/// The group start of the fixture (a calls b and c in the group chat), as JSON to change.
+fn group_start() -> TestResult<Value> {
+    Ok(chat_start_cases()?[1]["body"].clone())
+}
+
+#[test]
+fn a_call_start_from_a_chat_is_a_call_in_the_chat_it_carries_with_the_caller_and_every_callee() -> TestResult {
+    for case in chat_start_cases()? {
+        let body = case["body"].to_string();
+        let added: Vec<Mri> = case["added"]
+            .as_array()
+            .ok_or("added")?
+            .iter()
+            .map(|mri| mri.as_str().map(Mri::new).ok_or("an MRI"))
+            .collect::<Result<_, _>>()?;
+        let expected = Target::new(
+            WriteKind::Call,
+            Scope::Conversation {
+                id: case["chat"].as_str().ok_or("chat")?.to_owned(),
+            },
+        )
+        .with_added(added);
+        assert_eq!(
+            start_verdict(&body, &policy()),
+            Contact::Write(expected.clone()),
+            "{}",
+            case["name"]
+        );
+        // no echo service needed: it calls lab accounts in a chat
+        assert_eq!(
+            start_verdict(&body, &Policy::new()),
+            Contact::Write(expected),
+            "{}",
+            case["name"]
+        );
+    }
+    // the 1:1 chat is named by the two accounts as the chat service names it, whichever calls
+    let mut b_calls_a = one_to_one_start()?;
+    b_calls_a["participants"]["from"]["id"] = Value::from(format!("8:orgid:{GUID_B}"));
+    b_calls_a["participants"]["to"][0]["id"] = Value::from(format!("8:orgid:{GUID_A}"));
+    let Contact::Write(target) = start_verdict(&b_calls_a.to_string(), &policy()) else {
+        return Err("b's call to a isn't a write".into());
+    };
+    assert_eq!(target.scope(), &Scope::Conversation { id: one_to_one() });
+    Ok(())
+}
+
+#[test]
+fn a_call_start_from_a_chat_naming_someone_outside_the_lab_is_still_read_for_the_fence_to_deny() -> TestResult {
+    // the callee's form is a work account's: the fence judges who it is (`tests/calls.rs`)
+    let mut start = group_start()?;
+    start["participants"]["to"][1]["id"] = Value::from(format!("8:orgid:{GUID_X}"));
+    let Contact::Write(target) = start_verdict(&start.to_string(), &policy()) else {
+        return Err("a group start naming a coworker isn't a write".into());
+    };
+    assert!(target.added().contains(&lab_mri(GUID_X)));
+    Ok(())
+}
+
+/// The fixture's `start` with the value at the JSON pointer `at` set to `value`, or removed when `value` is `None`.
+fn changed(start: &Value, at: &str, value: Option<Value>) -> String {
+    let mut start = start.clone();
+    let (parent, key) = at.rsplit_once('/').unwrap_or_default();
+    if let Some(object) = start.pointer_mut(parent).and_then(Value::as_object_mut) {
+        match value {
+            Some(value) => drop(object.insert(key.to_owned(), value)),
+            None => drop(object.remove(key)),
+        }
+    }
+    start.to_string()
+}
+
+#[test]
+fn a_call_start_from_a_chat_off_its_captured_shape_is_unreadable() -> TestResult {
+    let one = one_to_one_start()?;
+    let group = group_start()?;
+    let callee = |guid: &str| serde_json::json!({"id": format!("8:orgid:{guid}"), "participantId": GUID_X});
+    let callees = |guids: &[&str]| Some(Value::from(guids.iter().map(|guid| callee(guid)).collect::<Vec<_>>()));
+    let text = |text: &str| Some(Value::from(text));
+    let changes = [
+        // the chat it is tied to can't be told
+        (&one, "/groupChat", None),
+        (&one, "/participants/to", callees(&[GUID_B, GUID_X])),
+        (&group, "/groupChat/threadId", text(&one_to_one())),
+        (&group, "/groupChat/threadId", text("19:abc@thread.tacv2")),
+        (
+            &group,
+            "/groupChat/threadId",
+            text(&format!("19:meeting_{GROUP}@thread.v2")),
+        ),
+        (&group, "/groupChat/messageId", text("1")),
+        (&group, "/groupChat/parentMessageId", Some(Value::Null)),
+        (&group, "/groupChat/threadId", None),
+        // its callees: none, twice the same, the caller, or not a work account's id
+        (&group, "/participants/to", callees(&[])),
+        (&group, "/participants/to", callees(&[GUID_B, GUID_B])),
+        (&group, "/participants/to", callees(&[GUID_B, GUID_A])),
+        (&group, "/participants/to/0/id", text(ECHO)),
+        (&group, "/participants/to/0/id", text("8:orgid:not-a-guid")),
+        (&one, "/participants/to", None),
+        (&one, "/participants/from/id", text("8:live:someone")),
+        // a call into a meeting, a group context, another scenario, a key nobody reviewed
+        (&one, "/meetingInfo", Some(serde_json::json!({"organizerId": GUID_A}))),
+        (&one, "/groupContext", Some(serde_json::json!({}))),
+        (&one, "/conversationRequest/scenario", text("SomethingElse")),
+        (&one, "/conversationRequest/scenario", text(TEST_CALL_SCENARIO)),
+        (&one, "/callInvitation/replaces", text("call-1")),
+        (
+            &one,
+            "/callInvitation/mediaContent/requiredFeatures",
+            Some(Value::from(1)),
+        ),
+        (&one, "/unreviewed", Some(Value::Null)),
+    ];
+    let off: Vec<String> = changes
+        .into_iter()
+        .map(|(start, at, value)| changed(start, at, value))
+        .collect();
+    for body in &off {
+        assert_eq!(start_verdict(body, &policy()), Contact::Unreadable, "{body}");
+    }
+    let body = one.to_string();
+    for (method, url) in [
+        ("POST", format!("{CALL_START_URL}?x=1")),
+        ("POST", format!("{CALL_START_URL}/x")),
+        ("PUT", CALL_START_URL.to_owned()),
+    ] {
+        let request = Request::new(method, &url).with_body(Some(body.as_bytes()));
+        assert_eq!(contacting(&request, &policy()), Contact::Unreadable, "{method} {url}");
+    }
+    Ok(())
+}
+
+const CHAT_FOLLOW_UPS: &str = include_str!("../../../tests/fixtures/calling/chat/follow_ups.json");
+
+#[test]
+fn the_caller_s_cancel_while_its_callee_rings_is_its_leave() -> TestResult {
+    let fixture: Value = serde_json::from_str(&fill(CHAT_FOLLOW_UPS).replace("<guid:3>", GUID_X))?;
+    let case = &fixture["cases"][0];
+    let (method, url) = (
+        case["method"].as_str().ok_or("method")?,
+        case["url"].as_str().ok_or("url")?,
+    );
+    let verdict = |body: &Value| {
+        let body = body.to_string();
+        contacting(&Request::new(method, url).with_body(Some(body.as_bytes())), &policy())
+    };
+    let Contact::Write(target) = verdict(&case["body"]) else {
+        return Err("the cancel's leave isn't a write".into());
+    };
+    let Scope::CallOperation { operation, from, .. } = target.scope() else {
+        return Err("the cancel's leave isn't a call operation".into());
+    };
+    assert_eq!(*operation, CallOperation::Leave);
+    assert_eq!(from.as_ref(), Some(&lab_mri(GUID_A)));
+    // only the diagnostics the capture had
+    let mut other = case["body"].clone();
+    other["callTransactionEnd"]["callQualityDiagnosticsInformation"]["networkScore"] = Value::from(1);
+    assert_eq!(verdict(&other), Contact::Unreadable);
+    let mut text = case["body"].clone();
+    other = text.clone();
+    other["callTransactionEnd"]["callQualityDiagnosticsInformation"]["cancelationDuration"] = Value::from("9");
+    assert_eq!(verdict(&other), Contact::Unreadable);
+    text["callTransactionEnd"]["callQualityDiagnosticsInformation"] = Value::Null;
+    assert_eq!(verdict(&text), Contact::Unreadable);
+    Ok(())
+}
+
+#[test]
+fn the_callee_s_attach_while_it_rings_is_unreadable_until_a_row_maps_it() -> TestResult {
+    let fixture: Value = serde_json::from_str(&fill(CHAT_FOLLOW_UPS))?;
+    let case = &fixture["cases"][1];
+    let body = case["body"].to_string();
+    let request = Request::new(
+        case["method"].as_str().ok_or("method")?,
+        case["url"].as_str().ok_or("url")?,
+    )
+    .with_body(Some(body.as_bytes()));
+    assert_eq!(contacting(&request, &policy()), Contact::Unreadable);
+    Ok(())
 }
 
 // --- the operations on a call (the call registry resolves them: `tests/calls.rs`) ---

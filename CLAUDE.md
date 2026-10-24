@@ -194,7 +194,7 @@ What the code does and why. A change that undoes one of these needs a new reason
   `--all-features` unify it in) refuses to run, so live runs use `cargo build -p <crate>`.
 - One permit covers one write to one exact `Target` (kind, scope, added participants); `Authorized::new` checks it. A
   request the fence can't read with certainty is `Unknown` and denied: bodies are read strictly (case-folded duplicate
-  keys make it `Unknown`), and the echo call start is matched in its captured shape.
+  keys make it `Unknown`), and a call start (the echo test call's, or a chat's) is matched in its captured shape.
 - `teams_fence::contacting(&Request, &Policy)` is the classifier of the lab rule, for both sides: `None` (reaches
   nobody), `Write(Target)` (judged by `Fence::check`) or `Unreadable` (denied). Only a mutating request (a method
   other than `GET`/`HEAD`/`OPTIONS`, a body, or a method override) on a contacting service (`Service`, told by host
@@ -216,6 +216,13 @@ What the code does and why. A change that undoes one of these needs a new reason
   chat id in another form) they are judged like any write. So a caller hands it a `Typing` or `ReadReceipt` target
   only for the content-free signal: `contacting` carves typing out only in its captured body (`content` empty or
   absent, no key but `content`, `contenttype`, `messagetype`) and a read receipt only with `name` its one query key.
+- **A call start** maps in two captured shapes (`contacting/call.rs`): the echo test call's (`WriteKind::Call` on
+  `Scope::New`, the caller and the echo service added), and a chat header's call (`chat_call_start`): `WriteKind::Call`
+  on the `Scope::Conversation` it is tied to by what it carries (`groupChat.threadId`, a group chat's id, or for a
+  start whose `groupChat` is `null` and that names one callee, the 1:1 chat of the caller and that callee by
+  `one_to_one_id`), the caller and every callee of `participants.to` added; so `Fence::check` reads that chat fresh
+  and admits the start only when its members and every callee are lab accounts. The callees are work accounts
+  (`8:orgid:<guid>`), at least one, none twice, none the caller.
 - **The call registry** (`crates/teams-fence/src/calls.rs`, one per fence): no source reads a call's members, so a
   follow-up passes only on a call this fence permitted, to exactly a link the call's own services handed out. A call
   start's permit (this fence's, taken once: `WritePermit` carries the fence's run-unique id and a serial) and the
@@ -404,8 +411,8 @@ What the code does and why. A change that undoes one of these needs a new reason
 - A scenario's `DenyPolicy` says which denies it expects: `load` all of them; the writing scenarios only their own
   forced denies, by label, and the reviewed **expected-deny list** (`scenario/expected.rs`: host + method +
   `/`-segment path pattern, frames by socket host, each class with the reason the scenario doesn't need it: bot
-  invokes, the account's own channel entry and channel properties, the file browser's prewarm, Trouter delivery
-  responses). The list judges the run only, never a verdict: everything on it stays denied and logged, and it holds
+  invokes, the account's own channel entry and channel properties, its call log's read horizon, the file browser's
+  prewarm, Trouter delivery responses). The list judges the run only, never a verdict: everything on it stays denied and logged, and it holds
   only what the lab rule denies. A deny on the scenario's own chat, one for a partial or refused membership, one whose
   `fence.log` entry was lost, a deny of what the lab rule lets through, and any class off the list fail the run, the
   failure naming the deny's contacting service; a new class goes onto the list with its reason, never waved through.
@@ -413,7 +420,10 @@ What the code does and why. A change that undoes one of these needs a new reason
 - Every run uses the one classifier (`classify::Classifier`, the lab rule; `echo-call` adds the echo service's MRI
   for its test call start), so a scenario picks none. What a scenario holds back on purpose is a labelled forced deny,
   of requests (`ForcedDeny`) or of frames (`ForcedFrameDeny`: `ab-trouter-quiet` and `own-presence-endpoint` hold
-  back `user.activity`, the other `own-presence` runs the endpoint `PUT` or the manual status), expected by its label.
+  back `user.activity`, the other `own-presence` runs the endpoint `PUT` or the manual status; `ab-call` and
+  `abc-call` a's call starts in `--call start-held`, and in their other steps everything each callee's page sends to
+  the calling services and every delivery response it sends, labelled by the moment: ringing, after its answer click,
+  after its decline click), expected by its label.
 - The sign-in window (`teams-signin`) keeps default-deny rules of its own (`teams_signin::classify`): reads, the
   token endpoint and authz in their captured queries, and Entra's sign-in form, which still takes any query
   (`docs/backlog/seeded-own-rules-ignore-the-query.md`). An own-state rule (`OwnRule`) matches the method, the
@@ -435,9 +445,13 @@ What the code does and why. A change that undoes one of these needs a new reason
   ~/.local/share/teams-lab/live.lock`) and runs under an outer `timeout --signal=INT`. Every page call and navigation
   is bounded (a `beforeunload` dialog holding a navigation is accepted after 5 s), and SIGINT or SIGTERM kills the
   run's browsers and lets the fence's decisions still running land in `fence.log` (`crates/proto-lab/src/stop.rs`).
-- **No call is answered.** No scenario clicks answer, the fence doesn't map `acceptance`, and Trouter delivery
-  responses are denied, but for the acknowledgement of the acceptance of a call the page itself started and the
-  fence registered. The native Trouter client ignores incoming calls the same way and has no path to answer any
+- **No call is answered.** A scenario clicks answer or decline only on an invitation naming only lab accounts or the
+  echo service, and only in a scenario that exists to do it (`ab-call`, `abc-call`: the lab's accounts calling each
+  other). The fence maps neither `acceptance` nor a decline and denies Trouter delivery responses (but for the
+  acknowledgement of the acceptance of a call the page itself started and the fence registered), and such a scenario
+  holds back everything the callee's page sends to the calling services and every delivery response it sends, from
+  before the call rings, with labelled forced denies, so the click answers and declines nothing. Every other incoming
+  call is ignored, never clicked. The native Trouter client ignores incoming calls and has no path to answer any
   delivery.
 - Live tests are built only with `--features live` and run only with `PROTO_LAB_LIVE=1`.
 - Tokens: our client is the native `1fec8e78-…` with the `nativeclient` redirect. The chat service takes

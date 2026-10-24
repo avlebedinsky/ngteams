@@ -289,7 +289,8 @@ pub fn delivery_of(connection: &str, text: &str) -> Option<Delivery> {
 }
 
 /// A deny a run asks for on purpose on WebSocket frames: every frame on a socket whose URL the pattern finds a match in
-/// and whose content the rule takes (any, a text frame holding a text, or any but a text frame starting with a prefix)
+/// and whose content the rule takes (any, a text frame holding a text or starting with a prefix, or any but a text
+/// frame starting with a prefix)
 /// is denied before it is classified ([`WsFence::force_deny`]). That
 /// is how a scenario holds back one kind of frame (the client's own `user.activity`, say) to see what the service does
 /// without it, and how a test stands a local socket in for one whose frames the fence denies.
@@ -307,6 +308,8 @@ enum FrameText {
     Any,
     /// Text frames holding this text.
     Containing(String),
+    /// Text frames starting with this text.
+    StartingWith(String),
     /// Every frame but a text frame starting with this text.
     NotStartingWith(String),
 }
@@ -331,6 +334,14 @@ impl ForcedFrameDeny {
         self
     }
 
+    /// Only text frames starting with `prefix` (a binary frame never matches then): a Trouter delivery response is a
+    /// text frame starting with `3:::`.
+    #[must_use]
+    pub fn with_text_starting_with(mut self, prefix: &str) -> Self {
+        self.text = FrameText::StartingWith(prefix.to_owned());
+        self
+    }
+
     /// Every frame but a text frame starting with `prefix` (a binary frame always matches then).
     #[must_use]
     pub fn except_text_starting_with(mut self, prefix: &str) -> Self {
@@ -345,12 +356,19 @@ impl ForcedFrameDeny {
         self
     }
 
+    /// The rule's label ([`ForcedFrameDeny::labelled`]), if it has one.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
     /// Whether it denies `frame`.
     #[must_use]
     pub fn matches(&self, frame: &Frame) -> bool {
         let text_matches = match (&self.text, &frame.payload) {
             (FrameText::Containing(wanted), Payload::Text(text)) => text.contains(wanted.as_str()),
-            (FrameText::Containing(_), _) => false,
+            (FrameText::StartingWith(prefix), Payload::Text(text)) => text.starts_with(prefix.as_str()),
+            (FrameText::Containing(_) | FrameText::StartingWith(_), _) => false,
             (FrameText::NotStartingWith(prefix), Payload::Text(text)) => !text.starts_with(prefix.as_str()),
             (FrameText::Any | FrameText::NotStartingWith(_), _) => true,
         };

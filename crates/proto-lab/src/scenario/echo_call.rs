@@ -513,16 +513,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 async fn call(session: &mut LabSession, options: RunOptions, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
     load(ACCOUNT, session, options.load_timeout).await?;
     report.notes.push(format!("{ACCOUNT}: the web client loaded"));
-    // a window the client lays out in full: the account menu and Settings' pages
-    session
-        .cdp()
-        .call(
-            Some(session.page()),
-            "Emulation.setDeviceMetricsOverride",
-            serde_json::json!({"width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": false}),
-        )
-        .await
-        .map_err(|error| ScenarioError::Setup(format!("can't size the page: {error}")))?;
+    size_page(session).await?;
     let mut driver = session.driver();
     stand_up_calling(&mut driver, report).await?;
     driver.click("a makes a test call", TEST_CALL_BUTTON).await?;
@@ -552,6 +543,24 @@ async fn call(session: &mut LabSession, options: RunOptions, report: &mut Scenar
     }
     linger(session, AFTER_HANG_UP).await;
     Ok(())
+}
+
+/// Gives the page a window the client lays out in full (1440 × 900): the account menu, Settings' pages and a chat's
+/// header with its call buttons.
+///
+/// # Errors
+/// When the browser refuses it.
+pub(crate) async fn size_page(session: &LabSession) -> Result<(), ScenarioError> {
+    session
+        .cdp()
+        .call(
+            Some(session.page()),
+            "Emulation.setDeviceMetricsOverride",
+            serde_json::json!({"width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": false}),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| ScenarioError::Setup(format!("can't size the page: {error}")))
 }
 
 /// Turns the call's noise suppression off from the call screen's audio options ([`AUDIO_OPTIONS`],
@@ -789,7 +798,7 @@ fn read_new_lines(file: &Path, offset: u64, tally: &mut AudioTally) -> u64 {
 
 /// Keeps the session's events flowing (and recorded) for `duration`, or until the connection goes. `false` when the
 /// connection is gone.
-async fn linger(session: &mut LabSession, duration: Duration) -> bool {
+pub(crate) async fn linger(session: &mut LabSession, duration: Duration) -> bool {
     let end = tokio::time::Instant::now() + duration;
     while let Some(left) = end.checked_duration_since(tokio::time::Instant::now()) {
         if left.is_zero() {

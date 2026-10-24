@@ -26,16 +26,21 @@
 //!   (`own-presence-manual-held`, `own-presence-manual`); recorded.
 //! - [`echo_call`] (account a, writes mapped, members read live, fake microphone): a places the web client's test call
 //!   to the echo service, the one approved participant outside the lab, stays in it a while and hangs up; recorded.
+//! - [`ab_call`] and [`abc_call`] (accounts a and b, or a, b and c, as `echo-call`): a calls b from their 1:1 chat, or
+//!   the a–b–c group chat; the run's step (`--call`) holds back a's starts, or plays out the ring with every callee's
+//!   sends held back; recorded.
 //!
 //! The steps are in [`dsl`]. A run fails (`proto-lab run` exits non-zero) when its goal isn't reached, when the fence
 //! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`]. The writing scenarios
 //! judge by the reviewed expected-deny list ([`expected`]), which never changes what the fence denies.
 
+pub mod ab_call;
 pub mod ab_chat;
 pub mod ab_chat_full;
 pub mod ab_file;
 pub mod ab_image;
 pub mod ab_trouter;
+pub mod abc_call;
 pub mod abc_chat;
 pub mod chat_shapes;
 pub mod dsl;
@@ -87,6 +92,10 @@ pub enum ScenarioName {
     ChatShapes,
     /// Account a places the test call to the echo service with a fake microphone playing a tone; recorded.
     EchoCall,
+    /// Account a calls b from their 1:1 chat, as the run's step (`--call`) says; recorded.
+    AbCall,
+    /// Account a calls the a–b–c group chat, as the run's step (`--call`) says; recorded.
+    AbcCall,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -114,6 +123,8 @@ impl ScenarioName {
             Self::AbTrouterQuiet => "ab-trouter-quiet",
             Self::ChatShapes => "chat-shapes",
             Self::EchoCall => "echo-call",
+            Self::AbCall => "ab-call",
+            Self::AbcCall => "abc-call",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -135,6 +146,8 @@ pub struct RunOptions {
     pub display: Display,
     /// How long the web client gets to load, per account.
     pub load_timeout: Duration,
+    /// What a call scenario (`ab-call`, `abc-call`) does; the others don't read it.
+    pub call: ab_call::CallStep,
 }
 
 /// Which denies a scenario expects; any other one fails the run.
@@ -345,6 +358,8 @@ pub async fn run(
         ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,
         ScenarioName::ChatShapes => chat_shapes::run(paths, options).await,
         ScenarioName::EchoCall => echo_call::run(paths, options).await,
+        ScenarioName::AbCall => ab_call::run(paths, options).await,
+        ScenarioName::AbcCall => abc_call::run(paths, options).await,
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth

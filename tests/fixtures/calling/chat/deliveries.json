@@ -1,0 +1,260 @@
+{
+ "_synthetic": "Made up, shaped like the ab-call and abc-call captures of 2026-10-24 (the ring with the callees' sends held back; read locally from the captures; docs/protocol/calling.md): the callee's invitation over its calling stack's Trouter socket, a 1:1 call's and a group call's (its `gp` is base64 of this JSON on the wire), and the caller's deliveries when the unanswered 1:1 call goes to the callee's voicemail, each at a callback the start handed out (`callback`: its token and kind under the start's call agent). <guid:a> and <guid:b> are lab accounts a and b, <group> the group chat's id, other <guid:\u2026> made-up ids; tests fill in made-up GUIDs. Every value is made up; the SDP is a stub on documentation addresses.",
+ "invitations": [
+  {
+   "name": "a 1:1 call's invitation, at b's endpoint",
+   "path": "/v4/f/SyntheticEndpoint00001/",
+   "body": {
+    "evt": 107,
+    "gp": {
+     "callNotification": {
+      "from": {
+       "id": "8:orgid:<guid:a>",
+       "displayName": "Lab A",
+       "displayNameSource": "substrate",
+       "endpointId": "<guid:3>",
+       "languageId": "en-us",
+       "participantId": "<guid:aa>",
+       "hidden": false,
+       "tenantId": "<guid:tenant>",
+       "propertyBag": null,
+       "region": "amer"
+      },
+      "to": {
+       "id": "8:orgid:<guid:b>",
+       "displayName": "Lab B",
+       "displayNameSource": "substrate",
+       "endpointId": "00000000-0000-0000-0000-000000000000",
+       "languageId": "en-us",
+       "participantId": "<guid:bb>",
+       "hidden": false,
+       "tenantId": "<guid:tenant>",
+       "propertyBag": null
+      },
+      "links": {
+       "attach": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall1/27/i1/1/attach?i=10-0-0-1",
+       "mediaAnswer": "cc://ma",
+       "progress": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall1/27/i1/1/progress?i=10-0-0-1",
+       "reject": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall1/27/i1/1/reject?i=10-0-0-1",
+       "udpTransport": "udp://203.0.113.20:3478/"
+      },
+      "mediaContent": {
+       "contentType": "application/sdp-ngc-1.0",
+       "blob": "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 50000 RTP/SAVP 111\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:111 opus/48000/2\r\na=label:main-audio\r\na=mid:0\r\na=sendrecv\r\na=candidate:1 1 udp 2122194687 192.0.2.10 50000 typ host\r\n",
+       "mediaLegId": "0000000000000000000000000000000A",
+       "escalationOccurring": false,
+       "newOffer": false,
+       "clientLocation": "ZZ",
+       "requiredFeatures": "nonByPass",
+       "applyChannelParameters": {
+        "multiChannelParameter": {
+         "mids": [
+          "0"
+         ],
+         "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":600000}}"
+        }
+       }
+      },
+      "udpKey": {
+       "sessionKey": "SyntheticSessionKey0000==",
+       "ticket": "SyntheticTicket000000=="
+      },
+      "clientEndpointCapabilities": 13530818,
+      "replaces": null,
+      "voicemailSettings": {}
+     },
+     "conversationInvitation": {
+      "conversationController": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1?i=10-0-0-2&e=1",
+      "isMultiParty": false,
+      "isBroadcast": false
+     },
+     "debugContent": {
+      "ecsEtag": "\"synthetic-etag\"",
+      "callId": "<guid:call>",
+      "ProcessingCallControllerInstance": "https://cc-zz-01-prod-aks.cc.skype.com/",
+      "callStartTime": "2026-10-24T00:00:00.0000000Z",
+      "potentialCallNotificationSent": false,
+      "participantId": "<guid:bb>"
+     },
+     "groupContext": null
+    }
+   }
+  },
+  {
+   "name": "a group call's invitation (the call's mixer dialling b out), at b's endpoint",
+   "path": "/v4/f/SyntheticEndpoint00001/",
+   "body": {
+    "evt": 109,
+    "gp": {
+     "callNotification": {
+      "from": {
+       "id": "8:orgid:<guid:a>",
+       "displayName": "Lab A",
+       "displayNameSource": "unknown",
+       "endpointId": "<guid:3>",
+       "languageId": null,
+       "participantId": "<guid:aa>",
+       "hidden": false,
+       "tenantId": "<guid:tenant>",
+       "propertyBag": null,
+       "region": "amer"
+      },
+      "to": {
+       "id": "8:orgid:<guid:b>",
+       "displayName": "Lab B",
+       "displayNameSource": "substrate",
+       "endpointId": "00000000-0000-0000-0000-000000000000",
+       "languageId": null,
+       "participantId": "<guid:bb>",
+       "hidden": false,
+       "tenantId": "<guid:tenant>",
+       "propertyBag": null
+      },
+      "links": {
+       "attach": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall2/959/i1/2/attach?i=10-0-0-1",
+       "mediaAnswer": "cc://ma",
+       "progress": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall2/959/i1/2/progress?i=10-0-0-1",
+       "reject": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall2/959/i1/2/reject?i=10-0-0-1",
+       "udpTransport": "udp://203.0.113.21:3478/"
+      },
+      "mediaContent": {
+       "contentType": "application/sdp-ngc-0.5",
+       "blob": "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 50000 RTP/SAVP 111\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:111 opus/48000/2\r\na=label:main-audio\r\na=mid:0\r\na=sendrecv\r\na=candidate:1 1 udp 2122194687 192.0.2.10 50000 typ host\r\n",
+       "mediaLegId": "<guid:leg>",
+       "escalationOccurring": false,
+       "newOffer": false,
+       "fromMixer": true,
+       "originator": "mcGvc",
+       "skipIceReinvite": true
+      },
+      "fromMixer": true,
+      "udpKey": {
+       "sessionKey": "SyntheticSessionKey0001==",
+       "ticket": "SyntheticTicket000001=="
+      },
+      "fromApplicationType": "",
+      "conversationType": "groupCall",
+      "isDialOut": true,
+      "isDialIn": false
+     },
+     "groupChat": {
+      "threadId": "19:<group>@thread.v2",
+      "messageId": "0"
+     },
+     "meetingProperties": {
+      "meetingLiveState": {
+       "phase": "staging",
+       "sequenceNumber": 0,
+       "seqNum": 0
+      },
+      "detectSensitiveContentDuringScreenSharing": false,
+      "preventComplianceRecording": 0
+     },
+     "conversationInvitation": {
+      "conversationController": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation2?i=10-0-0-2&e=1",
+      "isMultiParty": true,
+      "isBroadcast": false,
+      "groupCallInitiator": "8:orgid:<guid:a>",
+      "groupCallInitiatorParticipant": {
+       "id": "8:orgid:<guid:a>",
+       "displayName": null,
+       "endpointId": "00000000-0000-0000-0000-000000000000",
+       "languageId": null,
+       "participantId": null,
+       "hidden": false,
+       "propertyBag": null
+      },
+      "isHostless": true
+     },
+     "debugContent": {
+      "callStartTime": "2026-10-24T00:00:00.0000000Z",
+      "callId": "<guid:call2>",
+      "IsRetargetNegotiationPending": false,
+      "MPInstanceServiceUri": "https://mp-zz-01.mp.skype.com:10028/mediaprocessor/v1",
+      "MPInstanceId": "mp-zz-01.mp.skype.com.SyntheticRole",
+      "MPPublicIpTagUsed": "Business",
+      "participantId": "<guid:bb>"
+     },
+     "groupContext": null
+    }
+   }
+  }
+ ],
+ "cases": [
+  {
+   "name": "the call's progress: forwarded to b's voicemail",
+   "callback": "01010101/call/progress/",
+   "observed": "nothing",
+   "body": {
+    "callProgress": {
+     "sender": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": null,
+      "displayNameSource": "unknown",
+      "endpointId": "00000000-0000-0000-0000-000000000000",
+      "languageId": null,
+      "participantId": "<guid:bb>",
+      "hidden": false,
+      "tenantId": "<guid:tenant>",
+      "propertyBag": null
+     },
+     "status": "forwarded",
+     "phrase": null,
+     "forwardingDestinationType": "voicemail"
+    },
+    "debugContent": {
+     "ProcessingCallControllerInstance": "https://cc-zz-01-prod-aks.cc.skype.com/"
+    }
+   }
+  },
+  {
+   "name": "b's voicemail accepts the call for b",
+   "callback": "03030303/call/acceptance/",
+   "observed": "acceptance",
+   "body": {
+    "callAcceptance": {
+     "acceptedBy": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": null,
+      "displayNameSource": "unknown",
+      "endpointId": "<guid:voicemail>",
+      "languageId": null,
+      "participantId": "<guid:bb>",
+      "hidden": false,
+      "tenantId": "<guid:tenant>",
+      "propertyBag": null,
+      "region": "amer",
+      "endpointType": "voicemail"
+     },
+     "acceptedCallModalities": [
+      "Audio"
+     ],
+     "links": {
+      "acknowledgement": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/callAcceptance/SyntheticCall1/27/a1/1/acknowledge?i=10-0-0-1",
+      "callLeg": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1?i=10-0-0-1&e=1",
+      "callControllerHttpTransport": "http://203.0.113.30/enc",
+      "mediaRenegotiation": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/mediaRenegotiation?i=10-0-0-1&e=1",
+      "transfer": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/transfer?i=10-0-0-1&e=1",
+      "replacement": "https://cc-zz-01-prod-aks.cc.skype.com:443/cc/v1/callParticipant/SyntheticCall1/27/k2/1/replacement?i=10-0-0-1&e=1",
+      "retargetCompletion": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/retargetCompletion?i=10-0-0-1&e=1",
+      "startOutgoingNegotiation": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/startOutgoingNegotiation?i=10-0-0-1&e=1",
+      "hold": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/hold?i=10-0-0-1&e=1",
+      "monitor": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/monitor?i=10-0-0-1&e=1",
+      "updateCallState": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/updateCallState?i=10-0-0-1&e=1"
+     },
+     "mediaContent": {
+      "contentType": "application/sdp-ngc-1.0",
+      "blob": "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 50000 RTP/SAVP 111\r\nc=IN IP4 192.0.2.10\r\na=rtpmap:111 opus/48000/2\r\na=label:main-audio\r\na=mid:0\r\na=sendrecv\r\na=candidate:1 1 udp 2122194687 192.0.2.10 50000 typ host\r\n",
+      "mediaLegId": null,
+      "escalationOccurring": false,
+      "newOffer": false
+     },
+     "callKeepAliveInterval": 2700
+    },
+    "debugContent": {
+     "ProcessingCallControllerInstance": "https://cc-zz-01-prod-aks.cc.skype.com/"
+    }
+   }
+  }
+ ]
+}

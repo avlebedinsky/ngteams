@@ -229,6 +229,21 @@ fn a_forced_frame_deny_matches_its_socket_and_the_text_it_names() {
     assert!(every.matches(&binary(TROUTER, "AQID")) && every.matches(&text(TROUTER, "2::")));
 }
 
+#[test]
+fn a_forced_frame_deny_by_prefix_takes_only_text_frames_starting_with_it() {
+    let responses = ForcedFrameDeny::new("trouter").unwrap().with_text_starting_with("3:::");
+    assert!(responses.matches(&text(TROUTER, r#"3:::{"id":-7,"status":200}"#)));
+    for frame in [
+        text(TROUTER, r#"5:3+::{"name":"3:::"}"#),
+        text(TROUTER, "2::"),
+        text(TROUTER, " 3:::{}"),
+        binary(TROUTER, "Mzo6Ons9"),
+    ] {
+        assert!(!responses.matches(&frame), "{frame:?}");
+    }
+    assert!(!responses.matches(&text(LOCAL, "3:::{}")), "another socket");
+}
+
 // --- the guard script and its requests ---
 
 /// The token of the tests' guard scripts.

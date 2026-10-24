@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use teams_fence::{
     CALL_START_URL, CallOperation, Contact, Delivery, DeliveryDecision, DeliveryDenyReason, DenyReason, FailClosed,
-    Fence, FenceLog, Mri, Observed, PartialReason, PendingStart, Policy, RegisterError, Request, Roster, Scope,
-    TEST_CALL_SCENARIO, Target, WriteKind, WritePermit, contacting,
+    Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Observed, PartialReason, PendingStart,
+    Policy, RegisterError, Request, Roster, Scope, TEST_CALL_SCENARIO, Target, WriteKind, WritePermit, contacting,
 };
 
 const LAB_A: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -325,6 +325,245 @@ fn a_follow_up_off_its_captured_method_host_path_or_shape_is_unreadable() {
     }
     let request = Request::new("POST", &url);
     assert_eq!(contacting(&request, &policy()), Contact::Unreadable, "no body");
+}
+
+// --- a call start from a chat (`tests/fixtures/calling/chat/starts.json`) ---
+
+const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
+const GROUP_CHAT: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
+
+/// A source that answers every read with the same members.
+struct Members(Membership);
+
+impl Members {
+    fn of(members: &[&str]) -> Self {
+        Self(Membership::Complete(members.iter().copied().map(Mri::new).collect()))
+    }
+}
+
+impl MembershipSource for Members {
+    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
+        let membership = self.0.clone();
+        Box::pin(async move { membership })
+    }
+}
+
+/// A lab of a, b and c with the echo service.
+fn new_lab_of_three() -> TestResult<Lab> {
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("fence.log");
+    let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]);
+    let fence = Fence::new(roster, FenceLog::open(&log)?);
+    Ok(Lab { _dir: dir, log, fence })
+}
+
+/// A chat's call start from a, its callbacks on the endpoint's call agent: to `callees` in the group chat `group`, or
+/// with no group chat (a 1:1 call).
+fn chat_start_body(callees: &[&str], group: Option<&str>) -> Vec<u8> {
+    let to: Vec<Value> = callees
+        .iter()
+        .map(|id| json!({"id": id, "participantId": "callee"}))
+        .collect();
+    json!({
+        "conversationRequest": {
+            "conversationType": null,
+            "suppressDialout": false,
+            "links": {
+                "conversationEnd": format!("{CALLBACKS}/05050505/conversation/conversationEnd/"),
+                "conversationUpdate": format!("{CALLBACKS}/06060606/conversation/conversationUpdate/"),
+            },
+        },
+        "participants": {"from": {"id": LAB_A, "displayName": "Lab A"}, "to": to},
+        "groupChat": group.map(|id| json!({"threadId": id, "messageId": null})),
+        "callInvitation": {
+            "callModalities": ["Audio"],
+            "links": {
+                "acceptance": format!("{CALLBACKS}/03030303/call/acceptance/"),
+                "end": format!("{CALLBACKS}/04040404/call/end/"),
+            },
+            "mediaContent": {"blob": "v=0\r\n", "contentType": "application/sdp-ngc-1.0", "requiredFeatures": "nonByPass"},
+        },
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// The target the lab rule makes of a chat's call start.
+fn chat_start(body: &[u8]) -> TestResult<Target> {
+    match classify("POST", CALL_START_URL, body) {
+        Contact::Write(target) => Ok(target),
+        other => Err(format!("the chat's start isn't a write: {other:?}").into()),
+    }
+}
+
+#[tokio::test]
+async fn a_call_start_from_a_chat_is_judged_by_the_chat_s_fresh_members_and_every_callee() -> TestResult {
+    let lab = new_lab_of_three()?;
+    let one = chat_start(&chat_start_body(&[LAB_B], None))?;
+    assert_eq!(
+        one.scope(),
+        &Scope::Conversation {
+            id: one_to_one(LAB_A, LAB_B)
+        }
+    );
+    let judged = async |target: &Target, source: &Members| {
+        lab.fence
+            .check(target.clone(), source)
+            .await
+            .map(drop)
+            .map_err(|denied| *denied.reason())
+    };
+    assert_eq!(judged(&one, &Members::of(&[LAB_A, LAB_B])).await, Ok(()));
+    assert_eq!(
+        judged(&one, &Members::of(&[LAB_A, COWORKER])).await,
+        Err(DenyReason::Outsiders { count: 1 }),
+        "the chat's read has someone outside the lab"
+    );
+    assert_eq!(
+        judged(&one, &Members(Membership::Partial(PartialReason::NoSource))).await,
+        Err(DenyReason::Partial(PartialReason::NoSource)),
+        "a chat that can't be read in full"
+    );
+    let group = chat_start(&chat_start_body(&[LAB_B, LAB_C], Some(GROUP_CHAT)))?;
+    assert_eq!(group.scope(), &Scope::Conversation { id: GROUP_CHAT.into() });
+    assert_eq!(judged(&group, &Members::of(&[LAB_A, LAB_B, LAB_C])).await, Ok(()));
+    let a_and_b = chat_start(&chat_start_body(&[LAB_B], Some(GROUP_CHAT)))?;
+    assert_eq!(
+        judged(&a_and_b, &Members::of(&[LAB_A, LAB_B, LAB_C])).await,
+        Ok(()),
+        "a lab-only chat with one more lab member than it calls"
+    );
+    let outsider = chat_start(&chat_start_body(&[LAB_B, COWORKER], Some(GROUP_CHAT)))?;
+    assert_eq!(
+        judged(&outsider, &Members::of(&[LAB_A, LAB_B, LAB_C])).await,
+        Err(DenyReason::Outsiders { count: 1 }),
+        "a callee outside the lab, the chat lab-only"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_permitted_call_start_from_a_chat_pends_and_registers_as_the_test_call_s_does() -> TestResult {
+    let lab = new_lab_of_three()?;
+    let body = chat_start_body(&[LAB_B, LAB_C], Some(GROUP_CHAT));
+    let members = Members::of(&[LAB_A, LAB_B, LAB_C]);
+    let permit = lab.fence.check(chat_start(&body)?, &members).await?;
+    for (other, why) in [
+        (chat_start_body(&[LAB_B], Some(GROUP_CHAT)), "fewer callees"),
+        (chat_start_body(&[LAB_B, LAB_C], None), "no group chat"),
+        (start_body(), "the test call's start"),
+        (b"{}".to_vec(), "not a start"),
+    ] {
+        assert!(lab.fence.pend_start(&permit, &other).is_none(), "{why}");
+    }
+    let pending = lab
+        .fence
+        .pend_start(&permit, &body)
+        .ok_or("the permitted start isn't pending")?;
+    assert!(lab.fence.pend_start(&permit, &body).is_none(), "a permit pends once");
+    let leave = write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?;
+    assert_eq!(verdict(&lab.fence, leave.clone()).await, Err(UNREGISTERED));
+    lab.fence.register_start(pending, &answer("conv-1"))?;
+    let metadata = write(
+        CallOperation::UpdateEndpointMetadata,
+        &op_url(CallOperation::UpdateEndpointMetadata, "conv-1"),
+        &[],
+    )?;
+    assert_eq!(verdict(&lab.fence, metadata).await, Ok(()));
+    assert_eq!(verdict(&lab.fence, leave).await, Ok(()));
+    let other = new_lab_of_three()?;
+    assert!(
+        other.fence.pend_start(&permit, &body).is_none(),
+        "another fence's permit"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_call_from_a_chat_takes_follow_ups_only_from_its_caller_and_adds_only_lab_accounts() -> TestResult {
+    let lab = new_lab_of_three()?;
+    let body = chat_start_body(&[LAB_B], None);
+    let permit = lab
+        .fence
+        .check(chat_start(&body)?, &Members::of(&[LAB_A, LAB_B]))
+        .await?;
+    let pending = lab.fence.pend_start(&permit, &body).ok_or("not pending")?;
+    lab.fence.register_start(pending, &answer("conv-1"))?;
+    let by_b = json!({"id": LAB_B, "displayName": "Lab B"});
+    let leave_by_b = match classify(
+        "POST",
+        &op_url(CallOperation::Leave, "conv-1"),
+        &body_of(CallOperation::Leave, &by_b),
+    ) {
+        Contact::Write(target) => target,
+        other => return Err(format!("b's leave isn't a write: {other:?}").into()),
+    };
+    assert_eq!(
+        verdict(&lab.fence, leave_by_b).await,
+        Err(DenyReason::CallMismatch),
+        "b isn't the call's caller"
+    );
+    Ok(())
+}
+
+fn body_of(operation: CallOperation, sender: &Value) -> Vec<u8> {
+    body(operation, sender, &[])
+}
+
+/// The deliveries of a call from a chat (`tests/fixtures/calling/chat/deliveries.json`), their placeholders filled with
+/// this file's lab accounts and made-up ids.
+const CHAT_DELIVERIES: &str = include_str!("../../../tests/fixtures/calling/chat/deliveries.json");
+
+fn chat_deliveries() -> TestResult<Value> {
+    let mut filled = CHAT_DELIVERIES
+        .replace("<guid:a>", LAB_A.trim_start_matches("8:orgid:"))
+        .replace("<guid:b>", LAB_B.trim_start_matches("8:orgid:"));
+    for (n, placeholder) in ["tenant", "voicemail", "call", "aa", "bb", "3", "4", "agentb"]
+        .iter()
+        .enumerate()
+    {
+        filled = filled.replace(
+            &format!("<guid:{placeholder}>"),
+            &format!("00000000-0000-4000-8000-0000000002{n:02}"),
+        );
+    }
+    Ok(serde_json::from_str(&filled)?)
+}
+
+#[tokio::test]
+async fn an_unanswered_call_from_a_chat_goes_to_the_callee_s_voicemail_which_accepts_it() -> TestResult {
+    let lab = new_lab_of_three()?;
+    let body = chat_start_body(&[LAB_B], None);
+    let permit = lab
+        .fence
+        .check(chat_start(&body)?, &Members::of(&[LAB_A, LAB_B]))
+        .await?;
+    let pending = lab.fence.pend_start(&permit, &body).ok_or("not pending")?;
+    lab.fence.register_start(pending, &answer("conv-1"))?;
+    let fixture = chat_deliveries()?;
+    for (id, case) in (1..).zip(fixture["cases"].as_array().ok_or("cases")?) {
+        let path = format!(
+            "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/{}",
+            case["callback"].as_str().unwrap_or_default()
+        );
+        let expected = match case["observed"].as_str() {
+            Some("acceptance") => Observed::Acceptance,
+            _ => Observed::Nothing,
+        };
+        let observed = lab
+            .fence
+            .observe_delivery(&delivery(id, &path, case["body"].to_string().into_bytes()));
+        assert_eq!(observed, expected, "{}", case["name"]);
+    }
+    // the voicemail's acceptance bound the call controller's acknowledgement link
+    let acknowledge = fixture["cases"][1]["body"]["callAcceptance"]["links"]["acknowledgement"]
+        .as_str()
+        .ok_or("acknowledgement")?;
+    assert_eq!(
+        verdict(&lab.fence, write(CallOperation::Acknowledge, acknowledge, &[])?).await,
+        Ok(())
+    );
+    Ok(())
 }
 
 // --- registering a call ---

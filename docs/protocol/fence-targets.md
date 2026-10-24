@@ -55,7 +55,7 @@ lower case on a dot boundary (the host or any host under it), a trailing dot dro
 | Service | Hosts | What isn't `Unreadable` there |
 |---|---|---|
 | Chat service | a Teams origin's `/api/chatsvc/…`; `*.msg.teams.microsoft.com` | [its rows](#the-chat-services-rows) |
-| Calling | `*.flightproxy.teams.microsoft.com` (whose `ep/<host>/…` forms reach the hosts behind it), `api.fl.teams.microsoft.com`, every `*.skype.com` host but AMS's (`*.conv.skype.com`, `*.cc.skype.com`, `*.broker.skype.com` and any other: a Skype host whose purpose is unknown counts as contacting) | the web client's test call start in its captured shape (`CALL_START_URL`, no query), `Write(Call)` to `New` with the caller and the echo service, only when the policy names the echo callee (`Policy::with_echo_callee`; the browser's `Classifier::with_test_call_callee`): [calling-echo.md](calling-echo.md); the captured operations on a call (`updateEndpointMetadata`, `add`, `leave`, `acknowledge`, `applyChannelParameters`), each in its captured method, path and body, a write on `Scope::CallOperation` that [the call registry](#the-call-registry) resolves |
+| Calling | `*.flightproxy.teams.microsoft.com` (whose `ep/<host>/…` forms reach the hosts behind it), `api.fl.teams.microsoft.com`, every `*.skype.com` host but AMS's (`*.conv.skype.com`, `*.cc.skype.com`, `*.broker.skype.com` and any other: a Skype host whose purpose is unknown counts as contacting) | the web client's test call start in its captured shape (`CALL_START_URL`, no query), `Write(Call)` to `New` with the caller and the echo service, only when the policy names the echo callee (`Policy::with_echo_callee`; the browser's `Classifier::with_test_call_callee`): [calling-echo.md](calling-echo.md); a chat header's call start in its captured shape, `Write(Call)` to the chat it carries (`Conversation`) with the caller and every callee: [calling.md](calling.md#the-start); the captured operations on a call (`updateEndpointMetadata`, `add`, `leave`, `acknowledge`, `applyChannelParameters`), each in its captured method, path and body, a write on `Scope::CallOperation` that [the call registry](#the-call-registry) resolves |
 | Graph | `*.graph.microsoft.com`, every version, `$batch` included | nothing |
 | Outlook, OWA and Substrate | `*.outlook.office.com`, `*.outlook.office365.com`, `*.outlook.cloud.microsoft`, `*.outlook.live.com`, `*.substrate.office.com` | `POST /search/api/<version>/suggestions` and `…/query` on Substrate: search reads |
 | SharePoint and OneDrive | `*.sharepoint.com`, `*.sharepoint-df.com`, `*.microsoftpersonalcontent.com`, `*.onedrive.com`, `onedrive.live.com`, the media hosts `*.svc.ms` | nothing |
@@ -247,9 +247,11 @@ Rules that keep the mapping fail-closed:
   and binding it to that chat would take a registry of what the fence permitted or an authoritative read of the
   object's current readers, which no capture has shown and which `forward` could widen. So images aren't sent
   (`docs/backlog/ams-image-sending.md`, [chat.md](chat.md)).
-- Calls map the test call's start, as a new call of its caller and the echo service, and the captured operations on a
-  call the fence registered ([the call registry](#the-call-registry)); any other write on a call and any answer stay
-  unreadable ([calling-echo.md](calling-echo.md), `docs/backlog/fence-call-follow-ups.md` for what M3 maps next).
+- Calls map the test call's start, as a new call of its caller and the echo service; a chat header's call start, as
+  a call in the chat it carries with the caller and its callees ([calling.md](calling.md#the-start)); and the captured
+  operations on a call the fence registered ([the call registry](#the-call-registry)); any other write on a call, any
+  answer, decline, join and the callee's ring-time sends stay unreadable ([calling-echo.md](calling-echo.md),
+  `docs/backlog/fence-call-follow-ups.md` for what M3 maps next).
   Meetings, invites, mail and channel posts aren't mapped.
 
 ## The call registry
@@ -262,7 +264,23 @@ holds a call registry (`crates/teams-fence/src/calls.rs`), and a follow-up passe
 exactly a link the call's own services handed out for that operation. Decided with Codex (M3 Task 3, transcript under
 `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-3-call-registry/`).
 
-**The bindings**, each only as the echo call's capture shows it:
+**The starts it registers.** Two captured starts map (`crates/teams-fence/src/contacting/call.rs`): the echo test
+call's, a new call (`Scope::New`) of the caller and the echo service; and a chat header's call (`chat_call_start`, M3
+Task 5, [calling.md](calling.md#the-start)), `WriteKind::Call` on the `Scope::Conversation` of the chat it is tied to
+by what it carries, the caller and every callee it names added. The chat is the group chat `groupChat.threadId` names
+(a group chat's id), or, for a start whose `groupChat` is `null` and that names one callee, the 1:1 chat of the caller
+and that callee by `one_to_one_id`; never one taken from the client's context. So `Fence::check` reads that chat's
+members fresh and permits the start only when they and every callee are lab accounts (a lab-only chat with one more
+lab member than the start calls passes; a callee outside the lab is denied, however lab-only the chat). The callees
+must be work accounts (`8:orgid:<guid>`), at least one, none twice, none the caller, and `groupChat` must be there.
+Decided with Codex (M3 Task 5, transcript under
+`~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-5-start-target/`): the plan's
+`Scope::Call` names a call no source reads; the chat is what the rule reads, so the start lands on the conversation.
+`Fence::pend_start` re-reads the body with the row that matches the permit's scope and needs exactly the permit's
+target back.
+
+**The bindings**, each only as the echo call's capture shows it (a chat's call binds the same way: M3 Task 5's runs
+registered it from its answer and bound a voicemail's acceptance, [calling.md](calling.md#the-rings-ends)):
 
 | Step | What binds | How |
 |---|---|---|
