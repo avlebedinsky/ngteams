@@ -23,8 +23,15 @@ use crate::config::{Alias, LabPaths};
 /// deprecations, interventions, NEL) itself, and those POSTs never pause in `Fetch`, so the fence can't see them
 /// (checked on Chrome 155: an armed browser delivered a CSP report to a local server with no deny). This is the only
 /// `--disable-features`; Chrome keeps just the last one, so another must be merged into it.
+///
+/// Nothing a lab browser does is played aloud or reaches the desktop's audio server: its output is muted
+/// (`--mute-audio`) and its audio manager is the fake one (`--disable-audio-output`), which opens no audio device or
+/// server and still runs the page's audio (Web Audio, the fake microphone) on its own clock. A call scenario reads the
+/// audio it receives in the page (`assets/rtc_hooks.js`'s audio tap), never from a speaker.
 pub const BASE_ARGS: &[&str] = &[
     "--disable-features=Reporting,NetworkErrorLogging",
+    "--mute-audio",
+    "--disable-audio-output",
     "--no-first-run",
     "--no-default-browser-check",
     "--password-store=basic",
@@ -53,7 +60,8 @@ pub enum Media {
     /// Whatever the system has (and a permission prompt).
     System,
     /// Chrome's fake camera and microphone, granted without a prompt. With `audio`, the microphone plays that WAV
-    /// file instead of the default beep.
+    /// file instead of the default beep. Audio may start without a click (`--autoplay-policy`), so the hooks' audio
+    /// tap reads a received track as soon as it arrives; the output stays muted ([`BASE_ARGS`]).
     Fake { audio: Option<PathBuf> },
 }
 
@@ -99,6 +107,7 @@ impl LaunchOptions {
         if let Media::Fake { audio } = &self.media {
             args.push("--use-fake-ui-for-media-stream".into());
             args.push("--use-fake-device-for-media-stream".into());
+            args.push("--autoplay-policy=no-user-gesture-required".into());
             if let Some(audio) = audio {
                 args.push(flag("--use-file-for-fake-audio-capture=", audio.as_os_str()));
             }

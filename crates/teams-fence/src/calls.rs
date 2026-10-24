@@ -34,9 +34,10 @@
 //!
 //! **The acceptance's delivery response.** The one Trouter delivery response the fence lets through: the acceptance's
 //! acknowledgement, answering a pending acceptance delivery of a live call on the same connection, once
-//! ([`crate::Fence::check_delivery_response`]): the captured envelope (`id`, `status` 200, the headers `MS-CV`,
-//! `trouter-request` equal to the delivery's, `trouter-client`), and a `callAcceptanceAcknowledgement` whose links are
-//! all callbacks on the start's own endpoint and call agent. Every other delivery response stays denied.
+//! ([`crate::Fence::check_delivery_response`]): the captured envelope (`id`, `status` 200, exactly the headers `MS-CV`,
+//! `trouter-client`, and `trouter-request`, `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID` each equal
+//! to the delivery's own), and a `callAcceptanceAcknowledgement` whose links are all callbacks on the start's own
+//! endpoint and call agent. Every other delivery response stays denied.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
@@ -86,13 +87,16 @@ pub enum RegisterError {
 
 /// One Trouter delivery as the socket received it (a socket.io `3:::` request), its body decoded: the connection it
 /// came on (an opaque key of the caller's, the same for the responses sent on that connection), its signed id, the
-/// path it was delivered to, its `trouter-request` header and its body.
+/// path it was delivered to, its `trouter-request`, `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID`
+/// headers and its body.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Delivery {
     pub connection: String,
     pub id: i64,
     pub path: String,
     pub trouter_request: Option<String>,
+    pub chain_id: Option<String>,
+    pub message_id: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -160,7 +164,7 @@ pub enum DeliveryDenyReason {
     /// Not the captured envelope or acknowledgement, or a link that isn't a callback of the call's own endpoint.
     #[error("not the captured acknowledgement of the call's acceptance")]
     Shape,
-    /// Its `trouter-request` isn't the delivery's.
+    /// Its `trouter-request`, chain id or message id isn't the delivery's.
     #[error("it doesn't answer the delivery's request")]
     Uncorrelated,
     /// It would pass, but its decision couldn't be written to `fence.log`.
@@ -199,6 +203,8 @@ struct PendingDelivery {
     connection: String,
     id: i64,
     trouter_request: String,
+    chain_id: String,
+    message_id: String,
 }
 
 /// One call of the run.
@@ -516,11 +522,16 @@ fn bind_acceptance(call: &mut Call, delivery: &Delivery) -> Observed {
             call.links.push(link);
         }
     }
-    if let Some(trouter_request) = &delivery.trouter_request {
+    // a delivery without the headers its response echoes can't be answered in the captured shape
+    if let (Some(trouter_request), Some(chain_id), Some(message_id)) =
+        (&delivery.trouter_request, &delivery.chain_id, &delivery.message_id)
+    {
         call.deliveries.push(PendingDelivery {
             connection: delivery.connection.clone(),
             id: delivery.id,
             trouter_request: trouter_request.clone(),
+            chain_id: chain_id.clone(),
+            message_id: message_id.clone(),
         });
     }
     Observed::Acceptance
@@ -584,7 +595,13 @@ fn controller_path(url: &Url) -> Option<(String, String, String, String)> {
 
 /// The captured response envelope: these keys, and these headers.
 const ENVELOPE: [&str; 4] = ["id", "status", "headers", "body"];
-const HEADERS: [&str; 3] = ["MS-CV", "trouter-request", "trouter-client"];
+const HEADERS: [&str; 5] = [
+    "MS-CV",
+    "trouter-request",
+    "trouter-client",
+    "X-Microsoft-Skype-Chain-ID",
+    "X-Microsoft-Skype-Message-ID",
+];
 
 /// Judges a delivery response to `delivery` (see the module docs).
 fn judge_response(
@@ -605,7 +622,15 @@ fn judge_response(
     if !envelope_fits {
         return Err(shape);
     }
-    if headers.get("trouter-request").and_then(Value::as_str) != Some(delivery.trouter_request.as_str()) {
+    let echoes = [
+        ("trouter-request", &delivery.trouter_request),
+        ("X-Microsoft-Skype-Chain-ID", &delivery.chain_id),
+        ("X-Microsoft-Skype-Message-ID", &delivery.message_id),
+    ];
+    if echoes
+        .iter()
+        .any(|(name, value)| headers.get(*name).and_then(Value::as_str) != Some(value.as_str()))
+    {
         return Err(DeliveryDenyReason::Uncorrelated);
     }
     let body = object.get("body").and_then(Value::as_str).ok_or(shape)?;

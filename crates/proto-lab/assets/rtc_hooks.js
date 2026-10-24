@@ -13,10 +13,22 @@
 // first hooked method called on it (one made by another realm's constructor). The binding is taken off the global
 // before any page code runs, and the built-ins used later are captured now. This is capture, not enforcement: page code
 // that wanted to could still hide a connection from it.
+//
+// The audio tap: every received audio track (a connection's `track` event) is read in the page through WebAudio, never
+// from a speaker: a context of its own, the track as a source, an analyser that is connected to nothing else (an
+// analyser is pulled by itself, so the context's output stays silent). Chrome decodes a received track only while
+// something plays it out, so the tap also gives it a muted audio element of its own. Every TAP_INTERVAL_MS the
+// analyser's newest TAP_WINDOW samples are measured and reported as `audio`: their RMS level and, by a Goertzel filter
+// at TONE_HZ, the share of their power that is that tone (about 1 for the pure tone, near 0 for speech or silence),
+// until the track ends or its connection closes. The lab browser runs with its output muted and no audio device
+// (crates/proto-lab/src/browser.rs).
 (() => {
   'use strict';
   const BINDING = '{{BINDING}}';
   const STATS_INTERVAL_MS = {{STATS_INTERVAL_MS}};
+  const TAP_INTERVAL_MS = {{TAP_INTERVAL_MS}};
+  const TAP_WINDOW = {{TAP_WINDOW}};
+  const TONE_HZ = {{TONE_HZ}};
 
   const scope = globalThis;
   const { apply, construct, defineProperty, deleteProperty, getOwnPropertyDescriptor } = Reflect;
@@ -61,6 +73,47 @@
   };
   const STATE_EVENTS = ['connectionstatechange', 'iceconnectionstatechange', 'icegatheringstatechange', 'signalingstatechange'];
   let connections = 0;
+
+  // the audio tap's built-ins, where the scope has WebAudio (a page or an iframe; not a worklet)
+  const AudioContextOf = scope.AudioContext;
+  const StreamOf = scope.MediaStream;
+  const Samples = scope.Float32Array;
+  const { cos, sqrt, PI } = Math;
+  const methodOf = (owner, name) => (owner && typeof owner.prototype[name] === 'function' ? owner.prototype[name] : undefined);
+  const getterIn = (owner, name) => {
+    const descriptor = owner ? getOwnPropertyDescriptor(owner.prototype, name) : undefined;
+    return descriptor ? descriptor.get : undefined;
+  };
+  const setterIn = (owner, name) => {
+    const descriptor = owner ? getOwnPropertyDescriptor(owner.prototype, name) : undefined;
+    return descriptor ? descriptor.set : undefined;
+  };
+  const audio = {
+    __proto__: null,
+    createSource: methodOf(AudioContextOf, 'createMediaStreamSource'),
+    createAnalyser: methodOf(scope.BaseAudioContext, 'createAnalyser'),
+    resume: methodOf(AudioContextOf, 'resume'),
+    close: methodOf(AudioContextOf, 'close'),
+    contextState: getterIn(scope.BaseAudioContext, 'state'),
+    sampleRate: getterIn(scope.BaseAudioContext, 'sampleRate'),
+    connect: methodOf(scope.AudioNode, 'connect'),
+    setWindow: setterIn(scope.AnalyserNode, 'fftSize'),
+    read: methodOf(scope.AnalyserNode, 'getFloatTimeDomainData'),
+    kind: getterIn(scope.MediaStreamTrack, 'kind'),
+    trackId: getterIn(scope.MediaStreamTrack, 'id'),
+    readyState: getterIn(scope.MediaStreamTrack, 'readyState'),
+    trackOf: getterIn(scope.RTCTrackEvent, 'track'),
+    setMuted: setterIn(scope.HTMLMediaElement, 'muted'),
+    setSource: setterIn(scope.HTMLMediaElement, 'srcObject'),
+    play: methodOf(scope.HTMLMediaElement, 'play'),
+  };
+  const ElementOf = scope.Audio;
+  const tapsAudio = typeof AudioContextOf === 'function' && typeof StreamOf === 'function' &&
+    typeof ElementOf === 'function' &&
+    Object.values(audio).every((value) => typeof value === 'function');
+  const tapped = new WeakSet();
+  const isTapped = WeakSet.prototype.has;
+  const markTapped = WeakSet.prototype.add;
 
   const send = (id, event, data) => {
     let text;
@@ -111,6 +164,85 @@
     ]);
   };
 
+  // The RMS level of `samples` and the share of their power at TONE_HZ (a Goertzel filter at that frequency): for a
+  // tone of amplitude A over N samples the filter's power is about (A N / 2)^2 and the samples' energy A^2 N / 2, so
+  // 2 * power / (N * energy) is about 1, and it falls towards 0 as less of the signal is the tone.
+  const measure = (samples, rate) => {
+    const coefficient = 2 * cos((2 * PI * TONE_HZ) / rate);
+    let previous = 0;
+    let beforePrevious = 0;
+    let energy = 0;
+    for (let index = 0; index < samples.length; index += 1) {
+      const sample = samples[index];
+      const current = sample + coefficient * previous - beforePrevious;
+      beforePrevious = previous;
+      previous = current;
+      energy += sample * sample;
+    }
+    const power = previous * previous + beforePrevious * beforePrevious - coefficient * previous * beforePrevious;
+    const count = samples.length;
+    return {
+      __proto__: null,
+      rms: count > 0 ? sqrt(energy / count) : 0,
+      tone: energy > 0 ? (2 * power) / (count * energy) : 0,
+    };
+  };
+
+  // reads a received audio track through WebAudio (see the top), once per track, until it ends
+  const tap = (connection, id, track) => {
+    if (!tapsAudio || track === null || typeof track !== 'object' || apply(audio.kind, track, []) !== 'audio') {
+      return;
+    }
+    if (apply(isTapped, tapped, [track])) {
+      return;
+    }
+    apply(markTapped, tapped, [track]);
+    const name = apply(audio.trackId, track, []);
+    let context;
+    let analyser;
+    let element;
+    try {
+      const stream = construct(StreamOf, [[track]]);
+      element = construct(ElementOf, []);
+      apply(audio.setMuted, element, [true]);
+      apply(audio.setSource, element, [stream]);
+      apply(then, apply(audio.play, element, []), [() => {}, () => {}]);
+      context = construct(AudioContextOf, []);
+      const source = apply(audio.createSource, context, [stream]);
+      analyser = apply(audio.createAnalyser, context, []);
+      apply(audio.setWindow, analyser, [TAP_WINDOW]);
+      apply(audio.connect, source, [analyser]);
+    } catch (error) {
+      send(id, 'audio:error', toText(error && error.message));
+      return;
+    }
+    const samples = new Samples(TAP_WINDOW);
+    const rate = apply(audio.sampleRate, context, []);
+    const timer = apply(setTimer, scope, [
+      () => {
+        const state = apply(audio.contextState, context, []);
+        const ended =
+          apply(audio.readyState, track, []) === 'ended' || apply(signalingOf, connection, []) === 'closed';
+        if (ended || state === 'closed') {
+          apply(clearTimer, scope, [timer]);
+          apply(audio.setSource, element, [null]);
+          if (state !== 'closed') {
+            apply(then, apply(audio.close, context, []), [() => {}, () => {}]);
+          }
+          send(id, 'audio:ended', { __proto__: null, track: name });
+          return;
+        }
+        if (state === 'suspended') {
+          apply(then, apply(audio.resume, context, []), [() => {}, () => {}]);
+        }
+        apply(audio.read, analyser, [samples]);
+        const measured = measure(samples, rate);
+        send(id, 'audio', { __proto__: null, track: name, state, rate, rms: measured.rms, tone: measured.tone });
+      },
+      TAP_INTERVAL_MS,
+    ]);
+  };
+
   // the connection's number, noting it (and starting its listeners and stats) the first time it is seen
   const track = (connection, configuration) => {
     const known = apply(idOf, ids, [connection]);
@@ -119,6 +251,16 @@
     }
     // only a real connection takes the listeners; anything else (the prototype) throws here, before it is noted
     apply(addListener, connection, ['icecandidate', (event) => send(id, 'icecandidate', candidate(event.candidate))]);
+    apply(addListener, connection, [
+      'track',
+      (event) => {
+        try {
+          tap(connection, id, tapsAudio ? apply(audio.trackOf, event, []) : null);
+        } catch (_) {
+          // the page gets its track whatever the tap runs into
+        }
+      },
+    ]);
     connections += 1;
     const id = connections;
     apply(setId, ids, [connection, id]);

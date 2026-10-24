@@ -251,7 +251,8 @@ fn connection_key((session, request): &(Option<SessionId>, String)) -> String {
 const MAX_DELIVERY: u64 = 4 << 20;
 
 /// A Trouter delivery a socket received on `connection`, as the fence's call registry reads it: a socket.io message
-/// `3:::` whose JSON has a signed `id`, the `url` path it was delivered to, its `headers` (their `trouter-request`)
+/// `3:::` whose JSON has a signed `id`, the `url` path it was delivered to, its `headers` (their `trouter-request`,
+/// `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID`, the ones the acceptance's response echoes)
 /// and its `body`, decoded from base64 and gzip when `X-Microsoft-Skype-Content-Encoding` (any case) is `gzip`, as the
 /// call controller sends it. `None` for anything else, or a body that doesn't decode within [`MAX_DELIVERY`].
 #[must_use]
@@ -281,6 +282,8 @@ pub fn delivery_of(connection: &str, text: &str) -> Option<Delivery> {
         id: message.get("id")?.as_i64()?,
         path: message.get("url")?.as_str()?.to_owned(),
         trouter_request: header("trouter-request").map(str::to_owned),
+        chain_id: header("X-Microsoft-Skype-Chain-ID").map(str::to_owned),
+        message_id: header("X-Microsoft-Skype-Message-ID").map(str::to_owned),
         body,
     })
 }

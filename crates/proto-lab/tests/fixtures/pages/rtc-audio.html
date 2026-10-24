@@ -1,0 +1,39 @@
+<!doctype html>
+<title>rtc audio</title>
+<script>
+  // A loopback call carrying two tones, 440 Hz and 1000 Hz, each its own audio track from an oscillator of the page's
+  // own. The receiving connection's tracks are what the hooks' audio tap reads. Nothing is played: the page attaches the
+  // received tracks to nothing, and the browser's output is muted anyway.
+  const sender = new RTCPeerConnection();
+  const receiver = new RTCPeerConnection();
+  sender.onicecandidate = (event) => event.candidate && receiver.addIceCandidate(event.candidate);
+  receiver.onicecandidate = (event) => event.candidate && sender.addIceCandidate(event.candidate);
+  const sources = new AudioContext();
+  for (const frequency of [440, 1000]) {
+    const oscillator = new OscillatorNode(sources, { frequency });
+    const gain = new GainNode(sources, { gain: 0.5 });
+    const out = sources.createMediaStreamDestination();
+    oscillator.connect(gain).connect(out);
+    oscillator.start();
+    const [track] = out.stream.getAudioTracks();
+    sender.addTrack(track, out.stream);
+  }
+  window.outcome = (async () => {
+    await sender.setLocalDescription();
+    await receiver.setRemoteDescription(sender.localDescription);
+    await receiver.setLocalDescription();
+    await sender.setRemoteDescription(receiver.localDescription);
+    return 'negotiated';
+  })().then((outcome) => outcome, (error) => 'error ' + error);
+  // the received track of each tone, by the order the tones were added (mids 0 and 1)
+  window.receivedTracks = () => {
+    const byMid = Object.fromEntries(receiver.getTransceivers().map((each) => [each.mid, each.receiver.track.id]));
+    return JSON.stringify({ 440: byMid['0'], 1000: byMid['1'] });
+  };
+  window.closeAll = () => {
+    sender.close();
+    receiver.close();
+    sources.close();
+    return 'closed';
+  };
+</script>

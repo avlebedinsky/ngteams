@@ -1,0 +1,27 @@
+<!doctype html>
+<title>rtc mic</title>
+<script>
+  // A loopback call carrying the fake microphone, opened as a call page opens it (the browser's default processing:
+  // echo cancellation, noise suppression, gain control). The receiving connection's track is what the hooks' audio tap
+  // reads; nothing is played.
+  const sender = new RTCPeerConnection();
+  const receiver = new RTCPeerConnection();
+  sender.onicecandidate = (event) => event.candidate && receiver.addIceCandidate(event.candidate);
+  receiver.onicecandidate = (event) => event.candidate && sender.addIceCandidate(event.candidate);
+  window.outcome = (async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const [track] = stream.getAudioTracks();
+    sender.addTrack(track, stream);
+    await sender.setLocalDescription();
+    await receiver.setRemoteDescription(sender.localDescription);
+    await receiver.setLocalDescription();
+    await sender.setRemoteDescription(receiver.localDescription);
+    return 'negotiated';
+  })().then((outcome) => outcome, (error) => 'error ' + error);
+  window.receivedTrack = () => receiver.getReceivers()[0].track.id;
+  window.closeAll = () => {
+    sender.close();
+    receiver.close();
+    return 'closed';
+  };
+</script>

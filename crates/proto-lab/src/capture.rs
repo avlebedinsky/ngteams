@@ -28,8 +28,10 @@
 //! - `rtc`: what the WebRTC hooks reported, `payload` as the page sent it: `pc` (the connection's number in its
 //!   context), `event` (`create` with the configuration, `createOffer`, `createAnswer`, `setLocalDescription`,
 //!   `setRemoteDescription` with the description, `addIceCandidate` and `icecandidate` with the candidate, the state
-//!   changes, `stats` with every `getStats()` entry, `close`, and `<method>:error`), `ts` and `data`; `context` is the
-//!   execution context.
+//!   changes, `stats` with every `getStats()` entry, `close`, and `<method>:error`; and from the audio tap on every
+//!   received audio track, `audio` every [`TAP_INTERVAL`] with the `track` id, the tap's context `state`, its sample
+//!   `rate`, the `rms` level of the newest [`TAP_WINDOW`] samples and `tone`, the share of their power at
+//!   [`TAP_TONE_HZ`], then `audio:ended`, or `audio:error`), `ts` and `data`; `context` is the execution context.
 //! - `arming_failure`: a target the fence couldn't arm, as `fence.log` records it (`target_type`, `step`, `cause`,
 //!   `resume_sent`, `held`, `close`, `containment` and `verdict` `breach` or `contained`), plus its `session`,
 //!   `target_id` and `error`.
@@ -63,6 +65,16 @@ pub const RTC_BINDING: &str = "__labCaptureRtc";
 /// How often the hooks take a connection's `getStats()` unless told otherwise.
 pub const DEFAULT_STATS_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The frequency whose share of the received audio the hooks' audio tap measures: the fake microphone's tone
+/// (`echo-call`'s `TONE_HZ`).
+pub const TAP_TONE_HZ: u32 = 440;
+
+/// How often the audio tap measures a received audio track.
+pub const TAP_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How many of a track's newest samples each measurement reads (the analyser's window: about 170 ms at 48 kHz).
+pub const TAP_WINDOW: u32 = 8192;
+
 /// The largest response body fetched, in bytes as sent (CDP's `encodedDataLength`, a float).
 pub const MAX_BODY: f64 = 8_388_608.0;
 
@@ -93,7 +105,10 @@ impl RtcHooks {
         Self {
             source: HOOKS_TEMPLATE
                 .replace("{{BINDING}}", RTC_BINDING)
-                .replace("{{STATS_INTERVAL_MS}}", &interval.to_string()),
+                .replace("{{STATS_INTERVAL_MS}}", &interval.to_string())
+                .replace("{{TAP_INTERVAL_MS}}", &TAP_INTERVAL.as_millis().to_string())
+                .replace("{{TAP_WINDOW}}", &TAP_WINDOW.to_string())
+                .replace("{{TONE_HZ}}", &TAP_TONE_HZ.to_string()),
         }
     }
 

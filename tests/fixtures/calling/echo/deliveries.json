@@ -1,0 +1,206 @@
+{
+  "_synthetic": "Made up, shaped like the echo-call capture of 2026-10-24 (M3 Task 4, read locally from its sanitized reference copy; docs/protocol/calling-echo.md, 'What the M3 run added'): the call's deliveries over the calling stack's Trouter socket that the M0 capture lacked, each at a callback the start handed out (`callback`: its token and kind under the start's call agent). A conversation update and the roster updates bind nothing in the fence's call registry; the call's end ends the call. Bodies keep the captured keys the notes describe (the conversation update is an excerpt); every value is made up.",
+  "cases": [
+    {
+      "name": "the conversation update naming the call's 1:1 chat with the echo bot",
+      "callback": "06060606/conversation/conversationUpdate/",
+      "observed": "nothing",
+      "body": {
+        "conversationController": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0",
+        "sequenceNumber": 4,
+        "subject": "",
+        "activeModalities": {
+          "call": {
+            "links": {
+              "participants": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/callHub/SyntheticCall0/1/k1/3/participantLegs?i=0-0-0-0&e=1"
+            }
+          },
+          "groupChat": {"threadId": "19:<guid:a>_<guid:echo>@unq.gbl.spaces", "messageId": "0"},
+          "lobby": null,
+          "realTimeActivityFeed": {"links": {}}
+        },
+        "state": {
+          "isMultiParty": true,
+          "groupCallInitiator": "8:orgid:<guid:a>",
+          "isHostless": true,
+          "conversationType": "adHocMeeting",
+          "isBroadcast": false,
+          "isMeetingActivated": true
+        },
+        "links": {
+          "leave": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/leave?i=0-0-0-0&e=1",
+          "addParticipantAndModality": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/add?i=0-0-0-0&e=1",
+          "updateEndpointMetadata": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/updateEndpointMetadata?i=0-0-0-0&e=1",
+          "conversationHttpTransport": "http://203.0.113.10/enc"
+        },
+        "scenario": "UserInitiatedTestCall"
+      }
+    },
+    {
+      "name": "the echo service joins: a roster update adding its participant",
+      "callback": "07070707/conversation/rosterUpdate/",
+      "observed": "nothing",
+      "body": {
+        "participants": {
+          "28:<guid:echo>": {
+            "version": 4,
+            "state": "active",
+            "advancedMeetingRole": "presenter",
+            "details": {
+              "id": "28:<guid:echo>",
+              "displayName": null,
+              "displayNameSource": "unknown",
+              "propertyBag": null,
+              "resourceId": null,
+              "participantType": "none",
+              "endpointId": "SyntheticEndpointEcho",
+              "participantId": null,
+              "languageId": null,
+              "hidden": false
+            },
+            "endpoints": {
+              "SyntheticEndpointEcho": {
+                "call": {
+                  "mediaStreams": [
+                    {
+                      "type": "audio",
+                      "label": "main-audio",
+                      "sourceId": 400,
+                      "direction": "sendrecv",
+                      "serverMuted": false,
+                      "notInDefaultRoutingGroup": false,
+                      "subTypes": []
+                    }
+                  ],
+                  "serverMuteVersion": 1,
+                  "appliedInteractivityLevel": "interactive"
+                },
+                "endpointCapabilities": 67,
+                "clientEndpointCapabilities": 2097152,
+                "participantId": "synthetic-participant-echo",
+                "clientVersion": "SyntheticClient/1.0",
+                "callLinks": {
+                  "replacement": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/callParticipant/SyntheticCall0/2/k2/1/replacement?i=0-0-0-0&e=1"
+                },
+                "endpointJoinTime": "2026-01-01T00:00:00.0000000Z",
+                "modalityJoined": "Call",
+                "endpointMeetingRoles": ["presenter"]
+              }
+            },
+            "role": "admin",
+            "meetingRole": "presenter",
+            "meetingRoles": ["presenter"],
+            "enforceConsentToJoin": false
+          }
+        },
+        "type": "Delta",
+        "sequenceNumber": 4,
+        "participantCounts": {
+          "totalParticipants": 2,
+          "preheatedParticipants": 0,
+          "lobbyParticipants": 0,
+          "totalPresenters": 2,
+          "requestingAttentionPresenters": 0,
+          "totalAttendees": 0,
+          "requestingAttentionAttendees": 0,
+          "overflowAttendeeCount": 0,
+          "totalInterpreters": 0,
+          "requestingAttentionInterpreters": 0,
+          "streamingClients": 0,
+          "totalOrganizers": 1
+        }
+      }
+    },
+    {
+      "name": "the add of the echo bot succeeded",
+      "callback": "08080808/conversation/addParticipantSuccess/",
+      "observed": "nothing",
+      "body": {
+        "participants": ["28:<guid:echo>"],
+        "participantInfos": [
+          {
+            "id": "28:<guid:echo>",
+            "displayName": null,
+            "propertyBag": null,
+            "resourceId": null,
+            "endpointId": "SyntheticEndpointEcho",
+            "participantId": "synthetic-participant-echo",
+            "languageId": null,
+            "hidden": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "the echo service leaves (it heard only silence): a roster update with its participant inactive",
+      "callback": "07070707/conversation/rosterUpdate/",
+      "observed": "nothing",
+      "body": {
+        "participants": {
+          "28:<guid:echo>": {
+            "version": 5,
+            "state": "inactive",
+            "advancedMeetingRole": "presenter",
+            "details": {
+              "id": "28:<guid:echo>",
+              "displayName": null,
+              "displayNameSource": "unknown",
+              "propertyBag": null,
+              "resourceId": null,
+              "participantType": "none",
+              "endpointId": "SyntheticEndpointEcho",
+              "participantId": null,
+              "languageId": null,
+              "hidden": false
+            },
+            "endpoints": {},
+            "role": "admin",
+            "meetingRole": "presenter",
+            "meetingRoles": ["presenter"],
+            "enforceConsentToJoin": false
+          }
+        },
+        "type": "Delta",
+        "sequenceNumber": 5,
+        "participantCounts": {
+          "totalParticipants": 1,
+          "preheatedParticipants": 0,
+          "lobbyParticipants": 0,
+          "totalPresenters": 1,
+          "requestingAttentionPresenters": 0,
+          "totalAttendees": 0,
+          "requestingAttentionAttendees": 0,
+          "overflowAttendeeCount": 0,
+          "totalInterpreters": 0,
+          "requestingAttentionInterpreters": 0,
+          "streamingClients": 0,
+          "totalOrganizers": 1
+        }
+      }
+    },
+    {
+      "name": "the call's end after the caller's leave, at the start's own end callback",
+      "callback": "04040404/call/end/",
+      "observed": "ended",
+      "body": {
+        "callEnd": {
+          "code": 0,
+          "subCode": 0,
+          "phrase": "CallEndReasonLocalUserInitiated",
+          "reason": "noError",
+          "resultCategories": ["Success"],
+          "sender": {
+            "id": "8:orgid:<guid:a>",
+            "displayName": "Lab A",
+            "endpointId": "SyntheticEndpoint00000",
+            "participantId": "synthetic-participant-a",
+            "languageId": null,
+            "hidden": false,
+            "propertyBag": null
+          }
+        },
+        "debugContent": null
+      }
+    }
+  ]
+}

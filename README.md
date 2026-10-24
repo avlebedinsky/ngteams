@@ -237,9 +237,16 @@ chat other than its forced denies, one for a partial or refused membership, or a
   440 Hz tone. The run's classifier knows the echo service's MRI (`Classifier::with_test_call_callee`): what sets up
   the account's own endpoint reaches nobody and passes, and the call start maps only in exactly its captured shape, a
   new call of a and the echo (`teams_fence::contacting`'s calling row, `docs/protocol/calling-echo.md`), which
-  `Fence::check` permits. Every write on the started call is still denied (no authoritative call-membership read: `docs/backlog/fence-call-follow-ups.md`), so the echo never
-  joins and the run exits 1: it is judged by the same expected-deny list, and the call's follow-ups are needed, so
-  they are not on it. An incoming call is never answered.
+  `Fence::check` permits and registers; the call's follow-ups (the echo's `add`, the endpoint metadata, the channel
+  parameters, the acceptance's acknowledgement over Trouter, `leave`) pass only on that registered call. The run turns
+  the call's noise suppression off (it takes the tone for noise), waits until the hooks' audio tap reads the tone
+  coming back in the page, hangs up, and exits 0 only when the start, the `add`, the acknowledgement and the `leave`
+  were permitted, the statistics show audio both ways and the tone came back, with no deny off the expected-deny
+  list. An incoming call is never answered.
+
+Every lab browser runs with its output muted and Chrome's fake audio manager (`--mute-audio`,
+`--disable-audio-output`): nothing is played aloud and the desktop's audio server is never opened; a call scenario's
+browser also lets audio start without a click, and reads what it receives in the page.
 
 Live runs go one at a time under the live lock, with an outer bound, from a normal build:
 `flock ~/.local/share/teams-lab/live.lock timeout --signal=INT --kill-after=60 900 target/lab/debug/proto-lab run

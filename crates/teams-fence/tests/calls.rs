@@ -31,6 +31,9 @@ const CONVERSATION_END_PATH: &str =
     "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/05050505/conversation/conversationEnd/";
 const CONNECTION: &str = "session-1/socket-1";
 const TROUTER_REQUEST: &str = r#"{"id":"request-1","port":3443,"src":"198.51.100.7"}"#;
+/// The acceptance delivery's chain and message ids, which its response echoes.
+const CHAIN_ID: &str = "00000000-0000-4000-8000-00000000c4a1";
+const MESSAGE_ID: &str = "00000000-0000-4000-8000-00000000e55a";
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -131,6 +134,8 @@ fn delivery(id: i64, path: &str, body: Vec<u8>) -> Delivery {
         id,
         path: path.to_owned(),
         trouter_request: Some(TROUTER_REQUEST.to_owned()),
+        chain_id: Some(CHAIN_ID.to_owned()),
+        message_id: Some(MESSAGE_ID.to_owned()),
         body,
     }
 }
@@ -801,6 +806,64 @@ async fn after_its_leave_only_the_leave_passes_and_after_its_end_nothing() -> Te
     Ok(())
 }
 
+/// The M3 echo call's deliveries (`tests/fixtures/calling/echo/deliveries.json`), their placeholders filled with this
+/// file's lab account and echo service.
+const ECHO_DELIVERIES: &str = include_str!("../../../tests/fixtures/calling/echo/deliveries.json");
+
+fn echo_deliveries() -> TestResult<Vec<Value>> {
+    let filled = ECHO_DELIVERIES
+        .replace("<guid:a>", LAB_A.trim_start_matches("8:orgid:"))
+        .replace("<guid:echo>", ECHO.trim_start_matches("28:"));
+    let fixture: Value = serde_json::from_str(&filled)?;
+    Ok(fixture["cases"].as_array().ok_or("no cases")?.clone())
+}
+
+#[tokio::test]
+async fn the_echo_call_s_updates_bind_nothing_and_its_end_after_the_leave_ends_it() -> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    lab.fence
+        .observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("call-1")));
+    let metadata = write(
+        CallOperation::UpdateEndpointMetadata,
+        &op_url(CallOperation::UpdateEndpointMetadata, "conv-1"),
+        &[],
+    )?;
+    let leave = write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?;
+    let cases = echo_deliveries()?;
+    assert_eq!(cases.len(), 5);
+    for (id, case) in (2..).zip(&cases) {
+        let name = case["name"].as_str().unwrap_or_default();
+        let path = format!(
+            "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/{}",
+            case["callback"].as_str().unwrap_or_default()
+        );
+        let body = case["body"].to_string().into_bytes();
+        if case["observed"] == "ended" {
+            // the client leaves first; the call's end follows
+            assert_eq!(verdict(&lab.fence, leave.clone()).await, Ok(()), "{name}");
+            assert_eq!(
+                lab.fence.observe_delivery(&delivery(id, &path, body)),
+                Observed::Ended,
+                "{name}"
+            );
+            assert_eq!(verdict(&lab.fence, leave.clone()).await, Err(ENDED), "{name}");
+        } else {
+            assert_eq!(
+                lab.fence.observe_delivery(&delivery(id, &path, body)),
+                Observed::Nothing,
+                "{name}"
+            );
+            assert_eq!(
+                verdict(&lab.fence, metadata.clone()).await,
+                Ok(()),
+                "{name}: the call stays live"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_conversation_s_end_ends_a_live_call() -> TestResult {
     let lab = new_lab()?;
@@ -831,7 +894,13 @@ fn response(id: i64, trouter_request: &str, callbacks: &str) -> Vec<u8> {
     json!({
         "id": id,
         "status": 200,
-        "headers": {"MS-CV": "SyntheticCv.1.0", "trouter-request": trouter_request, "trouter-client": "{\"cd\":2}"},
+        "headers": {
+            "X-Microsoft-Skype-Chain-ID": CHAIN_ID,
+            "X-Microsoft-Skype-Message-ID": MESSAGE_ID,
+            "MS-CV": "SyntheticCv.1.0",
+            "trouter-request": trouter_request,
+            "trouter-client": "{\"cd\":2}",
+        },
         "body": acknowledgement.to_string(),
     })
     .to_string()
@@ -877,7 +946,16 @@ async fn the_acceptance_s_acknowledgement_answers_its_delivery_once() -> TestRes
 async fn a_response_off_the_captured_acknowledgement_is_denied_and_used_up() -> TestResult {
     let lab = new_lab()?;
     registered(&lab.fence, "conv-1").await?;
-    let empty = json!({"id": 5, "status": 200, "headers": {"MS-CV": "a", "trouter-request": TROUTER_REQUEST, "trouter-client": "b"}, "body": ""});
+    let mut empty: Value = serde_json::from_slice(&response(5, TROUTER_REQUEST, CALLBACKS))?;
+    empty["body"] = json!("");
+    let empty = empty.to_string();
+    // without the chain and message ids it echoes (the form no capture showed)
+    let unechoed = String::from_utf8(response(8, TROUTER_REQUEST, CALLBACKS))?
+        .replace(&format!(r#""X-Microsoft-Skype-Chain-ID":"{CHAIN_ID}","#), "")
+        .replace(&format!(r#""X-Microsoft-Skype-Message-ID":"{MESSAGE_ID}","#), "");
+    let other_chain = String::from_utf8(response(9, TROUTER_REQUEST, CALLBACKS))?.replace(CHAIN_ID, "another-chain");
+    let other_message =
+        String::from_utf8(response(10, TROUTER_REQUEST, CALLBACKS))?.replace(MESSAGE_ID, "another-message");
     let failing =
         String::from_utf8(response(6, TROUTER_REQUEST, CALLBACKS))?.replace(r#""status":200"#, r#""status":500"#);
     let extra_header =
@@ -892,7 +970,10 @@ async fn a_response_off_the_captured_acknowledgement_is_denied_and_used_up() -> 
         ),
         (2, response(2, TROUTER_REQUEST, &other_agent), DeliveryDenyReason::Shape),
         (3, response(3, TROUTER_REQUEST, &other_host), DeliveryDenyReason::Shape),
-        (5, empty.to_string().into_bytes(), DeliveryDenyReason::Shape),
+        (5, empty.into_bytes(), DeliveryDenyReason::Shape),
+        (8, unechoed.into_bytes(), DeliveryDenyReason::Shape),
+        (9, other_chain.into_bytes(), DeliveryDenyReason::Uncorrelated),
+        (10, other_message.into_bytes(), DeliveryDenyReason::Uncorrelated),
         (6, failing.into_bytes(), DeliveryDenyReason::Shape),
         (7, extra_header.into_bytes(), DeliveryDenyReason::Shape),
     ] {

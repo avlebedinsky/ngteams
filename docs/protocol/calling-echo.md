@@ -1,6 +1,7 @@
 # Calling: the web client's test call to the echo service
 
-Status: 2026-10-20, M0 Task 18 (spike 3b, part 1). Written from live runs of `proto-lab run echo-call --headless`
+Status: 2026-10-20, M0 Task 18 (spike 3b, part 1), and 2026-10-24, M3 Task 4 (the call completed under the call
+registry: [What the M3 run added](#what-the-m3-run-added)). Written from live runs of `proto-lab run echo-call --headless`
 (account a, Chrome for Testing 155 headless, a fake microphone playing a 440 Hz WAV tone, the fence armed with what
 were then its calling classifiers), from the web client's own diagnostic log of one of those runs (Ctrl+Alt+Shift+1, read locally),
 and from the web bundle `26260.1717.5229.7049`. The captures stay outside the repository; the fixtures in
@@ -17,6 +18,10 @@ fence's call registry resolves to exactly a link of a call it permitted (M3 Task
 (`crates/proto-lab/src/arming.rs`).
 
 ## Outcome
+
+Since M3 Task 4 the call completes: the fence permits the start, registers the call, and lets its follow-ups through
+on it; the echo joins, records and plays the tone back, and the page's audio tap reads it
+([What the M3 run added](#what-the-m3-run-added)). The M0 state:
 
 - The fence allowed the call start: a new call of a and the echo service, both in `lab.toml`.
 - The call reached Teams' media controller: ICE and DTLS connected over UDP (a server-reflexive candidate of ours paired
@@ -72,7 +77,8 @@ fence of the time, which allowed each as the account's own state in its captured
   acknowledges (and which it might answer: an incoming call's) isn't established (Codex and Claude, 2026-10-20). The
   service redelivers; the calls still reached the media controller without them. The one exception: the
   acceptance's acknowledgement for a call the fence registered passes once, on its own connection
-  ([fence-targets.md](fence-targets.md#the-call-registry)); every other response stays denied.
+  ([fence-targets.md](fence-targets.md#the-call-registry)); every other response stays denied. That response also
+  echoes the delivery's `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID` (five headers in all).
 - **Endpoint registration.** `POST <teams>/registrar/prod/V2/registrations` with `clientDescription` (`appId`,
   `templateKey`, …), a `registrationId` and `transports.TROUTER: [{"context":"","path":"<push url>","ttl":3600}]`;
   `202`. The messaging stack registers as `TeamsCDLWebWorker`; the calling stack opens a second Trouter socket and
@@ -180,6 +186,45 @@ telephone-event for audio (`a=ptime:20`, `transport-cc`, `abs-send-time` and tra
 the wire (WebRTC statistics) the audio codec in use was Opus 111 `usedtx=1`; the selected pair was our UDP
 server-reflexive candidate to the controller's relay candidate.
 
+## What the M3 run added
+
+From live runs of 2026-10-24 (M3 Task 4: `proto-lab run echo-call --headless`, account a, Chrome for Testing 155
+muted with its fake audio manager, the call registry of
+[fence-targets.md](fence-targets.md#the-call-registry)); the shapes are in
+`tests/fixtures/calling/echo/deliveries.json`, synthetic.
+
+- **The client's noise suppression removes the tone.** With it on (the default) the sent track's level stayed at about
+  -84 dBFS for the whole call, in the M0 runs too, while the same fake microphone in a plain page sends the tone
+  through Chrome's own processing. The echo then records silence, says so, and leaves (its roster entry turns
+  `inactive` about 10 s after it joined), and the client leaves the call by itself. The call screen's audio options
+  (`#audio-button-configure`) hold a "Noise suppression" switch (`data-tid="background-suppression-switch"`); the
+  scenario turns it off as soon as the call screen shows, and then the tone goes out and comes back. The Devices page
+  of Settings has no such switch in the web client.
+- **The acceptance is acknowledged once, one way.** The page answers the acceptance delivery with its delivery
+  response (the `callAcceptanceAcknowledgement` in the body); only when that response fails does it send
+  `POST …/callAcceptance/<call>/…/acknowledge`. With the response let through no `acknowledge` request goes.
+- **The echo joining.** After the `add` the conversation sends `addParticipantSuccess` (the bot's MRI in `participants`
+  and `participantInfos`) and a `rosterUpdate`: `type: "Delta"`, a `sequenceNumber` counting from 1 per conversation,
+  `participantCounts` (`totalParticipants` 2 with the bot), and per participant MRI its `version`, `state` (`active`,
+  later `inactive`), `details` (`participantType` `inTenant` for the account, `none` for the bot, no display name for
+  the bot), `endpoints` (per endpoint its `call.mediaStreams`: the bot only `audio` `sendrecv`, the account `audio`,
+  `video` and a receive-only stream; `callLinks.replacement`; `modalityJoined: "Call"`) and its meeting roles. The
+  first roster updates list only the caller.
+- **The conversation update.** `conversationUpdate` repeats the conversation (its controller, `links`, `state`:
+  `conversationType` `adHocMeeting`, `groupCallInitiator` the caller, `scenario`) and its `activeModalities`: `call`
+  with a `participants` link on the call controller's `callHub/<call id>`, and, from the update after the `add`, a
+  `groupChat` with the 1:1 chat with the bot as `threadId`. That is a delivered binding of the call to its chat; the
+  registry binds nothing from it yet (joining is Task 6's).
+- **No renegotiation.** The bot joins through the conversation, and no `mediaRenegotiation` was delivered in any run;
+  the acknowledgement only hands its link out.
+- **The end.** On hanging up the page sends `leave` (`CallEndReasonLocalUserInitiated`) and the call controller then
+  delivers `call/end` at the start's own end callback: `callEnd` with `code` 0, `phrase`, `reason: "noError"`,
+  `resultCategories`, and the `sender` (the caller's participant). No `conversationEnd` came.
+- **Redeliveries.** Every delivery whose response stays denied (the conversation and roster updates, `call/end`) is
+  delivered again about 13 s later (`Trouter-Timeout`); the redeliveries carry the same bodies.
+- **Timing.** The tone came back about 32 s after the call screen showed (the echo greets, beeps, records, beeps and
+  plays the recording back), on one run.
+
 ## Open
 
 1. **Fencing a call's follow-ups.** Settled in M3 Task 3 by the call registry, not by a membership read
@@ -200,7 +245,7 @@ server-reflexive candidate to the controller's relay candidate.
    caller, and it can't serve as the call's membership. The fence denied the follow-ups as partial. Also seen: the
    call controller's call id (`callAcceptance/<id>`, `mcProxy/<id>`) is tied to the conversation only in a delivered
    `conversationUpdate` (`activeModalities.call.links.participants`, `…/cc/v1/callHub/<same id>/…/participantLegs`).
-2. **Whether the echo answers.** With `add` allowed the echo service should join, record and play back; its timing
-   (spike 3b question 6) is still unseen.
+2. **Whether the echo answers.** Settled in M3 Task 4: with `add` allowed it joins, records and plays back
+   ([What the M3 run added](#what-the-m3-run-added)), once the client's noise suppression is off.
 3. **Headless Chrome.** The runs set a normal Chrome `User-Agent`; whether `HeadlessChrome` alone would keep the
    calling stack off wasn't isolated.

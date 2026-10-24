@@ -31,6 +31,9 @@ const ACCEPTANCE_PATH: &str = "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/03
 const TROUTER: &str =
     "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c?tc=%7B%7D&epid=00000000-0000-4000-8000-000000000001";
 const TROUTER_REQUEST: &str = r#"{"id":"request-1","port":3443,"src":"198.51.100.7"}"#;
+/// The acceptance delivery's chain and message ids, which its response echoes.
+const CHAIN_ID: &str = "00000000-0000-4000-8000-00000000c4a1";
+const MESSAGE_ID: &str = "00000000-0000-4000-8000-00000000e55a";
 
 struct Nobody;
 
@@ -121,7 +124,12 @@ fn acceptance_frame(id: i64) -> TestResult<String> {
         "id": id,
         "method": "POST",
         "url": ACCEPTANCE_PATH,
-        "headers": {"X-Microsoft-Skype-Content-Encoding": "gzip", "trouter-request": TROUTER_REQUEST},
+        "headers": {
+            "X-Microsoft-Skype-Content-Encoding": "gzip",
+            "X-Microsoft-Skype-Chain-ID": CHAIN_ID,
+            "X-Microsoft-Skype-Message-ID": MESSAGE_ID,
+            "trouter-request": TROUTER_REQUEST,
+        },
         "body": gzip_base64(&acceptance_body())?,
     });
     Ok(format!("3:::{message}"))
@@ -134,7 +142,13 @@ fn response_frame(id: i64) -> String {
     let message = json!({
         "id": id,
         "status": 200,
-        "headers": {"MS-CV": "SyntheticCv.1.0", "trouter-request": TROUTER_REQUEST, "trouter-client": "{\"cd\":2}"},
+        "headers": {
+            "X-Microsoft-Skype-Chain-ID": CHAIN_ID,
+            "X-Microsoft-Skype-Message-ID": MESSAGE_ID,
+            "MS-CV": "SyntheticCv.1.0",
+            "trouter-request": TROUTER_REQUEST,
+            "trouter-client": "{\"cd\":2}",
+        },
         "body": body.to_string(),
     });
     format!("3:::{message}")

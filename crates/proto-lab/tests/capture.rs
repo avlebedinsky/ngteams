@@ -1,7 +1,7 @@
 //! The capture recorder: where captures go and how entries are written (offline), the WebRTC hooks' place in the
 //! arming, and, with Chrome installed, a recorded run under the armed fence on local pages and a local echo server (its
 //! `Network` events, response bodies, frames and the fence's verdicts), and the WebRTC hooks on a loopback call between
-//! two `RTCPeerConnection`s in one page.
+//! two `RTCPeerConnection`s in one page, their audio tap reading the tones such a call receives.
 //!
 //! The Chrome tests run headless on throwaway user-data-dirs against local servers; see `common` for how Chrome is
 //! found.
@@ -18,12 +18,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures_util::{SinkExt as _, StreamExt as _};
 use page::evaluate;
 use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TargetKind};
-use proto_lab::browser::{Browser, LaunchOptions};
-use proto_lab::capture::{Capture, CaptureError, EVENTS_FILE, RTC_BINDING, Recorder, RtcHooks, capture_dir_name};
+use proto_lab::browser::{Browser, LaunchOptions, Media};
+use proto_lab::capture::{
+    Capture, CaptureError, EVENTS_FILE, RTC_BINDING, Recorder, RtcHooks, TAP_INTERVAL, TAP_TONE_HZ, TAP_WINDOW,
+    capture_dir_name,
+};
 use proto_lab::cdp::{Cdp, SessionId};
 use proto_lab::classify::Classifier;
 use proto_lab::fence_http::{ForcedDeny, HttpFence};
 use proto_lab::fence_ws::{ForcedFrameDeny, GuardScript, WsFence};
+use proto_lab::scenario::echo_call::tone_wav;
 use serde_json::{Value, json};
 use teams_fence::{FailClosed, Fence, FenceLog, Roster};
 use tokio_tungstenite::tungstenite::Message;
@@ -116,6 +120,13 @@ fn the_hooks_render_with_their_binding_and_interval() {
     let hooks = RtcHooks::new(Duration::from_millis(250));
     assert!(hooks.source().contains(&format!("'{RTC_BINDING}'")));
     assert!(hooks.source().contains("STATS_INTERVAL_MS = 250;"));
+    assert!(
+        hooks
+            .source()
+            .contains(&format!("TAP_INTERVAL_MS = {};", TAP_INTERVAL.as_millis()))
+    );
+    assert!(hooks.source().contains(&format!("TAP_WINDOW = {TAP_WINDOW};")));
+    assert!(hooks.source().contains(&format!("TONE_HZ = {TAP_TONE_HZ};")));
     assert!(!hooks.source().contains("{{"), "every placeholder filled");
     assert!(RtcHooks::default().source().contains("STATS_INTERVAL_MS = 1000;"));
 }
@@ -146,10 +157,16 @@ fn pages_and_iframes_get_the_hooks_after_the_guard_and_before_they_run() {
 
 // --- live runs ---
 
-const PAGES: [(&str, &str, &str); 5] = [
+const PAGES: [(&str, &str, &str); 7] = [
     ("blank.html", include_str!("fixtures/pages/blank.html"), "text/html"),
     ("capture.html", include_str!("fixtures/pages/capture.html"), "text/html"),
     ("rtc.html", include_str!("fixtures/pages/rtc.html"), "text/html"),
+    (
+        "rtc-audio.html",
+        include_str!("fixtures/pages/rtc-audio.html"),
+        "text/html",
+    ),
+    ("rtc-mic.html", include_str!("fixtures/pages/rtc-mic.html"), "text/html"),
     ("data.json", r#"{"hello":"lab"}"#, "application/json"),
     ("favicon.ico", "", "image/x-icon"),
 ];
@@ -235,10 +252,13 @@ struct Run {
 }
 
 /// How a recorded run records: the WebRTC hooks' stats interval, and whether request bodies are kept.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Recording {
     stats: Duration,
     request_bodies: bool,
+    /// The browser's media: with fake devices it is the browser a call scenario runs (audio allowed to start without a
+    /// click), the microphone playing the file it names.
+    media: Media,
 }
 
 impl Recording {
@@ -246,6 +266,7 @@ impl Recording {
         Self {
             stats,
             request_bodies: true,
+            media: Media::System,
         }
     }
 }
@@ -255,7 +276,9 @@ async fn start_run(pages: &MockServer, echo: Option<&str>, recording: Recording)
         return Ok(None);
     };
     let dirs = tempfile::tempdir()?;
-    let browser = Browser::launch(&chrome, &LaunchOptions::new(dirs.path().join("profile")), STEP).await?;
+    let mut launch = LaunchOptions::new(dirs.path().join("profile"));
+    launch.media = recording.media.clone();
+    let browser = Browser::launch(&chrome, &launch, STEP).await?;
     let fence = Arc::new(Fence::new(
         Roster::new([], []),
         FenceLog::open(&dirs.path().join("fence.log"))?,
@@ -392,6 +415,7 @@ async fn a_capture_without_request_bodies_keeps_the_requests_and_none_of_their_b
     let recording = Recording {
         stats: Duration::from_secs(1),
         request_bodies: false,
+        media: Media::System,
     };
     with_run(&pages, None, recording, async |run| {
         let cdp = run.armed.cdp();
@@ -666,4 +690,116 @@ fn sdp_candidate(candidate: &Value) -> bool {
     candidate["candidate"]
         .as_str()
         .is_some_and(|line| line.starts_with("candidate:"))
+}
+
+/// The audio tap's measurements of received track `track`: (`rms`, `tone`).
+fn tap_readings(entries: &[Value], track: &str) -> Vec<(f64, f64)> {
+    rtc_reports(entries)
+        .into_iter()
+        .filter(|(_, event, data)| event == "audio" && data["track"] == track)
+        .map(|(_, _, data)| {
+            (
+                data["rms"].as_f64().unwrap_or(0.0),
+                data["tone"].as_f64().unwrap_or(0.0),
+            )
+        })
+        .collect()
+}
+
+/// Whether the last `count` readings of `track` all hold `wanted`.
+fn steady(entries: &[Value], track: &str, count: usize, wanted: impl Fn(f64, f64) -> bool) -> bool {
+    let readings = tap_readings(entries, track);
+    readings.len() >= count
+        && readings[readings.len() - count..]
+            .iter()
+            .all(|(rms, tone)| wanted(*rms, *tone))
+}
+
+/// How many of `tracks` the tap has reported ended.
+fn ended_taps(entries: &[Value], tracks: &[&str]) -> usize {
+    rtc_reports(entries)
+        .into_iter()
+        .filter(|(_, event, data)| event == "audio:ended" && tracks.iter().any(|track| data["track"] == *track))
+        .count()
+}
+
+#[tokio::test]
+async fn the_audio_tap_reads_each_received_tone_in_the_page() {
+    let pages = serve_pages().await;
+    let recording = Recording {
+        stats: Duration::from_millis(500),
+        request_bodies: true,
+        media: Media::Fake { audio: None },
+    };
+    with_run(&pages, None, recording, async |run| {
+        let cdp = run.armed.cdp();
+        navigate(cdp, &run.page, &format!("{}/pages/rtc-audio.html", pages.uri())).await?;
+        assert_eq!(
+            evaluate_until(cdp, &run.page.session, "window.outcome || null").await?,
+            "negotiated"
+        );
+        let tracks: Value = serde_json::from_str(
+            evaluate_until(cdp, &run.page.session, "window.receivedTracks()")
+                .await?
+                .as_str()
+                .ok_or("no received tracks")?,
+        )?;
+        let tone = tracks["440"].as_str().ok_or("no 440 Hz track")?.to_owned();
+        let other = tracks["1000"].as_str().ok_or("no 1000 Hz track")?.to_owned();
+        let file = run.recorder.events_file();
+        // the 440 Hz track is nearly all tone, the 1000 Hz one nearly none of it, both clearly audible
+        let entries = entries_until(&file, |entries| {
+            steady(entries, &tone, 3, |rms, share| rms > 0.1 && share > 0.9)
+                && steady(entries, &other, 3, |rms, share| rms > 0.1 && share < 0.05)
+        })
+        .await?;
+        for entry in of_type(&entries, "rtc").filter(|entry| entry["payload"]["event"] == "audio") {
+            let data = &entry["payload"]["data"];
+            assert_eq!(entry["session"], run.page.session.as_str());
+            assert!(data["rate"].as_f64().is_some_and(|rate| rate >= 8_000.0), "{data}");
+            assert!(data["state"].is_string(), "{data}");
+        }
+        assert!(
+            rtc_reports(&entries).iter().all(|(_, event, _)| event != "audio:error"),
+            "the tap ran into nothing"
+        );
+        assert_eq!(evaluate(cdp, &run.page.session, "closeAll()").await?, "closed");
+        // a closed connection ends its tracks, and the tap stops with them
+        entries_until(&file, |entries| ended_taps(entries, &[&tone, &other]) == 2).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_call_scenario_s_fake_microphone_sends_its_tone_file() {
+    let pages = serve_pages().await;
+    let media = tempfile::tempdir().unwrap();
+    let tone = media.path().join("tone.wav");
+    std::fs::write(&tone, tone_wav(TAP_TONE_HZ, 2, 48_000)).unwrap();
+    let recording = Recording {
+        stats: Duration::from_millis(500),
+        request_bodies: true,
+        media: Media::Fake { audio: Some(tone) },
+    };
+    with_run(&pages, None, recording, async |run| {
+        let cdp = run.armed.cdp();
+        navigate(cdp, &run.page, &format!("{}/pages/rtc-mic.html", pages.uri())).await?;
+        assert_eq!(
+            evaluate_until(cdp, &run.page.session, "window.outcome || null").await?,
+            "negotiated"
+        );
+        let track = evaluate_until(cdp, &run.page.session, "window.receivedTrack()").await?;
+        let track = track.as_str().ok_or("no received track")?.to_owned();
+        // what the microphone sent comes back as the tone
+        entries_until(&run.recorder.events_file(), |entries| {
+            steady(entries, &track, 3, |rms, share| rms > 0.01 && share > 0.5)
+        })
+        .await?;
+        assert_eq!(evaluate(cdp, &run.page.session, "closeAll()").await?, "closed");
+        Ok(())
+    })
+    .await
+    .unwrap();
 }

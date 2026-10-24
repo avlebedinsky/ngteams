@@ -66,6 +66,23 @@ fn every_lab_browser_keeps_off_the_keyring_and_google_background_traffic() {
 }
 
 #[test]
+fn every_lab_browser_plays_nothing_aloud_and_opens_no_audio_device() {
+    for media in [
+        Media::System,
+        Media::Fake { audio: None },
+        Media::Fake {
+            audio: Some(PathBuf::from("/lab/tone.wav")),
+        },
+    ] {
+        let mut options = LaunchOptions::new(PathBuf::from("/lab/p"));
+        options.media = media;
+        let args = strings(&options.args());
+        assert!(args.contains(&"--mute-audio".to_owned()), "{args:?}");
+        assert!(args.contains(&"--disable-audio-output".to_owned()), "{args:?}");
+    }
+}
+
+#[test]
 fn every_lab_browser_has_report_uploads_off_in_its_only_disable_features() {
     let options = LaunchOptions::new(PathBuf::from("/lab/p"));
     let disabled: Vec<String> = strings(&options.args())
@@ -109,6 +126,15 @@ fn fake_media_can_play_a_wav_file_as_the_microphone() {
 
     assert!(args.contains(&"--use-fake-device-for-media-stream".to_owned()));
     assert!(args.contains(&"--use-file-for-fake-audio-capture=/lab/tone.wav".to_owned()));
+    // the audio tap reads a received track without waiting for a click; the output stays muted
+    assert!(args.contains(&"--autoplay-policy=no-user-gesture-required".to_owned()));
+    assert!(args.contains(&"--mute-audio".to_owned()));
+}
+
+#[test]
+fn only_fake_media_lets_audio_start_without_a_click() {
+    let args = strings(&LaunchOptions::new(PathBuf::from("/p")).args());
+    assert!(!args.iter().any(|arg| arg.starts_with("--autoplay-policy")));
 }
 
 #[test]

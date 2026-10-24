@@ -445,15 +445,31 @@ ui-sandbox (+ a private PipeWire: a tone source, a recorded sink, a fake camera)
 - Modify: `crates/proto-lab/src/{browser.rs,scenario/echo_call.rs}`, `docs/protocol/calling-echo.md`,
   `tests/fixtures/calling/echo/*`
 
-- [ ] tests first: a call scenario's Chrome runs with its output muted (`--mute-audio`) besides its fake devices, and
-      the scenario reads received audio in the page (WebAudio taps and `getStats()`), never from a speaker
-- [ ] `proto-lab run echo-call --headless`: the start permitted, the acceptance delivery observed and binding the call
+- [x] tests first: a call scenario's Chrome runs with its output muted (`--mute-audio`) besides its fake devices, and
+      the scenario reads received audio in the page (WebAudio taps and `getStats()`), never from a speaker (every lab
+      browser runs `--mute-audio --disable-audio-output`, Chrome's fake audio manager, so no desktop audio server is
+      opened; a call scenario's also `--autoplay-policy=no-user-gesture-required`; the hooks' audio tap reads each
+      received audio track through WebAudio with a muted element of its own, since Chrome decodes a received track only
+      while something plays it out, and reports its RMS and a Goertzel share at 440 Hz; tested on loopback pages)
+- [x] `proto-lab run echo-call --headless`: the start permitted, the acceptance delivery observed and binding the call
       id, the `add`, the acknowledgement and the `leave` permitted on the registered call; the echo joins and the tone
       comes back (`getStats()` and a Goertzel check of the received audio in the page); the run exits 0 with only its
-      expected denies
-- [ ] the capture exported to a reference copy; the shapes the M0 capture lacked (the echo joining, its roster update,
+      expected denies (exit 0 on capture `echo-call/20261024T150859Z`: the tone back about 32 s after the call screen,
+      16 tap readings in a row at a 440 Hz share of about 1.0). ⚠️ Found on the way: the acceptance's acknowledgement
+      over Trouter was denied as `Shape`: the captured response (M0's too) echoes the delivery's
+      `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID`, which Task 3's envelope left out; the fence now
+      requires exactly those five headers with both ids equal to the delivery's. With that response through the page
+      sends no HTTP `acknowledge` (it does only when the response fails), so the run takes either as the
+      acknowledgement. ⚠️ The client's own noise suppression sent silence for the tone (M0's runs too); the scenario
+      turns it off from the call screen's audio options before the echo records
+- [x] the capture exported to a reference copy; the shapes the M0 capture lacked (the echo joining, its roster update,
       `mediaRenegotiation`, the call's end) written into `docs/protocol/calling-echo.md` and as synthetic fixtures
-- [ ] `ab-chat` and `abc-chat` still exit 0; the gate passes
+      (`reference/calling/echo-call-m3.jsonl`; `tests/fixtures/calling/echo/deliveries.json`: the conversation update
+      naming the 1:1 chat, the echo joining and leaving in roster updates, `addParticipantSuccess`, `call/end` after
+      the `leave`, run through the registry in `crates/teams-fence/tests/calls.rs`). ⚠️ No `mediaRenegotiation` was
+      delivered in any run (the echo joins through the conversation) and no `conversationEnd`; both stay uncaptured
+- [x] `ab-chat` and `abc-chat` still exit 0; the gate passes (`ab-chat`'s first run timed out waiting for b's read of
+      the chat, which b showed open already, with only its forced denies; the rerun and `abc-chat` exited 0)
 
 ### Task 5: Lab-to-lab calls in the browser (capture the starts, map them, capture the ring)
 **Files:**

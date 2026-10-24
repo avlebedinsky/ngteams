@@ -293,7 +293,8 @@ An ended call is never restored, whatever arrives after.
 (`Fence::check_delivery_response`, logged as a `delivery_response` entry): it answers a pending acceptance delivery of
 a live call on the same connection (in the browser: the socket's session and `Network` id; a closed socket's pending
 deliveries are dropped), once, in the captured envelope (`id` the delivery's, `status` 200, exactly the headers
-`MS-CV`, `trouter-request` equal to the delivery's, `trouter-client`), its body a `callAcceptanceAcknowledgement` whose
+`MS-CV`, `trouter-client`, and `trouter-request`, `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID`
+each equal to the delivery's own), its body a `callAcceptanceAcknowledgement` whose
 links are all callbacks on the start's own endpoint and call agent (same authority, same path prefix). Every other
 delivery response stays denied, the empty acknowledgements of a `conversationUpdate` included.
 

@@ -5,6 +5,9 @@ added: 2026-10-20
 ---
 # M3 maps the call writes: lab-only calls started and answered, the follow-ups by a call registry
 
+Status: the echo call's follow-ups are mapped on the call registry and `echo-call` completes (the echo joins and plays
+the tone back, the run exits 0); starts to lab callees, answering, declining and joining are what is left.
+
 M0 Task 18: `proto-lab run echo-call` places the web client's test call and the fence allows the call start (a new
 call of lab account a and the approved echo service). Every later request lands on the call that now exists, is no
 row of the calling family in `teams_fence::contacting`, and is denied: `PUT …/conv/<id>/updateEndpointMetadata`,
