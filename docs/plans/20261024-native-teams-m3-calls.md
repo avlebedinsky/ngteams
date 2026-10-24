@@ -84,8 +84,8 @@
   M3: `ams-image-sending.md`, `file-sending.md`, `channel-writes-need-a-lab-only-team.md`,
   `bot-invokes-and-message-extensions.md` (M5), `own-presence-idle-and-offline-shapes.md`,
   `one-time-code-sign-in-under-the-fence.md`, `sanitizer-defence-in-depth-known-gaps.md`,
-  `webkit-sign-in-guard-redirects.md`, `containment-kill-cannot-order-an-unread-eof.md` (accepted),
-  `debug-build-keystroke-lag.md`.
+  `webkit-sign-in-guard-redirects.md`, `seeded-own-rules-ignore-the-query.md`,
+  `containment-kill-cannot-order-an-unread-eof.md` (accepted), `debug-build-keystroke-lag.md`.
 - Lab: a, b, c licensed and signed in, the echo service's MRI in `lab.toml`, the a–b–c group chat in `chats.toml`.
 
 ## Development Approach
@@ -201,7 +201,13 @@ ui-sandbox (+ a private audio server and a fake camera for tests and lab runs)
 - **Answering**: the invitation (a `callNotification` delivered to the calling stack's endpoint) names the caller and
   the participants; the fence judges `WriteKind::CallAnswer` on `Scope::Call` by those MRIs alone (no roster read).
   The native client asks the fence before it offers Answer: an invitation the fence wouldn't permit is ignored
-  (logged by kind, never shown as answerable), and Answer is only ever a user's action, never automatic.
+  (logged by kind, never shown as answerable, nothing sent for it). The engine never answers by itself: an answer goes
+  out only on an explicit `Action::Answer` for an invitation the engine offered (`Event::IncomingCall`), and each one
+  is a fresh `Fence::check`. In the app (`teams-app`, `teams`) that action is only the user's (Answer in the banner or
+  the notification). The one other sender is a lab binary's opt-in flag, `teams-headless <alias> watch
+  --answer-lab-calls`, which sends that same `Action::Answer` for an invitation the engine offered; the flag lives in
+  `teams-headless` alone (no path to it from `teams-core`, `teams-call`, `teams-ui`, `teams-app` or `teams`), and the
+  fence still judges every answer it sends, so nothing outside the lab is answered.
 - **Call writes through the outbox**: each one a fresh `Fence::check` and its `fence.log` line, and never resent after
   an unknown outcome (a call controller acting twice is worse than a failed step). Whether they are the transient kind
   (no row) or a kind of their own is decided in Task 8 with Codex; either way the state machine decides what a failed
@@ -273,25 +279,39 @@ ui-sandbox (+ a private audio server and a fake camera for tests and lab runs)
       `mediaRenegotiation`, the call's end) written into `docs/protocol/calling-echo.md` and as synthetic fixtures
 - [ ] `ab-chat` and `abc-chat` still exit 0; the gate passes
 
-### Task 4: Lab-to-lab calls in the browser (capture)
+### Task 4: Lab-to-lab calls in the browser (capture the starts, map them, capture the answers)
 **Files:**
 - Create: `crates/proto-lab/src/scenario/{ab_call.rs,abc_call.rs}`
-- Modify: `crates/proto-lab/src/scenario/expected.rs`, `docs/protocol/calling.md` (new), `endpoints.md`
+- Modify: `crates/proto-lab/src/scenario/expected.rs`, `crates/teams-fence/src/contacting/call.rs`,
+  `crates/teams-fence/tests/*`, `docs/protocol/calling.md` (new), `docs/protocol/fence-targets.md`, `endpoints.md`,
+  CLAUDE.md
 
-- [ ] `ab-call`: a calls b from their 1:1 chat (audio, then video); b's page receives the invitation; b's answer (the
-      `acceptance` and its delivery response) is held back by a labelled forced deny, so the call rings and ends
-      unanswered; the start to a lab callee (`to[]`) captured
-- [ ] `abc-call`: a calls the recorded group chat; the group start's shape captured; b's and c's answers held back
+The fence maps only the echo call's start today, so a start to b or c is denied before anyone is invited: the starts
+are captured denied first, mapped, and only then can a rerun reach the invitations and the answers.
+
+- [ ] capture the starts: `ab-call` (a calls b from their 1:1 chat, audio, then video) and `abc-call` (a calls the
+      recorded group chat), each start held back by a labelled forced deny (nothing reaches b or c); the start to a lab
+      callee (`to[]`) and the group start's shape captured
+- [ ] tests first: the start to lab callees and in a lab-only group chat mapped from those captures (`Scope::Call` with
+      its `to[]`, the group's fresh member read where the start names a chat), denied with any other callee; a
+      permitted start registers its call as the echo call's does
+- [ ] CLAUDE.md's "Live runs" line on answering rewritten before the scenarios click answer, for what the code then
+      does: a scenario clicks answer only on an invitation naming only lab accounts or the echo service, and only in a
+      scenario that exists to answer it; the fence doesn't map `acceptance` and denies Trouter delivery responses, so
+      such a click's answer is held back by a labelled forced deny; every other incoming call is ignored, never
+      clicked; the native Trouter client still has no path to answer any delivery
+- [ ] capture the answers: `ab-call` rerun with the start let through; b's page receives the invitation; b clicks
+      answer and the answer (the `acceptance` and its delivery response) is held back by a labelled forced deny, so the
+      call rings and ends unanswered; `abc-call` the same with b's and c's answers held back
 - [ ] the shapes written up in `docs/protocol/calling.md` (our own words): the start with callees and in a group, the
       invitation as delivered, the answer, what the callee sends after; fixtures synthetic, covering every form the
       runs show
 - [ ] the gate passes
 
-### Task 5: Starting and answering lab-to-lab calls (map, then live)
-- [ ] tests first: the start to lab callees and in a lab-only group chat (`Scope::Call` with its `to[]`, the group's
-      fresh member read where the start names a chat), denied with any other callee; answering judged by the
-      invitation's caller and participants, permitted only when all are lab accounts or the echo service; the typed
-      delivery response for that call; a registered answered call's follow-ups
+### Task 5: Answering lab-to-lab calls (map, then live)
+- [ ] tests first: answering judged by the invitation's caller and participants, permitted only when all are lab
+      accounts or the echo service; the typed delivery response for that call; a registered answered call's
+      follow-ups
 - [ ] `ab-call` and `abc-call` let the answers through: b (and c) answer by the scenario's click, the call connects,
       audio flows both ways (`getStats()`), every participant leaves; exit 0
 - [ ] CLAUDE.md's "Live runs" line on answering rewritten for what the code now does (still: nothing outside the lab
@@ -337,7 +357,8 @@ ui-sandbox (+ a private audio server and a fake camera for tests and lab runs)
       typed response for a registered call
 - [ ] tests first on the mock: an outgoing call through start → acceptance → acknowledgement → connected → leave; an
       incoming lab-only call answered by an action, one naming an outsider ignored and never answered (nothing sent for
-      it, no request or frame); every write with its `fence.log` line
+      it, no request or frame); an offered lab-only invitation nobody answers stays unanswered (the engine sends no
+      answer without `Action::Answer`); every write with its `fence.log` line
 - [ ] engine: `Action::{Call, Answer, Decline, Hangup, Mute, …}`, `Event::{IncomingCall, Call(state)}`; one call at a
       time
 - [ ] `spikes/echo-call` reduced to what isn't moved (or removed, its README row and docs updated)
@@ -353,8 +374,11 @@ ui-sandbox (+ a private audio server and a fake camera for tests and lab runs)
 - [ ] the gate passes
 
 ### Task 10: Native lab-to-lab audio (live)
+- [ ] tests first (`teams-headless`, on the mock): `watch --answer-lab-calls` sends `Action::Answer` for an
+      invitation the engine offers and nothing for one it ignores (an outsider's: no request, no frame); without the
+      flag nothing is answered; the flag exists in `teams-headless` alone (Technical Details, "Answering")
 - [ ] `teams-headless a call b`, with `teams-headless b watch --answer-lab-calls` answering only a lab-only
-      invitation: the call connects; a tone each way is recorded and checked on the other side; setup time and tone
+      invitation the engine offered: the call connects; a tone each way is recorded and checked on the other side; setup time and tone
       latency measured; both leave
 - [ ] the same for the a–b–c group chat (`teams-headless a call abc`, b and c answering)
 - [ ] `fence.log` as Task 9's; the gate passes
