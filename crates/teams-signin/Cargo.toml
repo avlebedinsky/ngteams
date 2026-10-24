@@ -1,0 +1,51 @@
+[package]
+name = "teams-signin"
+description = "The sign-in window: Microsoft's sign-in page in a WebKitGTK webview behind a request guard, handing the redirect's code to its parent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# the window, in this process's own GTK main loop
+gtk4.workspace = true
+# the answer channel: stdout duplicated close-on-exec, then pointed at stderr
+rustix = { workspace = true, features = ["stdio"] }
+# the request and answer lines, the redirect URI and the code as a secret
+teams-auth.workspace = true
+# fence.log and the lab's directories
+teams-fence.workspace = true
+# the guard's wire protocol; depending on it also builds the module WebKit loads into every web process
+teams-signin-extension.workspace = true
+# the private directory for the guard's socket and the module
+tempfile.workspace = true
+# the check that a window opens only on the UI sandbox's compositor
+ui-sandbox.workspace = true
+url.workspace = true
+webkit6.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# a fence.log that refuses every append (`FenceLog::from_writer`)
+teams-fence = { workspace = true, features = ["test-support"] }
+# the window test stands a local own-state rule in for Entra's (`Guard::with_own`); the binary refuses to run when a
+# test build unified it in
+teams-signin = { path = ".", features = ["test-support"] }
+
+[features]
+# a guard with test rules (`Guard::with_own`): tests only; the binary refuses to run with it
+test-support = []
+
+[[test]]
+# the window in the UI sandbox, on a local fake sign-in page: its own `main` (GTK runs on the main thread), which
+# runs itself again inside the sandbox
+name = "window"
+harness = false
+
+[[test]]
+# the answer channel on its own: its own `main` (a test harness prints to stdout), which runs itself again as a child
+name = "answer_channel"
+harness = false
+
+[lints]
+workspace = true

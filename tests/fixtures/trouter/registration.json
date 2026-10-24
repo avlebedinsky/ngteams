@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, shaped like the registrar registrations in the ab-trouter capture of 2026-10-20 (read locally; docs/protocol/trouter.md): each stack's registration of its own Trouter endpoint, with what Classifier::messaging makes of it (expected), and the registrar's answer. The request carries Authorization: Bearer (an ic3 token), X-MS-Migration: True and X-Ms-Test-User: False. Ids, endpoint names, the token and the client version are made up; <guid:N> stands for a made-up GUID the test fills in.",
+  "_synthetic": "Made up, shaped like the registrar registrations in the ab-trouter capture of 2026-10-20 (read locally; docs/protocol/trouter.md): each stack's registration of its own Trouter endpoint, with what the browser fence's lab rule makes of it (expected), and the registrar's answer. The request carries Authorization: Bearer (an ic3 token), X-MS-Migration: True and X-Ms-Test-User: False. Ids, endpoint names, the token and the client version are made up; <guid:N> stands for a made-up GUID the test fills in.",
   "answer": {
     "status": 202,
     "body": ""
@@ -30,7 +30,7 @@
           ]
         }
       },
-      "expected": "own:endpoint_registration"
+      "expected": "allow"
     },
     {
       "name": "the messaging stack's endpoint from a newer client, on the other origin",
@@ -57,10 +57,10 @@
           ]
         }
       },
-      "expected": "own:endpoint_registration"
+      "expected": "allow"
     },
     {
-      "name": "the calling stack's endpoint (its own socket): never in a run that only chats",
+      "name": "the calling stack's endpoint (its own socket)",
       "method": "POST",
       "url": "https://teams.microsoft.com/registrar/prod/V2/registrations",
       "body": {
@@ -84,7 +84,7 @@
           ]
         }
       },
-      "expected": "unknown"
+      "expected": "allow"
     }
   ]
 }

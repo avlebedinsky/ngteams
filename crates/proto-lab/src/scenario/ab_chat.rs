@@ -1,8 +1,8 @@
 //! The `ab-chat` scenario: account a sends a message in the a–b chat and account b receives it.
 //!
-//! Both accounts run with the write mapping ([`Classifier::mapped`]) and members read live (`LiveMembershipSource`,
-//! fed each account's chat service credential from its own page's requests): a write passes only when the chat's
-//! members, read fresh, are all lab accounts. The steps:
+//! Both accounts run under the lab rule (`crate::classify`) with members read live (`LiveMembershipSource`, fed each
+//! account's chat service credential from its own page's requests): a write on a chat passes only when the chat's
+//! members, read fresh, are all lab accounts; what reaches nobody passes. The steps:
 //! 1. Before anything loads, a's fence force-denies every write carrying [`PROBE_MARKER`] (`deny_probes`), for the
 //!    whole run: the web client keeps a send that failed and sends it again on a later load, so an earlier run's probe
 //!    would otherwise go out now. This run's probe ([`probe_text`] of a run-unique [`nonce`]) has a forced deny of its
@@ -21,10 +21,7 @@
 //! 6. After the run, judged by [`policy`]: no deny but the two probes' forced ones and the reviewed expected-deny list
 //!    ([`super::expected`]), and nothing denied on the a–b chat but the probes.
 //!
-//! Run live on 2026-10-20 (`docs/protocol/fence-targets.md`): steps 2–5 pass. Step 6 failed then on the web client's
-//! hundreds of unmapped requests (middle-tier lookups posted as `POST`, presence, the user's own properties, the push
-//! channel's frames, …), which the fence denies, as in `load`; those classes are now on the reviewed list, and stay
-//! denied. A failed run leaves each page's screenshot as `failure.png` in its capture.
+//! A failed run leaves each page's screenshot as `failure.png` in its capture.
 //!
 //! Every call to a page is bounded ([`super::dsl::CALL_TIMEOUT`], shorter for the failure's diagnosis): a page that
 //! stops answering fails the step, and the run still closes both browsers and finishes both captures.
@@ -32,11 +29,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::browser::Media;
-use crate::classify::Classifier;
 use crate::commands::status::account_status;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::{Denial, DenyCause, ForcedDeny, without_query};
-use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions, SessionState, TEAMS_URL};
 
 use regex::Regex;
@@ -105,7 +100,7 @@ pub fn policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
 }
 
 /// The web client's deep link that starts, or opens, the 1:1 chat with the account `mri`. By MRI, not by UPN: the
-/// client resolves a UPN with a profile lookup posted to the middle tier, which the fence denies (an unmapped `POST`),
+/// client resolves a UPN with a profile lookup posted to the middle tier, which a fail-closed run once denied,
 /// and the chat never opens. Nor by the chat's id (`l/chat/<id>/0`): a page that loaded before the chat existed says
 /// it is a chat the user isn't in.
 #[must_use]
@@ -164,13 +159,13 @@ pub fn message_text(nonce: &str) -> String {
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
-        classifier: Classifier::mapped(),
-        frames: FrameClassifier::seeded(),
         live_members: true,
         capture: Some(ScenarioName::AbChat.as_str().to_owned()),
+        capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
+        ..SessionOptions::fail_closed()
     };
     let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
@@ -371,6 +366,15 @@ pub fn probe_rules(probe: Option<&str>) -> Result<Vec<ForcedDeny>, regex::Error>
 /// When the compose box isn't there, the page refuses the input, or the box still holds `text` after the last try.
 pub async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), ScenarioError> {
     driver.type_into(&format!("{who} types"), COMPOSE, text).await?;
+    press_until_sent(driver, who, text).await
+}
+
+/// Sends what the compose box holds with Enter, and waits until it no longer holds `text` (a part of what it holds):
+/// [`send`]'s presses, for a message typed in parts (`chat-shapes`' lines).
+///
+/// # Errors
+/// As [`send`].
+pub(crate) async fn press_until_sent(driver: &mut Driver, who: &str, text: &str) -> Result<(), ScenarioError> {
     let sent = format!(
         "!(document.querySelector({})?.innerText ?? '').includes({})",
         js_string(COMPOSE_CSS),

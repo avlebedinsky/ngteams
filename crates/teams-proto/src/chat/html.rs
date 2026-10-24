@@ -178,10 +178,26 @@ pub fn parse(content: &str) -> RichText {
             Edge::Close(node) => builder.close(node.value()),
         }
     }
-    RichText {
-        nodes: builder.root,
-        truncated,
-    }
+    let mut nodes = builder.root;
+    drop_block_gaps(&mut nodes);
+    RichText { nodes, truncated }
+}
+
+/// Drops the markup whitespace beside a block (a paragraph or a quote): text of ASCII whitespace only, right before
+/// or after one, which HTML doesn't render. The service joins a read-back message's paragraphs with CRLF (the
+/// `chat-shapes` captures of 2026-10-21, `docs/protocol/chat.md`), which would otherwise read as blank lines. A
+/// no-break space is text, and whitespace between inline nodes stays.
+fn drop_block_gaps(nodes: &mut Vec<Node>) {
+    let is_block = |node: Option<&Node>| matches!(node, Some(Node::Paragraph(_) | Node::Quote(_)));
+    let is_gap = |node: &Node| matches!(node, Node::Text { text, .. } if text.chars().all(|c| c.is_ascii_whitespace()));
+    let keep: Vec<bool> = (0..nodes.len())
+        .map(|index| {
+            let before = index.checked_sub(1).and_then(|before| nodes.get(before));
+            !(is_gap(&nodes[index]) && (is_block(before) || is_block(nodes.get(index + 1))))
+        })
+        .collect();
+    let mut keep = keep.into_iter();
+    nodes.retain(|_| keep.next().unwrap_or(true));
 }
 
 /// `content` up to [`MAX_CONTENT`] bytes (cut on a character boundary), and whether it was cut.
@@ -373,7 +389,8 @@ impl Builder {
         self.frames.push(Frame::Pass { restore: marks });
     }
 
-    fn close_container(&mut self, kind: Container, children: Vec<Node>) {
+    fn close_container(&mut self, kind: Container, mut children: Vec<Node>) {
+        drop_block_gaps(&mut children);
         let node = match kind {
             Container::Paragraph => Node::Paragraph(children),
             Container::Link(href) => Node::Link { href, children },

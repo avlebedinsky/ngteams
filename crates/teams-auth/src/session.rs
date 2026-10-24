@@ -27,10 +27,16 @@
 //! - **Renewal notifications** ([`Session::subscribe`]): every refreshed access token and every renewed skypetoken is
 //!   announced by audience and expiry, never by value; a subscriber (Trouter re-authenticating) asks the session for
 //!   the token itself.
+//! - **Signed out** ([`Session::signed_out`], [`Session::watch_signed_out`]): once Entra refuses the stored refresh
+//!   token ([`TokenError::InvalidGrant`]: expired, revoked, already used) or none is stored
+//!   ([`TokenError::NotSignedIn`]), the session is signed out for good: every later call answers that error again at
+//!   once, from memory, with nothing sent and no token handed out (a cached one included), and a watcher hears of it
+//!   once. Only a new session (after signing in again) has tokens again.
 //! - **The region** comes from the account's stored [`Region`] (`proto-lab auth` persists it), and service bases are
 //!   read through [`Region::base`]: trimmed, with a fallback for names the region lacks.
 //!
-//! Nothing here logs. No `Debug` output or error carries a token: [`Secret`] redacts itself, and the session's own
+//! The log (M2 Task 24a) has each renewal by its audience, its expiry and its outcome, and the signing out, never a
+//! token or a token's value in any form. No `Debug` output or error carries a token: [`Secret`] redacts itself, and the session's own
 //! `Debug` names only the account and which audiences it holds.
 //!
 //! Sign-in and renewal POSTs (Entra's token endpoint, authz) go through [`TokenClient`] and [`AuthzClient`], the
@@ -41,11 +47,11 @@ use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::{Mutex as AsyncMutex, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, watch};
 
 use crate::authz::{AuthzClient, AuthzKind, Region, Skypetoken, skypetoken_expiry_key, skypetoken_key};
 use crate::secrets::{Secret, SecretStore};
-use crate::token::{SPACES_RESOURCE, Scope, TokenClient, TokenError, Tokens};
+use crate::token::{EntraError, SPACES_RESOURCE, Scope, TokenClient, TokenError, Tokens};
 
 /// How long before its expiry a token is refreshed.
 pub const REFRESH_MARGIN: Duration = Duration::from_mins(5);
@@ -98,6 +104,36 @@ pub enum Renewal {
     Skypetoken { expires_at: SystemTime },
 }
 
+/// Why a session is signed out: the account has to sign in again before it has a token (see the module docs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignedOut {
+    /// Entra refused the stored refresh token: it expired, was revoked or was already used.
+    InvalidGrant(Box<EntraError>),
+    /// No refresh token is stored for the account.
+    NotSignedIn,
+}
+
+impl SignedOut {
+    /// What signed the session out, if `error` is such an answer.
+    fn from_error(error: &TokenError) -> Option<Self> {
+        match error {
+            TokenError::InvalidGrant(refusal) => Some(Self::InvalidGrant(refusal.clone())),
+            TokenError::NotSignedIn { .. } => Some(Self::NotSignedIn),
+            _ => None,
+        }
+    }
+
+    /// The error every call answers once the session is signed out.
+    fn error(&self, account: &str) -> TokenError {
+        match self {
+            Self::InvalidGrant(refusal) => TokenError::InvalidGrant(refusal.clone()),
+            Self::NotSignedIn => TokenError::NotSignedIn {
+                account: account.to_owned(),
+            },
+        }
+    }
+}
+
 /// The tokens of one account (see the module docs). Shared between tasks behind an `Arc`; every method takes `&self`.
 pub struct Session<S> {
     account: String,
@@ -117,6 +153,8 @@ pub struct Session<S> {
     authz_backoff: Backoff,
     region: Mutex<Region>,
     renewals: broadcast::Sender<Renewal>,
+    /// Set once, for good, when a grant finds the account signed out.
+    signed_out: watch::Sender<Option<SignedOut>>,
 }
 
 impl<S> fmt::Debug for Session<S> {
@@ -125,6 +163,7 @@ impl<S> fmt::Debug for Session<S> {
         f.debug_struct("Session")
             .field("account", &self.account)
             .field("audiences", &audiences)
+            .field("signed_out", &self.signed_out.borrow().is_some())
             .finish_non_exhaustive()
     }
 }
@@ -148,6 +187,7 @@ impl<S: SecretStore> Session<S> {
             authz_backoff: Backoff::default(),
             region: Mutex::new(region),
             renewals,
+            signed_out: watch::Sender::new(None),
         }
     }
 
@@ -186,16 +226,31 @@ impl<S: SecretStore> Session<S> {
         self.renewals.subscribe()
     }
 
+    /// Why the session is signed out, once it is (see the module docs).
+    #[must_use]
+    pub fn signed_out(&self) -> Option<SignedOut> {
+        self.signed_out.borrow().clone()
+    }
+
+    /// The session's signed-out state from now on: `None` until it is signed out, then why, for good.
+    #[must_use]
+    pub fn watch_signed_out(&self) -> watch::Receiver<Option<SignedOut>> {
+        self.signed_out.subscribe()
+    }
+
     /// An access token for `resource` (such as `https://ic3.teams.office.com`): the one in memory while it is good for
     /// longer than the margin, else a fresh one from the stored refresh token.
     ///
     /// # Errors
     /// As [`TokenClient::refresh`]: [`TokenError::NotSignedIn`], Entra's refusal, [`TokenError::Throttled`] (not
-    /// retried), or a store failure.
+    /// retried), or a store failure. Once signed out, that error again, at once.
     pub async fn access_token(&self, resource: &str) -> Result<AccessToken, TokenError> {
+        self.check_signed_in()?;
         let ticket = self.entra_backoff.ticket();
         let slot = self.slot(resource);
         let mut cached = slot.lock().await;
+        // a caller that waited for the slot while another call signed the session out gets no token, a cached one too
+        self.check_signed_in()?;
         if let Some(token) = cached.as_ref().filter(|token| self.fresh(token.expires_at)) {
             return Ok(token.clone());
         }
@@ -208,9 +263,12 @@ impl<S: SecretStore> Session<S> {
     /// # Errors
     /// As [`Self::access_token`].
     pub async fn refresh_rejected(&self, resource: &str, rejected: &Secret) -> Result<AccessToken, TokenError> {
+        self.check_signed_in()?;
         let ticket = self.entra_backoff.ticket();
         let slot = self.slot(resource);
         let mut cached = slot.lock().await;
+        // a caller that waited for the slot while another call signed the session out gets no token, a cached one too
+        self.check_signed_in()?;
         match cached.as_ref() {
             Some(token) if token.token.expose() == rejected.expose() => *cached = None,
             Some(token) if self.fresh(token.expires_at) => return Ok(token.clone()),
@@ -227,8 +285,10 @@ impl<S: SecretStore> Session<S> {
     /// isn't new enough to renew with, authz's throttling as [`TokenError::Throttled`], any other refusal as
     /// [`TokenError::Authz`], or a store failure.
     pub async fn skypetoken(&self) -> Result<Skypetoken, TokenError> {
+        self.check_signed_in()?;
         let tickets = self.tickets();
         let mut slot = self.skypetoken.lock().await;
+        self.check_signed_in()?;
         self.load_stored_skypetoken(&mut slot).await?;
         if let Some(skypetoken) = self.usable(&slot) {
             return Ok(skypetoken.clone());
@@ -244,8 +304,10 @@ impl<S: SecretStore> Session<S> {
     /// # Errors
     /// As [`Self::skypetoken`].
     pub async fn skypetoken_rejected(&self, rejected: &Secret) -> Result<Skypetoken, TokenError> {
+        self.check_signed_in()?;
         let tickets = self.tickets();
         let mut slot = self.skypetoken.lock().await;
+        self.check_signed_in()?;
         self.load_stored_skypetoken(&mut slot).await?;
         if let Some(skypetoken) = self
             .usable(&slot)
@@ -322,8 +384,15 @@ impl<S: SecretStore> Session<S> {
             .exchange_at(&spaces.token, AuthzKind::TokenRefresh, self.clock.as_ref())
             .await
             .map_err(TokenError::from);
+        if let Err(error) = &exchanged {
+            log::warn!("session: the skypetoken can't be renewed: {error}");
+        }
         let mut skypetoken = self.authz_backoff.record(exchanged, self.clock.now())?;
         skypetoken.expires_at = skypetoken.expires_at.min(spaces.expires_at);
+        log::info!(
+            "session: the skypetoken renewed, it expires in {} s",
+            self.seconds_left(skypetoken.expires_at)
+        );
         skypetoken.store(&self.store, &self.account).await?;
         *lock(&self.region) = skypetoken.region.clone();
         self.announce(Renewal::Skypetoken {
@@ -342,6 +411,8 @@ impl<S: SecretStore> Session<S> {
     ) -> Result<AccessToken, TokenError> {
         let tokens = {
             let _grant = self.grants.lock().await;
+            // a caller that waited for the grant lock while another grant signed the session out sends nothing
+            self.check_signed_in()?;
             self.entra_backoff.check(ticket, self.clock.now())?;
             let refreshed = self
                 .tokens
@@ -352,15 +423,52 @@ impl<S: SecretStore> Session<S> {
                     self.clock.as_ref(),
                 )
                 .await;
+            if let Err(error) = &refreshed {
+                log::warn!("session: the token for {resource} can't be renewed: {error}");
+                self.sign_out_on(error);
+            }
             self.entra_backoff.record(refreshed, self.clock.now())?
         };
         let token = AccessToken::from(tokens);
+        log::info!(
+            "session: the token for {resource} renewed, it expires in {} s",
+            self.seconds_left(token.expires_at)
+        );
         *cached = Some(token.clone());
         self.announce(Renewal::AccessToken {
             resource: resource.to_owned(),
             expires_at: token.expires_at,
         });
         Ok(token)
+    }
+
+    /// [`SignedOut::error`] once the session is signed out.
+    fn check_signed_in(&self) -> Result<(), TokenError> {
+        match &*self.signed_out.borrow() {
+            Some(signed_out) => Err(signed_out.error(&self.account)),
+            None => Ok(()),
+        }
+    }
+
+    /// Signs the session out for good when `error` says the account has to sign in again; told to watchers once.
+    fn sign_out_on(&self, error: &TokenError) {
+        if let Some(signed_out) = SignedOut::from_error(error) {
+            let first = self.signed_out.send_if_modified(|state| {
+                let first = state.is_none();
+                if first {
+                    *state = Some(signed_out);
+                }
+                first
+            });
+            if first {
+                log::warn!("session: signed out ({error}); nothing more is sent until the account signs in again");
+            }
+        }
+    }
+
+    /// Whole seconds from now to `at`; 0 for a time past.
+    fn seconds_left(&self, at: SystemTime) -> u64 {
+        at.duration_since(self.clock.now()).unwrap_or_default().as_secs()
     }
 
     fn slot(&self, resource: &str) -> Arc<AsyncMutex<Option<AccessToken>>> {

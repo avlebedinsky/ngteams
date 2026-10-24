@@ -1,0 +1,76 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: a's message of three lines in the a-b 1:1 chat, the lines broken with Shift+Enter in the web client's compose box and the last holding a link, chat-shapes runs of 2026-10-21 (captures chat-shapes/20261021T170305Z for a and 20261021T170308Z for b, read locally; the unlinked form from 20261021T165600Z and 20261021T165601Z). Each line is a paragraph of its own. A link the editor turned into one (a space typed after it) is an anchor with rel, title and target, and properties.links, a JSON string, holds a HyperLink entry for it; the same link inserted with the text in one go stayed plain text with links []. As read back (b's NewMessage delivery) the paragraphs are joined by CRLF; the rest is as sent. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md.",
+  "request": {
+    "method": "POST",
+    "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+    "body": {
+      "id": "-1",
+      "type": "Message",
+      "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "conversationLink": "blah/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "from": "8:orgid:<guid:a>",
+      "fromUserId": "8:orgid:<guid:a>",
+      "composetime": "2026-01-01T00:01:00.000Z",
+      "originalarrivaltime": "2026-01-01T00:01:00.000Z",
+      "content": "<p>a made-up first line</p><p>a second line</p><p>a link <a href=\"https://example.com/made-up/path\" rel=\"noreferrer noopener\" title=\"https://example.com/made-up/path\" target=\"_blank\">https://example.com/made-up/path</a> on the third line</p>",
+      "messagetype": "RichText/Html",
+      "contenttype": "Text",
+      "imdisplayname": "Lab A",
+      "clientmessageid": "7777777777777777777",
+      "callId": "",
+      "state": 0,
+      "version": "0",
+      "amsreferences": [],
+      "properties": {
+        "importance": "",
+        "subject": "",
+        "title": "",
+        "cards": "[]",
+        "links": "[{\"@type\":\"http://schema.skype.com/HyperLink\",\"itemid\":\"0\",\"url\":\"https://example.com/made-up/path\",\"previewenabled\":true,\"preview\":{\"previewurl\":\"\"}}]",
+        "mentions": "[]",
+        "onbehalfof": null,
+        "files": "[]",
+        "policyViolation": null,
+        "formatVariant": "TEAMS"
+      },
+      "crossPostChannels": []
+    }
+  },
+  "response": {
+    "status": 201,
+    "body": {"OriginalArrivalTime": 1767225660900}
+  },
+  "unlinked_content": "<p>a made-up first line</p><p>a second line</p><p>a link https://example.com/made-up/path on the third line</p>",
+  "read_back": {
+    "clientmessageid": "7777777777777777777",
+    "content": "<p>a made-up first line</p>\r\n<p>a second line</p>\r\n<p>a link <a href=\"https://example.com/made-up/path\" rel=\"noreferrer noopener\" title=\"https://example.com/made-up/path\" target=\"_blank\">https://example.com/made-up/path</a> on the third line</p>",
+    "from": "https://notifications.skype.net/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "imdisplayname": "Lab A",
+    "prioritizeimdisplayname": null,
+    "id": "1767225660900",
+    "messagetype": "RichText/Html",
+    "originalarrivaltime": "2026-01-01T00:01:00.9000000Z",
+    "properties": {
+      "mentions": "[]",
+      "cards": "[]",
+      "importance": "",
+      "subject": "",
+      "title": "",
+      "links": "[{\"@type\":\"http://schema.skype.com/HyperLink\",\"itemid\":\"0\",\"url\":\"https://example.com/made-up/path\",\"previewenabled\":true,\"preview\":{\"previewurl\":\"\"}}]",
+      "files": "[]",
+      "formatVariant": "TEAMS",
+      "languageStamp": "languages=en:100;length:90;&detector=Bling"
+    },
+    "sequenceId": 41,
+    "version": "1767225660900",
+    "composetime": "2026-01-01T00:01:00.9000000Z",
+    "type": "Message",
+    "conversationLink": "https://notifications.skype.net/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "to": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "fromDisplayNameInToken": "Lab A",
+    "threadtype": "chat",
+    "isactive": false,
+    "inQuarantine": false
+  }
+}

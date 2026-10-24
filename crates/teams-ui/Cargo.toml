@@ -1,0 +1,75 @@
+[package]
+name = "teams-ui"
+description = "The GPUI views and models of the native Teams client over teams-core's engine: the bridge that owns the engine, the models it keeps up to date, the shell, the chat list, the chat switcher, the settings, the view trace; no request path of its own"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# the chat list's times, in the local time zone
+chrono.workspace = true
+# the bridge's drain: the engine's next event or the stop, whichever comes first
+futures-util.workspace = true
+gpui-pre.workspace = true
+# the bridge's shutdown and sign-out in the app's diagnostic log; capped at `debug` at compile time like teams-trouter's
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
+# the UI kit: compose's text area, the theme, the resizable panes, the command palette (the chat switcher), avatars,
+# buttons, switches and radios
+gpui-component.workspace = true
+# the view trace: one JSON object per line
+serde_json.workspace = true
+# the engine: its request side (behind `Core`), its events and its shutdown
+teams-core.workspace = true
+# a mention's MRI, as compose hands it to `teams-proto`'s message text
+teams-fence.workspace = true
+# a message's content read as rich text, for the chat list's preview line (sanitized, capped; never shown as HTML)
+teams-proto.workspace = true
+# the rows the engine's queries answer with
+teams-store.workspace = true
+# the diagnostic log's level in the settings (changed live) and the "copy diagnostics" text; never installed here
+teams-log.workspace = true
+# the settings file's problems
+thiserror.workspace = true
+# the bridge's stop signal to its drain task (a runtime-free oneshot)
+tokio = { workspace = true, features = ["sync"] }
+# the settings file
+toml.workspace = true
+# the notifications and the tray item, on the bus the app is given (async-io, as GPUI's own)
+zbus.workspace = true
+
+[dev-dependencies]
+# the views on GPUI's test context (`TestAppContext`): a fake core and a fake event source, no window system
+gpui-pre = { workspace = true, features = ["test-support"] }
+# the kit's widgets on GPUI's test context
+gpui-component = { workspace = true, features = ["test-support"] }
+# the kit's text area on the real platform, in the UI sandbox: GPUI's Linux platform, Wayland only
+gpui-pre-platform.workspace = true
+# the settings file, in a directory of its own per test
+tempfile.workspace = true
+# compose on two accounts' engines on the mock (`tests/compose_mock.rs`): their tokens, their fences on the lab
+# roster with a `fence.log` each, the mock chat service and its Trouter reached through the test-support mock origins
+teams-auth.workspace = true
+teams-fence = { workspace = true, features = ["test-support"] }
+teams-mock.workspace = true
+teams-proto = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
+# the push channel's events the fake engine hands the bridge; the mock's Trouter for compose's two-account test
+teams-trouter = { workspace = true, features = ["test-support"] }
+# the compositor, private bus and virtual keyboard the kit window test runs in
+ui-sandbox.workspace = true
+
+[[test]]
+# the kit's text area and the theme in the UI sandbox: its own `main` (GPUI runs on the main thread), which runs
+# itself again inside the sandbox
+name = "kit_window"
+harness = false
+
+[[test]]
+# what GPUI's own system notifications do on the sandbox's bus: its own `main`, which runs itself again inside the
+# sandbox
+name = "gpui_notification"
+harness = false
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 //! The native request policy's refusals: which chat bases and mock origins a transport accepts, which endpoints it
 //! refuses before sending, and how an endpoint's segments stay segments. The compile-time half (no request of another
-//! class, no own-state entry from outside, no mock origin in a normal build) is in `crates/fence-seal`.
+//! class, no write without a permit, no mock origin in a normal build) is in `crates/fence-seal`.
 //!
 //! Tokens and ids here are placeholders, never real ones.
 
@@ -251,20 +251,16 @@ async fn the_registrar_is_on_the_chat_bases_afd_host_or_the_first_one() {
 
 #[tokio::test]
 async fn a_regional_chat_base_keeps_its_path_from_v1() {
-    let log = SharedLog::default();
-    let (server, transport) = mocked("https://amer.ng.msg.teams.microsoft.com/", log.clone()).await;
-    let probe = ProbeOwnState::new(
-        Service::ChatService,
-        Endpoint::new(["v1", "users", "ME", "properties"]),
-        None,
-    );
+    let (server, transport) = mocked("https://amer.ng.msg.teams.microsoft.com/", SharedLog::default()).await;
 
-    transport.own_state(&probe).await.unwrap();
+    transport
+        .read(&Get(
+            Service::ChatService,
+            Endpoint::new(["v1", "users", "ME", "properties"]),
+        ))
+        .await
+        .unwrap();
 
-    assert_eq!(
-        log.urls(),
-        ["https://amer.ng.msg.teams.microsoft.com/v1/users/ME/properties"]
-    );
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests[0].url.path(), "/v1/users/ME/properties");
 }

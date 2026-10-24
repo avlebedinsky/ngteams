@@ -1,0 +1,11 @@
+error[E0599]: no method named `with_own_account` found for struct `Fence` in the current scope
+ --> tests/ui/fence_own_account.rs:7:19
+  |
+7 |     let _ = fence.with_own_account(Mri::new("8:orgid:anyone"));
+  |                   ^^^^^^^^^^^^^^^^
+  |
+help: there is a method `own_account` with a similar name, but with different arguments
+ --> $WORKSPACE/crates/teams-fence/src/decision.rs
+  |
+  |     pub fn own_account(&self) -> Option<&Mri> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

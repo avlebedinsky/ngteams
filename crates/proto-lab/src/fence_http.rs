@@ -1,11 +1,13 @@
 //! The browser fence's HTTP layer: what happens to one request `Fetch` paused.
 //!
-//! [`HttpFence::decide`] classifies the request ([`crate::classify`]) and decides:
+//! [`HttpFence::decide`] classifies the request ([`crate::classify`], the lab rule's `teams_fence::contacting`) and
+//! decides:
 //! - a read passes, unlogged;
-//! - an own-state request passes, and is logged to `fence.log` (one that can't be logged is denied);
+//! - a mutating request that reaches nobody passes, and is logged to `fence.log` as `allowed` by its method, host and
+//!   path shape (one that can't be logged is denied);
 //! - a mapped write passes only with a [`teams_fence::WritePermit`] from [`Fence::check`], which fetches the target's
 //!   members fresh and logs its own decision;
-//! - anything else is denied and logged.
+//! - a mutating request on a contacting service that nothing reads is denied and logged.
 //!
 //! [`HttpFence::handle`] carries a decision out: `Fetch.continueRequest` on allow, `Fetch.failRequest` (`BlockedByClient`)
 //! on deny, so a denied request never reaches the network and the page sees a network error. Every deny is also kept in
@@ -28,9 +30,9 @@
 //! For a run that writes, [`HttpFence::with_credentials`] hands the live membership source the lab account's chat
 //! service credential: [`HttpFence::handle`] offers every paused request's URL and headers, from the raw event, to
 //! [`ChatCredential::from_request`] before it builds the [`PausedRequest`], which holds every header's name but the
-//! value only of the few the read-by-`POST` list reads ([`crate::post_read::HEADER_VALUES_READ`]: `Content-Type`,
-//! `Origin` and some of the client's `x-ms-*` flags), never a token or a cookie. The raw event, headers included, has
-//! been handed to the run's event watchers and offered to the capture recorder before that.
+//! value only of the method overrides the classifier reads ([`OVERRIDE_HEADERS`]), never a token or a cookie. The raw
+//! event, headers included, has been handed to the run's event watchers and offered to the capture recorder before
+//! that.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -39,7 +41,8 @@ use serde_json::{Value, json};
 use teams_auth::redirect::{RedirectError, RedirectUri};
 use teams_auth::secrets::Secret;
 use teams_fence::{
-    Channel, ChatCredential, Fence, LiveMembershipSource, MembershipSource, RequestOutcome, RequestRecord,
+    AllowedRecord, Channel, ChatCredential, Fence, LiveMembershipSource, MembershipSource, OVERRIDE_HEADERS,
+    RequestOutcome, RequestRecord,
 };
 use tokio::sync::mpsc;
 use url::Url;
@@ -55,11 +58,16 @@ pub struct PausedRequest {
     pub method: String,
     pub url: String,
     /// The request's headers as the event lists them, each once: every header's name, with its value only when the
-    /// read-by-`POST` list reads it ([`crate::post_read::HEADER_VALUES_READ`]) and it is a string; so no credential
+    /// classifier reads it (a method override, [`OVERRIDE_HEADERS`]) and it is a string; so no credential
     /// (`authorization`, `Cookie`) is held here, and `Debug` prints none.
     pub headers: Vec<(String, Option<String>)>,
     /// The body as `postData` carries it. Missing when the request has none, or when Chrome didn't inline it.
     pub body: Option<Vec<u8>>,
+    /// Whether the event says something of a body that `body` doesn't hold: a `postData` that isn't a string, or
+    /// `hasPostData` or `postDataEntries` (of any value) without a string `postData`. Only with it false does a missing
+    /// `body` mean the request has none; the classifier reads such a request as one with an empty body
+    /// ([`Self::classified_body`]).
+    pub body_unread: bool,
     /// The request's `Network` id (`networkId`), the one the page's `Network` events know it by. Missing when the event
     /// doesn't give one.
     pub network_id: Option<String>,
@@ -83,9 +91,7 @@ impl PausedRequest {
                     headers
                         .iter()
                         .map(|(name, value)| {
-                            let read = crate::post_read::HEADER_VALUES_READ
-                                .iter()
-                                .any(|read| read.eq_ignore_ascii_case(name));
+                            let read = OVERRIDE_HEADERS.iter().any(|read| read.eq_ignore_ascii_case(name));
                             let value = value.as_str().filter(|_| read).map(str::to_owned);
                             (name.clone(), value)
                         })
@@ -93,8 +99,19 @@ impl PausedRequest {
                 })
                 .unwrap_or_default(),
             body: request["postData"].as_str().map(|body| body.as_bytes().to_vec()),
+            body_unread: !request["postData"].is_string()
+                && ["postData", "hasPostData", "postDataEntries"]
+                    .iter()
+                    .any(|key| request.get(key).is_some()),
             network_id: text(&params["networkId"]),
         })
+    }
+
+    /// The body the classifier reads: the inlined one, an empty one for a body Chrome didn't inline ([`Self::body_unread`]:
+    /// the request is mutating, and a row that reads its body finds nothing it takes), or none.
+    #[must_use]
+    pub fn classified_body(&self) -> Option<&[u8]> {
+        self.body.as_deref().or_else(|| self.body_unread.then_some(&[][..]))
     }
 }
 
@@ -106,9 +123,10 @@ pub struct MalformedPause(pub &'static str);
 /// Why a request (or a WebSocket frame) was denied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DenyCause {
-    /// Nothing classifies it.
+    /// A mutating request (or a frame) that could reach people and that nothing reads: unknown to the classifier.
     Unclassified,
-    /// An own-state request whose allow, or an unclassified one whose deny, couldn't be written to `fence.log`.
+    /// A request (or a frame) let through as reaching nobody whose `allowed` entry, or an unclassified or forced one
+    /// whose deny, couldn't be written to `fence.log`.
     LogUnavailable,
     /// The fence refused the write (its reason is in `fence.log`).
     Fenced(teams_fence::DenyReason),
@@ -402,7 +420,8 @@ impl HttpFence {
         }
     }
 
-    /// Classifies a request and decides it. Every deny is logged and kept; a forced one comes first.
+    /// Classifies a request and decides it. Every deny is logged and kept; a forced one comes first
+    /// ([`DenyCause::Forced`]; [`DenyCause::LogUnavailable`] when the log won't take it).
     pub async fn decide(&self, request: &PausedRequest) -> Verdict {
         if let Some(rule) = self.forced(request) {
             let record = RequestRecord {
@@ -411,20 +430,23 @@ impl HttpFence {
                 url: &request.url,
                 outcome: RequestOutcome::Forced,
             };
-            // denied whether or not the log takes it
-            let _ = self.fence.log().record_request(&record);
+            // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
+            let cause = match self.fence.log().record_request(&record) {
+                Ok(()) => DenyCause::Forced,
+                Err(_) => DenyCause::LogUnavailable,
+            };
             self.keep(Denial {
                 label: rule.label,
                 network_id: request.network_id.clone(),
-                ..Denial::new(&request.method, &request.url, DenyCause::Forced)
+                ..Denial::new(&request.method, &request.url, cause)
             });
-            return Verdict::Deny(DenyCause::Forced);
+            return Verdict::Deny(cause);
         }
-        let classification = self.classifier.classify_with_headers(
+        let classification = self.classifier.classify(
             &request.method,
             &request.url,
             &request.headers,
-            request.body.as_deref(),
+            request.classified_body(),
         );
         self.judge(classification, &request.method, &request.url).await
     }
@@ -525,9 +547,9 @@ impl HttpFence {
     }
 }
 
-/// Decides one request or frame already classified, for either layer of the browser fence: a read passes unlogged, an
-/// own-state one passes logged (denied if the log won't take it), so does a read by `POST` that names only lab accounts
-/// (one naming anyone else is denied as unknown), a mapped write passes only with a permit from
+/// Decides one request or frame already classified, for either layer of the browser fence: a read passes unlogged, one
+/// that reaches nobody passes logged as `allowed` ([`AllowedRecord`]: its method, host and path shape; denied as
+/// [`DenyCause::LogUnavailable`] if the log won't take it), a mapped write passes only with a permit from
 /// [`Fence::check`] (which logs it), and anything else is denied and logged ([`DenyCause::LogUnavailable`] when the
 /// log won't take it). `request` names the channel, method and URL for the log; its outcome is set here.
 pub(crate) async fn judge(
@@ -539,16 +561,12 @@ pub(crate) async fn judge(
     let record = |outcome| RequestRecord { outcome, ..request };
     match classification {
         Classification::Read => Verdict::Allow,
-        Classification::Own(kind) => match fence.log().record_request(&record(RequestOutcome::Own(kind.as_str()))) {
-            Ok(()) => Verdict::Allow,
-            Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
-        },
-        // a read naming only lab accounts passes logged; one naming anyone else is denied as unknown
-        Classification::PostRead { kind, names } if fence.lab_accounts_only(&names) => {
-            match fence
-                .log()
-                .record_request(&record(RequestOutcome::PostRead(kind.as_str())))
-            {
+        Classification::Allow => {
+            let allowed = AllowedRecord {
+                method: request.method,
+                url: request.url,
+            };
+            match fence.log().record_allowed(&allowed) {
                 Ok(()) => Verdict::Allow,
                 Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
             }
@@ -558,12 +576,10 @@ pub(crate) async fn judge(
             Err(denied) => Verdict::Deny(DenyCause::Fenced(*denied.reason())),
         },
         // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
-        Classification::PostRead { .. } | Classification::Unknown => {
-            match fence.log().record_request(&record(RequestOutcome::Unclassified)) {
-                Ok(()) => Verdict::Deny(DenyCause::Unclassified),
-                Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
-            }
-        }
+        Classification::Unknown => match fence.log().record_request(&record(RequestOutcome::Unclassified)) {
+            Ok(()) => Verdict::Deny(DenyCause::Unclassified),
+            Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
+        },
     }
 }
 

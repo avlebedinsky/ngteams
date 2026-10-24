@@ -4,10 +4,10 @@
 //! are the material of `docs/protocol/calling-echo.md`.
 //!
 //! The echo service is the one participant outside the lab the user approved (2026-10-19), by its MRI in `lab.toml`
-//! (`[[service_participants]] name = "echo"`). The run uses the calling classifiers ([`Classifier::calling`],
-//! [`FrameClassifier::calling`]): the write mapping, the own-state the calling stack needs for the account's own
-//! endpoint, and the call start, which the fence judges as a new call of a and the echo service
-//! ([`Classifier::with_test_call_callee`]). With no echo MRI in `lab.toml` the call start is unknown and denied.
+//! (`[[service_participants]] name = "echo"`). The run uses the lab rule, under which what sets up the account's own
+//! endpoint reaches nobody and passes, with the echo service's MRI ([`Classifier::with_test_call_callee`]): the call
+//! start is a write the fence judges as a new call of a and the echo service. With no echo MRI in `lab.toml` the call
+//! start is unknown and denied.
 //!
 //! The steps:
 //! 1. before the page loads, a's fence force-denies every write carrying `ab-chat`'s probe marker
@@ -22,13 +22,13 @@
 //! 5. after the run, the capture's WebRTC statistics must show audio sent and received ([`AudioSummary`]), and no deny
 //!    but the reviewed expected-deny list's and step 1's ([`policy`]).
 //!
-//! Live on 2026-10-20 steps 1–4 pass; step 5 doesn't: the call's later requests (the echo service's `add` to the
-//! conversation, the call's acknowledgements, `leave`) land on the call, whose members the fence can't read yet, so they
-//! stay unknown and are denied; the leg reaches Teams' media controller, the echo service never joins
-//! (`docs/protocol/calling-echo.md`). Those denies stay unexpected: the call needs them
-//! (`docs/backlog/fence-call-follow-ups.md`), so they are no class of the list.
+//! Step 5 fails while the call's later requests (the echo service's `add` to the conversation, the call's
+//! acknowledgements, `leave`) are unmapped: they land on the call, which no row reads yet, so they stay unknown and are
+//! denied; the leg reaches Teams' media controller, the echo service never joins (`docs/protocol/calling-echo.md`).
+//! Those denies stay unexpected: the call needs them (`docs/backlog/fence-call-follow-ups.md`), so they are no class of
+//! the list.
 //!
-//! The scenario never answers a call: nothing in it accepts one, and the fence keeps an answer unmapped (`Unknown`,
+//! The scenario never answers a call: nothing in it accepts one, and the fence keeps an answer unmapped (unknown,
 //! denied). A failed run leaves the page's screenshot as `failure.png` in its capture.
 
 use std::fs;
@@ -45,7 +45,6 @@ use crate::capture::EVENTS_FILE;
 use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::ForcedDeny;
-use crate::fence_ws::FrameClassifier;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{EARLIER_RUN_PROBE, load, probe_rules, save_screenshot};
@@ -76,8 +75,8 @@ const TEST_CALL_BUTTON_QUERY: &str =
 pub const HANG_UP: Selector<'static> = Selector::Css(HANG_UP_CSS);
 const HANG_UP_CSS: &str = r#"#hangup-button, [data-tid="hangup-main-btn"]"#;
 
-/// The call start's URL, as the fence's verdicts name it: the one `crate::calling::call_start` maps.
-pub use crate::calling::CALL_START_URL;
+/// The call start's URL, as the fence's verdicts name it: the one `teams_fence::contacting` maps.
+pub use teams_fence::CALL_START_URL;
 
 /// How long the app bar, and later the Devices page, get to show up.
 pub const PAGE_OPEN: Duration = Duration::from_secs(75);
@@ -299,19 +298,19 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let mut report = ScenarioReport::new(ScenarioName::EchoCall);
     let classifier = if let Some(echo) = echo_mri(&config) {
-        Classifier::calling().with_test_call_callee(Mri::new(echo))
+        Classifier::new().with_test_call_callee(Mri::new(echo))
     } else {
         report.notes.push(format!(
             "lab.toml has no MRI for the service participant {ECHO_SERVICE:?}: the fence will deny the call"
         ));
-        Classifier::calling()
+        Classifier::new()
     };
     let tone = write_tone(paths).map_err(|error| ScenarioError::Setup(format!("can't write the tone: {error}")))?;
     let session_options = SessionOptions {
         classifier,
-        frames: FrameClassifier::calling(),
         live_members: true,
         capture: Some(ScenarioName::EchoCall.as_str().to_owned()),
+        capture_request_bodies: true,
         display: options.display,
         media: Media::Fake { audio: Some(tone) },
         user_agent: Some(USER_AGENT.to_owned()),

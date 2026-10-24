@@ -1,14 +1,13 @@
 //! `proto-lab status`: whether each lab account's session still works, without signing anything in.
 //!
-//! For each account its persistent profile opens Teams, headless, under the armed fence (fail-closed, the seeded
-//! own-state list only: no sign-in form gets through). The web client loading means `ok`; Microsoft's sign-in page
+//! For each account its persistent profile opens Teams, headless, under the armed fence (the lab rule, its membership
+//! source fail-closed); nothing is typed, so nothing signs in. The web client loading means `ok`; Microsoft's sign-in page
 //! standing in its place means `login needed`. A signed-in account Teams refuses (its authz exchange refused: no
 //! Teams license) is reported as such, and anything else (another host, no answer in time) as it is.
 
 use std::fmt;
 use std::time::Duration;
 
-use crate::classify::Classifier;
 use crate::config::{Alias, LabPaths};
 use crate::session::{FenceReport, LabSession, SessionError, SessionState, TEAMS_URL};
 
@@ -65,7 +64,7 @@ pub async fn check(
     alias: Alias,
     timeout: Duration,
 ) -> Result<(AccountStatus, FenceReport), SessionError> {
-    let mut session = LabSession::open(paths, alias, Classifier::seeded()).await?;
+    let mut session = LabSession::open(paths, alias).await?;
     let state = match session.navigate(TEAMS_URL).await {
         Ok(()) => Ok(session.settle(timeout).await),
         Err(error) => Err(error),

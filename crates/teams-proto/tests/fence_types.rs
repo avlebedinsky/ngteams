@@ -13,7 +13,7 @@ use teams_fence::{
 };
 use teams_proto::chat::MessageText;
 use teams_proto::{
-    AddToCall, Author, Authorized, Client, ConversationUrl, Mutating, OwnState, Read, Response, SendMessage, StartCall,
+    AddToCall, Author, Authorized, Client, ConversationUrl, Mutating, Read, Request, Response, SendMessage, StartCall,
     Transport, WriteError,
 };
 
@@ -93,7 +93,7 @@ impl Transport for Recording {
         future::ready(Ok(Response::new(200, "{}")))
     }
 
-    fn own_state<R: OwnState>(&self, _request: &R) -> impl Future<Output = Result<Response, Never>> + Send {
+    fn send<R: Request>(&self, _request: &R) -> impl Future<Output = Result<Response, Never>> + Send {
         future::ready(Ok(Response::new(200, "{}")))
     }
 
@@ -120,7 +120,7 @@ impl Transport for Offline {
         future::ready(Err(io::Error::other("offline")))
     }
 
-    fn own_state<R: OwnState>(&self, _request: &R) -> impl Future<Output = Result<Response, io::Error>> + Send {
+    fn send<R: Request>(&self, _request: &R) -> impl Future<Output = Result<Response, io::Error>> + Send {
         future::ready(Err(io::Error::other("offline")))
     }
 

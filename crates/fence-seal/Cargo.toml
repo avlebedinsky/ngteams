@@ -10,7 +10,7 @@ publish.workspace = true
 # dev-dependencies and features, and the other crates' dev-dependencies enable test-support, so the cases live here,
 # where nothing does. teams-proto comes without its test-support feature too (it would turn on teams-fence's).
 [dev-dependencies]
-# an own-state request's body, in the case that tries to implement one
+# a request's body, in the cases that implement an own-state or a plain request
 serde_json.workspace = true
 teams-fence.workspace = true
 teams-proto.workspace = true

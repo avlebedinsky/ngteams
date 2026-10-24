@@ -800,6 +800,37 @@ fn the_unread_count_follows_our_read_horizon() {
 }
 
 #[test]
+fn a_display_name_is_the_one_a_person_s_newest_message_carried_in_any_chat() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    store
+        .upsert_conversation(&conversation(GROUP, ConversationKind::Group, 1))
+        .expect("the group");
+    assert_eq!(store.display_name(PEER).expect("nothing stored"), None);
+
+    let named = |id: &str, arrival: i64, name: Option<&str>| Message {
+        sender_name: name.map(str::to_owned),
+        ..message(id, arrival, "text", arrival, PEER)
+    };
+    store
+        .upsert_message(&named("1000", 1000, Some("Old Name")), None)
+        .expect("old");
+    assert_eq!(store.display_name(PEER).expect("read"), Some("Old Name".to_owned()));
+    // a newer message in another chat carries the newer name
+    let mut elsewhere = named("2000", 2000, Some("New Name"));
+    elsewhere.conversation_id = GROUP.to_owned();
+    store.upsert_message(&elsewhere, None).expect("newer elsewhere");
+    // newer still, but without a name or with a blank one: skipped
+    store.upsert_message(&named("3000", 3000, None), None).expect("unnamed");
+    store
+        .upsert_message(&named("4000", 4000, Some("  ")), None)
+        .expect("blank");
+    assert_eq!(store.display_name(PEER).expect("read"), Some("New Name".to_owned()));
+    // another person's names are theirs
+    assert_eq!(store.display_name(THIRD).expect("read"), None);
+}
+
+#[test]
 fn a_read_horizon_set_later_wins_even_when_it_moves_back() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = with_chat(&dir).expect("a store with the chat");
@@ -1265,6 +1296,81 @@ fn a_resend_starts_the_rows_budget_over_and_keeps_its_attempt_count() {
 }
 
 #[test]
+fn an_unreadable_entry_seen_for_a_row_is_kept_until_an_explicit_resend() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = open(&dir).expect("open the store");
+    let id = store.enqueue(&send("1001")).expect("enqueue").id;
+    let fresh = store.outbox_entry(id).expect("read").expect("the row");
+    assert_eq!(fresh.unreadable_seen_at, None);
+    assert!(!fresh.may_have_arrived());
+    store.begin_attempt(id).expect("begin");
+    let retry = AttemptOutcome::Retry {
+        not_before: 0,
+        error: "timed out".to_owned(),
+    };
+    store.finish_attempt(id, &retry).expect("retry");
+
+    let seen = store.outbox_unreadable_seen(id, 5_000).expect("seen");
+    assert_eq!(
+        (seen.state, seen.unreadable_seen_at),
+        (OutboxState::Pending, Some(5_000))
+    );
+    assert!(seen.may_have_arrived());
+    let again = store.outbox_unreadable_seen(id, 6_000).expect("seen again");
+    assert_eq!(again.unreadable_seen_at, Some(5_000), "the first sighting is kept");
+
+    // given up, it still may have arrived: the record outlives its checks
+    let give_up = CheckFailed::GiveUp {
+        error: "may have arrived".to_owned(),
+    };
+    let failed = store.check_failed(id, &give_up).expect("give up");
+    assert_eq!(
+        (failed.state, failed.unreadable_seen_at),
+        (OutboxState::Failed, Some(5_000))
+    );
+    assert!(failed.may_have_arrived());
+
+    // the explicit resend is the owner's decision to send it all the same
+    let resent = store.resend(id).expect("resend");
+    assert_eq!((resent.state, resent.unreadable_seen_at), (OutboxState::Pending, None));
+    assert!(!resent.may_have_arrived());
+
+    // a row our message came back for is sent: nothing is recorded on it
+    let sent = store.enqueue(&send("1002")).expect("enqueue").id;
+    store.outbox_arrived("1002", "2000").expect("arrived");
+    let after = store.outbox_unreadable_seen(sent, 7_000).expect("sent");
+    assert_eq!((after.state, after.unreadable_seen_at), (OutboxState::Sent, None));
+    assert!(!after.may_have_arrived());
+    assert!(matches!(
+        store.outbox_unreadable_seen(9_999, 7_000),
+        Err(StoreError::UnknownOutboxEntry(9_999))
+    ));
+}
+
+#[test]
+fn an_earlier_runs_row_keeps_what_was_seen_for_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let in_flight = {
+        let mut earlier = open(&dir).expect("open the store");
+        let id = earlier.enqueue(&send("1001")).expect("enqueue").id;
+        earlier.begin_attempt(id).expect("begin");
+        id
+    };
+    let mut store = open(&dir).expect("open the store again");
+    // another run's row: this run records what it saw for it all the same
+    store.outbox_unreadable_seen(in_flight, 5_000).expect("seen");
+    let left = store.outbox_left_by_earlier_runs().expect("left");
+    assert_eq!(left.len(), 1);
+    assert_eq!(
+        (left[0].state, left[0].unreadable_seen_at),
+        (OutboxState::Sending, Some(5_000))
+    );
+    assert!(left[0].may_have_arrived());
+    let adopted = store.resend(in_flight).expect("explicit resend");
+    assert_eq!(adopted.unreadable_seen_at, None);
+}
+
+#[test]
 fn a_store_of_the_first_schema_is_migrated_with_its_outbox_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = store_path(&dir);
@@ -1327,6 +1433,43 @@ fn a_sync_state_of_the_second_schema_is_migrated_without_a_gap_or_a_reach() {
 }
 
 #[test]
+fn an_outbox_row_of_the_third_schema_is_migrated_with_nothing_seen_for_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("store dir");
+    let raw = rusqlite::Connection::open(&path).expect("create directly");
+    for migration in [
+        include_str!("../src/migrations/0001_initial.sql"),
+        include_str!("../src/migrations/0002_outbox_budget.sql"),
+        include_str!("../src/migrations/0003_sync_chains.sql"),
+    ] {
+        raw.execute_batch(migration).expect("an earlier migration");
+    }
+    raw.pragma_update(None, "user_version", 3).expect("version 3");
+    raw.execute_batch(
+        "INSERT INTO runs (id, started_at) VALUES (1, 0);
+         INSERT INTO outbox (run_id, client_message_id, conversation_id, kind, payload, state, attempts, created_at,
+             updated_at)
+         VALUES (1, '1001', NULL, 'send', '{}', 'failed', 2, 0, 0);",
+    )
+    .expect("a row of the third schema");
+    drop(raw);
+
+    let store = Store::open(&path).expect("open and migrate");
+
+    assert_eq!(store.schema_version().expect("schema version"), SCHEMA_VERSION);
+    let row = store
+        .outbox_by_client_message_id("1001")
+        .expect("read")
+        .expect("the row");
+    assert_eq!(
+        (row.state, row.attempts, row.unreadable_seen_at),
+        (OutboxState::Failed, 2, None)
+    );
+    assert!(!row.may_have_arrived());
+}
+
+#[test]
 fn our_message_coming_back_marks_its_row_sent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = open(&dir).expect("open the store");
@@ -1346,4 +1489,147 @@ fn our_message_coming_back_marks_its_row_sent() {
         (row.state, row.message_id.as_deref()),
         (OutboxState::Sent, Some("1000"))
     );
+}
+
+#[test]
+fn a_conversations_unsettled_rows_are_those_not_sent_of_any_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (left, denied) = {
+        let mut earlier = open(&dir).expect("open the store");
+        let left = earlier.enqueue(&send("1")).expect("left pending").id;
+        let denied = earlier.enqueue(&send("2")).expect("denied").id;
+        earlier.begin_attempt(denied).expect("begin");
+        let outcome = AttemptOutcome::Denied {
+            reason: "outsider".to_owned(),
+        };
+        earlier.finish_attempt(denied, &outcome).expect("denied");
+        (left, denied)
+    };
+    let mut store = open(&dir).expect("open the store again");
+    let sent = store.enqueue(&send("3")).expect("sent").id;
+    store.begin_attempt(sent).expect("begin");
+    store
+        .finish_attempt(sent, &AttemptOutcome::Sent { message_id: None })
+        .expect("sent");
+    let in_flight = store.enqueue(&send("4")).expect("in flight").id;
+    store.begin_attempt(in_flight).expect("begin");
+    let waiting = store.enqueue(&send("5")).expect("waiting").id;
+    let elsewhere = NewOutboxEntry {
+        conversation_id: Some(GROUP.to_owned()),
+        ..send("6")
+    };
+    store.enqueue(&elsewhere).expect("another conversation's");
+
+    let ids: Vec<i64> = store
+        .outbox_unsettled(CHAT)
+        .expect("unsettled")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(
+        ids,
+        [left, denied, in_flight, waiting],
+        "oldest first, the sent one left out"
+    );
+    assert_eq!(store.outbox_unsettled(GROUP).expect("unsettled").len(), 1);
+    assert!(store.outbox_unsettled(THIRD).expect("none").is_empty());
+}
+
+// --- the engine lock ---
+
+/// The variable naming the store whose engine lock [`the_engine_lock_holder`] takes, in a process of its own.
+const HOLD_ENGINE_LOCK: &str = "TEAMS_STORE_TEST_HOLD_ENGINE_LOCK";
+/// What the holder prints once it holds the lock.
+const HELD: &str = "the engine lock is held";
+
+/// Not a test of its own: run as a child process by [`the_engine_lock_is_refused_while_another_process_holds_it`]
+/// (with [`HOLD_ENGINE_LOCK`] set), it opens the store, takes its engine lock, says so and holds it until its stdin
+/// closes. Without the variable it does nothing.
+#[test]
+fn the_engine_lock_holder() {
+    let Some(path) = std::env::var_os(HOLD_ENGINE_LOCK) else {
+        return;
+    };
+    let store = Store::open(Path::new(&path)).expect("open the store");
+    let lock = store.engine_lock().expect("take the engine lock");
+    // on the line libtest began with the test's name
+    println!("{HELD}");
+    std::io::Write::flush(&mut std::io::stdout()).expect("flush");
+    let mut rest = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut rest).expect("wait for stdin to close");
+    drop(lock);
+}
+
+#[test]
+fn a_second_engine_lock_in_the_process_is_refused_at_once_and_free_once_dropped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = open(&dir).expect("open the store");
+    let lock = first.engine_lock().expect("the first engine lock");
+    let runs = PathBuf::from(format!("{}-runs", store_path(&dir).display()));
+    assert_eq!(lock.path(), runs.join("engine.lock"));
+    assert_eq!(mode(lock.path()).expect("mode"), 0o600);
+
+    // the same store, and another store on the same file: both refused, neither waits
+    let started = std::time::Instant::now();
+    let error = first.engine_lock().expect_err("the same store again");
+    assert!(
+        matches!(&error, StoreError::EngineRunning { path } if path == lock.path()),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("another engine runs on this account"),
+        "{error}"
+    );
+    let second = open(&dir).expect("open the store again");
+    assert!(matches!(second.engine_lock(), Err(StoreError::EngineRunning { .. })));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "a refusal never waits"
+    );
+
+    // an open after it sweeps the ended runs' locks, never the engine's
+    drop(second);
+    let third = open(&dir).expect("open a third time");
+    assert!(lock.path().exists());
+    assert!(third.engine_lock().is_err(), "still held");
+
+    drop(lock);
+    let again = third.engine_lock().expect("free once dropped");
+    drop(again);
+    drop(first);
+    third.engine_lock().expect("free with its store closed too");
+}
+
+#[test]
+fn the_engine_lock_is_refused_while_another_process_holds_it() {
+    use std::io::BufRead as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    let mut holder = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", "the_engine_lock_holder", "--nocapture", "--test-threads=1"])
+        .env(HOLD_ENGINE_LOCK, &path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the holder");
+    let stdout = holder.stdout.take().expect("its stdout");
+    let mut lines = std::io::BufReader::new(stdout).lines();
+    let held = lines.by_ref().map_while(Result::ok).any(|line| line.ends_with(HELD));
+    if !held {
+        drop(holder.stdin.take());
+        drop(holder.wait());
+    }
+    assert!(held, "the holder took the lock");
+
+    let store = Store::open(&path).expect("open the store");
+    let error = store.engine_lock().expect_err("another process holds it");
+    assert!(matches!(error, StoreError::EngineRunning { .. }), "{error}");
+
+    drop(holder.stdin.take());
+    // the rest of its output read, so its last lines never meet a closed pipe
+    lines.for_each(drop);
+    let status = holder.wait().expect("the holder ends");
+    assert!(status.success(), "{status}");
+    store.engine_lock().expect("free once its holder is gone");
 }

@@ -1,0 +1,74 @@
+[package]
+name = "teams-app"
+description = "The lab's GPUI app for one lab account, and its credential broker (`teams-app secrets`), which serves the account's own Secret Service items to the sandboxed app on a socket pair"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+# the app's window: GPUI's Linux platform, Wayland only
+gpui-pre.workspace = true
+gpui-pre-platform.workspace = true
+# the broker's socket and the trace's descriptor: whether a descriptor handed in is open, before it is taken over
+libc.workspace = true
+# the broker's socket: a Unix stream socket; the trace's descriptor: open for writing; both made close-on-exec
+rustix = { workspace = true, features = ["fs", "net"] }
+# the broker's protocol, its server loop and the Secret Service store; the app's client of it, and its session's
+# sign-out
+teams-auth.workspace = true
+# the lab account's engine, built as teams-headless builds it
+teams-core.workspace = true
+# lab.toml: the account an alias names (its UPN), and the lab's keyring application; the app's fence
+teams-fence.workspace = true
+# the bridge over the engine, the models, the window, the view trace
+teams-ui.workspace = true
+# the account's diagnostic log, installed once before the engine starts (its `install`, the only logger)
+teams-log.workspace = true
+# the app's own lines in that log (its start, the settings' and the desktop's problems); capped at `debug` at compile
+# time like teams-trouter's
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
+thiserror.workspace = true
+# the broker's runtime: its socket, the Secret Service connected on the first request; the session's sign-out watch
+tokio = { workspace = true, features = ["net", "rt", "sync"] }
+# the check that a window opens only on the UI sandbox's compositor
+ui-sandbox.workspace = true
+
+[dev-dependencies]
+# the sign-out on GPUI's test context
+gpui-pre = { workspace = true, features = ["test-support"] }
+# the window test's screenshot, read back
+image = { workspace = true, features = ["png"] }
+serde_json.workspace = true
+tempfile.workspace = true
+# the window test's engine reaches the mock chat service and its Trouter through the test-support mock origins; the
+# app's binary refuses to run when a test build unified it in
+teams-fence = { workspace = true, features = ["test-support"] }
+teams-mock.workspace = true
+teams-proto = { workspace = true, features = ["test-support"] }
+teams-store.workspace = true
+teams-trouter = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+# the window test's tray host on the sandbox's private bus: the item's title, a click, the menu's "Quit"
+zbus.workspace = true
+
+[[test]]
+# the app's window in the UI sandbox, on the mock: its own `main` (GPUI runs on the main thread), which runs itself
+# again inside the sandbox
+name = "window"
+harness = false
+
+[[test]]
+# the live acceptance run (M2 Task 25): an orchestrator that spawns the lab build of the app in UI sandboxes for a, b
+# and c; built only with `--features live`, run only with PROTO_LAB_LIVE=1
+name = "ui_live"
+required-features = ["live"]
+
+[features]
+# builds the live acceptance test (`tests/ui_live.rs`); it still runs only with PROTO_LAB_LIVE=1, so `--all-features`
+# stays offline
+live = []
+
+[lints]
+workspace = true

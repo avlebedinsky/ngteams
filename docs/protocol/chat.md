@@ -1,8 +1,11 @@
 # The chat service: conversations, messages and what happens to them
 
-Status: 2026-10-21, M1 Task 7; images (sending, denied) 2026-10-21, M1 Task 20. Written from what the lab saw, in our
-own words, plus the web bundle where nothing was captured (marked so). The chat service's base, credential, ids, member
-reads and the fence's mapping of writes are in [fence-targets.md](fence-targets.md); its token in [auth.md](auth.md).
+Status: 2026-10-21, M1 Task 7; images (sending, denied) 2026-10-21, M1 Task 20; the shapes the UI needs (every quick
+reaction, typing, lines and links, a group mention) 2026-10-21, M2 Task 10; an image's object created once and read
+2026-10-22, M2 Task 21; files (sending, denied) and received attachments 2026-10-22, M2 Task 23. Written from what the
+lab saw, in our own words, plus the web bundle where nothing was captured (marked so). The chat service's base,
+credential, ids, member reads and the fence's mapping of writes are in [fence-targets.md](fence-targets.md); its token
+in [auth.md](auth.md).
 
 Sources (all outside the repository, under the lab's data dir; fixtures are written from them by hand, synthetic):
 
@@ -21,6 +24,20 @@ Sources (all outside the repository, under the lab's data dir; fixtures are writ
 - **ab-image**: `proto-lab run ab-image` of 2026-10-21 (M1 Task 20; accounts a and b, the a–b chat, captures
   `captures/ab-image/20261020T225251Z` and `20261021T010819Z` for a, read locally, nothing exported): a pasted a
   made-up image and sent it with every write to an AMS object denied ([Images](#images-sending-denied-ab-image)).
+- **ab-image-object**: two `proto-lab run ab-image-object` runs of 2026-10-22 (M2 Task 21; as ab-image, with the
+  object's creation mapped once for the a–b chat; captures `captures/ab-image-object/20261022T014327Z` for a (breached:
+  cut by a system suspend, see [below](#the-object-created-once-ab-image-object)) and `…/20261022T020426Z` for a (clean),
+  read locally), and `proto-lab probe object` of the first run's object as a, b and c and of the second's as a
+  (reference copies `reference/ams/object-a-run1.jsonl` and `…/object-a-run2.jsonl`; b's and c's reads printed only):
+  the creation's answer and the object's read ([The object created once](#the-object-created-once-ab-image-object)).
+- **chat-shapes**: three `proto-lab run chat-shapes` runs of 2026-10-21 (M2 Task 10; accounts a and b under the
+  messaging classifier, so b's push channel was up; captures `captures/chat-shapes/20261021T165600Z`, `…170305Z` and
+  `…171041Z` for a, `…165601Z`, `…170308Z` and `…171041Z-2` for b, read locally, nothing exported): a set and took back
+  each quick reaction, typed while b's open chat recorded its typing indicator, sent a message of three lines with a
+  link, and mentioned b in the lab's group chat ([The shapes the UI needs](#the-shapes-the-ui-needs-chat-shapes)).
+- **ab-file**: `proto-lab run ab-file` of 2026-10-22 (M2 Task 23; accounts a and b, the a–b chat, captures
+  `captures/ab-file/20261022T013754Z`, `…015634Z`, `…020205Z` and `…021606Z` for a, read locally, nothing exported):
+  a tried to send a made-up text file with every write of it denied ([Files](#files-sending-denied-ab-file)).
 - **bundle**: the web client `26260.1717.5229.7049`, for what no run showed.
 
 Every path below is relative to the chat service base (`…/api/chatsvc/<region>/`), and every id in a path is
@@ -103,8 +120,14 @@ every profile lookup; the account's display name since the lookups of lab accoun
   of objects (`messageId` a number, plus `message` null, `validationResult` `Valid`, `sharedRefId`, `replyChainId`) and
   `hasValidMsgReferences` true. A 1:1 chat has no reply chains: a quote is all a "reply" is.
 - **Mentions** (fixture `mention.json`): [below](#mentions-mention).
-- **Received attachments**: not seen; every message had `amsreferences` `[]` and `files` `"[]"`. Sending images is
-  deferred out of M1 ([Images](#images-sending-denied-ab-image)), so no message with one has been read either.
+- **Received attachments**: not seen; every message had `amsreferences` `[]` and `files` and `cards` `"[]"`. Sending
+  images is deferred out of M1 ([Images](#images-sending-denied-ab-image)) and a file never left the web client
+  ([Files](#files-sending-denied-ab-file)), so no message with one has been read either. The native client keeps a
+  list with an entry as it came (`teams_proto::chat::Unshown`; `Message::files` is `Field::Unknown`) and shows the
+  message's text with a line saying it has content that can't be shown here and a button that opens the chat in the
+  web client (`l/chat/<chat>/0`, the id encoded as `abc-chat` encodes it), never a guess at it (M2 Task 23). A message
+  of a type the chat view doesn't show gets the same button under its placeholder. The read-only channel view shows
+  the line without the button: no channel deep link has been captured.
 
 ## A message as sent (ab-chat-full, a)
 
@@ -147,6 +170,79 @@ registry of what it permitted (which the fence must not stand in) or an authorit
 readers, which no capture has shown, and which `forward` could change between the read and the upload. Every answer past
 the creation is uncaptured too. The fence maps none of it: AMS objects are `Unknown` and denied
 ([fence-targets.md](fence-targets.md)).
+
+### The object created once (ab-image-object)
+
+M2 Task 21 took the backlog item's first step: the creation mapped in exactly its captured shape (the async gateway,
+the captured headers with `x-ams-post-sharing-mode: Inline`, `X-MS-Migration: True`, `x-ms-test-user: False`,
+`content-type: application/json` pinned, the body above with one `permissions` key, the a–b chat, `["read"]`) to a
+write on that chat judged by `Fence::check` (its members read live: a and b), let out once per run by a forced deny
+that spared the first creation sent after the image was in the compose box; the upload, a forward, every later
+creation and every other media write stayed force-denied. The mapping was the experiment's only (`ab-image-object`)
+and was taken out again in the same task once the read below was in: the code is in the task's first commit, the
+tree has none of it.
+
+- **The creation's answer**: `201` with `{"id": "<object>"}` (the id like `0-eus-d15-<32 hex>`). The fence logged it
+  allowed (`media_object` on the a–b chat, once per pause: the page's and the browser's).
+- **What the client did next**: the upload, `PUT v1/objects/<id>/content/imgpsh` on the same host, no query,
+  `content-type: application/octet-stream`, the `ic3` bearer token, `X-MS-Migration: True` and `x-ms-test-user:
+  False`, the image's bytes as the body (denied); then three more creations within 12 s (denied; the run let only the
+  first out), and no message post: neither the caption nor `amsreferences` went out while the upload failed. After a
+  reload the client tried nothing again within 30 s, but its message actions for the unsent image showed no delete.
+- **The object's read** (`GET v1/objects/<id>/`, `proto-lab probe object`, the same with and without
+  `X-MS-Migration`): as a (its creator) and as b (the a–b chat's other member) `200` with eight keys, `contents` (an
+  empty object: nothing uploaded), `creation_date`, `expiry_date` (25 days after the creation), `filename`
+  (`MicrosoftTeams-image.png`), `geo` (`amer`), `id`, `tenant_id` and `type` (`pish/image`); as c (a lab account the
+  object wasn't shared with) `403` with a problem-details body (`detail`, `instance`, `message`, `status`, `title`,
+  `traceId`). The second run's object answered the same.
+
+**The read is not authoritative** (decided with Codex, transcript `discussions/task-21-ams-object-read/` of the M2
+run): it names no reader at all, no conversation, MRI or permission, so it can't say who may read the object now. The
+200s and the 403 show that the service checks readers, and only for the accounts the lab holds; they can never show
+that nobody else can read it. Even with a complete reader list the race between that read and the upload (a `forward`
+from any client) would need evidence of its own. So images stay deferred: the upload stays unmapped, AMS is no
+service of the native transport, there is no `SendImage`, and the app shows an image as a placeholder followed by a link to
+its message in Teams on the web. What would reopen it is in `docs/backlog/ams-image-sending.md`.
+
+The first run was **breached**: 15 s after the creation the laptop's lid closed and the machine suspended for eight
+minutes; on resume the fence found its connection to both browsers gone and killed them. `fence.log` has nothing of
+that run after 01:46:05Z and its captures end there too, so nothing shows what, if anything, the browsers sent between
+the resume and the kill. The second run (`…/20261022T020426Z`) came out clean (`ab-image-object: ok`).
+
+## Files: sending, denied (ab-file)
+
+What the web client does to send a file, with every write of it force-denied by the scenario (M2 Task 23): writes to
+the file services (SharePoint and OneDrive hosts, their media hosts, Graph), to AMS objects, and any `POST` or `PUT`
+whose body names a lab file (the file's name and the caption both carry the marker). a typed a caption, then handed
+the compose box of the a–b chat a made-up text file.
+
+- **A drop or a paste of the file attaches nothing.** The editor takes a pasted image
+  ([Images](#images-sending-denied-ab-image)), but a `text/plain` file dropped on it or pasted into it showed no
+  attachment. Pressing Enter then (the first run, whose attachment test took the typed caption for the file) posted
+  the caption alone, `properties.files` `"[]"`, tried five times within the minute watched, denied each time; the
+  client kept it as being sent and, after a reload, a deleted it from its actions without a request (it had no id on
+  the service).
+- **The attach button asks the account's own file storage first.** The compose box's controls are "Insert link",
+  "More options", "Discard", "Show Formatting options", "Emoji, GIFs and Stickers", "Attach files", "Actions and
+  apps" and "Send". "Attach files", clicked with the page's file pickers made to hand the file over without a dialog,
+  opened no menu and asked for no file; the page said "Sorry, you need OneDrive to share files. See your admin about
+  getting a license." Before that the client had asked `POST <middle tier>/beta/me/files/availability` (no body, the
+  `api.spaces.skype.com` token, `x-ms-client-caller: IsFluidSiteProvisioned`), which it sends on every load and the
+  fence of the time denied (it passes under the lab rule). Its answer was never seen, so whether the lab accounts have
+  a OneDrive at all is open: the notice may be the client's reading of the denied check.
+- **Nothing of a file went out**: no write to SharePoint, OneDrive, Graph or an AMS object, and no message post with
+  a file. The plain message before it (no marker) was sent and b showed it; b never showed the file's name (the
+  first run; the later ones stopped at the notice).
+- **Bundle only** (never seen): a chat file is uploaded into the account's own OneDrive, folder "Microsoft Teams
+  Chat Files" (`…/drive/root:/<folder>/<name>:/createUploadSession` on Graph or SharePoint's `_api/v2.0`, or a quick
+  upload), shared with the chat's members (`shareDriveItem`), and named in the message's `properties.files` (a JSON
+  string of a list; an entry has `fileName`, `fileInfo` with `fileUrl` and `shareUrl`, `@type`
+  `http://schema.skype.com/File`, `objectUrl`, `itemid`, `title`, `version`).
+
+Why sending stays out, and what would settle it, in order (`docs/backlog/file-sending.md`): the storage check as a
+reviewed read by `POST` of the account's own state, then the upload into the account's own drive, then the share,
+which names its readers and so could be judged by `Fence::check` (every recipient a lab account, a "specific people"
+link only), then the post. The fence maps none of it.
 
 ## Mentions (mention)
 
@@ -193,8 +289,8 @@ captured form is the one it reads.
 `reply.json`, `edit.json`, `delete.json`, `reaction.json` and the `writes.json` cases): a post with every key the web
 client sent (`id` `-1`, `version` `"0"`, the `conversationLink` `blah/<chat>` it sends, the empty JSON-string lists,
 `onbehalfof` and `policyViolation` null, `crossPostChannels` `[]`), the edit as the whole message again, the soft
-delete, the reaction and its take-back, the read horizon, typing (`Control/Typing` only: typing stopped wasn't
-captured) and a new chat (`fixedRoster` and `uniquerosterthread` for a 1:1 chat, neither for a group). A message's
+delete, the reaction and its take-back, the read horizon, typing (`Control/Typing` only: the web client never sent
+typing stopped, [Typing](#typing-chat-shapes)) and a new chat (`fixedRoster` and `uniquerosterthread` for a 1:1 chat, neither for a group). A message's
 text is a typed rich-text value with the MRI of each mention, from which `content`, `properties.mentions` and the
 write's target are all built; raw HTML can't be sent. Times go out as the web client writes them
 (`2026-01-01T00:00:00.000Z`), an edit's `version` and `properties.edittime` being one instant.
@@ -204,6 +300,75 @@ built in one place only, `mention_span` and `mention_entry` in `crates/teams-pro
 the bundle in Task 12, brought to the capture when the capture reached the M1 branch), and a no-break space written
 `&nbsp;` as the web client writes the one after a mention. Its tests compare the post with `mention.json` and read the
 mention back from both the post and the chat's copy.
+
+## The shapes the UI needs (chat-shapes)
+
+What M2's chat view and compose box need beyond M1's captures. Every write went to the a–b chat or the lab's group
+chat, mapped and judged by the fence with members read live; the three runs exited 0 with no breach.
+
+### Reactions (chat-shapes)
+
+Fixture: `tests/fixtures/chatsvc/reactions.json`.
+
+- The hover bar a message shows under the pointer offered four quick reactions, the same in every run: **`like`,
+  `heart`, `laugh`, `surprised`** (`data-tid` `message-actions-<key>`, marked `data-inp="message-hover-reactions"`).
+  The bundle takes the list from the account's settings or the service's config, with that list as its fallback, and
+  turns `like` into `yes-tone<n>` for an account that chose a skin tone (bundle only; the lab accounts chose none).
+- Each is set and taken back exactly as the like (`PUT`/`DELETE …/messages/<id>/properties?name=emotions`, the key in
+  the body, answered 200 with the texts `200` and `null`). The keys stand side by side: setting one never took another
+  back, so one account can hold all four on one message.
+- Read back (b's `MessageUpdate` deliveries, each carrying the whole message), `properties.emotions` lists the keys in
+  the order they were first set, each with its users; a key taken back stays with `users: []`, and
+  `annotationsSummary.emotions` counts only the keys that still have a user (`{}` once none has). Each change raised the
+  message's `version`.
+
+### Typing (chat-shapes)
+
+- **What a sends**: the post M1 saw and the native client sends, key for key (`{"content": "", "contenttype":
+  "Application/Message", "messagetype": "Control/Typing"}`), answered 201. **No `Control/ClearTyping`** went out in
+  any run: not when a stopped typing, not when it emptied its compose box (15–18 s watched after), not when it sent.
+- **When**: sparse. With a pressing a key twice a second for 45 s (keys pressed in one run, text inserted in
+  another), no typing post went out while it typed; one went 0.2–1.6 s after the presses stopped, and one or two
+  within a few seconds of a's sending a message (3.2 s and 7.2 s after it in one run). The closest two posts were
+  4.0 s apart, the next 16.9 s. The bundle sends it through a throttle on the editor's changes, leading edge, at most one
+  per `typingIndicator.notificationFrequency` (6 000 ms unless the service's config says otherwise), only in a chat of
+  2 to 20 members (`maxRosterSizeInGroupChatChatServiceLimit`, default 20), never while a message is being edited and
+  never in a reply chain (bundle only). Why the steady presses of the headless run brought none is not known.
+- **What b shows**: b's indicator (`data-tid="typing-indicator"`) showed within 0.3 s of each typing delivery and went
+  **about 25 s after the last one** (24.7–24.9 s after its delivery; 25.6–26.3 s after a's post) while a's text was still
+  in the box, in all three runs; it went at once when a message from a arrived (1.0 and 1.2 s after a's post, as it was
+  delivered). A typing delivery is a `NewMessage` of `messagetype` `Control/Typing` with
+  `X-Trouter-Delivery-Control: …; resilience=nostorenoloss` ([trouter.md](trouter.md)).
+- For the native client: send `Control/Typing` on input at most once every 6 s and nothing when typing stops; show
+  another's typing for 25 s after their last `Control/Typing`, or until a message from them arrives.
+
+### Lines and links (chat-shapes)
+
+Fixture: `tests/fixtures/chatsvc/lines.json`.
+
+- Shift+Enter in the compose box starts a **new paragraph**: three lines went out as `<p>…</p><p>…</p><p>…</p>`, no
+  `<br>`. Read back, the service had joined the paragraphs with CRLF (`</p>\r\n<p>`); that is markup, not text, and
+  `teams-proto`'s reader drops whitespace beside a paragraph or a quote (the quoted reply's CRLF after its quote too).
+- A link typed and followed by a space became an anchor: `<a href="<url>" rel="noreferrer noopener" title="<url>"
+  target="_blank"><url></a>`, and `properties.links` (a JSON string) held `[{"@type":
+  "http://schema.skype.com/HyperLink", "itemid": "0", "url": "<url>", "previewenabled": true, "preview":
+  {"previewurl": ""}}]`. Inserted with its text in one go, the link stayed plain text and `links` stayed `"[]"`.
+- With a link in the compose box the client asked the async gateway for its preview, `GET
+  /urlp/v1/url/info?url=<url>` (a read: the gateway fetched the URL and answered its title, status and favicon;
+  [endpoints.md](endpoints.md)). The native client doesn't ask for previews.
+
+### A mention in the group chat (chat-shapes)
+
+Fixture: `tests/fixtures/chatsvc/mention-group.json`.
+
+- The post is the 1:1 chat's ([Mentions](#mentions-mention)) to the group chat, key for key; the fence took b as its
+  added participant and let it out, b being a lab account. The picker offered b by name in the group chat as it does in
+  the 1:1 chat.
+- b's delivery of the message carries `mentiontypes` `["person"]` beside the resource (`[]` on other messages); the
+  message reads back as the 1:1 mention does (no `<readonly>`, `itemid` a number).
+- b's `48:notifications` stream got an entry of `activityType` **`mentionInChat`**, subtype `person` (the activity feed's
+  form for a group chat), and its `48:mentions` stream one of `activityType` `mentions`, reason and subtype `mention`,
+  each pointing at the message (`T_<chat>_M_<message>`) as in the 1:1 chat.
 
 ## Read horizons
 
@@ -219,13 +384,14 @@ mention back from both the post and the chat's copy.
 
 ## Seen beside it
 
-- Own properties the client puts and the fence denies (unknown, not on the own-state list): `messageDensity` (hundreds
-  of retries a run), `favorites`, `locale`, `firstLoginInformation`, and `readReceiptsEnabled`, new in this run.
+- Own properties the client puts, denied by the fence of the time (a carve-out under the lab rule): `messageDensity`
+  (hundreds of retries a run), `favorites`, `locale`, `firstLoginInformation`, and `readReceiptsEnabled`, new in this run.
 - Whenever an editor opens (the compose box, the mention picker, an edit box), the client asks its message
   extensions' bots for their commands: `POST v1/agents/28:<id>/invoke` with `name` `composeExtension/fetchCommands`, to
-  two bots, denied as unknown (a bot invoke reaches the bot's own service). The reviewed expected-deny list
-  (`crates/proto-lab/src/scenario/expected.rs`) now expects them, so a run isn't failed by them; they stay denied.
+  two bots, denied as unknown (a bot invoke hands the account's token to the bot's own service). The reviewed
+  expected-deny list (`crates/proto-lab/src/scenario/expected.rs`) expects them, so a run isn't failed by them; they
+  stay denied.
 - Once b's reaction reached a's activity feed, a's client marked the feed item read: `PUT
   v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread` with `{"isread": "true"}`, retried
-  nine times while denied. Expected by the same list (the account's own feed), still denied.
+  nine times while denied. A carve-out under the lab rule (the account's own feed): it passes.
 - `GET v1/users/ME/properties` answers 404, and so does `v1/users/ME/conversations/48:calllogs` for the lab accounts.

@@ -16,6 +16,10 @@
 //! A row's budget counts from when it was made or last resent: `attempts` counts every attempt it ever had (whether
 //! it was attempted at all), [`OutboxEntry::attempts_since_resend`] those since, and `failed_checks` the checks since
 //! that couldn't be made.
+//!
+//! A read that met an entry it couldn't read at all carrying a row's `clientmessageid` records it on the row
+//! ([`Store::outbox_unreadable_seen`]): its message may have arrived ([`OutboxEntry::may_have_arrived`]), and once the
+//! read moved past the entry nothing else tells. The record stays until the row is sent or explicitly resent.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -149,6 +153,9 @@ pub struct OutboxEntry {
     pub message_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When (milliseconds) a read first met an entry it couldn't read at all carrying the row's `clientmessageid`,
+    /// since the row was made or last resent ([`Store::outbox_unreadable_seen`]); none when none did.
+    pub unreadable_seen_at: Option<i64>,
 }
 
 impl OutboxEntry {
@@ -156,6 +163,14 @@ impl OutboxEntry {
     #[must_use]
     pub fn attempts_since_resend(&self) -> u32 {
         self.attempts.saturating_sub(self.attempts_at_resend)
+    }
+
+    /// Whether the row's message may have arrived though it isn't known sent: a read met an entry it couldn't read
+    /// carrying its `clientmessageid` ([`OutboxEntry::unreadable_seen_at`]). Such a row isn't sent again on its own,
+    /// only by an explicit [`Store::resend`], which its owner offers after saying so.
+    #[must_use]
+    pub fn may_have_arrived(&self) -> bool {
+        self.state != OutboxState::Sent && self.unreadable_seen_at.is_some()
     }
 }
 
@@ -189,7 +204,7 @@ pub enum AttemptOutcome {
 
 const OUTBOX_COLUMNS: &str = "id, run_id, client_message_id, conversation_id, kind, payload, state, attempts, \
                               not_before, last_error, message_id, created_at, updated_at, attempts_at_resend, \
-                              failed_checks";
+                              failed_checks, unreadable_seen_at";
 
 fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<OutboxEntry> {
     Ok(OutboxEntry {
@@ -208,6 +223,7 @@ fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<OutboxEntry> {
         updated_at: row.get(12)?,
         attempts_at_resend: row.get(13)?,
         failed_checks: row.get(14)?,
+        unreadable_seen_at: row.get(15)?,
     })
 }
 
@@ -299,6 +315,21 @@ impl Store {
         )
     }
 
+    /// A conversation's rows that aren't sent, of any run, oldest first: waiting, in flight, denied or failed (what
+    /// its view shows of the outbox beside its messages). A sent row is the message once it comes back.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn outbox_unsettled(&self, conversation_id: &str) -> Result<Vec<OutboxEntry>, StoreError> {
+        // `'sent'` written out, not bound: SQLite takes the partial index only for a term that implies its own
+        entries(
+            &self.conn,
+            "conversation_id = ?1 AND state <> 'sent'",
+            [conversation_id],
+        )
+    }
+
     /// Rows a run that has ended left pending or in flight: never sent on their own, only through [`Store::resend`].
     /// Rows of another run whose store is still open aren't listed.
     ///
@@ -382,9 +413,10 @@ impl Store {
         Ok(updated)
     }
 
-    /// Records that the check before a new attempt on one of this run's pending rows couldn't be made (its
-    /// conversation couldn't be synced): nothing was sent, its `failed_checks` goes up, and it waits until `not_before`
-    /// or is failed. A row already `sent` (the check's sync matched our message before it failed) stays as it is.
+    /// Records that the check before a new attempt on one of this run's pending rows couldn't tell whether the last
+    /// one arrived (its conversation couldn't be synced, or a read met an entry it couldn't read carrying the row's
+    /// `clientmessageid`): nothing was sent, its `failed_checks` goes up, and it waits until `not_before` or is
+    /// failed. A row already `sent` (the check's sync matched our message before it failed) stays as it is.
     ///
     /// # Errors
     ///
@@ -414,9 +446,32 @@ impl Store {
         Ok(updated)
     }
 
+    /// Records that a read met an entry it couldn't read at all carrying the row's `clientmessageid`, at `at`
+    /// (milliseconds): its message may have arrived ([`OutboxEntry::may_have_arrived`]). The first sighting's time is
+    /// kept. A row of any run is recorded, whatever its state; one already `sent` stays as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::UnknownOutboxEntry`] for no such row, [`StoreError::Sqlite`] when the write fails.
+    pub fn outbox_unreadable_seen(&mut self, id: i64, at: i64) -> Result<OutboxEntry, StoreError> {
+        let tx = self.conn.transaction()?;
+        let row = entry(&tx, id)?;
+        if row.state == OutboxState::Sent || row.unreadable_seen_at.is_some() {
+            return Ok(row);
+        }
+        tx.execute(
+            "UPDATE outbox SET unreadable_seen_at = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, at, now_ms()],
+        )?;
+        let updated = entry(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Adopts a row into this run as pending, with its `clientmessageid` unchanged: the explicit resend of a row a run
     /// that has ended left, or of one that was denied or failed. Its budget starts over (`attempts_at_resend` becomes
-    /// its `attempts`, `failed_checks` 0); `attempts` stays, so a row that was attempted is still known to be. For a row left `sending`, the caller first looks for
+    /// its `attempts`, `failed_checks` 0), and an unreadable entry seen for it is forgotten (the resend is its owner's
+    /// decision to send a row that may have arrived); `attempts` stays, so a row that was attempted is still known to be. For a row left `sending`, the caller first looks for
     /// its `clientmessageid` in a sync: the ended run's attempt may have arrived. A pending or sending row of a run
     /// whose store is open, this one or another, is refused: it is waiting for its attempt (and its `not_before`) or
     /// has one in flight that may not have reached the service yet, and a second attempt beside it could send the
@@ -445,7 +500,7 @@ impl Store {
         }
         tx.execute(
             "UPDATE outbox SET run_id = ?2, state = ?3, not_before = NULL, attempts_at_resend = attempts,
-                 failed_checks = 0, updated_at = ?4
+                 failed_checks = 0, unreadable_seen_at = NULL, updated_at = ?4
              WHERE id = ?1",
             params![id, self.run_id, OutboxState::Pending, now_ms()],
         )?;

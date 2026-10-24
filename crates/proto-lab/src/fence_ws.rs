@@ -18,10 +18,14 @@
 //! answered. The binding is in every context of a target, isolated worlds the guard isn't in included, and answering a
 //! call from one would hand the token to whatever that world defined as the resolver.
 //!
-//! **The decision** classifies a frame ([`FrameClassifier`]): an own-state frame on the reviewed list passes (logged),
-//! a mapped write goes through [`Fence::check`] (from M0 Task 11), anything else is denied and logged. Nothing is on
-//! the seeded list, so until writes are mapped every frame is denied, and every deny fails the run. `fence.log` gets the
-//! socket's URL without its query (channel `web_socket`, method `SEND`), never a frame's content.
+//! **The decision** classifies a frame by the frame rule ([`classify_frame`]): on a Trouter socket the socket.io 0.9
+//! type decides (the session's disconnect, connect, heartbeat and events pass; a message, which is how a delivery is
+//! answered, a JSON message, an acknowledgement, a binary frame and anything that doesn't parse are denied); every frame
+//! on a socket of a contacting service (`teams_fence::on_contacting_service`: calling, the chat service, …) is denied;
+//! on any other socket a frame passes. A frame let through is logged to `fence.log` as `allowed` (method `SEND`, the
+//! socket's host and path shape), a denied one with the socket's URL without its query (channel `web_socket`, method
+//! `SEND`), never a frame's content. A run can force a deny on frames too ([`ForcedFrameDeny`], before the rule), as it
+//! can on requests.
 //!
 //! **The audit** compares what the browser reports as sent (`Network.webSocketFrameSent`, on the session of the target
 //! that sent it) with the guard's allows: each allow covers one frame with the same opcode and content on the same
@@ -35,13 +39,14 @@ use std::fmt;
 use std::io::{self, Read as _};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
-use teams_fence::{Channel, Fence, MembershipSource, RequestOutcome, RequestRecord};
-use url::Url;
+use teams_fence::{Channel, Fence, MembershipSource, RequestOutcome, RequestRecord, on_contacting_service};
+use url::{Host, Url};
 
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
-use crate::classify::{Classification, OwnKind, UrlPattern};
+use crate::classify::Classification;
 use crate::fence_http::{DenyCause, Verdict, judge, without_query};
 
 /// The binding the guard asks for verdicts through. The guard takes it off the global before any page code runs.
@@ -162,116 +167,135 @@ pub struct Frame {
     pub payload: Payload,
 }
 
-/// One entry of the own-state list for frames: a text frame starting with `prefix`, on a socket whose URL matches.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FrameRule {
-    kind: OwnKind,
-    url: UrlPattern,
-    prefix: String,
-}
+/// The Trouter service's domain: the push channel's socket opens on `go.<domain>` and moves to a regional host under it.
+pub const TROUTER_DOMAIN: &str = "trouter.teams.microsoft.com";
 
-impl FrameRule {
-    /// `origin` (`ws://` or `wss://`) and `path` as [`UrlPattern::new`] takes them; `prefix` is the start of the
-    /// frame's text. A binary frame matches no rule.
-    #[must_use]
-    pub fn new(kind: OwnKind, origin: &str, path: &str, prefix: &str) -> Self {
-        Self {
-            kind,
-            url: UrlPattern::new(origin, path),
-            prefix: prefix.to_owned(),
-        }
-    }
+/// The socket.io 0.9 frame types that pass on a Trouter socket: the disconnect (`0`), the connect (`1`), the heartbeat
+/// (`2`) and an event (`5`: the session's own, such as its authentication, keep-alive, activity and loss
+/// acknowledgement). A message (`3`) is how a delivery is answered, which goes back to whoever sent it; a JSON message
+/// (`4`) and an acknowledgement (`6`) are denied with it, and so is every other type.
+const TROUTER_TYPES: [u8; 4] = *b"0125";
 
-    fn matches(&self, frame: &Frame) -> bool {
-        let Payload::Text(text) = &frame.payload else {
-            return false;
-        };
-        text.starts_with(&self.prefix) && Url::parse(&frame.url).is_ok_and(|url| self.url.matches(&url))
-    }
-}
-
-/// The classifier for frames: the own-state list (and, from M0 Task 11, the write mapping).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FrameClassifier {
-    own: Vec<FrameRule>,
-    /// Whether the Trouter session's own-state frames pass ([`FrameClassifier::calling`],
-    /// [`FrameClassifier::messaging`]).
-    trouter: bool,
-    /// Whether the client's own `user.activity` is held back ([`FrameClassifier::without_activity`]).
-    no_activity: bool,
-}
-
-impl FrameClassifier {
-    /// The seeded list, which is empty: no frame has been reviewed as own-state yet, so every frame is
-    /// [`Classification::Unknown`].
-    #[must_use]
-    pub fn seeded() -> Self {
-        Self::default()
-    }
-
-    /// The seeded list plus the calling stack's own-state frames ([`crate::calling::trouter_frame`]): what a run that
-    /// calls (`echo-call`) needs for the account's own push channel.
-    #[must_use]
-    pub fn calling() -> Self {
-        Self {
-            trouter: true,
-            ..Self::seeded()
-        }
-    }
-
-    /// The seeded list plus the Trouter session's own-state frames ([`crate::calling::trouter_frame`]: authenticate,
-    /// keep-alives, the client's own `user.activity`, the loss acknowledgement, the disconnect): what a run that chats
-    /// over the push channel (`ab-trouter`) needs. The same frames as [`FrameClassifier::calling`]; what sets the two
-    /// runs apart is which endpoint each may register ([`crate::classify::Classifier::messaging`]). Responses to
-    /// deliveries stay unknown (`docs/protocol/trouter.md`).
-    #[must_use]
-    pub fn messaging() -> Self {
-        Self {
-            trouter: true,
-            ..Self::seeded()
-        }
-    }
-
-    /// The same classifier, but every `user.activity` event is [`Classification::Unknown`] (denied): what
-    /// `ab-trouter-quiet` uses to see whether the service treats an endpoint that never reports its activity
-    /// differently (`docs/protocol/trouter.md`). It only takes away; an own-state rule ([`FrameClassifier::with_own`])
-    /// still passes what it matches.
-    #[must_use]
-    pub fn without_activity(mut self) -> Self {
-        self.no_activity = true;
-        self
-    }
-
-    /// The same list plus one more own-state rule. Tests use it to stand a local socket in for a Microsoft one.
-    #[must_use]
-    pub fn with_own(mut self, rule: FrameRule) -> Self {
-        self.own.push(rule);
-        self
-    }
-
-    /// Classifies one frame: [`Classification::Own`] or [`Classification::Unknown`], never a read (any frame can be
-    /// noticed by whoever is on the other end).
-    #[must_use]
-    pub fn classify(&self, frame: &Frame) -> Classification {
-        if let Some(rule) = self.own.iter().find(|rule| rule.matches(frame)) {
-            return Classification::Own(rule.kind);
-        }
-        match &frame.payload {
-            Payload::Text(text) if self.no_activity && crate::calling::is_activity_event(text) => {
-                Classification::Unknown
-            }
-            Payload::Text(text) if self.trouter => {
-                crate::calling::trouter_frame(&frame.url, text).map_or(Classification::Unknown, Classification::Own)
-            }
-            _ => Classification::Unknown,
-        }
-    }
-}
-
-/// Classifies one frame with the seeded classifier.
+/// What the fence makes of one frame (see the module docs): on a Trouter socket ([`is_trouter_socket`]) a text frame
+/// passes ([`Classification::Allow`]) only when it parses as a socket.io 0.9 frame of a type that passes; on a socket of
+/// a contacting service, or one whose URL doesn't parse, every frame is [`Classification::Unknown`]; on any other
+/// socket a frame passes. A frame the guard couldn't read, or one on another realm's socket, is unknown everywhere.
 #[must_use]
 pub fn classify_frame(frame: &Frame) -> Classification {
-    FrameClassifier::seeded().classify(frame)
+    let Ok(url) = Url::parse(&frame.url) else {
+        return Classification::Unknown;
+    };
+    let allowed = match &frame.payload {
+        Payload::Text(text) if is_trouter_socket(&url) => {
+            trouter_type(text).is_some_and(|kind| TROUTER_TYPES.contains(&kind))
+        }
+        Payload::Binary(_) if is_trouter_socket(&url) => false,
+        Payload::Text(_) | Payload::Binary(_) => !on_contacting_service(&url),
+        Payload::Unreadable | Payload::Foreign => false,
+    };
+    if allowed {
+        Classification::Allow
+    } else {
+        Classification::Unknown
+    }
+}
+
+/// Whether `url` is a socket of the Trouter service: any host under [`TROUTER_DOMAIN`] (in any case, a trailing dot
+/// dropped), whatever its scheme, port or path.
+#[must_use]
+pub fn is_trouter_socket(url: &Url) -> bool {
+    let Some(Host::Domain(host)) = url.host() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
+    host.strip_suffix(TROUTER_DOMAIN)
+        .and_then(|label| label.strip_suffix('.'))
+        .is_some_and(|label| !label.is_empty())
+}
+
+/// The type of a socket.io 0.9 frame (`<type>:<id>[+]:<endpoint>[:<data>]`): its one-digit type, when the frame starts
+/// with that digit, a `:`, an id of digits (or none) with an optional `+`, and another `:`. `None` for anything else,
+/// a batch of frames (`\u{fffd}<length>\u{fffd}…`) among it.
+#[must_use]
+pub fn trouter_type(text: &str) -> Option<u8> {
+    let bytes = text.as_bytes();
+    let (&kind, rest) = bytes.split_first()?;
+    let rest = rest.strip_prefix(b":")?;
+    let id_len = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    let rest = &rest[id_len..];
+    let rest = rest.strip_prefix(b"+").unwrap_or(rest);
+    (kind.is_ascii_digit() && rest.starts_with(b":")).then_some(kind)
+}
+
+/// A deny a run asks for on purpose on WebSocket frames: every frame on a socket whose URL the pattern finds a match in
+/// and whose content the rule takes (any, a text frame holding a text, or any but a text frame starting with a prefix)
+/// is denied before it is classified ([`WsFence::force_deny`]). That
+/// is how a scenario holds back one kind of frame (the client's own `user.activity`, say) to see what the service does
+/// without it, and how a test stands a local socket in for one whose frames the fence denies.
+#[derive(Clone, Debug)]
+pub struct ForcedFrameDeny {
+    url: Regex,
+    text: FrameText,
+    label: Option<String>,
+}
+
+/// Which frames on its sockets a [`ForcedFrameDeny`] denies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FrameText {
+    /// Every frame, of any kind.
+    Any,
+    /// Text frames holding this text.
+    Containing(String),
+    /// Every frame but a text frame starting with this text.
+    NotStartingWith(String),
+}
+
+impl ForcedFrameDeny {
+    /// Frames on a socket whose URL `url_pattern` (a regular expression) finds a match in.
+    ///
+    /// # Errors
+    /// When the pattern doesn't compile.
+    pub fn new(url_pattern: &str) -> Result<Self, regex::Error> {
+        Ok(Self {
+            url: Regex::new(url_pattern)?,
+            text: FrameText::Any,
+            label: None,
+        })
+    }
+
+    /// Only text frames holding `text` (a binary frame never matches then).
+    #[must_use]
+    pub fn with_text_containing(mut self, text: &str) -> Self {
+        self.text = FrameText::Containing(text.to_owned());
+        self
+    }
+
+    /// Every frame but a text frame starting with `prefix` (a binary frame always matches then).
+    #[must_use]
+    pub fn except_text_starting_with(mut self, prefix: &str) -> Self {
+        self.text = FrameText::NotStartingWith(prefix.to_owned());
+        self
+    }
+
+    /// Names the rule: a frame it denies is kept with this label ([`FrameDenial::label`]).
+    #[must_use]
+    pub fn labelled(mut self, label: &str) -> Self {
+        self.label = Some(label.to_owned());
+        self
+    }
+
+    /// Whether it denies `frame`.
+    #[must_use]
+    pub fn matches(&self, frame: &Frame) -> bool {
+        let text_matches = match (&self.text, &frame.payload) {
+            (FrameText::Containing(wanted), Payload::Text(text)) => text.contains(wanted.as_str()),
+            (FrameText::Containing(_), _) => false,
+            (FrameText::NotStartingWith(prefix), Payload::Text(text)) => !text.starts_with(prefix.as_str()),
+            (FrameText::Any | FrameText::NotStartingWith(_), _) => true,
+        };
+        self.url.is_match(&frame.url) && text_matches
+    }
 }
 
 /// What the guard asks: a verdict on one frame of one of its sockets.
@@ -331,6 +355,20 @@ impl GuardRequest {
 pub struct FrameDenial {
     pub url: String,
     pub cause: DenyCause,
+    /// For a forced deny: the label of the rule that forced it ([`ForcedFrameDeny::labelled`]), if it has one.
+    pub label: Option<String>,
+}
+
+impl FrameDenial {
+    /// A deny of a frame on the socket at `url` (its query and fragment dropped) for `cause`, with no label.
+    #[must_use]
+    pub fn new(url: &str, cause: DenyCause) -> Self {
+        Self {
+            url: without_query(url).to_owned(),
+            cause,
+            label: None,
+        }
+    }
 }
 
 /// A frame the browser sent without an allow covering it.
@@ -364,10 +402,10 @@ struct Audit {
 
 /// The WebSocket layer of the browser fence.
 pub struct WsFence {
-    classifier: FrameClassifier,
     fence: Arc<Fence>,
     members: Arc<dyn MembershipSource + Send>,
     script: GuardScript,
+    forced: Mutex<Vec<ForcedFrameDeny>>,
     denials: Mutex<Vec<FrameDenial>>,
     audit: Mutex<Audit>,
 }
@@ -375,17 +413,12 @@ pub struct WsFence {
 impl WsFence {
     /// `members` answers the membership checks of mapped writes; it has to fetch fresh on every call.
     #[must_use]
-    pub fn new(
-        classifier: FrameClassifier,
-        fence: Arc<Fence>,
-        members: Arc<dyn MembershipSource + Send>,
-        script: GuardScript,
-    ) -> Self {
+    pub fn new(fence: Arc<Fence>, members: Arc<dyn MembershipSource + Send>, script: GuardScript) -> Self {
         Self {
-            classifier,
             fence,
             members,
             script,
+            forced: Mutex::new(Vec::new()),
             denials: Mutex::new(Vec::new()),
             audit: Mutex::new(Audit::default()),
         }
@@ -401,8 +434,19 @@ impl WsFence {
         self.audit.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Denies every frame `rule` matches from now on, before it is classified (see [`ForcedFrameDeny`]).
+    pub fn force_deny(&self, rule: ForcedFrameDeny) {
+        self.forced.lock().unwrap_or_else(PoisonError::into_inner).push(rule);
+    }
+
+    /// Stops every forced deny of frames.
+    pub fn clear_forced(&self) {
+        self.forced.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+
     /// Classifies a frame and decides it. Every deny is logged and kept. A [`Payload::Foreign`] frame is denied
-    /// unclassified ([`DenyCause::ForeignSocket`]; `fence.log` has it as `unclassified`).
+    /// unclassified ([`DenyCause::ForeignSocket`]; `fence.log` has it as `unclassified`); a forced one comes next
+    /// ([`DenyCause::Forced`], logged as `forced`; [`DenyCause::LogUnavailable`] when the log won't take it).
     pub async fn decide(&self, frame: &Frame) -> Verdict {
         if frame.payload == Payload::Foreign {
             let record = RequestRecord {
@@ -413,11 +457,35 @@ impl WsFence {
             };
             // denied whether or not the log takes it
             let _ = self.fence.log().record_request(&record);
-            self.keep(&frame.url, DenyCause::ForeignSocket);
+            self.keep(FrameDenial::new(&frame.url, DenyCause::ForeignSocket));
             return Verdict::Deny(DenyCause::ForeignSocket);
         }
-        let classification = self.classifier.classify(frame);
-        self.judge(classification, &frame.url).await
+        let forced = self
+            .forced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|rule| rule.matches(frame))
+            .cloned();
+        if let Some(rule) = forced {
+            let record = RequestRecord {
+                channel: Channel::WebSocket,
+                method: SEND,
+                url: &frame.url,
+                outcome: RequestOutcome::Forced,
+            };
+            // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
+            let cause = match self.fence.log().record_request(&record) {
+                Ok(()) => DenyCause::Forced,
+                Err(_) => DenyCause::LogUnavailable,
+            };
+            self.keep(FrameDenial {
+                label: rule.label,
+                ..FrameDenial::new(&frame.url, cause)
+            });
+            return Verdict::Deny(cause);
+        }
+        self.judge(classify_frame(frame), &frame.url).await
     }
 
     /// Decides a frame already classified, sent on the socket at `url`. Every deny is logged and kept.
@@ -430,19 +498,13 @@ impl WsFence {
         };
         let verdict = judge(&self.fence, self.members.as_ref(), classification, request).await;
         if let Verdict::Deny(cause) = verdict {
-            self.keep(url, cause);
+            self.keep(FrameDenial::new(url, cause));
         }
         verdict
     }
 
-    fn keep(&self, url: &str, cause: DenyCause) {
-        self.denials
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(FrameDenial {
-                url: without_query(url).to_owned(),
-                cause,
-            });
+    fn keep(&self, denial: FrameDenial) {
+        self.denials.lock().unwrap_or_else(PoisonError::into_inner).push(denial);
     }
 
     fn deny_malformed(&self) {
@@ -454,7 +516,7 @@ impl WsFence {
         };
         // denied whether or not the log takes it
         let _ = self.fence.log().record_request(&record);
-        self.keep("?", DenyCause::Malformed);
+        self.keep(FrameDenial::new("?", DenyCause::Malformed));
     }
 
     /// Every frame denied so far, in order.

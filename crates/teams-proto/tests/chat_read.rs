@@ -18,8 +18,8 @@ use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
 use teams_proto::chat::{
     ChatReadError, ChatReads, Conversation, ConversationKind, ConversationList, Field, MAX_CONTENT, MAX_DEPTH, Marks,
-    MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText, Thread, link_endpoint,
-    parse_html,
+    MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText, Thread, Unshown, WEB_CLIENT,
+    link_endpoint, parse_html, unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::method;
@@ -205,13 +205,10 @@ fn a_quoted_reply_reads_its_quote_from_content_and_properties() -> TestResult {
         time: Some("1760000010000".to_owned()),
         body: vec![Node::Paragraph(vec![text("a made-up message, edited")])],
     };
+    // the line break between the quote and the reply is markup, not text (`chat-shapes`, 2026-10-21)
     assert_eq!(
         rich.nodes,
-        [
-            Node::Quote(quote),
-            text("\n"),
-            Node::Paragraph(vec![text("a made-up reply")])
-        ]
+        [Node::Quote(quote), Node::Paragraph(vec![text("a made-up reply")])]
     );
     assert_eq!(reply.mentions(), Field::Known(Vec::new()));
     assert_eq!(reply.files(), Field::Known(Vec::new()));
@@ -320,6 +317,166 @@ fn a_mention_reads_in_the_captured_form_from_content_and_properties_as_sent_and_
     Ok(())
 }
 
+/// Each reaction's key and how many users it lists, in the order read.
+fn reaction_counts(read: &Message) -> TestResult<Vec<(String, usize)>> {
+    let reactions = read.reactions().known().ok_or("emotions")?.clone();
+    Ok(reactions
+        .into_iter()
+        .map(|reaction| (reaction.key, reaction.users.len()))
+        .collect())
+}
+
+#[test]
+fn every_quick_reaction_reads_back_side_by_side_and_taken_back_one_by_one() -> TestResult {
+    let fixture = fixture("reactions.json")?;
+    let offered: Vec<&str> = fixture["offered"]
+        .as_array()
+        .ok_or("offered")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(offered, ["like", "heart", "laugh", "surprised"]);
+    let counts = |name: &str| -> TestResult<Vec<(String, usize)>> { reaction_counts(&message(&fixture[name])?) };
+    let keyed = |users: [usize; 4]| -> Vec<(String, usize)> {
+        offered.iter().map(|key| (*key).to_owned()).zip(users).collect()
+    };
+    assert_eq!(counts("read_back_all_set")?, keyed([1, 1, 1, 1]));
+    assert_eq!(counts("read_back_first_taken_back")?, keyed([0, 1, 1, 1]));
+    assert_eq!(counts("read_back_all_taken_back")?, keyed([0, 0, 0, 0]));
+    let all = message(&fixture["read_back_all_set"])?;
+    let reactions = all.reactions().known().ok_or("emotions")?.clone();
+    for (reaction, key) in reactions.iter().zip(&offered) {
+        assert_eq!(reaction.users[0].mri, LAB_A, "{key}");
+        assert!(reaction.users[0].value.as_known().is_some(), "{key}");
+    }
+    assert_eq!(
+        all.annotations_summary,
+        Some(json!({"emotions": {"like": 1, "heart": 1, "laugh": 1, "surprised": 1}}))
+    );
+    assert_eq!(
+        message(&fixture["read_back_all_taken_back"])?.annotations_summary,
+        Some(json!({}))
+    );
+    Ok(())
+}
+
+/// The three paragraphs of `lines.json`'s message, the last holding `link` (the link as the editor made it, or its
+/// plain text).
+fn three_lines(link: Option<Node>) -> Vec<Node> {
+    let url = "https://example.com/made-up/path";
+    let third = match link {
+        Some(link) => vec![text("a link "), link, text(" on the third line")],
+        None => vec![text(&format!("a link {url} on the third line"))],
+    };
+    vec![
+        Node::Paragraph(vec![text("a made-up first line")]),
+        Node::Paragraph(vec![text("a second line")]),
+        Node::Paragraph(third),
+    ]
+}
+
+#[test]
+fn lines_read_as_paragraphs_and_a_link_as_a_link_as_sent_and_read_back() -> TestResult {
+    let fixture = fixture("lines.json")?;
+    let url = "https://example.com/made-up/path";
+    let link = Node::Link {
+        href: url.to_owned(),
+        children: vec![text(url)],
+    };
+    // read back, the paragraphs are joined by CRLF: no text between them
+    for form in [&fixture["request"]["body"], &fixture["read_back"]] {
+        let read = message(form)?;
+        let rich = read.rich_text().ok_or("no rich text")?;
+        assert_eq!(rich.nodes, three_lines(Some(link.clone())));
+        assert_eq!(
+            rich.plain_text(),
+            format!("a made-up first line\na second line\na link {url} on the third line\n")
+        );
+        let links: Vec<Value> = serde_json::from_str(read.properties["links"].as_str().ok_or("links")?)?;
+        assert_eq!(links[0]["url"], url);
+        assert_eq!(links[0]["@type"], "http://schema.skype.com/HyperLink");
+    }
+    let unlinked = parse_html(fixture["unlinked_content"].as_str().ok_or("unlinked")?);
+    assert_eq!(unlinked.nodes, three_lines(None));
+    Ok(())
+}
+
+#[test]
+fn markup_whitespace_beside_a_paragraph_or_quote_is_no_text_and_other_whitespace_stays() {
+    let read = parse_html("\r\n<p>one</p>\r\n <p>two <b>bold</b>\u{a0}</p>\n<blockquote>q</blockquote>\t<p>three</p> ");
+    let quote = Node::Quote(Quote {
+        body: vec![text("q")],
+        ..Quote::default()
+    });
+    assert_eq!(
+        read.nodes,
+        [
+            Node::Paragraph(vec![text("one")]),
+            Node::Paragraph(vec![
+                text("two "),
+                Node::Text {
+                    text: "bold".to_owned(),
+                    marks: Marks::BOLD
+                },
+                text("\u{a0}")
+            ]),
+            quote,
+            Node::Paragraph(vec![text("three")]),
+        ]
+    );
+    // a no-break space between paragraphs is text, not markup
+    assert_eq!(
+        parse_html("<p>a</p>\u{a0}<p>b</p>").nodes,
+        [
+            Node::Paragraph(vec![text("a")]),
+            text("\u{a0}"),
+            Node::Paragraph(vec![text("b")])
+        ]
+    );
+}
+
+#[test]
+fn a_mention_in_the_group_chat_reads_as_in_the_one_to_one_chat_and_in_both_streams() -> TestResult {
+    let fixture = fixture("mention-group.json")?;
+    for form in ["request", "read_back", "notifications_entry", "mentions_entry"] {
+        let read = match form {
+            "request" => message(&fixture["request"]["body"])?,
+            _ => message(&fixture[form])?,
+        };
+        let mentions = read.mentions().known().ok_or("mentions as a JSON string")?;
+        assert_eq!(
+            (
+                mentions[0].item_id.as_str(),
+                mentions[0].mri.as_deref(),
+                &mentions[0].kind
+            ),
+            ("0", Some(LAB_B), &MentionKind::Person),
+            "{form}"
+        );
+        let rich = read.rich_text().ok_or("no rich text")?;
+        let mention = Node::Mention {
+            item_id: "0".to_owned(),
+            text: "Lab B".to_owned(),
+        };
+        let expected = match form {
+            "request" | "read_back" => vec![Node::Paragraph(vec![mention, text("\u{a0}a made-up group mention")])],
+            _ => vec![mention, text(" a made-up group mention")],
+        };
+        assert_eq!(rich.nodes, expected, "{form}");
+    }
+    let group = message(&fixture["read_back"])?;
+    assert_eq!(group.extra["to"], ABC_CHAT);
+    assert_eq!(
+        fixture["notifications_entry"]["properties"]["activity"]["activityType"],
+        "mentionInChat"
+    );
+    assert_eq!(
+        fixture["mentions_entry"]["properties"]["activity"]["activityType"],
+        "mentions"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_quote_as_sent_names_its_message_as_a_string() -> TestResult {
     let sent = message(&fixture("reply.json")?["request"]["body"])?;
@@ -376,6 +533,61 @@ fn what_this_build_does_not_know_is_kept_never_a_parse_failure() -> TestResult {
     assert_eq!(odd.edit_time(), Field::Unknown(Value::Null));
     assert_eq!(odd.quotes(), Field::Unknown(json!([{"sender": "no id"}])));
     assert_eq!(odd.files(), Field::Unknown(json!(3)));
+    Ok(())
+}
+
+#[test]
+fn a_file_card_or_ams_object_no_capture_showed_is_kept_as_it_came_never_read_as_one() -> TestResult {
+    // every captured message: the empty lists, as JSON strings, and no AMS object
+    let reply = message(&fixture("reply.json")?["read_back"])?;
+    assert_eq!(reply.files(), Field::Known(Vec::new()));
+    assert_eq!(reply.unshown(), Vec::new());
+    // an entry in either form no capture showed: kept whole, never a file (its fields aren't read)
+    let entry = r#"[{"fileName":"made-up.txt","objectUrl":"https://example.test/x"}]"#;
+    let odd = message(&json!({
+        "id": "18",
+        "version": "18",
+        "messagetype": "RichText/Html",
+        "content": "<p>a made-up caption</p>",
+        "amsreferences": ["0-wus-d1-made-up"],
+        "properties": {"files": entry, "cards": [{"made": "up"}], "links": "[]", "mentions": "[]"}
+    }))?;
+    assert_eq!(odd.files(), Field::Unknown(json!(entry)));
+    assert_eq!(
+        odd.unshown(),
+        [
+            Unshown::Files(json!(entry)),
+            Unshown::Cards(json!([{"made": "up"}])),
+            Unshown::AmsReferences(json!(["0-wus-d1-made-up"])),
+        ]
+    );
+    let names: Vec<&str> = odd.unshown().iter().map(Unshown::name).collect();
+    assert_eq!(names, ["files", "cards", "amsreferences"]);
+    // a form that isn't a list is unshown too; an empty list in either form, or none, is nothing to show
+    let parts =
+        |properties: Value| -> TestResult<Vec<Unshown>> { Ok(unshown_parts(&serde_json::from_value(properties)?)) };
+    assert_eq!(parts(json!({"files": 3}))?, [Unshown::Files(json!(3))]);
+    assert_eq!(
+        parts(json!({"files": "not json"}))?,
+        [Unshown::Files(json!("not json"))]
+    );
+    assert_eq!(parts(json!({"files": null}))?, [Unshown::Files(Value::Null)]);
+    assert_eq!(parts(json!({"files": [], "cards": "[]"}))?, []);
+    assert_eq!(parts(json!({}))?, []);
+    // the rest of the message reads as ever
+    assert!(odd.rich_text().is_some());
+    // where it is read in full: the web client, at the chat, its id one encoded segment
+    assert_eq!(
+        web_chat_link("19:a_b@unq.gbl.spaces"),
+        "https://teams.microsoft.com/l/chat/19%3Aa_b%40unq.gbl.spaces/0"
+    );
+    // as `abc-chat` encodes it: a 1:1 chat's object ids keep their `-`
+    assert_eq!(
+        web_chat_link("19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces"),
+        "https://teams.microsoft.com/l/chat/19%3A00000000-0000-4000-8000-00000000000a_\
+         00000000-0000-4000-8000-00000000000b%40unq.gbl.spaces/0"
+    );
+    assert!(web_chat_link("19:x/../y?z#w").starts_with(&format!("{WEB_CLIENT}/l/chat/19%3Ax%2F..%2Fy%3Fz%23w/")));
     Ok(())
 }
 

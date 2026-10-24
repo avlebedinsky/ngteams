@@ -1,0 +1,5 @@
+error[E0451]: fields `kind` and `names` of struct `PostReadPermit` are private
+ --> tests/ui/post_read_permit_literal.rs:5:30
+  |
+5 |     let _ = PostReadPermit { kind: "short_profile", names: vec![Mri::new("8:orgid:lab-a")] };
+  |                              ^^^^ private field     ^^^^^ private field

@@ -2,7 +2,7 @@
 //! the shape M2's GPUI bridge needs. A UI thread hands it [`Action`]s and queries and awaits each [`Reply`] on its own
 //! executor (a CLI blocks on it, [`Reply::blocking_wait`]), and takes its [`Event`]s as they come.
 //!
-//! - **Commands** ([`EngineHandle::write`]): an [`Action`] (send, edit, delete, react, take a reaction back, read,
+//! - **Commands** ([`EngineRequests::write`]): an [`Action`] (send, edit, delete, react, take a reaction back, read,
 //!   create a chat) is checked against the store first: an edit or a delete only of the account's own message that
 //!   isn't deleted, a reaction only on a message that isn't, a read receipt only up to a stored message. It becomes an
 //!   outbox row ([`enqueue`]) and is sent at once ([`Outbox::send`]): every attempt under a fresh `Fence::check`,
@@ -10,10 +10,12 @@
 //!   be read back): a row that waits (a `Retry-After`, a check that couldn't sync, an older row on its
 //!   [`Lane`](crate::Lane)) is in the reply as it waits, and goes out from the engine's tick ([`Outbox::send_due`]);
 //!   every row that settles comes as [`Event::Outbox`] too, and so does every row our own message coming back
-//!   settles, by whichever read brought it (a catch-up, a delivery, a sync after a write, the check of another row):
-//!   one event per change of the row ([`Outbox::take_arrived`]). Once a write went through, its conversation is
-//!   synced, so the account's own change is in the store (a new chat with it). A row can be read back by its id
-//!   ([`EngineHandle::outbox_entry`]).
+//!   settles, by whichever read brought it (a catch-up, a delivery, a sync after a write, the check of another row),
+//!   and every row a read finds may have arrived (an entry it couldn't read carrying its `clientmessageid`): one event
+//!   per change of the row, the last one the row as it now stands ([`Outbox::take_arrived`]); a row just made (or
+//!   adopted by a resend) is told first as [`Event::Queued`], before its first attempt. Once a write went
+//!   through, its conversation is synced, so the account's own change is in the store (a new chat with it). A row can
+//!   be read back by its id ([`EngineRequests::outbox_entry`]).
 //! - **Events → store**: each delivery of the push channel ([`teams_trouter`]) goes through the catch-up's
 //!   [`CatchUp::receive_message`], the path a sync takes, so a message that comes both ways is stored once, at its
 //!   newest version; the account's own read horizon through [`CatchUp::receive_horizon`]. A delivery naming a
@@ -21,36 +23,81 @@
 //!   is only an event, never stored; a delivery is never answered (the push channel can't).
 //! - **Catch-up** ([`Gaps`]): after every connect of the push channel when one is due (on start, and after every
 //!   disconnect), after a message-loss report about the chats (acknowledged once a catch-up ran with nothing failed),
-//!   and on [`EngineHandle::sync`]. One that failed is tried again from the tick, [`EngineOptions::catch_up_retry`]
+//!   and on [`EngineRequests::sync`]. One that failed is tried again from the tick, [`EngineOptions::catch_up_retry`]
 //!   later, while the channel is up; so is a delivery that didn't reach the store (its conversation couldn't be
 //!   added or synced, the store failed), and a sync after a write that failed: what they would have stored is missed
 //!   until a catch-up brings it.
+//! - **What the reads brought** ([`CatchUp::take_changes`]): after every read of the service (a catch-up, the sync
+//!   after a write or after a delivery's new conversation, the outbox's check, older history) each message it stored
+//!   new or newer is told as [`Event::Message`] marked with the read that brought it ([`Source::CatchUp`],
+//!   [`Source::History`]), and each conversation it changed as [`Event::ConversationChanged`]; a message the store
+//!   had already (a delivery the catch-up meets again) is not told twice.
 //! - **Queries**: the conversation list, a page of a conversation's messages, one message, its reactions, a chat's
-//!   members, an outbox row, all read from the store on the engine's thread, which owns it; older history from the
-//!   service ([`EngineHandle::load_older`]).
+//!   members, the unread count and the account's read horizon of a conversation, whether its whole history is stored,
+//!   an outbox row, a conversation's rows that aren't sent and the rows earlier runs left, all read from the store on
+//!   the engine's thread, which owns it; older history from the service ([`EngineRequests::load_older`]). A row of an earlier run (or a failed or
+//!   denied one) goes out again only by the explicit [`EngineRequests::resend`].
+//! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
+//!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
+//!   profile lookup, a read sent as a `POST`); each change stored is told as [`Event::Profile`].
+//! - **Others' presence** (M2 Task 17, [`EngineRequests::presence`]): the availability of the people the views asked
+//!   about, read from UPS by polling ([`crate::presence`]: [`EngineOptions::presence_poll`], never stored); each change
+//!   told as [`Event::Presence`].
+//! - **Search** ([`EngineRequests::search`]): the store's own index of the messages' plain text ([`crate::search`]),
+//!   never the service's search. Each message is indexed as it is stored; the messages stored before are indexed by a
+//!   backfill that runs from the engine's start, a batch at a time ([`EngineOptions::index_batch`]) between the
+//!   loop's other work and the runtime's other tasks, told as [`Event::Indexed`] once it is over. A search in some
+//!   conversations only ([`EngineRequests::search_in`]) leaves the others out before it counts the hits.
+//! - **Teams and channels** (M2 Task 16, read-only): the account's teams with their channels
+//!   ([`EngineRequests::teams`]), from the store, read from CSA in the background when the stored list is missing or
+//!   old ([`crate::teams`]), each change of the list told as [`Event::Teams`]; a channel's posts and replies synced
+//!   on demand like any conversation's ([`EngineRequests::sync_conversation`]: a channel other than a team's general
+//!   one is in no conversation list, so no catch-up reaches it), and the post each stored channel message belongs to
+//!   ([`EngineRequests::reply_roots`]). Nothing is written there: a channel has no write type.
+//! - **Transient writes** ([`EngineRequests::transient`]: typing) go out through the outbox too, but as no row
+//!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
+//!   once and briefly ([`crate::MAX_TRANSIENT_WAIT`]), and a message post to its conversation drops it (told as
+//!   [`Event::Transient`] with its drop).
+//! - **The account's own availability** (M2 Task 19, [`EngineRequests::own_availability`]): its endpoint's `PUT`
+//!   (available) and its manual status (set or cleared), transient writes naming the endpoint the push channel
+//!   registered in this run ([`PushEvent::Registered`]); refused before a registration went through and after the push
+//!   channel stopped, when one still waiting out a `Retry-After` is dropped too (told as [`Event::Transient`]). The
+//!   fence permits it for its own account only, without a member read. When to send what is the app's policy (Task
+//!   20, [`crate::own_presence`]), not the engine's.
+//! - **Its handles**: [`EngineRequests`], the request side (writes and queries, each a [`Reply`]), is cloneable, for a
+//!   UI's views to share; [`EngineHandle`] owns the engine: its events, its thread and its shutdown.
+//! - **One engine per account** ([`teams_store::Store::engine_lock`]): [`start`] takes the account's engine lock
+//!   without waiting, and is refused ([`EngineError::AlreadyRunning`]) while another engine holds it, in this process
+//!   or another; the lock goes when the engine's thread ends.
 //!
 //! The engine sends nothing of its own: every write goes out through the outbox, every read through the catch-up's
-//! client, and the push channel sends only its reviewed own frames. Without a push channel ([`Parts::push`] `None`:
-//! a one-shot command of the lab binary) nothing is caught up but on [`EngineHandle::sync`]. The store stays open
+//! client, and the push channel sends only its own typed frames. Without a push channel ([`Parts::push`] `None`:
+//! a one-shot command of the lab binary) nothing is caught up but on [`EngineRequests::sync`]. The store stays open
 //! until the engine stops, after every attempt it began has finished.
 //!
-//! M1 Task 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
+//! M1 Task 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`); M2 Task 5
+//! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 use std::fmt;
 use std::future::{Future, pending};
 use std::io;
+use std::ops::Deref;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::mpsc::RecvTimeoutError;
 use std::task::{Context, Poll};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
-use teams_proto::{Client, Credentials, HttpError, HttpTransport, Transport};
+use teams_proto::{
+    Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, ManualAvailability, RegisteredEndpoint, Transport,
+};
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
-    Store, StoreError,
+    ReadHorizon, SearchHit, Store, StoreError, Team,
 };
 use teams_trouter::{
     Change, ChatEvent, Delivery, Down, MessageLoss, PushEvent, RegistrationReport, Stop, Trouter, TrouterCredentials,
@@ -59,8 +106,14 @@ use teams_trouter::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::outbox::{Command, Outbox, OutboxError, Sent, create_chat, enqueue};
+use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
+use crate::presence::{Availability, PRESENCE_POLL, Polled, Presences};
+use crate::profiles::{PROFILE_RETRY, Person, Profiles};
+use crate::search::{Backfill, INDEX_BATCH, Step};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
+use crate::teams::{READING_TEAMS, TEAMS_RETRY, Teams, TeamsReadError};
+
+mod described;
 
 /// How the engine paces itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +123,16 @@ pub struct EngineOptions {
     /// How long after a catch-up that failed (or left a conversation unsynced), or a delivery that didn't reach the
     /// store, the next catch-up is tried: 30 s.
     pub catch_up_retry: Duration,
+    /// How long after a profile lookup that failed on the way the person is looked up again, from the tick:
+    /// [`PROFILE_RETRY`].
+    pub profile_retry: Duration,
+    /// How many stored messages one step of the search backfill indexes at most ([`crate::search`]): [`INDEX_BATCH`].
+    pub index_batch: usize,
+    /// How long after a read of the teams that failed a view's asking reads them again, at the soonest
+    /// ([`crate::teams`]): [`TEAMS_RETRY`].
+    pub teams_retry: Duration,
+    /// How often the watched people's presence is read ([`crate::presence`]): [`PRESENCE_POLL`].
+    pub presence_poll: Duration,
 }
 
 impl Default for EngineOptions {
@@ -77,6 +140,10 @@ impl Default for EngineOptions {
         Self {
             tick: Duration::from_secs(1),
             catch_up_retry: Duration::from_secs(30),
+            profile_retry: PROFILE_RETRY,
+            index_batch: INDEX_BATCH,
+            teams_retry: TEAMS_RETRY,
+            presence_poll: PRESENCE_POLL,
         }
     }
 }
@@ -88,7 +155,7 @@ impl Push {
     #[must_use]
     pub fn new<T, K>(trouter: Trouter<T, K>) -> Self
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         Self(Box::new(move || trouter.spawn()))
@@ -113,6 +180,9 @@ pub struct Parts<C, T> {
     pub outbox: Outbox<T>,
     pub push: Option<Push>,
     pub options: EngineOptions,
+    /// Names the binary knows already, by MRI (a lab binary: the lab accounts' from `lab.toml`): the last a person's
+    /// name comes from, after their profile and their messages ([`crate::profiles`]).
+    pub known_names: Vec<(String, String)>,
 }
 
 /// What the user asks the engine to write. Every one goes out through the outbox, under the fence.
@@ -167,6 +237,21 @@ impl From<Change> for MessageChange {
     }
 }
 
+/// What brought a message event: the push channel, or a read of the service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A delivery over the push channel.
+    Delivery,
+    /// A delivery the service had made before and made again (`mstore`).
+    Replay,
+    /// A read that brought the store up to date with the service: a catch-up, the sync after a write or after a
+    /// delivery's new conversation, the outbox's check, a conversation's sync asked for
+    /// ([`EngineRequests::sync_conversation`]: a channel opened).
+    CatchUp,
+    /// Older history, read on [`EngineRequests::load_older`].
+    History,
+}
+
 /// Why a catch-up ran on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cause {
@@ -186,24 +271,29 @@ pub enum Event {
     Connected { endpoint: String },
     /// How a registration of the push channel's endpoint went: deliveries come only to a registered one.
     Registration(RegistrationReport),
-    /// The push channel is down; it reconnects, and a catch-up is due.
-    Disconnected(Down),
+    /// The push channel is down; it reconnects, and a catch-up is due. `heard`: when its socket last read a frame once
+    /// connected, the last moment the channel was known to deliver (a socket that went down silently is noticed only
+    /// later); `None` when it never connected (see [`PushEvent::Disconnected`]).
+    Disconnected { down: Down, heard: Option<SystemTime> },
     /// The push channel stopped for good.
     PushStopped(Stop),
-    /// A catch-up ran on its own (not one [`EngineHandle::sync`] asked for), and why.
+    /// A catch-up ran on its own (not one [`EngineRequests::sync`] asked for), and why.
     CaughtUp { cause: Cause, report: CatchUpReport },
     /// A catch-up that ran on its own failed; it is tried again.
     CatchUpFailed { cause: Cause, error: CatchUpError },
     /// A message came over the push channel and went through the store: `applied` says whether anything changed
-    /// (a stored replay, or one the catch-up had already, changes nothing), `message` is the row as now stored.
+    /// (a stored replay, or one the catch-up had already, changes nothing), `message` is the row as now stored. Or a
+    /// read of the service stored it new or newer ([`Source::CatchUp`], [`Source::History`]): `change` is then
+    /// [`MessageChange::New`] for a new one and [`MessageChange::Other`] for a newer one (a read doesn't say what
+    /// changed), and `applied` is never [`Applied::Ignored`].
     Message {
         conversation: String,
         id: String,
         change: MessageChange,
         applied: Applied,
         message: Option<Box<Message>>,
-        /// The service replayed a delivery it had made before (`mstore`).
-        replay: bool,
+        /// What brought it.
+        source: Source,
     },
     /// Someone started (`typing`) or stopped typing; never stored.
     Typing {
@@ -213,13 +303,34 @@ pub enum Event {
     },
     /// The account's own read horizon in a conversation moved (stored).
     ReadHorizon { conversation: String },
-    /// A conversation changed (its properties, its last message).
+    /// A conversation changed (its properties, its last message): a delivery said so, or a read of the service changed
+    /// it in the store (added it, or its version, last activity, read horizon, roster or messages).
     ConversationChanged { conversation: String },
+    /// A write's row was made, or an earlier one adopted by its explicit resend, and is about to go out: told before
+    /// its first attempt, so a view shows it at once as sending ([`Event::Outbox`] then tells it as the attempt left
+    /// it).
+    Queued(OutboxEntry),
     /// An outbox row as it settled: after its first send, a later retry, or our own message coming back (by a
     /// catch-up, a delivery or any other sync).
     Outbox(OutboxEntry),
+    /// A transient that waited out its `Retry-After`, as its send from the tick went; or one that waited and was
+    /// dropped because a message post to its conversation went first.
+    Transient(Transient, TransientSent),
+    /// Someone's stored name or picture changed (a lookup in the background stored it): a view that shows them asks
+    /// for them again ([`EngineRequests::person`]).
+    Profile { mri: String },
+    /// Someone's presence, as a read in the background now gave it ([`crate::presence`]): told only when it changed;
+    /// [`Availability::Unknown`] too when they were dropped from the watch to make room for someone asked about later.
+    Presence { mri: String, availability: Availability },
+    /// The stored teams changed (a read in the background stored a list that differs): a view that shows them asks
+    /// for them again ([`EngineRequests::teams`]).
+    Teams,
     /// Something the engine did on its own failed: what, and why.
     Failed { during: &'static str, error: EngineError },
+    /// The search backfill is over: every message the store held when the engine started (or that a run before left
+    /// unindexed) is indexed; `messages` is how many this run indexed. Told once per run, unless it failed
+    /// ([`Event::Failed`]; the next run goes on with it).
+    Indexed { messages: usize },
 }
 
 /// What the engine's requests can fail with.
@@ -231,6 +342,8 @@ pub enum EngineError {
     Outbox(#[from] OutboxError),
     #[error(transparent)]
     CatchUp(#[from] CatchUpError),
+    #[error("the teams can't be read: {0}")]
+    Teams(#[from] TeamsReadError),
     #[error("no message {message} in conversation {conversation} in the store")]
     UnknownMessage { conversation: String, message: String },
     #[error("message {message} isn't the account's own, so it can't be {action}")]
@@ -245,12 +358,42 @@ pub enum EngineError {
     },
     #[error("those members don't make a chat (none, the account itself, or one given twice)")]
     NotAChat,
+    /// The account's own availability names its endpoint, and no registration of this run went through yet (or the
+    /// push channel stopped): nothing can be sent.
+    #[error("no endpoint of the account's is registered in this run, so its availability can't be set")]
+    NoEndpoint,
     #[error("the engine's runtime can't be built: {0}")]
     Runtime(#[source] io::Error),
     #[error("the engine's thread can't be started: {0}")]
     Thread(#[source] io::Error),
+    /// Another engine runs on the account, in this process or another: only one at a time ([`start`]).
+    #[error("another engine runs on this account (its lock {} is held): only one runs at a time", lock.display())]
+    AlreadyRunning { lock: PathBuf },
     #[error("the engine has stopped")]
     Stopped,
+}
+
+impl EngineError {
+    /// The error's kind, as the log names a failed reply: no id, no text.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Store(_) => "store",
+            Self::Outbox(_) => "outbox",
+            Self::CatchUp(_) => "catch-up",
+            Self::Teams(_) => "teams",
+            Self::UnknownMessage { .. } => "unknown message",
+            Self::NotOwn { .. } => "not the account's own",
+            Self::Deleted { .. } => "deleted",
+            Self::Unknown { .. } => "unknown field",
+            Self::NotAChat => "not a chat",
+            Self::NoEndpoint => "no endpoint",
+            Self::Runtime(_) => "runtime",
+            Self::Thread(_) => "thread",
+            Self::AlreadyRunning { .. } => "already running",
+            Self::Stopped => "stopped",
+        }
+    }
 }
 
 /// The answer to one request, once the engine has made it: await it on any executor, or block on it outside one.
@@ -259,6 +402,21 @@ pub enum EngineError {
 pub struct Reply<T>(oneshot::Receiver<Result<T, EngineError>>);
 
 impl<T> Reply<T> {
+    /// A reply already answered with `answer`: for a stand-in of the engine (a UI test's fake core) to hand back.
+    pub fn ready(answer: Result<T, EngineError>) -> Self {
+        let (reply, taken) = oneshot::channel();
+        // the receiver is held right here, so the answer is kept
+        let _ = reply.send(answer);
+        Self(taken)
+    }
+
+    /// A reply answered later, through the [`Answer`] that comes with it: for a stand-in of the engine (a UI test's
+    /// fake core) to hold an answer back.
+    pub fn later() -> (Answer<T>, Self) {
+        let (reply, taken) = oneshot::channel();
+        (Answer(reply), Self(taken))
+    }
+
     /// Waits for the answer on a thread that runs no async executor (it panics inside one, as tokio's does).
     ///
     /// # Errors
@@ -272,20 +430,54 @@ impl<T> Reply<T> {
 impl<T> Future for Reply<T> {
     type Output = Result<T, EngineError>;
 
+    /// A failed answer is told to the log by its kind ([`EngineError::kind`]): how a view's failed request shows there.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.get_mut().0)
-            .poll(cx)
-            .map(|answer| answer.unwrap_or(Err(EngineError::Stopped)))
+        Pin::new(&mut self.get_mut().0).poll(cx).map(|answer| {
+            let answer = answer.unwrap_or(Err(EngineError::Stopped));
+            if let Err(error) = &answer {
+                let level = if matches!(error, EngineError::Stopped) {
+                    log::Level::Debug
+                } else {
+                    log::Level::Warn
+                };
+                log::log!(level, "a request's reply failed: {}", error.kind());
+            }
+            answer
+        })
     }
 }
 
 type Responder<T> = oneshot::Sender<Result<T, EngineError>>;
 
+/// Where a [`Reply::later`] is answered; dropped unanswered, the reply is [`EngineError::Stopped`].
+#[derive(Debug)]
+pub struct Answer<T>(Responder<T>);
+
+impl<T> Answer<T> {
+    /// Answers the reply (nobody hears it once the reply is dropped).
+    pub fn send(self, answer: Result<T, EngineError>) {
+        let _ = self.0.send(answer);
+    }
+}
+
 /// A request to the engine's thread, with where its answer goes.
 enum Request {
     Write(Action, Responder<OutboxEntry>),
+    Resend(i64, Responder<OutboxEntry>),
+    Transient(Transient, Responder<TransientSent>),
+    OwnAvailability(OwnStatus, Responder<TransientSent>),
     Sync(Responder<CatchUpReport>),
     LoadOlder(String, Responder<Option<Synced>>),
+    SyncConversation(String, Responder<Synced>),
+    Person(String, Responder<Person>),
+    Presence(String, Responder<Availability>),
+    Teams(Responder<Option<Vec<Team>>>),
+    Query(Query),
+    Shutdown,
+}
+
+/// A request answered from the store alone.
+enum Query {
     Conversations(usize, Responder<Vec<Conversation>>),
     Messages {
         conversation: String,
@@ -304,23 +496,82 @@ enum Request {
         reply: Responder<Vec<Reaction>>,
     },
     Members(String, Responder<Vec<Member>>),
+    UnreadCount(String, Responder<u64>),
+    DisplayName(String, Responder<Option<String>>),
+    ReadHorizon(String, Responder<Option<ReadHorizon>>),
+    HistoryComplete(String, Responder<Option<bool>>),
     OutboxEntry(i64, Responder<Option<OutboxEntry>>),
-    Shutdown,
+    OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
+    LeftByEarlierRuns(Responder<Vec<OutboxEntry>>),
+    ReplyRoots(String, Responder<Vec<(String, String)>>),
+    Search {
+        query: String,
+        /// The conversations to look in; every one when `None`.
+        within: Option<Vec<String>>,
+        limit: usize,
+        reply: Responder<Vec<SearchHit>>,
+    },
 }
 
-/// The running engine: its requests and its events. Dropping it stops the engine (on its own thread, which isn't
-/// waited for); [`EngineHandle::shutdown`] waits.
-#[derive(Debug)]
-pub struct EngineHandle {
+/// What the account's own availability is set to ([`EngineRequests::own_availability`]), in the values a capture showed
+/// (M2 Task 18).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OwnStatus {
+    /// The account's endpoint is up and available (UPS's presence endpoint `PUT`): what makes it show online.
+    Available,
+    /// A manual status, as the account menu sets it, until it is cleared.
+    Manual(ManualAvailability),
+    /// The manual status cleared ("Reset status").
+    ClearManual,
+}
+
+/// The engine's request side: writes and queries, each answered by a [`Reply`]. Cloneable and `Send`, so a UI's
+/// views can share it; a request made after the engine stopped answers [`EngineError::Stopped`]. Holding one doesn't
+/// keep the engine running: its [`EngineHandle`] owns it.
+#[derive(Clone, Debug)]
+pub struct EngineRequests {
     requests: mpsc::UnboundedSender<Request>,
-    events: mpsc::UnboundedReceiver<Event>,
-    thread: Option<JoinHandle<()>>,
+    /// The account's MRI: who the engine writes as.
+    me: Arc<str>,
 }
 
-impl EngineHandle {
+impl EngineRequests {
+    /// The account's MRI: who the engine writes as, and whose read horizon and unread counts it answers with.
+    #[must_use]
+    pub fn me(&self) -> &str {
+        &self.me
+    }
+
     /// Writes through the outbox (see the module docs); the reply is the row as its first send left it.
     pub fn write(&self, action: Action) -> Reply<OutboxEntry> {
         self.ask(|reply| Request::Write(action, reply))
+    }
+
+    /// Sends an outbox row again, by its id: the explicit resend ([`Store::resend`]) of a row an earlier run left
+    /// pending or in flight, or of one that was denied or failed, of whichever run; only a pending or sending row of a
+    /// run whose store is still open (this one included) is refused, and a sent one. The row keeps its
+    /// `clientmessageid` and its budget starts over. A message post that had an attempt is first looked for (its
+    /// earlier attempt may have arrived); any other kind (an edit, a delete, a reaction, a read receipt, a chat's
+    /// creation) can't be looked for, so it goes out again unchecked, and the resend is the caller's decision to risk
+    /// applying it twice. The reply is the row as its send left it, as [`EngineRequests::write`]'s.
+    pub fn resend(&self, id: i64) -> Reply<OutboxEntry> {
+        self.ask(|reply| Request::Resend(id, reply))
+    }
+
+    /// Sends a transient write (typing) through the outbox, as no row ([`Transient`]); the reply is how its send went.
+    /// A typing in a conversation the store doesn't know is refused, and an availability naming an endpoint other than
+    /// the one the push channel registered and keeps ([`EngineError::NoEndpoint`], as
+    /// [`EngineRequests::own_availability`]).
+    pub fn transient(&self, transient: Transient) -> Reply<TransientSent> {
+        self.ask(|reply| Request::Transient(transient, reply))
+    }
+
+    /// Sets the account's own availability (M2 Task 19): a transient write through the outbox ([`Transient`]:
+    /// [`Transient::EndpointAvailable`] or [`Transient::ManualStatus`]), naming the endpoint the push channel
+    /// registered in this run, under the fence's permit for its own account; the reply is how its send went.
+    /// [`EngineError::NoEndpoint`] before a registration of this run went through, or once the push channel stopped.
+    pub fn own_availability(&self, status: OwnStatus) -> Reply<TransientSent> {
+        self.ask(|reply| Request::OwnAvailability(status, reply))
     }
 
     /// Catches up now, whatever [`Gaps`] says.
@@ -334,9 +585,33 @@ impl EngineHandle {
         self.ask(|reply| Request::LoadOlder(conversation, reply))
     }
 
+    /// Syncs one conversation's messages from the service now ([`CatchUp::sync_messages`]: its newest page the first
+    /// time, what changed since afterwards; one the store doesn't know is read as a thread first). What it stored comes
+    /// as [`Event::Message`] ([`Source::CatchUp`]). For a channel other than a team's general one, which no
+    /// conversation list (and so no catch-up) brings, this is the only way its posts are read.
+    pub fn sync_conversation(&self, conversation: impl Into<String>) -> Reply<Synced> {
+        let conversation = conversation.into();
+        self.ask(|reply| Request::SyncConversation(conversation, reply))
+    }
+
+    /// The account's teams with their channels, from the store; `None` before a read of them settled. A read from
+    /// CSA starts in the background when the stored list is missing or old, and a change it stores comes as
+    /// [`Event::Teams`] ([`crate::teams`]).
+    pub fn teams(&self) -> Reply<Option<Vec<Team>>> {
+        self.ask(Request::Teams)
+    }
+
+    /// The post each stored message of a channel belongs to, as (message id, post id) in no set order: a post's is
+    /// its own id; a message stored without one recorded (a chat's, or a channel's read before posts were kept) has
+    /// none.
+    pub fn reply_roots(&self, conversation: impl Into<String>) -> Reply<Vec<(String, String)>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::ReplyRoots(conversation, reply))
+    }
+
     /// Up to `limit` stored conversations, the latest activity first.
     pub fn conversations(&self, limit: usize) -> Reply<Vec<Conversation>> {
-        self.ask(|reply| Request::Conversations(limit, reply))
+        self.query(|reply| Query::Conversations(limit, reply))
     }
 
     /// Up to `limit` stored messages of a conversation older than `before` (from the newest when none), the newest
@@ -348,7 +623,7 @@ impl EngineHandle {
         limit: usize,
     ) -> Reply<MessagePage> {
         let conversation = conversation.into();
-        self.ask(|reply| Request::Messages {
+        self.query(|reply| Query::Messages {
             conversation,
             before,
             limit,
@@ -359,7 +634,7 @@ impl EngineHandle {
     /// One stored message.
     pub fn message(&self, conversation: impl Into<String>, id: impl Into<String>) -> Reply<Option<Message>> {
         let (conversation, id) = (conversation.into(), id.into());
-        self.ask(|reply| Request::Message {
+        self.query(|reply| Query::Message {
             conversation,
             id,
             reply,
@@ -369,7 +644,7 @@ impl EngineHandle {
     /// A stored message's reactions, one per user and key.
     pub fn reactions(&self, conversation: impl Into<String>, id: impl Into<String>) -> Reply<Vec<Reaction>> {
         let (conversation, id) = (conversation.into(), id.into());
-        self.ask(|reply| Request::Reactions {
+        self.query(|reply| Query::Reactions {
             conversation,
             id,
             reply,
@@ -379,12 +654,139 @@ impl EngineHandle {
     /// A chat's stored members.
     pub fn members(&self, conversation: impl Into<String>) -> Reply<Vec<Member>> {
         let conversation = conversation.into();
-        self.ask(|reply| Request::Members(conversation, reply))
+        self.query(|reply| Query::Members(conversation, reply))
+    }
+
+    /// How many stored messages of a conversation the account hasn't read ([`Store::unread_count`]).
+    pub fn unread_count(&self, conversation: impl Into<String>) -> Reply<u64> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::UnreadCount(conversation, reply))
+    }
+
+    /// The name `mri`'s newest stored message carried, in any conversation ([`Store::display_name`]).
+    pub fn display_name(&self, mri: impl Into<String>) -> Reply<Option<String>> {
+        let mri = mri.into();
+        self.query(|reply| Query::DisplayName(mri, reply))
+    }
+
+    /// Someone as the views show them: their name (their profile's, else their newest message's, else one the binary
+    /// knew) and their picture, from the store; when their stored profile is missing or old, a lookup starts in the
+    /// background and its change comes as [`Event::Profile`] ([`crate::profiles`]).
+    pub fn person(&self, mri: impl Into<String>) -> Reply<Person> {
+        let mri = mri.into();
+        self.ask(|reply| Request::Person(mri, reply))
+    }
+
+    /// Someone's presence as last read ([`Availability::Unknown`] before the first read); from now on they are watched,
+    /// and each change of their presence comes as [`Event::Presence`] ([`crate::presence`]: read from UPS every
+    /// [`EngineOptions::presence_poll`]). At most
+    /// [`MAX_WATCHED`](crate::MAX_WATCHED) people are watched: past it the one asked about longest ago is dropped and
+    /// told as [`Availability::Unknown`], so a view asks again about the people it shows whenever it shows them anew.
+    pub fn presence(&self, mri: impl Into<String>) -> Reply<Availability> {
+        let mri = mri.into();
+        self.ask(|reply| Request::Presence(mri, reply))
+    }
+
+    /// The account's own stored read horizon in a conversation.
+    pub fn read_horizon(&self, conversation: impl Into<String>) -> Reply<Option<ReadHorizon>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::ReadHorizon(conversation, reply))
+    }
+
+    /// Whether the store holds a conversation's whole history (its kept sync state says so); `None` when the
+    /// conversation was never synced, so [`Self::load_older`]'s `None` doesn't yet mean nothing is older.
+    pub fn history_complete(&self, conversation: impl Into<String>) -> Reply<Option<bool>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::HistoryComplete(conversation, reply))
     }
 
     /// An outbox row as it now stands, by its id (a write's reply has it).
     pub fn outbox_entry(&self, id: i64) -> Reply<Option<OutboxEntry>> {
-        self.ask(|reply| Request::OutboxEntry(id, reply))
+        self.query(|reply| Query::OutboxEntry(id, reply))
+    }
+
+    /// A conversation's outbox rows that aren't sent, of any run, oldest first ([`Store::outbox_unsettled`]): what its
+    /// view shows beside its messages.
+    pub fn outbox_unsettled(&self, conversation: impl Into<String>) -> Reply<Vec<OutboxEntry>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::OutboxUnsettled(conversation, reply))
+    }
+
+    /// The rows runs that have ended left pending or in flight ([`Store::outbox_left_by_earlier_runs`]): they go out
+    /// only by an explicit [`EngineRequests::resend`].
+    pub fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>> {
+        self.query(Query::LeftByEarlierRuns)
+    }
+
+    /// Up to `limit` stored messages whose text holds every term of `query` (the user's input, each term a prefix),
+    /// the newest first ([`Store::search`]): the account's own store, never the service's search. A message stored
+    /// before the index existed is found once the backfill reached it ([`Event::Indexed`]).
+    pub fn search(&self, query: impl Into<String>, limit: usize) -> Reply<Vec<SearchHit>> {
+        let query = query.into();
+        self.query(|reply| Query::Search {
+            query,
+            within: None,
+            limit,
+            reply,
+        })
+    }
+
+    /// As [`EngineRequests::search`], in the conversations of `within` only ([`Store::search_in`]): the others'
+    /// messages are left out before the hits are counted.
+    pub fn search_in(&self, query: impl Into<String>, within: Vec<String>, limit: usize) -> Reply<Vec<SearchHit>> {
+        let query = query.into();
+        self.query(|reply| Query::Search {
+            query,
+            within: Some(within),
+            limit,
+            reply,
+        })
+    }
+
+    fn query<T>(&self, query: impl FnOnce(Responder<T>) -> Query) -> Reply<T> {
+        self.ask(|reply| Request::Query(query(reply)))
+    }
+
+    fn ask<T>(&self, request: impl FnOnce(Responder<T>) -> Request) -> Reply<T> {
+        let (reply, answer) = oneshot::channel();
+        // a stopped engine drops the request with its responder, and the reply is `Stopped`
+        let _ = self.requests.send(request(reply));
+        Reply(answer)
+    }
+}
+
+/// The running engine, owned: its request side (also reached through `Deref`, and shared by
+/// [`EngineHandle::requests`]), its events and its thread. Dropping it stops the engine (on its own thread, which
+/// isn't waited for) whatever request handles are left; [`EngineHandle::shutdown`] waits.
+#[derive(Debug)]
+pub struct EngineHandle {
+    requests: EngineRequests,
+    events: mpsc::UnboundedReceiver<Event>,
+    thread: Option<JoinHandle<()>>,
+    /// Disconnected once the engine's thread has ended: nothing is ever sent on it.
+    ended: std::sync::mpsc::Receiver<()>,
+}
+
+impl Deref for EngineHandle {
+    type Target = EngineRequests;
+
+    fn deref(&self) -> &EngineRequests {
+        &self.requests
+    }
+}
+
+impl Drop for EngineHandle {
+    fn drop(&mut self) {
+        // a request handle left elsewhere keeps the channel open: the engine is told to stop
+        let _ = self.requests.requests.send(Request::Shutdown);
+    }
+}
+
+impl EngineHandle {
+    /// A request handle of the engine's own, for another owner (a view) to keep.
+    #[must_use]
+    pub fn requests(&self) -> EngineRequests {
+        self.requests.clone()
     }
 
     /// The next event; `None` once the engine has stopped and every event was taken.
@@ -405,45 +807,65 @@ impl EngineHandle {
     /// Stops the engine (its push channel sends its disconnect) and waits for its thread to end: call it outside an
     /// async executor, or where blocking the thread is fine.
     pub fn shutdown(mut self) {
-        let _ = self.requests.send(Request::Shutdown);
+        let _ = self.requests.requests.send(Request::Shutdown);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 
-    fn ask<T>(&self, request: impl FnOnce(Responder<T>) -> Request) -> Reply<T> {
-        let (reply, answer) = oneshot::channel();
-        // a stopped engine drops the request with its responder, and the reply is `Stopped`
-        let _ = self.requests.send(request(reply));
-        Reply(answer)
+    /// As [`EngineHandle::shutdown`], but when the engine's thread hasn't ended within `grace`, calls `overdue` once
+    /// (to end what holds the engine up: a secret store waiting on a prompt nobody answers) and then waits for it.
+    pub fn shutdown_within(mut self, grace: Duration, overdue: impl FnOnce()) {
+        let _ = self.requests.requests.send(Request::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            if let Err(RecvTimeoutError::Timeout) = self.ended.recv_timeout(grace) {
+                overdue();
+            }
+            let _ = thread.join();
+        }
     }
 }
 
-/// Starts an engine on a thread of its own, with its own tokio runtime; it runs until its handle is shut down or
-/// dropped.
+/// Starts an engine on a thread of its own, with its own tokio runtime, once it holds the account's engine lock
+/// ([`Store::engine_lock`]); it runs until its handle is shut down or dropped, and the lock goes when its thread ends.
 ///
 /// # Errors
 ///
-/// [`EngineError::Runtime`] when the runtime can't be built, [`EngineError::Thread`] when the thread can't start.
+/// [`EngineError::AlreadyRunning`] while another engine holds the account's lock (nothing waits for it, and it is
+/// never broken), [`EngineError::Store`] when the lock can't be taken, [`EngineError::Runtime`] when the runtime can't
+/// be built, [`EngineError::Thread`] when the thread can't start.
 pub fn start<C, T>(parts: Parts<C, T>) -> Result<EngineHandle, EngineError>
 where
     C: Credentials + 'static,
     T: Transport<Error = HttpError> + Send + 'static,
 {
+    let lock = parts.store.engine_lock().map_err(|error| match error {
+        StoreError::EngineRunning { path } => EngineError::AlreadyRunning { lock: path },
+        other => EngineError::Store(other),
+    })?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(EngineError::Runtime)?;
+    let me: Arc<str> = parts.outbox.me().mri().as_str().into();
     let (requests, received) = mpsc::unbounded_channel();
     let (events, taken) = mpsc::unbounded_channel();
+    let (ending, ended) = std::sync::mpsc::channel();
     let thread = std::thread::Builder::new()
         .name("teams-core".to_owned())
-        .spawn(move || runtime.block_on(Core::new(parts, events).run(received)))
+        .spawn(move || {
+            runtime.block_on(Core::new(parts, events).run(received));
+            // its tasks (the push channel's) and the store are gone before another engine may start
+            drop(runtime);
+            drop(lock);
+            drop(ending);
+        })
         .map_err(EngineError::Thread)?;
     Ok(EngineHandle {
-        requests,
+        requests: EngineRequests { requests, me },
         events: taken,
         thread: Some(thread),
+        ended,
     })
 }
 
@@ -452,16 +874,24 @@ struct Core<C, T> {
     store: Store,
     outbox: Arc<Outbox<T>>,
     catch_up: CatchUp<C, T>,
+    profiles: Profiles<C>,
+    teams: Teams<C>,
+    presences: Presences<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
     gaps: Gaps,
     /// The push channel is connected.
     up: bool,
+    /// The endpoint the push channel's last registration that went through registered ([`PushEvent::Registered`]),
+    /// while the channel runs: the one the account's own availability names.
+    endpoint: Option<RegisteredEndpoint>,
     /// When a catch-up is tried again after one that failed, or after something a delivery brought was missed.
     retry_at: Option<Instant>,
     /// Message-loss reports waiting for a catch-up that runs clean.
     losses: Vec<MessageLoss>,
+    /// The search backfill of the messages stored before ([`crate::search`]), until it is over or failed.
+    backfill: Option<Backfill>,
 }
 
 impl<C, T> Core<C, T>
@@ -472,18 +902,30 @@ where
     fn new(parts: Parts<C, T>, events: mpsc::UnboundedSender<Event>) -> Self {
         let outbox = Arc::new(parts.outbox);
         let me = outbox.me().mri().clone();
+        let profiles = Profiles::new(
+            Arc::clone(&parts.client),
+            parts.known_names,
+            parts.options.profile_retry,
+        );
+        let teams = Teams::new(Arc::clone(&parts.client), parts.options.teams_retry);
+        let presences = Presences::new(Arc::clone(&parts.client), parts.options.presence_poll);
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
         Self {
             store: parts.store,
             outbox,
             catch_up,
+            profiles,
+            teams,
+            presences,
             events,
             options: parts.options,
             push: parts.push,
             gaps: Gaps::new(),
             up: false,
+            endpoint: None,
             retry_at: None,
             losses: Vec::new(),
+            backfill: Some(Backfill::new(parts.options.index_batch)),
         }
     }
 
@@ -502,6 +944,15 @@ where
                     None => push = None,
                 },
                 _ = tick.tick() => self.on_tick().await,
+                done = background(&mut self.profiles, &mut self.teams, &mut self.presences),
+                    if self.profiles.busy() || self.teams.busy() || self.presences.busy() => {
+                    self.on_background(done);
+                }
+                // ready once the runtime's other tasks had their turn (the push channel's, on this current-thread
+                // runtime: an always-ready branch would never let them run until the backfill is over), and
+                // `select!` picks among the ready branches at random, so a request or an event waits at most for one
+                // batch
+                () = tokio::task::yield_now(), if self.backfill.is_some() => self.index_step(),
             }
             // whatever a read settled on its way (a sync after a write, a new conversation's sync, …)
             self.arrived(&[]);
@@ -511,18 +962,78 @@ where
         }
     }
 
+    /// One batch of the search backfill; once it is over, told as [`Event::Indexed`]. One that fails is told and
+    /// given up for this run (the next run goes on where it stopped), so a store that keeps failing isn't tried in a
+    /// loop.
+    fn index_step(&mut self) {
+        let Some(backfill) = self.backfill.as_mut() else {
+            return;
+        };
+        match backfill.step(&mut self.store) {
+            Ok(Step::Done(_)) => {
+                let messages = backfill.indexed();
+                self.backfill = None;
+                self.emit(Event::Indexed { messages });
+            }
+            Ok(Step::Indexed(_)) => {}
+            Err(error) => {
+                self.backfill = None;
+                self.failed("indexing stored messages for search", error);
+            }
+        }
+    }
+
     fn emit(&self, event: Event) {
+        // each event judged at its own level: a failure's warning is logged at `warn` too
+        if let Some((level, line)) = described::logged(&event, log::max_level()) {
+            log::log!(level, "{line}");
+        }
         // an owner that dropped its handle takes no more events
         let _ = self.events.send(event);
     }
 
-    /// Tells the owner of every row our own message coming back changed since the last look
-    /// ([`Outbox::take_arrived`]), apart from one already told as it now stands (in `told`).
+    /// Tells the owner what the reads since the last look stored ([`Core::brought`], as [`Source::CatchUp`]), then
+    /// every row a read changed ([`Outbox::take_arrived`]): our own message coming back, or an entry it couldn't read
+    /// carrying a row's `clientmessageid` ([`Outbox::unreadable_seen`]); apart from one already told as it now stands
+    /// (in `told`).
     fn arrived(&self, told: &[OutboxEntry]) {
+        self.brought(Source::CatchUp);
         for row in self.outbox.take_arrived() {
             if !told.contains(&row) {
                 self.emit(Event::Outbox(row));
             }
+        }
+    }
+
+    /// Tells the owner what the reads since the last look changed in the store ([`CatchUp::take_changes`]): each
+    /// message stored new or newer as [`Event::Message`] from `source`, as now stored, then each conversation changed
+    /// as [`Event::ConversationChanged`].
+    fn brought(&self, source: Source) {
+        let changes = self.catch_up.take_changes();
+        for stored in changes.messages {
+            let message = match self.store.message(&stored.conversation, &stored.id) {
+                Ok(message) => message.map(Box::new),
+                Err(error) => {
+                    self.failed("reading a synced message back", error);
+                    None
+                }
+            };
+            let change = if stored.applied == Applied::Inserted {
+                MessageChange::New
+            } else {
+                MessageChange::Other
+            };
+            self.emit(Event::Message {
+                conversation: stored.conversation,
+                id: stored.id,
+                change,
+                applied: stored.applied,
+                message,
+                source,
+            });
+        }
+        for conversation in changes.conversations {
+            self.emit(Event::ConversationChanged { conversation });
         }
     }
 
@@ -551,9 +1062,10 @@ where
     async fn on_request(&mut self, request: Request) {
         match request {
             Request::Write(action, reply) => {
-                let _ = reply.send(self.write(action).await);
+                let _ = reply.send(self.logged_write(action).await);
             }
             Request::Sync(reply) => {
+                log::info!("action: a catch-up asked for");
                 self.gaps.missed();
                 let report = self
                     .catch_up_due()
@@ -561,55 +1073,219 @@ where
                     .unwrap_or_else(|| Ok(CatchUpReport::default()));
                 let _ = reply.send(report.map_err(EngineError::from));
             }
+            Request::Resend(id, reply) => {
+                log::info!("action: resend of row {id}");
+                let _ = reply.send(logged(self.resend(id).await, || format!("resend of row {id}")));
+            }
+            Request::Transient(transient, reply) => {
+                let _ = reply.send(self.transient(transient).await);
+            }
+            Request::OwnAvailability(status, reply) => {
+                log::info!("action: own availability {status:?}");
+                let _ = reply.send(self.own_availability(status).await);
+            }
             Request::LoadOlder(conversation, reply) => {
+                log::info!("action: older history of {conversation}");
                 let older = self.catch_up.load_older(&mut self.store, &conversation).await;
+                self.brought(Source::History);
                 self.arrived(&[]);
                 let _ = reply.send(older.map_err(EngineError::from));
             }
-            Request::Conversations(limit, reply) => {
-                let _ = reply.send(self.store.conversations_by_activity(limit).map_err(EngineError::from));
+            Request::SyncConversation(conversation, reply) => {
+                log::info!("action: a sync of {conversation}");
+                let synced = self.catch_up.sync_messages(&mut self.store, &conversation).await;
+                let synced = synced.map_err(EngineError::from);
+                let _ = reply.send(logged(synced, || format!("sync of {conversation}")));
             }
-            Request::Messages {
-                conversation,
-                before,
-                limit,
-                reply,
-            } => {
-                let page = self.store.messages_before(&conversation, before.as_ref(), limit);
-                let _ = reply.send(page.map_err(EngineError::from));
+            Request::Person(mri, reply) => {
+                let person = self.profiles.person(&self.store, &mri);
+                let _ = reply.send(person.map_err(EngineError::from));
             }
-            Request::Message {
-                conversation,
-                id,
-                reply,
-            } => {
-                let _ = reply.send(self.store.message(&conversation, &id).map_err(EngineError::from));
+            Request::Presence(mri, reply) => {
+                let (availability, dropped) = self.presences.presence(&mri);
+                let _ = reply.send(Ok(availability));
+                // someone the watch dropped to make room: no read refreshes what a view was told of them
+                if let Some(mri) = dropped {
+                    self.emit(Event::Presence {
+                        mri,
+                        availability: Availability::Unknown,
+                    });
+                }
             }
-            Request::Reactions {
-                conversation,
-                id,
-                reply,
-            } => {
-                let _ = reply.send(self.store.reactions(&conversation, &id).map_err(EngineError::from));
+            Request::Teams(reply) => {
+                let teams = self.teams.teams(&self.store);
+                let _ = reply.send(teams.map_err(EngineError::from));
             }
-            Request::Members(conversation, reply) => {
-                let _ = reply.send(self.store.members(&conversation).map_err(EngineError::from));
-            }
-            Request::OutboxEntry(id, reply) => {
-                let _ = reply.send(self.store.outbox_entry(id).map_err(EngineError::from));
-            }
+            Request::Query(query) => self.answer(query),
             Request::Shutdown => {}
         }
     }
 
+    /// A lookup finished (`None`: none was under way): what it found stored, and told when it changed the store.
+    fn on_looked(&mut self, looked: Option<crate::profiles::Looked>) {
+        let Some(looked) = looked else { return };
+        match self.profiles.store(&mut self.store, looked) {
+            Ok(Some(profile)) => self.emit(Event::Profile { mri: profile.mri }),
+            Ok(None) => {}
+            Err(error) => self.failed("storing a profile", error),
+        }
+    }
+
+    /// A read in the background is over: a person's lookup, the teams' or the presence read.
+    fn on_background(&mut self, done: Background) {
+        match done {
+            Background::Looked(looked) => self.on_looked(looked),
+            Background::Teams(read) => self.on_teams(read),
+            Background::Presence(polled) => self.on_presence(polled),
+        }
+    }
+
+    /// A presence read is over (`None`: none ran): each change it brought told.
+    fn on_presence(&mut self, polled: Option<Polled>) {
+        let Some(polled) = polled else { return };
+        for (mri, availability) in self.presences.settle(polled) {
+            self.emit(Event::Presence { mri, availability });
+        }
+    }
+
+    /// A read of the teams is over (`None`: none ran): stored, and told when the list changed; a failure is told.
+    fn on_teams(&mut self, read: Option<Result<Vec<Team>, TeamsReadError>>) {
+        let Some(read) = read else { return };
+        match self.teams.store(&mut self.store, read) {
+            Ok(Ok(true)) => self.emit(Event::Teams),
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => self.failed(READING_TEAMS, error),
+            Err(error) => self.failed("storing the teams", error),
+        }
+    }
+
+    /// Answers a query from the store.
+    fn answer(&self, query: Query) {
+        fn give<T>(reply: Responder<T>, answer: Result<T, StoreError>) {
+            let _ = reply.send(answer.map_err(EngineError::from));
+        }
+        let store = &self.store;
+        match query {
+            Query::Conversations(limit, reply) => give(reply, store.conversations_by_activity(limit)),
+            Query::Messages {
+                conversation,
+                before,
+                limit,
+                reply,
+            } => give(reply, store.messages_before(&conversation, before.as_ref(), limit)),
+            Query::Message {
+                conversation,
+                id,
+                reply,
+            } => give(reply, store.message(&conversation, &id)),
+            Query::Reactions {
+                conversation,
+                id,
+                reply,
+            } => give(reply, store.reactions(&conversation, &id)),
+            Query::Members(conversation, reply) => give(reply, store.members(&conversation)),
+            Query::UnreadCount(conversation, reply) => give(reply, store.unread_count(&conversation, self.me())),
+            Query::DisplayName(mri, reply) => give(reply, store.display_name(&mri)),
+            Query::ReadHorizon(conversation, reply) => give(reply, store.read_horizon(&conversation, self.me())),
+            Query::HistoryComplete(conversation, reply) => give(
+                reply,
+                store
+                    .sync_state(&conversation)
+                    .map(|state| state.map(|state| state.history_complete)),
+            ),
+            Query::OutboxEntry(id, reply) => give(reply, store.outbox_entry(id)),
+            Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
+            Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
+            Query::ReplyRoots(conversation, reply) => give(reply, store.reply_roots(&conversation)),
+            Query::Search {
+                query,
+                within,
+                limit,
+                reply,
+            } => give(
+                reply,
+                match within {
+                    Some(within) => store.search_in(&query, &within, limit),
+                    None => store.search(&query, limit),
+                },
+            ),
+        }
+    }
+
+    /// The account's MRI.
+    fn me(&self) -> &str {
+        self.outbox.me().mri().as_str()
+    }
+
     // --- writes ---
+
+    /// [`EngineRequests::write`]'s action, told to the log by its kind and ids and the row it made.
+    async fn logged_write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
+        let described = described::action(&action);
+        log::info!("action: {described}");
+        let written = self.write(action).await;
+        if let Ok(row) = &written {
+            log::info!("action {described}: row {} {:?}", row.id, row.state);
+        }
+        logged(written, || described)
+    }
 
     async fn write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
         let command = self.command(action)?;
+        if let Command::Send { conversation, .. } = &command {
+            // the message a waiting typing announced goes now: the typing must not follow it
+            for (transient, dropped) in self.outbox.drop_waiting(conversation) {
+                self.emit(Event::Transient(transient, dropped));
+            }
+        }
         let row = enqueue(&mut self.store, &command)?;
-        let row = match self.outbox.send(&mut self.store, &self.catch_up, row.id).await {
+        self.emit(Event::Queued(row.clone()));
+        self.send_row(row.id).await
+    }
+
+    /// The explicit resend of a row ([`EngineRequests::resend`]): adopted into this run by the store, then sent as a
+    /// new write is.
+    async fn resend(&mut self, id: i64) -> Result<OutboxEntry, EngineError> {
+        let row = self.store.resend(id)?;
+        self.emit(Event::Queued(row.clone()));
+        self.send_row(row.id).await
+    }
+
+    /// A transient write ([`EngineRequests::transient`]), to a conversation the store knows; an availability only
+    /// from the endpoint the push channel registered and still keeps ([`EngineRequests::own_availability`]'s rule).
+    async fn transient(&mut self, transient: Transient) -> Result<TransientSent, EngineError> {
+        if let Some(endpoint) = transient.endpoint()
+            && self.endpoint.as_ref() != Some(endpoint)
+        {
+            return Err(EngineError::NoEndpoint);
+        }
+        if let Some(conversation) = transient.conversation()
+            && self.store.conversation(conversation)?.is_none()
+        {
+            return Err(StoreError::UnknownConversation(conversation.to_owned()).into());
+        }
+        Ok(self.outbox.send_transient(transient).await)
+    }
+
+    /// The account's own availability ([`EngineRequests::own_availability`]), from the endpoint registered in this run.
+    async fn own_availability(&mut self, status: OwnStatus) -> Result<TransientSent, EngineError> {
+        let endpoint = self.endpoint.clone().ok_or(EngineError::NoEndpoint)?;
+        let transient = match status {
+            OwnStatus::Available => Transient::EndpointAvailable { endpoint },
+            OwnStatus::Manual(status) => Transient::ManualStatus {
+                endpoint,
+                status: Some(status),
+            },
+            OwnStatus::ClearManual => Transient::ManualStatus { endpoint, status: None },
+        };
+        Ok(self.outbox.send_transient(transient).await)
+    }
+
+    /// Sends one of this run's rows at once; the row as its send left it (see [`EngineRequests::write`]).
+    async fn send_row(&mut self, id: i64) -> Result<OutboxEntry, EngineError> {
+        let row = match self.outbox.send(&mut self.store, &self.catch_up, id).await {
             Ok(row) => row,
-            Err(error) => self.row_after(row.id, error)?,
+            Err(error) => self.row_after(id, error)?,
         };
         self.settled(&row).await;
         // its own check's sync may have settled it, or another row, on the way
@@ -774,9 +1450,16 @@ where
         if let Some(error) = error {
             self.failed("sending the outbox's due rows", error);
         }
+        for (transient, sent) in self.outbox.send_due_transients().await {
+            self.emit(Event::Transient(transient, sent));
+        }
         if self.up && self.retry_at.is_some_and(|at| Instant::now() >= at) {
             self.auto_catch_up(Cause::Retry).await;
         }
+        // profile lookups that failed on the way, their wait over
+        self.profiles.retry_due();
+        // the watched people's presence, when a read is due
+        self.presences.poll_due();
     }
 
     // --- catch-up ---
@@ -821,6 +1504,7 @@ where
                 self.emit(Event::Connected { endpoint });
                 self.auto_catch_up(Cause::Connected).await;
             }
+            PushEvent::Registered(endpoint) => self.endpoint = Some(endpoint),
             PushEvent::Registration(report) => self.emit(Event::Registration(report)),
             PushEvent::MessageLoss(loss) => {
                 if loss.messaging() {
@@ -835,13 +1519,19 @@ where
             PushEvent::Delivery(delivery) => self.on_delivery(delivery).await,
             // an incoming call, or another endpoint's push: never acted on, never answered
             PushEvent::Ignored(_) => {}
-            PushEvent::Disconnected(down) => {
+            PushEvent::Disconnected { down, heard } => {
                 self.up = false;
                 self.gaps.disconnected();
-                self.emit(Event::Disconnected(down));
+                self.emit(Event::Disconnected { down, heard });
             }
             PushEvent::Stopped(stop) => {
                 self.up = false;
+                // no registration is renewed any more: the endpoint it kept is no longer the account's live one, and
+                // an availability waiting out a `Retry-After` doesn't go out from the tick after it
+                self.endpoint = None;
+                for (transient, dropped) in self.outbox.drop_own_availability() {
+                    self.emit(Event::Transient(transient, dropped));
+                }
                 self.gaps.disconnected();
                 self.emit(Event::PushStopped(stop));
             }
@@ -849,17 +1539,21 @@ where
     }
 
     async fn on_delivery(&mut self, delivery: Delivery) {
-        let replay = delivery.stored;
+        let source = if delivery.stored {
+            Source::Replay
+        } else {
+            Source::Delivery
+        };
         match delivery.event {
             ChatEvent::Message { conversation, message } => {
-                self.on_message(conversation, MessageChange::New, &message, replay)
+                self.on_message(conversation, MessageChange::New, &message, source)
                     .await;
             }
             ChatEvent::MessageUpdate {
                 conversation,
                 change,
                 message,
-            } => self.on_message(conversation, change.into(), &message, replay).await,
+            } => self.on_message(conversation, change.into(), &message, source).await,
             ChatEvent::Typing { conversation, from } => self.emit(Event::Typing {
                 conversation,
                 from,
@@ -879,7 +1573,13 @@ where
 
     /// A message delivered (new, or changed): stored as a sync would store it, its conversation added first when the
     /// store doesn't know it, and synced after. One that doesn't reach the store is missed ([`Core::missed`]).
-    async fn on_message(&mut self, conversation: String, change: MessageChange, message: &chat::Message, replay: bool) {
+    async fn on_message(
+        &mut self,
+        conversation: String,
+        change: MessageChange,
+        message: &chat::Message,
+        source: Source,
+    ) {
         let added = match self.add_if_unknown(&conversation).await {
             Ok(added) => added,
             Err(error) => return self.missed("adding a delivery's conversation", error),
@@ -901,7 +1601,7 @@ where
                     change,
                     applied: received.applied,
                     message: stored,
-                    replay,
+                    source,
                 });
             }
             // a control signal, or a message this build can't read: nothing stored (its row may be settled)
@@ -936,8 +1636,8 @@ where
         }
     }
 
-    /// A conversation changed: one the store doesn't know is added and synced (missed when it can't be, [`Core::missed`]);
-    /// the rest comes with the next catch-up.
+    /// A conversation changed: one the store doesn't know is added and synced (missed when it can't be, [`Core::missed`]),
+    /// and told as the reads' change ([`Core::brought`]); the rest comes with the next catch-up.
     async fn on_conversation(&mut self, conversation: String) {
         match self.add_if_unknown(&conversation).await {
             Ok(true) => {
@@ -945,10 +1645,9 @@ where
                     self.missed("syncing a new conversation", error);
                 }
             }
-            Ok(false) => {}
-            Err(error) => return self.missed("adding a changed conversation", error),
+            Ok(false) => self.emit(Event::ConversationChanged { conversation }),
+            Err(error) => self.missed("adding a changed conversation", error),
         }
-        self.emit(Event::ConversationChanged { conversation });
     }
 }
 
@@ -967,6 +1666,36 @@ fn original(message: &Message) -> Result<Sent, EngineError> {
         compose_time_ms: message.compose_time.ok_or_else(|| unknown("compose time"))?,
         arrival_time_ms: message.arrival_time,
     })
+}
+
+/// `result` as it is, its failure told to the log with what failed (`what`, by kind and ids).
+fn logged<T>(result: Result<T, EngineError>, what: impl FnOnce() -> String) -> Result<T, EngineError> {
+    if let Err(error) = &result {
+        log::warn!("action {} failed: {error}", what());
+    }
+    result
+}
+
+/// A read in the background that is over.
+enum Background {
+    Looked(Option<crate::profiles::Looked>),
+    Teams(Option<Result<Vec<Team>, TeamsReadError>>),
+    Presence(Option<Polled>),
+}
+
+/// The next read in the background to be over, a person's lookup, the teams' or the presence read; never while none
+/// runs.
+async fn background<C: Credentials + 'static>(
+    profiles: &mut Profiles<C>,
+    teams: &mut Teams<C>,
+    presences: &mut Presences<C>,
+) -> Background {
+    tokio::select! {
+        looked = profiles.next(), if profiles.busy() => Background::Looked(looked),
+        read = teams.next(), if teams.busy() => Background::Teams(read),
+        polled = presences.next(), if presences.busy() => Background::Presence(polled),
+        else => pending().await,
+    }
 }
 
 /// The push channel's next event; never, without one.

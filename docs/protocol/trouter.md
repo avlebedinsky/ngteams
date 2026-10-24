@@ -1,15 +1,16 @@
 # Trouter: the push channel for messaging
 
-Status: 2026-10-20, M1 Task 14; the native client's part (below) 2026-10-21, M1 Task 16. Written from live runs of `proto-lab run ab-trouter --headless` (accounts a and b,
-Chrome for Testing 155 headless, the fence armed with the **messaging set**, below), from M0's `echo-call` runs
+Status: 2026-10-20, M1 Task 14; the native client's part (below) 2026-10-21, M1 Task 16; others' and own presence 2026-10-23, M2 Tasks 17–18. Written from live runs of `proto-lab run ab-trouter --headless` (accounts a and b,
+Chrome for Testing 155 headless, the fence armed with what was then its **messaging set**, below), from M0's `echo-call` runs
 (`calling-echo.md`), and from the web bundle `26260.1717.5229.7049` (read locally, notes in our own words). The
 captures stay outside the repository; the fixtures in `tests/fixtures/trouter/` are synthetic, shaped like them
 (`session.json`: one socket's frames both ways; `registration.json`: both stacks' registrations; `deliveries.json`:
 the chat deliveries and the web client's answers). Ids, tokens, host numbers and addresses below are placeholders.
 
 The code: the scenario is `crates/proto-lab/src/scenario/ab_trouter.rs` (`ab-trouter`, and `ab-trouter-quiet`, which
-also holds back `user.activity`); what the fence lets through is `crates/proto-lab/src/calling.rs`
-(`messaging_request`, `trouter_frame`) behind `Classifier::messaging` and `FrameClassifier::messaging`.
+also holds back `user.activity` with a labelled forced frame deny, `ForcedFrameDeny`); what the fence lets through is
+the lab rule's: `teams_fence::contacting` for requests ([fence-targets.md](fence-targets.md#the-contacting-services))
+and the frame rule for frames (`crates/proto-lab/src/fence_ws.rs`, `classify_frame`), [below](#what-the-fence-lets-out).
 
 ## Outcome
 
@@ -25,26 +26,32 @@ also holds back `user.activity`); what the fence lets through is `crates/proto-l
 - The web client never re-authenticates an open socket; a renewed token takes a reconnect
   ([Token renewal](#token-renewal-on-a-live-socket)).
 
-## The messaging set (what the fence lets out)
+## What the fence lets out
 
-A run that chats over the push channel uses `Classifier::messaging` and `FrameClassifier::messaging`:
+A run that chats over the push channel runs under the lab rule, like every run:
 
-- the write mapping of `ab-chat` (`Classifier::mapped`, members read live);
-- the registrar registration of the **messaging stack's** endpoint only: `appId` exactly `TeamsCDLWebWorker` and
-  `templateKey` `TeamsCDLWebWorker_<digits and dots>` (`2.6` and `2.7` were seen), in the reviewed shape
-  (`calling::messaging_request`). The calling stack's (`SkypeSpacesWeb`) stays unknown: it makes the account reachable
-  for calls. Its denial, and its retries, are expected in this scenario's verdict (`TROUTER_RUN_REQUESTS`);
-- the Trouter session's own frames on any Trouter socket (`calling::trouter_frame`, the same frames `echo-call`
-  allows): `user.authenticate`, `ping`, the client's own `user.activity` (`active`/`inactive` only; the account showing
-  online is accepted, the user's decision of 2026-10-19), `trouter.processed_message_loss` and the disconnect `0::`;
-- nothing else: no settings reads, no call, and **no answer to any delivery** (`3:::` frames stay unknown and denied).
+- the chat writes as in `ab-chat` (mapped by `teams_fence::contacting`, members read live);
+- both stacks' registrar registrations: the registrar is no contacting service. The messaging stack's (`appId`
+  `TeamsCDLWebWorker`, `templateKey` `TeamsCDLWebWorker_<digits and dots>`, `2.6` and `2.7` seen) is what the
+  scenario waits for, each one's body read to tell it apart; the calling stack's (`SkypeSpacesWeb`) makes the account
+  reachable for calls, which is allowed: an incoming call is never answered;
+- every frame of socket.io type `0` (disconnect), `1` (connect), `2` (heartbeat) and `5` (event) on a Trouter socket
+  (any host under `trouter.teams.microsoft.com`): `user.authenticate`, `ping`, the client's own `user.activity`,
+  `trouter.processed_message_loss`, `0::`; each logged to `fence.log` as `allowed` (`SEND`, the socket's host and path
+  shape), never with its content;
+- and **no answer to any delivery**: a `3:::` frame, like a `4`, a `6`, a binary frame and anything that doesn't parse,
+  is denied on a Trouter socket (the writing scenarios' expected-deny list names the class, "Trouter delivery
+  responses", so a run isn't failed by it).
 
-## What the native client may send (M1 Task 15)
+Until 2026-10-23 a run that chatted over the push channel used a reviewed **messaging set** instead: the messaging
+stack's registration in its captured shape and the session's frames above, everything else denied.
 
-The native client's socket sends only `teams_proto::OwnFrame`s, through `teams_proto::FrameSink`, each logged to
-`fence.log` (`event` `frame`: the socket's URL without its query and the frame's kind, never its text) before it goes
-out; a frame that can't be logged isn't sent. The list is sealed and holds the messaging stack's own session frames in
-the shapes above:
+## What the native client sends
+
+M1 Task 15. The native client's socket sends only `teams_proto::OwnFrame`s, through `teams_proto::FrameSink`: typed
+frames of `teams-proto`, each built by its constructor in the messaging stack's shape. The trait is sealed only to keep
+frame text out of other crates' hands (no constructor takes frame text); which frames exist isn't a reviewed list, and
+adding one is an ordinary change. The sink writes nothing to `fence.log`: a frame isn't a contacting write. The frames:
 
 | kind | frame |
 |---|---|
@@ -53,8 +60,9 @@ the shapes above:
 | `trouter_message_loss_ack` | `5:<n>+::{"name":"trouter.processed_message_loss",…}`, the indicators as they came (never an empty list) |
 | `trouter_disconnect` | `0::` |
 
-The sink numbers the acknowledged events itself (`<n>`, from 1 per socket). No `user.activity` and no answer to a
-delivery: neither has a type, so neither can be sent.
+The sink numbers the acknowledged events itself (`<n>`, from 1 per socket). No `user.activity` (nothing needs it) and
+no answer to a delivery: neither has a type, so neither can be sent. The one answer that may be added is a typed
+response for a call the fence itself permitted (M3, `docs/backlog/fence-call-follow-ups.md`).
 
 ## The native client (M1 Task 16)
 
@@ -73,11 +81,11 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
   build.
 - **Frames**: `user.authenticate` at once after `1::` (never before it: a stop before then sends nothing at all),
   pings every 40 s and a reconnect when a pong is 5 s late, the message-loss acknowledgement once the owner has caught
-  up, and `0::` on a stop or a renewal (once authenticated). Each goes through `teams_proto::FrameSink` and is logged to `fence.log`
-  first; the socket's write half goes only to the sink. No `user.activity`, no answer to any delivery, an incoming
+  up, and `0::` on a stop or a renewal (once authenticated). Each goes through `teams_proto::FrameSink`, unlogged;
+  the socket's write half goes only to the sink. No `user.activity`, no answer to any delivery, an incoming
   call's (a `callNotification`, whatever its path) included.
-- **Registration**: the messaging stack's, as `teams_proto::EndpointRegistration` (an own-state request, logged
-  first): the body above with `templateKey` `TeamsCDLWebWorker_2.6` and `platformUIVersion` the `tc`'s `v`, on every
+- **Registration**: the messaging stack's, as `teams_proto::EndpointRegistration` (a plain request through
+  `Transport::send`: the registrar is no contacting service, so it goes out logged `allowed`): the body above with `templateKey` `TeamsCDLWebWorker_2.6` and `platformUIVersion` the `tc`'s `v`, on every
   `trouter.connected`, again 30 s before its hour ends, after a failure again 123 s later. The transport sends the
   registrar `X-MS-Migration: True` and `X-Ms-Test-User: False` with the token. The push URL's endpoint id is
   base64url; until M1 Task 21 the registration refused one with a `-` or `_` (11 of the 28 ids in the captures), so such an
@@ -223,7 +231,8 @@ events.
 
 The native client turns these into typed events (Task 16, `teams_trouter::events`): a `NewMessage` whose
 `messagetype` is `Control/Typing` is a signal (typing), not a message, and so is every other `Control/…` one
-(`Control/ClearTyping`, which the web client sends, is typing's end; one no capture showed is `Unknown`); a message's own `clientmessageid` matches it
+(`Control/ClearTyping`, known from the bundle only, is typing's end when one is delivered: the web client sent none in
+three `chat-shapes` runs, [chat.md](chat.md#typing-chat-shapes); one no capture showed is `Unknown`); a message's own `clientmessageid` matches it
 to our outbox row (Task 13). A `MessageUpdate` carries the whole message, so what changed is told from it the way
 every one in the captures of runs 12 and 13 (below; both accounts' sockets) could be told (read locally, the times
 compared, none printed): an
@@ -238,7 +247,8 @@ doesn't deliver those (`teams_mock::TrouterMock`).
 
 The web client answers each chat delivery `3:::{"id":<the delivery's id>,"status":200,"headers":{"MS-CV":"<its
 MS-CV>.0","trouter-request":"<echoed>","trouter-client":"{\"cd\":<ms spent>}"},"body":""}` and pings right after.
-The messaging set denies every answer (unknown), so every run showed what an endpoint that never answers gets:
+The messaging set denied every answer, as the frame rule still does (socket.io type `3`), so every run showed what an
+endpoint that never answers gets:
 
 - **On a stable socket, nothing more.** Each live delivery came once; in 16 minutes of observation after the last one
   (two runs) none came again. The socket stayed up, every ping was answered within about 100 ms, and later deliveries
@@ -280,15 +290,216 @@ newly found offline messages are notified is M2's.
   acknowledged within 10 s, so it reconnected about every 10 s for the whole run, with the replays above. That is the
   web client's own dependency, not the service's: a client that never sends the event has no acknowledgement to wait
   for.
-- **Decision** (same discussion): the native client sends no `user.activity` in M1; it is not on the reviewed
-  `OwnFrame` list (Task 15). Revisit only if a long-lived native session without it shows the service closing the
-  socket or delivering less.
+- **Decision** (same discussion): the native client sends no `user.activity` in M1. Revisit only if a long-lived
+  native session without it shows the service closing the socket or delivering less; adding the frame is then an
+  ordinary change (it reaches nobody).
 - Presence (for M2), not settled here: alongside `user.activity` the web client PUTs its presence endpoint,
   `PUT <teams>/ups/<geo>/v1/me/endpoints/` with `{"id":"<the Trouter epid>","availability":"Available","activity":
   "Available","activityReporting":"Transport","deviceType":"Web"}`, and subscribes to others' presence
-  (`POST …/ups/<geo>/v1/pubsub/subscriptions/<epid>`). The fence denied both in every run (they are on the run's
-  expected list), and other people's presence reads were denied too, so what makes an account show online (the PUT,
-  the activity, or both) was not tested.
+  (`POST …/ups/<geo>/v1/pubsub/subscriptions/<epid>`). The fence of the time denied both in every run (they were on the
+  run's expected list), and other people's presence reads were denied too, so what makes an account show online (the PUT,
+  the activity, or both) was not tested. Others' presence is read since M2 Task 17 ([below](#others-presence)); the
+  account's own was measured in M2 Task 18 ([Own presence](#own-presence-m2-task-18)): the endpoint `PUT` is what
+  makes it show online, `user.activity` alone does nothing others see.
+
+## Others' presence
+
+M2 Task 17. Others' presence is read from UPS (GTM `presenceUPS`, `<AFD host>/ups/<geo>`) by `POST
+v1/presence/getpresence/`, a read the web client sends as a `POST`.
+
+- **The request** (5461 of them in the captures of 2026-10-19 to 2026-10-21, all denied then): a JSON list of
+  `{"mri": …}`, up to 8 seen, the account's own sometimes with `"source": "ups"` beside it; no query; the trailing
+  slash; `behavioroverride: redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent: Teams-V2-Web`, an
+  empty `x-ms-object-id`, `Content-Type: application/json`, the client's caller and correlation ids, and on 2065 of
+  them `x-ms-endpoint-id` (the client's endpoint). The client asks with a caller per component
+  (`presence-sync-strategy:onInterval` about every four minutes, 218–258 s apart; others on a subscription event, on
+  Trouter's state, for its own "me" queries). Its token: `https://presence.teams.microsoft.com/`, CAE.
+- **The answer** (`ab-chat` of 2026-10-22, the first run that let lab-only reads through: 14 reads, all 200): one item
+  per MRI asked and no other, each `mri`, `presence` (`sourceNetwork`: `Self` for the account's own, `SameEnterprise`
+  for another; `calendarData.isOutOfOffice`; `capabilities`, empty; `availability`; `activity`; `lastActiveTime`; and
+  `source` when asked with it), `etagMatch`, `etag` and the item's `status`, `20000`. Every lab account was
+  `Offline`/`Offline` then (nothing sets their presence yet), `lastActiveTime` `0001-01-01T00:00:00Z`.
+- **The browser fence** lets it through whoever it names: UPS is no contacting service
+  ([fence-targets.md](fence-targets.md#the-presence-read)). Until 2026-10-23 it passed only in that shape, without
+  `x-ms-endpoint-id`, and only when every MRI was a lab account.
+- **The native client** sends it as `PresenceRead`, a plain request through `Transport::send` (logged `allowed`), by
+  MRI alone (`[{"mri": …}]`, never `source`), with the captured header values and its own non-CAE presence token,
+  which UPS took (`teams-headless a presence`, 2026-10-23: two reads, `Offline` for b and c;
+  [auth.md](auth.md#open-questions) question 4). The engine polls it every minute for the people the views asked
+  about, a colleague outside the lab included, in one read (`teams-core` `presence.rs`): at most 20 watched, the one asked about longest ago dropped (and told
+  unknown); someone newly asked about brings the read forward, never within 10 s of the last; a 429 or 503 holds every
+  read until its `Retry-After`, counted from the answer, is over. The views show a dot, "unknown" before the first read,
+  after a failed one and for someone no longer watched.
+- **No subscription**: the web client also subscribes its endpoint to others' presence (`POST
+  v1/pubsub/subscriptions/<epid>`), which the lab browser lets through (it reaches nobody); the native client doesn't
+  send one, so its presence is only as fresh as its last poll. If a minute proves too stale, a subscription is an
+  ordinary request to add.
+
+## Own presence (M2 Task 18)
+
+What makes a lab account show online to another, and what a manual status sends, measured under the user's
+exception of 2026-10-21 to the fence of the time (a lab account could set its own availability, in its captured
+shapes, availability values only, every id it names the account itself or its own registered endpoint). Under the lab
+rule presence reaches nobody, and all of it passes. The scenarios are
+`crates/proto-lab/src/scenario/own_presence.rs` (`own-presence-activity`, `-endpoint`, `-both`, `-manual-held`,
+`-manual`): only a's browser runs, as in `ab-trouter` ([above](#what-the-fence-lets-out)), and opens the a–b chat
+(the probe force-denied first, as `ab-chat`). b's view is b's native client reading a's presence, `teams-headless b
+presence` (the read of [Others' presence](#others-presence), under b's own fence), about every
+16 s, from before a's browser starts until minutes after it closed (`scripts/own-presence-run.sh`, under the live
+lock). Each run holds back on purpose, with a labelled forced deny, what it goes without: `-activity` the endpoint
+`PUT`, `-endpoint` every `user.activity` (`ForcedFrameDeny`), `-manual-held` the manual status; the runs below used
+the fence of the time instead ([The browser fence's mapping](#the-browser-fences-mapping)).
+
+### What the web client sends
+
+- **The endpoint `PUT`**: `PUT <teams origin>/ups/<geo>/v1/me/endpoints/`, no query, a body of exactly
+  `{"id","availability","activity","activityReporting":"Transport","deviceType":"Web"}`. `id` is the client's Trouter
+  endpoint id: the messaging stack's registration's `registrationId`, its socket's `epid`, and the request's
+  `x-ms-endpoint-id`, a lower-case GUID. The pairs seen (403 in the captures of 2026-10-20 to 2026-10-21):
+  `Available`/`Available` while the client runs (388) and `Busy`/`InACall` in a call (15, `echo-call`). Its callers
+  (`x-ms-client-caller`): `presence-sync-strategy:TrouterStateChanged` (the push channel's state changed),
+  `presence-sync-strategy-client` and the two `set-callstate-presence-worker-resolver:setCallStatePresence…`.
+  Answered `201` with no body when let through. The web client sends it a few seconds after a Trouter connect, after
+  its presence subscriptions (denied) were tried: 11–60 s after the page began in runs 1, 2, 4 and 5 below, and not
+  at all in runs 3 (within the 79 s its page was open) and 6–10, the same client version (`1415/26100212011`)
+  throughout; what decides it is not known.
+- **The manual status** (the account menu's status list, captured with it denied in run 7): `PUT
+  <teams origin>/ups/<geo>/v1/me/forceavailability/`, no query, the same headers as the endpoint `PUT` (its
+  `x-ms-endpoint-id` the current messaging endpoint), the caller `TeamsClient:setPresenceAvailability` and a body of
+  exactly `{"availability": <Busy | DoNotDisturb | Away | Available>}` (the menu's "Busy", "Do not disturb", "Appear
+  away", "Available"; three tries each when denied). **"Reset status"** clears it with the same `PUT` and **no body
+  at all** (no `postData`, no `hasPostData` in Chrome's event), the caller `TeamsClient:setPresenceAvailability-reset`,
+  `Content-Type: application/json` still sent. Each was answered `200` with no body when let through (runs 8–10).
+  Choosing "Available" by hand is a set like the others (it forces Available); only the reset clears. In runs 9 and
+  10 the client sent nothing for the choices after Busy (Do not disturb, Away, Available) within 20 s of each, while
+  run 8 sent all five; its own presence reads, denied (they carry `x-ms-endpoint-id`, [above](#others-presence)),
+  may be why. Not driven, so not captured: "Be right back", "Appear offline", a duration
+  (`set-availability-duration`), and a status note.
+- **`user.activity`** (`active`) on each Trouter socket, as [above](#useractivity-and-presence); the browser fence
+  lets it through (a socket.io event).
+- When the account menu opens, the client also sends `PUT …/api/mt/part/<partition>/beta/me/engagementSurfaces/
+  displayed` (which of its prompts it showed); denied in these runs, it passes under the lab rule.
+
+### What b saw
+
+All `proto-lab run <scenario> --headless` from a normal lab build, under the live lock, 2026-10-22 23:31 to
+2026-10-23 05:28 UTC, the machine otherwise idle. Every run's probe was force-denied and failed in a's page; the only
+writes the fence let through were a's typing on the a–b chat (2 permits a run) and the own availability below; no
+target failed to arm, **no run was breached**.
+
+| run | start (UTC) | scenario | what reported a | b's reads of a |
+|---|---|---|---|---|
+| 1 | 23:31 | `own-presence-activity` (ok) | `user.activity` (2 sent); the endpoint `PUT` denied (3) | `Offline` throughout: before, during the 5 min the page was open, after |
+| 2 | 23:48 | `own-presence-endpoint` (ok) | the endpoint `PUT` (2 answered `201`, two endpoints after a reconnect); every `user.activity` held back (the client reconnected about every 10 s, as in `ab-trouter-quiet`) | `Available` from 4 s after the `PUT` until the page closed; `Offline` 10–25 s after the browser closed |
+| 3 | 00:09 | `own-presence-both` (failed: no endpoint `PUT` within the 60 s it then waited) | `user.activity` (2) | `Offline` throughout |
+| 4 | 00:25 | `own-presence-both` (ok) | both (`user.activity` 2, the `PUT` 1 answered `201`) | `Available` from 7 s after the `PUT`; still `Available` 5 min 37 s after the browser closed, `Offline` by 5 min 55 s |
+| 5 | 00:44 | `own-presence-manual-held` (failed: the status entries' `data-tid`s had changed, no status chosen) | both (the `PUT` answered `201`) | `Available`, then `Offline` about 5 min 50 s after the browser closed |
+| 6 | 01:04 | `own-presence-manual-held` (failed: no endpoint `PUT` within 180 s) | `user.activity` | `Offline` throughout |
+| 7 | 01:26 | `own-presence-manual-held` (failed on one unexpected deny, `engagementSurfaces/displayed`, since listed) | `user.activity`; no endpoint `PUT` sent; the five manual requests denied (15 with retries: the capture of their shape) | `Offline` throughout |
+| 8 | 02:01 | `own-presence-manual` (its exit not kept) | `user.activity`; no endpoint `PUT` sent; the five manual requests let through, each answered `200` | not kept: the run's printed report and b's samples were in `/tmp`, lost in the machine's reboot of 2026-10-23; `fence.log` holds b's 92 reads, let through, without their answers |
+| 9 | 05:04 | `own-presence-manual` (ok) | `user.activity`; no endpoint `PUT`; Busy let through (`200`), nothing sent for the next three choices, the reset let through (`200`) 6 min after Busy | `Offline` throughout, Busy included |
+| 10 | 05:28 | `own-presence-manual` (ok) | as run 9 | `Offline` throughout, Busy included |
+
+So:
+
+- **The endpoint `PUT` makes an account show online; `user.activity` alone does not** (run 1). One `PUT` held it
+  `Available` for the whole 5 minutes the page stayed open (runs 2, 4): no refresh was needed within that time.
+- **Going offline** follows the browser's close: within 25 s when no `user.activity` was sent (run 2), about 6 minutes
+  when it was (runs 4, 5). Run 2's socket also reconnected every 10 s, so which of the two (the frame or a steady
+  socket) holds the endpoint open after its socket closes is not separated. No explicit "offline" request was seen:
+  the web client sent none when its page closed.
+- **A manual status shows nothing while the account has no live endpoint**: in runs 9 and 10 UPS took Busy (`200`)
+  and, 6 minutes later, its reset, and b read `Offline` before, during and after. Whether a manual status overrides
+  an endpoint's `Available` as b sees it (what the menu promises) was not observed: the web client sent no endpoint
+  `PUT` in any run that let the manual status through. The native client sends its endpoint `PUT` itself (Task 19),
+  so its first live runs settle it: Busy set beside a live endpoint, then the reset, each read by b. **Settled by
+  Task 19** ([below](#the-native-clients-own-availability-m2-task-19)): it does, Busy shows while the endpoint is
+  live, and the reset brings back `Available`.
+- **A manual status is cleared** by the reset (the bodiless `PUT`, answered `200`); no other request clears it.
+- For the native client (Tasks 19–20): the endpoint `PUT` is needed and enough to show online; `user.activity` isn't
+  needed for it, and without it the account went offline within seconds of the client's end rather than minutes.
+
+### The native client's own availability (M2 Task 19)
+
+- **The writes**: `teams_proto::SetEndpointAvailability` (the endpoint `PUT`, `Available`/`Available` only: the
+  captured `Busy`/`InACall` is a call's) and `ForceAvailability` (`set` of `Busy`, `DoNotDisturb`, `Away` or
+  `Available`; `reset` with no body), sealed `Mutating` writes in the captured shapes ([endpoints.md](endpoints.md)).
+  Their target is `WriteKind::OwnAvailability` on `Scope::Account` (the account's MRI): `Fence::check` permits it
+  without a member read, and only for the fence's own account (`Fence::open_lab_account`, the MRI `lab.toml` gives the
+  account the binary runs as). The endpoint each names (the body's `id`, and `x-ms-endpoint-id` on both) is a
+  `RegisteredEndpoint`, which only `teams_proto::register` gives, once a registration of this run that the account's
+  native HTTP transport sent was answered with a success (a sealed `EndpointRegistrar`: no fake transport outside
+  `test-support`), recorded for the transport's fence's own account, and no write of another account's availability
+  can name it: the push channel hands it on (`PushEvent::Registered`) and the engine keeps it while the channel
+  runs; once the channel stopped, an availability still waiting out a `Retry-After` is dropped and no other is sent.
+  They go out as transient writes of the outbox (`EngineRequests::own_availability`), under the presence token and
+  the presence read's header values, without the web client's caller, session ids or cookies, which UPS took. No `user.activity` (above: not needed to show online).
+- **Live** (`scripts/own-availability-native-run.sh busy 120 240 360 12
+  ~/.local/share/teams-lab/runs/own-availability-native-2.txt`, 2026-10-23 07:26–07:35 UTC, under the live lock, from
+  a normal lab build; a's `teams-headless a availability --manual busy --manual-after 120 --reset-after 240
+  --hold 360`, b's `teams-headless b presence` about every 16 s). The first attempt (run 1, 07:15) sent nothing: the
+  fence permitted each of its three steps, but the outbox's transport hadn't been given UPS's base, so the transport
+  refused them before sending (`no presence base`); b read `Offline` throughout. Fixed in `teams-core`'s `lab.rs`
+  (the writes' transport gets the base too), then run 2:
+
+  | after the `PUT` | a sent (each answered with a success) | b read a as |
+  |---|---|---|
+  | 0 s (1.2 s after the registration went through) | the endpoint `PUT`, `Available` | `Available` from the first sample after it (12 s) |
+  | 119 s | the manual status `Busy` | `Busy` from the first sample after it (6 s) |
+  | 239 s | the reset | `Available` at once (the sample taken as it was sent) |
+  | 320 s | nothing (the socket still up, its pings answered) | `Offline` from then on |
+  | 360 s | (the command ended, its socket closed) | `Offline` throughout the 3 min after |
+
+  `fence.log` holds, for each run, the three `own_availability` permits and nothing denied; b's 72 presence reads
+  each a permitted read by `POST`.
+- **So**: the native endpoint `PUT` alone makes the account show online, as the browser's did; **a manual status
+  overrides it** as another account sees it (Busy beside a live endpoint), and the reset clears it back to the
+  endpoint's `Available`. **One endpoint `PUT` lapses on its own**: b read `Offline` 5 min 20 s after it, with the
+  push channel up and the manual status cleared. The browser runs of Task 18 kept a page open 5 min after one `PUT`
+  and didn't reach that point. A client that wants to stay online sends it again before then (Task 20's policy); what
+  interval the web client keeps, and whether a manual status lapses the same way, are open.
+
+### The app's policy (M2 Task 20)
+
+When the app sends which of the writes above: `teams_core::own_presence` (`OwnPresencePolicy`), driven by
+`teams-ui`'s `OwnPresence` (held by the desktop for the app's life, told of the window's use by the shell's mouse and
+key input, of the push channel by the engine's events, of the manual status and idle time by the settings). Only the
+captured requests are used; settled with Codex (2026-10-23, `discussions/task-20-away-offline`):
+
+- **Available**: the endpoint `PUT` once a registration went through, if the window was used within the idle time
+  (the app's start counts as use) or a manual status is chosen; sent again every 2 min (`AVAILABLE_REFRESH`), a
+  policy number well inside the 5 min 20 s after which one `PUT` was read `Offline`. A registration while idle sends
+  nothing; the window used again sends the `PUT` at once.
+- **Idle** (the settings' idle time, 5 min by default): nothing is sent; the endpoint lapses on its own, so others see
+  `Offline` some minutes later, **not Away**. No captured request reports Away for one endpoint: the manual `Away`
+  is account-wide server state (it overrode a live endpoint's `Available` as b saw it, Task 19), so sent for idle it
+  would override the account's other devices, clear a status set elsewhere when reset on the next use, and outlive
+  the app after a suspend or a crash. How the web client reports idle is open
+  (`docs/backlog/own-presence-idle-and-offline-shapes.md`). Cross-device aggregation is inferred, not observed.
+- **Quit**: nothing is sent (no captured request reports Offline); the refresh stops, the engine's shutdown closes the
+  push channel, and the endpoint goes after it (timing not measured natively). A manual status stays as set.
+- **A manual status** (the account menu, or the settings; Automatic and the four captured ones, "Be right back" and
+  "Appear offline" not offered): sent once when chosen; Automatic sends the reset, only after a manual status. It
+  overrides Available until cleared, and the endpoint keeps being refreshed meanwhile, idle or not (a manual status
+  with no live endpoint read `Offline`, runs 9–10). The saved choice is sent once at the run's first registration;
+  Automatic at the start sends no reset.
+- **A failed report** is shown in the account menu and never sent again on its own (the transient kind's own rules
+  are the only retries); a failed `PUT` doesn't bring the refresh forward. A manual status or reset that failed is
+  shown as not set (what the account shows isn't known: a failed reset may leave it in its manual status), and the
+  user choosing it again in the menu sends it again, a new write of the user's through the engine's fenced path. A
+  fence denial stops the reports for the run.
+
+### The browser fence's mapping
+
+Under the lab rule there is none: UPS is no contacting service, so the endpoint `PUT`, the manual status and
+everything else on UPS pass, logged `allowed`. The runs above used the fence of the time, which let these requests
+out only in their captured shapes, behind a classifier of the run's (`Classifier::with_own_availability`: both
+requests, `own-presence-manual`; `Classifier::with_own_endpoint_put`: the endpoint `PUT` alone, `-endpoint`, `-both`,
+`-manual-held`), every other run denying them. That mapping (`availability.rs`, since removed, designed with Codex on
+2026-10-23) took exactly the shapes above, every pinned header required and the callers pinned, a reset only with its
+body positively absent in Chrome's event, and only on an endpoint this browser's fence had let the account register in
+that run (a messaging-stack registration whose verdict was `Allow`); anything else ("Be right back", "Appear offline",
+a duration, a status note, a work location, out-of-office, the presence subscriptions) stayed denied.
 
 ## Reconnect parameters and backoff (from the bundle)
 
@@ -320,7 +531,7 @@ are lab accounts; the probe was force-denied and failed in a's page in every run
 
 | run | start | outcome |
 |---|---|---|
-| 1 | 19:09 | a's browser killed to contain an iframe not armed in time (contained, no breach); failed at a's compose box; the calling stack's registration and presence denied as unexpected (now `TROUTER_RUN_REQUESTS`) |
+| 1 | 19:09 | a's browser killed to contain an iframe not armed in time (contained, no breach); failed at a's compose box; the calling stack's registration and presence denied as unexpected (listed afterwards; both pass under the lab rule) |
 | 2 | 19:23 | **breached**: b, an iframe whose resume got no answer within 10 s (resume sent); browser killed. Its capture and `fence.log` show nothing sent unguarded (b's 3 frames all allowed, no mutating request answered without a verdict) |
 | 3 | 19:29 | failed at a's compose box (60 s; under load) |
 | 4 | 19:40 | **breached**: a, two `browser_ui` targets (Chrome's own omnibox pages, not held at attach) whose auto-attach got no answer; b contained a worker. Nothing sent unguarded |
@@ -353,4 +564,11 @@ place.
   denied). Revisit only if the replay measurably impairs the native client.
 - Whether a long-lived native session without `user.activity` is treated differently (the sockets that never sent
   one here lived seconds to minutes).
-- What makes an account show online ([presence](#useractivity-and-presence)).
+- ~~What makes an account show online ([presence](#useractivity-and-presence)).~~ **Answered (live, M2 Task 18,
+  2026-10-23)**: UPS's presence endpoint `PUT`; `user.activity` alone doesn't
+  ([Own presence](#own-presence-m2-task-18)).
+- How often the endpoint `PUT` has to be sent again: one lapsed 5 min 20 s after it with the socket up (M2 Task 19,
+  [above](#the-native-clients-own-availability-m2-task-19)); the web client's interval isn't known, nor whether a
+  manual status lapses too.
+- Why a closed browser that had sent `user.activity` stayed online about 6 minutes, and one that hadn't only seconds
+  ([Own presence](#own-presence-m2-task-18)); and why the web client sent no endpoint `PUT` at all in some runs.

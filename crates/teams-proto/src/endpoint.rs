@@ -1,6 +1,6 @@
 //! What every class of request names: the [`Service`] it goes to and its [`Endpoint`] under that service's base; a
 //! request that isn't a read also names its [`Method`]. Never a host or an absolute URL: the transport builds the URL
-//! from the service's base, which it alone knows, and checks the result against its host allowlist.
+//! from the service's base, which it alone knows, and checks the result against that base.
 
 /// A service the native transport reaches, and so the only hosts it sends to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -11,11 +11,34 @@ pub enum Service {
     /// read recognize the chat service by one check. Its endpoints start with `v1`.
     ChatService,
     /// The registrar, `https://<AFD host>/registrar/…`, on the chat base's AFD host (`teams.microsoft.com` when the
-    /// chat base is a regional host). It registers an endpoint's Trouter URL (an own-state request, added by the task
-    /// that reviews it).
+    /// chat base is a regional host). It registers an endpoint's Trouter URL ([`crate::EndpointRegistration`]).
     Registrar,
     /// Trouter's HTTP side, `https://go.trouter.teams.microsoft.com/`.
     Trouter,
+    /// The middle tier at the account's middle-tier base, the region's GTM `middleTier`
+    /// (`https://<AFD host>/api/mt/part/<partition>`, the partition a region and a number: `amer-03`), which a
+    /// transport reaches only once it was given one (`HttpTransport::with_middle_tier`). Its endpoints are under
+    /// `beta/users/`. It takes the account's token for `https://api.spaces.skype.com`. The profile lookups go here
+    /// ([`crate::ShortProfileLookup`]).
+    MiddleTier,
+    /// Microsoft Graph, `https://graph.microsoft.com/v1.0/`, with the account's token for `https://graph.microsoft.com`:
+    /// a user's name (`users/<object id>?$select=id,displayName`, [`crate::GraphUser`]) and their 96×96 picture
+    /// (`users/<object id>/photos/96x96/$value`, [`crate::GraphPicture`]). Graph is a contacting service: a plain
+    /// request to it that isn't a read is refused.
+    Graph,
+    /// The chat service aggregator (CSA) at the account's CSA base, the region's GTM `chatSvcAggAfd`
+    /// (`https://<AFD host>/api/csa/<region>`), which a transport reaches only once it was given one
+    /// (`HttpTransport::with_csa`), with the account's token for `https://chatsvcagg.teams.microsoft.com`: the account's
+    /// teams and their channels (`api/v3/teams/users/me` with the web client's query, [`crate::CsaTeams`]).
+    Csa,
+    /// UPS, the presence service, at the account's presence base, the region's GTM `presenceUPS`
+    /// (`https://<AFD host>/ups/<geo>`, the geo lowercase letters: `noam`), which a transport reaches only once it was
+    /// given one (`HttpTransport::with_presence`), with the account's token for
+    /// `https://presence.teams.microsoft.com/`: the presence read (`v1/presence/getpresence/`, [`crate::PresenceRead`])
+    /// and the account's own availability, as an authorized write (`v1/me/endpoints/`,
+    /// [`crate::SetEndpointAvailability`]; `v1/me/forceavailability/`, [`crate::ForceAvailability`]), every path sent
+    /// with the trailing slash every captured UPS path had.
+    Presence,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

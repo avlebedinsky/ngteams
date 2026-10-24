@@ -1,13 +1,19 @@
-//! The calling stack under the fence (M0 Task 18, `docs/protocol/calling-echo.md`): the own-state of a run that calls
-//! (the Trouter session's frames) and the mapping of the call's writes, on synthetic requests shaped like the
-//! `echo-call` capture's (made-up ids and tokens).
+//! The calling stack under the fence (`docs/protocol/calling-echo.md`, `docs/protocol/trouter.md`): what sets up the
+//! account's own endpoint reaches nobody and passes (its Trouter session's frames, its settings reads, either stack's
+//! registration), a delivery's answer is denied, and the web client's test call start is a write judged by its
+//! participants, on synthetic requests shaped like the `echo-call` and `ab-trouter` captures' (made-up ids and tokens).
 
-use proto_lab::classify::{Classification, Classifier, OwnKind};
-use proto_lab::fence_ws::{Frame, FrameClassifier, Payload};
+use proto_lab::classify::{Classification, Classifier};
+use proto_lab::fence_ws::{Frame, Payload, classify_frame};
+use proto_lab::scenario::ab_trouter::hold_activity;
 use teams_fence::{Mri, Scope, Target, WriteKind};
 
 const TROUTER: &str = "wss://go.trouter.teams.microsoft.com/v4/c/?tc=%7B%22cv%22%3A%220.0%22%7D&auth=true&epid=00000000-0000-4000-8000-000000000001";
 
+const REGIONAL: &str =
+    "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c?tc=%7B%7D&epid=00000000-0000-4000-8000-000000000001";
+
+/// The authentication on the regional socket: the reconnect parameters the service handed over, made up.
 fn text(url: &str, data: &str) -> Frame {
     Frame {
         url: url.to_owned(),
@@ -21,304 +27,63 @@ const AUTHENTICATE: &str = r#"5:::{"name":"user.authenticate","args":[{"headers"
 // --- the Trouter session's frames ---
 
 #[test]
-fn the_trouter_authentication_is_own_state_of_a_calling_run_only() {
-    let frame = text(TROUTER, AUTHENTICATE);
-    assert_eq!(
-        FrameClassifier::calling().classify(&frame),
-        Classification::Own(OwnKind::TrouterSession)
-    );
-    assert_eq!(FrameClassifier::seeded().classify(&frame), Classification::Unknown);
-}
-
-#[test]
-fn an_authentication_anywhere_but_the_trouter_socket_is_unknown() {
-    for url in [
-        "wss://go.trouter.teams.microsoft.com/v4/c/extra",
-        "wss://go.trouter.teams.microsoft.com/v4/c//",
-        "wss://go.trouter.teams.microsoft.com/v3/c/",
-        "ws://go.trouter.teams.microsoft.com/v4/c/",
-        "wss://go.trouter.teams.microsoft.com.example.com/v4/c/",
-        "wss://augloop.office.com/v4/c/",
-        "wss://go.trouter.teams.microsoft.com:444/v4/c/",
-        "not a url",
-    ] {
-        assert_eq!(
-            FrameClassifier::calling().classify(&text(url, AUTHENTICATE)),
-            Classification::Unknown,
-            "{url}"
-        );
-    }
-}
-
-#[test]
-fn only_the_exact_authentication_shape_is_own_state() {
-    let frames = [
-        // another event
-        r#"5:::{"name":"user.activity","args":[{"state":"active"}]}"#,
-        // trailing data after the value
-        &format!("{AUTHENTICATE} "),
-        &format!("{AUTHENTICATE}{{}}"),
-        // a message, not an event
-        r#"3:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"}}]}"#,
-        // an event with an id or an endpoint
-        r#"5:1::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"}}]}"#,
-        r#"5::/x:{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"}}]}"#,
-        // two names, alike in some case
-        r#"5:::{"name":"user.authenticate","Name":"x","args":[{"headers":{"Authorization":"Bearer x"}}]}"#,
-        // a key beside name and args
-        r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"}}],"to":"8:orgid:x"}"#,
-        // two args, or something beside the headers
-        r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"}},{}]}"#,
-        r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"},"body":"hi"}]}"#,
-        // a header not on the reviewed list, or not a string
-        r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x","X-Forward-To":"y"}}]}"#,
-        r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":["Bearer x"]}}]}"#,
-        // no authorization at all
-        r#"5:::{"name":"user.authenticate","args":[{"headers":{"X-Ms-Test-User":"False"}}]}"#,
-        // not JSON
-        "5:::user.authenticate",
-        "",
-    ];
-    for data in frames {
-        assert_eq!(
-            FrameClassifier::calling().classify(&text(TROUTER, data)),
-            Classification::Unknown,
-            "{data}"
-        );
-    }
-}
-
-#[test]
-fn a_binary_frame_on_the_trouter_socket_is_unknown() {
-    let frame = Frame {
-        url: TROUTER.to_owned(),
-        payload: Payload::Binary("NTo6Ont9".to_owned()),
-    };
-    assert_eq!(FrameClassifier::calling().classify(&frame), Classification::Unknown);
-}
-
-/// The regional Trouter socket the client moves to, as the service names it.
-const REGIONAL: &str =
-    "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c?tc=%7B%7D&epid=00000000-0000-4000-8000-000000000001";
-
-/// The authentication on the regional socket: the reconnect parameters the service handed over, made up.
-const AUTHENTICATE_REGIONAL: &str = r#"5:::{"name":"user.authenticate","args":[{"headers":{"X-Ms-Test-User":"False","Authorization":"Bearer synthetic.token.value","X-MS-Migration":"True"},"connectparams":{"issuer":"","scae":"1","sig":"","sr":"SyntheticSessionId00000","sp":"pub-ent-zz-01","se":"1700000600000","st":"1700000000000"}}]}"#;
-
-#[test]
-fn the_regional_trouter_socket_takes_the_same_session_frames() {
-    for (url, data) in [
-        (REGIONAL, AUTHENTICATE_REGIONAL),
-        (REGIONAL, AUTHENTICATE),
-        (TROUTER, AUTHENTICATE_REGIONAL),
-        (TROUTER, r#"5:1+::{"name":"ping"}"#),
-        (REGIONAL, r#"5:27+::{"name":"ping"}"#),
-        (TROUTER, "0::"),
-        // the acknowledgement of the service's report of messages lost while the socket was away
-        (
-            REGIONAL,
-            r#"5:2+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[{"tag":"","etag":"2000-01-01T00:00:00.0000000Z"},{"tag":"messaging","etag":"2000-01-01T00:00:00.0000001Z"}]}]}"#,
-        ),
-        // the client's own activity, which keeps the account "Available"
-        (
-            REGIONAL,
-            r#"5:4+::{"name":"user.activity","args":[{"state":"active","cv":"SyntheticCorrelation0.0.1"}]}"#,
-        ),
-        (
-            TROUTER,
-            r#"5:5+::{"name":"user.activity","args":[{"state":"inactive","cv":"SyntheticCorrelation0.0.2"}]}"#,
-        ),
-    ] {
-        assert_eq!(
-            FrameClassifier::calling().classify(&text(url, data)),
-            Classification::Own(OwnKind::TrouterSession),
-            "{url} {data}"
-        );
-    }
-}
-
-#[test]
-fn other_session_frames_are_unknown() {
-    for (url, data) in [
-        // a Trouter-looking host elsewhere, or two labels deep
-        (
-            "wss://pub.trouter.teams.microsoft.com.example.com/v4/c",
+fn the_trouter_session_s_own_frames_pass_on_either_socket() {
+    for url in [TROUTER, REGIONAL] {
+        for data in [
+            AUTHENTICATE,
             r#"5:1+::{"name":"ping"}"#,
-        ),
-        ("wss://a.b.trouter.teams.microsoft.com/v4/c", r#"5:1+::{"name":"ping"}"#),
-        ("wss://trouter.teams.microsoft.com/v4/c", r#"5:1+::{"name":"ping"}"#),
-        // a ping with more in it, without an id, or with a bad id
-        (TROUTER, r#"5:1+::{"name":"ping","args":[1]}"#),
-        (TROUTER, r#"5:::{"name":"ping"}"#),
-        (TROUTER, r#"5:x+::{"name":"ping"}"#),
-        (TROUTER, r#"5:1+:/x:{"name":"ping"}"#),
-        // a disconnect of an endpoint, or with data
-        (TROUTER, "0::/x"),
-        (TROUTER, "0:: "),
-        // reconnect parameters outside the reviewed list, or not strings
-        (
-            TROUTER,
-            r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"},"connectparams":{"to":"8:orgid:x"}}]}"#,
-        ),
-        (
-            TROUTER,
-            r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"},"connectparams":{"sr":1}}]}"#,
-        ),
-        // a loss report acknowledged with more than its indicators, or an indicator with more than a tag and an etag
-        (
-            TROUTER,
-            r#"5:2+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[],"to":"x"}]}"#,
-        ),
-        (
-            TROUTER,
-            r#"5:2+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[{"tag":"","etag":"","body":"hi"}]}]}"#,
-        ),
-        // an indicator without its etag, an activity without its correlation id
-        (
-            TROUTER,
-            r#"5:2+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[{"tag":""}]}]}"#,
-        ),
-        (TROUTER, r#"5:4+::{"name":"user.activity","args":[{"state":"active"}]}"#),
-        // reconnect parameters short of the ones the service hands out
-        (
-            REGIONAL,
-            r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer x"},"connectparams":{"sr":"x"}}]}"#,
-        ),
-        // an activity with a state nobody reviewed (a status message, a presence it sets), or more in it
-        (
-            TROUTER,
-            r#"5:4+::{"name":"user.activity","args":[{"state":"busy","cv":"x"}]}"#,
-        ),
-        (
-            TROUTER,
-            r#"5:4+::{"name":"user.activity","args":[{"state":"active","cv":"x","note":"out today"}]}"#,
-        ),
-        (
-            TROUTER,
-            r#"5:4+::{"name":"user.activity","args":[{"state":"active","cv":"x"},{}]}"#,
-        ),
-        // an event nobody reviewed
-        (
-            TROUTER,
-            r#"5:4+::{"name":"user.message","args":[{"to":"8:orgid:x","text":"hi"}]}"#,
-        ),
-        // a message with content, or an acknowledgement
-        (TROUTER, r#"3:::{"id":1,"status":200,"headers":{},"body":"x"}"#),
-        (TROUTER, "6:::1+[]"),
-    ] {
-        assert_eq!(
-            FrameClassifier::calling().classify(&text(url, data)),
-            Classification::Unknown,
-            "{url} {data}"
-        );
-    }
-}
-
-// --- the account's own settings, read by POST ---
-
-const AGGREGATE_SETTINGS: &str =
-    r#"{"userPropertiesSettings":true,"voiceAdminSettings":true,"tenantSettingsV2":true,"clientSettings":true}"#;
-const EFFECTIVE_POLICIES: &str = r#"["teamsCallingPolicy","teamsMeetingPolicy","externalAccessPolicy"]"#;
-
-#[test]
-fn reading_the_account_s_own_settings_and_policies_is_own_state_of_a_calling_run_only() {
-    for origin in ["https://teams.microsoft.com", "https://teams.cloud.microsoft"] {
-        for (path, body) in [
-            (
-                "/api/mt/part/amer-03/beta/users/useraggregatesettings",
-                AGGREGATE_SETTINGS,
-            ),
-            ("/api/mt/part/emea-01/beta/users/effectivePolicies", EFFECTIVE_POLICIES),
+            r#"5:2+::{"name":"user.activity","args":[{"state":"active","cv":"SyntheticCv.0.1"}]}"#,
+            r#"5:3+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[{"tag":"t","etag":"e"}]}]}"#,
+            "0::",
+            "2::",
         ] {
-            let url = format!("{origin}{path}");
-            assert_eq!(
-                Classifier::calling().classify("POST", &url, Some(body.as_bytes())),
-                Classification::Own(OwnKind::SettingsRead),
-                "{url}"
-            );
-            assert_eq!(
-                Classifier::mapped().classify("POST", &url, Some(body.as_bytes())),
-                Classification::Unknown,
-                "{url}"
-            );
+            assert_eq!(classify_frame(&text(url, data)), Classification::Allow, "{url} {data}");
         }
     }
 }
 
 #[test]
-fn a_settings_read_off_the_reviewed_shape_is_unknown() {
-    let settings = "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/useraggregatesettings";
-    let policies = "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/effectivePolicies";
-    for (method, url, body) in [
-        // a value that isn't a flag, or a list of anything but names
-        ("POST", settings, r#"{"clientSettings":{"set":1}}"#),
-        ("POST", settings, r#"{"clientSettings":"x"}"#),
-        ("POST", settings, EFFECTIVE_POLICIES),
-        (
-            "POST",
-            policies,
-            r#"["teamsCallingPolicy",{"allowPrivateCalling":true}]"#,
-        ),
-        ("POST", policies, AGGREGATE_SETTINGS),
-        ("POST", policies, "[]"),
-        ("POST", settings, "{}"),
-        // a setting group or a policy nobody reviewed
-        ("POST", settings, r#"{"clientSettings":true,"updateUserSettings":true}"#),
-        ("POST", policies, r#"["teamsCallingPolicy","setTeamsCallingPolicy"]"#),
-        // keys alike in some case, trailing data
-        ("POST", settings, r#"{"clientSettings":true,"ClientSettings":true}"#),
-        ("POST", policies, r#"["x"] ["y"]"#),
-        // another user's, another method, another path, another origin, another partition shape
-        (
-            "POST",
-            "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/8:orgid:x/useraggregatesettings",
-            AGGREGATE_SETTINGS,
-        ),
-        ("PUT", settings, AGGREGATE_SETTINGS),
-        (
-            "POST",
-            "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/useraggregatesettings/x",
-            AGGREGATE_SETTINGS,
-        ),
-        (
-            "POST",
-            "https://example.com/api/mt/part/amer-03/beta/users/useraggregatesettings",
-            AGGREGATE_SETTINGS,
-        ),
-        (
-            "POST",
-            "https://teams.microsoft.com/api/mt/part/amer/beta/users/effectivePolicies",
-            EFFECTIVE_POLICIES,
-        ),
-        (
-            "POST",
-            "https://teams.microsoft.com/api/mt/part/../beta/users/effectivePolicies",
-            EFFECTIVE_POLICIES,
-        ),
-        // the captured reads have no query: one they didn't show makes the request unknown
-        (
-            "POST",
-            "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/useraggregatesettings?x=1",
-            AGGREGATE_SETTINGS,
-        ),
-        (
-            "POST",
-            "https://teams.cloud.microsoft/api/mt/part/amer-03/beta/users/effectivePolicies?",
-            EFFECTIVE_POLICIES,
-        ),
+fn a_delivery_response_is_unknown_even_with_an_empty_body() {
+    // the endpoint's answer to something the service delivered goes back to whoever sent it, an incoming call's among
+    // them: none passes
+    for data in [
+        r#"3:::{"id":2029851735,"status":200,"headers":{"MS-CV":"SyntheticCv.0.1","trouter-request":"{\"id\":\"x\",\"src\":\"y\"}","trouter-client":"{\"cd\":2}"},"body":""}"#,
+        r#"3:::{"id":-2129608987,"status":204,"headers":{},"body":""}"#,
+        r#"3:::{"id":1,"status":200,"headers":{},"body":"{\"callAcceptanceAcknowledgement\":{}}"}"#,
+        "6:::1+[]",
     ] {
-        assert_eq!(
-            Classifier::calling().classify(method, url, Some(body.as_bytes())),
-            Classification::Unknown,
-            "{method} {url} {body}"
-        );
+        for url in [TROUTER, REGIONAL] {
+            assert_eq!(classify_frame(&text(url, data)), Classification::Unknown, "{data}");
+        }
     }
-    assert_eq!(
-        Classifier::calling().classify("POST", settings, None),
-        Classification::Unknown
-    );
+    let binary = Frame {
+        url: REGIONAL.to_owned(),
+        payload: Payload::Binary("AQID".to_owned()),
+    };
+    assert_eq!(classify_frame(&binary), Classification::Unknown);
 }
 
-// --- the endpoint's registration ---
+#[test]
+fn a_frame_on_a_calling_host_s_socket_is_unknown() {
+    for url in [
+        "wss://api.flightproxy.teams.microsoft.com/api/v2/ep/conv",
+        "wss://pub-ent-zz-01.conv.skype.com/conv/x",
+        "wss://api.fl.teams.microsoft.com/x",
+    ] {
+        assert_eq!(
+            classify_frame(&text(url, AUTHENTICATE)),
+            Classification::Unknown,
+            "{url}"
+        );
+        assert_eq!(classify_frame(&text(url, "2::")), Classification::Unknown, "{url}");
+    }
+}
+
+// --- the account's own setup: settings reads and either stack's registration ---
+
+const AGGREGATE_SETTINGS: &str =
+    r#"{"userPropertiesSettings":true,"voiceAdminSettings":true,"tenantSettingsV2":true,"clientSettings":true}"#;
+const EFFECTIVE_POLICIES: &str = r#"["teamsCallingPolicy","teamsMeetingPolicy","externalAccessPolicy"]"#;
 
 /// The registration of the endpoint's Trouter URL, as the web client posts it (made-up ids).
 const REGISTRATION: &str = r#"{"clientDescription":{"appId":"TeamsCDLWebWorker","aesKey":"","languageId":"en-US","platform":"chrome","templateKey":"TeamsCDLWebWorker_2.6","platformUIVersion":"1/1"},"registrationId":"00000000-0000-4000-8000-000000000002","nodeId":"","transports":{"TROUTER":[{"context":"","path":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticSessionId00000/","ttl":3600}]}}"#;
@@ -329,103 +94,33 @@ const REGISTRAR: [&str; 2] = [
 ];
 
 #[test]
-fn registering_the_endpoint_s_trouter_url_is_own_state_of_a_calling_run_only() {
+fn the_calling_stack_s_own_setup_reaches_nobody() {
+    let calling = REGISTRATION.replace("TeamsCDLWebWorker", "SkypeSpacesWeb");
+    for origin in ["https://teams.microsoft.com", "https://teams.cloud.microsoft"] {
+        for (path, body) in [
+            (
+                "/api/mt/part/amer-03/beta/users/useraggregatesettings",
+                AGGREGATE_SETTINGS,
+            ),
+            ("/api/mt/part/emea-01/beta/users/effectivePolicies", EFFECTIVE_POLICIES),
+            // whatever the body: a settings read changes nothing anyone else sees
+            ("/api/mt/part/emea-01/beta/users/effectivePolicies", r#"{"anything":1}"#),
+            ("/registrar/prod/V2/registrations", REGISTRATION),
+            ("/registrar/prod/V2/registrations", calling.as_str()),
+        ] {
+            let url = format!("{origin}{path}");
+            assert_eq!(
+                Classifier::new().classify("POST", &url, &[], Some(body.as_bytes())),
+                Classification::Allow,
+                "{url} {body}"
+            );
+        }
+    }
     for url in REGISTRAR {
         assert_eq!(
-            Classifier::calling().classify("POST", url, Some(REGISTRATION.as_bytes())),
-            Classification::Own(OwnKind::EndpointRegistration),
+            Classifier::new().classify("POST", url, &[], None),
+            Classification::Allow,
             "{url}"
-        );
-        assert_eq!(
-            Classifier::mapped().classify("POST", url, Some(REGISTRATION.as_bytes())),
-            Classification::Unknown,
-            "{url}"
-        );
-    }
-}
-
-#[test]
-fn a_registration_off_the_reviewed_shape_is_unknown() {
-    let off = [
-        // a transport that isn't the endpoint's own Trouter URL
-        REGISTRATION.replace("pub-ent-zz-01-f.trouter.teams.microsoft.com", "example.com"),
-        REGISTRATION.replace("https://pub-ent", "http://pub-ent"),
-        REGISTRATION.replace(r#""TROUTER""#, r#""WEBHOOK""#),
-        // a second transport kind, or a field nobody reviewed
-        REGISTRATION.replace(r#""transports":{"#, r#""transports":{"SMS":[],"#),
-        REGISTRATION.replace(r#""nodeId":"""#, r#""nodeId":"","members":["8:orgid:x"]"#),
-        // no transport at all
-        REGISTRATION.replace(
-            r#"[{"context":"","path":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticSessionId00000/","ttl":3600}]"#,
-            "[]",
-        ),
-        // keys alike in some case, trailing data
-        REGISTRATION.replace(r#""nodeId":"""#, r#""nodeId":"","NodeId":"""#),
-        format!("{REGISTRATION}{{}}"),
-        // a push URL on another port, with a query or a fragment, off the push path, with user info
-        REGISTRATION.replace(":3443/v4/f/", ":444/v4/f/"),
-        REGISTRATION.replace("SyntheticSessionId00000/", "SyntheticSessionId00000/?to=x"),
-        REGISTRATION.replace("SyntheticSessionId00000/", "SyntheticSessionId00000/#x"),
-        REGISTRATION.replace("/v4/f/SyntheticSessionId00000/", "/v4/x/SyntheticSessionId00000/"),
-        REGISTRATION.replace("/v4/f/SyntheticSessionId00000/", "/v4/f/a/b/"),
-        REGISTRATION.replace("https://pub-ent", "https://user@pub-ent"),
-        // a transport's fields of another type or missing
-        REGISTRATION.replace(r#""ttl":3600"#, r#""ttl":"3600""#),
-        REGISTRATION.replace(r#""context":"","#, ""),
-        // a client description with more or less in it
-        REGISTRATION.replace(r#""appId":"TeamsCDLWebWorker","#, ""),
-        REGISTRATION.replace(r#""platform":"chrome","#, r#""platform":"chrome","userId":"8:orgid:x","#),
-        // no node id
-        REGISTRATION.replace(r#""nodeId":"","#, ""),
-    ];
-    for body in &off {
-        assert_eq!(
-            Classifier::calling().classify("POST", REGISTRAR[0], Some(body.as_bytes())),
-            Classification::Unknown,
-            "{body}"
-        );
-    }
-    // another method, path or origin
-    for (method, url) in [
-        ("PUT", REGISTRAR[0]),
-        ("DELETE", REGISTRAR[0]),
-        ("POST", "https://teams.microsoft.com/registrar/prod/V2/registrations/x"),
-        ("POST", "https://teams.microsoft.com/registrar/prod/V3/registrations"),
-        ("POST", "https://example.com/registrar/prod/V2/registrations"),
-        // the captured registration has no query: one it didn't show makes the request unknown
-        (
-            "POST",
-            "https://teams.microsoft.com/registrar/prod/V2/registrations?x=1",
-        ),
-        ("POST", "https://teams.cloud.microsoft/registrar/prod/V2/registrations?"),
-    ] {
-        assert_eq!(
-            Classifier::calling().classify(method, url, Some(REGISTRATION.as_bytes())),
-            Classification::Unknown,
-            "{method} {url}"
-        );
-    }
-    assert_eq!(
-        Classifier::calling().classify("POST", REGISTRAR[0], None),
-        Classification::Unknown
-    );
-}
-
-// --- the Trouter session's delivery responses ---
-
-#[test]
-fn a_delivery_response_is_unknown_even_with_an_empty_body() {
-    // the endpoint's answer to something the service delivered goes back to whoever sent it; which deliveries an empty
-    // success only acknowledges (and which it might answer, an incoming call's) isn't established, so none passes
-    for data in [
-        r#"3:::{"id":2029851735,"status":200,"headers":{"MS-CV":"SyntheticCv.0.1","trouter-request":"{\"id\":\"x\",\"src\":\"y\"}","trouter-client":"{\"cd\":2}"},"body":""}"#,
-        r#"3:::{"id":-2129608987,"status":204,"headers":{},"body":""}"#,
-        r#"3:::{"id":1,"status":200,"headers":{},"body":"{\"callAcceptanceAcknowledgement\":{}}"}"#,
-    ] {
-        assert_eq!(
-            FrameClassifier::calling().classify(&text(REGIONAL, data)),
-            Classification::Unknown,
-            "{data}"
         );
     }
 }
@@ -449,12 +144,12 @@ fn test_call() -> String {
 }
 
 fn classify_start(classifier: &Classifier, body: &str) -> Classification {
-    classifier.classify("POST", CONVERSATIONS, Some(body.as_bytes()))
+    classifier.classify("POST", CONVERSATIONS, &[], Some(body.as_bytes()))
 }
 
 #[test]
 fn the_test_call_start_is_a_call_with_the_caller_and_the_echo_service() {
-    let classifier = Classifier::calling().with_test_call_callee(Mri::new(ECHO));
+    let classifier = Classifier::new().with_test_call_callee(Mri::new(ECHO));
     let expected = Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(CALLER), Mri::new(ECHO)]);
     assert_eq!(
         classify_start(&classifier, &test_call()),
@@ -466,19 +161,14 @@ fn the_test_call_start_is_a_call_with_the_caller_and_the_echo_service() {
 fn a_test_call_start_is_unknown_without_the_echo_service_s_mri() {
     // the start names nobody but the caller: without knowing whom the call is for, the fence can't judge it
     assert_eq!(
-        classify_start(&Classifier::calling(), &test_call()),
-        Classification::Unknown
-    );
-    // and a run that doesn't call maps no call at all
-    assert_eq!(
-        classify_start(&Classifier::mapped(), &test_call()),
+        classify_start(&Classifier::new(), &test_call()),
         Classification::Unknown
     );
 }
 
 #[test]
 fn a_test_call_start_may_name_the_echo_service_and_nobody_else() {
-    let classifier = Classifier::calling().with_test_call_callee(Mri::new(ECHO));
+    let classifier = Classifier::new().with_test_call_callee(Mri::new(ECHO));
     let expected = Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(CALLER), Mri::new(ECHO)]);
     let test_call = r#","scenario":"UserInitiatedTestCall""#;
     for to in [
@@ -497,7 +187,7 @@ fn a_test_call_start_may_name_the_echo_service_and_nobody_else() {
 fn a_call_start_naming_anyone_but_the_echo_service_is_unknown() {
     // Only the test call was captured: a call to named people (a lab account included), with or without a scenario, is
     // a shape nobody reviewed
-    let classifier = Classifier::calling().with_test_call_callee(Mri::new(ECHO));
+    let classifier = Classifier::new().with_test_call_callee(Mri::new(ECHO));
     let lab_b = r#"{"id":"8:orgid:00000000-0000-4000-8000-00000000000b","displayName":"B"}"#;
     let echo = format!(r#"{{"id":"{ECHO}"}}"#);
     let test_call = r#","scenario":"UserInitiatedTestCall""#;
@@ -519,7 +209,7 @@ fn a_call_start_naming_anyone_but_the_echo_service_is_unknown() {
 
 #[test]
 fn a_call_start_off_the_reviewed_shape_is_unknown() {
-    let classifier = Classifier::calling().with_test_call_callee(Mri::new(ECHO));
+    let classifier = Classifier::new().with_test_call_callee(Mri::new(ECHO));
     let callee = r#"{"id":"8:orgid:00000000-0000-4000-8000-00000000000b"}"#;
     let off = [
         // a test call that names callees too, or another scenario with nobody to call
@@ -589,21 +279,27 @@ fn a_call_start_off_the_reviewed_shape_is_unknown() {
     for (method, url) in [
         ("PUT", CONVERSATIONS),
         ("POST", "https://api.flightproxy.teams.microsoft.com/api/v2/epconv/x"),
-        (
-            "POST",
-            "https://api.flightproxy.teams.microsoft.com.example.com/api/v2/epconv",
-        ),
         ("POST", "http://api.flightproxy.teams.microsoft.com/api/v2/epconv"),
         // the captured start has no query: one it didn't show makes the request unknown
         ("POST", "https://api.flightproxy.teams.microsoft.com/api/v2/epconv?x=1"),
         ("POST", "https://api.flightproxy.teams.microsoft.com/api/v2/epconv?"),
     ] {
         assert_eq!(
-            classifier.classify(method, url, Some(test_call().as_bytes())),
+            classifier.classify(method, url, &[], Some(test_call().as_bytes())),
             Classification::Unknown,
             "{method} {url}"
         );
     }
+    // a lookalike host is no contacting service: whatever goes there reaches nobody of the tenant
+    assert_eq!(
+        classifier.classify(
+            "POST",
+            "https://api.flightproxy.teams.microsoft.com.example.com/api/v2/epconv",
+            &[],
+            Some(test_call().as_bytes())
+        ),
+        Classification::Allow
+    );
 }
 
 // --- the captured call, from the synthetic fixtures ---
@@ -637,9 +333,7 @@ fn expected(name: &str) -> Option<Classification> {
     Some(match name.split_once(':') {
         _ if name == "read" => Classification::Read,
         _ if name == "unknown" => Classification::Unknown,
-        Some(("own", "settings_read")) => Classification::Own(OwnKind::SettingsRead),
-        Some(("own", "endpoint_registration")) => Classification::Own(OwnKind::EndpointRegistration),
-        Some(("own", "trouter_session")) => Classification::Own(OwnKind::TrouterSession),
+        _ if name == "allow" => Classification::Allow,
         Some(("chat_create", list)) => {
             Classification::Write(Target::new(WriteKind::ChatCreate, Scope::New).with_added(participants(list)))
         }
@@ -653,7 +347,7 @@ fn expected(name: &str) -> Option<Classification> {
 #[test]
 fn every_captured_request_of_the_test_call_is_what_the_fixture_says() {
     let fixture: serde_json::Value = serde_json::from_str(&filled(REQUESTS)).unwrap();
-    let classifier = Classifier::calling().with_test_call_callee(Mri::new(format!("28:{ECHO_GUID}")));
+    let classifier = Classifier::new().with_test_call_callee(Mri::new(format!("28:{ECHO_GUID}")));
     let cases = fixture["cases"].as_array().unwrap();
     assert!(cases.len() >= 10);
     for case in cases {
@@ -661,6 +355,7 @@ fn every_captured_request_of_the_test_call_is_what_the_fixture_says() {
         let got = classifier.classify(
             case["method"].as_str().unwrap(),
             case["url"].as_str().unwrap(),
+            &[],
             body.as_deref().map(str::as_bytes),
         );
         let want = expected(case["expected"].as_str().unwrap()).expect("an expectation the test knows");
@@ -675,7 +370,7 @@ fn every_captured_frame_of_the_test_call_is_what_the_fixture_says() {
     assert!(cases.len() >= 8);
     for case in cases {
         let socket = fixture["sockets"][case["socket"].as_str().unwrap()].as_str().unwrap();
-        let got = FrameClassifier::calling().classify(&text(socket, case["frame"].as_str().unwrap()));
+        let got = classify_frame(&text(socket, case["frame"].as_str().unwrap()));
         let want = expected(case["expected"].as_str().unwrap()).expect("an expectation the test knows");
         assert_eq!(got, want, "{}", case["name"]);
     }
@@ -709,7 +404,7 @@ fn pointers(value: &serde_json::Value, at: &str, found: &mut Vec<String>) {
 }
 
 fn classify_captured(start: &serde_json::Value) -> Classification {
-    let classifier = Classifier::calling().with_test_call_callee(Mri::new(format!("28:{ECHO_GUID}")));
+    let classifier = Classifier::new().with_test_call_callee(Mri::new(format!("28:{ECHO_GUID}")));
     classify_start(&classifier, &start.to_string())
 }
 
@@ -754,176 +449,6 @@ fn every_value_of_the_test_call_start_is_typed_as_captured() {
     }
 }
 
-// --- the messaging set: the Trouter session of a run that chats (M1 Task 14, `docs/protocol/trouter.md`) ---
-
-/// The calling stack's registration: [`REGISTRATION`]'s shape, its app and template `SkypeSpacesWeb` (made-up ids).
-fn calling_registration() -> String {
-    REGISTRATION.replace("TeamsCDLWebWorker", "SkypeSpacesWeb")
-}
-
-#[test]
-fn the_messaging_set_lets_the_trouter_session_out() {
-    for (url, data) in [
-        (TROUTER, AUTHENTICATE),
-        (REGIONAL, AUTHENTICATE_REGIONAL),
-        (REGIONAL, r#"5:3+::{"name":"ping"}"#),
-        (REGIONAL, "0::"),
-        (
-            REGIONAL,
-            r#"5:2+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[{"tag":"messaging","etag":"2000-01-01T00:00:00.0000001Z"}]}]}"#,
-        ),
-        // the client's own activity: the account shows online while it runs (accepted by the user, 2026-10-19)
-        (
-            REGIONAL,
-            r#"5:4+::{"name":"user.activity","args":[{"state":"active","cv":"SyntheticCorrelation0.0.1"}]}"#,
-        ),
-        (
-            REGIONAL,
-            r#"5:5+::{"name":"user.activity","args":[{"state":"inactive","cv":"SyntheticCorrelation0.0.2"}]}"#,
-        ),
-    ] {
-        assert_eq!(
-            FrameClassifier::messaging().classify(&text(url, data)),
-            Classification::Own(OwnKind::TrouterSession),
-            "{url} {data}"
-        );
-        assert_eq!(
-            FrameClassifier::seeded().classify(&text(url, data)),
-            Classification::Unknown,
-            "{url} {data}"
-        );
-    }
-}
-
-#[test]
-fn the_messaging_set_answers_no_delivery() {
-    // a chat delivery's acknowledgement goes back to the service like any other response: it stays unknown unless the
-    // user approves answering reviewed chat deliveries (`docs/protocol/trouter.md`)
-    for data in [
-        r#"3:::{"id":1234567,"status":200,"headers":{"MS-CV":"SyntheticCv.0.1","trouter-request":"{\"id\":\"x\",\"src\":\"y\"}","trouter-client":"{\"cd\":2}"},"body":""}"#,
-        r#"3:::{"id":1,"status":204,"headers":{},"body":""}"#,
-        r#"5:6+::{"name":"user.message","args":[{"to":"8:orgid:x","text":"hi"}]}"#,
-        r#"5:4+::{"name":"user.activity","args":[{"state":"busy","cv":"x"}]}"#,
-    ] {
-        assert_eq!(
-            FrameClassifier::messaging().classify(&text(REGIONAL, data)),
-            Classification::Unknown,
-            "{data}"
-        );
-    }
-    let binary = Frame {
-        url: REGIONAL.to_owned(),
-        payload: Payload::Binary("NTo6Ont9".to_owned()),
-    };
-    assert_eq!(FrameClassifier::messaging().classify(&binary), Classification::Unknown);
-}
-
-#[test]
-fn the_messaging_set_registers_the_messaging_stack_only() {
-    for url in REGISTRAR {
-        assert_eq!(
-            Classifier::messaging().classify("POST", url, Some(REGISTRATION.as_bytes())),
-            Classification::Own(OwnKind::EndpointRegistration),
-            "{url}"
-        );
-        // never the calling stack's endpoint: that one makes the account reachable for calls
-        assert_eq!(
-            Classifier::messaging().classify("POST", url, Some(calling_registration().as_bytes())),
-            Classification::Unknown,
-            "{url}"
-        );
-    }
-    let template = r#""templateKey":"TeamsCDLWebWorker_2.6""#;
-    let app = r#""appId":"TeamsCDLWebWorker""#;
-    let off = [
-        // the messaging app with the calling stack's template, or the other way round
-        REGISTRATION.replace(template, r#""templateKey":"SkypeSpacesWeb_2.6""#),
-        REGISTRATION.replace(app, r#""appId":"SkypeSpacesWeb""#),
-        // an app or a template that only starts like the messaging stack's
-        REGISTRATION.replace(app, r#""appId":"TeamsCDLWebWorkerCalls""#),
-        REGISTRATION.replace(template, r#""templateKey":"TeamsCDLWebWorkerX""#),
-        REGISTRATION.replace(template, r#""templateKey":"TeamsCDLWebWorker_""#),
-        REGISTRATION.replace(template, r#""templateKey":"TeamsCDLWebWorker_2.6/x""#),
-        // the messaging stack's registration off the reviewed shape
-        REGISTRATION.replace("pub-ent-zz-01-f.trouter.teams.microsoft.com", "example.com"),
-        REGISTRATION.replace(r#""nodeId":"""#, r#""nodeId":"","members":["8:orgid:x"]"#),
-        REGISTRATION.replace(r#""nodeId":"""#, r#""nodeId":"","NodeId":"""#),
-    ];
-    for body in &off {
-        assert_eq!(
-            Classifier::messaging().classify("POST", REGISTRAR[0], Some(body.as_bytes())),
-            Classification::Unknown,
-            "{body}"
-        );
-    }
-    assert_eq!(
-        Classifier::messaging().classify("PUT", REGISTRAR[0], Some(REGISTRATION.as_bytes())),
-        Classification::Unknown
-    );
-    // the captured registration has no query: one it didn't show makes the request unknown
-    for query in ["?x=1", "?"] {
-        assert_eq!(
-            Classifier::messaging().classify(
-                "POST",
-                &format!("{}{query}", REGISTRAR[0]),
-                Some(REGISTRATION.as_bytes())
-            ),
-            Classification::Unknown,
-            "{query}"
-        );
-    }
-    assert_eq!(
-        Classifier::messaging().classify("POST", REGISTRAR[0], None),
-        Classification::Unknown
-    );
-}
-
-#[test]
-fn the_messaging_set_maps_chat_writes_and_nothing_of_calling() {
-    let chat =
-        "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/19%3Aa_b%40unq.gbl.spaces/messages";
-    let message = r#"{"content":"hi","messagetype":"RichText/Html","contenttype":"Text"}"#;
-    let mapped = Classifier::mapped().classify("POST", chat, Some(message.as_bytes()));
-    assert!(matches!(mapped, Classification::Write(_)), "{mapped:?}");
-    assert_eq!(
-        Classifier::messaging().classify("POST", chat, Some(message.as_bytes())),
-        mapped
-    );
-    // the calling stack's own-state and its writes stay out of a run that only chats
-    let settings = "https://teams.microsoft.com/api/mt/part/amer-03/beta/users/useraggregatesettings";
-    assert_eq!(
-        Classifier::messaging().classify("POST", settings, Some(AGGREGATE_SETTINGS.as_bytes())),
-        Classification::Unknown
-    );
-    let start = test_call();
-    assert_eq!(
-        Classifier::messaging().with_test_call_callee(Mri::new(ECHO)).classify(
-            "POST",
-            CONVERSATIONS,
-            Some(start.as_bytes())
-        ),
-        Classification::Unknown
-    );
-}
-
-#[test]
-fn the_messaging_set_without_activity_holds_back_only_the_activity() {
-    let quiet = FrameClassifier::messaging().without_activity();
-    for data in [
-        r#"5:4+::{"name":"user.activity","args":[{"state":"active","cv":"SyntheticCorrelation0.0.1"}]}"#,
-        r#"5:5+::{"name":"user.activity","args":[{"state":"inactive","cv":"SyntheticCorrelation0.0.2"}]}"#,
-    ] {
-        assert_eq!(quiet.classify(&text(REGIONAL, data)), Classification::Unknown, "{data}");
-    }
-    for data in [AUTHENTICATE_REGIONAL, r#"5:3+::{"name":"ping"}"#, "0::"] {
-        assert_eq!(
-            quiet.classify(&text(REGIONAL, data)),
-            Classification::Own(OwnKind::TrouterSession),
-            "{data}"
-        );
-    }
-}
-
 // --- the messaging session and deliveries, from the synthetic fixtures (`tests/fixtures/trouter/`) ---
 
 const SESSION: &str = include_str!("../../../tests/fixtures/trouter/session.json");
@@ -940,18 +465,10 @@ fn every_frame_the_client_sends_in_the_captured_session_is_what_the_fixture_says
         let socket = fixture["sockets"][case["socket"].as_str().unwrap()].as_str().unwrap();
         let frame = text(socket, case["frame"].as_str().unwrap());
         let want = expected(case["expected"].as_str().unwrap()).expect("an expectation the test knows");
-        let want_quiet = case["expected_quiet"].as_str().map_or(want.clone(), |name| {
-            expected(name).expect("an expectation the test knows")
-        });
-        assert_eq!(FrameClassifier::messaging().classify(&frame), want, "{}", case["name"]);
-        assert_eq!(
-            FrameClassifier::messaging().without_activity().classify(&frame),
-            want_quiet,
-            "{}",
-            case["name"]
-        );
-        // nothing of the session is own-state without the Trouter set
-        assert_eq!(FrameClassifier::seeded().classify(&frame), Classification::Unknown);
+        assert_eq!(classify_frame(&frame), want, "{}", case["name"]);
+        // the quiet run holds back what the fixture marks held, and nothing else
+        let held = case["expected_quiet"].as_str() == Some("held");
+        assert_eq!(hold_activity().unwrap().matches(&frame), held, "{}", case["name"]);
     }
 }
 
@@ -962,24 +479,14 @@ fn every_captured_registration_is_what_the_fixture_says() {
     assert!(cases.len() >= 3);
     for case in cases {
         let body = case["body"].to_string();
-        let got = Classifier::messaging().classify(
+        let got = Classifier::new().classify(
             case["method"].as_str().unwrap(),
             case["url"].as_str().unwrap(),
+            &[],
             Some(body.as_bytes()),
         );
         let want = expected(case["expected"].as_str().unwrap()).expect("an expectation the test knows");
         assert_eq!(got, want, "{}", case["name"]);
-        // a run that calls registers either stack
-        assert_eq!(
-            Classifier::calling().classify(
-                case["method"].as_str().unwrap(),
-                case["url"].as_str().unwrap(),
-                Some(body.as_bytes())
-            ),
-            Classification::Own(OwnKind::EndpointRegistration),
-            "{}",
-            case["name"]
-        );
     }
 }
 
@@ -1004,31 +511,11 @@ fn chat_deliveries_come_on_the_messaging_path_and_their_answers_stay_unknown() {
         let body: serde_json::Value = serde_json::from_str(delivery["body"].as_str().unwrap()).unwrap();
         assert_eq!(body["type"], "EventMessage", "{name}");
         assert_eq!(body["resourceType"], case["resource_type"], "{name}");
-        // the web client's answer: unknown to the messaging set, and to the calling set too
+        // the web client's answer: a socket.io message, which the frame rule denies
         let answer = text(socket, case["answer"].as_str().unwrap());
         let answered: serde_json::Value =
             serde_json::from_str(case["answer"].as_str().unwrap().strip_prefix("3:::").unwrap()).unwrap();
         assert_eq!(answered["id"], delivery["id"], "{name}");
-        assert_eq!(
-            FrameClassifier::messaging().classify(&answer),
-            Classification::Unknown,
-            "{name}"
-        );
-        assert_eq!(
-            FrameClassifier::calling().classify(&answer),
-            Classification::Unknown,
-            "{name}"
-        );
-    }
-}
-
-#[test]
-fn the_calling_set_still_registers_both_stacks() {
-    for body in [REGISTRATION.to_owned(), calling_registration()] {
-        assert_eq!(
-            Classifier::calling().classify("POST", REGISTRAR[0], Some(body.as_bytes())),
-            Classification::Own(OwnKind::EndpointRegistration),
-            "{body}"
-        );
+        assert_eq!(classify_frame(&answer), Classification::Unknown, "{name}");
     }
 }

@@ -1,7 +1,8 @@
 //! The command line: `teams-headless <alias> <command>`.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use teams_fence::lab::Alias;
+use teams_proto::ManualAvailability;
 
 /// How long a one-shot write waits by default for a row that waits (a `Retry-After`) to settle, in seconds.
 pub const DEFAULT_WAIT_SECS: u64 = 120;
@@ -12,7 +13,7 @@ pub const DEFAULT_LIMIT: usize = 20;
 #[derive(Debug, Parser)]
 #[command(
     name = "teams-headless",
-    about = "One lab account's native Teams client, headless: its writes go only through the fence (Fence::open_lab), \
+    about = "One lab account's native Teams client, headless: its writes go only through the fence (Fence::open_lab_account), \
              its tokens come from the Secret Service (`proto-lab auth` stored them), its store is \
              <data_dir>/store/<alias>.sqlite. Prints no token."
 )]
@@ -101,6 +102,48 @@ pub enum Command {
         #[arg(long, default_value_t = DEFAULT_WAIT_SECS)]
         wait: u64,
     },
+    /// The other lab accounts' presence, and anyone's `--mri` names, read once from UPS (a read sent as a `POST`,
+    /// which reaches nobody whoever it names); prints `presence <alias or MRI> <availability>` per person. Reads only;
+    /// refused for more people, all told, than the engine watches at once (`teams_core::MAX_WATCHED`).
+    Presence {
+        /// Seconds to wait for the read.
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+        /// Someone else to read too, by MRI (`8:orgid:…`); repeatable.
+        #[arg(long = "mri", value_name = "MRI")]
+        mris: Vec<String>,
+    },
+    /// People's names as the engine looks them up (Graph's user record, then the middle tier's profile lookup, a read
+    /// sent as a `POST`, for a name Graph doesn't give), by MRI, whoever they are; prints `profile <alias or MRI>
+    /// <source>` per person: where the name the engine has came from (`graph`, `short_profile`, `message`, `known`,
+    /// or `none`), never the name. Reads only.
+    Profile {
+        /// Their MRIs (`8:orgid:…`).
+        #[arg(required = true, value_name = "MRI")]
+        mris: Vec<String>,
+        /// Seconds to wait for the lookups.
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+    },
+    /// Sets the account's own availability from its push channel's endpoint (M2 Task 19): once the endpoint is
+    /// registered, its presence `PUT` (available), then, if asked, a manual status and its reset, each counted in
+    /// seconds from the `PUT`; ends `--hold` seconds after the `PUT` (or on SIGINT or SIGTERM), which takes the
+    /// endpoint down. A write others see, under the fence's permit for the account's own availability (the user's
+    /// exception of 2026-10-21); prints each step with its time.
+    Availability {
+        /// A manual status to set.
+        #[arg(long, value_enum)]
+        manual: Option<ManualArg>,
+        /// Seconds after the `PUT` the manual status is set.
+        #[arg(long, default_value_t = 60)]
+        manual_after: u64,
+        /// Seconds after the `PUT` the manual status is cleared.
+        #[arg(long)]
+        reset_after: Option<u64>,
+        /// Seconds after the `PUT` the command ends.
+        #[arg(long, default_value_t = 300)]
+        hold: u64,
+    },
     /// Listens on the push channel (Trouter) until SIGINT or SIGTERM, catching up on every connect; prints each event
     /// as it is received, with its receive time. Answers no delivery and no call.
     Watch {
@@ -108,4 +151,24 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// A manual status as the command line names it: the account menu's, as captured (M2 Task 18).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ManualArg {
+    Busy,
+    DoNotDisturb,
+    Away,
+    Available,
+}
+
+impl From<ManualArg> for ManualAvailability {
+    fn from(arg: ManualArg) -> Self {
+        match arg {
+            ManualArg::Busy => Self::Busy,
+            ManualArg::DoNotDisturb => Self::DoNotDisturb,
+            ManualArg::Away => Self::Away,
+            ManualArg::Available => Self::Available,
+        }
+    }
 }

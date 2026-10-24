@@ -184,6 +184,22 @@ impl Key {
         text: None,
         modifiers: 0,
     };
+    /// Shift+Enter: a line break in the compose box, where Enter alone sends.
+    pub const SHIFT_ENTER: Self = Self {
+        key: "Enter",
+        code: "Enter",
+        virtual_key: 13,
+        text: Some("\r"),
+        modifiers: 8,
+    };
+    /// Space, pressed as a key (an editor may act on the key, an autolink, where an inserted space does nothing).
+    pub const SPACE: Self = Self {
+        key: " ",
+        code: "Space",
+        virtual_key: 32,
+        text: Some(" "),
+        modifiers: 0,
+    };
     /// Ctrl+A: selects everything in the focused editor.
     pub const SELECT_ALL: Self = Self {
         key: "a",
@@ -275,6 +291,9 @@ pub struct SeenRequest {
     /// Its body, when the event carried it inline (`postData`); kept in memory only, for
     /// [`RequestPattern::with_body_containing`].
     pub body: Option<String>,
+    /// When it was sent, in ms since the Unix epoch (the event's `wallTime`), if the event said: what a scenario times
+    /// a signal by (`chat-shapes`' typing posts).
+    pub sent_ms: Option<u64>,
 }
 
 /// Drives one armed tab (see the module docs).
@@ -659,6 +678,37 @@ impl Driver {
         }
     }
 
+    /// `request` with its body: the one its `Network` event carried inline or, when it carried none, the one the
+    /// browser still holds for it (`Network.getRequestPostData` on the session it was seen on, within the call
+    /// timeout), kept for later looks. A body neither gives (a request without one, one the browser no longer holds)
+    /// stays `None`. Chrome leaves some bodies out of the event (the registrar's registrations, seen live).
+    ///
+    /// # Errors
+    /// [`StepError::Timeout`] when the browser doesn't answer in time.
+    pub async fn read_body(&mut self, step: &str, request: &SeenRequest) -> Result<SeenRequest, StepError> {
+        if request.body.is_some() {
+            return Ok(request.clone());
+        }
+        let call = self.cdp.call(
+            request.session.as_ref(),
+            "Network.getRequestPostData",
+            json!({"requestId": request.request_id}),
+        );
+        let answer = tokio::time::timeout(self.call_timeout, call)
+            .await
+            .map_err(|_| StepError::Timeout {
+                step: step.to_owned(),
+                waited: self.call_timeout,
+                waiting_for: format!("the body of {} {}", request.method, without_query(&request.url)),
+            })?;
+        let mut read = request.clone();
+        read.body = answer.ok().and_then(|answer| post_data_text(&answer));
+        if let Some(seen) = self.seen_mut(request.session.as_ref(), &request.request_id) {
+            seen.body.clone_from(&read.body);
+        }
+        Ok(read)
+    }
+
     /// Reads every event that has come in.
     fn drain(&mut self) {
         loop {
@@ -718,6 +768,7 @@ impl Driver {
                     status: None,
                     failed: None,
                     body: request["postData"].as_str().map(str::to_owned),
+                    sent_ms: wall_time_ms(&params["wallTime"]),
                 });
             }
             "Network.responseReceived" => {
@@ -859,6 +910,25 @@ pub fn navigated_away(error: &StepError) -> bool {
         StepError::Cdp { source: CdpError::Remote { error, .. }, .. }
             if NAVIGATED_AWAY.iter().any(|text| error.message.contains(text))
     )
+}
+
+/// The text of a `Network.getRequestPostData` answer (`postData`, base64 when `base64Encoded`); `None` for a body that
+/// isn't UTF-8.
+fn post_data_text(answer: &Value) -> Option<String> {
+    let data = answer["postData"].as_str()?;
+    if answer["base64Encoded"] == true {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+        String::from_utf8(bytes).ok()
+    } else {
+        Some(data.to_owned())
+    }
+}
+
+/// A `Network.requestWillBeSent`'s `wallTime` (seconds since the Unix epoch, with a fraction) in whole ms; `None` for
+/// anything but a finite, non-negative number.
+fn wall_time_ms(wall_time: &Value) -> Option<u64> {
+    let since_epoch = Duration::try_from_secs_f64(wall_time.as_f64()?).ok()?;
+    u64::try_from(since_epoch.as_millis()).ok()
 }
 
 /// A JavaScript string literal of `text`.

@@ -7,15 +7,18 @@ use std::time::Duration;
 
 use clap::Parser;
 use teams_core::{Action, EngineHandle};
-use teams_headless::chat;
 use teams_headless::cli::{Cli, Command};
 use teams_headless::commands::{self, WatchEnd};
 use teams_headless::lab::Lab;
 use teams_headless::print::visible;
+use teams_headless::{availability, chat};
 use teams_proto::chat::MessageText;
 use teams_store::OutboxState;
 use teams_trouter::Stop;
 use tokio::signal::unix::{Signal, SignalKind, signal};
+
+/// How long `availability` waits for its push channel's registration.
+const REGISTER_WAIT: Duration = Duration::from_secs(90);
 
 /// The exit code after SIGINT or SIGTERM cut a one-shot command short.
 const INTERRUPTED: u8 = 130;
@@ -86,25 +89,89 @@ async fn run(cli: Cli) -> Outcome {
             commands::show(&lab.open_store()?, &conversation, limit, &lab.names, &mut out)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Sync => {
-            let handle = lab.start_engine(false).await?;
-            let synced = tokio::select! {
-                synced = commands::sync(&handle, &mut out) => Some(synced),
-                () = signals.next() => None,
-            };
-            finish(handle, synced.map(|synced| synced.map(|_| ExitCode::SUCCESS)))
-        }
+        Command::Sync => sync(&lab, &mut signals, &mut out).await,
         Command::Watch { json } => watch(&lab, json, &mut signals, &mut out).await,
+        Command::Presence { wait, mris } => {
+            presence(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
+        }
+        Command::Profile { mris, wait } => {
+            profile(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
+        }
+        Command::Availability {
+            manual,
+            manual_after,
+            reset_after,
+            hold,
+        } => {
+            let plan = availability::Plan {
+                manual: manual.map(|status| (status.into(), Duration::from_secs(manual_after))),
+                reset_after: reset_after.map(Duration::from_secs),
+                hold: Duration::from_secs(hold),
+                register_wait: REGISTER_WAIT,
+            };
+            own_availability(&lab, plan, &mut signals, &mut out).await
+        }
         command => {
             let (action, wait) = write_action(&lab, command)?;
-            let mut handle = lab.start_engine(false).await?;
-            let written = tokio::select! {
-                written = write(&mut handle, action, wait, &mut out) => Some(written),
-                () = signals.next() => None,
-            };
-            finish(handle, written)
+            one_write(&lab, action, wait, &mut signals, &mut out).await
         }
     }
+}
+
+/// A catch-up through the engine ([`commands::sync`]).
+async fn sync(lab: &Lab, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let handle = lab.start_engine(false).await?;
+    let synced = tokio::select! {
+        synced = commands::sync(&handle, out) => Some(synced),
+        () = signals.next() => None,
+    };
+    finish(handle, synced.map(|synced| synced.map(|_| ExitCode::SUCCESS)))
+}
+
+/// One write through the engine ([`write`]).
+async fn one_write(lab: &Lab, action: Action, wait: Duration, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let mut handle = lab.start_engine(false).await?;
+    let written = tokio::select! {
+        written = write(&mut handle, action, wait, out) => Some(written),
+        () = signals.next() => None,
+    };
+    finish(handle, written)
+}
+
+/// The other lab accounts' presence and `others`', read once through the engine ([`commands::presence`]).
+async fn presence(
+    lab: &Lab,
+    others: &[String],
+    wait: Duration,
+    signals: &mut Signals,
+    out: &mut impl Write,
+) -> Outcome {
+    let mut whom: Vec<String> = teams_fence::lab::Alias::ALL
+        .into_iter()
+        .filter(|alias| *alias != lab.alias)
+        .filter_map(|alias| lab.names.mri(alias).map(str::to_owned))
+        .collect();
+    for mri in others {
+        if !whom.contains(mri) {
+            whom.push(mri.clone());
+        }
+    }
+    let mut handle = lab.start_engine(false).await?;
+    let read = tokio::select! {
+        read = commands::presence(&mut handle, &whom, wait, &lab.names, out) => Some(read),
+        () = signals.next() => None,
+    };
+    finish(handle, read.map(|read| read.map(|()| ExitCode::SUCCESS)))
+}
+
+/// `whom`'s names as the engine looks them up ([`commands::profile`]).
+async fn profile(lab: &Lab, whom: &[String], wait: Duration, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let mut handle = lab.start_engine(false).await?;
+    let looked_up = tokio::select! {
+        looked_up = commands::profile(&mut handle, whom, wait, &lab.names, out) => Some(looked_up),
+        () = signals.next() => None,
+    };
+    finish(handle, looked_up.map(|looked_up| looked_up.map(|()| ExitCode::SUCCESS)))
 }
 
 /// The conversation a command's chat argument names for the lab account.
@@ -172,7 +239,13 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
             },
             wait,
         ),
-        Command::Sync | Command::List { .. } | Command::Show { .. } | Command::Watch { .. } => {
+        Command::Sync
+        | Command::List { .. }
+        | Command::Show { .. }
+        | Command::Watch { .. }
+        | Command::Presence { .. }
+        | Command::Profile { .. }
+        | Command::Availability { .. } => {
             return Err("not a write".into());
         }
     };
@@ -200,6 +273,21 @@ async fn watch(lab: &Lab, json: bool, signals: &mut Signals, out: &mut impl Writ
         WatchEnd::Stopped | WatchEnd::PushStopped(Stop::Requested) => Ok(ExitCode::SUCCESS),
         WatchEnd::PushStopped(why) => Err(format!("the push channel stopped: {why:?}").into()),
         WatchEnd::EngineStopped => Err("the engine stopped".into()),
+    }
+}
+
+/// The account's own availability from its push channel's endpoint ([`availability::run`]): exits 0 when every step
+/// went through or a signal ended it, non-zero otherwise.
+async fn own_availability(lab: &Lab, plan: availability::Plan, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let mut handle = lab.start_engine(true).await?;
+    let end = availability::run(&mut handle, plan, out, signals.next()).await;
+    handle.shutdown();
+    match end? {
+        availability::End::Done { all_sent: true } | availability::End::Stopped => Ok(ExitCode::SUCCESS),
+        availability::End::Done { all_sent: false } => Err("a step didn't go through".into()),
+        availability::End::NotRegistered => Err("no registration went through: nothing was set".into()),
+        availability::End::PushStopped(why) => Err(format!("the push channel stopped: {why:?}").into()),
+        availability::End::EngineStopped => Err("the engine stopped".into()),
     }
 }
 

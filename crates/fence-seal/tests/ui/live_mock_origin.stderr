@@ -12,5 +12,5 @@ note: if you're trying to build a new `LiveMembershipSource` consider using one 
   |     pub fn new() -> Result<Self, LiveSourceError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
-  |     pub fn for_fence(fence: &Fence) -> Result<Self, LiveSourceError> {
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     pub fn for_fence(_fence: &Fence) -> Result<Self, LiveSourceError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

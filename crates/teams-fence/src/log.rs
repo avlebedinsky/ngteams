@@ -11,9 +11,10 @@
 //! material: it stays local (0600) and goes through the fixture guard and a manual review before any of it is copied
 //! into the repo. Allows are logged too (without a reason), so the log is the full audit of a run.
 //!
-//! The browser fence logs the requests it decides without a membership check ([`RequestRecord`]): an own-state request
-//! let through, or one that nothing classifies, denied. Such an entry holds the channel, the method and the URL without
-//! its query, fragment or user info (where tokens travel), never a body:
+//! The browser fence logs a request it denies without a membership check (one that nothing classifies, or a forced
+//! deny) as a [`RequestRecord`], and a mutating one it lets through as an [`AllowedRecord`]; the sign-in window and the
+//! native transport's own-state requests are [`RequestRecord`]s too. Such an entry holds the channel, the method and
+//! the URL without its query, fragment or user info (where tokens travel), never a body:
 //!
 //! ```json
 //! {"ts_ms":1760000000000,"verdict":"deny","channel":"http","method":"POST","url":"https://host/path",
@@ -23,14 +24,36 @@
 //! A WebSocket frame the audit saw leave the browser without an allow is logged the same way, with the verdict
 //! `breach` and the reason `sent_without_allow`.
 //!
-//! The native client's own Trouter frames ([`FrameRecord`]) are logged before each is sent, by the one socket sink
-//! that can send them (`teams_proto::FrameSink`): the channel, the socket's URL without its query, fragment or user
-//! info, and the frame's kind from the reviewed list, never its text (the authentication frame carries the account's
-//! token):
+//! The sign-in window (`teams-signin`) logs every request it decides the same way, its reads too (`"read": true`), and
+//! the redirect that carries the authorization code as a deny with the reason `sign_in_redirect` (never its query).
+//!
+//! A frame record ([`FrameRecord`]) is the personal build's (`docs/personal-build.md`: it logs its Trouter frames
+//! before each is sent); the lab's frame sink (`teams_proto::FrameSink`) writes none, a frame being no contacting
+//! write. It holds the channel, the socket's URL without its query, fragment or user info, and the frame's kind
+//! (`teams_proto::OwnFrame::KIND`), never its text (the authentication frame carries the account's token):
 //!
 //! ```json
 //! {"ts_ms":1760000000000,"verdict":"allow","event":"frame","channel":"web_socket","url":"wss://host/v4/c",
 //!  "own":"trouter_ping"}
+//! ```
+//!
+//! The fence's decision on a native read by `POST` (`Fence::check_post_read`) is logged as it is made: the entry's
+//! kind, how many MRIs it names (never the MRIs), the verdict and, for a deny, the reason. The native transport then
+//! logs the request itself as a [`RequestRecord`] with [`RequestOutcome::PostRead`] right before it sends it:
+//!
+//! ```json
+//! {"ts_ms":1760000000000,"verdict":"allow","event":"post_read_decision","post_read":"short_profile","names":2}
+//! ```
+//!
+//! A mutating request the fence lets through because it reaches nobody (`contacting` called it
+//! [`Contact::None`](crate::Contact::None)) is logged as `allowed` ([`AllowedRecord`]), by the browser fence and the
+//! native transport alike: its method, its host and its path's shape, every id in the path replaced by its kind
+//! ([`path_shape`]: `<chat>`, `<message>`, `<mri>`, `<guid>`, `<id>`), never a query, a header or the body. That is
+//! the record that shows a family of requests reaching people is missing from the classifier:
+//!
+//! ```json
+//! {"ts_ms":1760000000000,"verdict":"allow","event":"allowed","method":"PUT","host":"teams.microsoft.com",
+//!  "path":"/api/chatsvc/emea/v1/users/ME/conversations/<chat>/properties"}
 //! ```
 //!
 //! So is a target the browser fence couldn't arm ([`ArmingRecord`]): its type, the step that failed and how, whether
@@ -62,9 +85,12 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use percent_encoding::percent_decode_str;
 use serde::Serialize;
+use url::Url;
 
 use crate::decision::DenyReason;
+use crate::post_read::PostReadDenyReason;
 use crate::target::{Scope, Target, WriteKind};
 
 /// The outcome of one decision.
@@ -87,6 +113,19 @@ struct Entry<'a> {
     message: Option<String>,
 }
 
+#[derive(Serialize)]
+struct PostReadDecisionEntry {
+    ts_ms: u64,
+    verdict: &'static str,
+    event: &'static str,
+    post_read: &'static str,
+    names: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<PostReadDenyReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
 /// The channel a browser request went over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,13 +134,16 @@ pub enum Channel {
     WebSocket,
 }
 
-/// How the browser fence decided a request it didn't need a membership check for.
+/// How a request was decided without a membership check: by the browser fence, the sign-in window's guard or the native
+/// transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestOutcome {
-    /// An own-state request on the reviewed list (its kind's name), let through.
+    /// A request on the sign-in window's own-state list (`teams-signin`'s sign-in rules; its kind's name), or an entry
+    /// of the personal build's sealed `OwnState` list: let through.
     Own(&'static str),
-    /// A read sent as a `POST`, on the browser fence's reviewed list (its kind's name), whose body names only lab
-    /// accounts ([`crate::Fence::lab_accounts_only`]): let through. Not own-state and not a write.
+    /// A read sent as a `POST`, an entry of the personal build's sealed `PostRead` list (its kind's name), sent under
+    /// its [`crate::PostReadPermit`] (in a lab build, naming only lab accounts: [`crate::Fence::lab_accounts_only`]):
+    /// let through. Not own-state and not a write.
     PostRead(&'static str),
     /// Nothing classifies it: denied.
     Unclassified,
@@ -111,9 +153,15 @@ pub enum RequestOutcome {
     /// Denied on purpose, whatever it is: the run forced a deny on it to check that a denied request never leaves the
     /// browser (an enforcement test).
     Forced,
+    /// A read (`GET`, `HEAD` or `OPTIONS`), let through. Only the sign-in window logs its reads (`teams-signin`: every
+    /// decision is logged before the request goes); the browser fence lets reads through unlogged.
+    Read,
+    /// The sign-in's redirect to the registered redirect URI, which carries the authorization code: caught and handed
+    /// to the parent process, never let through (`teams-signin`). Its query, where the code travels, isn't logged.
+    SignInRedirect,
 }
 
-/// A browser request the fence decided without a membership check. The URL is logged without its query, fragment or
+/// A request the fence decided without a membership check. The URL is logged without its query, fragment or
 /// user info.
 #[derive(Clone, Copy, Debug)]
 pub struct RequestRecord<'a> {
@@ -134,14 +182,16 @@ struct RequestEntry<'a> {
     own: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     post_read: Option<&'static str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    read: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'static str>,
 }
 
-/// An own frame the native client is about to send on a WebSocket: the socket's URL (logged without its query,
-/// fragment or user info) and the frame's kind on the reviewed list. Never the frame's text.
+/// A frame the personal build is about to send on a WebSocket: the socket's URL (logged without its query, fragment or
+/// user info) and the frame's kind. Never the frame's text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameRecord<'a> {
     pub url: &'a str,
@@ -156,6 +206,24 @@ struct FrameEntry {
     channel: Channel,
     url: String,
     own: &'static str,
+}
+
+/// A mutating request let through because it reaches nobody: its method and URL. Only the URL's host and its path's
+/// shape ([`path_shape`]) are logged: never its query, user info or fragment, nor any header or body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllowedRecord<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+}
+
+#[derive(Serialize)]
+struct AllowedEntry<'a> {
+    ts_ms: u64,
+    verdict: &'static str,
+    event: &'static str,
+    method: &'a str,
+    host: String,
+    path: String,
 }
 
 /// How an arming step failed.
@@ -351,6 +419,25 @@ impl FenceLog {
         self.append(&entry)
     }
 
+    /// Appends the fence's decision on one read by `POST` (`kind`, naming `names` MRIs; `None` allows) as a single line,
+    /// and flushes it. Once an append has failed, every later one fails too.
+    pub(crate) fn record_post_read(
+        &self,
+        kind: &'static str,
+        names: usize,
+        verdict: Option<PostReadDenyReason>,
+    ) -> io::Result<()> {
+        self.append(&PostReadDecisionEntry {
+            ts_ms: now_ms(),
+            verdict: if verdict.is_some() { "deny" } else { "allow" },
+            event: "post_read_decision",
+            post_read: kind,
+            names,
+            reason: verdict,
+            message: verdict.map(|reason| reason.to_string()),
+        })
+    }
+
     /// Appends one browser request decided without a membership check, as a single line, and flushes it. Once an
     /// append has failed, every later one fails too.
     ///
@@ -358,7 +445,7 @@ impl FenceLog {
     /// When the entry can't be written, or an earlier append failed.
     pub fn record_request(&self, request: &RequestRecord<'_>) -> io::Result<()> {
         let (verdict, reason, message) = match request.outcome {
-            RequestOutcome::Own(_) | RequestOutcome::PostRead(_) => ("allow", None, None),
+            RequestOutcome::Own(_) | RequestOutcome::PostRead(_) | RequestOutcome::Read => ("allow", None, None),
             RequestOutcome::Unclassified => ("deny", Some("unclassified"), Some("no rule classifies this request")),
             RequestOutcome::SentWithoutAllow => (
                 "breach",
@@ -369,6 +456,11 @@ impl FenceLog {
                 "deny",
                 Some("forced"),
                 Some("denied on purpose by the run (an enforcement test)"),
+            ),
+            RequestOutcome::SignInRedirect => (
+                "deny",
+                Some("sign_in_redirect"),
+                Some("the sign-in's redirect, caught and handed to the parent; it never loads"),
             ),
         };
         self.append(&RequestEntry {
@@ -385,12 +477,13 @@ impl FenceLog {
                 RequestOutcome::PostRead(kind) => Some(kind),
                 _ => None,
             },
+            read: request.outcome == RequestOutcome::Read,
             reason,
             message,
         })
     }
 
-    /// Appends one own frame the native client is about to send, as a single line, and flushes it: the sink calls it
+    /// Appends one frame the personal build is about to send, as a single line, and flushes it: its sink calls it
     /// before the frame goes out and sends nothing it couldn't log. Once an append has failed, every later one fails
     /// too.
     ///
@@ -404,6 +497,30 @@ impl FenceLog {
             channel: Channel::WebSocket,
             url: redact_url(frame.url),
             own: frame.kind,
+        })
+    }
+
+    /// Appends one mutating request let through because it reaches nobody, as a single line, and flushes it: its
+    /// method, host (lowercase, no port) and path shape ([`path_shape`]). A URL that doesn't parse is logged with an
+    /// empty host and the path `<unparsable>`. Once an append has failed, every later one fails too.
+    ///
+    /// # Errors
+    /// When the entry can't be written, or an earlier append failed.
+    pub fn record_allowed(&self, request: &AllowedRecord<'_>) -> io::Result<()> {
+        let (host, path) = Url::parse(request.url).map_or_else(
+            |_| (String::new(), "<unparsable>".to_owned()),
+            |url| {
+                let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+                (host, path_shape(url.path()))
+            },
+        );
+        self.append(&AllowedEntry {
+            ts_ms: now_ms(),
+            verdict: "allow",
+            event: "allowed",
+            method: request.method,
+            host,
+            path,
         })
     }
 
@@ -461,6 +578,79 @@ fn redact_url(url: &str) -> String {
         Some(at) => format!("{}{}", &url[..scheme_end], &rest[at + 1..]),
         None => url.to_owned(),
     }
+}
+
+/// The longest path segment [`path_shape`] keeps as it is.
+const MAX_WORD: usize = 32;
+
+/// The shape of a URL path (as [`Url::path`] gives it, percent-encoded): each segment percent-decoded and, when it is
+/// an id, replaced by its kind, so that the shape names an endpoint and not whom it concerns:
+/// - `<chat>`: a conversation id (`19:…`, a chat's, a channel's or a meeting's);
+/// - `<mri>`: any other MRI (`8:orgid:…`, `28:…`), but a named `48:` stream (`48:notifications`) stays as it is;
+/// - `<guid>`: a GUID;
+/// - `<message>`: a number of 6 digits or more (a message id, a timestamp);
+/// - `<id>`: anything else that isn't a short word: longer than 32 characters, holding a character other than ASCII
+///   letters, digits and `. _ ~ $ -`, or a run of 6 digits or more (an object id, an endpoint id, a token).
+///
+/// Every other segment is a word of the API and stays.
+#[must_use]
+pub fn path_shape(path: &str) -> String {
+    path.split('/')
+        .map(|segment| shape_segment(&percent_decode_str(segment).decode_utf8_lossy()))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn shape_segment(segment: &str) -> String {
+    if segment.is_empty() {
+        return String::new();
+    }
+    let kind = if segment.starts_with("19:") {
+        "<chat>"
+    } else if let Some((prefix, rest)) = segment.split_once(':')
+        && !prefix.is_empty()
+        && prefix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        if prefix == "48" && !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_lowercase()) {
+            return segment.to_owned();
+        }
+        "<mri>"
+    } else if is_guid_text(segment) {
+        "<guid>"
+    } else if segment.len() >= 6 && segment.bytes().all(|byte| byte.is_ascii_digit()) {
+        "<message>"
+    } else if is_word(segment) {
+        return segment.to_owned();
+    } else {
+        "<id>"
+    };
+    kind.to_owned()
+}
+
+/// A short word of an API: at most [`MAX_WORD`] ASCII letters, digits and `. _ ~ $ -`, without a run of 6 digits.
+fn is_word(segment: &str) -> bool {
+    segment.len() <= MAX_WORD
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'$' | b'-'))
+        && !segment
+            .as_bytes()
+            .windows(6)
+            .any(|run| run.iter().all(u8::is_ascii_digit))
+}
+
+/// A GUID, `8-4-4-4-12` hex digits, in braces or not.
+fn is_guid_text(segment: &str) -> bool {
+    let bare = segment
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+        .unwrap_or(segment);
+    let groups: Vec<&str> = bare.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(group, len)| group.len() == len && group.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// Ends the file's last line with a newline when it has none.

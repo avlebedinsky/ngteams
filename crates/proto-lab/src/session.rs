@@ -3,7 +3,7 @@
 //!
 //! [`SessionWatch`] reads the connection's events (from [`crate::arming::ArmedBrowser::watch`]) and tells:
 //! - **loaded**: the page's main frame is on Teams and, in that document, the web client's authz exchange (its access
-//!   token for a skypetoken, an own-state request the fence lets through) succeeded, or a read of the chat service or
+//!   token for a skypetoken, which reaches nobody and passes) succeeded, or a read of the chat service or
 //!   CSA did (a client holding a cached skypetoken skips authz) with no authz refused; the client does either only with
 //!   a working session;
 //! - **refused**: the main frame is on Teams, but Teams forbade the exchange (403) and hasn't allowed one since: a
@@ -18,8 +18,9 @@
 //!   object id, tenant and UPN claims are kept; the token itself never leaves the event.
 //!
 //! [`LabSession`] runs one: the pinned Chrome on the account's profile, headless unless asked otherwise, one armed tab,
-//! and the events watched. By default it is armed fail-closed (`FailClosed`: every write whose target has to be
-//! fetched is denied); a run that writes ([`SessionOptions::live_members`]) reads its targets' members live instead
+//! and the events watched, under the lab rule (`crate::classify`: what reaches nobody passes, a contacting write only
+//! with the fence's permit). By default its membership source fails closed (`FailClosed`: every write whose target has
+//! to be fetched is denied); a run that writes ([`SessionOptions::live_members`]) reads its targets' members live instead
 //! (`LiveMembershipSource`, fed the account's chat service credential from the page's own requests). A run can also be
 //! recorded as a capture ([`SessionOptions::capture`]).
 
@@ -40,11 +41,11 @@ use crate::arming::{ArmError, ArmOptions, ArmedBrowser, ArmingFailure, DECISION_
 use crate::browser::{Browser, BrowserError, Display, LaunchOptions, Media};
 use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
-use crate::classify::{Classification, Classifier, OwnKind};
+use crate::classify::Classifier;
 use crate::commands::chrome::ChromeBuild;
 use crate::config::{Alias, LabPaths};
 use crate::fence_http::{Denial, ForcedDeny, HttpFence, RedirectCatch};
-use crate::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
+use crate::fence_ws::{ForcedFrameDeny, FrameDenial, GuardScript, WsFence};
 use crate::scenario::dsl::{Driver, NavigateError, navigate_tab};
 
 /// Where the web client starts.
@@ -342,9 +343,17 @@ impl Settling {
     }
 }
 
-/// Whether `url` is one of Teams' authz endpoints.
+/// Teams' authz endpoints of the commercial cloud, as the web client names them.
+const AUTHZ: [&str; 4] = [
+    "https://teams.microsoft.com/api/authsvc/v1.0/authz",
+    "https://teams.microsoft.com/api/authsvc/v1.0/authzcore",
+    "https://authsvc.teams.microsoft.com/v1.0/authz",
+    "https://authsvc.teams.microsoft.com/v1.0/authzcore",
+];
+
+/// Whether `url` is one of Teams' authz endpoints ([`AUTHZ`]), with no query.
 fn is_authz(url: &str) -> bool {
-    Classifier::seeded().classify("POST", url, None) == Classification::Own(OwnKind::Authz)
+    Url::parse(url).is_ok_and(|url| url.query().is_none() && url.fragment().is_none() && AUTHZ.contains(&url.as_str()))
 }
 
 /// Whether `url` is a read the web client makes only with a working session: the chat service or the chat service
@@ -527,15 +536,17 @@ pub const NAVIGATE_TIMEOUT: Duration = Duration::from_secs(90);
 /// How a lab session runs.
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
-    /// What the fence makes of each request.
+    /// What the fence makes of each request: the lab rule, with the echo service's MRI for a run that calls
+    /// ([`Classifier::with_test_call_callee`]). Every WebSocket frame is judged by the frame rule
+    /// ([`crate::fence_ws::classify_frame`]).
     pub classifier: Classifier,
-    /// What the fence makes of each WebSocket frame.
-    pub frames: FrameClassifier,
     /// Read write targets' members live ([`LiveMembershipSource`]), for a run that writes; otherwise every write whose
     /// target has to be fetched is denied ([`FailClosed`]).
     pub live_members: bool,
     /// Record the run as a capture of this scenario (`captures/<scenario>/<ts>/` in the lab's data dir).
     pub capture: Option<String>,
+    /// Whether the capture keeps request bodies; `login` keeps none ([`Capture::without_request_bodies`]).
+    pub capture_request_bodies: bool,
     pub display: Display,
     /// The browser's camera and microphone: the system's (and a prompt), or Chrome's fake devices, the microphone
     /// playing a WAV file (`echo-call`).
@@ -545,14 +556,14 @@ pub struct SessionOptions {
 }
 
 impl SessionOptions {
-    /// Fail-closed, headless, not recorded.
+    /// The lab rule with no echo callee, its membership source fail-closed, headless, not recorded.
     #[must_use]
-    pub fn fail_closed(classifier: Classifier) -> Self {
+    pub fn fail_closed() -> Self {
         Self {
-            classifier,
-            frames: FrameClassifier::seeded(),
+            classifier: Classifier::new(),
             live_members: false,
             capture: None,
+            capture_request_bodies: true,
             display: Display::Headless,
             media: Media::System,
             user_agent: None,
@@ -582,12 +593,12 @@ impl LabSession {
     ///
     /// # Errors
     /// As [`Self::open_with`].
-    pub async fn open(paths: &LabPaths, alias: Alias, classifier: Classifier) -> Result<Self, SessionError> {
-        Self::open_with(paths, alias, SessionOptions::fail_closed(classifier)).await
+    pub async fn open(paths: &LabPaths, alias: Alias) -> Result<Self, SessionError> {
+        Self::open_with(paths, alias, SessionOptions::fail_closed()).await
     }
 
     /// Launches the pinned Chrome on `alias`'s profile and arms it before any page loads: the fence from `lab.toml`
-    /// ([`Fence::open_lab`]), the membership source and request classifier `options` name, and the seeded frame list;
+    /// ([`Fence::open_lab`]), the membership source and request classifier `options` name, and the frame rule;
     /// recording into a new capture when asked. Then opens one armed tab on `about:blank`.
     ///
     /// # Errors
@@ -602,13 +613,8 @@ impl LabSession {
     ///
     /// # Errors
     /// As [`Self::open_with`].
-    pub async fn open_catching(
-        paths: &LabPaths,
-        alias: Alias,
-        classifier: Classifier,
-        catch: RedirectCatch,
-    ) -> Result<Self, SessionError> {
-        Self::open_armed(paths, alias, SessionOptions::fail_closed(classifier), Some(catch)).await
+    pub async fn open_catching(paths: &LabPaths, alias: Alias, catch: RedirectCatch) -> Result<Self, SessionError> {
+        Self::open_armed(paths, alias, SessionOptions::fail_closed(), Some(catch)).await
     }
 
     async fn open_armed(
@@ -637,7 +643,7 @@ impl LabSession {
             None => http,
         };
         let guard = GuardScript::generate().map_err(SessionError::Guard)?;
-        let ws = WsFence::new(options.frames, fence, members, guard);
+        let ws = WsFence::new(fence, members, guard);
         let recorder = match &options.capture {
             Some(scenario) => Some(Arc::new(Recorder::create(&paths.captures_dir(), scenario)?)),
             None => None,
@@ -652,6 +658,11 @@ impl LabSession {
         let armed = match &recorder {
             Some(recorder) => {
                 let capture = Capture::new(Arc::clone(recorder), RtcHooks::default());
+                let capture = if options.capture_request_bodies {
+                    capture
+                } else {
+                    capture.without_request_bodies()
+                };
                 ArmedBrowser::arm_capturing(browser, http, ws, &ArmOptions::default(), capture).await?
             }
             None => ArmedBrowser::arm(browser, http, ws, &ArmOptions::default()).await?,
@@ -684,7 +695,12 @@ impl LabSession {
         self.armed.force_deny(rule);
     }
 
-    /// Stops every forced deny.
+    /// Denies every WebSocket frame `rule` matches from now on (holding one kind of frame back).
+    pub fn force_deny_frames(&self, rule: ForcedFrameDeny) {
+        self.armed.force_deny_frames(rule);
+    }
+
+    /// Stops every forced deny, of requests and of frames.
     pub fn clear_forced(&self) {
         self.armed.clear_forced();
     }

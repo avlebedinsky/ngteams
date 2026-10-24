@@ -7,13 +7,14 @@
 //! What the WebSocket layer itself sends on the socket (the masked handshake request, a pong to a WebSocket ping, the
 //! reply to a close) carries no data of ours and reaches no one: those are the protocol's own control frames.
 //!
-//! **No frame reaches a log.** tungstenite logs every frame it sends and reads at `trace` level, its payload
-//! included (`Sending frame: …`, `writing frame …`, `Received message …`), and `user.authenticate` carries the bearer
-//! token. This crate takes `log` with `max_level_debug` and `release_max_level_debug` (`Cargo.toml`), so those
-//! `trace!` calls compile to nothing in any build with this crate in it, whatever logger a binary installs. Its
-//! `debug!` lines (the handshake, a close, a send error's kind) carry no payload. rustls logs only the handshake's
-//! metadata, and hyper and h2 log through `tracing` without its `log` feature (h2's frame `Debug` leaves the header
-//! fields out on purpose).
+//! **No frame reaches a log unredacted.** tungstenite logs every frame it sends and reads at `trace` level, its
+//! payload included (`Sending frame: …`, `writing frame …`, `Received message …`), and `user.authenticate` carries the
+//! bearer token. This crate takes `log` with `max_level_debug` and `release_max_level_debug` (`Cargo.toml`), so those
+//! `trace!` calls compile to nothing in any build with this crate in it, whatever logger a binary installs. At `debug`
+//! the write half logs each frame it sends itself, as a `teams_log::wire::Frame`, whose formatting redacts
+//! `user.authenticate`'s arguments and every credential field (M2 Task 24a: the app's diagnostic log); the session
+//! logs each frame it reads the same way. rustls logs only the handshake's metadata, and hyper and h2 log through
+//! `tracing` without its `log` feature (h2's frame `Debug` leaves the header fields out on purpose).
 
 use std::future::Future;
 use std::io;
@@ -169,12 +170,37 @@ pub(crate) fn tls_config() -> Result<Arc<ClientConfig>, tokio_rustls::rustls::Er
     Ok(Arc::new(config))
 }
 
+/// Every URL a client on a mock origin was asked to open, as it was built and checked (before the mock took its
+/// path and query), in order. Under a mock origin the handshake carries the mock's address, so this is how a test sees
+/// which host a connect chose. Tests only (`test-support`).
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Default)]
+pub struct OpenedUrls(Arc<std::sync::Mutex<Vec<Url>>>);
+
+#[cfg(feature = "test-support")]
+impl OpenedUrls {
+    /// The URLs asked for so far, oldest first.
+    #[must_use]
+    pub fn urls(&self) -> Vec<Url> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    fn push(&self, url: &Url) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(url.clone());
+    }
+}
+
 /// How a socket is opened: TLS to the URL's host, or (`test-support` only) plain TCP to a loopback mock.
 #[derive(Clone)]
 pub(crate) struct Opener {
     tls: Arc<ClientConfig>,
     #[cfg(feature = "test-support")]
     mock_origin: Option<Url>,
+    #[cfg(feature = "test-support")]
+    opened: OpenedUrls,
 }
 
 impl Opener {
@@ -183,6 +209,8 @@ impl Opener {
             tls,
             #[cfg(feature = "test-support")]
             mock_origin: None,
+            #[cfg(feature = "test-support")]
+            opened: OpenedUrls::default(),
         }
     }
 
@@ -190,6 +218,12 @@ impl Opener {
     pub(crate) fn with_mock_origin(mut self, origin: Url) -> Self {
         self.mock_origin = Some(origin);
         self
+    }
+
+    /// The URLs this opener was asked to open on its mock origin.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn opened(&self) -> OpenedUrls {
+        self.opened.clone()
     }
 
     /// Opens the socket at `url` (checked against the allowlist first) within `limit`: TCP, TLS, the WebSocket
@@ -206,6 +240,7 @@ impl Opener {
     async fn open_checked(&self, url: &Url) -> Result<Stream, ConnectError> {
         #[cfg(feature = "test-support")]
         if let Some(origin) = &self.mock_origin {
+            self.opened.push(url);
             let mut mocked = origin.clone();
             mocked.set_path(url.path());
             mocked.set_query(url.query());
@@ -289,7 +324,17 @@ impl FrameWriter for SocketWriter {
     type Error = WriteFailed;
 
     fn write(&mut self, text: FrameText) -> impl Future<Output = Result<(), WriteFailed>> + Send {
-        let message = Message::text(text.into_string());
+        let text = text.into_string();
+        // the frame in full at `debug`, `user.authenticate` included: its record redacts the arguments
+        log::debug!(
+            target: teams_log::wire::FRAME_TARGET,
+            "{}",
+            teams_log::wire::Frame {
+                direction: teams_log::wire::Direction::Sent,
+                text: &text,
+            }
+        );
+        let message = Message::text(text);
         async move { self.0.send(message).await.map_err(WriteFailed::from) }
     }
 }

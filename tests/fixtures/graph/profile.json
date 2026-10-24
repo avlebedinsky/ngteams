@@ -1,0 +1,36 @@
+{
+  "_synthetic": "Made up, in the shape of Microsoft Graph's answers to `proto-lab probe profile` (M2 Task 12, 2026-10-21: lab accounts a and b, each with its own Graph token, reading a's, b's and c's records; the probe printed statuses, header names, content types, sizes and key names with their JSON types, never a value, and kept nothing). The user read with $select=id,displayName answered 200, application/json, the keys @odata.context, id and displayName, all strings; the whole record had @odata.context, businessPhones (an array), displayName, givenName and surname (strings, or null for an account without them), id, jobTitle, mail, mobilePhone, officeLocation, preferredLanguage (null) and userPrincipalName. The 96x96 picture answered 200, image/jpeg, about 7 KB for the one account with a picture, and 404, application/json, {error: {...}} with the code ImageNotFound for the two without. Names are made up; <guid:a> is a lab account's object id, tests fill it in; the picture's bytes are a made-up JPEG header, not an image.",
+  "user": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users(id,displayName)/$entity",
+      "id": "<guid:a>",
+      "displayName": "Lab Account A"
+    }
+  },
+  "user_without_name": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users(id,displayName)/$entity",
+      "id": "<guid:a>",
+      "displayName": null
+    }
+  },
+  "picture": {
+    "status": 200,
+    "content_type": "image/jpeg",
+    "body_base64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2Q=="
+  },
+  "no_picture": {
+    "status": 404,
+    "content_type": "application/json",
+    "body": {
+      "error": {
+        "code": "ImageNotFound",
+        "message": "Made-up text: the account has no picture."
+      }
+    }
+  }
+}

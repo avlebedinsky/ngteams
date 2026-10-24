@@ -1,30 +1,20 @@
-//! What a browser request is, as far as the fence is concerned.
+//! What a browser request is, as far as the fence is concerned: the lab rule, **lab accounts contact only each other;
+//! everything else is allowed** (CLAUDE.md).
 //!
-//! [`classify`] sorts a request into:
-//! - [`Classification::Read`]: `GET`, `HEAD` or `OPTIONS`, which change nothing anyone else sees;
-//! - [`Classification::Own`]: a mutating request on the seeded, reviewed own-state list (the Entra token endpoint and
-//!   Teams' authz exchange), which changes only the signed-in account's own session; `proto-lab login` adds Entra's
-//!   sign-in form ([`Classifier::sign_in`]);
-//! - [`Classification::PostRead`]: a read the web client sends as a `POST`, on the reviewed read-by-`POST` list
-//!   ([`crate::post_read`]; [`Classifier::mapped`] and the classifiers built on it, [`Classifier::calling`] and
-//!   [`Classifier::messaging`], only), with the MRIs it names: the fence lets it through only when every one is a lab
-//!   account;
-//! - [`Classification::Write`]: a mapped write with its [`Target`], judged by [`teams_fence::Fence::check`];
-//! - [`Classification::Unknown`]: everything else, denied.
+//! [`Classifier::classify`] asks [`teams_fence::contacting`], the one classifier the browser fence and the native
+//! transport share, and sorts a request into:
+//! - [`Classification::Read`]: a request that can't change anything (`GET`, `HEAD` or `OPTIONS` with no body and no
+//!   method override): let through, unlogged;
+//! - [`Classification::Allow`]: a mutating request that reaches nobody ([`Contact::None`]: every request to a host that
+//!   isn't a contacting service, and the named carve-outs on one): let through, logged to `fence.log` as `allowed`;
+//! - [`Classification::Write`]: a mapped write with its [`Target`] ([`Contact::Write`]), judged by
+//!   [`teams_fence::Fence::check`] against the target's fresh member list;
+//! - [`Classification::Unknown`]: a mutating request on a contacting service that no row maps or carves out
+//!   ([`Contact::Unreadable`]): denied.
 //!
-//! The seeded classifier ([`Classifier::seeded`], and [`Classifier::sign_in`] for `login`) maps no writes, so a run
-//! that uses it is fail-closed: every mutating request outside the own-state list is [`Classification::Unknown`]. A
-//! run that writes uses [`Classifier::mapped`], which also maps the chat service's writes on chats
-//! (`docs/protocol/fence-targets.md`): messages, typing, edits, deletes, reactions, read receipts, new chats and member
-//! changes, each to its [`Target`]; whoever a message or an edit mentions is added to its target, so the fence judges
-//! them as it judges the chat's members. Anything the mapping doesn't recognize, a channel or team among them, stays
-//! [`Classification::Unknown`]. A run that chats over the push channel adds the messaging stack's endpoint
-//! registration ([`Classifier::messaging`]); a run that calls, the calling stack's own-state and its call start
-//! ([`Classifier::calling`]). Any method other than the three reading ones counts as mutating, including ones the
-//! classifier has never heard of.
-//!
-//! An own-state rule matches the method, the exact origin (scheme, host and port) and the path segment by segment; a
-//! `*` segment stands for exactly one non-empty segment (an Entra tenant). The query plays no part.
+//! The headers [`teams_fence::contacting`] reads are the method overrides ([`teams_fence::OVERRIDE_HEADERS`]); every
+//! other header is passed by name alone. The web client's test call start is a write only with the echo service's
+//! MRI ([`Classifier::with_test_call_callee`]); without it, it is unknown.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -35,459 +25,78 @@ use serde_json::{Map, Value};
 /// anything but the chat service. It is teams-fence's, so the mapping and the live member read recognize the chat
 /// service by one check.
 pub use teams_fence::chat_service_path;
-use teams_fence::{Mri, Scope, Target, WriteKind};
-use url::Url;
+use teams_fence::{Contact, Mri, Policy, Request, Target, contacting};
 
-use crate::post_read::PostReadKind;
-
-/// A reviewed kind of own-state request: it changes only the signed-in account's own session state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum OwnKind {
-    /// The Entra token endpoint: code exchange and refresh.
-    EntraToken,
-    /// Teams' authz exchange: an access token for a skypetoken and the regional endpoints.
-    Authz,
-    /// Entra's sign-in form: the username lookup, the password and "Stay signed in?". Only `proto-lab login` allows
-    /// it ([`Classifier::sign_in`]).
-    EntraSignIn,
-    /// The account's own Trouter (push channel) session: authenticating its own endpoint's socket. Only a run that
-    /// calls or chats allows it ([`crate::fence_ws::FrameClassifier::calling`],
-    /// [`crate::fence_ws::FrameClassifier::messaging`], `crate::calling`).
-    TrouterSession,
-    /// Registering the account's own endpoint (its Trouter URL) with the registrar, which makes it reachable. Only a
-    /// run that calls allows it for both stacks ([`Classifier::calling`]); a run that chats, for the messaging stack's
-    /// endpoint only ([`Classifier::messaging`], `crate::calling`).
-    EndpointRegistration,
-    /// Reading the account's own settings and policies from the middle tier, which takes the names to read as a
-    /// `POST` body. The calling stack stays off until it knows the calling policy. Only a run that calls allows it
-    /// ([`Classifier::calling`], `crate::calling`).
-    SettingsRead,
-}
-
-impl OwnKind {
-    /// The name used in `fence.log`.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::EntraToken => "entra_token",
-            Self::Authz => "authz",
-            Self::EntraSignIn => "entra_sign_in",
-            Self::TrouterSession => "trouter_session",
-            Self::EndpointRegistration => "endpoint_registration",
-            Self::SettingsRead => "settings_read",
-        }
-    }
-}
-
-/// What the fence makes of one request.
+/// What the fence makes of one request (or one WebSocket frame: [`crate::fence_ws::classify_frame`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Classification {
-    /// A reading method: let through.
+    /// A request that can't change anything: let through.
     Read,
-    /// A mutating request on the own-state list: let through.
-    Own(OwnKind),
-    /// A read by `POST` on the reviewed list ([`crate::post_read`]), naming `names`: let through only when every one
-    /// is a lab account ([`teams_fence::Fence::lab_accounts_only`]), else denied as unknown.
-    PostRead { kind: PostReadKind, names: Vec<Mri> },
+    /// A mutating request (or a frame) that reaches nobody: let through, logged as `allowed`.
+    Allow,
     /// A mapped write: let through only with a permit from the fence.
     Write(Target),
-    /// A mutating request nothing classifies: denied.
+    /// A mutating request (or a frame) that could reach people and that nothing reads: denied.
     Unknown,
 }
 
-/// An exact origin and a path matched segment by segment; the query plays no part.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UrlPattern {
-    origin: String,
-    path: Vec<String>,
-}
-
-impl UrlPattern {
-    /// `origin` is `scheme://host[:port]` as a browser serializes it (no default port, lowercase host); `path` starts
-    /// with `/`, and a `*` segment stands for one non-empty segment.
-    #[must_use]
-    pub fn new(origin: &str, path: &str) -> Self {
-        Self {
-            origin: origin.to_owned(),
-            path: segments(path).map(str::to_owned).collect(),
-        }
-    }
-
-    /// Whether `url` has exactly this origin and a path this pattern matches.
-    #[must_use]
-    pub fn matches(&self, url: &Url) -> bool {
-        if self.origin != url.origin().ascii_serialization() {
-            return false;
-        }
-        let mut path = segments(url.path());
-        let mut pattern = self.path.iter();
-        loop {
-            match (pattern.next(), path.next()) {
-                (None, None) => return true,
-                (Some(wanted), Some(segment)) if !segment.is_empty() && (wanted == "*" || wanted == segment) => {}
-                _ => return false,
-            }
-        }
-    }
-}
-
-/// One entry of the own-state list.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OwnRule {
-    kind: OwnKind,
-    method: String,
-    url: UrlPattern,
-}
-
-impl OwnRule {
-    /// `origin` and `path` as [`UrlPattern::new`] takes them.
-    #[must_use]
-    pub fn new(kind: OwnKind, method: &str, origin: &str, path: &str) -> Self {
-        Self {
-            kind,
-            method: method.to_ascii_uppercase(),
-            url: UrlPattern::new(origin, path),
-        }
-    }
-
-    fn matches(&self, method: &str, url: &Url) -> bool {
-        self.method == method && self.url.matches(url)
-    }
-}
-
-/// The path's segments after the leading `/`.
-fn segments(path: &str) -> std::str::Split<'_, char> {
-    path.strip_prefix('/').unwrap_or(path).split('/')
-}
-
-/// The authz endpoints of the commercial cloud, as the web client names them.
-const AUTHZ: [(&str, &str); 4] = [
-    ("https://teams.microsoft.com", "/api/authsvc/v1.0/authz"),
-    ("https://teams.microsoft.com", "/api/authsvc/v1.0/authzcore"),
-    ("https://authsvc.teams.microsoft.com", "/v1.0/authz"),
-    ("https://authsvc.teams.microsoft.com", "/v1.0/authzcore"),
-];
-
-/// Entra's sign-in form on `login.microsoftonline.com`, as the sign-in page posts it (`*` is `common`,
-/// `organizations` or a tenant): the username lookup, the password, and the answer to "Stay signed in?". Nothing
-/// of multi-factor sign-in (`SAS/*`) or of the account's security info is on it: what those requests set off (a code
-/// sent by text or call, a push to a phone) and whether verifying a method can be told apart from registering one has
-/// never been captured, so `login` stops at any multi-factor prompt instead.
-const SIGN_IN: [&str; 4] = ["/*/GetCredentialType", "/*/login", "/kmsi", "/*/kmsi"];
-
-/// The classifier: the own-state list, and for a run that writes, the write mapping.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The classifier: the lab rule's ([`teams_fence::contacting`]), with what it needs to know beyond the request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Classifier {
-    own: Vec<OwnRule>,
-    /// Whether the chat service's writes are mapped and the read-by-`POST` list applies ([`Classifier::mapped`]).
-    writes: bool,
-    /// Whether the calling stack's own-state passes and call starts are mapped ([`Classifier::calling`]).
-    calling: bool,
-    /// Whether the messaging stack's endpoint registration passes ([`Classifier::messaging`]).
-    messaging: bool,
-    /// The participant the web client's test call is for: the echo service `lab.toml` approves.
-    test_call_callee: Option<Mri>,
+    policy: Policy,
 }
 
 impl Classifier {
-    /// The seeded own-state list: `POST` to the Entra v2 token endpoint of any tenant on `login.microsoftonline.com`,
-    /// and `POST` to Teams' authz endpoints.
+    /// The lab rule with no echo callee: a test call start is unknown.
     #[must_use]
-    pub fn seeded() -> Self {
-        let mut own = vec![OwnRule::new(
-            OwnKind::EntraToken,
-            "POST",
-            "https://login.microsoftonline.com",
-            "/*/oauth2/v2.0/token",
-        )];
-        own.extend(
-            AUTHZ
-                .iter()
-                .map(|(origin, path)| OwnRule::new(OwnKind::Authz, "POST", origin, path)),
-        );
-        Self {
-            own,
-            writes: false,
-            calling: false,
-            messaging: false,
-            test_call_callee: None,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// The seeded list plus the write mapping (see the module docs) and the read-by-`POST` list ([`crate::post_read`]:
-    /// the mention picker's profile lookups of lab accounts): what a run that writes uses, together with a membership
-    /// source that can read the targets' members (`teams_fence::LiveMembershipSource`).
-    #[must_use]
-    pub fn mapped() -> Self {
-        Self {
-            writes: true,
-            ..Self::seeded()
-        }
-    }
-
-    /// The write mapping ([`Classifier::mapped`]) plus the calling stack's own-state (`crate::calling::own_request`:
-    /// the account's own endpoint registration and settings/policy reads) and one more write, the web client's test
-    /// call start (`crate::calling::call_start`, a [`WriteKind::Call`] on [`Scope::New`] the fence judges, mapped only
-    /// with [`Classifier::with_test_call_callee`]). What a run that calls (`echo-call`) uses.
-    #[must_use]
-    pub fn calling() -> Self {
-        Self {
-            calling: true,
-            ..Self::mapped()
-        }
-    }
-
-    /// The write mapping ([`Classifier::mapped`]) plus the messaging stack's endpoint registration
-    /// (`crate::calling::messaging_request`: the account's own messaging endpoint, never the calling stack's), so its
-    /// chat events reach its Trouter socket. What a run that chats over the push channel (`ab-trouter`) uses, with
-    /// [`crate::fence_ws::FrameClassifier::messaging`].
-    #[must_use]
-    pub fn messaging() -> Self {
-        Self {
-            messaging: true,
-            ..Self::mapped()
-        }
-    }
-
-    /// The participant the web client's test call is for, which its start doesn't name (`crate::calling::call_start`):
-    /// the echo service `lab.toml` approves. Without one, a test call start is unknown.
+    /// The participant the web client's test call is for, which its start doesn't name: the echo service `lab.toml`
+    /// approves ([`Policy::with_echo_callee`]). Without one, a test call start is unknown.
     #[must_use]
     pub fn with_test_call_callee(mut self, callee: Mri) -> Self {
-        self.test_call_callee = Some(callee);
+        self.policy = self.policy.with_echo_callee(callee);
         self
     }
 
-    /// The seeded list plus Entra's sign-in form ([`OwnKind::EntraSignIn`]): what `proto-lab login` needs to type a
-    /// lab account's password into Microsoft's sign-in page under the fence. The form changes only that account's own
-    /// sign-in session. Nothing else uses it: `status` and the scenarios never sign in.
+    /// Classifies one request whose headers are known as the browser fence pauses it: each header's name, and its
+    /// value when [`teams_fence::contacting`] reads it (a method override) and the event gave one as a string. A method
+    /// override whose value isn't held reads as one naming another method. `body` is `Some` (even empty) for a request
+    /// with a body: [`crate::fence_http::PausedRequest`] passes an empty one for a body Chrome didn't inline.
     #[must_use]
-    pub fn sign_in() -> Self {
-        let mut classifier = Self::seeded();
-        classifier.own.extend(
-            SIGN_IN
-                .iter()
-                .map(|path| OwnRule::new(OwnKind::EntraSignIn, "POST", "https://login.microsoftonline.com", path)),
-        );
-        classifier
-    }
-
-    /// The same list plus one more own-state rule. Tests use it to stand a local endpoint in for a Microsoft one.
-    #[must_use]
-    pub fn with_own(mut self, rule: OwnRule) -> Self {
-        self.own.push(rule);
-        self
-    }
-
-    /// Classifies one request: a read, an own-state request, a read by `POST` or a mapped write (with
-    /// [`Classifier::mapped`]; the body names what some writes are, and whom a read by `POST` looks up), or unknown.
-    #[must_use]
-    pub fn classify(&self, method: &str, url: &str, body: Option<&[u8]>) -> Classification {
-        self.classify_with_headers(method, url, &[], body)
-    }
-
-    /// [`Classifier::classify`] of a request whose headers are known, as the browser fence pauses it: only with them
-    /// can a request be a read by `POST` ([`crate::post_read`] checks the headers it depends on), and only when the
-    /// write mapping doesn't take it. Each header is its name and, as [`crate::fence_http::PausedRequest`] keeps it,
-    /// its value when the list reads it.
-    #[must_use]
-    pub fn classify_with_headers(
+    pub fn classify(
         &self,
         method: &str,
         url: &str,
         headers: &[(String, Option<String>)],
         body: Option<&[u8]>,
     ) -> Classification {
-        let method = method.to_ascii_uppercase();
-        if !is_mutating(&method) {
+        let mut request = Request::new(method, url).with_body(body);
+        for (name, value) in headers {
+            request = request.with_header(name, value.as_deref().unwrap_or_default());
+        }
+        if !request.is_mutating() {
             return Classification::Read;
         }
-        let Ok(url) = Url::parse(url) else {
-            return Classification::Unknown;
-        };
-        if let Some(rule) = self.own.iter().find(|rule| rule.matches(&method, &url)) {
-            return Classification::Own(rule.kind);
+        match contacting(&request, &self.policy) {
+            Contact::None => Classification::Allow,
+            Contact::Write(target) => Classification::Write(target),
+            Contact::Unreadable => Classification::Unknown,
         }
-        if self.messaging
-            && let Some(kind) = crate::calling::messaging_request(&method, &url, body)
-        {
-            return Classification::Own(kind);
-        }
-        if self.calling {
-            if let Some(kind) = crate::calling::own_request(&method, &url, body) {
-                return Classification::Own(kind);
-            }
-            if let Some(target) = crate::calling::call_start(&method, &url, body, self.test_call_callee.as_ref()) {
-                return Classification::Write(target);
-            }
-        }
-        if !self.writes {
-            return Classification::Unknown;
-        }
-        // a write is judged only by the fence's check: the read-by-POST list never takes what the mapping maps
-        if let Some(target) = map_write(&method, &url, body) {
-            return Classification::Write(target);
-        }
-        crate::post_read::lookup(&method, &url, headers, body).map_or(Classification::Unknown, |(kind, names)| {
-            Classification::PostRead { kind, names }
-        })
     }
 }
 
-/// The write a chat service request makes, if the mapping knows it (`docs/protocol/fence-targets.md`).
-fn map_write(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
-    let path = chat_service_path(url)?;
-    let path: Vec<&str> = path.iter().map(String::as_str).collect();
-    let name = || {
-        url.query_pairs()
-            .find(|(key, _)| key == "name")
-            .map(|(_, value)| value.into_owned())
-    };
-    let on = |kind, chat: &str| chat_scope(chat).map(|scope| Target::new(kind, scope));
-    match (method, path.as_slice()) {
-        ("POST", ["users", "ME", "conversations", chat, "messages"]) => message_write(body?, chat, Post::New),
-        ("PUT", ["users", "ME", "conversations", chat, "messages", _]) => message_write(body?, chat, Post::Edit),
-        ("DELETE", ["users", "ME", "conversations", chat, "messages", _]) => on(WriteKind::Delete, chat),
-        ("PUT" | "DELETE", ["users", "ME", "conversations", chat, "messages", _, "properties"])
-            if name()? == "emotions" =>
-        {
-            on(WriteKind::Reaction, chat)
-        }
-        ("PUT", ["users", "ME", "conversations", chat, "properties"]) if name()? == "consumptionhorizon" => {
-            on(WriteKind::ReadReceipt, chat)
-        }
-        ("POST", ["threads"]) => Some(Target::new(WriteKind::ChatCreate, Scope::New).with_added(body_members(body?)?)),
-        ("PUT", ["threads", chat, "members"]) => {
-            Some(on(WriteKind::MemberChange, chat)?.with_added(body_members(body?)?))
-        }
-        ("PUT", ["threads", chat, "members", member]) if is_member(member) => {
-            Some(on(WriteKind::MemberChange, chat)?.with_added([Mri::new(*member)]))
-        }
-        ("DELETE", ["threads", chat, "members", member]) if is_member(member) => on(WriteKind::MemberChange, chat),
-        _ => None,
-    }
+/// Classifies one request with no headers ([`Classifier::new`]).
+#[must_use]
+pub fn classify(method: &str, url: &str, body: Option<&[u8]>) -> Classification {
+    Classifier::new().classify(method, url, &[], body)
 }
 
-/// A chat's conversation id: `19:…@unq.gbl.spaces` (1:1) or `19:…@thread.v2` (group and meeting chats), never a
-/// channel or team (`@thread.tacv2`, `@thread.skype`) or a reply chain within one (`;messageid=`).
-fn chat_scope(id: &str) -> Option<Scope> {
-    let chat = id.starts_with("19:")
-        && (id.ends_with("@unq.gbl.spaces") || id.ends_with("@thread.v2"))
-        && !id.contains([';', '/', '?', '#']);
-    chat.then(|| Scope::Conversation { id: id.to_owned() })
-}
-
-/// Which of the two message writes a request is.
-#[derive(Clone, Copy)]
-enum Post {
-    /// A new message or typing, posted to the chat.
-    New,
-    /// An edit: the whole message again, as the web client sends it.
-    Edit,
-}
-
-/// A message post or an edit ([`Post`]) on the chat `chat`, its body read by [`strict_json`]; whoever it mentions is
-/// added ([`mentioned`]). An edit whose body isn't a message ([`message_kind`]), and a body that could reach beyond the
-/// chat ([`chat_only`]), are unknown.
-fn message_write(body: &[u8], chat: &str, post: Post) -> Option<Target> {
-    let body = strict_json(body)?;
-    chat_only(&body)?;
-    let kind = match (message_kind(&body)?, post) {
-        (kind, Post::New) => kind,
-        (WriteKind::Message, Post::Edit) => WriteKind::Edit,
-        (_, Post::Edit) => return None,
-    };
-    Some(Target::new(kind, chat_scope(chat)?).with_added(mentioned(&body)?))
-}
-
-/// What a message post (or edit) is, by the `messagetype` of its body (read by [`strict_json`]): typing
-/// (`Control/Typing`, `Control/ClearTyping`) or a message (`Text`, `RichText`, `RichText/…`). Any other type, or a
-/// body that isn't a JSON object with one, is unknown.
-fn message_kind(body: &Value) -> Option<WriteKind> {
-    match body.get("messagetype")?.as_str()? {
-        "Control/Typing" | "Control/ClearTyping" => Some(WriteKind::Typing),
-        "Text" | "RichText" => Some(WriteKind::Message),
-        kind if kind.starts_with("RichText/") => Some(WriteKind::Message),
-        _ => None,
-    }
-}
-
-/// `Some` for a message body whose fields that could take it beyond the chat are as the captures showed them, or left
-/// out: `crossPostChannels` (a post into channels too) an empty list, `properties.onbehalfof` (a message sent for
-/// someone else) `null`. Any other value of either, or either key in another case ([`optional`]), is `None` (unknown):
-/// the mapping's target is the chat alone, and what the service does with those forms wasn't seen.
-fn chat_only(body: &Value) -> Option<()> {
-    let body = body.as_object()?;
-    match optional(body, "crossPostChannels").ok()? {
-        None => {}
-        Some(Value::Array(channels)) if channels.is_empty() => {}
-        Some(_) => return None,
-    }
-    let Some(properties) = optional(body, "properties").ok()? else {
-        return Some(());
-    };
-    match optional(properties.as_object()?, "onbehalfof").ok()? {
-        None | Some(Value::Null) => Some(()),
-        Some(_) => None,
-    }
-}
-
-/// The MRIs a message body mentions: its `properties.mentions`, a JSON list sent as a string, each entry naming one
-/// `mri` (`docs/protocol/chat.md`: the form `ab-chat-full`'s mention of b showed on 2026-10-21, as the web bundle
-/// builds it). They are the write's added participants, so the fence judges whoever is mentioned as it judges the
-/// chat's members. No `properties`, or no `mentions` in them, is no mention. Anything else is `None` (unknown):
-/// `properties` that aren't an object, `mentions` that aren't a string holding a JSON list read by [`strict_json`],
-/// an entry that isn't an object with a string `mri`, and either key in another case ([`optional`]).
-fn mentioned(body: &Value) -> Option<Vec<Mri>> {
-    let Some(properties) = optional(body.as_object()?, "properties").ok()? else {
-        return Some(Vec::new());
-    };
-    let Some(mentions) = optional(properties.as_object()?, "mentions").ok()? else {
-        return Some(Vec::new());
-    };
-    strict_json(mentions.as_str()?.as_bytes())?
-        .as_array()?
-        .iter()
-        .map(|mention| mention.as_object()?.get("mri")?.as_str().map(Mri::new))
-        .collect()
-}
-
-/// A key a body may leave out, in an object read by [`strict_json`]: the value under `name` exactly, `None` when no
-/// key of its [`fold`] is there, and [`OtherCase`] (unknown) for a key of its fold in another case (`Mentions` for
-/// `mentions`). An exact lookup alone would read that key as missing, and a missing optional key means the body asks
-/// nothing of that kind, while a service binding keys in any case would act on it.
-fn optional<'v>(object: &'v Map<String, Value>, name: &str) -> Result<Option<&'v Value>, OtherCase> {
-    if let Some(value) = object.get(name) {
-        return Ok(Some(value));
-    }
-    let folded = fold(name);
-    if object.keys().any(|key| fold(key) == folded) {
-        return Err(OtherCase);
-    }
-    Ok(None)
-}
-
-/// [`optional`]'s key, there only in another case.
-struct OtherCase;
-
-/// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the body
-/// isn't read by [`strict_json`], or the list is missing, empty, or has a member that isn't an object with a string id.
-fn body_members(body: &[u8]) -> Option<Vec<Mri>> {
-    let body = strict_json(body)?;
-    let members: Vec<Mri> = body
-        .get("members")?
-        .as_array()?
-        .iter()
-        .map(|member| member.get("id")?.as_str().map(Mri::new))
-        .collect::<Option<_>>()?;
-    (!members.is_empty()).then_some(members)
-}
-
-/// A request body as one JSON value, read so that the fence and the chat service can't read it differently: `None`
-/// for anything but a single JSON value, and for a body in which any object has two keys a case-insensitive reader
-/// could take for one (an exact duplicate, `members` beside `Members`, `id` beside `ID`). A .NET service may bind keys
-/// in any case and keep either duplicate, so such a body is ambiguous and its write stays unknown. With every key
-/// unique in any case, an exact lookup ([`Value::get`]) finds the one key the service binds, or nothing: a key the
-/// fence would miss only because of its case (`Members` alone) reads as missing, which is unknown too.
+/// A body as one JSON value, read as the fence's classifier reads one (`teams_fence::contacting`'s reader, which is
+/// private to it): `None` for anything but a single JSON value, and for a body in which any object has two keys a
+/// case-insensitive reader could take for one. The scenarios read what the web client sent with it.
 pub(crate) fn strict_json(body: &[u8]) -> Option<Value> {
     let mut reader = serde_json::Deserializer::from_slice(body);
     let value = Strict.deserialize(&mut reader).ok()?;
@@ -567,23 +176,4 @@ impl<'de> Visitor<'de> for Strict {
         }
         Ok(Value::Object(object))
     }
-}
-
-/// One member named in a path: an MRI, not the `ALL` every-member form.
-fn is_member(segment: &str) -> bool {
-    segment.contains(':') && !segment.eq_ignore_ascii_case("ALL")
-}
-
-/// Whether a method can change anything: every method but `GET`, `HEAD` and `OPTIONS` (in any case).
-#[must_use]
-pub fn is_mutating(method: &str) -> bool {
-    !["GET", "HEAD", "OPTIONS"]
-        .iter()
-        .any(|reading| reading.eq_ignore_ascii_case(method))
-}
-
-/// Classifies one request with the seeded classifier.
-#[must_use]
-pub fn classify(method: &str, url: &str, body: Option<&[u8]>) -> Classification {
-    Classifier::seeded().classify(method, url, body)
 }

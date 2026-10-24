@@ -6,7 +6,9 @@
 //!   hour of their expiry, three connects in a row have failed (any connect that ended before its `trouter.connected`
 //!   but for a renewal) or the service disconnected twice for a `dup` within 10 s.
 //! - **Authenticate** in the first frame, at once after the service's `1::` ([`Authenticate`]: the session's `ic3`
-//!   token and the cached reconnect parameters). The socket is never authenticated again.
+//!   token and the cached reconnect parameters). The socket is never authenticated again. The token is asked of the
+//!   session again at the `1::`, never the one held since the connect began: a session signed out while the socket
+//!   opened stops the client with nothing sent, and one renewed meanwhile authenticates with its new token.
 //! - **Keep-alive**: a [`Ping`] every [`Options::ping_interval`] once connected; a pong missing for
 //!   [`Options::pong_timeout`] means a reconnect.
 //! - **Reconnect** after the socket closes, the service disconnects or a pong is missing: at once for a renewal, a
@@ -25,8 +27,8 @@
 //!   [`PushEvent::Ignored`] and never answered either. A message-loss report becomes [`PushEvent::MessageLoss`]: catch
 //!   up, then [`MessageLoss::caught_up`] acknowledges it.
 //!
-//! Every frame goes out through the connection's [`FrameSink`], which logs it to `fence.log` first; a frame that can't
-//! be logged isn't sent, and the client stops ([`Stop::LogUnavailable`]).
+//! Every frame goes out through the connection's [`FrameSink`]; none is written to `fence.log` (a frame isn't a
+//! contacting write).
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -40,10 +42,9 @@ use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Clock, REFRESH_MARGIN, Renewal, SystemClock};
 use teams_auth::token::TokenError;
-use teams_fence::Fence;
 use teams_proto::{
-    Authenticate, ConnectParams, Disconnect, DroppedIndicator, EndpointRegistration, FrameError, FrameSink,
-    IC3_AUDIENCE, MessageLossAck, OwnFrame, Ping, Sent, Transport,
+    Authenticate, ConnectParams, Disconnect, DroppedIndicator, EndpointRegistrar, EndpointRegistration, FrameError,
+    FrameSink, IC3_AUDIENCE, MessageLossAck, OwnFrame, Ping, RegisteredEndpoint, Sent,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -53,7 +54,7 @@ use tokio_tungstenite::tungstenite::{self, Message};
 use crate::credentials::TrouterCredentials;
 use crate::events::Delivery;
 use crate::frames::{self, Connected, Event, Incoming, RawDelivery};
-use crate::registration::{Registrar, RegistrationReport, RegistrationTimes};
+use crate::registration::{Outcome, Registrar, RegistrationReport, RegistrationTimes};
 use crate::socket::{self, ConnectBase, ConnectError, Opener, SocketWriter, Stream, WriteFailed};
 
 /// The least time between two reconnects without a wait: a second one sooner waits a backoff, so a service that keeps
@@ -110,6 +111,10 @@ pub enum PushEvent {
     /// A socket is up and its endpoint known (`trouter.connected`): pushes may have been missed before it, so catch
     /// up. `new_endpoint` when the service handed over another endpoint id than the last connection's.
     Connected { endpoint: String, new_endpoint: bool },
+    /// A registration of the endpoint went through: the endpoint it registered (the client's `epid`), the account's own
+    /// registered endpoint of this run, the one id its own availability may name (M2 Task 19). Told just before the
+    /// registration's [`PushEvent::Registration`] report.
+    Registered(RegisteredEndpoint),
     /// How a registration of the endpoint went.
     Registration(RegistrationReport),
     /// The service reported pushes the endpoint missed.
@@ -118,8 +123,11 @@ pub enum PushEvent {
     Delivery(Delivery),
     /// A delivery that isn't a chat event of this endpoint. It is never answered.
     Ignored(Ignored),
-    /// The socket is down; the client reconnects.
-    Disconnected(Down),
+    /// The socket is down; the client reconnects. `heard`: when (by the client's clock) the socket last read a frame
+    /// once connected (a delivery, a pong, any frame), the last moment the channel was known to work; a socket that
+    /// went down silently (a suspend, a half-open connection) is noticed only later, by a late pong. `None` when
+    /// the socket never got its `trouter.connected`.
+    Disconnected { down: Down, heard: Option<SystemTime> },
     /// The client stopped; nothing more comes.
     Stopped(Stop),
 }
@@ -182,8 +190,6 @@ pub enum Down {
 pub enum Stop {
     /// Its owner asked ([`TrouterHandle::stop`], or the handle dropped).
     Requested,
-    /// `fence.log` can't be written, so no frame can be sent.
-    LogUnavailable,
     /// The account isn't signed in.
     SignedOut,
     /// The service disconnected with `skypetoken-deprecated`.
@@ -205,7 +211,6 @@ pub enum BuildError {
 pub struct Trouter<T, K> {
     transport: Arc<T>,
     credentials: Arc<K>,
-    fence: Arc<Fence>,
     clock: Arc<dyn Clock>,
     opener: Opener,
     /// The endpoint's id on every connect (`epid`) and its registration's `registrationId`.
@@ -224,20 +229,19 @@ impl<T, K> std::fmt::Debug for Trouter<T, K> {
 
 impl<T, K> Trouter<T, K>
 where
-    T: Transport + Send + 'static,
+    T: EndpointRegistrar + Send + 'static,
     K: TrouterCredentials + 'static,
 {
     /// The push channel of the account whose registrations go through `transport` and whose tokens `credentials`
-    /// gives, logging its frames to `fence`'s log, with a fresh endpoint id.
+    /// gives, with a fresh endpoint id.
     ///
     /// # Errors
     /// [`BuildError::Tls`] when the system's certificate verifier can't be set up, [`BuildError::Random`] when no
     /// endpoint id can be made.
-    pub fn new(transport: Arc<T>, credentials: Arc<K>, fence: Arc<Fence>) -> Result<Self, BuildError> {
+    pub fn new(transport: Arc<T>, credentials: Arc<K>) -> Result<Self, BuildError> {
         Ok(Self {
             transport,
             credentials,
-            fence,
             clock: Arc::new(SystemClock),
             opener: Opener::new(socket::tls_config().map_err(BuildError::Tls)?),
             epid: guid().ok_or(BuildError::Random)?,
@@ -252,21 +256,24 @@ where
     /// [`BuildError::MockOrigin`] unless `origin` is `ws` on a loopback host with a port and nothing after it;
     /// otherwise as [`Self::new`].
     #[cfg(feature = "test-support")]
-    pub fn with_mock_origin(
-        transport: Arc<T>,
-        credentials: Arc<K>,
-        fence: Arc<Fence>,
-        origin: &str,
-    ) -> Result<Self, BuildError> {
+    pub fn with_mock_origin(transport: Arc<T>, credentials: Arc<K>, origin: &str) -> Result<Self, BuildError> {
         let url = url::Url::parse(origin).map_err(|_| BuildError::MockOrigin)?;
         let loopback = matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"));
         let bare = url.path() == "/" && url.query().is_none() && url.fragment().is_none() && url.username().is_empty();
         if url.scheme() != "ws" || !loopback || url.port().is_none() || !bare || url.password().is_some() {
             return Err(BuildError::MockOrigin);
         }
-        let mut trouter = Self::new(transport, credentials, fence)?;
+        let mut trouter = Self::new(transport, credentials)?;
         trouter.opener = trouter.opener.with_mock_origin(url);
         Ok(trouter)
+    }
+
+    /// Every URL this client asks its mock origin to open, as built and checked: the host a connect chose, which the
+    /// mock's handshake can't show. Tests only (`test-support`).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn opened_urls(&self) -> socket::OpenedUrls {
+        self.opener.opened()
     }
 
     /// Another clock (a fake one in tests); the session's should be the same.
@@ -308,6 +315,7 @@ where
             last_endpoint: None,
             last_immediate: None,
             last_dup: None,
+            heard: None,
         };
         TrouterHandle {
             events: received,
@@ -388,6 +396,8 @@ struct Run<T, K> {
     last_immediate: Option<Instant>,
     /// When the service last disconnected for a `dup`.
     last_dup: Option<Instant>,
+    /// When the connection under way last read a frame once connected ([`PushEvent::Disconnected`]).
+    heard: Option<SystemTime>,
 }
 
 impl<T, K> Run<T, K> {
@@ -399,7 +409,7 @@ impl<T, K> Run<T, K> {
 
 impl<T, K> Run<T, K>
 where
-    T: Transport + Send + 'static,
+    T: EndpointRegistrar + Send + 'static,
     K: TrouterCredentials + 'static,
 {
     async fn run(mut self) {
@@ -407,12 +417,15 @@ where
             let started = Instant::now();
             let (down, wait) = match self.connection().await {
                 End::Stop(stop) => {
+                    log::info!("push channel stopped: {stop:?}");
                     self.emit(PushEvent::Stopped(stop));
                     return;
                 }
                 End::Again(down, wait) => (down, wait),
             };
-            self.emit(PushEvent::Disconnected(down));
+            log::info!("push channel down: {down:?}");
+            let heard = self.heard.take();
+            self.emit(PushEvent::Disconnected { down, heard });
             if started.elapsed() >= self.trouter.options.stable_after {
                 self.level = 0;
             }
@@ -422,12 +435,14 @@ where
             let delay = match wait {
                 Wait::None if immediate_allowed => {
                     self.last_immediate = Some(Instant::now());
+                    log::info!("push channel reconnecting at once");
                     continue;
                 }
                 Wait::None | Wait::Backoff => self.backoff(),
                 // the service's wait is a floor: a `Retry-After: 0` (or a past date) still waits the backoff
                 Wait::For(delay) => delay.max(self.backoff()),
             };
+            log::info!("push channel reconnecting in {} ms", delay.as_millis());
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
                 _ = &mut self.stop => {
@@ -486,7 +501,7 @@ where
             }
         };
         let (writer, read) = socket::split(socket);
-        let sink = FrameSink::new(writer, Arc::clone(&self.trouter.fence), url.as_str());
+        let sink = FrameSink::new(writer);
         let mut link = Link::new(sink, read, token, params, &options, self.trouter.clock.now());
         let end = link.serve(self).await;
         // a connect that ended before its `trouter.connected` failed, whatever ended it (the socket closed, the
@@ -547,6 +562,12 @@ where
             _ => None,
         };
         let new_endpoint = self.last_endpoint.as_deref() != Some(connected.id.as_str());
+        log::info!(
+            "push channel connected (connect {}, endpoint {}{})",
+            self.connects,
+            connected.id,
+            if new_endpoint { ", a new one" } else { "" }
+        );
         self.last_endpoint = Some(connected.id.clone());
         self.emit(PushEvent::Connected {
             endpoint: connected.id.clone(),
@@ -572,7 +593,7 @@ enum Step {
     HelloLate,
     RenewCheck,
     Renewal(Result<Renewal, broadcast::error::RecvError>),
-    Report(RegistrationReport),
+    Report(Outcome),
     CaughtUp(Vec<DroppedIndicator>),
 }
 
@@ -597,8 +618,8 @@ struct Link {
     pong_timeout: Duration,
     registration: RegistrationTimes,
     registrar: Option<Registrar>,
-    reports: mpsc::UnboundedReceiver<RegistrationReport>,
-    reports_to: mpsc::UnboundedSender<RegistrationReport>,
+    reports: mpsc::UnboundedReceiver<Outcome>,
+    reports_to: mpsc::UnboundedSender<Outcome>,
     acks: FuturesUnordered<LossAck>,
 }
 
@@ -617,10 +638,7 @@ impl Link {
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut renew_check = tokio::time::interval_at(start + options.renew_check, options.renew_check);
         renew_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let renew = token
-            .expires_at
-            .checked_sub(options.renew_lead)
-            .is_some_and(|due| due > now);
+        let renew = renewable(&token, options.renew_lead, now);
         Self {
             sink,
             read,
@@ -645,7 +663,7 @@ impl Link {
 
     async fn serve<T, K>(&mut self, run: &mut Run<T, K>) -> End
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         loop {
@@ -675,7 +693,7 @@ impl Link {
 
     async fn take<T, K>(&mut self, step: Step, run: &mut Run<T, K>) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         match step {
@@ -686,13 +704,22 @@ impl Link {
                 }
                 Some(End::Stop(Stop::Requested))
             }
-            Step::Frame(frame) => self.on_frame(frame, run).await,
+            Step::Frame(frame) => {
+                let end = self.on_frame(frame, run).await;
+                if end.is_none() && self.endpoint.is_some() {
+                    run.heard = Some(run.trouter.clock.now());
+                }
+                end
+            }
             Step::HelloLate => Some(End::Again(Down::HelloTimeout, Wait::Backoff)),
             Step::PongLate => Some(End::Again(Down::PongTimeout, Wait::None)),
             Step::Ping => self.ping().await,
             Step::RenewCheck => self.renew_check(run).await,
             Step::Renewal(renewal) => self.on_renewal(renewal, run).await,
-            Step::Report(report) => {
+            Step::Report((report, endpoint)) => {
+                if let Some(endpoint) = endpoint {
+                    run.emit(PushEvent::Registered(endpoint));
+                }
                 run.emit(PushEvent::Registration(report));
                 None
             }
@@ -703,11 +730,9 @@ impl Link {
         }
     }
 
-    /// Sends one own frame through the sink; a frame that can't be logged stops the client, one the socket couldn't
-    /// send ends the connection.
+    /// Sends one own frame through the sink; one the socket couldn't send ends the connection.
     async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, End> {
         self.sink.send(frame).await.map_err(|error| match error {
-            FrameError::LogUnavailable(_) => End::Stop(Stop::LogUnavailable),
             FrameError::Write(failed) => End::Again(Down::SendFailed(failed), Wait::Backoff),
         })
     }
@@ -728,11 +753,22 @@ impl Link {
         run: &mut Run<T, K>,
     ) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         match frame {
-            Some(Ok(Message::Text(text))) => self.on_text(text.as_str(), run).await,
+            Some(Ok(Message::Text(text))) => {
+                // the frame in full at `debug`: its record redacts every credential field
+                log::debug!(
+                    target: teams_log::wire::FRAME_TARGET,
+                    "{}",
+                    teams_log::wire::Frame {
+                        direction: teams_log::wire::Direction::Received,
+                        text: text.as_str(),
+                    }
+                );
+                self.on_text(text.as_str(), run).await
+            }
             Some(Ok(Message::Close(_)) | Err(_)) | None => Some(End::Again(Down::Closed, Wait::Backoff)),
             Some(Ok(_)) => None,
         }
@@ -740,15 +776,11 @@ impl Link {
 
     async fn on_text<T, K>(&mut self, text: &str, run: &mut Run<T, K>) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         match frames::decode(text) {
-            Ok(Incoming::Connect) if !self.authenticated => {
-                self.authenticated = true;
-                let authenticate = Authenticate::new(&self.token.token, self.params.clone());
-                self.send(&authenticate).await.err()
-            }
+            Ok(Incoming::Connect) if !self.authenticated => self.authenticate(run).await,
             Ok(Incoming::Event(event)) => {
                 self.on_event(&event, run);
                 None
@@ -775,9 +807,35 @@ impl Link {
         }
     }
 
+    /// The socket's first frame, with the token the session holds now (asked again: the connect's may be stale by
+    /// the `1::`). A session that has none any more (signed out) stops the client and any other failure ends the
+    /// connection, nothing sent either way; a stop while it is asked ends it at once.
+    async fn authenticate<T, K>(&mut self, run: &mut Run<T, K>) -> Option<End>
+    where
+        T: EndpointRegistrar + Send + 'static,
+        K: TrouterCredentials + 'static,
+    {
+        let asked = tokio::select! {
+            biased;
+            _ = &mut run.stop => return Some(End::Stop(Stop::Requested)),
+            asked = run.trouter.credentials.ic3() => asked,
+        };
+        let token = match run.token(asked) {
+            Ok(token) => token,
+            Err(end) => return Some(end),
+        };
+        if token.token.expose() != self.token.token.expose() {
+            self.renew = renewable(&token, self.renew_lead, run.trouter.clock.now());
+            self.token = token;
+        }
+        self.authenticated = true;
+        let authenticate = Authenticate::new(&self.token.token, self.params.clone());
+        self.send(&authenticate).await.err()
+    }
+
     fn on_event<T, K>(&mut self, event: &Event, run: &mut Run<T, K>)
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         if let Some(connected) = Connected::from_event(event) {
@@ -801,7 +859,7 @@ impl Link {
     /// Registers the endpoint's push URL (the messaging stack's registration), replacing the last loop.
     fn register<T, K>(&mut self, connected: &Connected, run: &Run<T, K>)
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
     {
         self.registrar = None;
         match EndpointRegistration::messaging(&run.trouter.epid, &connected.push_url) {
@@ -868,7 +926,7 @@ impl Link {
     /// Reconnects with a new token once the held one is within the lead of its expiry.
     async fn renew_check<T, K>(&mut self, run: &mut Run<T, K>) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         let due = self
@@ -891,7 +949,7 @@ impl Link {
         run: &mut Run<T, K>,
     ) -> Option<End>
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
         K: TrouterCredentials + 'static,
     {
         let ask = match renewal {
@@ -929,6 +987,11 @@ impl Link {
             _ => End::Again(Down::Renewal, Wait::None),
         }
     }
+}
+
+/// Whether `token`'s expiry is far enough off at `now` to renew it `lead` before it runs out.
+fn renewable(token: &AccessToken, lead: Duration, now: SystemTime) -> bool {
+    token.expires_at.checked_sub(lead).is_some_and(|due| due > now)
 }
 
 /// An instant no wait reaches (a guarded `select!` branch still needs one).

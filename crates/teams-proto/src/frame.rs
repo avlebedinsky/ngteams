@@ -1,8 +1,8 @@
-//! The Trouter frame policy (M1 Task 15): what the native client may send on its push channel's socket.
+//! The Trouter frames the native client sends on its push channel's socket.
 //!
-//! A socket's write half is handed to a [`FrameSink`], and the sink sends only an [`OwnFrame`]: the sealed, reviewed
-//! list of the Trouter session's own frames, each of which touches only the account's own session and reaches no one
-//! else (`docs/protocol/trouter.md`, the shapes the messaging stack sent in M1 Task 14's captures):
+//! A socket's write half is handed to a [`FrameSink`], and the sink sends only an [`OwnFrame`]: a typed frame of this
+//! crate's, built by its constructor in the shape the messaging stack sent (`docs/protocol/trouter.md`, M1 Task 14's
+//! captures):
 //!
 //! - [`Authenticate`], the first frame on every socket: `5:::{"name":"user.authenticate","args":[{"headers":{…},
 //!   "connectparams":{…}}]}`, the headers exactly `X-Ms-Test-User: False`, `Authorization: Bearer <ic3>` and
@@ -13,14 +13,16 @@
 //!   `5:<n>+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[{"tag":…,"etag":…},…]}]}`;
 //! - [`Disconnect`], the client's disconnect: `0::`.
 //!
-//! Nothing else. Not `user.activity` (Task 14: deliveries come without it, so the native client doesn't report its
-//! activity in M1), and no answer to a delivery (`3:::`): deliveries stay unanswered (Task 14, decided with Codex), so
-//! no response type exists. A frame is built only by this crate's constructors, each of which gives exactly its
-//! reviewed shape; no constructor takes frame text, and [`OwnFrame`] is sealed, so no other crate adds to the list.
+//! [`OwnFrame`] is sealed only to keep frame text out of other crates' hands: no constructor takes frame text, and no
+//! other crate makes a frame. Which frames exist isn't a reviewed list: the session's own frames reach nobody, so adding
+//! one here (`user.activity`, say) is an ordinary change. No answer to a delivery (`3:::`) exists: deliveries stay
+//! unanswered; the one that may be added is a typed response for a call the fence itself permitted (`CLAUDE.md`,
+//! "Calls go only to the lab").
 //!
-//! The sink numbers the events that ask for an acknowledgement itself (`<n>` above, from 1 per socket) and logs every
-//! frame to `fence.log` ([`FrameRecord`]: the socket, the frame's kind, never its text) before it hands it to the
-//! writer; a frame that can't be logged isn't sent.
+//! The sink numbers the events that ask for an acknowledgement itself (`<n>` above, from 1 per socket). It writes
+//! nothing to `fence.log`: a frame isn't a contacting write. ([`FrameRecord`](teams_fence::FrameRecord), a frame's
+//! `fence.log` entry by its [`OwnFrame::KIND`], stays in `teams-fence` for the personal build, which logs its frames:
+//! `docs/personal-build.md`.)
 //!
 //! The frames' JSON is written by this module's own writer ([`Object`]) with its keys in the order the messaging stack
 //! sent them, byte for byte: `serde_json`'s `Map` keeps insertion order only with its `preserve_order` feature, which
@@ -29,24 +31,23 @@
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
-use std::io;
-use std::sync::Arc;
 
 use serde_json::Value;
 use teams_auth::secrets::Secret;
-use teams_fence::{Fence, FrameRecord};
 
 use self::sealed::Event;
 
-/// A reviewed own frame of the Trouter session (see the module docs). Sealed: no other crate can implement it.
+/// A frame of the Trouter session (see the module docs). Sealed: no other crate can implement it, so no frame text is
+/// made outside this crate.
 pub trait OwnFrame: sealed::Sealed {
-    /// The entry's name, logged to `fence.log` with every frame of it.
+    /// The frame's kind, the name a `fence.log` record of it carries ([`FrameRecord`](teams_fence::FrameRecord)): the
+    /// personal build logs its frames (`docs/personal-build.md`); the lab's sink logs none.
     const KIND: &'static str;
 }
 
 mod sealed {
-    /// The seal on [`OwnFrame`](super::OwnFrame): a public trait no other crate can name. Its implementations are the
-    /// reviewed list, and it carries the frame's content, which only this crate reads.
+    /// The seal on [`OwnFrame`](super::OwnFrame): a public trait no other crate can name. It carries the frame's
+    /// content, which only this crate makes and reads.
     pub trait Sealed {
         fn event(&self) -> Event;
     }
@@ -328,10 +329,7 @@ pub trait FrameWriter: Send {
 /// [`FrameError::Write`] may hold the unsent frame ([`FrameWriter::Error`]), so none of them shows it.
 #[derive(thiserror::Error)]
 pub enum FrameError<E: Error + 'static> {
-    /// Its `fence.log` entry couldn't be written; it wasn't sent.
-    #[error("fence.log can't be written, so the frame wasn't sent: {0}")]
-    LogUnavailable(#[source] io::Error),
-    /// The socket failed to send it (after it was logged): the writer's error, reached only by matching the variant.
+    /// The socket failed to send it: the writer's error, reached only by matching the variant.
     #[error("the socket failed to send the frame")]
     Write(E),
 }
@@ -339,7 +337,6 @@ pub enum FrameError<E: Error + 'static> {
 impl<E: Error + 'static> fmt::Debug for FrameError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LogUnavailable(error) => f.debug_tuple("LogUnavailable").field(error).finish(),
             Self::Write(_) => f.write_str("Write(<the writer's error, not shown: it may hold the frame>)"),
         }
     }
@@ -360,12 +357,10 @@ impl Sent {
     }
 }
 
-/// The one way the native client sends on a Trouter socket: only an [`OwnFrame`], each logged to `fence.log` before
-/// it is sent. It has no method that takes text, and it doesn't give its writer back.
+/// The one way the native client sends on a Trouter socket: only an [`OwnFrame`]. It has no method that takes text,
+/// and it doesn't give its writer back. It writes nothing to `fence.log`: a frame isn't a contacting write.
 pub struct FrameSink<W> {
     writer: W,
-    fence: Arc<Fence>,
-    url: String,
     last_ack: u64,
 }
 
@@ -378,24 +373,17 @@ impl<W> fmt::Debug for FrameSink<W> {
 }
 
 impl<W: FrameWriter> FrameSink<W> {
-    /// The sink for the socket at `url` (logged with every frame, without its query), sending through `writer` and
-    /// logging to `fence`'s log.
+    /// The sink for a socket's write half, `writer`.
     #[must_use]
-    pub fn new(writer: W, fence: Arc<Fence>, url: &str) -> Self {
-        Self {
-            writer,
-            fence,
-            url: url.to_owned(),
-            last_ack: 0,
-        }
+    pub fn new(writer: W) -> Self {
+        Self { writer, last_ack: 0 }
     }
 
-    /// Logs `frame` to `fence.log`, then sends it. An event that asks for an acknowledgement takes the socket's next
-    /// id, logged or not, so an id is never used twice.
+    /// Sends `frame`. An event that asks for an acknowledgement takes the socket's next id, sent or not, so an id is
+    /// never used twice.
     ///
     /// # Errors
-    /// [`FrameError::LogUnavailable`] when the log can't take the entry (nothing was sent), [`FrameError::Write`] when
-    /// the socket failed.
+    /// [`FrameError::Write`] when the socket failed.
     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
         let (text, ack) = match frame.event() {
             Event::Plain(event) => (format!("5:::{event}"), None),
@@ -405,14 +393,6 @@ impl<W: FrameWriter> FrameSink<W> {
             }
             Event::Disconnect => ("0::".to_owned(), None),
         };
-        let record = FrameRecord {
-            url: &self.url,
-            kind: F::KIND,
-        };
-        self.fence
-            .log()
-            .record_frame(&record)
-            .map_err(FrameError::LogUnavailable)?;
         self.writer.write(FrameText(text)).await.map_err(FrameError::Write)?;
         Ok(Sent { ack })
     }

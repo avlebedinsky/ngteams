@@ -1,14 +1,13 @@
-//! The `load` scenario: account a opens the Teams web client under the **fail-closed** fence (the seeded own-state list
-//! only, no write mapped), waits for it to load, keeps recording a while, and closes. The run is recorded
-//! (`captures/load/<ts>/`); every request the fence denies is expected and is in the capture as data for mapping writes
-//! (`docs/protocol/fence-targets.md`).
+//! The `load` scenario: account a opens the Teams web client under the lab rule with a **fail-closed** membership source
+//! (every write whose target has to be fetched is denied), waits for it to load, keeps recording a while, and closes.
+//! The run is recorded (`captures/load/<ts>/`); every request the fence denies is expected and is in the capture as
+//! data for mapping writes (`docs/protocol/fence-targets.md`).
 //!
 //! It fails when the web client doesn't load (Teams refusing the account, a sign-in page, no answer in time) and when
 //! the fence is breached. Denies don't fail it ([`DenyPolicy::AllExpected`]).
 
 use std::time::Duration;
 
-use crate::classify::Classifier;
 use crate::commands::status::account_status;
 use crate::config::{Alias, LabPaths};
 use crate::session::{LabSession, SessionOptions, SessionState, TEAMS_URL};
@@ -29,7 +28,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let session_options = SessionOptions {
         capture: Some(ScenarioName::Load.as_str().to_owned()),
         display: options.display,
-        ..SessionOptions::fail_closed(Classifier::seeded())
+        ..SessionOptions::fail_closed()
     };
     let mut session = LabSession::open_with(paths, ACCOUNT, session_options).await?;
     let state = match session.navigate(TEAMS_URL).await {

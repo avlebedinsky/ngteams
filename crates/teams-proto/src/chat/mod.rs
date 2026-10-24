@@ -10,8 +10,9 @@
 //! - [`MessageText`]: what a message is written from (M1 Task 12), a [`RichText`] and the MRI each of its mentions
 //!   names, from which a post's or an edit's `content`, `properties.mentions` and target are all built.
 //!
-//! Received attachments are parsed, never fetched: `amsreferences` and `properties.files` are kept as they come (no
-//! capture showed one), and an image's `src` is kept on [`Image`].
+//! Received attachments are parsed, never fetched: `amsreferences`, `properties.files` and `properties.cards` with an
+//! entry are kept as they came ([`Unshown`]: no capture showed one, so a view says the message has content it can't
+//! show and never guesses at it), and an image's `src` is kept on [`Image`].
 
 mod compose;
 mod html;
@@ -26,5 +27,6 @@ pub use html::{
 pub use model::{
     ConsumptionHorizon, Conversation, ConversationKind, ConversationList, Field, Malformed, MemberList, Mention,
     MentionKind, Message, MessagePage, MessageType, QuotedMessage, Reaction, ReactionUser, Thread, ThreadMember,
+    Unshown, WEB_CLIENT, unshown_parts, web_chat_link,
 };
 pub use read::{ChatReadError, ChatReads, MAX_PAGE_SIZE, link_endpoint};

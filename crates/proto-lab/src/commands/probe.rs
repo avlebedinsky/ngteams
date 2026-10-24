@@ -118,7 +118,7 @@ impl fmt::Display for HeaderForm {
 /// Where the probe's reads go.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Origin {
-    /// The chat service, at the base the GTMs give.
+    /// The service itself (the chat service at the base the GTMs give, or Graph for `probe profile`), over `https`.
     ChatService,
     /// A local mock (`http://127.0.0.1:<port>`) in place of the base's origin, with the base's path. Tests only:
     /// refused unless the build has `teams-fence`'s `test-support` feature.
@@ -151,6 +151,10 @@ pub enum ProbeError {
     NoChatBase,
     #[error("the chat base from the GTMs isn't a chat service base: {0:?}")]
     NotAChatBase(String),
+    #[error("the region has no chatSvcAggAfd GTM (CSA's base)")]
+    NoCsaBase,
+    #[error("the chatSvcAggAfd GTM isn't a CSA base (https://<AFD host>/api/csa/<region>): {0:?}")]
+    NotACsaBase(String),
     #[error("a mock origin is for tests only (a build with teams-fence's test-support feature)")]
     MockOrigin,
     #[error("the ic3 token: {0}")]
@@ -307,6 +311,16 @@ impl Answer {
     /// The answer's body, kept for a reference copy; never shown.
     pub(crate) fn body(&self) -> &[u8] {
         &self.kept.body
+    }
+
+    /// The value of the answer's header `name` (lowercase), kept for a report that shows only a checked form of it
+    /// (a media type); never shown as it is.
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.kept
+            .headers
+            .iter()
+            .find(|(header, _)| header == name)
+            .map(|(_, value)| value.as_str())
     }
 }
 

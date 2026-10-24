@@ -13,10 +13,10 @@ use futures_util::StreamExt as _;
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::cdp::{Cdp, CdpError, Event, RemoteError, SessionId};
-use proto_lab::classify::{Classifier, OwnKind, OwnRule};
+use proto_lab::classify::Classifier;
 use proto_lab::config::Alias;
 use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
-use proto_lab::fence_ws::{FrameClassifier, FrameDenial, GuardScript, WsFence};
+use proto_lab::fence_ws::{FrameDenial, GuardScript, WsFence};
 use proto_lab::scenario::ab_chat::{
     self, MESSAGE_POST, PROBE_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id, probe_text,
 };
@@ -126,9 +126,8 @@ where
         FenceLog::open(&dir.path().join("fence.log"))?,
     ));
     let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-    let classifier = Classifier::seeded().with_own(OwnRule::new(OwnKind::Authz, "POST", &server.uri(), "/api/send"));
-    let http = HttpFence::new(classifier, Arc::clone(&fence), Arc::clone(&members));
-    let ws = WsFence::new(FrameClassifier::seeded(), fence, members, GuardScript::generate()?);
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::clone(&members));
+    let ws = WsFence::new(fence, members, GuardScript::generate()?);
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };
@@ -657,6 +656,7 @@ fn a_request_pattern_with_a_body_text_matches_only_a_body_holding_it() -> TestRe
         status: None,
         failed: None,
         body: body.map(str::to_owned),
+        sent_ms: None,
     };
     let any = RequestPattern::new(Some("POST"), "/messages$")?;
     let message = any.clone().with_body_containing("lab message");
@@ -698,11 +698,11 @@ fn a_writing_scenario_expects_only_its_probes_and_the_reviewed_list() -> TestRes
     let policy = ab_chat::policy(Some(CHAT))?;
     let expected = [
         denial(
-            "https://browser.events.data.microsoft.com/OneCollector/1.0/",
+            "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
             DenyCause::Unclassified,
         ),
         denial(
-            "https://teams.events.data.microsoft.com/OneCollector/1.0/",
+            "https://teams.cloud.microsoft/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
             DenyCause::Unclassified,
         ),
         forced(
@@ -720,11 +720,15 @@ fn a_writing_scenario_expects_only_its_probes_and_the_reviewed_list() -> TestRes
             "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints/x",
             DenyCause::Unclassified,
         ),
+        // telemetry reaches nobody and passes: a deny of it means something is off
         denial(
-            "https://notevents.data.microsoft.com.example.com/",
+            "https://browser.events.data.microsoft.com/OneCollector/1.0/",
             DenyCause::Unclassified,
         ),
-        denial("https://xevents.data.microsoft.com/", DenyCause::Unclassified),
+        denial(
+            "https://teams.microsoft.com.example.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
+            DenyCause::Unclassified,
+        ),
         denial("not a url", DenyCause::Malformed),
     ];
     for denial in &expected {
@@ -803,14 +807,8 @@ fn account(denials: Vec<Denial>, fence: FenceReport) -> AccountRun {
 #[test]
 fn a_writing_run_fails_on_a_denied_frame_off_the_list() -> TestResult {
     let policy = ab_chat::policy(Some(CHAT))?;
-    let frame = FrameDenial {
-        url: "wss://teams.microsoft.com/api/socket".to_owned(),
-        cause: DenyCause::Unclassified,
-    };
-    let listed = FrameDenial {
-        url: "wss://augloop.office.com/".to_owned(),
-        cause: DenyCause::Unclassified,
-    };
+    let frame = FrameDenial::new("wss://teams.microsoft.com/api/socket", DenyCause::Unclassified);
+    let listed = FrameDenial::new("wss://go.trouter.teams.microsoft.com/v4/c", DenyCause::Unclassified);
     let fence = FenceReport {
         denied_frames: 2,
         ..FenceReport::default()
@@ -867,7 +865,7 @@ fn a_writing_run_fails_on_a_denied_frame_off_the_list() -> TestResult {
 #[test]
 fn a_run_fails_on_an_unexpected_deny_or_a_breach_only() {
     let telemetry = denial(
-        "https://browser.events.data.microsoft.com/OneCollector/1.0/",
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
         DenyCause::Unclassified,
     );
     let endpoint = denial(
@@ -892,6 +890,8 @@ fn a_run_fails_on_an_unexpected_deny_or_a_breach_only() {
         "{:?}",
         denied.failures
     );
+    // the failure names the deny's class: the contacting service its URL goes to
+    assert!(denied.failures[0].contains("chat_service"), "{:?}", denied.failures);
 
     // the fail-closed load expects every deny, but not a breach
     let mut load = ScenarioReport::new(ScenarioName::Load);
@@ -1029,6 +1029,7 @@ fn seen(status: Option<u16>, failed: Option<&str>) -> SeenRequest {
         status,
         failed: failed.map(str::to_owned),
         body: None,
+        sent_ms: None,
     }
 }
 
@@ -1239,6 +1240,272 @@ async fn ab_image_hands_the_compose_box_its_test_image_by_paste_or_drop() -> Tes
     .await
 }
 
+/// A compose box that, like the web client's, takes a file dropped on it (or pasted, when `#mode` says `paste`) and
+/// shows it as an attachment beside the box: a chip with the file's name apart from its extension, saying on the page
+/// the file's type and size. A chat message above names a file of another run.
+const FILE_PAGE: &str = r#"<!doctype html><html><body>
+<div data-tid="chat-pane-message"><span>lab-file-n0</span><span>.txt</span></div>
+<div id="out"></div>
+<div id="mode">drop</div>
+<div contenteditable="true" role="textbox" id="compose"></div>
+<div id="attachments"></div>
+<script>
+const compose = document.getElementById('compose');
+function take(files, how) {
+  if (document.getElementById('mode').textContent !== how) return;
+  const file = files[0];
+  document.getElementById('out').textContent = how + ' ' + file.type + ' ' + file.size;
+  const chip = document.createElement('div');
+  chip.setAttribute('title', file.name);
+  const stem = document.createElement('span');
+  stem.textContent = file.name.replace(/\.txt$/, '');
+  const extension = document.createElement('span');
+  extension.textContent = '.txt';
+  chip.append(stem, extension);
+  document.getElementById('attachments').append(chip);
+}
+compose.addEventListener('paste', (event) => { event.preventDefault(); take(event.clipboardData.files, 'paste'); });
+compose.addEventListener('dragover', (event) => event.preventDefault());
+compose.addEventListener('drop', (event) => { event.preventDefault(); take(event.dataTransfer.files, 'drop'); });
+</script></body></html>"#;
+
+#[tokio::test]
+async fn ab_file_hands_the_compose_box_its_file_by_drop_or_paste_and_sees_it_attached() -> TestResult {
+    use proto_lab::scenario::ab_file::{file_event, shows_attachment, test_file};
+    with_html(FILE_PAGE, async |run| {
+        let drive = &mut run.driver;
+        let content = test_file("n1");
+        let short = Duration::from_secs(5);
+        // another run's file in a message isn't this run's attachment
+        let other = drive
+            .wait_until_true(
+                "another run's",
+                &shows_attachment("lab-file-n0.txt"),
+                "an attachment",
+                Duration::from_millis(500),
+            )
+            .await;
+        assert!(matches!(other, Err(StepError::Timeout { .. })), "{other:?}");
+        let attached = shows_attachment("lab-file-n1.txt");
+        // the caption typed in the box names the file's stem, never its whole name: not an attachment
+        drive
+            .wait_until_true(
+                "caption",
+                "(() => { document.getElementById('compose').textContent = 'lab-file-n1 caption'; return true; })()",
+                "typed",
+                short,
+            )
+            .await?;
+        let caption = drive
+            .wait_until_true("only a caption", &attached, "an attachment", Duration::from_millis(500))
+            .await;
+        assert!(matches!(caption, Err(StepError::Timeout { .. })), "{caption:?}");
+        // the page takes drops: a paste does nothing there
+        drive
+            .wait_until_true(
+                "paste",
+                &file_event(&content, "lab-file-n1.txt", "text/plain", "paste"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        let none = drive
+            .wait_until_true("not attached", &attached, "an attachment", Duration::from_millis(500))
+            .await;
+        assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
+        drive
+            .wait_until_true(
+                "drop",
+                &file_event(&content, "lab-file-n1.txt", "text/plain", "drop"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        drive
+            .wait_until_true("attached", &attached, "an attachment", short)
+            .await?;
+        let said = format!("drop text/plain {}", content.len());
+        drive.wait_for_text("dropped", &said, short).await?;
+        // a page that takes pastes
+        drive
+            .wait_until_true(
+                "switch",
+                "(() => { document.getElementById('mode').textContent = 'paste'; return true; })()",
+                "switched",
+                short,
+            )
+            .await?;
+        drive
+            .wait_until_true(
+                "paste",
+                &file_event(&content, "lab-file-n2.txt", "text/plain", "paste"),
+                "dispatched",
+                short,
+            )
+            .await?;
+        drive
+            .wait_until_true("pasted", &shows_attachment("lab-file-n2.txt"), "an attachment", short)
+            .await?;
+        let said = format!("paste text/plain {}", content.len());
+        drive.wait_for_text("pasted", &said, short).await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A compose box whose attach button opens a menu, and whose upload item clicks a hidden file input, as a web client
+/// does; the input's chosen file is shown beside the box with its type and size. A profile button (whose label holds
+/// "file") and a send button stand first, so the attach button has to be told by its label.
+const PICKER_PAGE: &str = r#"<!doctype html><html><body>
+<button aria-label="Your profile, status Unknown">me</button>
+<div id="out"></div>
+<div contenteditable="true" role="textbox" id="compose"></div>
+<button aria-label="Send">send</button>
+<button aria-label="Attach file" id="attach">clip</button>
+<div id="menu"></div>
+<div id="attachments"></div>
+<script>
+document.getElementById('attach').addEventListener('click', () => {
+  const item = document.createElement('div');
+  item.setAttribute('role', 'menuitem');
+  item.textContent = 'Upload from this device';
+  item.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.style.display = 'none';
+    input.addEventListener('change', () => {
+      const file = input.files[0];
+      document.getElementById('out').textContent = 'chosen ' + file.type + ' ' + file.size;
+      document.getElementById('attachments').textContent = file.name;
+    });
+    document.body.append(input);
+    input.click();
+  });
+  document.getElementById('menu').append(item);
+});
+</script></body></html>"#;
+
+#[tokio::test]
+async fn ab_file_hands_the_file_to_the_attach_button_s_picker_without_a_dialog() -> TestResult {
+    use proto_lab::scenario::ab_file::{
+        CLICK_ATTACH, PAGE_NOTICES, PICK_UPLOAD, hand_file_to_pickers, shows_attachment, test_file,
+    };
+    with_html(PICKER_PAGE, async |run| {
+        let drive = &mut run.driver;
+        let content = test_file("n1");
+        let short = Duration::from_secs(5);
+        drive
+            .wait_until_true(
+                "hand",
+                &hand_file_to_pickers(&content, "lab-file-n1.txt", "text/plain"),
+                "installed",
+                short,
+            )
+            .await?;
+        let attach = format!("({CLICK_ATTACH}) === 'Attach file'");
+        drive
+            .wait_until_true("attach", &attach, "the attach button clicked", short)
+            .await?;
+        drive
+            .wait_until_true("upload", PICK_UPLOAD, "an upload item", short)
+            .await?;
+        drive
+            .wait_until_true("attached", &shows_attachment("lab-file-n1.txt"), "an attachment", short)
+            .await?;
+        let said = format!("chosen text/plain {}", content.len());
+        drive.wait_for_text("chosen", &said, short).await?;
+        drive
+            .wait_until_true("handed", "window.__labFileHanded === 1", "one hand-over", short)
+            .await?;
+        // a page with no attach button: nothing clicked
+        drive
+            .wait_until_true(
+                "remove",
+                "(() => { document.getElementById('attach').remove(); return true; })()",
+                "removed",
+                short,
+            )
+            .await?;
+        let none = format!("({CLICK_ATTACH}) === null");
+        drive
+            .wait_until_true("no attach", &none, "nothing clicked", short)
+            .await?;
+        // what the page says in a popup, shown ones only, each on one line
+        drive
+            .wait_until_true(
+                "popups",
+                r"(() => {
+  const hidden = document.createElement('div');
+  hidden.setAttribute('role', 'dialog');
+  hidden.style.display = 'none';
+  hidden.textContent = 'not shown';
+  const shown = document.createElement('div');
+  shown.setAttribute('role', 'dialog');
+  shown.innerHTML = '<p>Sorry, you need a made-up thing</p>\n<p>  to share files</p>';
+  document.body.append(hidden, shown);
+  return true;
+})()",
+                "added",
+                short,
+            )
+            .await?;
+        let said = format!(
+            "JSON.stringify({PAGE_NOTICES}) === JSON.stringify(['Sorry, you need a made-up thing to share files'])"
+        );
+        drive
+            .wait_until_true("notices", &said, "the shown popup's text", short)
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A chat with two messages naming this run's file (the newer by its chip's title only), and messages that must never
+/// be taken for one: another run's file, a message of text, and this run's file name in no message (the compose box's
+/// attachment).
+const FILES_CHAT_PAGE: &str = r#"<!doctype html><html><body>
+<div data-tid="chat-pane-message" id="older"><p>lab-file-n1.txt</p></div>
+<div data-tid="chat-pane-message" id="newer"><div title="lab-file-n1.txt"><svg></svg></div></div>
+<div data-tid="chat-pane-message" id="other"><p>lab-file-n0.txt</p></div>
+<div data-tid="chat-pane-message" id="text"><p>lab file n1 plain</p></div>
+<div id="attachment"><p>lab-file-n1.txt</p></div>
+</body></html>"#;
+
+#[tokio::test]
+async fn ab_file_marks_only_this_run_s_unsent_file() -> TestResult {
+    use proto_lab::scenario::ab_file::mark_unsent_file;
+    let mark = mark_unsent_file("lab-file-n1");
+    with_html(FILES_CHAT_PAGE, async |run| {
+        let drive = &mut run.driver;
+        drive
+            .wait_until_true("mark", &mark, "this run's unsent file", Duration::from_secs(5))
+            .await?;
+        drive
+            .wait_for("marked", Selector::Css("#newer[data-lab-mark]"), Duration::from_secs(1))
+            .await?;
+        drive
+            .wait_until_true("one mark", ONE_MARK, "one marked message", Duration::from_secs(1))
+            .await?;
+        drive
+            .wait_until_true(
+                "remove",
+                "(() => { document.getElementById('newer').remove(); document.getElementById('older').remove(); return true; })()",
+                "removed",
+                Duration::from_secs(5),
+            )
+            .await?;
+        let none = drive
+            .wait_until_true("mark again", &mark, "this run's unsent file", Duration::from_millis(500))
+            .await;
+        assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
+        drive
+            .wait_until_true("no mark", NO_MARK, "no marked message", Duration::from_secs(1))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
 /// A page that asks before it is left, as the web client does while a message is still being sent: once a key has
 /// been pressed in it (a dialog before leaving needs the user to have done something on the page).
 const LEAVING_PAGE: &str = r#"<!doctype html><html><body>
@@ -1360,6 +1627,137 @@ async fn ab_image_marks_only_this_run_s_unsent_image() -> TestResult {
         assert!(matches!(none, Err(StepError::Timeout { .. })), "{none:?}");
         drive
             .wait_until_true("no mark", NO_MARK, "no marked message", Duration::from_secs(1))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A request's send time is the event's `wallTime` in whole ms; an event without one (or with a time no clock gives)
+/// leaves it unknown.
+#[tokio::test]
+async fn a_request_s_send_time_is_read_from_its_wall_time() -> TestResult {
+    let (events, watch) = tokio::sync::mpsc::unbounded_channel();
+    let mut driver = Driver::new(silent_cdp().await?, SessionId::new("S-page"), watch);
+    let request = json!({"method": "POST", "url": "http://127.0.0.1/api/send"});
+    for (id, wall_time) in [
+        ("1", json!(1_792_527_333.116_4)),
+        ("2", Value::Null),
+        ("3", json!(-1.0)),
+        ("4", json!("1792527333")),
+    ] {
+        events.send(network_event(
+            "Network.requestWillBeSent",
+            json!({"requestId": id, "request": request, "wallTime": wall_time}),
+        ))?;
+    }
+    driver.seen_so_far();
+    let times: Vec<Option<u64>> = driver.requests().iter().map(|seen| seen.sent_ms).collect();
+    assert_eq!(times, [Some(1_792_527_333_116), None, None, None]);
+    Ok(())
+}
+
+/// A page whose box tells Shift+Enter (a line break) from Enter (a send), as the web client's compose box does.
+const LINES_PAGE: &str = r#"<!doctype html><html><body>
+<div id="out"></div>
+<div contenteditable="true" role="textbox" data-tid="box" id="box"></div>
+<script>
+document.getElementById('box').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  document.getElementById('out').textContent += event.shiftKey ? '[break]' : '[send]';
+});
+</script></body></html>"#;
+
+#[tokio::test]
+async fn shift_enter_is_a_line_break_and_not_a_send() -> TestResult {
+    with_html(LINES_PAGE, async |run| {
+        run.driver.type_into("type", Selector::Tid("box"), "one").await?;
+        // a space pressed as a key types one
+        run.driver.press("space", Key::SPACE).await?;
+        run.driver
+            .wait_until_true(
+                "spaced",
+                "document.getElementById('box').textContent.replace('\\u00a0', ' ') === 'one '",
+                "the box to hold 'one '",
+                Duration::from_secs(5),
+            )
+            .await?;
+        run.driver.press("break", Key::SHIFT_ENTER).await?;
+        run.driver.press_enter("send").await?;
+        run.driver
+            .wait_for_text("keys", "[break][send]", Duration::from_secs(5))
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+/// A page with a message's hover bar as the web client's bundle builds it: quick reactions marked
+/// `message-hover-reactions` (one hidden), the same reaction again in the message's menu (`message-reaction`), and other
+/// actions; and a typing indicator that shows after 1.5 s, hides by `aria-hidden` at 2 s, shows again at 2.5 s and goes
+/// from the page at 3 s.
+const SHAPES_PAGE: &str = r#"<!doctype html><html><body>
+<div data-tid="chat-pane-message">
+  <button data-tid="message-actions-like" data-inp="message-hover-reactions">like</button>
+  <button data-tid="message-actions-heart" data-inp="message-hover-reactions">heart</button>
+  <button data-tid="message-actions-angry" data-inp="message-hover-reactions" style="display: none">angry</button>
+  <button data-tid="message-hover-action-edit">edit</button>
+  <button data-tid="message-actions-more">more</button>
+  <div role="menu"><button data-tid="message-actions-like" data-inp="message-reaction">like</button>
+  <button data-tid="message-actions-surprised" data-inp="message-reaction">surprised</button></div>
+</div>
+<script>
+const show = () => {
+  const e = document.createElement('div'); e.dataset.tid = 'typing-indicator'; e.id = 'typing'; e.textContent = 'typing';
+  document.body.append(e);
+};
+setTimeout(show, 1500);
+setTimeout(() => document.getElementById('typing').setAttribute('aria-hidden', 'true'), 2000);
+setTimeout(() => document.getElementById('typing').removeAttribute('aria-hidden'), 2500);
+setTimeout(() => document.getElementById('typing').remove(), 3000);
+</script></body></html>"#;
+
+#[tokio::test]
+async fn chat_shapes_reads_the_hover_bar_s_quick_reactions_once_each() -> TestResult {
+    use proto_lab::scenario::chat_shapes::HOVER_REACTIONS;
+    with_html(SHAPES_PAGE, async |run| {
+        let expected = r#"["message-actions-like","message-actions-heart","message-actions-surprised"]"#;
+        run.driver
+            .wait_until_true(
+                "reactions",
+                &format!("JSON.stringify({HOVER_REACTIONS}) === {expected:?}"),
+                "the visible quick reactions, each once",
+                Duration::from_secs(5),
+            )
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn chat_shapes_records_when_the_typing_indicator_shows_and_goes() -> TestResult {
+    use proto_lab::scenario::chat_shapes::TYPING_RECORDER;
+    with_html(SHAPES_PAGE, async |run| {
+        let drive = &mut run.driver;
+        drive
+            .wait_until_true("install", TYPING_RECORDER, "the recorder", Duration::from_secs(5))
+            .await?;
+        // installed twice, it keeps its log
+        drive
+            .wait_until_true("again", TYPING_RECORDER, "the recorder", Duration::from_secs(5))
+            .await?;
+        let changes = "JSON.stringify((window.__labTyping ?? []).map((change) => change[1])) === \
+                       '[true,false,true,false]' && window.__labTyping.every((change, i, all) => \
+                       Number.isInteger(change[0]) && (i === 0 || change[0] >= all[i - 1][0]))";
+        drive
+            .wait_until_true(
+                "changes",
+                changes,
+                "shown, hidden, shown, gone",
+                Duration::from_secs(10),
+            )
             .await?;
         Ok(())
     })

@@ -1,8 +1,6 @@
 //! The `abc-chat` scenario's offline parts: its deep links, how it finds the group chat a first message went to, its
 //! forced-deny labels and how it judges denies. Every id here is made up.
 
-use std::fmt::Write as _;
-
 use clap::ValueEnum as _;
 use proto_lab::config::LabPaths;
 use proto_lab::fence_http::{Denial, DenyCause, ForcedDeny, PausedRequest};
@@ -14,10 +12,10 @@ use proto_lab::scenario::abc_chat::{
     forced_denies, group_chat_of_message_post, messaging_blocked, new_chat_link, policy, record_creation,
 };
 use proto_lab::scenario::{DenyPolicy, ScenarioError, ScenarioName, ScenarioReport};
-use proto_lab::scenario::{ab_image, ab_trouter, echo_call};
+use proto_lab::scenario::{ab_file, ab_image, ab_trouter, chat_shapes, echo_call};
 use regex::Regex;
 use teams_fence::LiveMembershipSource;
-use teams_fence::lab::{LabChats, LabConfig, record_abc_chat};
+use teams_fence::lab::LabChats;
 
 const GROUP: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
 const GROUP_ENCODED: &str = "19%3A0123456789abcdef0123456789abcdef%40thread.v2";
@@ -62,6 +60,7 @@ fn message_post_of(text: &str) -> PausedRequest {
         url: format!("{BASE}/users/ME/conversations/{GROUP_ENCODED}/messages"),
         headers: Vec::new(),
         body: Some(format!(r#"{{"content":"<p>{text}</p>","messagetype":"RichText/Html"}}"#).into_bytes()),
+        body_unread: false,
         network_id: Some("network-1".to_owned()),
     }
 }
@@ -184,47 +183,21 @@ fn the_group_chat_comes_only_from_a_message_post_to_a_group_chat() {
     }
 }
 
-/// A `lab.toml` in `dir` whose a, b and c have made-up MRIs (`c` none when `with_c` is false).
-fn lab_config(dir: &std::path::Path, with_c: bool) -> Result<LabConfig, teams_fence::lab::ConfigError> {
-    let accounts = [("a", Some(MRI_A)), ("b", Some(MRI_B)), ("c", with_c.then_some(MRI_C))]
-        .into_iter()
-        .fold(String::new(), |mut out, (alias, mri)| {
-            let mri = mri.map(|mri| format!("mri = \"{mri}\"\n")).unwrap_or_default();
-            let _ = write!(
-                out,
-                "\n[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.com\"\n{mri}"
-            );
-            out
-        });
-    let text = format!("data_dir = {:?}\n{accounts}", dir.display().to_string());
-    LabConfig::parse(&text, dir)
-}
-
 #[test]
-fn the_messaging_run_starts_only_when_the_lab_s_source_reads_the_recorded_chat_in_full() {
+fn the_messaging_run_starts_for_any_group_chat_and_never_for_what_isn_t_a_chat() {
     // a message the fence denies stays unsent in a's client and is sent again on every later load
-    let dir = tempfile::tempdir().unwrap();
-    let config = lab_config(dir.path(), true).unwrap();
-    let source = || {
-        LiveMembershipSource::with_mock_origin("http://127.0.0.1:9")
-            .unwrap()
-            .with_lab(&config)
-    };
-    let blocked = messaging_blocked(&source(), GROUP).unwrap_or_default();
-    assert!(blocked.contains("chats.toml records"), "{blocked}");
-    assert!(blocked.contains("nothing was opened"), "{blocked}");
-
-    record_abc_chat(config.paths(), GROUP).unwrap();
-    assert_eq!(messaging_blocked(&source(), GROUP), None);
-    // not with a source that doesn't know the lab, nor for another chat, nor in a lab without c's MRI
-    let bare = LiveMembershipSource::with_mock_origin("http://127.0.0.1:9").unwrap();
-    assert!(messaging_blocked(&bare, GROUP).is_some());
-    assert!(messaging_blocked(&source(), "19:fedcba9876543210fedcba9876543210@thread.v2").is_some());
-    let without_c = lab_config(dir.path(), false).unwrap();
-    let source = LiveMembershipSource::with_mock_origin("http://127.0.0.1:9")
-        .unwrap()
-        .with_lab(&without_c);
-    assert!(messaging_blocked(&source, GROUP).is_some());
+    let source = LiveMembershipSource::with_mock_origin("http://127.0.0.1:9").unwrap();
+    // the recorded chat or any other group chat: chats.toml plays no part in the fence's read
+    assert_eq!(messaging_blocked(&source, GROUP), None);
+    assert_eq!(
+        messaging_blocked(&source, "19:fedcba9876543210fedcba9876543210@thread.v2"),
+        None
+    );
+    for id in ["19:0123456789abcdef@thread.tacv2", "48:notes", "not a chat"] {
+        let blocked = messaging_blocked(&source, id).unwrap_or_default();
+        assert!(blocked.contains("won't read"), "{id}: {blocked}");
+        assert!(blocked.contains("nothing was opened"), "{id}: {blocked}");
+    }
 }
 
 #[test]
@@ -245,8 +218,8 @@ fn only_the_scenario_s_forced_denies_and_the_list_are_expected_and_nothing_on_th
     let receipt = format!("{BASE}/users/ME/conversations/{GROUP_ENCODED}/properties?name=consumptionhorizon");
     assert!(!policy.expects(&Denial::new("PUT", &receipt, DenyCause::Unclassified)));
     // a listed class elsewhere is
-    let telemetry = "https://eu-mobile.events.data.microsoft.com/OneCollector/1.0/";
-    assert!(policy.expects(&Denial::new("POST", telemetry, DenyCause::Unclassified)));
+    let invoke = "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke";
+    assert!(policy.expects(&Denial::new("POST", invoke, DenyCause::Unclassified)));
     // without the chat's id (a creation run that didn't learn it) the forced denies are still the only ones expected
     let creation = proto_lab::scenario::abc_chat::policy(None)?;
     assert!(creation.expects(&forced(FIRST_MESSAGE)));
@@ -264,15 +237,37 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
     Ok(Some(match name {
         ScenarioName::Load => return Ok(None),
         ScenarioName::AbChat | ScenarioName::AbChatFull => (probe_rules(Some(&probe))?, ab_chat::policy(ab)?),
-        ScenarioName::AbTrouter | ScenarioName::AbTrouterQuiet => {
-            (probe_rules(Some(&probe))?, ab_trouter::trouter_policy(ab)?)
-        }
+        ScenarioName::AbTrouter => (
+            probe_rules(Some(&probe))?,
+            ab_trouter::trouter_policy(ab_trouter::Activity::Reported, ab)?,
+        ),
+        ScenarioName::AbTrouterQuiet => (
+            probe_rules(Some(&probe))?,
+            ab_trouter::trouter_policy(ab_trouter::Activity::HeldBack, ab)?,
+        ),
         ScenarioName::AbImage => (
             [probe_rules(Some(&probe))?, ab_image::media_rules()?].concat(),
             ab_image::policy(ab)?,
         ),
+        ScenarioName::AbFile => (
+            [probe_rules(Some(&probe))?, ab_file::file_rules()?].concat(),
+            ab_file::policy(ab)?,
+        ),
         ScenarioName::AbcChat => (forced_denies(nonce), policy(Some(GROUP))?),
+        ScenarioName::ChatShapes => (forced_denies(nonce), chat_shapes::policy(ab, Some(GROUP))?),
         ScenarioName::EchoCall => (echo_call::forced_rules()?, echo_call::policy()),
+        ScenarioName::OwnPresenceActivity
+        | ScenarioName::OwnPresenceEndpoint
+        | ScenarioName::OwnPresenceBoth
+        | ScenarioName::OwnPresenceManualHeld
+        | ScenarioName::OwnPresenceManual => {
+            let report = proto_lab::scenario::own_presence::Report::of(name)
+                .unwrap_or(proto_lab::scenario::own_presence::Report::Both);
+            (
+                probe_rules(Some(&probe))?,
+                proto_lab::scenario::own_presence::policy(report, ab)?,
+            )
+        }
     }))
 }
 

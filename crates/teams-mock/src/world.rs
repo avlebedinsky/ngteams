@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use crate::fixtures::{FixtureError, Fixtures, object};
 use crate::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, CHAT_BASE, ChatEvent, EventKind, LAB_A, LAB_B, LAB_C, NOTIFICATIONS,
-    OUTSIDER,
+    OUTSIDER, TEAM_CHANNEL,
 };
 
 /// The mock's clock starts after every time in the fixtures, and moves one millisecond per change.
@@ -48,6 +48,9 @@ pub(crate) struct Conversation {
     pub(crate) horizons: BTreeMap<String, String>,
     /// Its conversation list entry as a fixture gave it; a read fills in what changes.
     pub(crate) entry: Value,
+    /// In its members' conversation lists: a team's channel other than its general one isn't (M2 Task 16's probe: the
+    /// chat service listed 2 of 10 channels, the teams' general ones), and is read by its id alone.
+    pub(crate) listed: bool,
 }
 
 impl Conversation {
@@ -79,6 +82,8 @@ pub(crate) struct State {
     pub(crate) events: BTreeMap<String, Vec<ChatEvent>>,
     /// The endpoints registered with the registrar (the mock's Trouter delivers only to those).
     pub(crate) registrations: Vec<crate::trouter::Registration>,
+    /// The own-availability writes UPS took, in order (`ups.rs`).
+    pub(crate) availability: Vec<crate::ups::OwnAvailability>,
     /// Counts the changes the mock's Trouter acts on (a queued event, a registration), so its sockets wake up.
     pub(crate) changes: watch::Sender<u64>,
     clock: u64,
@@ -109,6 +114,7 @@ impl State {
             conversations,
             events: BTreeMap::new(),
             registrations: Vec::new(),
+            availability: Vec::new(),
             changes: watch::Sender::new(0),
             clock: CLOCK_START,
             groups_made: 0,
@@ -205,9 +211,20 @@ fn seed(fixtures: &Fixtures) -> Result<Vec<Conversation>, FixtureError> {
     let channel = listed(channel, Kind::ReadOnly, &[LAB_A], Vec::new());
     let stream = vec![notifications["lastMessage"].clone()];
     let notifications = listed(notifications, Kind::ReadOnly, &[LAB_A], stream);
-    let conversations = vec![ab, ac, ax, abc, channel, notifications];
+    let team_channel = unlisted_channel(fixtures.channel_messages.clone());
+    let conversations = vec![ab, ac, ax, abc, channel, notifications, team_channel];
     let ids: Vec<&str> = conversations.iter().map(|found| found.id.as_str()).collect();
-    if ids == [AB_CHAT, AC_CHAT, AX_CHAT, ABC_CHAT, CHANNEL, NOTIFICATIONS] {
+    if ids
+        == [
+            AB_CHAT,
+            AC_CHAT,
+            AX_CHAT,
+            ABC_CHAT,
+            CHANNEL,
+            NOTIFICATIONS,
+            TEAM_CHANNEL,
+        ]
+    {
         Ok(conversations)
     } else {
         Err(FixtureError::from_message("conversations.json: other conversation ids"))
@@ -234,6 +251,29 @@ fn listed(entry: &Value, kind: Kind, members: &[&str], messages: Vec<Value>) -> 
         messages,
         horizons,
         entry: entry.clone(),
+        listed: true,
+    }
+}
+
+/// The team's other channel ([`TEAM_CHANNEL`], the `topics` entry of the team in `conversations.json`): a, b and c
+/// its members, `messages` its posts and replies, in nobody's conversation list, its thread a `topic`.
+fn unlisted_channel(messages: Vec<Value>) -> Conversation {
+    let created = messages
+        .first()
+        .and_then(|message| message["version"].as_str())
+        .and_then(|version| version.parse().ok())
+        .unwrap_or_default();
+    Conversation {
+        id: TEAM_CHANNEL.to_owned(),
+        kind: Kind::ReadOnly,
+        members: [LAB_A, LAB_B, LAB_C].map(str::to_owned).to_vec(),
+        creator: String::new(),
+        created,
+        version: created,
+        messages,
+        horizons: BTreeMap::new(),
+        entry: json!({"threadProperties": {"threadType": "topic"}}),
+        listed: false,
     }
 }
 
@@ -270,6 +310,7 @@ pub(crate) fn created(empty: &Value, id: &str, kind: Kind, members: &[&str], cre
         messages: Vec::new(),
         horizons: BTreeMap::new(),
         entry,
+        listed: true,
     }
 }
 

@@ -96,10 +96,10 @@ pub struct MessagePage {
     pub next: Option<PageCursor>,
 }
 
-const MESSAGE_COLUMNS: &str = "conversation_id, id, version, client_message_id, sender, sender_name, message_type, \
+pub(crate) const MESSAGE_COLUMNS: &str = "conversation_id, id, version, client_message_id, sender, sender_name, message_type, \
                                content, properties, arrival_time, compose_time, edit_time, delete_time";
 
-fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
+pub(crate) fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
         conversation_id: row.get(0)?,
         id: row.get(1)?,
@@ -268,6 +268,39 @@ fn merge_reactions(conn: &Connection, message: &Message, reactions: &[Reaction])
     Ok(())
 }
 
+/// [`Store::upsert_message`]'s write, inside the caller's transaction.
+pub(crate) fn upsert(
+    conn: &Connection,
+    message: &Message,
+    reactions: Option<&[Reaction]>,
+) -> Result<Applied, StoreError> {
+    Store::require_conversation(conn, &message.conversation_id)?;
+    let stored: Option<i64> = conn
+        .query_row(
+            "SELECT version FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            params![message.conversation_id, message.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let applied = match stored {
+        None => Applied::Inserted,
+        Some(version) if message.version > version => Applied::Updated,
+        Some(_) => Applied::Ignored,
+    };
+    if applied != Applied::Ignored {
+        write_message(conn, message)?;
+    }
+    let reactions = if message.delete_time.is_some() {
+        Some(&[][..])
+    } else {
+        reactions
+    };
+    if let Some(reactions) = reactions {
+        merge_reactions(conn, message, reactions)?;
+    }
+    Ok(applied)
+}
+
 impl Store {
     /// Writes a message unless the stored one is as new or newer (by `version`), and moves the conversation's last
     /// activity up to its arrival. A deleted message (`delete_time` set) is stored without content, properties or
@@ -285,32 +318,12 @@ impl Store {
     ///
     /// [`StoreError::UnknownConversation`] when the conversation isn't stored, [`StoreError::Sqlite`] when the write
     /// fails.
+    ///
+    /// The message's text isn't indexed for search here: [`Store::upsert_message_indexed`] indexes it, and the core's
+    /// backfill indexes a message stored this way later.
     pub fn upsert_message(&mut self, message: &Message, reactions: Option<&[Reaction]>) -> Result<Applied, StoreError> {
         let tx = self.conn.transaction()?;
-        Self::require_conversation(&tx, &message.conversation_id)?;
-        let stored: Option<i64> = tx
-            .query_row(
-                "SELECT version FROM messages WHERE conversation_id = ?1 AND id = ?2",
-                params![message.conversation_id, message.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let applied = match stored {
-            None => Applied::Inserted,
-            Some(version) if message.version > version => Applied::Updated,
-            Some(_) => Applied::Ignored,
-        };
-        if applied != Applied::Ignored {
-            write_message(&tx, message)?;
-        }
-        let reactions = if message.delete_time.is_some() {
-            Some(&[][..])
-        } else {
-            reactions
-        };
-        if let Some(reactions) = reactions {
-            merge_reactions(&tx, message, reactions)?;
-        }
+        let applied = upsert(&tx, message, reactions)?;
         tx.commit()?;
         Ok(applied)
     }
@@ -458,5 +471,24 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(u64::try_from(count).unwrap_or_default())
+    }
+
+    /// The name `mri`'s newest stored message carried (`imdisplayname`), in any conversation; `None` when no stored
+    /// message of theirs carried a name. A blank name is skipped.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn display_name(&self, mri: &str) -> Result<Option<String>, StoreError> {
+        let name = self
+            .conn
+            .prepare_cached(
+                "SELECT sender_name FROM messages
+                 WHERE sender = ?1 AND sender_name IS NOT NULL AND trim(sender_name) <> ''
+                 ORDER BY arrival_time DESC LIMIT 1",
+            )?
+            .query_row([mri], |row| row.get(0))
+            .optional()?;
+        Ok(name)
     }
 }

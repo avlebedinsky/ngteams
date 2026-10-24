@@ -5,8 +5,13 @@
 //! - [`messages`]: messages by id and version (an edit or a soft delete is a newer version), reactions per user, pages
 //!   of a conversation, the unread count;
 //! - [`state`]: read horizons and where each conversation's sync stands;
+//! - [`profiles`]: people's names and pictures as the account last read them (M2 Task 12);
 //! - [`outbox`]: writes waiting to go out, keyed by `clientmessageid`; a run sends only its own rows, and adopts only
-//!   rows of runs that have ended (each open run holds a lock of its own, `runs`);
+//!   rows of runs that have ended (each open run holds a lock of its own, `runs`); one engine per account holds the
+//!   engine lock ([`Store::engine_lock`]);
+//! - [`search`]: local search over the messages' plain text (FTS5), the text the core hands in (M2 Task 15);
+//! - [`teams`]: the account's teams and their channels as CSA last listed them, and each stored channel message's
+//!   post (M2 Task 16);
 //! - [`schema`]: the migrations, applied in order on open.
 //!
 //! Every versioned write is an upsert that never lets an older version overwrite a newer one, so a Trouter delivery
@@ -19,9 +24,12 @@ pub mod conversations;
 mod file;
 pub mod messages;
 pub mod outbox;
+pub mod profiles;
 mod runs;
 pub mod schema;
+pub mod search;
 pub mod state;
+pub mod teams;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -32,8 +40,11 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 pub use conversations::{Conversation, ConversationKind, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
+pub use profiles::{NameSource, PictureState, Profile, StoredPicture};
 pub use schema::SCHEMA_VERSION;
+pub use search::{IndexCursor, IndexText, SearchHit};
 pub use state::{ReadHorizon, SyncState};
+pub use teams::{Team, TeamChannel};
 
 /// How long a write waits for another connection's lock (a second process on the same account) before it fails.
 /// Every transaction takes the write lock when it begins (`BEGIN IMMEDIATE`), so one that reads before it writes
@@ -63,6 +74,25 @@ pub enum StoreError {
     OutboxNotSendable { id: i64, state: OutboxState },
     #[error("outbox row {id} is {} in run {run_id}, whose store is still open", state.as_str())]
     OutboxRunOpen { id: i64, run_id: i64, state: OutboxState },
+    /// Another engine runs on this account (in this process or another): its lock is held.
+    #[error("another engine runs on this account: its lock {} is held", path.display())]
+    EngineRunning { path: PathBuf },
+}
+
+/// The account's engine lock, held until it is dropped ([`Store::engine_lock`]): one engine per account, so two never
+/// hold two push channels, nor send read receipts, typing and presence twice.
+#[derive(Debug)]
+pub struct EngineLock {
+    _file: File,
+    path: PathBuf,
+}
+
+impl EngineLock {
+    /// The lock file: `<store>-runs/engine.lock`.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// What a versioned write did.
@@ -135,6 +165,8 @@ impl Store {
         }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // `rarray`: a search in some conversations binds them as one value (`Store::search_in`)
+        rusqlite::vtab::array::load_module(&conn)?;
         Ok(conn)
     }
 
@@ -162,6 +194,23 @@ impl Store {
     #[must_use]
     pub fn run_id(&self) -> i64 {
         self.run_id
+    }
+
+    /// Takes the account's engine lock (`flock` on `<store>-runs/engine.lock`) without waiting, for an engine's owner
+    /// to hold while the engine runs. A second engine on the account, in this process or another, is refused rather
+    /// than kept waiting, and the lock is never broken: the kernel drops it when its holder closes it or dies. The
+    /// store's own runs ([`Store::run_id`]) are unaffected: any number of stores may still be open on the file.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::EngineRunning`] when another holds it, [`StoreError::File`] when it can't be made or locked.
+    pub fn engine_lock(&self) -> Result<EngineLock, StoreError> {
+        match runs::try_hold_engine(&self.runs)? {
+            Some((file, path)) => Ok(EngineLock { _file: file, path }),
+            None => Err(StoreError::EngineRunning {
+                path: runs::engine_lock_path(&self.runs),
+            }),
+        }
     }
 
     /// The schema version the store is at.

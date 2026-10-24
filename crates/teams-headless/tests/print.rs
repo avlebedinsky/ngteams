@@ -3,7 +3,7 @@
 //! same value; neither prints one raw.
 
 use serde_json::Value;
-use teams_core::{Event, MessageChange};
+use teams_core::{Availability, Event, MessageChange, Source};
 use teams_headless::chat::LabNames;
 use teams_headless::print::{
     conversation_line, event_json, event_line, is_terminal_control, json_line, message_line, visible,
@@ -83,7 +83,7 @@ fn hostile_event() -> Event {
         change: MessageChange::New,
         applied: Applied::Inserted,
         message: Some(Box::new(message(HOSTILE))),
-        replay: false,
+        source: Source::Delivery,
     }
 }
 
@@ -110,4 +110,34 @@ fn an_event_as_text_prints_no_raw_control() {
         line.contains(r#" text="hi\u001b[2J\rfake\u202etxet\u007f\u009b""#),
         "{line}"
     );
+}
+
+#[test]
+fn a_presence_event_names_whose_presence_changed_and_to_what() {
+    let mri = "8:orgid:synthetic-person";
+    let told = |availability| Event::Presence {
+        mri: mri.to_owned(),
+        availability,
+    };
+    let value = event_json(&told(Availability::DoNotDisturb), 1, &LabNames::default());
+    assert_eq!(value["event"], "presence");
+    assert_eq!(value["who"], mri);
+    assert_eq!(value["availability"], "DoNotDisturb");
+    // a word this build doesn't name is printed as UPS gave it, without its controls
+    let line = event_line(
+        &told(Availability::Other("New\u{1b}[2J".to_owned())),
+        1,
+        &LabNames::default(),
+    );
+    assert!(raw_controls(&line).is_empty(), "{line:?}");
+    assert!(line.contains("presence"), "{line}");
+}
+
+#[test]
+fn a_profile_event_names_whose_profile_changed_and_never_their_name() {
+    let mri = "8:orgid:synthetic-person";
+    let value = event_json(&Event::Profile { mri: mri.to_owned() }, 1, &LabNames::default());
+    assert_eq!(value["event"], "profile");
+    assert_eq!(value["who"], mri);
+    assert_eq!(value.as_object().map(serde_json::Map::len), Some(3), "{value}");
 }

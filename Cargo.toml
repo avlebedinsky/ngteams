@@ -5,14 +5,20 @@ members = [
     "crates/fence-seal",
     "crates/fixture-guard",
     "crates/proto-lab",
+    "crates/teams-app",
     "crates/teams-auth",
     "crates/teams-core",
     "crates/teams-fence",
     "crates/teams-headless",
+    "crates/teams-log",
     "crates/teams-mock",
     "crates/teams-proto",
+    "crates/teams-signin",
+    "crates/teams-signin-extension",
     "crates/teams-store",
     "crates/teams-trouter",
+    "crates/teams-ui",
+    "crates/ui-sandbox",
     "spikes/echo-call",
     "spikes/gpui-video",
     "spikes/media-loop",
@@ -33,17 +39,28 @@ proto-lab = { path = "crates/proto-lab" }
 teams-auth = { path = "crates/teams-auth" }
 teams-core = { path = "crates/teams-core" }
 teams-fence = { path = "crates/teams-fence" }
+# the app's diagnostic log (M2 Task 24a): installed by the app crates only, through its `install`
+teams-log = { path = "crates/teams-log" }
 # tests only: a crate takes it under [dev-dependencies], never [dependencies] (crates/teams-mock/tests/mock.rs checks)
 teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }
+# the sign-in window's web process extension; `teams-signin` depends on it, so its build builds the module
+teams-signin-extension = { path = "crates/teams-signin-extension" }
 teams-store = { path = "crates/teams-store" }
 teams-trouter = { path = "crates/teams-trouter" }
+# the GPUI views and models over the engine
+teams-ui = { path = "crates/teams-ui" }
+# tests and lab runs only: the private compositor, bus, input and URI opener every GUI process runs in
+ui-sandbox = { path = "crates/ui-sandbox" }
 media-loop = { path = "spikes/media-loop" }
 # The video source hands frames to GPUI's foreground executor: the version GPUI already links.
 async-channel = "2.5.0"
 # base64 bodies and frames in captures, decoded by the sanitizer
 base64 = "0.23.1"
-clap = { version = "4.6.7", features = ["derive"] }
+# the chat list's times in the local time zone (read from TZ and the zoneinfo files, no libc localtime): the version
+# the UI kit already links, with only its clock
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+clap ={ version = "4.6.7", features = ["derive"] }
 # STUN FINGERPRINT (CRC-32) for the echo call's TURN client
 crc32fast = "1.5.2"
 # gzip only, on the zlib-rs backend zip already uses
@@ -57,12 +74,28 @@ getrandom = "0.4.3"
 # are. Wayland only: without `x11`, GPUI's Linux platform has no X11 backend to fall back to.
 gpui-pre = { version = "=0.3.9", default-features = false, features = ["wayland"] }
 gpui-pre-platform = { version = "=0.3.9", default-features = false, features = ["wayland"] }
+# The sign-in window's web process extension (M2 Task 24): `g_variant_*` and `g_signal_connect_data` by hand, on
+# the -sys crates of the GLib that webkit6 and gtk4 link
+glib-sys = "0.22.9"
+gobject-sys = "0.22.9"
+# The sign-in window (M2 Task 24): GTK 4 and WebKitGTK 6.0 (2.54 on the machine; `v2_52` is the newest API level the
+# binding has), in `teams-signin`'s own process, apart from GPUI's main loop
+# `v4_10`: webkit6 0.6.1 names `gtk::Accessible`, which gtk4 has only from that API level on (GTK 4.24 here)
+gtk4 = { version = "0.11.5", features = ["v4_10"] }
+webkit6 = { version = "0.6.1", features = ["v2_52"] }
+# The UI kit (Apache-2.0; M2 Task 7's audit): built for `gpui-pre =0.3.9`, so it resolves to the vendored patched
+# copy above. It takes `gpui-pre` with its default features, so the workspace's GPUI gains `x11`, `font-kit` and
+# `windows-manifest` (the lab app refuses a set `DISPLAY`); none of the kit's own optional features.
+gpui-component = { version = "0.8.0", default-features = false }
 # GPUI's `RenderImage` frames are `image` buffers: the version GPUI already links.
 image = { version = "0.25.10", default-features = false }
 # STUN MESSAGE-INTEGRITY (HMAC-SHA1 over a long-term key) for the echo call's TURN client
 hmac = "0.13.0"
 # a Retry-After given as an HTTP date
 httpdate = "1.0.3"
+# the UI sandbox's spawn marks every inherited descriptor but the named ones close-on-exec (`close_range`, which rustix
+# doesn't wrap): the version the workspace already links
+libc = "0.2.191"
 log = "0.4.34"
 # the STUN long-term credential key: MD5(username:realm:password), RFC 8489 9.2.2
 md-5 = "0.11.0"
@@ -82,7 +115,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 # the Trouter socket checks the server certificate as reqwest does (the system verifier)
 rustls-platform-verifier = "0.7.1"
 # the local store: SQLite built from source (`bundled`), so every machine runs the same version
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["array", "bundled"] }
 rustix = { version = "1.1.5", features = ["process"] }
 # the chat service's message HTML, read into a small typed model (teams-proto's `chat::html`): html5ever's
 # browser-grade parse, as a tree to walk; without the CLI (`main`) and the parse-error list (`errors`)
@@ -104,9 +137,24 @@ tokio-tungstenite = "0.30.0"
 toml = "1.1.8"
 # edits lab.toml in place (the MRI of an account after its first login), keeping its comments
 toml_edit = "0.25.17"
+# tests only: the UI kit's `tracing` events forwarded to `log` (its `log` feature, no subscriber), the version the kit
+# already links
+tracing = { version = "0.1.44", default-features = false }
 trybuild = "1.0.122"
 url = "2.5.8"
+# The UI sandbox's virtual keyboard and pointer: a Wayland client of the nested niri, on the versions GPUI already
+# links (wayland-client, the wlr protocols) and the misc protocols built for them (`zwp_virtual_keyboard_v1`).
+wayland-client = "0.31.15"
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 wiremock = "0.6.5"
+# the virtual keyboard's keymap and its text-to-key table: the version GPUI already links, without its features
+xkbcommon = { version = "0.8.0", default-features = false }
+# D-Bus for the app's notifications and tray item (M2 Task 14) and the UI sandbox's fake notification server and tray
+# watcher: the version and the async-io flavour GPUI's ashpd already takes (a `tokio` flavour breaks every workspace
+# build with GPUI in it, as for oo7). 5.19.0 is what GPUI links; crates.io's newest was 6.0.0 on 2026-10-22, which
+# would put a second zbus in the tree.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 zeroize = "1.9.1"
 zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 

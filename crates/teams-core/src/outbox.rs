@@ -17,6 +17,13 @@
 //!   nothing: the row waits [`CHECK_RETRY_WAIT`], doubled for each check of its that failed before. A row is given up
 //!   (failed) after [`MAX_ATTEMPTS`] attempts or [`MAX_FAILED_CHECKS`] checks that couldn't sync, both counted since
 //!   it was made or last resent.
+//! - **An entry no read can take that carries a row's `clientmessageid`** ([`Outbox::unreadable_seen`]): any read
+//!   (an ordinary catch-up as much as a check) that meets one for a message post of its conversation that had an
+//!   attempt records it on the row and moves on, so the conversation's sync is never held up by it. Its message may
+//!   have arrived, and once the read moved past the entry no later sync tells, so every check of the row fails
+//!   ([`UnreadableSeen`]) as one that couldn't sync does, until it is given up at [`MAX_FAILED_CHECKS`]: it isn't sent
+//!   again on its own, only by an explicit resend ([`OutboxEntry::may_have_arrived`] says so to its owner first). Our
+//!   message coming back readable after all still settles it.
 //! - **Writes on one thing go out in the order they were asked for** ([`Lane`]): a row waits, sending nothing, while
 //!   an older pending row of this run acts on the same message (an edit, a delete, a reaction or taking it back) or,
 //!   for a read receipt, on the same conversation's read horizon; so a take-back sent while its reaction waits out a
@@ -33,11 +40,20 @@
 //!   budget over. An adopted row that had an attempt (in any run) begins with the sync check above, so a message an
 //!   earlier attempt got through isn't sent twice.
 //!
+//! - **Transient writes** ([`Transient`], [`Outbox::send_transient`]): typing goes out from here too, each send under a
+//!   fresh `Fence::check`, but never as a row: nothing of it is stored, checked for, retried after an unknown outcome or
+//!   sent by a later run; a throttled one waits in memory, once and briefly ([`MAX_TRANSIENT_WAIT`]), the newest of
+//!   the same takes its place, and a message post to its conversation drops it ([`Outbox::drop_waiting`]).
+//!
 //! The commands are the chat writes of `teams-proto` (M1 Task 12): a message post, an edit, a soft delete, a reaction
 //! and taking it back, a read receipt and a new chat; the engine (M1 Task 18) builds them from what the user asks
 //! for. Only a message post can be looked for by its `clientmessageid`, so only its row is checked and tried again
 //! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice. The sync
 //! the check relies on is the [`ConversationSync`] seam, which M1 Task 17's catch-up sync fills.
+
+mod transient;
+
+pub use transient::{MAX_TRANSIENT_WAIT, Transient, TransientSent};
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -246,9 +262,10 @@ pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 pub enum OutboxError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    /// The conversation couldn't be synced before a new attempt, so whether the last one arrived is unknown: nothing was
-    /// sent, and the row waits (or, at [`MAX_FAILED_CHECKS`], is failed).
-    #[error("the conversation couldn't be synced, so outbox row {id} wasn't sent again: {source}")]
+    /// The check before a new attempt couldn't tell whether the last one arrived: its conversation couldn't be synced
+    /// (a [`SyncError`] of the sync), or a read met an entry it couldn't read carrying the row's `clientmessageid`
+    /// ([`UnreadableSeen`]). Nothing was sent, and the row waits (or, at [`MAX_FAILED_CHECKS`], is failed).
+    #[error("the check couldn't tell whether outbox row {id} arrived, so it wasn't sent again: {source}")]
     Sync {
         id: i64,
         #[source]
@@ -263,12 +280,20 @@ pub enum OutboxError {
     Payload(#[source] serde_json::Error),
 }
 
+/// A check before a new attempt couldn't tell whether the row's message arrived because a read met an entry it couldn't
+/// read at all carrying the row's `clientmessageid` ([`Outbox::unreadable_seen`]): the row isn't sent again on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a read met an entry it couldn't read carrying its clientmessageid, so it may have arrived")]
+pub struct UnreadableSeen;
+
 /// What one [`Outbox::send_due`] did.
 #[derive(Debug, Default)]
 pub struct SentDue {
-    /// Every due row as it ended up, oldest first; one whose check couldn't sync is here too, waiting or failed.
+    /// Every due row as it ended up, oldest first; one whose check couldn't tell whether it arrived is here too,
+    /// waiting or failed.
     pub rows: Vec<OutboxEntry>,
-    /// The rows whose check before a new attempt couldn't sync, so nothing was sent for them.
+    /// The rows whose check before a new attempt couldn't tell whether they arrived ([`OutboxError::Sync`]: a sync
+    /// that failed, or [`UnreadableSeen`]), so nothing was sent for them.
     pub unsynced: Vec<Unsynced>,
 }
 
@@ -282,7 +307,8 @@ pub struct DueFailed {
     pub error: OutboxError,
 }
 
-/// A row whose check before a new attempt couldn't sync its conversation.
+/// A row whose check before a new attempt couldn't tell whether it arrived: why, as [`OutboxError::Sync`] gives it (a
+/// [`SyncError`] of the sync, or [`UnreadableSeen`]).
 #[derive(Debug)]
 pub struct Unsynced {
     pub id: i64,
@@ -358,6 +384,19 @@ enum Tried {
     Uncertain(String),
 }
 
+impl Tried {
+    /// What the attempt came to, for the log: the fence's decision and the service's status, never a body.
+    fn summary(&self) -> String {
+        match self {
+            Self::Answered(answer) => format!("fence allowed, HTTP {}", answer.status()),
+            Self::Denied(denied) => format!("fence denied: {}", denied.reason()),
+            Self::NotSent(why) => format!("not sent: {why}"),
+            Self::Throttled { wait, .. } => format!("throttled for {} ms", wait.as_millis()),
+            Self::Uncertain(why) => format!("outcome unknown: {why}"),
+        }
+    }
+}
+
 /// Sends the outbox's rows over a transport, each attempt under a fresh permit (see the module docs).
 pub struct Outbox<T> {
     transport: Arc<T>,
@@ -366,12 +405,18 @@ pub struct Outbox<T> {
     /// The account: its messages go out as its, and only its messages are matched to outbox rows.
     me: Author,
     clock: Clock,
-    /// The rows a message coming in changed ([`Outbox::match_arrival`]), as it left them, until they are taken.
+    /// The rows a read changed, until they are taken: by a message of ours coming in ([`Outbox::match_arrival`]), or
+    /// by an entry it couldn't read carrying a row's `clientmessageid` ([`Outbox::unreadable_seen`]). Each row is kept
+    /// once, as the outbox last left it: a later read that changes it replaces its copy ([`Outbox::keep_arrived`]), and
+    /// so does a check that changes it afterwards ([`Outbox::check_failed`]).
     arrived: Mutex<Vec<OutboxEntry>>,
     /// The rows that had their one more attempt after a 401, each with its `attempts_at_resend` then: another 401
     /// within the same budget fails the row, whatever came between (other answers, a check that couldn't sync, more
     /// [`Outbox::send`] calls); a resend starts a new budget, and with it a new allowance.
     refreshed: Mutex<BTreeMap<i64, u32>>,
+    /// The transients waiting for their `Retry-After`, one of each kind and target ([`Transient::replaces`]); kept
+    /// in memory only.
+    waiting: Mutex<Vec<transient::Waiting>>,
 }
 
 impl<T: Transport<Error = HttpError>> Outbox<T> {
@@ -387,6 +432,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             clock: Arc::new(now_ms),
             arrived: Mutex::new(Vec::new()),
             refreshed: Mutex::new(BTreeMap::new()),
+            waiting: Mutex::new(Vec::new()),
         }
     }
 
@@ -403,10 +449,19 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         &self.me
     }
 
-    /// The rows a message coming in changed since the last call, as each change left them, oldest first: a row
-    /// that became sent (or had its message id filled in) by [`Outbox::match_arrival`], whichever read brought the
-    /// message (a sync page, a delivery, the check before another row's attempt). A row a send returns may be among
-    /// them too. They are kept until taken: the engine takes them after every read it makes.
+    /// The fence every attempt asks.
+    #[must_use]
+    pub fn fence(&self) -> &Arc<Fence> {
+        &self.fence
+    }
+
+    /// The rows a read changed since the last call, oldest first, each as the outbox last left it: a row that became
+    /// sent (or had its message id filled in) by [`Outbox::match_arrival`], whichever read brought the message (a sync
+    /// page, a delivery, the check before another row's attempt), and a pending row a read met an entry it couldn't
+    /// read for ([`Outbox::unreadable_seen`]), which stays pending. Each row is here once: one that several reads
+    /// changed is here as the last of them left it, and one whose own check changed it after the read as that check
+    /// left it, never as the read did. A row a send returns may be among them too. They are kept
+    /// until taken: the engine takes them after every read it makes.
     pub fn take_arrived(&self) -> Vec<OutboxEntry> {
         std::mem::take(&mut *self.arrived.lock().unwrap_or_else(PoisonError::into_inner))
     }
@@ -458,8 +513,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     /// # Errors
     ///
     /// [`OutboxError::OtherRun`] for a pending row of another run, due or not (nothing is sent),
-    /// [`OutboxError::Sync`] when the check before a new attempt can't sync (nothing is sent, the row waits or, at
-    /// [`MAX_FAILED_CHECKS`], is failed), [`OutboxError::Store`] when the store fails.
+    /// [`OutboxError::Sync`] when the check before a new attempt can't tell whether the last one arrived (its sync
+    /// failed, or [`UnreadableSeen`]; nothing is sent, the row waits or, at [`MAX_FAILED_CHECKS`], is failed),
+    /// [`OutboxError::Store`] when the store fails.
     pub async fn send<S: ConversationSync>(
         &self,
         store: &mut Store,
@@ -481,17 +537,27 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             }
             let row = store.begin_attempt(id)?;
             let tried = self.attempt(&row).await;
+            let summary = tried.summary();
             let (outcome, again) = self.settle(&row, tried);
             let row = store.finish_attempt(id, &outcome)?;
+            // the fence's decision is the `fence.log` line written just before, for the same target
+            log::info!(
+                "outbox row {} ({:?}, clientmessageid {}) attempt {}: {summary}; now {:?}",
+                row.id,
+                row.kind,
+                row.client_message_id,
+                row.attempts,
+                row.state
+            );
             if !again || row.state != OutboxState::Pending {
                 return Ok(row);
             }
         }
     }
 
-    /// Stores a message that came in (a Trouter delivery or a sync) and, when it is ours, matches it by its
-    /// `clientmessageid` to its row, which becomes sent with the message's id. The same message coming in again
-    /// (the other way, or a later version) is stored once, and its row is left as it is.
+    /// Stores a message that came in (a Trouter delivery or a sync) with its text for search ([`crate::search`]) and,
+    /// when it is ours, matches it by its `clientmessageid` to its row, which becomes sent with the message's id. The
+    /// same message coming in again (the other way, or a later version) is stored once, and its row is left as it is.
     ///
     /// # Errors
     ///
@@ -502,7 +568,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         message: &Message,
         reactions: Option<&[Reaction]>,
     ) -> Result<Received, OutboxError> {
-        let applied = store.upsert_message(message, reactions)?;
+        let applied = store.upsert_message_indexed(message, reactions, crate::search::search_text)?;
         let outbox = self.match_own(store, message)?;
         Ok(Received { applied, outbox })
     }
@@ -539,12 +605,39 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
         let arrived = store.outbox_arrived(client_message_id, arrival.id)?;
         if let Some(row) = &arrived {
-            self.arrived
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(row.clone());
+            self.keep_arrived(row);
         }
         Ok(arrived)
+    }
+
+    /// A read met an entry it couldn't read at all, in `conversation`, carrying `client_message_id`: when that is the
+    /// `clientmessageid` of a message post of `conversation` (of any run) that had an attempt and isn't known sent, its
+    /// message may have arrived, and the row records it ([`Store::outbox_unreadable_seen`]; see the module docs).
+    /// Returns the row when this recorded it, which is also kept for [`Outbox::take_arrived`]. Who sent the entry isn't
+    /// inferred, and the row isn't matched from it.
+    ///
+    /// # Errors
+    ///
+    /// [`OutboxError::Store`] when the store fails.
+    pub fn unreadable_seen(
+        &self,
+        store: &mut Store,
+        conversation: &str,
+        client_message_id: &str,
+    ) -> Result<Option<OutboxEntry>, OutboxError> {
+        let Some(row) = store.outbox_by_client_message_id(client_message_id)? else {
+            return Ok(None);
+        };
+        let may_have_arrived = findable(&row) == Some(conversation)
+            && row.state != OutboxState::Sent
+            && row.attempts > 0
+            && row.unreadable_seen_at.is_none();
+        if !may_have_arrived {
+            return Ok(None);
+        }
+        let seen = store.outbox_unreadable_seen(row.id, (self.clock)())?;
+        self.keep_arrived(&seen);
+        Ok(Some(seen))
     }
 
     /// The row a message of ours belongs to ([`Outbox::match_arrival`]).
@@ -559,9 +652,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// Before a new attempt: syncs the row's conversation and looks for its `clientmessageid` among our messages.
-    /// Found, the row is sent; `None` when it wasn't found (or a row of its kind can't be looked for). A sync that fails
-    /// leaves the row waiting its backoff, or fails it ([`Outbox::check_failed`]), and is returned as
-    /// [`OutboxError::Sync`].
+    /// Found, the row is sent; `None` when it wasn't found (or a row of its kind can't be looked for). A sync that fails,
+    /// or a row a read met an unreadable entry for ([`UnreadableSeen`]), leaves the row waiting its backoff, or fails
+    /// it ([`Outbox::check_failed`]), and is returned as [`OutboxError::Sync`].
     async fn look_for_arrival<S: ConversationSync>(
         &self,
         store: &mut Store,
@@ -572,7 +665,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             return Ok(None);
         };
         if let Err(source) = sync.sync_conversation_since(store, conversation, row.created_at).await {
-            let after = self.check_failed(store, row, &source)?;
+            let error =
+                format!("the conversation couldn't be synced to look for it ({source}); whether it arrived is unknown");
+            let after = self.check_failed(store, row, error)?;
             if after.state == OutboxState::Sent {
                 // the sync matched it before it failed
                 return Ok(Some(after));
@@ -584,22 +679,27 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             // the sync's own receive matched it
             return Ok(Some(current));
         }
-        match store.message_by_client_id(conversation, &row.client_message_id)? {
-            Some(message) if self.is_mine(&message) => Ok(store.outbox_arrived(&row.client_message_id, &message.id)?),
-            _ => Ok(None),
+        if let Some(message) = store.message_by_client_id(conversation, &row.client_message_id)?
+            && self.is_mine(&message)
+        {
+            return Ok(store.outbox_arrived(&row.client_message_id, &message.id)?);
         }
+        if current.unreadable_seen_at.is_some() {
+            self.check_failed(store, &current, UnreadableSeen.to_string())?;
+            return Err(OutboxError::Sync {
+                id: row.id,
+                source: Box::new(UnreadableSeen),
+            });
+        }
+        Ok(None)
     }
 
-    /// A check that couldn't sync: the row waits its backoff, or is failed at its last check.
-    fn check_failed(
-        &self,
-        store: &mut Store,
-        row: &OutboxEntry,
-        source: &SyncError,
-    ) -> Result<OutboxEntry, OutboxError> {
+    /// A check that couldn't tell whether the row's message arrived, for the reason `error`: the row waits its
+    /// backoff, or is failed at its last check. A copy of the row a read kept for [`Outbox::take_arrived`] on the way
+    /// (its sync met an entry it couldn't read) is replaced by the row as this leaves it, so that copy is never told
+    /// after it.
+    fn check_failed(&self, store: &mut Store, row: &OutboxEntry, error: String) -> Result<OutboxEntry, OutboxError> {
         let failed = row.failed_checks.saturating_add(1);
-        let error =
-            format!("the conversation couldn't be synced to look for it ({source}); whether it arrived is unknown");
         let outcome = if failed >= MAX_FAILED_CHECKS {
             CheckFailed::GiveUp {
                 error: format!("{error}, so it isn't sent again; given up after {failed} checks"),
@@ -611,7 +711,43 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 error,
             }
         };
-        Ok(store.check_failed(row.id, &outcome)?)
+        let after = store.check_failed(row.id, &outcome)?;
+        log::info!(
+            "outbox row {} (clientmessageid {}): check {failed} before another attempt failed; now {:?}",
+            after.id,
+            after.client_message_id,
+            after.state
+        );
+        self.replace_arrived(&after);
+        Ok(after)
+    }
+
+    /// Keeps `row`, as a read just changed it, for [`Outbox::take_arrived`]: in place of any copy of it an earlier
+    /// read kept, moved last as its latest change. One row is kept once, as the outbox last left it, whichever reads
+    /// changed it on the way (a sync page that holds an entry of it no read can take and then a readable one): an
+    /// earlier copy told after a later one would leave its owner with a row the store no longer has.
+    fn keep_arrived(&self, row: &OutboxEntry) {
+        log::info!(
+            "outbox row {} ({:?}, clientmessageid {}) settled by a read: now {:?}",
+            row.id,
+            row.kind,
+            row.client_message_id,
+            row.state
+        );
+        let mut arrived = self.arrived.lock().unwrap_or_else(PoisonError::into_inner);
+        arrived.retain(|queued| queued.id != row.id);
+        arrived.push(row.clone());
+    }
+
+    /// `row` as it now stands in place of any copy of it kept for [`Outbox::take_arrived`], moved last as its latest
+    /// change; nothing is kept for it when none was.
+    fn replace_arrived(&self, row: &OutboxEntry) {
+        let mut arrived = self.arrived.lock().unwrap_or_else(PoisonError::into_inner);
+        let kept = arrived.len();
+        arrived.retain(|queued| queued.id != row.id);
+        if arrived.len() != kept {
+            arrived.push(row.clone());
+        }
     }
 
     /// One attempt: the row's request, a fresh permit for its target, and the transport.
@@ -679,8 +815,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
 
     async fn deliver<R: Mutating + Send>(&self, request: R) -> Tried {
         let permit = match self.fence.check(request.target(), &*self.membership).await {
-            Ok(permit) => permit,
-            Err(denied) => return Tried::Denied(denied),
+            Ok(permit) => {
+                log::info!("fence allowed {}", request.target());
+                permit
+            }
+            Err(denied) => {
+                log::info!("{denied}");
+                return Tried::Denied(denied);
+            }
         };
         let write = match Authorized::new(request, permit) {
             Ok(write) => write,

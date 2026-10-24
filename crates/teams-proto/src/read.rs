@@ -1,5 +1,23 @@
 //! Reads: requests that change nothing anyone could notice, always sent as `GET`.
+//!
+//! Besides the chat service's reads (in [`crate::chat`]), the reads of Microsoft Graph a person's name and picture come
+//! from (M2 Task 12): [`GraphUser`] and [`GraphPicture`], in the shapes `proto-lab probe profile` read live
+//! (`docs/protocol/graph.md`). Graph is our own reach, not the web client's (it names people through the middle
+//! tier's profile lookups, `crate::ShortProfileLookup`), so the probe's answers are the reviewed shape.
+//!
+//! And CSA's read of the account's teams and their channels (M2 Task 16): [`CsaTeams`], in the shape the web client
+//! sent it and `proto-lab probe teams` read live with our own `chatsvcagg` token (`docs/protocol/channels.md`). A
+//! channel's posts are read from the chat service like a chat's messages.
+//!
+//! Any other read on Graph ([`Service::Graph`]) or CSA ([`Service::Csa`]) goes to that service's base too; a mutating
+//! request to either is a plain [`Request`](crate::Request), judged by [`teams_fence::contacting`].
 
+use std::fmt;
+
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::client::Response;
 use crate::endpoint::{Endpoint, Service};
 
 /// A read. It names only its service and its endpoint under that service's base; the transport always sends it as a
@@ -8,4 +26,388 @@ use crate::endpoint::{Endpoint, Service};
 pub trait Read {
     fn service(&self) -> Service;
     fn endpoint(&self) -> Endpoint;
+}
+
+/// The `$select` of a Graph user read: the record's id and the name it shows, nothing else of the person's record.
+pub const GRAPH_USER_SELECT: &str = "id,displayName";
+
+/// The picture size read: 96×96, what an avatar needs (the probe's 96×96 pictures were about 7 KB, the largest size
+/// about 230 KB).
+pub const GRAPH_PICTURE_SIZE: &str = "96x96";
+
+/// The largest picture kept, in bytes; a longer answer is [`GraphAnswerError::TooLarge`].
+pub const MAX_PICTURE: usize = 256 * 1024;
+
+/// The object id an MRI `8:orgid:<object id>` names, when it is a GUID in its hyphenated form; `None` for any other
+/// MRI (a bot's, a phone number's, an unknown form).
+#[must_use]
+pub fn object_id(mri: &str) -> Option<&str> {
+    mri.strip_prefix("8:orgid:").filter(|id| is_guid(id))
+}
+
+/// A GUID in its hyphenated form, any case.
+pub(crate) fn is_guid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12])
+        && groups
+            .iter()
+            .all(|group| group.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// `GET https://graph.microsoft.com/v1.0/users/<object id>?$select=id,displayName`: the name Graph shows for one
+/// account, by its object id. Its answer is read with [`GraphUser::read_answer`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct GraphUser {
+    id: String,
+}
+
+impl GraphUser {
+    /// The read of the account `mri` names; `None` unless it is `8:orgid:<object id>` ([`object_id`]).
+    #[must_use]
+    pub fn of(mri: &str) -> Option<Self> {
+        object_id(mri).map(|id| Self { id: id.to_owned() })
+    }
+
+    /// The name the answer `body` gives (trimmed; `None` when it gives none or an empty one).
+    ///
+    /// # Errors
+    /// [`GraphAnswerError::Malformed`] unless the body is a JSON object with a string `id` (and a `displayName` that
+    /// is a string or `null`, when there is one); [`GraphAnswerError::OtherUser`] when its `id` isn't the one asked
+    /// for (any case).
+    pub fn read_answer(&self, body: &[u8]) -> Result<Option<String>, GraphAnswerError> {
+        let answer: UserAnswer = serde_json::from_slice(body).map_err(|_| GraphAnswerError::Malformed)?;
+        if !answer.id.eq_ignore_ascii_case(&self.id) {
+            return Err(GraphAnswerError::OtherUser);
+        }
+        Ok(answer
+            .display_name
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty()))
+    }
+}
+
+/// `Debug` leaves the object id out.
+impl fmt::Debug for GraphUser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GraphUser").finish_non_exhaustive()
+    }
+}
+
+impl Read for GraphUser {
+    fn service(&self) -> Service {
+        Service::Graph
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::new(["users", self.id.as_str()]).with_query("$select", GRAPH_USER_SELECT)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserAnswer {
+    id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+/// `GET https://graph.microsoft.com/v1.0/users/<object id>/photos/96x96/$value`: one account's picture at 96×96, as
+/// image bytes. An account without a picture answers 404 (`ImageNotFound`). Its answer is read with
+/// [`GraphPicture::read_answer`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct GraphPicture {
+    id: String,
+}
+
+impl GraphPicture {
+    /// The read of the account `mri` names; `None` unless it is `8:orgid:<object id>` ([`object_id`]).
+    #[must_use]
+    pub fn of(mri: &str) -> Option<Self> {
+        object_id(mri).map(|id| Self { id: id.to_owned() })
+    }
+
+    /// The picture the answer gives.
+    ///
+    /// # Errors
+    /// [`GraphAnswerError::UnknownType`] unless its `Content-Type` is `image/jpeg` (what the probe saw) or
+    /// `image/png`; [`GraphAnswerError::TooLarge`] over [`MAX_PICTURE`] bytes; [`GraphAnswerError::Malformed`] for an
+    /// empty body.
+    pub fn read_answer(&self, answer: &Response) -> Result<Picture, GraphAnswerError> {
+        let format = answer
+            .content_type()
+            .and_then(PictureFormat::of)
+            .ok_or(GraphAnswerError::UnknownType)?;
+        let bytes = answer.body();
+        if bytes.len() > MAX_PICTURE {
+            return Err(GraphAnswerError::TooLarge);
+        }
+        if bytes.is_empty() {
+            return Err(GraphAnswerError::Malformed);
+        }
+        Ok(Picture {
+            format,
+            bytes: bytes.to_vec(),
+        })
+    }
+}
+
+/// `Debug` leaves the object id out.
+impl fmt::Debug for GraphPicture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GraphPicture").finish_non_exhaustive()
+    }
+}
+
+impl Read for GraphPicture {
+    fn service(&self) -> Service {
+        Service::Graph
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::new(["users", self.id.as_str(), "photos", GRAPH_PICTURE_SIZE, "$value"])
+    }
+}
+
+/// A picture's image format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PictureFormat {
+    Jpeg,
+    Png,
+}
+
+impl PictureFormat {
+    /// The format a `Content-Type` names (its parameters and case ignored), if it is one kept.
+    #[must_use]
+    pub fn of(content_type: &str) -> Option<Self> {
+        let media = content_type.split(';').next().unwrap_or_default().trim();
+        if media.eq_ignore_ascii_case("image/jpeg") {
+            Some(Self::Jpeg)
+        } else if media.eq_ignore_ascii_case("image/png") {
+            Some(Self::Png)
+        } else {
+            None
+        }
+    }
+
+    /// Its media type.
+    #[must_use]
+    pub const fn media_type(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+        }
+    }
+}
+
+/// A person's picture as Graph gave it: its format and its bytes, undecoded. `Debug` shows the format and the size.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub format: PictureFormat,
+    pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for Picture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Picture")
+            .field("format", &self.format)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// Why a Graph answer wasn't read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GraphAnswerError {
+    /// Not the probed answer's shape.
+    #[error("not a Graph answer of the probed shape")]
+    Malformed,
+    /// A user record of another account than the one asked for.
+    #[error("the answer is of another account than the one asked for")]
+    OtherUser,
+    /// A picture whose `Content-Type` isn't an image format kept.
+    #[error("a picture of a type that isn't kept")]
+    UnknownType,
+    /// A picture over [`MAX_PICTURE`] bytes.
+    #[error("a picture over {MAX_PICTURE} bytes")]
+    TooLarge,
+}
+
+/// The query of CSA's teams read, pair by pair in order: the web client's in every capture of the full read
+/// (`ab-chat`, `abc-chat`, `load`), the one `proto-lab probe teams` read live (M2 Task 16).
+pub const CSA_TEAMS_QUERY: [(&str, &str); 5] = [
+    ("isPrefetch", "false"),
+    ("enableMembershipSummary", "true"),
+    ("supportsAdditionalSystemGeneratedFolders", "true"),
+    ("supportsSliceItems", "true"),
+    ("enableEngageCommunities", "false"),
+];
+
+/// The path of CSA's teams read under the CSA base.
+pub const CSA_TEAMS_PATH: [&str; 5] = ["api", "v3", "teams", "users", "me"];
+
+/// `GET <CSA base>/api/v3/teams/users/me?`[`CSA_TEAMS_QUERY`]: the account's teams with their channels (and its chats,
+/// which the native client reads from the chat service instead). Its answer is read with [`CsaTeams::read_answer`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CsaTeams;
+
+impl CsaTeams {
+    /// The teams the answer `body` gives, each with its channels: a team or a channel marked deleted is left out, and
+    /// so is one without a string `id` and `displayName` (counted in [`TeamsAnswer::skipped`]). A team's general
+    /// channel (`isGeneral` `true`, or the channel whose id is the team's) comes first, the others in the answer's
+    /// order.
+    ///
+    /// The answer must say it is whole: `metadata.isPartialData` exactly `false`, as every captured answer had it. A
+    /// partial answer leaves teams out, and the store replaces its list with what a read gives, so one that says it is
+    /// partial, or doesn't say (no `metadata`, no flag, a flag that isn't a boolean), is refused rather than taken for
+    /// complete.
+    ///
+    /// # Errors
+    /// [`CsaAnswerError::Malformed`] unless the body is a JSON object with a `teams` array and `metadata.isPartialData`
+    /// `false`.
+    pub fn read_answer(body: &[u8]) -> Result<TeamsAnswer, CsaAnswerError> {
+        let answer: Value = serde_json::from_slice(body).map_err(|_| CsaAnswerError::Malformed)?;
+        let whole = answer
+            .get("metadata")
+            .and_then(|metadata| metadata.get("isPartialData"))
+            .and_then(Value::as_bool)
+            == Some(false);
+        if !whole {
+            return Err(CsaAnswerError::Malformed);
+        }
+        let entries = answer
+            .get("teams")
+            .and_then(Value::as_array)
+            .ok_or(CsaAnswerError::Malformed)?;
+        let mut read = TeamsAnswer::default();
+        for entry in entries {
+            match named(entry) {
+                Named::Deleted => {}
+                Named::Unreadable => read.skipped += 1,
+                Named::Kept(id, name) => {
+                    let team = team(entry, id, name, &mut read.skipped);
+                    read.teams.push(team);
+                }
+            }
+        }
+        Ok(read)
+    }
+}
+
+impl Read for CsaTeams {
+    fn service(&self) -> Service {
+        Service::Csa
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        CSA_TEAMS_QUERY
+            .iter()
+            .fold(Endpoint::new(CSA_TEAMS_PATH), |endpoint, (name, value)| {
+                endpoint.with_query(*name, *value)
+            })
+    }
+}
+
+/// What CSA's teams read gave.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TeamsAnswer {
+    pub teams: Vec<Team>,
+    /// Teams and channels left out because they had no string `id` or `displayName`.
+    pub skipped: usize,
+}
+
+/// A team the account is a member of. `Debug` leaves the names out.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Team {
+    /// Its id: its general channel's (`19:…@thread.tacv2`).
+    pub id: String,
+    pub name: String,
+    /// Archived: read-only for everyone.
+    pub archived: bool,
+    /// Its channels, the general one first.
+    pub channels: Vec<Channel>,
+}
+
+impl fmt::Debug for Team {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Team")
+            .field("id", &self.id)
+            .field("archived", &self.archived)
+            .field("channels", &self.channels)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A team's channel: a conversation of the chat service, read like a chat. `Debug` leaves the name out.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+    /// The team's general channel.
+    pub general: bool,
+}
+
+impl fmt::Debug for Channel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Channel")
+            .field("id", &self.id)
+            .field("general", &self.general)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a CSA answer wasn't read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CsaAnswerError {
+    /// Not the probed answer's shape, or an answer that doesn't say it is whole (`metadata.isPartialData` `false`).
+    #[error("not a whole CSA teams answer of the probed shape")]
+    Malformed,
+}
+
+/// How a team or a channel entry reads.
+enum Named<'a> {
+    Kept(&'a str, &'a str),
+    Deleted,
+    Unreadable,
+}
+
+/// An entry's id and name, unless it is marked deleted (`isDeleted` `true`) or has no string `id` and `displayName`.
+fn named(entry: &Value) -> Named<'_> {
+    if flag(entry, "isDeleted") {
+        return Named::Deleted;
+    }
+    let text = |key| entry.get(key).and_then(Value::as_str);
+    match (text("id"), text("displayName")) {
+        (Some(id), Some(name)) if !id.is_empty() => Named::Kept(id, name),
+        _ => Named::Unreadable,
+    }
+}
+
+/// Whether an entry's boolean `key` is `true`; anything else (absent, another type) is `false`.
+fn flag(entry: &Value, key: &str) -> bool {
+    entry.get(key).and_then(Value::as_bool) == Some(true)
+}
+
+/// A team entry read, its unreadable channels counted in `skipped`.
+fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
+    let mut channels = Vec::new();
+    let listed = entry.get("channels").and_then(Value::as_array);
+    for channel in listed.into_iter().flatten() {
+        match named(channel) {
+            Named::Deleted => {}
+            Named::Unreadable => *skipped += 1,
+            Named::Kept(channel_id, channel_name) => channels.push(Channel {
+                id: channel_id.to_owned(),
+                name: channel_name.to_owned(),
+                general: flag(channel, "isGeneral") || channel_id == id,
+            }),
+        }
+    }
+    // the general channel first, the others in the answer's order
+    channels.sort_by_key(|channel| !channel.general);
+    Team {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        archived: flag(entry, "isArchived"),
+        channels,
+    }
 }

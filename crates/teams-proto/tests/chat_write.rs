@@ -947,11 +947,25 @@ fn outsiders(denied: &Denied) -> bool {
 async fn a_write_to_a_chat_with_an_outsider_is_denied_logged_and_never_sent() -> TestResult {
     let lab = Lab::start().await?;
     let mut denials = 0;
-    for (_, write) in every_write(AX_CHAT, "1760000010000") {
-        let denied = lab.write(write).await.unwrap_err();
-        assert!(outsiders(&denied), "{denied:?}");
-        denials += 1;
+    let mut signals = 0;
+    for (target, write) in every_write(AX_CHAT, "1760000010000") {
+        if target.kind().is_contacting() {
+            let denied = lab.write(write).await.unwrap_err();
+            assert!(outsiders(&denied), "{denied:?}");
+            denials += 1;
+        } else {
+            // typing and a read receipt reach nobody: they go out without a member read
+            let answer = lab.write(write).await?;
+            assert!(answer.is_success(), "{target:?}: {answer:?}");
+            signals += 1;
+        }
     }
+    assert_eq!(signals, 2);
+    assert_eq!(
+        lab.reads_received().await,
+        denials,
+        "a member read for each contacting write alone"
+    );
     let to_outsider = SendMessage::new(AB_CHAT, lab_a(), mentioning(OUTSIDER, "Someone"));
     let denied = lab.write(ChatWrite::Send(to_outsider)).await.unwrap_err();
     assert!(outsiders(&denied), "a mention of an outsider: {denied:?}");
@@ -960,30 +974,36 @@ async fn a_write_to_a_chat_with_an_outsider_is_denied_logged_and_never_sent() ->
     assert!(outsiders(&denied), "{denied:?}");
     denials += 2;
 
-    assert_eq!(lab.writes_received().await, 0, "nothing was sent");
+    assert_eq!(lab.writes_received().await, signals, "no contacting write was sent");
     let lines = lab.log.lines();
-    assert_eq!(lines.len(), denials);
-    for line in &lines {
-        assert_eq!(line["verdict"], "deny", "{line}");
+    assert_eq!(lines.len(), denials + signals);
+    let denied: Vec<_> = lines.iter().filter(|line| line["verdict"] == "deny").collect();
+    assert_eq!(denied.len(), denials);
+    for line in denied {
         assert!(line["reason"].get("outsiders").is_some(), "{line}");
     }
-    assert!(lab.mock.take_events(OUTSIDER).is_empty());
+    let told: Vec<EventKind> = lab.mock.take_events(OUTSIDER).iter().map(|event| event.kind).collect();
+    assert!(
+        told.iter()
+            .all(|kind| matches!(kind, EventKind::Typing | EventKind::ReadReceipt)),
+        "nothing but typing and a read receipt reached the outsider: {told:?}"
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn a_group_chat_write_is_denied_though_the_group_may_be_created() -> TestResult {
+async fn a_lab_only_group_chat_is_written_to_a_new_one_included() -> TestResult {
     let lab = Lab::start().await?;
     for write in [
         ChatWrite::Send(SendMessage::new(ABC_CHAT, lab_a(), plain("hello"))),
         ChatWrite::Typing(Typing::new(ABC_CHAT)),
     ] {
-        let denied = lab.write(write).await.unwrap_err();
-        assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::Unsupported));
+        assert_eq!(lab.write(write).await?.status(), 201);
     }
-    assert_eq!(lab.writes_received().await, 0);
+    assert_eq!(lab.writes_received().await, 2);
+    assert_eq!(lab.reads_received().await, 1, "the message's member read alone");
 
-    // a new group of lab accounts is judged by its members alone, as the web client's was (M1 Task 8) …
+    // a new group of lab accounts is judged by its members alone …
     let create = CreateChat::group(mri(LAB_A), [mri(LAB_B), mri(LAB_C)]).ok_or("a group")?;
     let created = lab.write(ChatWrite::Create(create)).await?;
     assert_eq!(created.status(), 201);
@@ -991,23 +1011,28 @@ async fn a_group_chat_write_is_denied_though_the_group_may_be_created() -> TestR
         .as_str()
         .ok_or("no id")?
         .to_owned();
-    // … but nothing can be written to it while its member read isn't known to be complete
-    let denied = lab
+    // … and written to like any chat, by its fresh member read
+    let posted = lab
         .write(ChatWrite::Send(SendMessage::new(&group, lab_a(), plain("hello"))))
-        .await
-        .unwrap_err();
-    assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::Unsupported));
-    assert_eq!(lab.writes_received().await, 1, "the create alone");
-    assert_eq!(lab.log.verdicts(), ["deny", "deny", "allow", "deny"]);
+        .await?;
+    assert_eq!(posted.status(), 201);
+    assert_eq!(lab.writes_received().await, 4);
+    assert_eq!(lab.log.verdicts(), ["allow"; 4]);
     Ok(())
 }
 
 #[tokio::test]
-async fn without_the_native_clients_credential_every_write_is_partial() -> TestResult {
+async fn without_the_native_clients_credential_every_contacting_write_is_partial() -> TestResult {
     let lab = Lab::without_credential(ChatServiceMock::start().await?, None)?;
-    for (_, write) in every_write(AB_CHAT, "1760000010000") {
-        let denied = lab.write(write).await.unwrap_err();
-        assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::NoCredential));
+    for (target, write) in every_write(AB_CHAT, "1760000010000") {
+        let verdict = lab.fence.check(write.target(), &lab.source).await;
+        if target.kind().is_contacting() {
+            let denied = verdict.unwrap_err();
+            assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::NoCredential));
+        } else {
+            // typing and a read receipt need no member read, so no credential either
+            assert!(verdict.is_ok(), "{target:?}: {verdict:?}");
+        }
     }
 
     // a source that has no token (signed out) gives no credential either
@@ -1025,21 +1050,21 @@ async fn without_the_native_clients_credential_every_write_is_partial() -> TestR
 #[tokio::test]
 async fn the_member_read_takes_the_transports_token_as_it_is_now() -> TestResult {
     let lab = Lab::start().await?;
-    let typing = || ChatWrite::Typing(Typing::new(AB_CHAT));
-    assert_eq!(lab.write(typing()).await?.status(), 201);
+    let post = || ChatWrite::Send(SendMessage::new(AB_CHAT, lab_a(), plain("hello")));
+    assert_eq!(lab.write(post()).await?.status(), 201);
 
     // the service takes only a new token from now on: the transport still has the old one, and its session gives the
     // same one again, so the read is refused twice and the write denied …
     let renewed = "a-renewed-made-up-token-for-lab-a";
     assert!(lab.mock.set_token(LAB_A, renewed));
-    let denied = lab.write(typing()).await.unwrap_err();
+    let denied = lab.write(post()).await.unwrap_err();
     assert_eq!(
         denied.reason(),
         &DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Status(401)))
     );
     // … until the session renews it: the next read asks the transport again and takes the new one
     lab.token.renew(renewed);
-    assert_eq!(lab.write(typing()).await?.status(), 201);
+    assert_eq!(lab.write(post()).await?.status(), 201);
 
     assert_eq!(lab.writes_received().await, 2);
     assert_eq!(lab.log.verdicts(), ["allow", "deny", "allow"]);
@@ -1050,14 +1075,14 @@ async fn the_member_read_takes_the_transports_token_as_it_is_now() -> TestResult
 async fn a_refused_member_read_renews_the_token_and_reads_once_more() -> TestResult {
     let lab = Lab::start().await?;
     let first = lab.mock.token(LAB_A).ok_or("no a")?;
-    let typing = || ChatWrite::Typing(Typing::new(AB_CHAT));
+    let post = || ChatWrite::Send(SendMessage::new(AB_CHAT, lab_a(), plain("hello")));
 
     // the service refuses a's token before it expires (revoked): the read tells the session, which renews it, and the
     // read sent once more with the new token lets the write through
     let renewed = "a-renewed-made-up-token-for-lab-a";
     assert!(lab.mock.set_token(LAB_A, renewed));
     lab.token.renew_when_refused(renewed);
-    assert_eq!(lab.write(typing()).await?.status(), 201);
+    assert_eq!(lab.write(post()).await?.status(), 201);
     assert_eq!(
         lab.token.refused(),
         std::slice::from_ref(&first),
@@ -1069,7 +1094,7 @@ async fn a_refused_member_read_renews_the_token_and_reads_once_more() -> TestRes
     let revoked = "a-revoked-made-up-token-for-lab-a";
     lab.token.renew_when_refused(revoked);
     assert!(lab.mock.set_token(LAB_A, "a-later-made-up-token-for-lab-a"));
-    let denied = lab.write(typing()).await.unwrap_err();
+    let denied = lab.write(post()).await.unwrap_err();
     assert_eq!(
         denied.reason(),
         &DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Status(401)))

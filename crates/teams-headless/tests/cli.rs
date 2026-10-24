@@ -2,7 +2,8 @@
 //! `test-support` is unified into it), which chat a command's argument names, and the commands themselves on native
 //! engines of a and b against the mock chat service and its Trouter (`teams-mock`, through the `test-support` mock
 //! origins): a's `sync`, `send`, `edit` and `react` print what they did, b's `watch` (as JSON and as text) prints each
-//! event with its receive time, and `list` and `show` print a's store.
+//! event with its receive time, `list` and `show` print a's store, and `presence` and `profile` print anyone asked
+//! about by MRI.
 //!
 //! Every id and token here is the mock's made-up one, never a real one.
 
@@ -17,21 +18,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use clap::Parser as _;
 use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Parts, Push};
-use teams_core::{EngineError, Outbox};
+use teams_core::{EngineError, MAX_WATCHED, NameFrom, Outbox};
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster, one_to_one_id};
+use teams_headless::availability;
 use teams_headless::chat::{ChatError, LabNames, resolve};
+use teams_headless::cli::{Cli, Command as CliCommand};
 use teams_headless::commands::{self, CommandError, WatchEnd};
 use teams_headless::lab::display_name;
-use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
+use teams_headless::print::name_source_word;
+use teams_mock::{
+    AB_CHAT, ABC_CHAT, AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OUTSIDER, PRESENCE_BASE,
+    TrouterMock, lab_toml,
+};
+use teams_proto::ManualAvailability;
 use teams_proto::chat::MessageText;
 use teams_proto::{
-    Author, Authorized, Client, Credentials, HttpError, HttpTransport, Mutating, OwnState, Read, Response, Transport,
+    Author, Authorized, Client, Credentials, HttpError, HttpTransport, Mutating, Read, Request as ProtoRequest,
+    Response, Transport,
 };
 use teams_store::{OutboxState, Store};
 use teams_trouter::{Options, Trouter, TrouterCredentials};
@@ -51,7 +61,18 @@ fn help_names_every_command() {
     assert!(output.status.success(), "{output:?}");
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
-        "sync", "list", "show", "send", "edit", "delete", "react", "read", "watch",
+        "sync",
+        "list",
+        "show",
+        "send",
+        "edit",
+        "delete",
+        "react",
+        "read",
+        "watch",
+        "presence",
+        "profile",
+        "availability",
     ] {
         assert!(
             help.lines().any(|line| line.trim_start().starts_with(command)),
@@ -99,6 +120,31 @@ fn a_usage_error_is_reported_by_the_parser() {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let output = Command::new(BINARY).args(["a", "send", "b"]).output().unwrap();
     assert_eq!(output.status.code(), Some(2), "{output:?}");
+    // a lookup names whom it looks up
+    let output = Command::new(BINARY).args(["a", "profile"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+#[test]
+fn presence_takes_anyone_by_mri_and_profile_takes_their_mris() {
+    let parsed = Cli::try_parse_from(["teams-headless", "a", "presence", "--mri", OUTSIDER, "--mri", LAB_B]).unwrap();
+    match parsed.command {
+        CliCommand::Presence { wait, mris } => {
+            assert_eq!(wait, 30);
+            assert_eq!(mris, [OUTSIDER, LAB_B]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let parsed = Cli::try_parse_from(["teams-headless", "a", "presence"]).unwrap();
+    assert!(matches!(parsed.command, CliCommand::Presence { ref mris, .. } if mris.is_empty()));
+    let parsed = Cli::try_parse_from(["teams-headless", "b", "profile", OUTSIDER, LAB_C, "--wait", "5"]).unwrap();
+    match parsed.command {
+        CliCommand::Profile { mris, wait } => {
+            assert_eq!(mris, [OUTSIDER, LAB_C]);
+            assert_eq!(wait, 5);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 // --- which chat ---
@@ -246,8 +292,6 @@ struct Lab {
     mock: ChatServiceMock,
     trouter: TrouterMock,
     dir: tempfile::TempDir,
-    /// The lab's `lab.toml` (a, b and c with the mock's MRIs), whose `chats.toml` records the mock's a–b–c chat.
-    config: LabConfig,
 }
 
 impl Lab {
@@ -255,14 +299,10 @@ impl Lab {
         let mock = ChatServiceMock::start().await.unwrap();
         let trouter = mock.start_trouter().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        // the lab's `chats.toml` records the mock's a–b–c chat, as `abc-chat` records the lab's
         let config = LabConfig::parse(&lab_toml(dir.path()), dir.path()).unwrap();
         record_abc_chat(config.paths(), ABC_CHAT).unwrap();
-        Self {
-            mock,
-            trouter,
-            dir,
-            config,
-        }
+        Self { mock, trouter, dir }
     }
 
     fn store_file(&self, me: &str) -> std::path::PathBuf {
@@ -280,37 +320,56 @@ impl Lab {
 
     /// As [`Self::engine`], its first write answered 429 with a short `Retry-After` with `throttle_first_write`.
     fn engine_with(&self, me: &str, push: bool, throttle_first_write: bool) -> EngineHandle {
+        self.build(me, push, throttle_first_write, false)
+    }
+
+    /// `me`'s engine with its push channel, as the lab binary builds it for its own availability: its fence's own
+    /// account `me` (`Fence::open_lab_account`'s), its transport given the mock's presence base.
+    fn engine_owning(&self, me: &str) -> EngineHandle {
+        self.build(me, true, false, true)
+    }
+
+    /// As [`Self::engine_owning`], its first write answered 429 with a short `Retry-After`.
+    fn engine_owning_throttled(&self, me: &str) -> EngineHandle {
+        self.build(me, true, true, true)
+    }
+
+    fn build(&self, me: &str, push: bool, throttle_first_write: bool, own: bool) -> EngineHandle {
         let tokens = Arc::new(Tokens {
             token: self.mock.token(me).unwrap(),
             renewals: broadcast::channel(4).0,
         });
-        let fence = Arc::new(Fence::new(
+        let fence = Fence::new(
             Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
             FenceLog::from_writer(io::sink()),
-        ));
+        );
+        let fence = Arc::new(if own {
+            fence.with_own_account(Mri::new(me))
+        } else {
+            fence
+        });
         let origin = self.mock.origin();
-        let http =
-            || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+        let http = || {
+            let transport =
+                HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+            if own {
+                transport.with_presence(PRESENCE_BASE).unwrap()
+            } else {
+                transport
+            }
+        };
         let transport = Arc::new(http());
-        // the lab's group chat policy, as `LiveMembershipSource::for_fence` gives the lab binary's source
-        let membership = LiveMembershipSource::with_mock_origin(&origin)
-            .unwrap()
-            .with_lab(&self.config);
+        let membership = LiveMembershipSource::with_mock_origin(&origin).unwrap();
         membership.set_credential_source(transport.clone());
         let push = push.then(|| {
-            let trouter = Trouter::with_mock_origin(
-                Arc::clone(&transport),
-                Arc::clone(&tokens),
-                Arc::clone(&fence),
-                self.trouter.origin(),
-            )
-            .unwrap()
-            .with_options(Options {
-                backoff_base: Duration::from_millis(50),
-                backoff_cap: Duration::from_millis(50),
-                backoff_jitter_percent: 0,
-                ..Options::default()
-            });
+            let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), self.trouter.origin())
+                .unwrap()
+                .with_options(Options {
+                    backoff_base: Duration::from_millis(50),
+                    backoff_cap: Duration::from_millis(50),
+                    backoff_jitter_percent: 0,
+                    ..Options::default()
+                });
             Push::new(trouter)
         });
         let author = Author::new(Mri::new(me), display_name("lab@example.invalid"));
@@ -343,7 +402,9 @@ fn start<T: Transport<Error = HttpError> + Send + 'static>(
         options: EngineOptions {
             tick: Duration::from_millis(50),
             catch_up_retry: Duration::from_millis(500),
+            ..EngineOptions::default()
         },
+        known_names: Vec::new(),
     })
     .unwrap()
 }
@@ -361,8 +422,8 @@ impl Transport for ThrottledOnce {
         self.inner.read(request)
     }
 
-    fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
-        self.inner.own_state(request)
+    fn send<R: ProtoRequest>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        self.inner.send(request)
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
@@ -439,6 +500,11 @@ async fn write(handle: &mut EngineHandle, action: Action) -> (OutboxState, Vec<(
     (state, fields(&String::from_utf8(out).unwrap()))
 }
 
+/// A message event the push channel delivered: a read's (a catch-up's) event for the same message doesn't count.
+fn delivered(line: &Value) -> bool {
+    line["event"] == "message" && line["source"] == "delivery"
+}
+
 #[tokio::test]
 async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
     let lab = Lab::start().await;
@@ -469,7 +535,7 @@ async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
     assert_eq!(field(&sent, "state"), "sent");
 
     let received = watch
-        .json_line(|line| line["event"] == "message" && line["id"] == id.as_str())
+        .json_line(|line| delivered(line) && line["id"] == id.as_str())
         .await;
     assert_eq!(received["conversation"], AB_CHAT);
     assert_eq!(received["change"], "new");
@@ -492,7 +558,7 @@ async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
         "{edited:?}"
     );
     let changed = watch
-        .json_line(|line| line["event"] == "message" && line["id"] == id.as_str() && line["change"] == "edit")
+        .json_line(|line| delivered(line) && line["id"] == id.as_str() && line["change"] == "edit")
         .await;
     assert_eq!(changed["text"], "hello b, edited");
 
@@ -504,7 +570,7 @@ async fn a_s_send_edit_and_reaction_reach_b_s_watch_with_their_times() {
     let (state, reacted) = write(&mut a, react).await;
     assert_eq!(state, OutboxState::Sent, "{reacted:?}");
     watch
-        .json_line(|line| line["event"] == "message" && line["id"] == id.as_str() && line["change"] == "reaction")
+        .json_line(|line| delivered(line) && line["id"] == id.as_str() && line["change"] == "reaction")
         .await;
 
     let _ = stop.send(());
@@ -568,7 +634,7 @@ async fn a_s_send_to_the_lab_s_group_chat_reaches_b_s_and_c_s_watch() {
     let id = field(&sent, "message_id").to_owned();
     for watch in [&watch_b, &watch_c] {
         let received = watch
-            .json_line(|line| line["event"] == "message" && line["id"] == id.as_str())
+            .json_line(|line| delivered(line) && line["id"] == id.as_str())
             .await;
         assert_eq!(received["conversation"], ABC_CHAT);
         assert_eq!(received["sender"], "a");
@@ -698,4 +764,257 @@ async fn a_write_the_store_refuses_fails_and_show_needs_a_known_chat() {
     let unknown = commands::show(&store, "19:unknown@thread.v2", 10, &names(), &mut Vec::new());
     assert!(matches!(unknown, Err(CommandError::Store(_))), "{unknown:?}");
     assert!(Path::new(&lab.store_file(LAB_A)).exists());
+}
+
+#[tokio::test]
+async fn presence_prints_each_account_as_the_engine_has_it_unknown_without_a_read() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+    let mut out = Vec::new();
+
+    // the mock's reads have no presence base: nothing is read, and each stays unknown once the wait is over
+    let whom = [LAB_B.to_owned(), LAB_C.to_owned()];
+    commands::presence(&mut a, &whom, Duration::from_millis(300), &names(), &mut out)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "presence b Unknown\npresence c Unknown\n"
+    );
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn presence_and_profile_print_anyone_asked_about_by_mri_never_a_name() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+
+    // an outsider is printed by MRI, a lab account by alias; the mock's reads have no presence base, so each stays
+    // unknown once the wait is over
+    let whom = [LAB_B.to_owned(), OUTSIDER.to_owned()];
+    let mut out = Vec::new();
+    commands::presence(&mut a, &whom, Duration::from_millis(300), &names(), &mut out)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("presence b Unknown\npresence {OUTSIDER} Unknown\n")
+    );
+
+    // nothing gives the mock's engine a name for either (no Graph or middle-tier base, no message, no known names):
+    // each is printed with where its name came from, `none`
+    let mut out = Vec::new();
+    commands::profile(&mut a, &whom, Duration::from_millis(300), &names(), &mut out)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("profile b none\nprofile {OUTSIDER} none\n")
+    );
+
+    // asked again: the store has both fresh, no lookup starts, so nothing is waited for however long `--wait` is
+    let started = tokio::time::Instant::now();
+    let mut out = Vec::new();
+    commands::profile(&mut a, &whom, WAIT, &names(), &mut out)
+        .await
+        .unwrap();
+    assert!(started.elapsed() < WAIT / 2, "{:?}", started.elapsed());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        format!("profile b none\nprofile {OUTSIDER} none\n")
+    );
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn presence_refuses_more_people_than_the_engine_watches_before_asking_anyone() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+    let whom: Vec<String> = (0..=MAX_WATCHED)
+        .map(|n| format!("8:orgid:00000000-0000-4000-8000-{n:012}"))
+        .collect();
+    let mut out = Vec::new();
+    let refused = commands::presence(&mut a, &whom, WAIT, &names(), &mut out).await;
+    assert!(
+        matches!(refused, Err(CommandError::TooMany { asked, most }) if asked == MAX_WATCHED + 1 && most == MAX_WATCHED),
+        "{refused:?}"
+    );
+    assert!(out.is_empty());
+    a.shutdown();
+}
+
+#[test]
+fn a_name_s_source_is_printed_as_one_word() {
+    assert_eq!(name_source_word(Some(NameFrom::Graph)), "graph");
+    assert_eq!(name_source_word(Some(NameFrom::ShortProfile)), "short_profile");
+    assert_eq!(name_source_word(Some(NameFrom::Message)), "message");
+    assert_eq!(name_source_word(Some(NameFrom::Known)), "known");
+    assert_eq!(name_source_word(None), "none");
+}
+
+#[tokio::test]
+async fn availability_sets_the_endpoint_then_the_manual_status_and_its_reset_printing_each_step() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine_owning(LAB_A);
+    let mut out = Vec::new();
+    let plan = availability::Plan {
+        manual: Some((ManualAvailability::Busy, Duration::from_millis(100))),
+        reset_after: Some(Duration::from_millis(200)),
+        hold: Duration::from_millis(300),
+        register_wait: WAIT,
+    };
+
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+
+    assert_eq!(end, availability::End::Done { all_sent: true });
+    let printed = String::from_utf8(out).unwrap();
+    let steps: Vec<String> = printed
+        .lines()
+        .map(|line| line.rsplit_once(" at_ms=").unwrap().0.to_owned())
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "availability registered",
+            "availability available sent",
+            "availability manual Busy sent",
+            "availability reset sent",
+        ],
+        "{printed}"
+    );
+    let changes: Vec<AvailabilityChange> = lab
+        .mock
+        .own_availability()
+        .into_iter()
+        .map(|taken| {
+            assert_eq!(taken.account, LAB_A);
+            taken.change
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            AvailabilityChange::Endpoint {
+                availability: "Available".to_owned(),
+                activity: "Available".to_owned(),
+            },
+            AvailabilityChange::Manual("Busy".to_owned()),
+            AvailabilityChange::Reset,
+        ]
+    );
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_without_its_own_account_prints_the_refusal_and_sets_nothing() {
+    let lab = Lab::start().await;
+    // a fence of no account: what a binary built on `Fence::open_lab` would have; its push channel's endpoint is
+    // registered for no account, so no account's availability can name it
+    let mut a = lab.engine(LAB_A, true);
+    let mut out = Vec::new();
+    let plan = availability::Plan {
+        manual: None,
+        reset_after: None,
+        hold: Duration::ZERO,
+        register_wait: WAIT,
+    };
+
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+
+    assert_eq!(end, availability::End::Done { all_sent: false });
+    let printed = String::from_utf8(out).unwrap();
+    assert!(
+        printed.contains("availability available dropped: ") && printed.contains("wasn't registered for this account"),
+        "{printed}"
+    );
+    assert!(lab.mock.own_availability().is_empty());
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_counts_a_throttled_step_sent_once_it_went_out_after_its_wait() {
+    let lab = Lab::start().await;
+    // the endpoint's `PUT` is answered 429 with a `Retry-After` of 300 ms, and goes out from the engine's tick after it
+    let mut a = lab.engine_owning_throttled(LAB_A);
+    let mut out = Vec::new();
+    let plan = availability::Plan {
+        manual: None,
+        reset_after: None,
+        hold: Duration::from_secs(3),
+        register_wait: WAIT,
+    };
+
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert_eq!(end, availability::End::Done { all_sent: true }, "{printed}");
+    assert!(
+        printed.contains("availability available waiting not_before_ms="),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("availability endpoint_available sent after_its_wait"),
+        "{printed}"
+    );
+    assert_eq!(lab.mock.own_availability().len(), 1, "UPS took the `PUT` once");
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_counts_a_step_still_waiting_when_the_hold_ends_as_not_sent() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine_owning_throttled(LAB_A);
+    let mut out = Vec::new();
+    // the hold ends before the `PUT`'s 300 ms `Retry-After` does
+    let plan = availability::Plan {
+        manual: None,
+        reset_after: None,
+        hold: Duration::ZERO,
+        register_wait: WAIT,
+    };
+
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert_eq!(end, availability::End::Done { all_sent: false }, "{printed}");
+    assert!(
+        printed.contains("availability available waiting not_before_ms="),
+        "{printed}"
+    );
+    assert!(!printed.contains("after_its_wait"), "{printed}");
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn availability_ends_on_its_stop_and_without_a_push_channel_sets_nothing() {
+    let lab = Lab::start().await;
+    let mut a = lab.engine(LAB_A, false);
+    let mut out = Vec::new();
+    let plan = availability::Plan {
+        manual: None,
+        reset_after: None,
+        hold: Duration::from_secs(60),
+        register_wait: Duration::from_millis(200),
+    };
+    // no push channel, so no registration
+    let end = availability::run(&mut a, plan, &mut out, future::pending())
+        .await
+        .unwrap();
+    assert_eq!(end, availability::End::NotRegistered);
+    let end = availability::run(&mut a, plan, &mut out, future::ready(()))
+        .await
+        .unwrap();
+    assert_eq!(end, availability::End::Stopped);
+    assert!(out.is_empty());
+    assert!(lab.mock.own_availability().is_empty());
+    a.shutdown();
 }

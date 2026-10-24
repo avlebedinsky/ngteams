@@ -16,7 +16,7 @@ use time::OffsetDateTime;
 use super::sealed::Sealed;
 use super::{Mutating, Wire};
 use crate::chat::MessageText;
-use crate::endpoint::{Endpoint, Method};
+use crate::endpoint::{Endpoint, Method, Service};
 
 /// Who writes: the account's MRI and the name its messages carry (`imdisplayname`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +143,8 @@ impl Sealed for SendMessage {
             fields.insert("properties".to_owned(), Value::Object(properties(&self.text)));
         }
         Some(Wire {
+            service: Service::ChatService,
+            headers: Vec::new(),
             method: Method::Post,
             endpoint: messages(&self.conversation),
             body: Some(body),
@@ -246,6 +248,8 @@ impl Sealed for EditMessage {
             fields.insert("properties".to_owned(), Value::Object(properties));
         }
         Some(Wire {
+            service: Service::ChatService,
+            headers: Vec::new(),
             method: Method::Put,
             endpoint: message(&self.conversation, &self.message_id),
             body: Some(body),
@@ -280,6 +284,8 @@ impl Mutating for DeleteMessage {
 impl Sealed for DeleteMessage {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            service: Service::ChatService,
+            headers: Vec::new(),
             method: Method::Delete,
             endpoint: message(&self.conversation, &self.message_id).with_query("behavior", "softDelete"),
             body: None,
@@ -327,6 +333,8 @@ impl Mutating for SetReaction {
 impl Sealed for SetReaction {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            service: Service::ChatService,
+            headers: Vec::new(),
             method: Method::Put,
             endpoint: emotions(&self.conversation, &self.message_id),
             body: Some(json!({"emotions": {"key": self.key, "value": self.time_ms}})),
@@ -363,6 +371,8 @@ impl Mutating for RemoveReaction {
 impl Sealed for RemoveReaction {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            service: Service::ChatService,
+            headers: Vec::new(),
             method: Method::Delete,
             endpoint: emotions(&self.conversation, &self.message_id),
             body: Some(json!({"emotions": {"key": self.key}})),
@@ -422,6 +432,8 @@ impl Sealed for ReadReceipt {
         let endpoint = Endpoint::new(["v1", "users", "ME", "conversations", &self.conversation, "properties"])
             .with_query("name", "consumptionhorizon");
         Some(Wire {
+            service: Service::ChatService,
+            headers: Vec::new(),
             method: Method::Put,
             endpoint,
             body: Some(json!({"consumptionhorizon": self.horizon()})),
@@ -455,6 +467,8 @@ impl Mutating for Typing {
 impl Sealed for Typing {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            service: Service::ChatService,
+            headers: Vec::new(),
             method: Method::Post,
             endpoint: messages(&self.conversation),
             body: Some(json!({"content": "", "contenttype": "Application/Message", "messagetype": "Control/Typing"})),
@@ -527,6 +541,8 @@ impl Sealed for CreateChat {
             json!({"threadType": "chat"})
         };
         Some(Wire {
+            service: Service::ChatService,
+            headers: Vec::new(),
             method: Method::Post,
             endpoint: Endpoint::new(["v1", "threads"]),
             body: Some(json!({"members": members, "properties": properties})),

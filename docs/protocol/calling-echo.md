@@ -1,15 +1,18 @@
 # Calling: the web client's test call to the echo service
 
 Status: 2026-10-20, M0 Task 18 (spike 3b, part 1). Written from live runs of `proto-lab run echo-call --headless`
-(account a, Chrome for Testing 155 headless, a fake microphone playing a 440 Hz WAV tone, the fence armed with the
-calling classifiers), from the web client's own diagnostic log of one of those runs (Ctrl+Alt+Shift+1, read locally),
+(account a, Chrome for Testing 155 headless, a fake microphone playing a 440 Hz WAV tone, the fence armed with what
+were then its calling classifiers), from the web client's own diagnostic log of one of those runs (Ctrl+Alt+Shift+1, read locally),
 and from the web bundle `26260.1717.5229.7049`. The captures stay outside the repository; the fixtures in
 `tests/fixtures/calling/echo/` are synthetic, shaped like them. Ids, tokens, hosts' numbers and addresses below are
 placeholders.
 
-The code: the scenario is `crates/proto-lab/src/scenario/echo_call.rs`; what the fence lets through for a run that
-calls is `crates/proto-lab/src/calling.rs` (`Classifier::calling`, `FrameClassifier::calling`), and audio worklets
-are armed by `TargetKind::Worklet` (`crates/proto-lab/src/arming.rs`).
+The code: the scenario is `crates/proto-lab/src/scenario/echo_call.rs`; the call start is the calling family's one
+mapped row in `teams_fence::contacting` (`crates/teams-fence/src/contacting/call.rs`, `CALL_START_URL`), mapped only
+with the echo service's MRI (`Classifier::with_test_call_callee`); every other mutating request on a calling host is
+denied ([fence-targets.md](fence-targets.md#the-contacting-services)), and what M3 maps next is in
+`docs/backlog/fence-call-follow-ups.md`. Audio worklets are armed by `TargetKind::Worklet`
+(`crates/proto-lab/src/arming.rs`).
 
 ## Outcome
 
@@ -44,8 +47,8 @@ deferred ("Deferring calling stack Initialization. [entryPoint:startEchoBotCall]
 app or an app pre-warm starts it. A headless lab run only gets it by opening the Calls app first. A Settings deep link
 reloads the page and loses it again, so the scenario opens Settings from the account menu.
 
-Before that, the calling stack needs (each one is own-state of the account in `Classifier::calling` /
-`FrameClassifier::calling`, strict shapes, tests in `crates/proto-lab/tests/calling.rs`):
+Before that, the calling stack needs (each reaches nobody, so the lab rule lets it through; the runs here used the
+fence of the time, which allowed each as the account's own state in its captured shape):
 
 - **The account's own settings and policies.** Calling stays off until the client knows the calling policy
   (`callingPolicy.allowPrivateCalling` from `POST <teams>/api/mt/part/<region>-<n>/beta/users/useraggregatesettings`,
@@ -74,7 +77,7 @@ Before that, the calling stack needs (each one is own-state of the account in `C
   doesn't map (denied), the delivery responses above are denied too, and the scenario never clicks an answer.
 
 Nothing else of the client's unmapped traffic (presence, the middle tier's other lookups, the async media gateway's
-cookie exchanges, telemetry) was needed; it stays denied.
+cookie exchanges, telemetry) was needed; it was denied then, and passes under the lab rule.
 
 ## The TURN credentials
 
@@ -115,13 +118,13 @@ each URL handed out by the service before it is used.
    The answer is the conversation: `conversationController` (its URL on the conversation service), `links` (`leave`,
    `addParticipant`, `removeParticipant`, `updateEndpointMetadata`, `getAllParticipants`, `searchParticipants`,
    `subscribe`, `brokerPublish`, …), `state`, `scenario`, `tenantId`, `region`, `conversationStartTime`.
-   **The fence maps it** (`calling::call_start`), and only this shape: `WriteKind::Call` on `Scope::New`, its
-   participants `from` and the echo service of `lab.toml`, which the start doesn't name and is counted in, so the call
-   passes only if the fence would admit the echo. The scenario must be `UserInitiatedTestCall`, `to` empty or exactly
-   the echo service, and every key at every level one the capture had, its value of the captured type (`null` where it
-   was `null`: `replaces`, `transferor`, `clientTransferContext`, the group, chat, meeting and content sharing). Any
-   other call (a named callee, another scenario, an unreviewed key anywhere) or a body that doesn't read strictly is
-   unknown.
+   **The fence maps it** (`teams_fence::contacting`'s calling row, `contacting/call.rs`), and only this shape:
+   `WriteKind::Call` on `Scope::New`, its participants `from` and the echo service of `lab.toml`, which the start
+   doesn't name and is counted in, so the call passes only if the fence would admit the echo. The scenario must be
+   `UserInitiatedTestCall`, `to` empty or exactly the echo service, and every key at every level one the capture had,
+   its value of the captured type (`null` where it was `null`: `replaces`, `transferor`, `clientTransferContext`, the
+   group, chat, meeting and content sharing). Any other call (a named callee, another scenario, an unreviewed key
+   anywhere) or a body that doesn't read strictly is unreadable, and denied.
 4. **Events.** `GET …/ep/broker-…/api/v1/subscribe/<id>/<n>` long-polls (reads): each answer has `message` (gzip,
    base64: a delivered HTTP request) and `nextSubscribeUrl`. The same callbacks also come over Trouter.
 5. **Acceptance.** The call controller calls back `…/call/acceptance/` with `callAcceptance.links`: the call leg

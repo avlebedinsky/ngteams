@@ -18,6 +18,8 @@ teams-auth.workspace = true
 teams-core.workspace = true
 # `Fence::open_lab`, the lab's config and paths, the live member read
 teams-fence.workspace = true
+# which records are the app's full requests and frames (`teams_log::wire::is_wire`), which this log leaves out
+teams-log.workspace = true
 teams-proto.workspace = true
 teams-store.workspace = true
 teams-trouter.workspace = true

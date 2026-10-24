@@ -1,0 +1,35 @@
+---
+worth: later
+where: docs/protocol/channels.md (No channel write), crates/teams-proto/src/write/
+added: 2026-10-22
+---
+# Channel writes need a team of the lab accounts only
+
+M2 Task 16 made teams and channels read-only in both builds, as the user decided on 2026-10-21: the Teams rail lists
+the account's teams and their channels (CSA's teams read), and a channel's posts and reply chains are shown from the
+chat service, with no composer and no message action. Nothing the native client sends can post, reply, react, mark
+read or type in a channel: a chat write the engine takes for a channel's id (a post, a read receipt) is denied by the
+fence, which never reads a channel's members complete (`teams-core`'s `nothing_is_written_to_a_channel`); no write is
+mapped to `WriteKind::ChannelPost`; and `teams_fence::contacting` leaves the web client's channel writes unreadable,
+so the browser fence denies them (`docs/protocol/endpoints.md`).
+
+Why they can't be mapped now: a channel write is seen by every member of its team, and the lab accounts' teams are
+the tenant's, shared with people outside the lab (the M2 plan's premise; Task 16's probe found two teams and no team
+of the lab's own). A write there is
+one the tenant's directory shows to people outside the lab, which the hard rules forbid; and the fence has no complete
+read of a channel's audience anyway (a channel's thread read listed one member, the team's roster is CSA's or the
+middle tier's, and a shared or private channel has its own).
+
+What would settle it, in order:
+
+1. A team whose members are exactly the lab accounts a, b and c, created by the user (creating a team is itself a write
+   the tenant's directory shows: the user's decision, never an agent's).
+2. An authoritative, complete read of that team's and its channels' members at decision time (the team's roster from
+   CSA or the middle tier, a channel's own for a private or shared one), probed read-only first. The hard rules
+   already allow a write whose every participant, read fresh and complete, is a lab account; what is missing is a
+   read the fence can take as complete for a team.
+3. Captures of the web client's channel post, reply, edit, delete, reaction and read in that team under the armed
+   fence, each mapped from its capture (`ChannelPost` and the reply chain's `<channel>;messageid=<post>` target), then
+   sealed native writes and a composer in the channel view.
+
+Until then the personal build stays read-only in channels too.

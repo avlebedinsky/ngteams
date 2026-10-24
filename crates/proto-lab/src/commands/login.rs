@@ -14,12 +14,14 @@
 //! - a request to register an MFA method stops the run, and so does any other multi-factor prompt: one to pick a
 //!   method, to approve in an app, or to enter a one-time code.
 //!
-//! The fence lets Entra's sign-in form through for this command only ([`Classifier::sign_in`]); everything else
-//! mutating is denied as in every run, and the denies are expected (the web client loads in a reduced state).
-//! Multi-factor sign-in (Entra's `SAS/*` requests) isn't on that list: no such exchange has been captured, so what its
-//! requests set off (a code sent by text or call, a push to a phone, as soon as the page shows the prompt) and whether
-//! verifying a method can be told apart from registering one are unknown. A one-time code could never be submitted
-//! under the fence, so the run stops instead of asking for one.
+//! The fence runs the lab rule as in every run: Entra's sign-in form reaches nobody, so it goes through, and any deny
+//! is expected (the web client loads in a reduced state). The run is recorded like a scenario's, under
+//! `captures/login/<ts>/` ([`LOGIN_CAPTURE`]), so the sign-in form's queries can be read for the sign-in window's own
+//! rules (`teams-signin`), but without any request body ([`crate::capture::Capture::without_request_bodies`]): the
+//! form's posts carry the account's password. Multi-factor sign-in (Entra's `SAS/*` requests) is never driven: no such
+//! exchange has been captured, so what its requests set off (a code sent by text or call, a push to a phone, as soon as
+//! the page shows the prompt) and whether verifying a method can be told apart from registering one are unknown, and
+//! the run stops instead of asking for a one-time code.
 //!
 //! Once the web client has loaded, the account's MRI is made from the object id in the claims of a bearer token the
 //! page sent for that account's UPN, and recorded in `lab.toml` ([`record_account_mri`]). An account that is signed
@@ -35,10 +37,11 @@ use serde_json::{Value, json};
 
 use crate::accounts::{ACCOUNTS_FILE, AccountsError, AccountsFile, Credentials};
 use crate::cdp::{Cdp, CdpError, SessionId};
-use crate::classify::Classifier;
 use crate::config::{Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri};
 use crate::scenario::dsl::js_string;
-use crate::session::{FenceReport, LabSession, NotAGuid, SessionError, SessionState, Settling, TEAMS_URL};
+use crate::session::{
+    FenceReport, LabSession, NotAGuid, SessionError, SessionOptions, SessionState, Settling, TEAMS_URL,
+};
 
 /// What a sign-in page shows, as [`probe`] finds it. A field is the selector of the one element of its kind a person
 /// could type into (the probe marks it), or `None`.
@@ -131,7 +134,7 @@ pub enum SignInStop {
     MfaChoice,
     #[error("Microsoft asks to approve the sign-in in an app; not proceeding")]
     MfaApproval,
-    #[error("Microsoft asks for a one-time code; not proceeding (MFA requests aren't on the fence's reviewed list)")]
+    #[error("Microsoft asks for a one-time code; not proceeding")]
     MfaCode,
 }
 
@@ -451,6 +454,20 @@ pub struct LoginOptions {
     pub timeout: Duration,
 }
 
+/// The scenario name `login` records its runs under (`captures/login/<ts>/` in the lab's data dir).
+pub const LOGIN_CAPTURE: &str = "login";
+
+/// How `login` runs its browser: the lab rule, its membership source fail-closed, headless, recorded under
+/// [`LOGIN_CAPTURE`] with no request body.
+#[must_use]
+pub fn session_options() -> SessionOptions {
+    SessionOptions {
+        capture: Some(LOGIN_CAPTURE.to_owned()),
+        capture_request_bodies: false,
+        ..SessionOptions::fail_closed()
+    }
+}
+
 /// What a login did.
 #[derive(Debug)]
 pub struct LoginReport {
@@ -461,6 +478,8 @@ pub struct LoginReport {
     pub refused: Option<u16>,
     pub mri: MriRecord,
     pub fence: FenceReport,
+    /// The run's capture.
+    pub capture: Option<PathBuf>,
 }
 
 /// What the browser part of a login found.
@@ -486,7 +505,7 @@ pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, L
         let accounts = AccountsFile::load(Path::new(ACCOUNTS_FILE), |name| std::env::var(name).ok())?;
         let credentials = accounts.for_alias(alias, &upn)?;
         status.write("starting", &json!({})).map_err(LoginError::Status)?;
-        let mut session = LabSession::open(&paths, alias, Classifier::sign_in()).await?;
+        let mut session = LabSession::open_with(&paths, alias, session_options()).await?;
         let run = Run {
             upn: &upn,
             credentials,
@@ -495,9 +514,9 @@ pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, L
         };
         let signed = run.drive(&mut session).await;
         // the browser goes down whatever happened, before anything else is reported
-        let fence = session.close().await;
+        let closed = session.close_recorded().await;
         let signed = signed?;
-        let fence = fence?;
+        let (fence, capture) = closed?;
         if fence.breached() {
             return Err(LoginError::Breach(fence.summary()));
         }
@@ -507,6 +526,7 @@ pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, L
             refused: signed.refused,
             mri,
             fence,
+            capture,
         })
     }
     .await;

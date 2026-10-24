@@ -1,0 +1,112 @@
+error: future cannot be sent between threads safely
+  --> tests/ui/proto_register_fake_transport.rs:14:45
+   |
+14 |     async fn read<R: Read>(&self, _: &R) -> Result<Response, io::Error> {
+   |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ future returned by `read` is not `Send`
+   |
+note: captured value is not `Send` because `&` references cannot be sent unless their referent is `Sync`
+  --> tests/ui/proto_register_fake_transport.rs:14:35
+   |
+14 |     async fn read<R: Read>(&self, _: &R) -> Result<Response, io::Error> {
+   |                                   ^ has type `&R` which is not `Send`, because `R` is not `Sync`
+note: required by a bound in `teams_proto::Transport::read::{anon_assoc#0}`
+  --> $WORKSPACE/crates/teams-proto/src/client.rs
+   |
+   |     fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
+   |                                                                                                   ^^^^ required by this bound in `Transport::read::{anon_assoc#0}`
+help: consider further restricting type parameter `R` with trait `Sync`
+   |
+14 |     async fn read<R: Read + std::marker::Sync>(&self, _: &R) -> Result<Response, io::Error> {
+   |                           +++++++++++++++++++
+
+error: future cannot be sent between threads safely
+  --> tests/ui/proto_register_fake_transport.rs:18:48
+   |
+18 |     async fn send<R: Request>(&self, _: &R) -> Result<Response, io::Error> {
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^ future returned by `send` is not `Send`
+   |
+note: captured value is not `Send` because `&` references cannot be sent unless their referent is `Sync`
+  --> tests/ui/proto_register_fake_transport.rs:18:38
+   |
+18 |     async fn send<R: Request>(&self, _: &R) -> Result<Response, io::Error> {
+   |                                      ^ has type `&R` which is not `Send`, because `R` is not `Sync`
+note: required by a bound in `teams_proto::Transport::send::{anon_assoc#0}`
+  --> $WORKSPACE/crates/teams-proto/src/client.rs
+   |
+   |     fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
+   |                                                                                                      ^^^^ required by this bound in `Transport::send::{anon_assoc#0}`
+help: consider further restricting type parameter `R` with trait `Sync`
+   |
+18 |     async fn send<R: Request + std::marker::Sync>(&self, _: &R) -> Result<Response, io::Error> {
+   |                              +++++++++++++++++++
+
+error[E0277]: the trait bound `Answering: EndpointRegistrar` is not satisfied
+  --> tests/ui/proto_register_fake_transport.rs:33:22
+   |
+33 |     let _ = register(&Answering, &registration).await;
+   |             -------- ^^^^^^^^^^ unsatisfied trait bound
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `teams_proto::own::registrar::Sealed` is not implemented for `Answering`
+  --> tests/ui/proto_register_fake_transport.rs:9:1
+   |
+ 9 | struct Answering;
+   | ^^^^^^^^^^^^^^^^
+help: the trait `teams_proto::own::registrar::Sealed` is implemented for `HttpTransport<C>`
+  --> $WORKSPACE/crates/teams-proto/src/own.rs
+   |
+   |     impl<C: crate::Credentials> Sealed for crate::HttpTransport<C> {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `Answering` to implement `EndpointRegistrar`
+note: required by a bound in `register`
+  --> $WORKSPACE/crates/teams-proto/src/own.rs
+   |
+   | pub async fn register<T: EndpointRegistrar>(
+   |                          ^^^^^^^^^^^^^^^^^ required by this bound in `register`
+
+error[E0277]: the trait bound `Answering: teams_proto::own::registrar::Sealed` is not satisfied
+  --> tests/ui/proto_register_fake_transport.rs:33:13
+   |
+33 |     let _ = register(&Answering, &registration).await;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `teams_proto::own::registrar::Sealed` is not implemented for `Answering`
+  --> tests/ui/proto_register_fake_transport.rs:9:1
+   |
+ 9 | struct Answering;
+   | ^^^^^^^^^^^^^^^^
+help: the trait `teams_proto::own::registrar::Sealed` is implemented for `HttpTransport<C>`
+  --> $WORKSPACE/crates/teams-proto/src/own.rs
+   |
+   |     impl<C: crate::Credentials> Sealed for crate::HttpTransport<C> {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `Answering` to implement `EndpointRegistrar`
+note: required by a bound in `register`
+  --> $WORKSPACE/crates/teams-proto/src/own.rs
+   |
+   | pub async fn register<T: EndpointRegistrar>(
+   |                          ^^^^^^^^^^^^^^^^^ required by this bound in `register`
+
+error[E0277]: the trait bound `Answering: teams_proto::own::registrar::Sealed` is not satisfied
+  --> tests/ui/proto_register_fake_transport.rs:33:49
+   |
+33 |     let _ = register(&Answering, &registration).await;
+   |                                                 ^^^^^ unsatisfied trait bound
+   |
+help: the trait `teams_proto::own::registrar::Sealed` is not implemented for `Answering`
+  --> tests/ui/proto_register_fake_transport.rs:9:1
+   |
+ 9 | struct Answering;
+   | ^^^^^^^^^^^^^^^^
+help: the trait `teams_proto::own::registrar::Sealed` is implemented for `HttpTransport<C>`
+  --> $WORKSPACE/crates/teams-proto/src/own.rs
+   |
+   |     impl<C: crate::Credentials> Sealed for crate::HttpTransport<C> {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `Answering` to implement `EndpointRegistrar`
+note: required by a bound in `register`
+  --> $WORKSPACE/crates/teams-proto/src/own.rs
+   |
+   | pub async fn register<T: EndpointRegistrar>(
+   |                          ^^^^^^^^^^^^^^^^^ required by this bound in `register`

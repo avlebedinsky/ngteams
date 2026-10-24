@@ -1,0 +1,23 @@
+[package]
+name = "teams-log"
+description = "The app's diagnostic log: one file per account, our own crates' records only, rotated by size, written from a thread of its own; every line redacted by the logger itself (tokens, cookies, codes, Trouter's authentication), full requests and frames only at `debug`; and the \"copy diagnostics\" text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# the one logging facade: no `tracing` subscriber is ever installed. Capped at `debug` at compile time, as
+# teams-trouter takes it (log's features unify): tungstenite's `trace!` frames don't exist in a build with this crate
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
+# bodies and frames read as JSON, so their token fields are redacted by name
+serde_json.workspace = true
+
+[dev-dependencies]
+# the log's directory and files, in a directory of its own per test
+tempfile.workspace = true
+# the UI kit's `tracing` events reach `log` this way (no subscriber): the test that they never reach the file
+tracing = { workspace = true, features = ["log", "std"] }
+
+[lints]
+workspace = true

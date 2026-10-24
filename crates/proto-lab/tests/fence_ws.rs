@@ -1,7 +1,8 @@
-//! The browser fence's WebSocket layer: the frame classifier, the guard script, the decision on one frame, the answer
+//! The browser fence's WebSocket layer: the frame rule, forced frame denies, the guard script, the decision on one frame, the answer
 //! to the guard and the audit of what was sent (against a recording endpoint and synthetic events), and, with Chrome
-//! installed, enforcement on a local echo server: in the page, a dedicated, a shared and a service worker a denied
-//! frame never reaches the server, an allowed one does, in order; a frame sent through another realm's `send` (an
+//! installed, enforcement on a local echo server (which the frame rule lets through: a forced deny stands it in for a
+//! socket whose frames the fence denies, all but `allow:` frames): in the page, a dedicated, a shared and a service
+//! worker a denied frame never reaches the server, an allowed one does, in order; a frame sent through another realm's `send` (an
 //! iframe's, a popup's) is refused whatever it holds; and a frame that gets past the guard fails the run.
 //!
 //! The Chrome tests run headless on throwaway user-data-dirs against local servers; see `common` for how Chrome is
@@ -20,11 +21,11 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TargetKind};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::cdp::{Cdp, Event, SessionId};
-use proto_lab::classify::{Classification, Classifier, OwnKind};
+use proto_lab::classify::{Classification, Classifier};
 use proto_lab::fence_http::{DenyCause, HttpFence, Verdict};
 use proto_lab::fence_ws::{
-    BINDING, BadToken, Frame, FrameClassifier, FrameRule, GuardRequest, GuardScript, Payload, RESOLVER, WsFence,
-    classify_frame,
+    BINDING, BadToken, ForcedFrameDeny, Frame, GuardRequest, GuardScript, Payload, RESOLVER, WsFence, classify_frame,
+    is_trouter_socket, trouter_type,
 };
 use serde_json::{Value, json};
 use teams_fence::{
@@ -50,65 +51,182 @@ fn text(url: &str, data: &str) -> Frame {
     }
 }
 
-/// A local stand-in rule: text frames starting with `allow:` on any path of one local socket server.
-fn local_rule(origin: &str) -> FrameRule {
-    FrameRule::new(OwnKind::Authz, origin, "/*", "allow:")
+/// The local stand-in: every frame on one local socket server but a text frame starting with `allow:` is
+/// force-denied.
+fn local_hold(origin: &str) -> Result<ForcedFrameDeny, regex::Error> {
+    Ok(ForcedFrameDeny::new(&format!("^{}/", regex::escape(origin)))?.except_text_starting_with("allow:"))
 }
 
-// --- the frame classifier ---
+fn binary(url: &str, base64: &str) -> Frame {
+    Frame {
+        url: url.to_owned(),
+        payload: Payload::Binary(base64.to_owned()),
+    }
+}
+
+// --- the frame rule ---
 
 #[test]
-fn every_frame_is_unknown_on_the_seeded_list() {
-    let frames = [
-        text(TROUTER, "5:::{\"name\":\"ping\"}"),
-        text(TROUTER, ""),
-        text("wss://teams.microsoft.com/api/authsvc/v1.0/authz", "anything"),
-        Frame {
-            url: TROUTER.to_owned(),
-            payload: Payload::Binary("AQID".to_owned()),
-        },
-        Frame {
-            url: TROUTER.to_owned(),
-            payload: Payload::Unreadable,
-        },
-        text("not a url", "allow:1"),
-    ];
-    for frame in &frames {
-        assert_eq!(classify_frame(frame), Classification::Unknown, "{frame:?}");
-        assert_eq!(FrameClassifier::seeded().classify(frame), Classification::Unknown);
+fn on_a_trouter_socket_the_session_s_frames_pass_and_a_delivery_s_answer_does_not() {
+    let regional = "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c";
+    for url in [TROUTER, regional, "ws://go.trouter.teams.microsoft.com/other/path"] {
+        for text_frame in [
+            "0::",
+            "1::",
+            "2::",
+            r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer made-up"}}]}"#,
+            r#"5:1+::{"name":"ping"}"#,
+            r#"5:3+::{"name":"user.activity","args":[{"state":"active","cv":"made-up"}]}"#,
+            r#"5:12+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[]}]}"#,
+            "5::/endpoint:{}",
+        ] {
+            assert_eq!(
+                classify_frame(&text(url, text_frame)),
+                Classification::Allow,
+                "{url} {text_frame}"
+            );
+        }
+        for text_frame in [
+            // a delivery's answer, which goes back to whoever sent it
+            r#"3:::{"id":"-123","status":200,"headers":{},"body":""}"#,
+            "3::",
+            // a JSON message, an acknowledgement, an error, a noop: no client frame of the session
+            "4:::{}",
+            "6:::1+[]",
+            "7:::1+0",
+            "8::",
+            // what doesn't parse
+            "",
+            "5",
+            "52::",
+            "5:x::{}",
+            "5:1++::{}",
+            " 2::",
+            "\u{fffd}3\u{fffd}2::",
+        ] {
+            assert_eq!(
+                classify_frame(&text(url, text_frame)),
+                Classification::Unknown,
+                "{url} {text_frame:?}"
+            );
+        }
+        assert_eq!(classify_frame(&binary(url, "AQID")), Classification::Unknown, "{url}");
     }
 }
 
 #[test]
-fn an_own_rule_matches_its_origin_path_and_text_prefix_only() {
-    let classifier = FrameClassifier::seeded().with_own(local_rule("ws://127.0.0.1:9"));
-    let own = Classification::Own(OwnKind::Authz);
-    assert_eq!(classifier.classify(&text(LOCAL, "allow:1")), own);
-    assert_eq!(classifier.classify(&text("ws://127.0.0.1:9/x", "allow:")), own);
+fn socket_io_frames_are_read_by_their_one_digit_type() {
+    for (frame, kind) in [
+        ("0::", Some(b'0')),
+        ("2::", Some(b'2')),
+        ("5:1+::{}", Some(b'5')),
+        ("5:::{}", Some(b'5')),
+        ("3:::{}", Some(b'3')),
+        ("1::/v4", Some(b'1')),
+        ("5:12::x", Some(b'5')),
+        ("5", None),
+        ("5:", None),
+        ("5:1", None),
+        ("5:1+", None),
+        ("x::", None),
+        ("", None),
+        ("55::", None),
+    ] {
+        assert_eq!(trouter_type(frame), kind, "{frame:?}");
+    }
+}
 
-    let lookalikes = [
+#[test]
+fn a_trouter_socket_is_any_host_under_the_trouter_domain() -> TestResult {
+    for url in [
+        TROUTER,
+        "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c",
+        "wss://GO.Trouter.Teams.Microsoft.com./v4/c",
+        "ws://go.trouter.teams.microsoft.com:8443/anything",
+    ] {
+        assert!(is_trouter_socket(&url::Url::parse(url)?), "{url}");
+    }
+    for url in [
+        "wss://trouter.teams.microsoft.com/v4/c",
+        "wss://go.trouter.teams.microsoft.com.example.com/v4/c",
+        "wss://gotrouter.teams.microsoft.com/v4/c",
+        "wss://127.0.0.1/v4/c",
+    ] {
+        assert!(!is_trouter_socket(&url::Url::parse(url)?), "{url}");
+    }
+    Ok(())
+}
+
+#[test]
+fn every_frame_on_a_contacting_service_s_socket_is_unknown() {
+    for url in [
+        "wss://api.flightproxy.teams.microsoft.com/api/v2/ep/x",
+        "wss://emea.ng.msg.teams.microsoft.com/v1/socket",
+        "wss://teams.microsoft.com/api/chatsvc/emea/v1/socket",
+        "wss://teams.microsoft.com//api/chatsvc/emea/v1/socket",
+        "wss://go.skype.com/x",
+        "wss://graph.microsoft.com/beta/subscriptions",
+    ] {
+        assert_eq!(classify_frame(&text(url, "anything")), Classification::Unknown, "{url}");
+        assert_eq!(classify_frame(&binary(url, "AQID")), Classification::Unknown, "{url}");
+    }
+}
+
+#[test]
+fn on_any_other_socket_a_frame_passes_but_one_the_guard_could_not_read() {
+    for url in [
+        LOCAL,
+        "wss://augloop.office.com/",
+        "wss://teams.microsoft.com/v2/socket",
+        "wss://teams.microsoft.com/api/authsvc/v1.0/authz",
+    ] {
+        assert_eq!(classify_frame(&text(url, "anything")), Classification::Allow, "{url}");
+        assert_eq!(classify_frame(&text(url, "3:::{}")), Classification::Allow, "{url}");
+        assert_eq!(classify_frame(&binary(url, "AQID")), Classification::Allow, "{url}");
+        for payload in [Payload::Unreadable, Payload::Foreign] {
+            let frame = Frame {
+                url: url.to_owned(),
+                payload,
+            };
+            assert_eq!(classify_frame(&frame), Classification::Unknown, "{url}");
+        }
+    }
+    assert_eq!(classify_frame(&text("not a url", "allow:1")), Classification::Unknown);
+}
+
+#[test]
+fn a_forced_frame_deny_matches_its_socket_and_the_text_it_names() {
+    let held = ForcedFrameDeny::new("^ws://127\\.0\\.0\\.1:9/")
+        .unwrap()
+        .with_text_containing(r#""name":"user.activity""#);
+    assert!(held.matches(&text(LOCAL, r#"5:3+::{"name":"user.activity","args":[]}"#)));
+    assert!(!held.matches(&text(LOCAL, r#"5:1+::{"name":"ping"}"#)));
+    assert!(
+        !held.matches(&binary(LOCAL, "AQID")),
+        "a text rule takes no binary frame"
+    );
+    assert!(!held.matches(&text(TROUTER, r#"5:3+::{"name":"user.activity","args":[]}"#)));
+
+    let local = local_hold("ws://127.0.0.1:9").unwrap();
+    assert!(!local.matches(&text(LOCAL, "allow:1")));
+    for frame in [
         text(LOCAL, "deny:allow:1"),
         text(LOCAL, "Allow:1"),
         text(LOCAL, ""),
-        text("wss://127.0.0.1:9/page", "allow:1"),
-        text("ws://127.0.0.1:10/page", "allow:1"),
-        text("ws://localhost:9/page", "allow:1"),
-        text("ws://127.0.0.1:9/page/deeper", "allow:1"),
-        text("ws://127.0.0.1:9/", "allow:1"),
-        text("http://127.0.0.1:9/page", "allow:1"),
-        Frame {
-            url: LOCAL.to_owned(),
-            // "allow:1" as bytes: a binary frame matches no rule
-            payload: Payload::Binary("YWxsb3c6MQ==".to_owned()),
-        },
+        binary(LOCAL, "YWxsb3c6MQ=="),
         Frame {
             url: LOCAL.to_owned(),
             payload: Payload::Unreadable,
         },
-    ];
-    for frame in &lookalikes {
-        assert_eq!(classifier.classify(frame), Classification::Unknown, "{frame:?}");
+    ] {
+        assert!(local.matches(&frame), "{frame:?}");
     }
+    assert!(
+        !local.matches(&text("ws://127.0.0.1:10/page", "deny:1")),
+        "another socket"
+    );
+    let every = ForcedFrameDeny::new("^wss://").unwrap().labelled("all");
+    assert!(every.matches(&binary(TROUTER, "AQID")) && every.matches(&text(TROUTER, "2::")));
 }
 
 // --- the guard script and its requests ---
@@ -270,13 +388,14 @@ fn members(mris: &[&str]) -> Arc<Fixed> {
     )))
 }
 
-fn ws_fence(fence: &Arc<Fence>, classifier: FrameClassifier, member_list: &[&str]) -> TestResult<WsFence> {
-    Ok(WsFence::new(
-        classifier,
-        Arc::clone(fence),
-        members(member_list),
-        GuardScript::with_token(TOKEN)?,
-    ))
+/// A fence over `member_list`, standing the local socket server at `hold` in for one whose frames are denied but
+/// `allow:` frames ([`local_hold`]).
+fn ws_fence(fence: &Arc<Fence>, hold: Option<&str>, member_list: &[&str]) -> TestResult<WsFence> {
+    let ws = WsFence::new(Arc::clone(fence), members(member_list), GuardScript::with_token(TOKEN)?);
+    if let Some(origin) = hold {
+        ws.force_deny(local_hold(origin)?);
+    }
+    Ok(ws)
 }
 
 fn log_entries(path: &Path) -> TestResult<Vec<Value>> {
@@ -298,7 +417,7 @@ fn untimed(mut entry: Value) -> Value {
 #[tokio::test]
 async fn an_unknown_frame_is_denied_kept_and_logged_without_its_query_or_content() {
     let lab = lab().unwrap();
-    let ws = ws_fence(&lab.fence, FrameClassifier::seeded(), &[]).unwrap();
+    let ws = ws_fence(&lab.fence, None, &[]).unwrap();
 
     let verdict = ws.decide(&text(TROUTER, "secret-content")).await;
 
@@ -329,12 +448,7 @@ async fn an_unknown_frame_is_denied_kept_and_logged_without_its_query_or_content
 #[tokio::test]
 async fn a_frame_on_another_realms_socket_is_denied_unclassified_whatever_rule_would_match() {
     let lab = lab().unwrap();
-    let ws = ws_fence(
-        &lab.fence,
-        FrameClassifier::seeded().with_own(local_rule("ws://127.0.0.1:9")),
-        &[],
-    )
-    .unwrap();
+    let ws = ws_fence(&lab.fence, Some("ws://127.0.0.1:9"), &[]).unwrap();
     let foreign = Frame {
         url: LOCAL.to_owned(),
         payload: Payload::Foreign,
@@ -370,37 +484,70 @@ impl std::io::Write for Refuses {
 }
 
 #[tokio::test]
-async fn an_own_frame_passes_logged_and_one_that_cannot_be_logged_is_denied() {
+async fn a_frame_that_reaches_nobody_passes_logged_as_allowed_and_one_that_cannot_be_logged_is_denied() {
     let lab = lab().unwrap();
-    let ws = ws_fence(
-        &lab.fence,
-        FrameClassifier::seeded().with_own(local_rule("ws://127.0.0.1:9")),
-        &[],
-    )
-    .unwrap();
+    let ws = ws_fence(&lab.fence, Some("ws://127.0.0.1:9"), &[]).unwrap();
     assert_eq!(ws.decide(&text(LOCAL, "allow:1")).await, Verdict::Allow);
     assert!(ws.denials().is_empty());
-    let entries = log_entries(&lab.log_path).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["verdict"], "allow");
-    assert_eq!(entries[0]["own"], "authz");
-    assert_eq!(entries[0]["url"], "ws://127.0.0.1:9/page");
+    let entries: Vec<Value> = log_entries(&lab.log_path).unwrap().into_iter().map(untimed).collect();
+    assert_eq!(
+        entries,
+        [json!({"verdict": "allow", "event": "allowed", "method": "SEND", "host": "127.0.0.1", "path": "/page"})]
+    );
 
     let fence = Arc::new(Fence::new(
         Roster::new([Mri::new(LAB_A)], []),
         FenceLog::from_writer(Refuses),
     ));
-    let ws = ws_fence(
-        &fence,
-        FrameClassifier::seeded().with_own(local_rule("ws://127.0.0.1:9")),
-        &[],
-    )
-    .unwrap();
+    let ws = ws_fence(&fence, Some("ws://127.0.0.1:9"), &[]).unwrap();
     assert_eq!(
         ws.decide(&text(LOCAL, "allow:1")).await,
         Verdict::Deny(DenyCause::LogUnavailable)
     );
     assert_eq!(ws.denials()[0].cause, DenyCause::LogUnavailable);
+    // a forced deny the log won't take is still denied, but as lost, never as the forced deny a scenario expects
+    ws.force_deny(ForcedFrameDeny::new("^ws://").unwrap().labelled("held"));
+    assert_eq!(
+        ws.decide(&text(LOCAL, "allow:1")).await,
+        Verdict::Deny(DenyCause::LogUnavailable)
+    );
+    let denials = ws.denials();
+    assert_eq!(denials.len(), 2);
+    assert_eq!(denials[1].cause, DenyCause::LogUnavailable);
+    assert_eq!(denials[1].label.as_deref(), Some("held"));
+}
+
+#[tokio::test]
+async fn a_forced_frame_deny_comes_before_the_rule_is_kept_with_its_label_and_logged() {
+    let lab = lab().unwrap();
+    let ws = ws_fence(&lab.fence, None, &[]).unwrap();
+    let ping = text(TROUTER, r#"5:1+::{"name":"ping"}"#);
+    let activity = text(TROUTER, r#"5:3+::{"name":"user.activity","args":[{"state":"active"}]}"#);
+    assert_eq!(ws.decide(&activity).await, Verdict::Allow, "the rule lets it through");
+    ws.force_deny(
+        ForcedFrameDeny::new("trouter")
+            .unwrap()
+            .with_text_containing("user.activity")
+            .labelled("held"),
+    );
+    assert_eq!(ws.decide(&activity).await, Verdict::Deny(DenyCause::Forced));
+    assert_eq!(ws.decide(&ping).await, Verdict::Allow);
+    let denials = ws.denials();
+    assert_eq!(denials.len(), 1);
+    assert_eq!(denials[0].label.as_deref(), Some("held"));
+    assert_eq!(denials[0].url, "wss://go.trouter.teams.microsoft.com/v4/c");
+    let entries: Vec<Value> = log_entries(&lab.log_path).unwrap().into_iter().map(untimed).collect();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[1]["verdict"], "deny");
+    assert_eq!(entries[1]["reason"], "forced");
+    assert_eq!(entries[1]["url"], "wss://go.trouter.teams.microsoft.com/v4/c");
+    let log = std::fs::read_to_string(&lab.log_path).unwrap();
+    assert!(
+        !log.contains("user.activity") && !log.contains("planted-query"),
+        "{log}"
+    );
+    ws.clear_forced();
+    assert_eq!(ws.decide(&activity).await, Verdict::Allow);
 }
 
 #[tokio::test]
@@ -414,12 +561,12 @@ async fn a_mapped_write_frame_goes_through_the_fence_with_a_fresh_membership() {
         )
     };
     let lab = lab().unwrap();
-    let lab_only = ws_fence(&lab.fence, FrameClassifier::seeded(), &[LAB_A]).unwrap();
+    let lab_only = ws_fence(&lab.fence, None, &[LAB_A]).unwrap();
     assert_eq!(
         lab_only.judge(Classification::Write(target()), TROUTER).await,
         Verdict::Allow
     );
-    let with_coworker = ws_fence(&lab.fence, FrameClassifier::seeded(), &[LAB_A, COWORKER]).unwrap();
+    let with_coworker = ws_fence(&lab.fence, None, &[LAB_A, COWORKER]).unwrap();
     assert_eq!(
         with_coworker.judge(Classification::Write(target()), TROUTER).await,
         Verdict::Deny(DenyCause::Fenced(DenyReason::Outsiders { count: 1 }))
@@ -477,12 +624,7 @@ fn socket_created(session: &str, socket: &str, url: &str) -> Event {
 #[tokio::test]
 async fn the_verdict_goes_back_to_the_context_that_asked_and_an_allow_covers_one_frame() {
     let lab = lab().unwrap();
-    let ws = ws_fence(
-        &lab.fence,
-        FrameClassifier::seeded().with_own(local_rule("ws://127.0.0.1:9")),
-        &[],
-    )
-    .unwrap();
+    let ws = ws_fence(&lab.fence, Some("ws://127.0.0.1:9"), &[]).unwrap();
     let (url, commands) = recording_endpoint().await.unwrap();
     let (cdp, _events) = Cdp::connect(&url).await.unwrap();
     let ask = |seq: u64, data: &str| request(seq, "text", data);
@@ -511,7 +653,7 @@ async fn the_verdict_goes_back_to_the_context_that_asked_and_an_allow_covers_one
         .await;
 
     assert_eq!(allowed.unwrap(), Some(Verdict::Allow));
-    assert_eq!(denied.unwrap(), Some(Verdict::Deny(DenyCause::Unclassified)));
+    assert_eq!(denied.unwrap(), Some(Verdict::Deny(DenyCause::Forced)));
     assert_eq!(ignored.unwrap(), None);
     assert_eq!(malformed.unwrap(), Some(Verdict::Deny(DenyCause::Malformed)));
     assert_eq!(unauthenticated.unwrap(), Some(Verdict::Deny(DenyCause::Malformed)));
@@ -520,7 +662,7 @@ async fn the_verdict_goes_back_to_the_context_that_asked_and_an_allow_covers_one
     assert_eq!(
         causes,
         [
-            DenyCause::Unclassified,
+            DenyCause::Forced,
             DenyCause::Malformed,
             DenyCause::Malformed,
             DenyCause::ForeignSocket
@@ -563,7 +705,7 @@ async fn the_verdict_goes_back_to_the_context_that_asked_and_an_allow_covers_one
 #[tokio::test]
 async fn a_frame_sent_without_an_allow_is_a_logged_breach() {
     let lab = lab().unwrap();
-    let ws = ws_fence(&lab.fence, FrameClassifier::seeded(), &[]).unwrap();
+    let ws = ws_fence(&lab.fence, None, &[]).unwrap();
 
     ws.observe(&socket_created("S1", "ws-1", TROUTER));
     ws.observe(&frame_sent("S1", "ws-1", 1, "secret-content"));
@@ -603,12 +745,7 @@ async fn a_frame_sent_without_an_allow_is_a_logged_breach() {
 #[tokio::test]
 async fn a_detached_session_takes_its_allows_with_it() {
     let lab = lab().unwrap();
-    let ws = ws_fence(
-        &lab.fence,
-        FrameClassifier::seeded().with_own(local_rule("ws://127.0.0.1:9")),
-        &[],
-    )
-    .unwrap();
+    let ws = ws_fence(&lab.fence, Some("ws://127.0.0.1:9"), &[]).unwrap();
     let (url, _commands) = recording_endpoint().await.unwrap();
     let (cdp, _events) = Cdp::connect(&url).await.unwrap();
     let ask = request(1, "text", "allow:1");
@@ -770,14 +907,14 @@ async fn navigate(cdp: &Cdp, tab: &ArmedTarget, url: &str) -> TestResult {
     page::navigate(cdp, &tab.session, url, STEP).await
 }
 
-/// One armed run on a throwaway profile, with an own rule standing in for the echo server.
+/// One armed run on a throwaway profile, the echo server standing in for a socket whose frames are denied.
 struct Run {
     armed: ArmedBrowser,
     lab: Lab,
     _profile: tempfile::TempDir,
 }
 
-/// Runs `body` on an armed browser whose frame classifier allows `allow:` text frames to `echo`, then closes the
+/// Runs `body` on an armed browser whose fence denies every frame to `echo` but `allow:` text frames, then closes the
 /// browser whatever `body` returned. Without Chrome it does nothing.
 async fn with_run<F>(pages: &MockServer, echo: &EchoServer, body: F) -> TestResult
 where
@@ -789,12 +926,8 @@ where
     let profile = tempfile::tempdir()?;
     let browser = Browser::launch(&chrome, &LaunchOptions::new(profile.path().join("p")), STEP).await?;
     let lab = lab()?;
-    let http = HttpFence::new(Classifier::seeded(), Arc::clone(&lab.fence), members(&[]));
-    let ws = ws_fence(
-        &lab.fence,
-        FrameClassifier::seeded().with_own(local_rule(&echo.origin)),
-        &[],
-    )?;
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&lab.fence), members(&[]));
+    let ws = ws_fence(&lab.fence, Some(echo.origin.as_str()), &[])?;
     let options = ArmOptions {
         service_worker_origins: vec![pages.uri()],
     };
@@ -850,7 +983,7 @@ async fn frames_leave_only_on_allow_and_in_order_in_every_scope() {
         // each scope's two denied text frames, its bytes and its Blob, logged and kept without the query
         let mut denied: BTreeMap<String, usize> = BTreeMap::new();
         for denial in run.armed.frame_denials() {
-            assert_eq!(denial.cause, DenyCause::Unclassified, "{denial:?}");
+            assert_eq!(denial.cause, DenyCause::Forced, "{denial:?}");
             *denied.entry(denial.url).or_default() += 1;
         }
         let expected: BTreeMap<String, usize> = SCOPES

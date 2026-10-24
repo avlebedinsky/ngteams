@@ -10,13 +10,17 @@ publish.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 httpdate.workspace = true
+# the session's renewals (audience, expiry, outcome) and its signing out, in the app's diagnostic log; never a token
+log.workspace = true
 oo7.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-# the session: one refresh per audience however many callers wait on it, and its renewal notifications
-tokio = { workspace = true, features = ["sync"] }
+# the session: one refresh per audience however many callers wait on it, and its renewal notifications; the broker:
+# its server reads and writes any async stream (`io-util`) and watches it close while a store call waits (`macros`),
+# its client's blocking socket runs on the blocking pool (`rt`)
+tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync"] }
 # form encoding of the token requests and of the authorize URL's query
 url.workspace = true
 zeroize.workspace = true
@@ -24,7 +28,8 @@ zeroize.workspace = true
 [dev-dependencies]
 # the region record read back from a file
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+# the broker's tests: its server on a socket pair's end, a deadline on its end (`time`)
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
 wiremock.workspace = true
 
 [lints]

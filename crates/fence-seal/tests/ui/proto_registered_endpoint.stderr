@@ -1,0 +1,9 @@
+error[E0451]: fields `id` and `account` of struct `RegisteredEndpoint` are private
+  --> tests/ui/proto_registered_endpoint.rs:9:9
+   |
+ 8 |     let _ = RegisteredEndpoint {
+   |             ------------------ in this type
+ 9 |         id: "00000000-0000-4000-8000-000000000001".to_owned(),
+   |         ^^ private field
+10 |         account: Some(Mri::new("8:orgid:anyone")),
+   |         ^^^^^^^ private field

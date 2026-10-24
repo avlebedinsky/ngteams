@@ -11,17 +11,17 @@
 //! - a edits its first message and reacts to it; both reach b.
 //! - The a–b–c group chat (`chats.toml`'s `abc`): c watches too, in a process of its own; a sends
 //!   [`GROUP_MESSAGES`] messages to the group chat, and each reaches both b's and c's watch (latencies reported per
-//!   receiver, not held to a limit). The fence lets these writes out only because it reads this one recorded chat as
-//!   complete when both of its member reads agree on exactly a, b and c: an assumption the user accepted on
-//!   2026-10-21, not evidence (`CLAUDE.md`, `docs/protocol/fence-targets.md`, "The lab's group chat").
+//!   receiver, not held to a limit). The fence lets these writes out because its fresh member-list read of the chat,
+//!   made on every write, finds only lab accounts (`CLAUDE.md`, "The sealed fence API").
 //! - Catch-up: b's watch stops (its socket closes), a sends [`GAP_MESSAGES`] more, b watches again, and b's store then
 //!   has every message of the run exactly once (each catch-up must sync every conversation); then b reads the chat up
 //!   to the run's last message: a read receipt, which moves b's stored read horizon (the consumption horizon) but not
 //!   b's web client's "last read" mark (`ab_chat::wait_for_newest` deals with that).
 //! - b's store holds every group message exactly once, and so does c's.
 //! - `fence.log` over the run: whole lines; allows only on the a–b chat (message, edit, reaction, read receipt) and
-//!   messages on the recorded group chat; no deny at all, so none of a mapped write; only reviewed own-state requests
-//!   and own Trouter frames; nothing else (no write on any other chat, no breach, no delivery response).
+//!   messages on the recorded group chat; no deny at all, so none of a mapped write; requests let through because they
+//!   reach nobody (logged `allowed`); nothing else (no write on any other chat, no breach, and no frame: the native
+//!   sink writes none to `fence.log`).
 //!
 //! Built only with `--features live`, and even then it skips unless `PROTO_LAB_LIVE=1`, so
 //! `cargo test --all-features` stays offline. Run it under the lab's live lock (`flock
@@ -41,7 +41,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use teams_fence::lab::{Alias, LabChats, LabConfig, LabLocations, LabPaths};
 use teams_fence::one_to_one_id;
-use teams_proto::{Authenticate, Disconnect, EndpointRegistration, MessageLossAck, OwnFrame, OwnState, Ping};
 
 /// How many messages a sends to b while b watches.
 const MESSAGES: usize = 50;
@@ -290,12 +289,15 @@ fn send_to(live: &Live, name: &str, chat: &str, text: &str) -> Sent {
     }
 }
 
-/// When a watch received a message event of `change` for `id` in `chat` (the first one).
+/// When a watch received a message event of `change` for `id` in `chat` over the push channel (the first one): a
+/// read's event for the same message (a catch-up after a drop or a message-loss report) is no delivery, and a
+/// delivery it stood in for may have been lost.
 fn received(events: &[Value], chat: &str, id: &str, change: &str) -> Option<i64> {
     events
         .iter()
         .find(|event| {
             event["event"] == "message"
+                && event["source"] == "delivery"
                 && event["conversation"] == chat
                 && event["id"] == id
                 && event["change"] == change
@@ -426,6 +428,7 @@ fn edit_and_react(live: &Live, watch: &mut Watch, first: &Sent) -> Value {
     let edited = watch.until(ARRIVAL_LIMIT, "received the edit", |events| {
         events.iter().find_map(|event| {
             (event["event"] == "message"
+                && event["source"] == "delivery"
                 && event["id"] == first.id.as_str()
                 && event["change"] == "edit"
                 && event["text"] == text.as_str())
@@ -529,13 +532,13 @@ fn b_reads_up_to(live: &Live, last: &Sent) {
 struct FenceCounts {
     writes: BTreeMap<String, usize>,
     group_writes: BTreeMap<String, usize>,
-    own_requests: BTreeMap<String, usize>,
-    own_frames: BTreeMap<String, usize>,
+    /// Mutating requests let through because they reach nobody, by method, host and path shape.
+    allowed: BTreeMap<String, usize>,
 }
 
 /// `fence.log`'s lines since `start` (a byte offset): whole JSON lines; allows only for the a–b chat's message,
-/// edit, reaction and read receipt and the recorded group chat's messages; no deny; own-state requests and frames only
-/// of the reviewed kinds.
+/// edit, reaction and read receipt and the recorded group chat's messages; no deny; the requests let through because
+/// they reach nobody, counted by their shape; no frame (the native sink logs none).
 fn fence_log_holds(live: &Live, start: u64) -> Value {
     let log = fs::read(&live.fence_log).unwrap();
     let run = &log[usize::try_from(start).unwrap()..];
@@ -559,8 +562,7 @@ fn fence_log_holds(live: &Live, start: u64) -> Value {
         "lines": lines,
         "allowed_writes": counts.writes,
         "allowed_group_writes": counts.group_writes,
-        "own_requests": counts.own_requests,
-        "own_frames": counts.own_frames,
+        "allowed": counts.allowed,
     })
 }
 
@@ -592,16 +594,10 @@ impl FenceCounts {
             return;
         }
         assert_eq!(verdict, "allow", "a line that is no allow: {}", entry["event"]);
-        let own = entry["own"].as_str().unwrap_or_default().to_owned();
-        if entry["event"] == "frame" {
-            let frames = [Authenticate::KIND, Ping::KIND, MessageLossAck::KIND, Disconnect::KIND];
-            assert!(frames.contains(&own.as_str()), "a frame off the list: {own}");
-            *self.own_frames.entry(own).or_default() += 1;
-        } else {
-            assert_eq!(entry["channel"], "http", "a line of another kind");
-            assert_eq!(own, EndpointRegistration::KIND, "a request off the list");
-            *self.own_requests.entry(own).or_default() += 1;
-        }
+        assert_eq!(entry["event"], "allowed", "a line of another kind");
+        let text = |key: &str| entry[key].as_str().unwrap_or_default().to_owned();
+        let shape = format!("{} {}{}", text("method"), text("host"), text("path"));
+        *self.allowed.entry(shape).or_default() += 1;
     }
 }
 

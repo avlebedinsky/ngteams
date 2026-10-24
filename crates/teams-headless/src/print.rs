@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use teams_core::{Cause, Event, MessageChange};
+use teams_core::{Availability, Cause, Event, MessageChange, NameFrom, Source, TransientSent};
 use teams_proto::chat;
 use teams_store::{Applied, Conversation, Member, Message, OutboxEntry, OutboxState, Reaction};
 use teams_trouter::RegistrationReport;
@@ -217,7 +217,7 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         Event::Registration(RegistrationReport::Failed(error)) => {
             json!({"event": "registration", "registered": false, "error": error})
         }
-        Event::Disconnected(down) => json!({"event": "disconnected", "reason": format!("{down:?}")}),
+        Event::Disconnected { down, .. } => json!({"event": "disconnected", "reason": format!("{down:?}")}),
         Event::PushStopped(stop) => json!({"event": "push_stopped", "reason": format!("{stop:?}")}),
         Event::CaughtUp { cause: why, report } => json!({
             "event": "caught_up",
@@ -230,24 +230,7 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         Event::CatchUpFailed { cause: why, error } => {
             json!({"event": "catch_up_failed", "cause": cause(*why), "error": error.to_string()})
         }
-        Event::Message {
-            conversation,
-            id,
-            change: what,
-            applied: how,
-            message,
-            replay,
-        } => {
-            let value = json!({
-                "event": "message",
-                "conversation": conversation,
-                "id": id,
-                "change": change(*what),
-                "applied": applied(*how),
-                "replay": replay,
-            });
-            with_message(value, message.as_deref(), names)
-        }
+        Event::Message { .. } => message_fields(event, names),
         Event::Typing {
             conversation,
             from,
@@ -261,6 +244,13 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         Event::ConversationChanged { conversation } => {
             json!({"event": "conversation_changed", "conversation": conversation})
         }
+        Event::Queued(row) => json!({
+            "event": "queued",
+            "row": row.id,
+            "kind": row.kind.as_str(),
+            "state": row.state.as_str(),
+            "conversation": row.conversation_id,
+        }),
         Event::Outbox(row) => json!({
             "event": "outbox",
             "row": row.id,
@@ -270,7 +260,83 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
             "message_id": row.message_id,
             "error": row.last_error,
         }),
+        Event::Transient(transient, sent) => json!({
+            "event": "transient",
+            "kind": transient.kind(),
+            "conversation": transient.conversation(),
+            "outcome": transient_outcome(sent),
+        }),
+        // whose profile changed, never their name
+        Event::Profile { mri } => json!({"event": "profile", "who": names.show(mri)}),
+        Event::Teams => json!({"event": "teams"}),
+        Event::Presence { mri, availability } => json!({
+            "event": "presence",
+            "who": names.show(mri),
+            "availability": availability_word(availability),
+        }),
         Event::Failed { during, error } => json!({"event": "failed", "during": during, "error": error.to_string()}),
+        Event::Indexed { messages } => json!({"event": "indexed", "messages": messages}),
+    }
+}
+
+/// Where a person's name came from, as printed: `graph`, `short_profile`, `message`, `known`, or `none` without a name.
+#[must_use]
+pub const fn name_source_word(from: Option<NameFrom>) -> &'static str {
+    match from {
+        Some(NameFrom::Graph) => "graph",
+        Some(NameFrom::ShortProfile) => "short_profile",
+        Some(NameFrom::Message) => "message",
+        Some(NameFrom::Known) => "known",
+        None => "none",
+    }
+}
+
+/// An availability as printed: its name (`Available`, `Offline`, …), `Unknown`, or a word this build doesn't name as
+/// UPS gave it ([`visible`]).
+#[must_use]
+pub fn availability_word(availability: &Availability) -> String {
+    match availability {
+        Availability::Other(word) => visible(word),
+        named => format!("{named:?}"),
+    }
+}
+
+/// A message event's fields (see [`event_fields`]).
+fn message_fields(event: &Event, names: &LabNames) -> Value {
+    let Event::Message {
+        conversation,
+        id,
+        change: what,
+        applied: how,
+        message,
+        source,
+    } = event
+    else {
+        return Value::Null;
+    };
+    let value = json!({
+        "event": "message",
+        "conversation": conversation,
+        "id": id,
+        "change": change(*what),
+        "applied": applied(*how),
+        "replay": *source == Source::Replay,
+        "source": match source {
+            Source::Delivery => "delivery",
+            Source::Replay => "replay",
+            Source::CatchUp => "catch_up",
+            Source::History => "history",
+        },
+    });
+    with_message(value, message.as_deref(), names)
+}
+
+fn transient_outcome(sent: &TransientSent) -> Value {
+    match sent {
+        TransientSent::Sent => json!("sent"),
+        TransientSent::Waiting { not_before } => json!({"waiting": not_before}),
+        TransientSent::Denied { reason } => json!({"denied": reason}),
+        TransientSent::Dropped { reason } => json!({"dropped": reason}),
     }
 }
 

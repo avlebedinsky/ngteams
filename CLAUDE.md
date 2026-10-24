@@ -1,62 +1,47 @@
 # ms-teams
 
 A native Microsoft Teams client for Linux in Rust + GPUI, written against Teams' internal APIs with the web client as
-the reference. M0 (a protocol lab with a hard write fence, and risk spikes) is done: its plan is
-`docs/plans/completed/20261019-native-teams-m0-lab-and-spikes.md`, its outcome `docs/m0-acceptance.md`. M1 (the
-headless chat core: `teams-store`, `teams-trouter`, `teams-core`, the `teams-headless` lab binary) is done: its plan is
-`docs/plans/completed/20261020-native-teams-m1-headless-chat-core.md`, its outcome `docs/m1-acceptance.md`. The next
-milestone is M2, the GPUI daily driver (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`). Commands and
-layout are in [README.md](README.md).
+the reference. The work in progress is the GPUI daily driver
+(`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`); finished plans are in `docs/plans/completed/`. Commands
+and layout are in [README.md](README.md).
 
 ## Hard rules
 
-These hold for every agent and every change, with no exceptions.
+These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
+else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
+this rule.
 
-- **Writes go only through the fence, and only within the 3 lab accounts.** A write is anything others could notice:
-  messages, edits, deletes, reactions, typing, read receipts, calls and answering a call, invites, meetings, member
-  changes, chat creation, channel posts, bot replies. It is allowed only when every participant of its target, fetched
-  fresh, is a lab account or an approved service participant. Anything unknown, partial or paginated is denied.
-- **One group chat counts as read in full: the lab's own.** The user set this on 2026-10-21. It is the a–b–c chat
-  `chats.toml` records as `abc`, looked up when the fence decides. Its thread read and its member list, both read
-  fresh within one 10 s budget, must list exactly a, b and c (`lab.toml`'s MRIs), the same in both, made by a, with
-  `totalMemberCount` 3, equal `eTag`s, no paging key anywhere, and the rest of the shape the service gave live
-  (`docs/protocol/fence-targets.md`). This is an accepted assumption, not evidence: a member the service hides from
-  both reads would still get the write. Every other group chat, a natively created one included, stays partial and
-  is never read. Never widen it to another chat, another roster or another shape without new evidence.
-- **A denied request may be allowed only if nothing it does or names leaves the lab.** The user set this on
-  2026-10-21. Nobody outside the 3 lab accounts can notice it: it changes nothing (a read sent by `POST`), or only
-  lab-account state no one outside the lab can see (its session, its tokens, its own settings). Presence, a status
-  note, out-of-office, profile fields, typing and read receipts are seen across the tenant: they are writes, under the
-  rule above. A request the write mapping classifies as a write is judged only by `Fence::check`, never allowed by
-  this rule. Every id it names is checked when the fence decides: an account or MRI against the roster; a
-  conversation by its members, fetched fresh and complete through the fence's membership source, all lab accounts; a
-  message or notification id only under such a conversation or the account's own `ME`. Any other id makes it
-  `Unknown`. Its captured response shape can hold only the accounts it names or that conversation's members: a
-  request whose results can list anyone else (a search, suggestions, the org chart) is never allowed. It hands no
-  token or credential to a third party (a bot, an app's backend). It never covers calls.
-- **An allowance matches the request's exact captured shape, query included.** It is added only after a review, with
-  its reason and tests first. Its shape is the host, the method, the path, every query parameter and its value, the
-  headers that change what the request does, and the body schema. A query parameter or body field the capture didn't
-  show makes the request `Unknown`, as does anything the fence can't read with certainty, and any other shape of the
-  same endpoint stays `Unknown` and denied. A path-only matcher doesn't qualify: `OwnRule` and `UrlPattern` ignore the
-  query and `classify` checks own rules before `map_write`, so such a rule on a message's `properties` path would pass
-  a reaction (`?name=emotions`) unfenced. An allowance never takes a request the write mapping would classify. What
-  it allows is logged to `fence.log`. For example, the mention picker's profile lookups of lab accounts may be
-  allowed; the people search, whose results list other tenant users, and bot invokes, whose body carries the
-  account's token, may not.
-- **Nothing runs live against the tenant before the browser fence is armed** (M0 Tasks 6–7): HTTP interception on
-  every host and target, the WebSocket guard, the service worker neutralized. Until the write-target mapping exists
-  (M0 Task 11) the fence runs fail-closed: every mutating request is denied except the seeded own-state list.
-- **The native client sends only what its sealed policy allows** (M1 Tasks 5, 15), as the browser fence does for the
-  browser. A request is a read (`GET`, no body), an entry of `teams-proto`'s sealed `OwnState` list, or a sealed
-  `Mutating` write sent only as `Authorized<_>` with a `WritePermit` from `Fence::check` for its exact target. A
-  Trouter frame is an entry of the sealed `OwnFrame` list, sent only through `FrameSink`. Each own-state request and
-  each frame is logged to `fence.log` before it is sent, and one that can't be logged isn't sent; a write is logged by
-  `Fence::check`. Nothing else can go out: no raw request or frame, no answer to a delivery, no retry the transport
-  didn't decide (the HTTP client's own retries are off). The transport reaches only its fixed host allowlist,
-  `https` only, no proxy, no redirects. Both lists grow only by a reviewed entry in its exact captured shape, under the
-  allowance rules above; sign-in and token renewal stay in `teams-auth`'s own clients and touch only the account's own
-  credentials. A mock origin (HTTP or socket) exists only under a `test-support` feature, which a lab binary refuses to
+- **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
+  post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
+  joining or answering one), a chat created, a member added or removed, an invite, a meeting, a mail, a share. It is
+  allowed only when every participant of its target, read fresh and complete (no paging key), is one of the 3 lab
+  accounts (`lab.toml`'s MRIs) or an approved service participant (the echo service, by its MRI). A target whose
+  members can't be read in full, or a write the fence can't tie to a target with certainty, is denied.
+- **Everything else is allowed**, in the lab browser and in the native client, with no capture or review needed:
+  reads by any method (a `POST` search or people lookup too, whoever its results list), the account's own session,
+  tokens and settings (out-of-office with automatic replies included), presence, a status note, typing and read
+  receipts (others may see these; that is fine).
+- **When unsure whether a request reaches people, treat it as contacting.** On a service whose purpose is reaching
+  people (the chat service, calling, Graph, Outlook, SharePoint, AMS, the middle tier's team, meeting and invite
+  paths, CSA), a mutating request is contacting unless it is known not to be (typing, read receipts, the account's
+  own feed, settings and endpoints); one the fence can't read is denied, never let through.
+- **No token or credential goes to a third party** (a bot, an app's backend): a bot invoke stays denied. Sign-in and
+  token renewal stay in `teams-auth`'s own clients and touch only the account's own credentials.
+- **Calls go only to the lab, both ways.** A call may be started when every callee is a lab account or the echo
+  service, and answered when its invitation names only lab accounts or the echo service; every other incoming call
+  is ignored, never answered (no `acceptance`, no delivery response for it, no scenario click). A write on an
+  existing call is allowed only on a call the fence itself permitted a start or an answer for in this run; an `add`
+  is judged per invitee. The roster isn't watched. Media (TURN, ICE, DTLS-SRTP) isn't classified: it carries a call
+  the signaling fence permitted.
+- **Nothing runs live against the tenant before the browser fence is armed**: HTTP interception on every host and
+  target, the WebSocket guard, the service worker neutralized.
+- **The native client sends a contacting write only as `Authorized<_>`** with a `WritePermit` from `Fence::check`
+  for its exact target, logged to `fence.log` by `Fence::check`; a sealed `Mutating` type in `teams-proto` is the
+  only way to build one, and the transport refuses any other request `teams_fence::contacting` doesn't call `None`.
+  The transport is `https` only, with no proxy and no redirects, to its services' bases, and hands each token only to
+  its own service's host.
+  A write is never resent by the transport (the HTTP client's own retries stay off: an HTTP/2 retry could post
+  twice). A mock origin (HTTP or socket) exists only under a `test-support` feature, which a lab binary refuses to
   run with. No write ever comes from a `cargo test` process: a live test spawns a normally built lab binary (built
   with `--target-dir target/lab`) and reads its output and `fence.log`.
 - **Captures and tokens never enter the repo, not even sanitized.** Captures live under
@@ -70,12 +55,12 @@ These hold for every agent and every change, with no exceptions.
   defence in depth, not permission to commit its output. Tokens never reach logs or stdout: print only aud, exp,
   scopes and tenant.
 - **Agents never build or run a personal build and never receive the user's tokens.** Lab binaries get a
-  `WritePermit` only from `teams-fence`: their fence comes from `Fence::open_lab` (roster from `lab.toml`, the lab's
-  `fence.log`), and `teams-fence`'s `test-support` feature (any roster, any log, fake membership sources) is enabled
-  only under `[dev-dependencies]`, never as a normal dependency.
+  `WritePermit` only from `teams-fence`: their fence comes from `Fence::open_lab` or `Fence::open_lab_account`
+  (roster from `lab.toml`, the lab's `fence.log`), and `teams-fence`'s `test-support` feature (any roster, any log,
+  fake membership sources) is enabled only under `[dev-dependencies]`, never as a normal dependency.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
 
-## Patterns learned in M0 and M1
+## Patterns
 
 What the code does and why. A change that undoes one of these needs a new reason, not a cleanup.
 
@@ -92,21 +77,24 @@ What the code does and why. A change that undoes one of these needs a new reason
   iframes through `Runtime.enable` + `Page.enable` + a new-document script with `runImmediately`, workers through a
   `Runtime.evaluate` that must report `armed`. Frames wait per socket and go out only on an explicit allow, answered
   with the run's token; a send on a socket made in another realm is refused (`foreign`). `Network.webSocketFrameSent`
-  is only an audit: a frame no allow covers is a breach.
+  is only an audit: a frame no allow covers is a breach. The frame rule (`fence_ws::classify_frame`): on a Trouter
+  socket (any host under `trouter.teams.microsoft.com`) only socket.io 0.9 types `0`, `1`, `2` and `5` pass, so a
+  delivery response (`3`), a JSON message, an acknowledgement, a binary frame and anything unparsable are denied; on a
+  contacting service's socket (`teams_fence::on_contacting_service`) every frame is denied; anywhere else a frame
+  passes. A frame let through is logged `allowed` (method `SEND`).
 - **Service workers only through the browser.** Target-level auto-attach filters them out: one attached twice while
   paused answers nothing until it runs. At run start they are unregistered and their caches cleared
   (`Storage.clearDataForOrigin` works only on a page session), and pages bypass them (`Network.setBypassServiceWorker`
   needs `Network.enable` on the same session).
 - **Worklets** (the calling stack's audio) have no network API and no `Fetch`: armed with `Resume` only.
 - **A target that can't be armed is closed, never resumed.** Every step times out after 10 s, the close too. A held
-  target sends nothing until its parent's auto-attach ends or the connection holding it drops (Chrome 155, M1 Task 2:
-  `tests/browser.rs`), and `Target.getTargets` doesn't list a held out-of-process iframe, so a close that isn't
-  confirmed is never re-checked: the fence `SIGKILL`s the browser's process group while its connection still holds
-  the target, then reaps it. A held, never-resumed target closed or killed that way is contained (a warning; a killed
-  browser fails the run). A target whose resume was sent, that wasn't held at attach, or that could be neither closed
-  nor killed is a breach. Each one is an `ArmingRecord` in `fence.log` and an `arming_failure` in the capture. The kill
-  can't order an EOF Chrome sent just before it (`docs/backlog/containment-kill-cannot-order-an-unread-eof.md`,
-  accepted).
+  target sends nothing until its parent's auto-attach ends or the connection holding it drops (`tests/browser.rs`),
+  and `Target.getTargets` doesn't list a held out-of-process iframe, so a close that isn't confirmed is never
+  re-checked: the fence `SIGKILL`s the browser's process group while its connection still holds the target, then reaps
+  it. A held, never-resumed target closed or killed that way is contained (a warning; a killed browser fails the run).
+  A target whose resume was sent, that wasn't held at attach, or that could be neither closed nor killed is a breach.
+  Each one is an `ArmingRecord` in `fence.log` and an `arming_failure` in the capture. The kill can't order an EOF
+  Chrome sent just before it (`docs/backlog/containment-kill-cannot-order-an-unread-eof.md`, accepted).
 - The browser lives and dies with the fence: `ArmedBrowser` owns it, a lost CDP connection kills it, and `close` waits
   for decisions still running (a live membership read) before the run's denies are read. Reporting and NEL are
   disabled by flag (their uploads bypass `Fetch`). The CDP client stays our own: `chromiumoxide` resumes held targets
@@ -114,43 +102,76 @@ What the code does and why. A change that undoes one of these needs a new reason
 
 ### The sealed fence API (`crates/teams-fence`, `crates/fence-seal`)
 
-- A lab binary's fence is `Fence::open_lab()` (roster from `lab.toml`, the lab's `fence.log`); its membership source is
-  `FailClosed` (every fetched scope `Partial(NoSource)`) or `LiveMembershipSource::for_fence(&fence)` (1:1 chats,
-  complete only when the members are exactly the two the chat id names; and the lab's recorded group chat under the
-  rule above, from the same `lab.toml` snapshot as the fence's roster; `LiveMembershipSource::new` admits no group
-  chat). The native client's member reads take their credential from a `CredentialSource` asked on every read (the
-  session's current `ic3` token), renewed once on a 401; without one every write is `Partial(NoCredential)`.
-  `MembershipSource` and `Mutating` are sealed: a new source lives
-  in `teams-fence`, a new write type in `teams-proto`, and `fence-seal`'s trybuild cases prove nothing else can mint a
-  permit. A binary built with `test-support` (`cargo test`, `--all-targets`, `--all-features` unify it in) refuses to
-  run, so live runs use `cargo build -p <crate>`.
-- One permit covers one write to one exact `Target` (kind, scope, added participants); `Authorized::new` checks it.
-  A request the fence can't read with certainty is `Unknown` and denied: bodies are read strictly (case-folded
-  duplicate keys make it `Unknown`), and shapes are allowlisted from captures (the echo call start), never guessed.
-- Writes on an existing call can't be fenced yet: no authoritative call-membership read exists
-  (`docs/backlog/fence-call-follow-ups.md`). Don't stand in a registry of what the fence permitted.
-- A group chat the native client creates isn't recorded in `chats.toml`, so its writes are denied: admitting one
-  needs an enrolment that binds the id the service returns to the exact create the fence permitted, and a change to
-  the group-chat rule above (`docs/backlog/group-chat-member-read-completeness.md`). Only `abc-chat` records the lab's
-  chat, once.
-- The read-by-`POST` list (`crates/proto-lab/src/post_read.rs`, `fence.log` `post_read`) is a class of its own, asked
-  only after the write mapping: the mention picker's profile lookups (`users/fetchShortProfile`, `users/fetch`) in
-  their captured query, header values and body, let through only when every MRI is a lab account of the roster at
-  decision time (`Fence::lab_accounts_only`; approved services don't count). A `PausedRequest` keeps header values
-  only for the headers the list reads, never a token or cookie.
+- A lab binary's fence is `Fence::open_lab()` (roster from `lab.toml`, the lab's `fence.log`), or for one account's
+  native client `Fence::open_lab_account(alias)`, the same with that account as its own; its membership source
+  is `FailClosed` (every fetched scope `Partial(NoSource)`) or `LiveMembershipSource::for_fence(&fence)` (1:1 chats,
+  complete only when the members are exactly the two the chat id names; group and meeting chats, any of them, from one
+  fresh member-list read, complete only in the shape `parse_members` takes: no paging key, the count equal to the
+  members listed, nobody hidden, deleted or listed twice, every MRI `8:orgid:<guid>` or `28:<guid>`;
+  `LiveMembershipSource::new` reads the same). The native client's
+  member reads take their credential from a `CredentialSource` asked on every read (the session's current `ic3`
+  token), renewed once on a 401; without one every write is `Partial(NoCredential)`. `MembershipSource` and `Mutating`
+  are sealed: a new source lives in `teams-fence`, a new write type in `teams-proto`, and `fence-seal`'s trybuild
+  cases prove nothing else can mint a permit. A binary built with `test-support` (`cargo test`, `--all-targets`,
+  `--all-features` unify it in) refuses to run, so live runs use `cargo build -p <crate>`.
+- One permit covers one write to one exact `Target` (kind, scope, added participants); `Authorized::new` checks it. A
+  request the fence can't read with certainty is `Unknown` and denied: bodies are read strictly (case-folded duplicate
+  keys make it `Unknown`), and the echo call start is matched in its captured shape.
+- `teams_fence::contacting(&Request, &Policy)` is the classifier of the lab rule, for both sides: `None` (reaches
+  nobody), `Write(Target)` (judged by `Fence::check`) or `Unreadable` (denied). Only a mutating request (a method
+  other than `GET`/`HEAD`/`OPTIONS`, a body, or a method override) on a contacting service (`Service`, told by host
+  and, on a Teams origin, by path) is looked at further; there it is unreadable unless a row of its
+  table (`crates/teams-fence/src/contacting.rs`, `contacting/chat.rs`, `contacting/call.rs`) maps or carves it out. A
+  row is code plus a case in `crates/teams-fence/tests/contacting.rs` or its fixtures under
+  `crates/teams-fence/tests/fixtures/contacting/`. A mutating request let through as `None` is logged as `allowed`
+  (`FenceLog::record_allowed`: method, host and `path_shape`, every id replaced by its kind, never a query, header or
+  body). The browser fence asks it for every paused request (`proto-lab`'s `Classifier`: a read passes unlogged,
+  `None` passes logged, `Write` goes to `Fence::check`, `Unreadable` is denied), and so does the native transport for
+  every plain request (`Transport::send`: `None` is sent, logged; `Write` and `Unreadable` are refused before anything
+  is sent, `Refusal::Write` and `Refusal::Unreadable`).
+- `Fence::check` reads the target's members for every write except a new target (`Scope::New`, a chat or call
+  created, judged by its added participants alone), typing and read receipts on a chat, and the account's own
+  availability (which keeps its own-account check). Typing and read receipts reach nobody: on a chat
+  id `is_chat_id` takes (1:1, group or meeting, the rule `contacting` carves them out by) they are permitted without a
+  member read, judged only by the participants they name, and logged like every decision; anywhere else (a channel, a
+  chat id in another form) they are judged like any write. So a caller hands it a `Typing` or `ReadReceipt` target
+  only for the content-free signal: `contacting` carves typing out only in its captured body (`content` empty or
+  absent, no key but `content`, `contenttype`, `messagetype`) and a read receipt only with `name` its one query key.
+- Writes on an existing call are denied: the follow-ups aren't mapped, and the native `add` (`AddToCall`, an `Invite`
+  on `Scope::Call`) is `Partial`, since no membership source reads a call's members
+  (`docs/backlog/fence-call-follow-ups.md`).
+- A group or meeting chat is judged like a 1:1 chat, by its fresh member list: a lab-only one is writable, a group
+  chat the native client creates included. `chats.toml` is lab data for the scenarios and clients (`abc-chat` records
+  the lab's a–b–c chat in it, once); the fence doesn't read it.
+- A `PausedRequest` keeps header values only for the method overrides `contacting` reads (`OVERRIDE_HEADERS`), never a
+  token or cookie, and a body Chrome didn't inline is classified as an empty one: a row that reads the body takes
+  nothing, so such a request is never judged by a guess.
 
 ### The native client (`crates/teams-proto`, `teams-trouter`, `teams-core`, `teams-store`)
 
 - **The outbox** (`teams-core/src/outbox.rs`) is the only way a write goes out. A command is a row with a random
-  numeric `clientmessageid` kept across attempts; every attempt is a fresh `Fence::check`. After an outcome that
-  isn't known (a timeout, a network error, a 5xx other than 503) the chat is synced and searched for the row's
+  numeric `clientmessageid` kept across attempts; every attempt is a fresh `Fence::check`. After an outcome that isn't
+  known (a timeout, a network error, a 5xx other than 503) the chat is synced and searched for the row's
   `clientmessageid` before it goes again with the same id, and every attempt after the first starts with that check;
   only a post can be looked for, so any other write with an unknown outcome is failed, never resent. Writes on one
   message (or on one chat's read horizon) go out in the order asked. Our message coming back is matched to its row by
   `clientmessageid`, never stored twice. **No resend across runs**: each open store is a run holding a lock; rows of
-  an earlier run go out only after an explicit `Store::resend`, never a row of a run still open (the web client's
-  late resend in M0 is the case this rules out).
-- **The retry table, by layer**: the transport retries a read or own-state request once (after a 401 the session
+  an earlier run go out only after an explicit `Store::resend`, never a row of a run still open (the web client
+  resends a failed send on a later load; this rules that out).
+- **What the native client sends** (`teams-proto`): a read (`Read`: `GET`, no body), a plain request (`Request`, an
+  open trait: any method and body, sent by `Transport::send` only when `teams_fence::contacting` calls it `None`,
+  logged `allowed` before it goes: the registration, profile lookups and presence reads whoever they name, the
+  account's own settings), or a sealed `Mutating` write as `Authorized<_>`; a Trouter frame only as a typed
+  `OwnFrame`, through `FrameSink`, which writes nothing to `fence.log` (a frame isn't a contacting write). `OwnFrame`
+  is sealed only to keep raw text out: no other crate makes frame text, and a new frame type in `teams-proto` (say
+  `user.activity`) is an ordinary change. A request that can't be logged isn't sent. Each service has one base
+  (`Service`; a new one is a code change: its base and its token's audience), and every URL is built on it and
+  checked against it. The personal build's sealed `OwnState` and `PostRead` lists stay beside them
+  (`HttpTransport::own_state`, `HttpTransport::post_read` under a `Fence::check_post_read` permit), and so does
+  `teams_fence::FrameRecord` for its frame log; a lab binary sends their entries as plain requests. There is no raw
+  frame, no answer to a delivery (one may come only as a typed response for a call the fence permitted), and no retry
+  the transport didn't decide.
+- **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The
   session returns throttling as `TokenError::Throttled` with its wait, shared by every caller already waiting, with
@@ -162,19 +183,34 @@ What the code does and why. A change that undoes one of these needs a new reason
   row); upserts go by version, so an older one never overwrites a newer one; reactions are per user, the latest
   change wins, and a take-back stays as a tombstone. `Control/*` messages (typing) are signals, never stored, and
   never settle a row.
-- **Deliveries are never answered** (M1 Task 14: no harm shown; on a reconnect the service replays up to ~15 min of
-  unanswered events, which the catch-up and the versioned store absorb). An incoming call is ignored, and the native
-  client sends no `user.activity` and sets no presence; which request makes an account show online is open
-  (`docs/protocol/trouter.md`). A message-loss report means: catch up, then acknowledge it. A token renewal reconnects
-  the socket (5 min before expiry, and on the session's renewal); an open socket is never re-authenticated.
-- **Read a field's whole captured range, not the mock's.** Two bugs passed every offline test in M1 and lost
-  messages live, because the fixtures held only the common form: a delivery's socket.io `id` is a signed 32-bit
-  number (about one in ten negative), and the push URL's endpoint id is base64url (`-` and `_`). A fixture of a
-  field's shape covers every form the captures show.
-- **No log line carries a payload.** `teams-trouter` caps `log` at `debug` at compile time (`max_level_debug`, for any
-  binary that links it): `tungstenite`'s `trace!` prints every frame it sends, the `user.authenticate` with its bearer
-  token included. A new dependency that logs at `debug` or below is checked the same way. `TEAMS_HEADLESS_LOG=debug`
-  logs our own crates only, by kind and size.
+- **Deliveries are never answered** (on a reconnect the service replays up to ~15 min of unanswered events, which the
+  catch-up and the versioned store absorb). An incoming call is ignored, and the native client sends no
+  `user.activity`; what makes an account show online is UPS's endpoint `PUT`, not `user.activity`
+  (`docs/protocol/trouter.md`, "Own presence"). Its own availability goes out only as the sealed writes
+  `SetEndpointAvailability` and `ForceAvailability`, transient writes of the outbox on `Scope::Account`, which the
+  fence permits without a member read only for its own account (`Fence::open_lab_account`), each naming only a
+  `RegisteredEndpoint` (only `teams_proto::register` makes one, from a registration of this run the registrar took,
+  sent over the native `HttpTransport`: `register` and the push channel take only an `EndpointRegistrar`, sealed,
+  which a fake transport is only under `test-support`). It records the account it was registered for, the transport's
+  fence's own (`Transport::own_account`), and a write of any other account's availability can't be built from it (the
+  constructors give `None`; the outbox drops it unsent). A waiting availability is dropped when the push channel
+  stops. A message-loss report means: catch up, then acknowledge it. A token renewal reconnects the socket (5 min
+  before expiry, and on the session's renewal); an open socket is never re-authenticated.
+- **Read a field's whole captured range, not the mock's.** A fixture holding only a field's common form passes offline
+  and loses messages live: a delivery's socket.io `id` is a signed 32-bit number (about one in ten negative), and the
+  push URL's endpoint id is base64url (`-` and `_`). A fixture of a field's shape covers every form the captures show.
+- **No log line carries a payload, except the app's debug log.** `teams-trouter` caps `log` at `debug` at compile time
+  (`max_level_debug`, for any binary that links it): `tungstenite`'s `trace!` prints every frame it sends, the
+  `user.authenticate` with its bearer token included. A new dependency that logs at `debug` or below is checked the
+  same way. `TEAMS_HEADLESS_LOG=debug` logs our own crates only, by kind and size. The one exception: at `debug` the
+  app's own diagnostic log (`teams-log`) carries full HTTP requests and responses (method, URL with its query,
+  headers, bodies) and every Trouter frame both ways; at `info` it stays payload-free. Tokens still never reach logs:
+  credentials are redacted by the logger itself (`Authorization`, `Cookie`/`Set-Cookie`, the skypetoken and every
+  other token header, the token fields of sign-in and renewal answers, sign-in's code and verifier wherever they are
+  written, Trouter's `user.authenticate` and the `connectparams` signature (`sig`) of `trouter.connected`, a
+  credential's `name=` value anywhere on a line in any escaped form: a SAS link's `sig` in a message's HTML as
+  `&amp;sig=`, `%26sig%3D`, `\u0026sig=`), never left to call sites. A lab run's debug log is lab data like a capture
+  (never in the repo, never sanitized into it); the personal build's is the user's data, which agents never read.
 - **The store** (`teams-store`): one SQLite file per account (`0600`, its dir `0700`), WAL, migrations by
   `user_version`, each in an `IMMEDIATE` transaction; a released migration is never edited, a new one is added. A new
   file is made and switched to WAL under `<store>-runs/open.lock`: SQLite answers two connections switching at once
@@ -211,17 +247,22 @@ What the code does and why. A change that undoes one of these needs a new reason
   members live on a lab profile force-denies an earlier run's probe (`ab_chat::probe_rules`), `echo-call` included,
   and with it the group chat's first message, which begins with the probe's marker.
 - A scenario's `DenyPolicy` says which denies it expects: `load` all of them; the writing scenarios only their own
-  forced denies, by label, and the reviewed **expected-deny list** (`scenario/expected.rs`: host + method + `/`-segment
-  path pattern, frames by socket host, each class with the reason the scenario doesn't need it; `ab-trouter` adds its
-  own classes, `TROUTER_RUN_REQUESTS`). The list judges the run only, never a verdict: everything on it stays denied
-  and logged. A deny on the scenario's own chat, one for a partial or refused membership, one whose `fence.log` entry
-  was lost, and any class off the list fail the run; a new class is reviewed onto the list, never waved through.
+  forced denies, by label, and the reviewed **expected-deny list** (`scenario/expected.rs`: host + method +
+  `/`-segment path pattern, frames by socket host, each class with the reason the scenario doesn't need it: bot
+  invokes, the account's own channel entry and channel properties, the file browser's prewarm, Trouter delivery
+  responses). The list judges the run only, never a verdict: everything on it stays denied and logged, and it holds
+  only what the lab rule denies. A deny on the scenario's own chat, one for a partial or refused membership, one whose
+  `fence.log` entry was lost, a deny of what the lab rule lets through, and any class off the list fail the run, the
+  failure naming the deny's contacting service; a new class goes onto the list with its reason, never waved through.
   `echo-call` still exits 1 on the call's follow-ups: they are needed, so they aren't on it.
-- Classifiers are chosen per run: `seeded` (status, load, auth), `sign_in` (login only), `mapped` (ab-chat,
-  ab-chat-full, ab-image, abc-chat), `messaging` (ab-trouter: the messaging stack's registration and the Trouter
-  session frames), `calling` (echo-call, a superset of `mapped`). Own-state is added only after a review, in the exact
-  shape a capture showed, its query included; the seeded rules still ignore the query, a known gap
-  (`docs/backlog/seeded-own-rules-ignore-the-query.md`).
+- Every run uses the one classifier (`classify::Classifier`, the lab rule; `echo-call` adds the echo service's MRI
+  for its test call start), so a scenario picks none. What a scenario holds back on purpose is a labelled forced deny,
+  of requests (`ForcedDeny`) or of frames (`ForcedFrameDeny`: `ab-trouter-quiet` and `own-presence-endpoint` hold
+  back `user.activity`, the other `own-presence` runs the endpoint `PUT` or the manual status), expected by its label.
+- The sign-in window (`teams-signin`) keeps default-deny rules of its own (`teams_signin::classify`): reads, the
+  token endpoint and authz in their captured queries, and Entra's sign-in form, which still takes any query
+  (`docs/backlog/seeded-own-rules-ignore-the-query.md`). An own-state rule (`OwnRule`) matches the method, the
+  origin, the path and the query (none unless given its `QueryRule`), never the body or headers.
 - After native runs the web client opens a chat at its "last read" mark (a native read receipt moves the stored
   horizon but not that mark), so a scenario waiting for a new message clicks "Jump to newest" or the "New messages"
   pill (`ab_chat::wait_for_newest`).
@@ -234,8 +275,8 @@ What the code does and why. A change that undoes one of these needs a new reason
   ~/.local/share/teams-lab/live.lock`) and runs under an outer `timeout --signal=INT`. Every page call and navigation
   is bounded (a `beforeunload` dialog holding a navigation is accepted after 5 s), and SIGINT or SIGTERM kills the
   run's browsers and lets the fence's decisions still running land in `fence.log` (`crates/proto-lab/src/stop.rs`).
-- **Never answer a call.** No scenario clicks answer, the fence doesn't map `acceptance`, and Trouter delivery
-  responses stay denied. The native Trouter client ignores incoming calls the same way and has no path to answer any
+- **No call is answered.** No scenario clicks answer, the fence doesn't map `acceptance`, and Trouter delivery
+  responses are denied. The native Trouter client ignores incoming calls the same way and has no path to answer any
   delivery.
 - Live tests are built only with `--features live` and run only with `PROTO_LAB_LIVE=1`.
 - Tokens: our client is the native `1fec8e78-…` with the `nativeclient` redirect. The chat service takes
@@ -255,8 +296,8 @@ a failure; never raise a timeout or skip an arming step to make it pass.
 
 **A fence breach is never a flake.** Under load an arming step can go unanswered for 10 s; the target is then closed
 or the browser killed (contained: "Arming the lab browser" above), and the run is breached when the target's resume
-was sent, it wasn't held at attach, or it could be neither closed nor killed. M1 Task 2 settled that such a breach is
-real: it counts as one. Don't rerun until a run comes out clean and record that as a pass. Keep the breached run's
+was sent, it wasn't held at attach, or it could be neither closed nor killed. Such a breach is real: it counts as
+one. Don't rerun until a run comes out clean and record that as a pass. Keep the breached run's
 printed output (the failed step survives there and in the capture's `arming_failure`; `fence.log` keeps the
 `ArmingRecord` without ids), check it and `fence.log` for anything sent unguarded, report the run as breached, and
 report any later clean run next to it, never in its place.

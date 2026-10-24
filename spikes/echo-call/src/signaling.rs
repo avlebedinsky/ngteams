@@ -249,7 +249,7 @@ impl NgcSdp {
 /// `to`, the scenario [`TEST_CALL_SCENARIO`], the call's and the conversation's callback links, the offer. Its keys are
 /// a subset of the web client's (the rest of what it sends, capabilities and client details, is left out: whether the
 /// service needs any of it is unconfirmed). The browser fence maps exactly this shape to the [`StartCall`]'s target
-/// (`proto_lab::calling::call_start`, checked in `tests/signaling.rs`).
+/// (`teams_fence::contacting`, checked in `tests/signaling.rs`).
 #[must_use]
 pub fn call_start_body(call: &Authorized<StartCall>, me: &Endpoint, offer: &NgcSdp, links: &CallbackLinks) -> Value {
     let link_map = |callbacks: &[Callback]| -> Map<String, Value> {

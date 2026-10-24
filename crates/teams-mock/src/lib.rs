@@ -22,7 +22,8 @@
 //! 1:1 chat holding the messages of `messages.json` (an add-member event, plain, edited, quoted and deleted
 //! messages); an empty a–c chat (`conversations.json`); an empty a–x chat with the outsider; the a–b–c group chat of
 //! `thread-group.json`; and, in a's list only, a team channel and a's notifications stream (`conversations.json`),
-//! both read-only. The ids are the constants below, made up (never a real tenant's).
+//! both read-only; the team's other channel, read-only, in nobody's list, holding the posts and replies of
+//! `channel-messages.json` (M2 Task 16). The ids are the constants below, made up (never a real tenant's).
 //!
 //! **What it serves** (paths under [`CHAT_BASE`]):
 //! - reads: the conversation list (`GET v1/users/ME/conversations`, and the sync link it hands out, which names the
@@ -34,6 +35,15 @@
 //!   …/conversations/<id>/properties?name=consumptionhorizon`) and chat creation (`POST v1/threads`). Each changes
 //!   the state every later read shows and queues a [`ChatEvent`] for each **other** member of the chat
 //!   ([`ChatServiceMock::take_events`]); the writer gets none.
+//!
+//! **CSA** (`csa.rs`, M2 Task 16): its one read the native client sends, the account's teams and their channels (`GET
+//! /api/csa/<region>/api/v3/teams/users/me` with the web client's query), from `tests/fixtures/csa/teams.json`, under
+//! the CSA base `https://teams.microsoft.com/api/csa/amer`, taking the account's token alone.
+//!
+//! **UPS** (`ups.rs`, M2 Task 19): the account's own availability, its presence endpoint's `PUT` and its manual status
+//! (set, or cleared with no body), in the shapes the web client sent, under the presence base [`PRESENCE_BASE`],
+//! naming an endpoint the account registered with the registrar here; answered `201` and `200` with no body, as UPS
+//! answered, and kept ([`ChatServiceMock::own_availability`]).
 //!
 //! **Trouter** ([`ChatServiceMock::start_trouter`], `trouter.rs`): connect, authenticate, `trouter.connected`, pings,
 //! the deliveries of the queued events and their replay on connect, from the synthetic `tests/fixtures/trouter/`
@@ -55,9 +65,11 @@
 //! and its own capabilities aren't known, so they aren't made up.
 
 mod chatsvc;
+mod csa;
 mod fixtures;
 mod reads;
 mod trouter;
+mod ups;
 mod world;
 mod writes;
 
@@ -65,11 +77,12 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
-use wiremock::matchers::any;
-use wiremock::{Mock, MockServer, Request};
+use wiremock::matchers::{any, method};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 pub use fixtures::FixtureError;
 pub use trouter::{REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
+pub use ups::{AvailabilityChange, OwnAvailability};
 
 /// The region of the mock's chat base.
 pub const REGION: &str = "amer";
@@ -77,6 +90,14 @@ pub const REGION: &str = "amer";
 /// The chat base a client is built with (`chatServiceAfd` as the region's GTMs give it); its requests go to
 /// [`ChatServiceMock::origin`] with this base's path.
 pub const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
+
+/// The CSA base a client is given (`chatSvcAggAfd` as the region's GTMs give it); its requests go to
+/// [`ChatServiceMock::origin`] with this base's path.
+pub const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/amer";
+
+/// The presence base a client is given (`presenceUPS` as the region's GTMs give it); its requests go to
+/// [`ChatServiceMock::origin`] with this base's path.
+pub const PRESENCE_BASE: &str = "https://teams.microsoft.com/ups/noam";
 
 /// The regional host the service names new resources on in a 201's `Location` (`docs/protocol/fence-targets.md`).
 pub const REGIONAL_HOST: &str = "https://amer.ng.msg.teams.microsoft.com";
@@ -120,8 +141,12 @@ pub fn lab_toml(data_dir: &std::path::Path) -> String {
     format!("data_dir = {:?}\n{accounts}", data_dir.display().to_string())
 }
 
-/// A team channel in a's list: read-only.
+/// A team channel in a's list: read-only. It is the team's id and its general channel's (`csa/teams.json`).
 pub const CHANNEL: &str = "19:channel0001@thread.tacv2";
+/// The team's other channel (`csa/teams.json`, and the team's `topics` in `conversations.json`): a, b and c are its
+/// members, it holds the posts and replies of `channel-messages.json`, it is in nobody's conversation list (the chat
+/// service lists a team's general channel only), and its thread is a `topic`. Read-only.
+pub const TEAM_CHANNEL: &str = "19:channel0002@thread.tacv2";
 /// a's notifications stream: read-only.
 pub const NOTIFICATIONS: &str = "48:notifications";
 
@@ -157,6 +182,15 @@ pub enum EventKind {
 pub struct ChatServiceMock {
     server: MockServer,
     state: Arc<Mutex<world::State>>,
+}
+
+/// Matches a request whose path (still percent-encoded) ends with the string held.
+struct PathEnds(String);
+
+impl Match for PathEnds {
+    fn matches(&self, request: &Request) -> bool {
+        request.url.path().ends_with(&self.0)
+    }
 }
 
 impl std::fmt::Debug for ChatServiceMock {
@@ -221,6 +255,72 @@ impl ChatServiceMock {
         let mut world = self.lock();
         world.events.entry(mri.to_owned()).or_default().push(event);
         world.changed();
+    }
+
+    /// `from` posts `html` (a rich-text message) to `chat`, as one of its clients would: stored as a read gives it back
+    /// and queued for the chat's other members, as any post. Its id, or `None` when `from` may not write there.
+    #[must_use = "None says the post was refused"]
+    pub fn post_as(&self, from: &str, chat: &str, html: &str) -> Option<String> {
+        writes::post_text(&mut self.lock(), from, chat, html)
+    }
+
+    /// Changes the message of `conversation` that carries `client_message_id` as `change` says, as every later read
+    /// gives it (a test's stand-in for an entry a client can't read); its `version` is whatever `change` leaves, so a
+    /// sync link already past it doesn't bring it again. `false` when there is no such message.
+    pub fn change_message(&self, conversation: &str, client_message_id: &str, change: impl FnOnce(&mut Value)) -> bool {
+        let mut world = self.lock();
+        let message = world.conversation_mut(conversation).and_then(|conversation| {
+            conversation
+                .messages
+                .iter_mut()
+                .find(|message| message["clientmessageid"].as_str() == Some(client_message_id))
+        });
+        let Some(message) = message else {
+            return false;
+        };
+        change(message);
+        true
+    }
+
+    /// Adds a copy of the message of `conversation` that carries `client_message_id`, changed as `change` says, as
+    /// the conversation's newest entry, the original kept as it is (a test's stand-in for a second entry of one
+    /// message, one a client can't read, met by the same read as the readable one). `false` when there is no such
+    /// message.
+    pub fn copy_message(&self, conversation: &str, client_message_id: &str, change: impl FnOnce(&mut Value)) -> bool {
+        let mut world = self.lock();
+        let Some(conversation) = world.conversation_mut(conversation) else {
+            return false;
+        };
+        let Some(mut copy) = conversation
+            .messages
+            .iter()
+            .find(|message| message["clientmessageid"].as_str() == Some(client_message_id))
+            .cloned()
+        else {
+            return false;
+        };
+        change(&mut copy);
+        conversation.messages.push(copy);
+        true
+    }
+
+    /// Answers the next request of `http_method` whose path ends with `path_end` with `status` and no body, before the
+    /// world sees it: a test's stand-in for a write the service refuses (the world doesn't change and nobody is told).
+    /// Every later request is answered as before.
+    pub async fn refuse_next(&self, http_method: &str, path_end: &str, status: u16) {
+        Mock::given(method(http_method))
+            .and(PathEnds(path_end.to_owned()))
+            .respond_with(ResponseTemplate::new(status))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// The own-availability writes UPS took, in order (see the crate docs).
+    #[must_use]
+    pub fn own_availability(&self) -> Vec<OwnAvailability> {
+        self.lock().availability.clone()
     }
 
     /// Every request the mock got, in order (to check what a client sent, and how often).

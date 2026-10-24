@@ -3,12 +3,14 @@
 //!
 //! Nothing reaches the desktop the tests run in. Each sandbox ([`gpui_video::sandbox`]) starts a private headless
 //! weston (GL renderer, `--fake-seat`: GPUI needs a `wl_seat`) and a niri nested in it, each with its own
-//! `XDG_RUNTIME_DIR` in a temp dir. Every child's environment is built from scratch: no `WAYLAND_DISPLAY`, `DISPLAY`,
-//! `NIRI_SOCKET` or D-Bus address of the session leaks in, the smoke binary gets the nested niri's socket as an
-//! absolute `WAYLAND_DISPLAY`, and `niri msg` always gets the nested niri's `NIRI_SOCKET`.
+//! `XDG_RUNTIME_DIR` in a temp dir, a private `dbus-daemon` with fake notification and tray servers, and a no-op URI
+//! opener first on the client's `PATH`. Every child's environment is built from scratch: no `WAYLAND_DISPLAY`,
+//! `DISPLAY`, `NIRI_SOCKET` or D-Bus address of the session leaks in, the smoke binary gets the nested niri's socket
+//! as an absolute `WAYLAND_DISPLAY` and the private bus's address, and `niri msg` always gets the nested niri's
+//! `NIRI_SOCKET`.
 //!
-//! Without a weston that takes `--fake-seat` (15.0 or later) or a niri on `PATH`, the compositor tests say so on
-//! stderr and pass, unless `GPUI_SMOKE_REQUIRE=1`, which makes them fail instead.
+//! Without a weston that takes `--fake-seat` (15.0 or later), a niri or a `dbus-daemon` on `PATH`, the compositor
+//! tests say so on stderr and pass, unless `GPUI_SMOKE_REQUIRE=1`, which makes them fail instead.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -182,7 +184,7 @@ fn refuses_to_run_without_a_wayland_display() {
 }
 
 /// A compositor outside an opted-in sandbox (the desktop session's) is refused before the binary connects to it:
-/// without `GPUI_VIDEO_SANDBOX`, with it naming another dir, and with a bare socket name in `XDG_RUNTIME_DIR`.
+/// without `UI_SANDBOX_DIR`, with it naming another dir, and with a bare socket name in `XDG_RUNTIME_DIR`.
 #[test]
 fn refuses_a_compositor_outside_the_sandbox() {
     let dir = TempDir::new().unwrap();

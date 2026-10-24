@@ -9,10 +9,13 @@ publish.workspace = true
 [dependencies]
 # a fresh `clientmessageid` for each command, from the system random source
 getrandom.workspace = true
+# a lab engine's warning that the region's middle-tier base was refused (never its value); capped at `debug` at compile
+# time like teams-trouter's
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
 serde.workspace = true
 # a command's outbox payload, and a message post's answer (`OriginalArrivalTime`)
 serde_json.workspace = true
-# a throttled token (`TokenError::Throttled`) waits like a throttled post
+# a throttled token (`TokenError::Throttled`) waits like a throttled post; a lab engine's session (`lab`)
 teams-auth.workspace = true
 teams-fence.workspace = true
 teams-proto.workspace = true
@@ -30,6 +33,8 @@ reqwest.workspace = true
 teams-fence = { workspace = true, features = ["test-support"] }
 # the sync tests' chat service, from the synthetic fixtures
 teams-mock.workspace = true
+# the diagnostic log at `info` and at `debug` over an offline run (`tests/diagnostic_log.rs`, `tests/diagnostic_log_debug.rs`)
+teams-log.workspace = true
 # the transport reaches wiremock through its mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
 # the engine tests' push channel reaches the Trouter mock through its mock origin

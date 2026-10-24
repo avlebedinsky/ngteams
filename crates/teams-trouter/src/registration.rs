@@ -1,16 +1,20 @@
-//! The registrar registration of the endpoint's push URL, for the messaging stack only, and its renewal: the reviewed
-//! own-state request [`EndpointRegistration`] (`teams_proto`), sent through the account's transport, which logs it to
-//! `fence.log` first and takes the `ic3` token from the session.
+//! The registrar registration of the endpoint's push URL, for the messaging stack only, and its renewal: the plain
+//! request [`EndpointRegistration`] (`teams_proto`), sent through the account's transport, which asks the fence's
+//! classifier, logs it to `fence.log` as `allowed` first and takes the `ic3` token from the session.
 //!
 //! As the web client's messaging stack does it (`docs/protocol/trouter.md`): a registration on every
 //! `trouter.connected`, again [`RegistrationTimes::renew_before`] before its TTL ends, and after a failure again once
 //! [`RegistrationTimes::retry_after`] has passed. The calling stack's registration (`SkypeSpacesWeb`) is never made:
 //! it would make the account reachable for calls.
+//!
+//! Each registration goes out through `teams_proto::register`, which gives the endpoint it registered once the
+//! registrar took it (a `teams_proto::RegisteredEndpoint`): the one id the account's own availability may name (M2 Task
+//! 19). The loop hands it on with the registration's report.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use teams_proto::{EndpointRegistration, REGISTRATION_TTL, Transport};
+use teams_proto::{EndpointRegistrar, EndpointRegistration, REGISTRATION_TTL, RegisteredEndpoint, register};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -44,6 +48,9 @@ pub enum RegistrationReport {
     Failed(String),
 }
 
+/// What one registration came to: its report, and the endpoint it registered when it went through.
+pub(crate) type Outcome = (RegistrationReport, Option<RegisteredEndpoint>);
+
 /// The registration loop of one connection; dropping it stops the loop.
 pub(crate) struct Registrar {
     task: JoinHandle<()>,
@@ -61,25 +68,28 @@ impl Registrar {
         transport: Arc<T>,
         registration: EndpointRegistration,
         times: RegistrationTimes,
-        reports: mpsc::UnboundedSender<RegistrationReport>,
+        reports: mpsc::UnboundedSender<Outcome>,
     ) -> Self
     where
-        T: Transport + Send + 'static,
+        T: EndpointRegistrar + Send + 'static,
     {
         let task = tokio::spawn(async move {
             loop {
-                let (report, wait) = match transport.own_state(&registration).await {
-                    Ok(answer) if answer.is_success() => (
-                        RegistrationReport::Registered,
+                let (outcome, wait) = match register(&*transport, &registration).await {
+                    Ok((_, Some(endpoint))) => (
+                        (RegistrationReport::Registered, Some(endpoint)),
                         times.ttl.saturating_sub(times.renew_before),
                     ),
-                    Ok(answer) => (
-                        RegistrationReport::Failed(format!("the registrar answered HTTP {}", answer.status())),
+                    Ok((answer, None)) => (
+                        (
+                            RegistrationReport::Failed(format!("the registrar answered HTTP {}", answer.status())),
+                            None,
+                        ),
                         times.retry_after,
                     ),
-                    Err(error) => (RegistrationReport::Failed(error.to_string()), times.retry_after),
+                    Err(error) => ((RegistrationReport::Failed(error.to_string()), None), times.retry_after),
                 };
-                if reports.send(report).is_err() {
+                if reports.send(outcome).is_err() {
                     return;
                 }
                 tokio::time::sleep(wait).await;

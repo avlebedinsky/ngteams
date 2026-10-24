@@ -173,6 +173,20 @@ impl LabPaths {
         self.data_dir.join("store").join(format!("{}.sqlite", alias.as_str()))
     }
 
+    /// A lab account's app settings (`teams-ui`'s settings file: the selected chat, read receipts, typing,
+    /// notifications, the idle time, the manual status), `<data_dir>/ui/<alias>.toml`: lab data, never in the repo.
+    #[must_use]
+    pub fn ui_settings_file(&self, alias: Alias) -> PathBuf {
+        self.data_dir.join("ui").join(format!("{}.toml", alias.as_str()))
+    }
+
+    /// A lab account's app diagnostic log directory (`teams-log`: `teams-app.log` and its rotated files),
+    /// `<data_dir>/logs/<alias>`: lab data like a capture, never in the repo.
+    #[must_use]
+    pub fn app_log_dir(&self, alias: Alias) -> PathBuf {
+        self.data_dir.join("logs").join(alias.as_str())
+    }
+
     /// The lab's own chats whose ids no account's MRIs give (the a–b–c group chat), `<data_dir>/chats.toml`
     /// ([`LabChats`]): lab data, never in the repo.
     #[must_use]
@@ -182,7 +196,8 @@ impl LabPaths {
 }
 
 /// The lab's chats whose ids can't be derived (`<data_dir>/chats.toml`, [`LabPaths::chats_file`]): today the group
-/// chat of a, b and c, which `proto-lab run abc-chat` creates once and records here.
+/// chat of a, b and c, which `proto-lab run abc-chat` creates once and records here. Lab data for the scenarios and
+/// the clients, which find the chat by it; the fence doesn't read it (a group chat's members are read like any chat's).
 ///
 /// ```toml
 /// abc = "19:<id>@thread.v2"

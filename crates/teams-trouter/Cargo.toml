@@ -1,6 +1,6 @@
 [package]
 name = "teams-trouter"
-description = "The native client's Trouter push channel: socket.io 0.9 over WSS, sending only teams-proto's reviewed own frames, deliveries read into typed chat events and never answered"
+description = "The native client's Trouter push channel: socket.io 0.9 over WSS, sending only teams-proto's typed own frames, deliveries read into typed chat events and never answered"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -28,9 +28,10 @@ rustls-platform-verifier.workspace = true
 serde_json.workspace = true
 # the `ic3` token with its expiry, the renewal notifications and the clock
 teams-auth.workspace = true
-teams-fence.workspace = true
-# the frame sink and the reviewed own frames, the registrar registration (an own-state request), the message model
+# the frame sink and the typed own frames, the registrar registration (a plain request), the message model
 teams-proto.workspace = true
+# at `debug`, every frame both ways as the diagnostic log's typed record, which redacts `user.authenticate`
+teams-log.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-rustls.workspace = true

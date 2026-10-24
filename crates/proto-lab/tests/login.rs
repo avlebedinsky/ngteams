@@ -16,16 +16,17 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use proto_lab::accounts::{AccountsError, AccountsFile};
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
-use proto_lab::browser::{Browser, LaunchOptions};
+use proto_lab::browser::{Browser, Display, LaunchOptions};
 use proto_lab::cdp::{Event, SessionId};
-use proto_lab::classify::{Classification, Classifier, OwnKind};
+use proto_lab::classify::{Classification, Classifier, classify};
 use proto_lab::commands::login::{
-    Action, Clicks, Progress, SignInProbe, SignInStop, StatusFile, next_action, perform, probe,
+    Action, Clicks, LOGIN_CAPTURE, Progress, SignInProbe, SignInStop, StatusFile, next_action, perform, probe,
+    session_options,
 };
 use proto_lab::commands::status::{AccountStatus, account_status};
 use proto_lab::config::Alias;
 use proto_lab::fence_http::HttpFence;
-use proto_lab::fence_ws::{FrameClassifier, GuardScript, WsFence};
+use proto_lab::fence_ws::{GuardScript, WsFence};
 use proto_lab::session::{Identity, REFUSAL_GRACE, SessionState, SessionWatch, Settling};
 use serde_json::{Value, json};
 use teams_fence::{FailClosed, Fence, FenceLog, Roster};
@@ -764,69 +765,33 @@ fn an_mri_needs_an_object_id_shaped_like_a_guid() {
 // --- what login lets through ---
 
 #[test]
-fn login_lets_entras_sign_in_form_through_and_nothing_more() {
-    let sign_in = Classifier::sign_in();
+fn login_records_its_run_fail_closed_and_without_request_bodies() {
+    let options = session_options();
+    assert_eq!(options.capture.as_deref(), Some(LOGIN_CAPTURE));
+    assert_eq!(LOGIN_CAPTURE, "login");
+    assert!(
+        !options.capture_request_bodies,
+        "the sign-in form's posts carry the password"
+    );
+    assert!(!options.live_members, "fail-closed");
+    assert_eq!(options.classifier, Classifier::new());
+    assert_eq!(options.display, Display::Headless);
+}
+
+#[test]
+fn entras_sign_in_form_reaches_nobody_under_the_lab_rule() {
     for url in [
         "https://login.microsoftonline.com/common/GetCredentialType?mkt=en-US",
         "https://login.microsoftonline.com/common/login",
-        "https://login.microsoftonline.com/organizations/login",
         "https://login.microsoftonline.com/kmsi",
-        "https://login.microsoftonline.com/common/kmsi",
+        "https://login.microsoftonline.com/common/oauth2/v2.0/token?client-request-id=0a1b2c3d-4e5f-4061-8293-a4b5c6d7e8f9",
+        "https://login.microsoftonline.com/common/instrumentation/reportpageload",
+        // the account's own multi-factor sign-in: `login` never drives it, and stops at its prompt instead
+        "https://login.microsoftonline.com/common/SAS/BeginAuth",
     ] {
-        assert_eq!(
-            sign_in.classify("POST", url, None),
-            Classification::Own(OwnKind::EntraSignIn),
-            "{url}"
-        );
-        // the seeded list, which status and the scenarios use, has none of it
-        assert_eq!(
-            Classifier::seeded().classify("POST", url, None),
-            Classification::Unknown,
-            "{url}"
-        );
+        assert_eq!(classify("POST", url, Some(b"{}")), Classification::Allow, "{url}");
+        assert_eq!(classify("GET", url, None), Classification::Read, "{url}");
     }
-    // the seeded own-state list is still there
-    let token = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
-    assert_eq!(
-        sign_in.classify("POST", token, None),
-        Classification::Own(OwnKind::EntraToken)
-    );
-    for (method, url) in [
-        // multi-factor sign-in (never captured: what it sets off and how verifying is told from registering is
-        // unknown, so login stops at a multi-factor prompt instead) and security info
-        ("POST", "https://login.microsoftonline.com/common/SAS/BeginAuth"),
-        ("POST", "https://login.microsoftonline.com/common/SAS/EndAuth"),
-        ("POST", "https://login.microsoftonline.com/common/SAS/ProcessAuth"),
-        ("POST", "https://login.microsoftonline.com/organizations/SAS/BeginAuth"),
-        (
-            "POST",
-            "https://login.microsoftonline.com/00000000-0000-4000-8000-0000000000ff/SAS/ProcessAuth",
-        ),
-        ("POST", "https://login.microsoftonline.com/SAS/ProcessAuth"),
-        (
-            "POST",
-            "https://mysignins.microsoft.com/api/authentication/registration",
-        ),
-        // telemetry, other hosts, lookalikes, other methods
-        (
-            "POST",
-            "https://login.microsoftonline.com/common/instrumentation/reportpageload",
-        ),
-        ("POST", "https://login.microsoftonline.com/login"),
-        ("POST", "https://login.microsoftonline.com/common/login/x"),
-        ("POST", "https://login.microsoft.com/common/login"),
-        ("POST", "https://login.microsoftonline.com.example.com/common/login"),
-        ("POST", "http://login.microsoftonline.com/common/login"),
-        ("PUT", "https://login.microsoftonline.com/common/login"),
-        ("POST", "https://teams.microsoft.com/common/login"),
-    ] {
-        assert_eq!(
-            sign_in.classify(method, url, None),
-            Classification::Unknown,
-            "{method} {url}"
-        );
-    }
-    assert_eq!(OwnKind::EntraSignIn.as_str(), "entra_sign_in");
 }
 
 // --- the sign-in steps ---
@@ -910,7 +875,7 @@ fn every_mfa_prompt_stops_the_run() {
         next_action(&registration, after),
         Action::Stop(SignInStop::MfaRegistration)
     );
-    // a one-time code can't be submitted under the fence (its requests aren't on the list): stop, don't ask for one
+    // `login` has no step that types a one-time code in: stop, don't ask for one
     let code = probe_of(&json!({"otc": r#"input[name="otc"]"#, "next": true}));
     assert_eq!(next_action(&code, after), Action::Stop(SignInStop::MfaCode));
     assert_eq!(
@@ -1039,8 +1004,8 @@ async fn sign_in_run(chrome: &Path, server: &MockServer) -> TestResult<SignInRun
         FenceLog::open(&dir.path().join("fence.log"))?,
     ));
     let members = Arc::new(FailClosed);
-    let http = HttpFence::new(Classifier::seeded(), Arc::clone(&fence), members.clone());
-    let ws = WsFence::new(FrameClassifier::seeded(), fence, members, GuardScript::generate()?);
+    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), members.clone());
+    let ws = WsFence::new(fence, members, GuardScript::generate()?);
     let options = ArmOptions {
         service_worker_origins: vec![server.uri()],
     };

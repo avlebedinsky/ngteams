@@ -141,8 +141,8 @@ asks for `https://outlook.office.com//.default` (two slashes) and Entra grants s
 
 What is not known: whether Conditional Access treats the other audiences (Outlook, Graph, SharePoint) as strictly as
 `api.spaces.skype.com`, which passed. A CA block shows up as `AADSTS53003` on that one refresh grant, and the other
-audiences keep working. Task 14 checks this with a refresh grant per audience (the Entra token endpoint is already on
-the fence's own-state list). (Answered since, see [Open questions](#open-questions) 1.)
+audiences keep working. Task 14 checks this with a refresh grant per audience (the Entra token endpoint was already on
+the fence's own-state list then; under the lab rule Entra is no contacting service). (Answered since, see [Open questions](#open-questions) 1.)
 
 **Capture:** the web client warms tokens the same way. Right after the code redemption it chains refresh grants, each
 with the newest refresh token, for `api.spaces.skype.com` (again, now asking for CAE), `chatsvcagg`,
@@ -183,14 +183,16 @@ environment; prod doesn't set it.
   `https://ic3.teams.office.com`. How chat authenticates without a skypetoken in this mode isn't clear from the
   bundle.
 - **For us:** use authz. It's what prod does by default, it gives us the skypetoken and the region GTMs, and authzcore
-  would only matter if Microsoft flips the flight for the whole tenant. Both are on the fence's own-state list.
+  would only matter if Microsoft flips the flight for the whole tenant. Both reach nobody (the lab rule lets them
+  through; the sign-in window's rules take both).
   **Capture:** every authz POST the web client made went to `…/authz`, never to `authzcore` (4 POSTs in 3 runs, see
   [Request](#request); the other runs made none and reused the skypetoken from an earlier run). Chat itself no
   longer needs the skypetoken (see the [service table](#audience--service-table)); the few calls that still do are
   listed there.
 - **Never call `…/authz/signuptrial`** (or `…/authzcore/signuptrial`). It's the "start a Teams trial" variant of the
-  same POST, a write that changes the account's licensing. The fence's own-state rules match `authz` and `authzcore`
-  as whole paths, so `signuptrial` stays denied; keep it that way.
+  same POST, a write that changes the account's licensing. The lab browser's fence lets it through (it reaches nobody
+  else), so nothing but our own code keeps it from being sent: `teams-auth` sends only to a URL ending in `/authz`,
+  and the sign-in window's rules match `authz` and `authzcore` as whole paths; keep it that way.
 
 ### Request
 
@@ -355,7 +357,7 @@ not whether the service accepts it. Rows marked *bundle* weren't seen on the wir
 | Chat service (chatsvc: messages, threads, conversations, properties) | GTM `chatServiceAfd` | **Capture:** Entra, STM, `BehaviorOverride: redirectAs404`. Never the bundle's `Authentication: skypetoken=…`, and no `RegistrationToken` (no endpoint was registered in any run) | `https://ic3.teams.office.com` |
 | Chat service aggregator (CSA) | GTM `chatSvcAggAfd` / `csaResource` | **Capture:** Entra, with or without STM; never a skypetoken (`disableSkypeTokenOnCsa` on). *Bundle:* CSA rejects tokens for `teams.microsoft.com`, `api.spaces.skype.com` and `ic3` | `https://chatsvcagg.teams.microsoft.com` |
 | Push service (`/api/tps/…`) | GTM `teamsPushServiceAfd` | **Capture:** Entra, no STM | `https://chatsvcagg.teams.microsoft.com` (the CSA token) |
-| Presence | GTM `presenceUPS` (`<AFD host>/ups/<geo>`), not `unifiedPresence` | **Capture:** Entra, `BehaviorOverride: redirectAs404`, no skypetoken, no STM; every request was a POST (`v1/presence/getpresence` and the like), all denied by the fence | `https://presence.teams.microsoft.com/` (with the slash) |
+| Presence | GTM `presenceUPS` (`<AFD host>/ups/<geo>`), not `unifiedPresence` | **Capture:** Entra, `BehaviorOverride: redirectAs404`, no skypetoken, no STM; every request was a POST (`v1/presence/getpresence` and the like), denied by the fence until M2 Task 17 let the presence read of lab accounts through. **Live (M2 Task 17):** our own non-CAE token taken by `getpresence` ([question 4](#open-questions)) | `https://presence.teams.microsoft.com/` (with the slash) |
 | AMS token exchanges (`ams`, `amsV2`) | GTMs | **Capture:** POST `/v1/skypetokenauth` with `Authorization: skype_token <skypetoken>` on both hosts; on `amsV2` also POST `/v1/<id>/aadtokenauth` with Entra, STM. All denied by the fence | `https://ic3.teams.office.com` (`aadtokenauth`) |
 | URL preview (`urlp`, `urlpV2`) | GTMs | *bundle:* `Authorization: skype_token <skypetoken>`; not seen | — |
 | Trouter (`go.trouter.teams.microsoft.com`) | fixed; `calling_trouterUrl` | **Capture:** no credential on the HTTP probe (`GET /?check=…`) or the WebSocket handshake; the first frame the client sends, a `user.authenticate` event, carries `Authorization: Bearer …` and `X-MS-Migration: True` as its headers (denied by the WebSocket guard) | `https://ic3.teams.office.com` |
@@ -461,10 +463,13 @@ sign-in. Whether chat still accepts the skypetoken form is unknown and not neede
    for the web client's CAE one (see [Response](#response)).
 3. Which runtime setting makes macOS use `nativeclient` instead of `msauth.com.microsoft.teams2://auth`? It doesn't
    matter while `nativeclient` works for us.
-4. Does presence accept a token whose audience is the presence origin, or does it want `api.spaces.skype.com`? **Half
-   answered (capture):** the web client sends a token for `https://presence.teams.microsoft.com/` to `presenceUPS`.
-   Every presence request was a POST the fence denied, so whether presence accepts it (and a non-CAE one like ours)
-   is still open.
+4. ~~Does presence accept a token whose audience is the presence origin, or does it want `api.spaces.skype.com`?~~
+   **Answered (M2 Task 17, capture and live):** the presence origin with its slash,
+   `https://presence.teams.microsoft.com/`. The web client's `getpresence` reads, let through by the browser fence for
+   the first time (`ab-chat` of 2026-10-22, 14 reads), all carried a CAE token (`xms_cc`) of that audience and were
+   answered 200. Ours, non-CAE, from the native client's own refresh grant, was taken too: `teams-headless a
+   presence` (2026-10-23, under the live lock) sent two reads (b, then b and c), each a `post_read` `presence` line in
+   `fence.log` (the fence of the time), and read both accounts' availability (`Offline`) from 200 answers; no 401, no claims challenge.
 5. Is the `RegistrationToken` (from the chat service's `Set-RegistrationToken` response header after registering an
    endpoint) needed for reads, or only for the event channel? **Capture:** the web client registered no chat
    endpoint and sent no `RegistrationToken` in any run, and its chat reads worked with the `ic3` token alone. For the
@@ -500,8 +505,8 @@ The `load` and `ab-chat` captures of 2026-10-19/20 (M0 Task 11) settled what the
       `X-MS-Migration: True` with no `x-skypetoken` (all the others seen but two, which carry neither): see the
       [table](#audience--service-table);
 - [x] the audiences of the Bearer tokens the page sends to presence (`https://presence.teams.microsoft.com/`), CSA
-      (`chatsvcagg`), Graph, Outlook (`https://outlook.office.com/`) and substrate search (an application ID); whether
-      presence accepts its token is still open (question 4);
+      (`chatsvcagg`), Graph, Outlook (`https://outlook.office.com/`) and substrate search (an application ID); presence
+      accepts both the web client's token and ours (question 4, M2 Task 17);
 - [x] whether any request carries `X-MS-Migration: True` with an IC3 Entra token: yes, chat, the AMS `aadtokenauth`
       exchange, `/trap/tokens` and trouter's authenticate frame ([STM](#skype-token-migration-stm));
 - [ ] the shape of a 401 claims challenge: none happened. The only 401s were middle-tier image requests without their

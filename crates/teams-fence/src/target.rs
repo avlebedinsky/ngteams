@@ -13,8 +13,11 @@ pub enum WriteKind {
     Edit,
     Delete,
     Reaction,
+    /// A typing signal: others see it, but it carries nothing to them, so the fence permits it on a chat without a
+    /// member read.
     Typing,
-    /// A read receipt or a consumption horizon update.
+    /// A read receipt or a consumption horizon update: like [`WriteKind::Typing`], permitted on a chat without a member
+    /// read.
     ReadReceipt,
     /// Placing a call.
     Call,
@@ -26,10 +29,14 @@ pub enum WriteKind {
     ChatCreate,
     ChannelPost,
     BotReply,
+    /// The account's own availability (UPS's presence endpoint `PUT` and the manual status): seen across the tenant,
+    /// but it carries nothing to anyone. The fence permits it without a member read, only on [`Scope::Account`] naming
+    /// the fence's own account, with nobody added, so that a lab account never sets another's presence.
+    OwnAvailability,
 }
 
 impl WriteKind {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Message,
         Self::Edit,
         Self::Delete,
@@ -44,6 +51,7 @@ impl WriteKind {
         Self::ChatCreate,
         Self::ChannelPost,
         Self::BotReply,
+        Self::OwnAvailability,
     ];
 
     /// The name used in `fence.log`.
@@ -64,7 +72,15 @@ impl WriteKind {
             Self::ChatCreate => "chat_create",
             Self::ChannelPost => "channel_post",
             Self::BotReply => "bot_reply",
+            Self::OwnAvailability => "own_availability",
         }
+    }
+
+    /// Whether this kind of write reaches other people, so its target's members are judged: every kind but typing,
+    /// read receipts and the account's own availability, which others may see but which carry nothing to them.
+    #[must_use]
+    pub fn is_contacting(self) -> bool {
+        !matches!(self, Self::Typing | Self::ReadReceipt | Self::OwnAvailability)
     }
 
     /// Whether this kind of write can create its own target ([`Scope::New`]): a new chat, a new call, a new meeting.
@@ -120,6 +136,10 @@ pub enum Scope {
     /// exactly the target's added participants. Only kinds that [create a target](WriteKind::creates_target) may use
     /// it; the fence denies any other kind on `New`.
     New,
+    /// The account itself, by its MRI: where its own availability lands ([`WriteKind::OwnAvailability`]). It has no
+    /// members to fetch: the fence permits a write here only when it is the account's own availability and `mri` is
+    /// the fence's own account ([`crate::Fence::own_account`]); it denies any other kind here.
+    Account { mri: String },
 }
 
 impl fmt::Display for Scope {
@@ -130,6 +150,7 @@ impl fmt::Display for Scope {
             Self::Team { id } => write!(f, "team {id}"),
             Self::Call { id } => write!(f, "call {id}"),
             Self::New => f.write_str("a new target"),
+            Self::Account { mri } => write!(f, "account {mri}"),
         }
     }
 }

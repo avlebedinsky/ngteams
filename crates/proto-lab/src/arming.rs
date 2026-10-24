@@ -90,7 +90,7 @@ use crate::browser::{Browser, BrowserError};
 use crate::capture::{Capture, RTC_BINDING};
 use crate::cdp::{Cdp, CdpError, Event, Events, SessionId};
 use crate::fence_http::{Denial, ForcedDeny, Handled, HttpFence};
-use crate::fence_ws::{FrameDenial, GuardScript, UnsanctionedFrame, WsFence};
+use crate::fence_ws::{ForcedFrameDeny, FrameDenial, GuardScript, UnsanctionedFrame, WsFence};
 
 /// The origins whose service workers are neutralized at the start of every run.
 pub const TEAMS_ORIGINS: [&str; 2] = ["https://teams.microsoft.com", "https://teams.cloud.microsoft"];
@@ -1020,9 +1020,15 @@ impl ArmedBrowser {
         self.shared.http.force_deny(rule);
     }
 
-    /// Stops every forced deny ([`HttpFence::clear_forced`]).
+    /// Denies every WebSocket frame `rule` matches from now on ([`WsFence::force_deny`]).
+    pub fn force_deny_frames(&self, rule: ForcedFrameDeny) {
+        self.shared.ws.force_deny(rule);
+    }
+
+    /// Stops every forced deny, of requests ([`HttpFence::clear_forced`]) and of frames ([`WsFence::clear_forced`]).
     pub fn clear_forced(&self) {
         self.shared.http.clear_forced();
+        self.shared.ws.clear_forced();
     }
 
     /// Every WebSocket frame denied so far.

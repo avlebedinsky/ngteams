@@ -1,28 +1,35 @@
-//! The client: every mutating call takes a [`WritePermit`] and goes through [`Authorized::new`] before it reaches the
-//! [`Transport`]. A transport takes requests of three classes only: a [`Read`], an [`OwnState`] request, or an
-//! [`Authorized`] write.
+//! The client: every contacting write takes a [`WritePermit`] and goes through [`Authorized::new`] before it reaches
+//! the [`Transport`]. A transport takes requests of three classes only: a [`Read`] (always a `GET`), a plain
+//! [`Request`] (sent only when [`teams_fence::contacting`] says it reaches nobody), or an [`Authorized`] write.
 
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use teams_fence::WritePermit;
+use teams_fence::{Mri, PostReadPermit, WritePermit};
 
+use crate::http::{Credentials, HttpError, HttpTransport};
 use crate::own::OwnState;
+use crate::post_read::{AuthorizedPostRead, PostRead, PostReadMismatch};
 use crate::read::Read;
+use crate::request::Request;
 use crate::write::{Authorized, Mutating, TargetMismatch};
 
-/// Carries requests to the service, of three classes only: a [`Read`] (always a `GET`), an [`OwnState`] request (the
-/// reviewed, sealed list) and an [`Authorized`] write, which it can't be handed without the permit for its target.
+/// Carries requests to the service, of three classes only: a [`Read`] (always a `GET`), a plain [`Request`] (any
+/// method, which the transport sends only when [`teams_fence::contacting`] calls it [`teams_fence::Contact::None`],
+/// and refuses otherwise before anything is sent) and an [`Authorized`] write, which it can't be handed without the
+/// permit for its target.
 pub trait Transport: Sync {
     type Error: Error + Send + Sync + 'static;
 
     /// Sends a read as a `GET`.
     fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 
-    /// Sends a reviewed own-state request.
-    fn own_state<R: OwnState>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
+    /// Sends a plain request when it reaches nobody ([`teams_fence::contacting`] calls it
+    /// [`teams_fence::Contact::None`]), logged to `fence.log` as `allowed` before it goes when it is mutating; refuses
+    /// a write or a request the classifier can't read, before anything is sent.
+    fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 
     /// Sends an authorized write and returns the service's answer, whatever its status: what to do about a refusal is
     /// the caller's (the outbox's) decision.
@@ -30,6 +37,15 @@ pub trait Transport: Sync {
         &self,
         write: Authorized<R>,
     ) -> impl Future<Output = Result<Response, Self::Error>> + Send;
+
+    /// The account this transport sends for, as its fence owns it ([`teams_fence::Fence::own_account`]): the account an
+    /// endpoint registered through it is recorded for ([`crate::register`], [`crate::RegisteredEndpoint::account`]).
+    /// `None` (the default) when it owns none. Only an [`EndpointRegistrar`](crate::EndpointRegistrar)'s is ever read,
+    /// and outside `test-support` that is the native transport's alone, so another transport's answer here can't make
+    /// an endpoint any account's.
+    fn own_account(&self) -> Option<&Mri> {
+        None
+    }
 }
 
 /// A service's answer: its status, the few headers a caller acts on, and the body (capped by the transport that read
@@ -156,12 +172,12 @@ impl<T: Transport> Client<T> {
         self.transport.read(request).await
     }
 
-    /// Sends a reviewed own-state request.
+    /// Sends a plain request, when it reaches nobody (see [`Transport::send`]).
     ///
     /// # Errors
-    /// The transport's.
-    pub async fn own_state<R: OwnState>(&self, request: &R) -> Result<Response, T::Error> {
-        self.transport.own_state(request).await
+    /// The transport's, a refusal of a write or of a request the fence's classifier can't read included.
+    pub async fn send<R: Request>(&self, request: &R) -> Result<Response, T::Error> {
+        self.transport.send(request).await
     }
 
     /// Sends one mutating request under the permit `teams-fence` issued for its target, and returns the service's
@@ -178,4 +194,42 @@ impl<T: Transport> Client<T> {
         let write = Authorized::new(request, permit)?;
         self.transport.deliver(write).await.map_err(WriteError::Transport)
     }
+}
+
+/// The sealed lists the personal build sends its own-state requests and reads by `POST` from (`docs/personal-build.md`):
+/// over the native transport only, each logged to `fence.log` by its entry's kind before it goes.
+impl<C: Credentials> Client<HttpTransport<C>> {
+    /// Sends an entry of the sealed own-state list ([`HttpTransport::own_state`]).
+    ///
+    /// # Errors
+    /// The transport's.
+    pub async fn own_state<R: OwnState>(&self, request: &R) -> Result<Response, HttpError> {
+        self.transport.own_state(request).await
+    }
+
+    /// Sends one read by `POST` under the permit `Fence::check_post_read` gave for its entry and its exact MRIs
+    /// ([`HttpTransport::post_read`]). The permit is consumed.
+    ///
+    /// # Errors
+    /// [`PostReadError::Mismatch`] when the permit was given for another entry or other MRIs (checked before anything
+    /// is sent), [`PostReadError::Transport`] when the transport refuses or fails it.
+    pub async fn post_read<R: PostRead + Send>(
+        &self,
+        request: R,
+        permit: PostReadPermit,
+    ) -> Result<Response, PostReadError<HttpError>> {
+        let read = AuthorizedPostRead::new(request, permit)?;
+        self.transport.post_read(read).await.map_err(PostReadError::Transport)
+    }
+}
+
+/// Why a read by `POST` didn't go out or come back.
+#[derive(Debug, thiserror::Error)]
+pub enum PostReadError<E> {
+    /// The permit was given for another entry or other MRIs; nothing reached the transport.
+    #[error(transparent)]
+    Mismatch(#[from] PostReadMismatch),
+    /// The transport refused or failed it.
+    #[error("the read by POST failed: {0}")]
+    Transport(#[source] E),
 }
