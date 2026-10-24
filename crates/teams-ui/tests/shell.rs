@@ -21,7 +21,9 @@ use teams_log::diagnostics::{Source as DiagnosticsSource, WARNING};
 use teams_store::{Applied, Conversation, ConversationKind, Member, Message};
 use teams_trouter::{Down, Stop};
 use teams_ui::chat_list::{ChatList, DELETED, RowKind, format_time, listed, one_to_one_partner, preview};
-use teams_ui::settings::{Copied, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel};
+use teams_ui::settings::{
+    Copied, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel,
+};
 use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, RailItem, Shell, ShellParts};
 use teams_ui::switcher::{fuzzy_score, matches};
 use teams_ui::view::{Shown, status_text};
@@ -643,6 +645,7 @@ fn the_settings_view_changes_the_settings() {
     for selector in [
         "send-typing",
         "send-read-receipts",
+        "send-presence",
         "notifications-mentions",
         "idle-15",
         "status-do-not-disturb",
@@ -656,6 +659,7 @@ fn the_settings_view_changes_the_settings() {
         Settings {
             send_typing: false,
             send_read_receipts: false,
+            send_presence: false,
             notifications: Notifications::Mentions,
             idle_minutes: 15,
             manual_status: ManualStatus::DoNotDisturb,
@@ -859,4 +863,35 @@ fn the_root_shows_the_shell_until_the_account_is_signed_out() {
     rig.cx
         .update(|cx| rig.models.signed_out("run `proto-lab auth a`".into(), cx));
     assert!(bounds(cx, "rail").is_none(), "only the sign-in hint is left");
+}
+
+#[test]
+fn the_first_run_screen_shows_over_everything_until_it_is_confirmed() {
+    let rig = seeded();
+    // the lab app doesn't ask
+    let (_, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    assert!(bounds(cx, "first-run").is_none());
+    // the personal build asks: the three switches at their defaults, and nothing sent on its own before "Confirm"
+    let model = SettingsModel::in_memory(Settings::default()).requiring_first_run();
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    assert!(bounds(cx, "first-run").is_some());
+    for switch in [
+        "first-run-send-typing",
+        "first-run-send-read-receipts",
+        "first-run-send-presence",
+    ] {
+        assert!(bounds(cx, switch).is_some(), "{switch}");
+    }
+    assert!(cx.update(|_, cx| shell.read(cx).settings().read(cx).awaiting_first_run()));
+    click(cx, "first-run-send-typing");
+    click(cx, "first-run-confirm");
+    assert!(bounds(cx, "first-run").is_none(), "gone once confirmed");
+    let settings = settings_of(&shell, cx);
+    assert_eq!(settings.first_run, FirstRunState::Confirmed);
+    assert!(!settings.send_typing && settings.send_read_receipts && settings.send_presence);
+    let model = cx.update(|_, cx| shell.read(cx).settings().clone());
+    assert!(cx.update(|_, cx| {
+        let model = model.read(cx);
+        !model.sends_typing() && model.sends_read_receipts() && model.sends_presence()
+    }));
 }

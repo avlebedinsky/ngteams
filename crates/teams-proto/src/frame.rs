@@ -19,10 +19,11 @@
 //! unanswered; the one that may be added is a typed response for a call the fence itself permitted (`CLAUDE.md`,
 //! "Calls go only to the lab").
 //!
-//! The sink numbers the events that ask for an acknowledgement itself (`<n>` above, from 1 per socket). It writes
-//! nothing to `fence.log`: a frame isn't a contacting write. ([`FrameRecord`](teams_fence::FrameRecord), a frame's
-//! `fence.log` entry by its [`OwnFrame::KIND`], stays in `teams-fence` for the personal build, which logs its frames:
-//! `docs/personal-build.md`.)
+//! The sink numbers the events that ask for an acknowledgement itself (`<n>` above, from 1 per socket). A lab sink
+//! writes nothing to `fence.log`: a frame isn't a contacting write. The personal build's sink ([`FrameSink::logging`],
+//! for a transport whose fence is the personal one, [`Transport::frame_log`](crate::Transport::frame_log)) logs each
+//! frame by its [`OwnFrame::KIND`] before it goes ([`FrameRecord`](teams_fence::FrameRecord):
+//! `docs/personal-build.md`), and sends none it couldn't log.
 //!
 //! The frames' JSON is written by this module's own writer ([`Object`]) with its keys in the order the messaging stack
 //! sent them, byte for byte: `serde_json`'s `Map` keeps insertion order only with its `preserve_order` feature, which
@@ -31,9 +32,12 @@
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::io;
+use std::sync::Arc;
 
 use serde_json::Value;
 use teams_auth::secrets::Secret;
+use teams_fence::{Fence, FrameRecord};
 
 use self::sealed::Event;
 
@@ -332,12 +336,16 @@ pub enum FrameError<E: Error + 'static> {
     /// The socket failed to send it: the writer's error, reached only by matching the variant.
     #[error("the socket failed to send the frame")]
     Write(E),
+    /// The personal build's sink couldn't log the frame to `fence.log`: it wasn't sent.
+    #[error("fence.log can't be written, so the frame wasn't sent: {0}")]
+    LogUnavailable(io::Error),
 }
 
 impl<E: Error + 'static> fmt::Debug for FrameError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Write(_) => f.write_str("Write(<the writer's error, not shown: it may hold the frame>)"),
+            Self::LogUnavailable(error) => f.debug_tuple("LogUnavailable").field(error).finish(),
         }
     }
 }
@@ -358,10 +366,13 @@ impl Sent {
 }
 
 /// The one way the native client sends on a Trouter socket: only an [`OwnFrame`]. It has no method that takes text,
-/// and it doesn't give its writer back. It writes nothing to `fence.log`: a frame isn't a contacting write.
+/// and it doesn't give its writer back. A lab sink writes nothing to `fence.log`; the personal build's logs each frame
+/// first ([`FrameSink::logging`]).
 pub struct FrameSink<W> {
     writer: W,
     last_ack: u64,
+    /// The personal build's: the fence whose log each frame goes to first, and the socket's URL.
+    log: Option<(Arc<Fence>, String)>,
 }
 
 impl<W> fmt::Debug for FrameSink<W> {
@@ -376,15 +387,36 @@ impl<W: FrameWriter> FrameSink<W> {
     /// The sink for a socket's write half, `writer`.
     #[must_use]
     pub fn new(writer: W) -> Self {
-        Self { writer, last_ack: 0 }
+        Self {
+            writer,
+            last_ack: 0,
+            log: None,
+        }
+    }
+
+    /// The personal build's sink for a socket's write half at `url`: each frame logged to `fence`'s log by its kind
+    /// (the URL without its query) before it goes, none sent that couldn't be logged.
+    #[must_use]
+    pub fn logging(writer: W, fence: Arc<Fence>, url: &str) -> Self {
+        Self {
+            log: Some((fence, url.to_owned())),
+            ..Self::new(writer)
+        }
     }
 
     /// Sends `frame`. An event that asks for an acknowledgement takes the socket's next id, sent or not, so an id is
     /// never used twice.
     ///
     /// # Errors
-    /// [`FrameError::Write`] when the socket failed.
+    /// [`FrameError::Write`] when the socket failed; [`FrameError::LogUnavailable`] when a logging sink couldn't log it
+    /// (nothing sent).
     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
+        if let Some((fence, url)) = &self.log {
+            fence
+                .log()
+                .record_frame(&FrameRecord { url, kind: F::KIND })
+                .map_err(FrameError::LogUnavailable)?;
+        }
         let (text, ack) = match frame.event() {
             Event::Plain(event) => (format!("5:::{event}"), None),
             Event::Acknowledged(event) => {

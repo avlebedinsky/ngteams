@@ -247,6 +247,46 @@ fn nothing_is_sent_on_quit_or_after_it() {
 }
 
 #[test]
+fn nothing_is_reported_before_the_first_run_is_confirmed_nor_with_its_switch_off() {
+    let rig = Rig::start();
+    let parts = parts::parts(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    let settings = parts.settings.clone();
+    rig.cx.update(|cx| {
+        settings.update(cx, |model, _| {
+            *model = std::mem::replace(model, SettingsModel::in_memory(Settings::default())).requiring_first_run();
+        });
+    });
+    let own = own_over(&rig, &parts);
+    registered(&rig);
+    used(&rig, &own);
+    wait(&rig, AVAILABLE_REFRESH * 2);
+    assert!(asked(&rig).is_empty(), "nothing before the first run is confirmed");
+    // confirmed: the registration already made is reported at once
+    rig.cx
+        .update(|cx| settings.update(cx, SettingsModel::confirm_first_run));
+    rig.cx.run_until_parked();
+    assert_eq!(asked(&rig), [OwnStatus::Available]);
+    // its switch off: nothing more, not even the refresh
+    rig.cx.update(|cx| {
+        settings.update(cx, |model, cx| {
+            model.change(|settings| settings.send_presence = false, cx);
+        });
+    });
+    rig.cx.run_until_parked();
+    used(&rig, &own);
+    wait(&rig, AVAILABLE_REFRESH * 2);
+    assert!(asked(&rig).is_empty());
+    // on again: reported again
+    rig.cx.update(|cx| {
+        settings.update(cx, |model, cx| {
+            model.change(|settings| settings.send_presence = true, cx);
+        });
+    });
+    rig.cx.run_until_parked();
+    assert_eq!(asked(&rig), [OwnStatus::Available]);
+}
+
+#[test]
 fn a_failed_report_is_shown_and_never_sent_again() {
     let (rig, own, settings, written) = reporting(Settings::default());
     registered(&rig);

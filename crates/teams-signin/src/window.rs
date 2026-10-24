@@ -84,9 +84,34 @@ pub const WEB_PROCESS_ENDED: &str = "the page's web process ended";
 /// The guard's own setup: a hook for tests that add a local own-state rule (`Guard::with_own`).
 pub type GuardSetup = Box<dyn FnOnce(Guard) -> Guard>;
 
+/// Where the window may go.
+#[derive(Clone, Debug)]
+pub enum Bound {
+    /// Loopback only (the lab's window while [`crate::cli::NOT_LIVE`] holds): the guard in loopback-only mode, the
+    /// network session's way out the black hole ([`BlackHole`]).
+    Loopback,
+    /// The personal sign-in window's hosts (`personal`): the guard bound to them ([`Guard::hosts_only`]), the network
+    /// session's only way out the host gate ([`crate::egress::HostGate`]).
+    #[cfg(feature = "personal")]
+    Hosts(Arc<crate::hosts::SignInHosts>),
+}
+
+impl Bound {
+    /// Whether a navigation to `uri` stays on the bound once the page is armed.
+    fn admits(&self, uri: &str) -> bool {
+        match self {
+            Self::Loopback => is_local_page(uri),
+            #[cfg(feature = "personal")]
+            Self::Hosts(hosts) => hosts.admits_url(uri),
+        }
+    }
+}
+
 /// What the window needs.
 pub struct WindowConfig {
     pub request: WindowRequest,
+    /// Where it may go.
+    pub bound: Bound,
     /// The extension module (`libteams_signin_extension.so`).
     pub extension: PathBuf,
     /// Where the guard's decisions go (the lab's `fence.log`).
@@ -142,20 +167,35 @@ impl Window {
         let dir = private_dir()?;
         let extensions = install_extension(&config.extension, dir.path())?;
         let (sender, events) = mpsc::channel();
-        let guard = Arc::new((config.setup)(
-            Guard::new(config.log, redirect.clone(), sender).local_only(),
-        ));
+        let guard = Guard::new(config.log, redirect.clone(), sender);
+        let guard = Arc::new((config.setup)(match &config.bound {
+            Bound::Loopback => guard.local_only(),
+            #[cfg(feature = "personal")]
+            Bound::Hosts(hosts) => guard.hosts_only(Arc::clone(hosts)),
+        }));
         let socket = dir.path().join("guard.sock");
         let server = GuardServer::start(&socket, Arc::clone(&guard))
             .map_err(|error| format!("the guard's socket can't be bound: {error}"))?;
-        let black_hole = BlackHole::start(Arc::clone(&guard))
-            .map_err(|error| format!("the egress proxy can't be bound: {error}"))?;
+        let (proxy, bypass): (String, &[&str]) = match &config.bound {
+            Bound::Loopback => {
+                let black_hole = BlackHole::start(Arc::clone(&guard))
+                    .map_err(|error| format!("the egress proxy can't be bound: {error}"))?;
+                (black_hole.uri(), &BYPASS)
+            }
+            #[cfg(feature = "personal")]
+            Bound::Hosts(hosts) => {
+                let gate = crate::egress::HostGate::start(Arc::clone(&guard), Arc::clone(hosts))
+                    .map_err(|error| format!("the egress gate can't be bound: {error}"))?;
+                // nothing goes direct: every connection asks the gate
+                (gate.uri(), &[])
+            }
+        };
 
         let context = WebContext::new();
         context.set_web_process_extensions_directory(&extensions.to_string_lossy());
         context.set_web_process_extensions_initialization_user_data(&socket.to_string_lossy().to_variant());
         context.add_path_to_sandbox(dir.path(), true);
-        let session = network_session(&black_hole);
+        let session = network_session(&proxy, bypass);
         let view = WebView::builder()
             .web_context(&context)
             .network_session(&session)
@@ -166,7 +206,12 @@ impl Window {
         let answer = Rc::new(RefCell::new(None));
         let finish = finisher(&main, &answer);
         let stage = Rc::new(Cell::new(Stage::Arming));
-        connect_policy(&view, (redirect, guard), Rc::clone(&stage), finish.clone());
+        connect_policy(
+            &view,
+            (redirect, guard, config.bound),
+            Rc::clone(&stage),
+            finish.clone(),
+        );
         let window = gtk4::Window::builder()
             .title("Sign in to Microsoft Teams")
             .default_width(520)
@@ -253,13 +298,13 @@ fn install_extension(module: &Path, dir: &Path) -> Result<PathBuf, String> {
     Ok(extensions)
 }
 
-/// An ephemeral network session (no website data), ITP off, downloads cancelled, reaching anything but [`BYPASS`]
-/// only through `black_hole`.
-fn network_session(black_hole: &BlackHole) -> NetworkSession {
+/// An ephemeral network session (no website data), ITP off, downloads cancelled, reaching anything but `bypass` only
+/// through the proxy at `proxy` (the black hole, or the personal window's host gate with nothing bypassing it).
+fn network_session(proxy: &str, bypass: &[&str]) -> NetworkSession {
     let session = NetworkSession::new_ephemeral();
     session.set_itp_enabled(false);
     session.connect_download_started(|_, download| download.cancel());
-    let proxy = NetworkProxySettings::new(Some(&black_hole.uri()), &BYPASS);
+    let proxy = NetworkProxySettings::new(Some(proxy), bypass);
     session.set_proxy_settings(NetworkProxyMode::Custom, Some(&proxy));
     session
 }
@@ -285,7 +330,7 @@ fn settings() -> Result<Settings, String> {
 /// `decide-policy` and `create`: see the module docs.
 fn connect_policy(
     view: &WebView,
-    (redirect, guard): (RedirectUri, Arc<Guard>),
+    (redirect, guard, bound): (RedirectUri, Arc<Guard>, Bound),
     stage: Rc<Cell<Stage>>,
     finish: Finish,
 ) {
@@ -301,7 +346,7 @@ fn connect_policy(
                 decision.ignore();
                 return true;
             };
-            match navigation(&uri, stage.get(), &redirect) {
+            match navigation(&uri, stage.get(), &redirect, &bound) {
                 Navigation::Redirect => {
                     decision.ignore();
                     guard.caught_navigation(&uri);
@@ -348,15 +393,15 @@ enum Navigation {
     Refuse,
 }
 
-/// The navigation policy's verdict on `uri` at `stage`.
-fn navigation(uri: &str, stage: Stage, redirect: &RedirectUri) -> Navigation {
+/// The navigation policy's verdict on `uri` at `stage`, within `bound`.
+fn navigation(uri: &str, stage: Stage, redirect: &RedirectUri, bound: &Bound) -> Navigation {
     if redirect.matches(uri) {
         Navigation::Redirect
     } else if uri == "about:blank" {
         Navigation::Use
     } else if stage == Stage::Arming {
         Navigation::Hold
-    } else if is_local_page(uri) {
+    } else if bound.admits(uri) {
         Navigation::Use
     } else {
         Navigation::Refuse
@@ -417,9 +462,52 @@ mod tests {
             ("data:text/html,x", Navigation::Hold, Navigation::Refuse),
             ("file:///etc/passwd", Navigation::Hold, Navigation::Refuse),
         ] {
-            assert_eq!(navigation(uri, Stage::Arming, &redirect), arming, "{uri} arming");
-            assert_eq!(navigation(uri, Stage::Open, &redirect), open, "{uri} open");
+            assert_eq!(
+                navigation(uri, Stage::Arming, &redirect, &Bound::Loopback),
+                arming,
+                "{uri} arming"
+            );
+            assert_eq!(
+                navigation(uri, Stage::Open, &redirect, &Bound::Loopback),
+                open,
+                "{uri} open"
+            );
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "personal")]
+    #[test]
+    fn the_personal_window_navigates_only_to_its_hosts() -> Result<(), String> {
+        let redirect = RedirectUri::parse(NATIVE_CLIENT_REDIRECT).map_err(|_| "the redirect URI")?;
+        let hosts =
+            crate::hosts::SignInHosts::entra_with(&["sso.example.test".to_owned()]).map_err(|e| e.to_string())?;
+        let bound = Bound::Hosts(Arc::new(hosts));
+        for (uri, open) in [
+            (
+                "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=x",
+                Navigation::Use,
+            ),
+            ("https://sso.example.test/adfs/ls/", Navigation::Use),
+            ("http://login.microsoftonline.com/x", Navigation::Refuse),
+            ("https://login.microsoftonline.com:8443/x", Navigation::Refuse),
+            ("https://teams.microsoft.com/v2/", Navigation::Refuse),
+            ("https://graph.microsoft.com/v1.0/me", Navigation::Refuse),
+            ("http://127.0.0.1:8080/next", Navigation::Refuse),
+            ("https://evil.example.test/", Navigation::Refuse),
+        ] {
+            assert_eq!(navigation(uri, Stage::Open, &redirect, &bound), open, "{uri}");
+            assert_eq!(
+                navigation(uri, Stage::Arming, &redirect, &bound),
+                Navigation::Hold,
+                "{uri}"
+            );
+        }
+        let caught = format!("{NATIVE_CLIENT_REDIRECT}?code=made-up&state=made-up");
+        assert_eq!(
+            navigation(&caught, Stage::Open, &redirect, &bound),
+            Navigation::Redirect
+        );
         Ok(())
     }
 }

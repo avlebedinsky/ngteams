@@ -232,6 +232,20 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Everyone the stored member lists hold, across every conversation, by MRI, each once: the people of the account's
+    /// chats (the personal build's reads by `POST` may name them, `teams_fence::ChatPeople`).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn all_members(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT DISTINCT mri FROM members ORDER BY mri")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// The `rosterVersion` the stored members are at; none before the first roster (or for an unknown conversation).
     ///
     /// # Errors

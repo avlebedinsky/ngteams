@@ -214,7 +214,8 @@ mod registrar {
     impl<T: crate::Transport> Sealed for T {}
 }
 
-/// Sends `registration` through `transport` (a plain request: the transport logs it to `fence.log` before it goes) and returns the answer, with the endpoint it registered when the answer is a success, recorded for
+/// Sends `registration` through `transport` (a plain request, or through the personal build's fence its own-state entry
+/// ([`Transport::send_own`]): the transport logs it to `fence.log` before it goes) and returns the answer, with the endpoint it registered when the answer is a success, recorded for
 /// the transport's own account ([`Transport::own_account`]: its fence's, the account whose token the registrar took).
 /// A refusal or a failure registers nothing. Only an [`EndpointRegistrar`] (the native HTTP transport) registers: a
 /// fake transport answering a success can't make a [`RegisteredEndpoint`] outside `test-support`.
@@ -225,7 +226,7 @@ pub async fn register<T: EndpointRegistrar>(
     transport: &T,
     registration: &EndpointRegistration,
 ) -> Result<(Response, Option<RegisteredEndpoint>), T::Error> {
-    let answer = transport.send(registration).await?;
+    let answer = transport.send_own(registration).await?;
     let endpoint = answer.is_success().then(|| RegisteredEndpoint {
         id: registration.registration_id.clone(),
         account: transport.own_account().cloned(),

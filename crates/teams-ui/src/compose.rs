@@ -808,7 +808,7 @@ impl Compose {
 
     /// Typing goes out (see the module docs) when it may.
     fn typed(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let wanted = self.settings.read(cx).settings().send_typing
+        let wanted = self.settings.read(cx).sends_typing()
             && !matches!(self.mode, Mode::Edit { .. })
             && self.focused(window, cx)
             && self.holds_text(cx);

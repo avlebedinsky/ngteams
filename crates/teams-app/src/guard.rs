@@ -1,5 +1,6 @@
 //! What the app refuses before it touches the lab: a build with `teams-fence`'s `test-support` (its fence API takes
-//! any roster and any member list, its transports a mock origin), and a window anywhere but the UI sandbox.
+//! any roster and any member list, its transports a mock origin) or its `personal` (the personal build's fence), and a
+//! window anywhere but the UI sandbox.
 //!
 //! The app opens a window only on a Wayland compositor whose socket lies in the dir `UI_SANDBOX_DIR` names (the UI
 //! sandbox sets both, `ui_sandbox::window_allowed`), and only with `DISPLAY` unset: GPUI's X11 backend, which the UI
@@ -14,6 +15,16 @@ use ui_sandbox::{SANDBOX_ENV, in_sandbox, names_wayland_display};
 pub fn test_support_refusal() -> Option<&'static str> {
     teams_fence::test_support_enabled().then_some(
         "built with teams-fence's test-support feature (cargo test, --all-targets or --all-features unify it in); \
+         rebuild with `cargo build -p teams-app`",
+    )
+}
+
+/// Why a build with the personal build's fence doesn't run (`teams-fence`'s `personal`, unified in by a build with
+/// `teams`), or `None` for a lab build.
+#[must_use]
+pub fn personal_refusal() -> Option<&'static str> {
+    teams_fence::personal_enabled().then_some(
+        "built with teams-fence's personal feature (a build with `teams`, --workspace or --all-features unify it in); \
          rebuild with `cargo build -p teams-app`",
     )
 }

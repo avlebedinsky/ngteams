@@ -159,6 +159,9 @@ pub enum RequestOutcome {
     /// The sign-in's redirect to the registered redirect URI, which carries the authorization code: caught and handed
     /// to the parent process, never let through (`teams-signin`). Its query, where the code travels, isn't logged.
     SignInRedirect,
+    /// A connection the personal sign-in window's host gate opened to a host on its list (`teams-signin`'s `personal`
+    /// feature): let through, its requests inside the tunnel decided by the window's guard as far as it sees them.
+    Tunnel,
 }
 
 /// A request the fence decided without a membership check. The URL is logged without its query, fragment or
@@ -184,6 +187,8 @@ struct RequestEntry<'a> {
     post_read: Option<&'static str>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     read: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    tunnel: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -445,7 +450,9 @@ impl FenceLog {
     /// When the entry can't be written, or an earlier append failed.
     pub fn record_request(&self, request: &RequestRecord<'_>) -> io::Result<()> {
         let (verdict, reason, message) = match request.outcome {
-            RequestOutcome::Own(_) | RequestOutcome::PostRead(_) | RequestOutcome::Read => ("allow", None, None),
+            RequestOutcome::Own(_) | RequestOutcome::PostRead(_) | RequestOutcome::Read | RequestOutcome::Tunnel => {
+                ("allow", None, None)
+            }
             RequestOutcome::Unclassified => ("deny", Some("unclassified"), Some("no rule classifies this request")),
             RequestOutcome::SentWithoutAllow => (
                 "breach",
@@ -478,6 +485,7 @@ impl FenceLog {
                 _ => None,
             },
             read: request.outcome == RequestOutcome::Read,
+            tunnel: request.outcome == RequestOutcome::Tunnel,
             reason,
             message,
         })

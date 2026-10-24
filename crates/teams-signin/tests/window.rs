@@ -99,6 +99,7 @@ fn child(scenario: &str) -> SandboxResult {
         Box::new(|guard| guard)
     };
     let answer = window::run(WindowConfig {
+        bound: window::Bound::Loopback,
         request: WindowRequest {
             authorize: format!("{origin}/authorize?scenario={scenario}&state={STATE}"),
             redirect_uri: NATIVE_CLIENT_REDIRECT.into(),

@@ -1790,7 +1790,7 @@ impl ChatView {
             && self.reveal.is_none()
             && self.revealing.is_none()
             && self.list.is_following_tail()
-            && self.settings.read(cx).settings().send_read_receipts;
+            && self.settings.read(cx).sends_read_receipts();
         if !wanted {
             return None;
         }

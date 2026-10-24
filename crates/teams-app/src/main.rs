@@ -59,6 +59,9 @@ fn run_app(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> ExitCode
     if let Some(refusal) = guard::test_support_refusal() {
         return fail("app", &refusal);
     }
+    if let Some(refusal) = guard::personal_refusal() {
+        return fail("app", &refusal);
+    }
     let launch = match prepare(alias, secrets_fd, trace_fd) {
         Ok(launch) => launch,
         Err(error) => return fail("app", &error),

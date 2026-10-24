@@ -13,6 +13,10 @@
 //!   endpoint lapses on its own: no captured request reports Away for one endpoint); nothing on quit (no captured
 //!   request reports Offline); the manual status when chosen, its reset when Automatic is chosen again. The policy's
 //!   module docs say why.
+//! - **Only while it may be sent** ([`SettingsModel::sends_presence`]: its switch on, and no first run's screen
+//!   waiting in the personal build): until then a registration isn't told to the policy, so nothing is reported; once
+//!   it may be, a registration already made is told then, and when it may no longer be, the policy is told the push
+//!   channel stopped.
 //! - **A failed report is shown** ([`OwnPresence::failure`], in the account menu) and never sent again on its own: the
 //!   engine's transient rules are the only retries (one more attempt after a 401, one short `Retry-After` wait), and a
 //!   later [`FeedEvent::OwnReport`] tells how a waiting one went. A manual status (or reset) that failed is shown as not
@@ -77,6 +81,10 @@ pub struct OwnPresence {
     /// tick compares against this, not against a reading taken after the idle time already passed.
     shown: Reporting,
     trace: Arc<ViewTrace>,
+    /// A registration of the push channel went through and it hasn't stopped since.
+    registered: bool,
+    /// The account's availability may be reported now ([`SettingsModel::sends_presence`]).
+    allowed: bool,
     _subscriptions: [Subscription; 2],
     _ticking: Task<()>,
 }
@@ -92,10 +100,13 @@ impl OwnPresence {
     ) -> Self {
         let now = cx.background_executor().now();
         let saved = settings.read(cx).settings().clone();
+        let allowed = settings.read(cx).sends_presence();
         let policy = OwnPresencePolicy::new(saved.manual_status.choice(), idle(saved.idle_minutes), now);
         let feeding = cx.subscribe(&models.feed, |this: &mut Self, _, event, cx| this.fed(event, cx));
         let settled = cx.observe(settings, |this: &mut Self, settings, cx| {
+            let allowed = settings.read(cx).sends_presence();
             let settings = settings.read(cx).settings().clone();
+            this.allowed_changed(allowed, cx);
             this.settings_changed(&settings, cx);
         });
         let ticking = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -114,6 +125,8 @@ impl OwnPresence {
             failure: None,
             shown,
             trace,
+            registered: false,
+            allowed,
             _subscriptions: [feeding, settled],
             _ticking: ticking,
         }
@@ -180,14 +193,38 @@ impl OwnPresence {
         let now = cx.background_executor().now();
         match event {
             FeedEvent::Registered => {
-                let send = self.policy.registered(now);
-                self.send(send, cx);
+                self.registered = true;
+                if self.allowed {
+                    let send = self.policy.registered(now);
+                    self.send(send, cx);
+                }
             }
-            FeedEvent::PushStopped => self.policy.stopped(),
+            FeedEvent::PushStopped => {
+                self.registered = false;
+                self.policy.stopped();
+            }
             FeedEvent::OwnReport { status, sent } => self.answered(*status, Ok(sent), cx),
             FeedEvent::Arrived { .. } | FeedEvent::Read { .. } | FeedEvent::Changed { .. } | FeedEvent::Down { .. } => {
                 return;
             }
+        }
+        self.changed(cx);
+    }
+
+    /// Whether the account's availability may be reported changed (its switch, or the first run's screen confirmed): a
+    /// registration already made is told to the policy once it may, and the policy is told the push channel stopped
+    /// once it may not.
+    fn allowed_changed(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        if allowed == self.allowed {
+            return;
+        }
+        self.allowed = allowed;
+        if !allowed {
+            self.policy.stopped();
+        } else if self.registered {
+            let now = cx.background_executor().now();
+            let send = self.policy.registered(now);
+            self.send(send, cx);
         }
         self.changed(cx);
     }

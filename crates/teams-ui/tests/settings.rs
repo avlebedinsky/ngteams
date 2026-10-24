@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, TestAppContext};
 use teams_ui::settings::{
-    DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsFile,
-    SettingsModel, parse, render,
+    DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings,
+    SettingsFile, SettingsModel, parse, render,
 };
 
 const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
@@ -32,6 +32,8 @@ fn changed() -> Settings {
         selected_chat: Some(CHAT.to_owned()),
         send_typing: false,
         send_read_receipts: false,
+        send_presence: false,
+        first_run: FirstRunState::Confirmed,
         notifications: Notifications::Mentions,
         idle_minutes: 15,
         manual_status: ManualStatus::DoNotDisturb,
@@ -320,4 +322,49 @@ fn only_the_captured_manual_statuses_are_kept_and_each_is_the_policy_s_choice() 
             Choice::Manual(ManualAvailability::Away),
         ]
     );
+}
+
+#[test]
+fn presence_is_sent_and_the_first_run_waits_by_default_and_both_go_through_the_file() {
+    let defaults = Settings::default();
+    assert!(defaults.send_presence);
+    assert_eq!(defaults.first_run, FirstRunState::Waiting);
+    let (read, problems) = parse("send_presence = false\nfirst_run = \"confirmed\"").expect("TOML");
+    assert!(!read.send_presence);
+    assert_eq!(read.first_run, FirstRunState::Confirmed);
+    assert!(problems.is_empty());
+    let (read, problems) = parse("first_run = \"skipped\"").expect("TOML");
+    assert_eq!(read.first_run, FirstRunState::Waiting);
+    assert!(matches!(&problems[..], [Problem::BadValue { key: "first_run", .. }]));
+}
+
+#[gpui::test]
+fn nothing_writes_on_its_own_until_the_first_run_is_confirmed(cx: &mut TestAppContext) {
+    // the lab app doesn't ask: each switch says
+    let lab = SettingsModel::in_memory(Settings::default());
+    assert!(!lab.awaiting_first_run());
+    assert!(lab.sends_typing() && lab.sends_read_receipts() && lab.sends_presence());
+    // the personal build asks: nothing until it is confirmed, whatever the switches say
+    let model = cx.new(|_| SettingsModel::in_memory(Settings::default()).requiring_first_run());
+    cx.read(|cx| {
+        let model = model.read(cx);
+        assert!(model.awaiting_first_run());
+        assert!(!model.sends_typing() && !model.sends_read_receipts() && !model.sends_presence());
+    });
+    model.update(cx, |model, cx| {
+        model.change(|settings| settings.send_read_receipts = false, cx);
+        model.confirm_first_run(cx);
+    });
+    cx.read(|cx| {
+        let model = model.read(cx);
+        assert!(!model.awaiting_first_run());
+        assert!(model.sends_typing() && !model.sends_read_receipts() && model.sends_presence());
+        assert_eq!(model.settings().first_run, FirstRunState::Confirmed);
+    });
+    // confirmed once, kept in the file
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (file, _) = file_in(&dir);
+    let saved = cx.new(|_| SettingsModel::load(file.clone()).requiring_first_run());
+    saved.update(cx, SettingsModel::confirm_first_run);
+    assert!(!SettingsModel::load(file).requiring_first_run().awaiting_first_run());
 }

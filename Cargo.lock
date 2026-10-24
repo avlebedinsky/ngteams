@@ -8038,6 +8038,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "teams"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "clap",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "log",
+ "serde_json",
+ "teams-auth",
+ "teams-core",
+ "teams-fence",
+ "teams-log",
+ "teams-mock",
+ "teams-proto",
+ "teams-signin",
+ "teams-store",
+ "teams-trouter",
+ "teams-ui",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "wiremock",
+]
+
+[[package]]
 name = "teams-app"
 version = "0.1.0"
 dependencies = [
@@ -8213,6 +8240,7 @@ dependencies = [
  "teams-signin",
  "teams-signin-extension",
  "tempfile",
+ "thiserror 2.0.21",
  "ui-sandbox",
  "url",
  "webkit6",

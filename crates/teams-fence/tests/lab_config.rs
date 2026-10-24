@@ -259,6 +259,7 @@ fn load_reads_the_file_and_names_it_on_error() {
     let locations = LabLocations {
         config_file: file.clone(),
         data_dir: dir.path().join("data"),
+        personal_data_dir: dir.path().join("teams"),
     };
     let config = LabConfig::load(&locations).unwrap();
     assert_eq!(config.paths().data_dir(), dir.path().join("data"));
@@ -276,6 +277,7 @@ fn lab_paths_follow_lab_toml_and_need_none() {
     let locations = LabLocations {
         config_file: file.clone(),
         data_dir: dir.path().join("default"),
+        personal_data_dir: dir.path().join("teams"),
     };
 
     // no lab.toml: the default data dir
@@ -356,6 +358,7 @@ fn lab_file(text: &str) -> std::io::Result<(tempfile::TempDir, LabLocations)> {
     let locations = LabLocations {
         config_file: file,
         data_dir: dir.path().join("data"),
+        personal_data_dir: dir.path().join("teams"),
     };
     Ok((dir, locations))
 }
@@ -575,4 +578,56 @@ fn only_a_group_chat_id_is_recorded_or_read() {
     assert!(matches!(meeting, ChatsError::NotAGroupChat(_)), "{meeting:?}");
     let unknown = LabChats::parse("ab = \"19:0123@thread.v2\"\n").unwrap_err();
     assert!(matches!(unknown, ChatsError::Parse(_)), "{unknown:?}");
+}
+
+#[test]
+fn the_personal_data_dir_is_where_the_xdg_data_home_puts_teams() {
+    let locations = LabLocations::resolve(None, Some("/data".into()), Some("/home/someone".into())).unwrap();
+    assert_eq!(locations.data_dir, Path::new("/data/teams-lab"));
+    assert_eq!(locations.personal_data_dir, Path::new("/data/teams"));
+}
+
+#[test]
+fn a_lab_data_dir_that_is_holds_or_lies_inside_the_personal_one_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("lab.toml");
+    let personal = dir.path().join("share/teams");
+    // no lab.toml: the default data dir is checked as lab_paths falls back to it
+    for default in [personal.clone(), personal.join("lab"), dir.path().join("share")] {
+        let locations = LabLocations {
+            config_file: file.clone(),
+            data_dir: default.clone(),
+            personal_data_dir: personal.clone(),
+        };
+        let error = locations.lab_paths().unwrap_err();
+        assert!(
+            matches!(error, ConfigError::PersonalDataDir { .. }),
+            "{default:?}: {error:?}"
+        );
+    }
+    // lab.toml's data_dir, read by every command that loads the config
+    let locations = LabLocations {
+        config_file: file.clone(),
+        data_dir: dir.path().join("share/teams-lab"),
+        personal_data_dir: personal.clone(),
+    };
+    assert!(locations.lab_paths().is_ok());
+    for inside in [personal.clone(), personal.join("store")] {
+        fs::write(&file, format!("data_dir = {inside:?}\n{}", three())).unwrap();
+        let error = LabConfig::load(&locations).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::PersonalDataDir { .. }),
+            "{inside:?}: {error:?}"
+        );
+        assert!(locations.lab_paths().is_err());
+    }
+    // through a symlink too
+    fs::create_dir_all(&personal).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&personal, &link).unwrap();
+    fs::write(&file, format!("data_dir = {link:?}\n{}", three())).unwrap();
+    assert!(matches!(
+        LabConfig::load(&locations),
+        Err(ConfigError::PersonalDataDir { .. })
+    ));
 }

@@ -1,10 +1,12 @@
-# The personal build: its rules, for the user's decision
+# The personal build: its rules
 
-Status: 2026-10-22, M2 Task 26 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`). **A proposal, not yet
-approved.** Nothing here is in force: CLAUDE.md's hard rules still name the lab only, and no code that loosens the
-fence for a personal build exists or may be written before the user approves this text or an amended one
-(`docs/backlog/personal-build-rules-await-the-users-decision.md`). Task 27 implements what is approved, as the
-approved CLAUDE.md text says.
+Status: **approved by the user on 2026-10-23, as written, all five choices included**; in force in CLAUDE.md's hard
+rules, and implemented in M2 Task 27 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`: `crates/teams`,
+the `personal` features of `teams-fence` and `teams-signin`). The proposal below was written on 2026-10-22, before the
+lab fence was rewritten around "lab accounts contact only each other" (`docs/plans/completed/20261023-lab-fence-contacting-writes-only.md`);
+where that rewrite changed what a sentence here assumed, [How the implementation reads it](#how-the-implementation-reads-it)
+says how. The current CLAUDE.md wins on everything about the lab; this text wins on the personal build's own rules,
+and nothing was loosened.
 
 It writes up the direction the user gave on 2026-10-21 (the plan's "Decisions of 2026-10-21", last bullet) against
 the code as it stands after M2 Tasks 1–16 and 24: `teams-fence` (`Fence`, `Fence::open_lab`, `LiveMembershipSource`,
@@ -433,4 +435,27 @@ Approve this document (and the CLAUDE.md text above), or amend it. The choices t
    `cargo build` included, kept out by `default-members` and the install marker), no install, no run, no access to
    its data, keyring items or logs, the diagnostic log included.
 
-Task 27 waits on this decision.
+Task 27 waited on this decision; the user approved it on 2026-10-23.
+
+## How the implementation reads it
+
+Written after the approval and the lab fence's rewrite, by Task 27:
+
+- **Reads.** The lab's native client now sends its reads by `POST` and its registration as plain requests the
+  classifier lets through; the personal build sends **no plain request** (`Refusal::Personal`): `GET`s, the
+  registration as its sealed own-state entry, the profile lookup and the presence read only as `PostRead` under a
+  `Fence::check_post_read_among` permit naming the account or people of its stored chats (`ChatPeople`, refreshed by
+  the engine from its store before a lookup starts), and its Trouter frames logged by kind (`FrameSink::logging`).
+- **Typing and read receipts.** The lab fence permits them on a chat without a member read; the personal fence keeps
+  rule 3 for them as for every write: the chat's thread is read and must list the account.
+- **Membership.** The personal source's answer is `Membership::Listed` (one unpaged thread read in a captured shape,
+  every member `8:orgid:<guid>` or `28:<guid>`, a group chat's `threadType` `chat`, a 1:1 chat's members exactly the
+  two its id names); the lab fence denies a listing, and the personal fence denies anything but one.
+- **`account.toml`.** `teams --account <UPN>` writes the UPN (and the user may add `idp_hosts`) before the first
+  sign-in, which adds the object id and tenant; the personal fence opens only once both are there.
+- **Changing account** is `teams --forget` (the `teams-personal` items, `account.toml`, the region; the store stays, to
+  delete by hand), a command line flag rather than an item in the app.
+- **The lab's credential broker** (`teams-app secrets`) builds no fence and refuses neither `test-support` nor
+  `personal`, as before; the app itself refuses both.
+- **CLAUDE.md** carries the approved text without its date (CLAUDE.md holds current rules only), its references to
+  the lab rules that the rewrite renamed adjusted, and the reads sentence as above.

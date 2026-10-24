@@ -21,12 +21,14 @@
 //!   messages stored before indexed by a backfill in batches.
 //! - [`teams`]: the account's teams and their channels, read from CSA in the background and kept in the store;
 //!   read-only, as a channel's posts are.
-//! - [`lab`]: a lab account's engine, assembled as every lab binary builds it (its session over the secret store the
-//!   binary hands in).
+//! - [`account`]: one account's engine, assembled the one way every binary builds it (its session over the secret
+//!   store the binary hands in, the fence and the member read it opened); [`lab`] gives it a lab account's parts, the
+//!   personal build (`crates/teams`) its own.
 //!
 //! M1 Tasks 13, 17 and 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`); M2 Task 5
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
+pub mod account;
 pub mod engine;
 pub mod lab;
 pub mod outbox;

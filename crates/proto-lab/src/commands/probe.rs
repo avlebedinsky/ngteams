@@ -634,5 +634,7 @@ pub(crate) fn membership_line(membership: &Membership) -> String {
         }
         Membership::Partial(reason) => format!("partial: {reason}"),
         Membership::OrgWide => "org-wide".to_owned(),
+        // the personal fence's answer; the lab's sources never give it
+        Membership::Listed(members) => format!("listed: {} members (not proven complete)", members.len()),
     }
 }

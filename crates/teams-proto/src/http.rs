@@ -71,8 +71,8 @@ use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
 use teams_auth::token::{SPACES_RESOURCE, TokenError, retry_after};
 use teams_fence::{
-    AFD_HOSTS, AllowedRecord, Channel, ChatCredential, Contact, CredentialFuture, CredentialSource, Fence, Mri, Policy,
-    Request as FenceRequest, RequestOutcome, RequestRecord, chat_service_path, contacting,
+    AFD_HOSTS, AllowedRecord, Channel, ChatCredential, ChatPeople, Contact, CredentialFuture, CredentialSource, Fence,
+    Mri, Policy, Request as FenceRequest, RequestOutcome, RequestRecord, chat_service_path, contacting,
 };
 use url::Url;
 
@@ -211,6 +211,13 @@ pub enum Refusal {
     /// A token that can't be sent as a header value.
     #[error("a token that can't be sent in a header")]
     Token,
+    /// A plain request through the personal build's fence: it sends only reads, its sealed own-state and read-by-`POST`
+    /// lists and authorized writes (`docs/personal-build.md`).
+    #[error("the personal build sends no plain request")]
+    Personal,
+    /// A read by `POST` the fence denied: it names someone the fence doesn't let it name.
+    #[error("the fence denied the read by POST")]
+    PostReadDenied,
 }
 
 /// How a request failed on the way.
@@ -270,6 +277,9 @@ pub struct HttpTransport<C> {
     /// Tests only: every request goes to this origin instead, with the path and query it was built and checked with.
     /// Only [`HttpTransport::with_mock_origin`] (`test-support`) sets it; without that feature it is always `None`.
     mock_origin: Option<Url>,
+    /// The people of the account's chats, as the engine last read them from its store: whom a read by `POST` through
+    /// a personal fence may name ([`Fence::check_post_read_among`]). Unread through a lab fence.
+    people: Arc<ChatPeople>,
 }
 
 impl<C> fmt::Debug for HttpTransport<C> {
@@ -369,7 +379,34 @@ impl<C: Credentials> HttpTransport<C> {
             max_retry_wait: MAX_RETRY_WAIT,
             policy,
             mock_origin: None,
+            people: Arc::new(ChatPeople::new()),
         })
+    }
+
+    /// The transport sharing `people` (the people of the account's chats, which the engine keeps from its store) for its
+    /// reads by `POST` through a personal fence ([`Client::lookup`](crate::Client::lookup)).
+    #[must_use]
+    pub fn with_chat_people(mut self, people: Arc<ChatPeople>) -> Self {
+        self.people = people;
+        self
+    }
+
+    /// The people of the account's chats this transport's reads by `POST` may name through a personal fence.
+    #[must_use]
+    pub fn chat_people(&self) -> &Arc<ChatPeople> {
+        &self.people
+    }
+
+    /// Whether this transport sends through the personal build's fence ([`Fence::is_personal`]).
+    #[must_use]
+    pub fn is_personal(&self) -> bool {
+        self.fence.is_personal()
+    }
+
+    /// The fence this transport logs to and asks.
+    #[must_use]
+    pub fn fence(&self) -> &Fence {
+        &self.fence
     }
 
     /// The transport with the account's middle-tier base, the region's GTM `middleTier` (trimmed): `https`, an AFD host
@@ -802,13 +839,29 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let (service, method, endpoint, body) =
             (request.service(), request.method(), request.endpoint(), request.body());
         async move {
+            // the personal build sends no plain request (`docs/personal-build.md`): only its sealed lists
+            if self.is_personal() {
+                return Err(HttpError::Refused(Refusal::Personal));
+            }
             self.send_plain(service, method.to_reqwest(), &endpoint, body.as_ref(), Record::Allowed)
                 .await
         }
     }
 
+    async fn send_own<R: OwnState + Request + Sync>(&self, request: &R) -> Result<Response, HttpError> {
+        if self.is_personal() {
+            self.own_state(request).await
+        } else {
+            self.send(request).await
+        }
+    }
+
     fn own_account(&self) -> Option<&Mri> {
         self.fence.own_account()
+    }
+
+    fn frame_log(&self) -> Option<Arc<Fence>> {
+        self.is_personal().then(|| Arc::clone(&self.fence))
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {

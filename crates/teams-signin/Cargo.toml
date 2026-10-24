@@ -19,6 +19,8 @@ teams-fence.workspace = true
 teams-signin-extension.workspace = true
 # the private directory for the guard's socket and the module
 tempfile.workspace = true
+# the personal window's host bound refusing a host
+thiserror.workspace = true
 # the check that a window opens only on the UI sandbox's compositor
 ui-sandbox.workspace = true
 url.workspace = true
@@ -30,11 +32,16 @@ serde_json.workspace = true
 teams-fence = { workspace = true, features = ["test-support"] }
 # the window test stands a local own-state rule in for Entra's (`Guard::with_own`); the binary refuses to run when a
 # test build unified it in
-teams-signin = { path = ".", features = ["test-support"] }
+teams-signin = { path = ".", features = ["test-support", "personal"] }
 
 [features]
-# a guard with test rules (`Guard::with_own`): tests only; the binary refuses to run with it
+# a guard with test rules (`Guard::with_own`, `SignInHosts::for_tests`): tests only; the binary refuses to run with it
 test-support = []
+# the personal sign-in window (docs/personal-build.md, Choice C): the host bound (`hosts`), the host gate
+# (`egress::HostGate`) and the guard and navigation policy bound to it. Only crates/teams enables it (a manifest test
+# checks every workspace manifest), for its `teams-signin-personal` binary; the lab's `teams-signin` binary refuses to
+# run when a build unified it in
+personal = []
 
 [[test]]
 # the window in the UI sandbox, on a local fake sign-in page: its own `main` (GTK runs on the main thread), which

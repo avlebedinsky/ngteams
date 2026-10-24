@@ -1,0 +1,60 @@
+[package]
+name = "teams"
+description = "The personal build: the user's own Teams account on the user's desktop, under the personal fence (docs/personal-build.md). Agents compile and mock-test it only; it runs only when scripts/install-personal.sh built it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+# the app
+name = "teams"
+path = "src/main.rs"
+
+[[bin]]
+# its sign-in window: teams-signin's window bound to Entra's and the identity provider's hosts
+name = "teams-signin-personal"
+path = "src/bin/teams-signin-personal.rs"
+
+[dependencies]
+clap.workspace = true
+# the app's window: GPUI's Linux platform, Wayland only
+gpui-pre.workspace = true
+gpui-pre-platform.workspace = true
+# the app's own lines in its diagnostic log; capped at `debug` at compile time like teams-trouter's
+log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
+# the sign-in (the window's protocol, the code exchange, authz and the region), the session, the Secret Service
+teams-auth.workspace = true
+# the account's engine, assembled as every binary builds one (`teams_core::account`)
+teams-core.workspace = true
+# the personal fence: only this crate enables `personal` (docs/personal-build.md; tests/apart.rs checks every manifest)
+teams-fence = { workspace = true, features = ["personal"] }
+# the diagnostic log, installed once before the engine starts
+teams-log.workspace = true
+# the personal sign-in window: only this crate enables `personal`
+teams-signin = { workspace = true, features = ["personal"] }
+# the views and the bridge over the engine
+teams-ui.workspace = true
+thiserror.workspace = true
+# the sign-in's and the engine's runtimes; the session's sign-out watch
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+base64.workspace = true
+gpui-pre = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+tempfile.workspace = true
+# a personal fence over a test log and given lab locations, its source and the transports reaching the mock; the two
+# binaries refuse to run when a test build unified it in
+teams-fence = { workspace = true, features = ["test-support", "personal"] }
+teams-mock.workspace = true
+teams-proto = { workspace = true, features = ["test-support"] }
+teams-store.workspace = true
+teams-trouter = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+# the manifest tests read every workspace manifest
+toml.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

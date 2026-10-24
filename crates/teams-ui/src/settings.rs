@@ -1,9 +1,15 @@
 //! The app's settings, kept in a TOML file of the account's own: the lab build's at `<data_dir>/ui/<alias>.toml`
 //! (`teams_fence::lab::LabPaths::ui_settings_file`), the personal build's in its own data dir.
 //!
-//! - **What**: the chat shown last ([`Settings::selected_chat`]), whether typing and read receipts are sent, which
-//!   messages notify ([`Notifications`]), the idle time after which the account's availability stops being reported, the
-//!   account's manual status ([`ManualStatus`]). Tasks 13, 14 and 20 act on the ones Task 8 only kept.
+//! - **What**: the chat shown last ([`Settings::selected_chat`]), whether typing, read receipts and the account's own
+//!   availability are sent, which messages notify ([`Notifications`]), the idle time after which the account's
+//!   availability stops being reported, the account's manual status ([`ManualStatus`]), and whether the first run's
+//!   screen of the writes that happen on their own was confirmed. Tasks 13, 14 and 20 act on the ones Task 8 only kept.
+//! - **The first run** (the personal build, M2 Task 27, [`SettingsModel::requiring_first_run`]): typing, read receipts
+//!   and the account's availability are the writes that happen without a per-item action; until the user confirms the
+//!   first-run screen ([`Settings::first_run`]) none of them is sent, whatever its switch says
+//!   ([`SettingsModel::sends_typing`], [`SettingsModel::sends_read_receipts`], [`SettingsModel::sends_presence`]). The
+//!   lab app doesn't ask: its settings send as their switches say.
 //! - **Forgiving to read**: a missing file gives the defaults; a file that can't be read or isn't TOML gives the
 //!   defaults and is reported, and is never written over: changes hold in memory until the app quits, so the file
 //!   is there to mend by hand; a value that is bad (of the wrong type, out of range, a name this build doesn't know)
@@ -146,6 +152,32 @@ impl ManualStatus {
     }
 }
 
+/// Whether the first run's screen was confirmed ([`Settings::first_run`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FirstRunState {
+    /// Not yet: where the app asks for the screen, typing, read receipts and presence aren't sent.
+    #[default]
+    Waiting,
+    Confirmed,
+}
+
+impl FirstRunState {
+    /// Its name in the file.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Confirmed => "confirmed",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        [Self::Waiting, Self::Confirmed]
+            .into_iter()
+            .find(|state| state.key() == key)
+    }
+}
+
 /// The settings (see the module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -155,6 +187,11 @@ pub struct Settings {
     pub send_typing: bool,
     /// Read receipts are sent as a chat is read (Task 13).
     pub send_read_receipts: bool,
+    /// The account's own availability is reported, following the app or a manual status (Task 20).
+    pub send_presence: bool,
+    /// Whether the first run's screen of the writes that happen on their own (typing, read receipts, presence) was
+    /// confirmed; read only where the app asks for it ([`SettingsModel::requiring_first_run`]).
+    pub first_run: FirstRunState,
     pub notifications: Notifications,
     /// Minutes without use after which the account's availability stops being reported (Task 20,
     /// [`crate::own_presence`]), within [`IDLE_MINUTES`].
@@ -170,6 +207,8 @@ impl Default for Settings {
             selected_chat: None,
             send_typing: true,
             send_read_receipts: true,
+            send_presence: true,
+            first_run: FirstRunState::Waiting,
             notifications: Notifications::default(),
             idle_minutes: DEFAULT_IDLE_MINUTES,
             manual_status: ManualStatus::default(),
@@ -183,6 +222,8 @@ pub mod keys {
     pub const SELECTED_CHAT: &str = "selected_chat";
     pub const SEND_TYPING: &str = "send_typing";
     pub const SEND_READ_RECEIPTS: &str = "send_read_receipts";
+    pub const SEND_PRESENCE: &str = "send_presence";
+    pub const FIRST_RUN: &str = "first_run";
     pub const NOTIFICATIONS: &str = "notifications";
     pub const IDLE_MINUTES: &str = "idle_minutes";
     pub const MANUAL_STATUS: &str = "manual_status";
@@ -236,6 +277,15 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
                 .as_bool()
                 .ok_or(bad(keys::SEND_READ_RECEIPTS, "not true or false"))?;
         }
+        keys::SEND_PRESENCE => {
+            settings.send_presence = value.as_bool().ok_or(bad(keys::SEND_PRESENCE, "not true or false"))?;
+        }
+        keys::FIRST_RUN => {
+            settings.first_run = value
+                .as_str()
+                .and_then(FirstRunState::from_key)
+                .ok_or(bad(keys::FIRST_RUN, "not one of waiting, confirmed"))?;
+        }
         keys::NOTIFICATIONS => {
             settings.notifications = value
                 .as_str()
@@ -286,6 +336,11 @@ pub fn render(settings: &Settings) -> String {
     table.insert(
         keys::SEND_READ_RECEIPTS.to_owned(),
         Value::Boolean(settings.send_read_receipts),
+    );
+    table.insert(keys::SEND_PRESENCE.to_owned(), Value::Boolean(settings.send_presence));
+    table.insert(
+        keys::FIRST_RUN.to_owned(),
+        Value::String(settings.first_run.key().to_owned()),
     );
     table.insert(
         keys::NOTIFICATIONS.to_owned(),
@@ -449,6 +504,8 @@ pub struct SettingsModel {
     copied: Option<Copied>,
     /// The "copy diagnostics" being collected.
     copying: Option<Task<()>>,
+    /// Typing, read receipts and presence wait for the first run's screen ([`SettingsModel::requiring_first_run`]).
+    first_run: bool,
 }
 
 impl SettingsModel {
@@ -467,6 +524,7 @@ impl SettingsModel {
             diagnostics: None,
             copied: None,
             copying: None,
+            first_run: false,
         }
     }
 
@@ -481,7 +539,45 @@ impl SettingsModel {
             diagnostics: None,
             copied: None,
             copying: None,
+            first_run: false,
         }
+    }
+
+    /// The settings with the first run's screen asked for (the personal build): until [`Settings::first_run`] is confirmed,
+    /// none of typing, read receipts and presence is sent.
+    #[must_use]
+    pub fn requiring_first_run(mut self) -> Self {
+        self.first_run = true;
+        self
+    }
+
+    /// Whether the first run's screen is waiting for the user: asked for, and not confirmed yet.
+    #[must_use]
+    pub fn awaiting_first_run(&self) -> bool {
+        self.first_run && self.settings.first_run == FirstRunState::Waiting
+    }
+
+    /// Whether typing is sent now: its switch is on and no first run waits.
+    #[must_use]
+    pub fn sends_typing(&self) -> bool {
+        !self.awaiting_first_run() && self.settings.send_typing
+    }
+
+    /// Whether read receipts are sent now: their switch is on and no first run waits.
+    #[must_use]
+    pub fn sends_read_receipts(&self) -> bool {
+        !self.awaiting_first_run() && self.settings.send_read_receipts
+    }
+
+    /// Whether the account's own availability is reported now: its switch is on and no first run waits.
+    #[must_use]
+    pub fn sends_presence(&self) -> bool {
+        !self.awaiting_first_run() && self.settings.send_presence
+    }
+
+    /// The first run's screen confirmed with the switches as they stand: from now on each is sent as its switch says.
+    pub fn confirm_first_run(&mut self, cx: &mut Context<Self>) {
+        self.change(|settings| settings.first_run = FirstRunState::Confirmed, cx);
     }
 
     /// The settings with where "copy diagnostics" reads from; a log that couldn't be opened

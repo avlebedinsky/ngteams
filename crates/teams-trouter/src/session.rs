@@ -194,6 +194,8 @@ pub enum Stop {
     SignedOut,
     /// The service disconnected with `skypetoken-deprecated`.
     Deprecated,
+    /// The personal build's `fence.log` can't be written, so no frame may go out.
+    LogUnavailable,
 }
 
 /// Why a client couldn't be built.
@@ -466,6 +468,15 @@ where
         wait.saturating_mul(100 - jitter + spread) / 100
     }
 
+    /// The sink for a socket at `url`: the personal build's logs its frames (`docs/personal-build.md`), a lab sink logs
+    /// none.
+    fn sink(&self, writer: SocketWriter, url: &url::Url) -> FrameSink<SocketWriter> {
+        match self.trouter.transport.frame_log() {
+            Some(fence) => FrameSink::logging(writer, fence, url.as_str()),
+            None => FrameSink::new(writer),
+        }
+    }
+
     /// One connection, from asking for its token to its end. A stop while the token is fetched or the socket opened
     /// ends it at once (nothing was sent).
     async fn connection(&mut self) -> End {
@@ -501,7 +512,7 @@ where
             }
         };
         let (writer, read) = socket::split(socket);
-        let sink = FrameSink::new(writer);
+        let sink = self.sink(writer, &url);
         let mut link = Link::new(sink, read, token, params, &options, self.trouter.clock.now());
         let end = link.serve(self).await;
         // a connect that ended before its `trouter.connected` failed, whatever ended it (the socket closed, the
@@ -734,6 +745,7 @@ impl Link {
     async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, End> {
         self.sink.send(frame).await.map_err(|error| match error {
             FrameError::Write(failed) => End::Again(Down::SendFailed(failed), Wait::Backoff),
+            FrameError::LogUnavailable(_) => End::Stop(Stop::LogUnavailable),
         })
     }
 

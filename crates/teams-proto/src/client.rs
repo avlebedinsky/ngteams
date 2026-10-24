@@ -5,11 +5,12 @@
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
-use teams_fence::{Mri, PostReadPermit, WritePermit};
+use teams_fence::{Fence, Mri, PostReadPermit, WritePermit};
 
-use crate::http::{Credentials, HttpError, HttpTransport};
+use crate::http::{Credentials, HttpError, HttpTransport, Refusal};
 use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead, PostReadMismatch};
 use crate::read::Read;
@@ -31,6 +32,16 @@ pub trait Transport: Sync {
     /// a write or a request the classifier can't read, before anything is sent.
     fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 
+    /// Sends an entry of the sealed own-state list that is also a plain request (the registration): as a plain request
+    /// ([`Transport::send`]) by default and through a lab fence; through the personal build's fence, as its own-state
+    /// entry, logged by its kind ([`HttpTransport::own_state`]).
+    fn send_own<R: OwnState + Request + Sync>(
+        &self,
+        request: &R,
+    ) -> impl Future<Output = Result<Response, Self::Error>> + Send {
+        self.send(request)
+    }
+
     /// Sends an authorized write and returns the service's answer, whatever its status: what to do about a refusal is
     /// the caller's (the outbox's) decision.
     fn deliver<R: Mutating + Send>(
@@ -44,6 +55,13 @@ pub trait Transport: Sync {
     /// and outside `test-support` that is the native transport's alone, so another transport's answer here can't make
     /// an endpoint any account's.
     fn own_account(&self) -> Option<&Mri> {
+        None
+    }
+
+    /// The fence whose log the push channel's frames go to before they are sent ([`crate::FrameSink::logging`]): the
+    /// native transport's when its fence is the personal build's; `None` (the default, and every lab transport's) for a
+    /// sink that logs none.
+    fn frame_log(&self) -> Option<Arc<Fence>> {
         None
     }
 }
@@ -205,6 +223,29 @@ impl<C: Credentials> Client<HttpTransport<C>> {
     /// The transport's.
     pub async fn own_state<R: OwnState>(&self, request: &R) -> Result<Response, HttpError> {
         self.transport.own_state(request).await
+    }
+
+    /// Sends a read by `POST` of the sealed list: through a lab fence as a plain request ([`Transport::send`], whoever it
+    /// names); through the personal build's fence only under the permit [`teams_fence::Fence::check_post_read_among`]
+    /// gives for its exact MRIs against the people of the account's chats ([`HttpTransport::chat_people`]), once, in its
+    /// entry's captured shape ([`HttpTransport::post_read`]).
+    ///
+    /// # Errors
+    /// The transport's; [`HttpError::Refused`] with [`Refusal::PostReadDenied`] when the personal fence denied it
+    /// (nothing sent), [`HttpError::Unknown`] when the permit doesn't match it.
+    pub async fn lookup<R: PostRead + Request + Send + Sync>(&self, request: R) -> Result<Response, HttpError> {
+        if !self.transport.is_personal() {
+            return self.transport.send(&request).await;
+        }
+        let permit = self
+            .transport
+            .fence()
+            .check_post_read_among(R::KIND, request.names(), self.transport.chat_people())
+            .map_err(|_| HttpError::Refused(Refusal::PostReadDenied))?;
+        self.post_read(request, permit).await.map_err(|error| match error {
+            PostReadError::Mismatch(_) => HttpError::Unknown,
+            PostReadError::Transport(error) => error,
+        })
     }
 
     /// Sends one read by `POST` under the permit `Fence::check_post_read` gave for its entry and its exact MRIs

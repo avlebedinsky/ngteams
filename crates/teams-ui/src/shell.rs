@@ -37,6 +37,7 @@ use crate::bridge::Core;
 use crate::channel_view::ChannelView;
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView};
+use crate::first_run::FirstRun;
 use crate::models::Models;
 use crate::own_presence::{self, OwnPresence};
 use crate::presence;
@@ -118,6 +119,8 @@ pub struct Shell {
     /// The channel opened in the conversation pane, with the names its header shows.
     channel: Option<(Entity<ChannelView>, ChannelChosen)>,
     settings_view: Entity<SettingsView>,
+    /// The first run's screen, shown over everything while it waits ([`SettingsModel::awaiting_first_run`]).
+    first_run: Entity<FirstRun>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
     search: Option<(Entity<Search>, Subscription)>,
     rail: RailItem,
@@ -130,7 +133,7 @@ pub struct Shell {
     status_menu: bool,
     /// What the chat's header was last traced showing.
     header_traced: Option<HeaderShown>,
-    _subscriptions: [Subscription; 6],
+    _subscriptions: [Subscription; 7],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -173,6 +176,9 @@ impl Shell {
             }
         });
         let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx));
+        let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
+        // the first run's screen comes and goes with the settings
+        let settled = cx.observe(&settings, |_: &mut Self, _, cx| cx.notify());
         // a presence the engine told: the chat's header draws its dot again
         let presence = cx.observe(&models.presence, |this: &mut Self, _, cx| {
             this.trace_header(cx);
@@ -209,6 +215,7 @@ impl Shell {
             chat,
             channel: None,
             settings_view,
+            first_run,
             switcher: None,
             search: None,
             rail: RailItem::Chats,
@@ -218,7 +225,7 @@ impl Shell {
             own_presence: None,
             status_menu: false,
             header_traced: None,
-            _subscriptions: [opened, channel_opened, kept_channel, presence, typed, renamed],
+            _subscriptions: [opened, channel_opened, kept_channel, presence, typed, renamed, settled],
         }
     }
 
@@ -885,6 +892,18 @@ impl Render for Shell {
         let switcher = self.switcher().map(|switcher| overlay(switcher.clone().into()));
         let search = self.search().map(|search| overlay(search.clone().into()));
         let status_menu = self.status_menu.then(|| self.status_menu_view(palette, cx));
+        let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(self.first_run.clone())
+        });
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -902,6 +921,7 @@ impl Render for Shell {
             .children(switcher)
             .children(search)
             .children(status_menu)
+            .children(first_run)
     }
 }
 

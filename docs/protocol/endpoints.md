@@ -53,7 +53,10 @@ keeps that until a note describes it.
   the middle tier's `/api/mt/…` base, Graph's `v1.0`, CSA and UPS, so a `Read` or a `Request` could name it, judged
   as above; none does yet), or **no service** (its host is none of those, so the transport can't send it at all; a
   new service is a code change). The personal build keeps sealed lists beside these (`OwnState`, `PostRead`, sent by
-  `HttpTransport::own_state` and `::post_read`); a lab binary sends their entries as `Request`s.
+  `HttpTransport::own_state` and `::post_read`); a lab binary sends their entries as `Request`s. The personal build
+  (`crates/teams`, M2 T27) sends no `Request` at all: the registration goes as its `OwnState` entry, the profile
+  lookup and the presence read only through `Client::lookup` under a `Fence::check_post_read_among` permit naming the
+  account or people of its stored chats; it adds no endpoint of its own.
 - **Notes · task**: the note that describes it, and the task that captured, mapped or built it (M0, M1 or M2 task
   number).
 - **Evidence**: `seen` (in the lab's captures, with the scenarios), `probe` (a `proto-lab` command's own live request),

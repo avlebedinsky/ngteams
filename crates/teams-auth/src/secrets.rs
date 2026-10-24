@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
 
+use tokio::sync::OnceCell;
 use zeroize::Zeroizing;
 
 /// A secret value: a refresh token, an access token or a skypetoken. The memory is zeroed on drop.
@@ -197,5 +198,49 @@ impl SecretStore for KeyringSecretStore {
         self.unlock().await?;
         self.keyring.delete(&self.attributes(key)).await?;
         Ok(())
+    }
+}
+
+/// The Secret Service store of `application`, connected on its first use and kept from then on; a failed connection
+/// is tried again on the next request.
+#[derive(Debug)]
+pub struct LazyKeyring {
+    application: String,
+    keyring: OnceCell<KeyringSecretStore>,
+}
+
+impl LazyKeyring {
+    #[must_use]
+    pub fn new(application: impl Into<String>) -> Self {
+        Self {
+            application: application.into(),
+            keyring: OnceCell::new(),
+        }
+    }
+
+    /// Whether the Secret Service has been connected.
+    #[must_use]
+    pub fn connected(&self) -> bool {
+        self.keyring.initialized()
+    }
+
+    async fn keyring(&self) -> Result<&KeyringSecretStore, SecretError> {
+        self.keyring
+            .get_or_try_init(|| KeyringSecretStore::new(self.application.clone()))
+            .await
+    }
+}
+
+impl SecretStore for LazyKeyring {
+    async fn put(&self, key: &SecretKey, secret: &Secret) -> Result<(), SecretError> {
+        self.keyring().await?.put(key, secret).await
+    }
+
+    async fn get(&self, key: &SecretKey) -> Result<Option<Secret>, SecretError> {
+        self.keyring().await?.get(key).await
+    }
+
+    async fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
+        self.keyring().await?.delete(key).await
     }
 }

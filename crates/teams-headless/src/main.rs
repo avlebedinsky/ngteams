@@ -35,6 +35,14 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+    if teams_fence::personal_enabled() {
+        // the personal build's fence came in with `teams` built in the same cargo invocation: a lab binary never has it
+        eprintln!(
+            "teams-headless: built with teams-fence's personal feature (a build with `teams`); rebuild with \
+             `cargo build -p teams-headless`"
+        );
+        return ExitCode::FAILURE;
+    }
     teams_headless::debug_log::init_from_env();
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,

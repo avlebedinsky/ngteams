@@ -33,6 +33,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-log` | the app's diagnostic log: one file per account (`0600` in a `0700` dir, rotated at 8 MiB, 4 older kept), our own crates' records only, written from a thread of its own; every line redacted by the logger itself (credential headers, token fields, sign-in's codes, Trouter's `user.authenticate`, then JWT-shaped strings, `skypetoken=`, `Bearer `); full requests and frames only at `debug`; the "copy diagnostics" text |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; clients reach it through the `test-support` mock origins |
 | `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
+| `crates/teams` | the personal build (`docs/personal-build.md`): `teams`, the user's own account on the user's desktop under the personal fence (`teams-fence`'s `personal` feature, which only this crate enables), and `teams-signin-personal`, its sign-in window bound to Entra's and the identity provider's hosts through a host gate. No broker, no sandbox; its data under `~/.local/share/teams/` and `~/.config/teams/`, its tokens under `teams-personal` on the Secret Service. Left out of the root's `default-members`; both binaries refuse a `test-support` build and one `scripts/install-personal.sh` didn't make. Agents compile and mock-test it only |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and checks each fixture's `_synthetic` marker |
@@ -357,6 +358,25 @@ the tray item keeping the app when the window closes, the window back when the w
 registered again with a new one, opening it again and quitting it) and keeps its two screenshots
 under `target/ui-shots/`: `teams-app-window.png` (the window as the catch-up filled it) and `teams-app-chat.png` (the
 chat opened).
+
+## `teams` (the personal build)
+
+The user's own Teams account, built and installed only by the user (`docs/personal-build.md`; agents never build a
+runnable one, install it, run it or touch its data):
+
+```sh
+scripts/install-personal.sh          # a release build of teams and teams-signin-personal, installed under ~/.local
+teams --account you@your-tenant.com  # the first run: the account to sign in, through the sign-in window
+teams                                # afterwards
+teams --forget                       # sign out and forget the account (the store stays)
+```
+
+The first run shows what the app sends on its own (typing, read receipts, presence) and sends none of it until that
+screen is confirmed. A refresh token Entra refuses shows "signed out", stops the engine and opens the sign-in window
+again. Its fence permits a write only to a 1:1 or group chat whose thread, read fresh, lists the account (channels,
+meeting chats and new chats stay read-only), its reads by `POST` only for people of the account's chats, and logs every
+decision to `~/.local/share/teams/fence.log`. A plain `cargo build` at the root leaves it out; `cargo build -p teams`
+gives binaries that refuse to start (no install marker).
 
 ## `teams-app secrets`
 

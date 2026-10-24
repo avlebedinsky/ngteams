@@ -20,6 +20,10 @@
 //! [`Fence::check_post_read`]: a [`PostReadPermit`] for its exact list of MRIs when every one is a lab account, none
 //! twice, the decision logged. The lab's native client sends its reads by `POST` as plain requests instead.
 //!
+//! The personal build's fence (`docs/personal-build.md`) is the `personal` module, behind the `personal` feature only
+//! `crates/teams` enables: [`Fence::open_personal`] is its only constructor outside tests, and every lab binary refuses
+//! to run in a build that has it ([`personal_enabled`]). The keep-apart paths both builds check are [`apart`].
+//!
 //! Nothing outside this crate can bend a decision: a lab binary builds its fence only with [`Fence::open_lab`] (the
 //! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed, so its sources are
 //! the ones this crate defines: [`FailClosed`], which denies every write whose scope has to be fetched, and
@@ -29,11 +33,14 @@
 //! as a membership source); only dev-dependencies enable it, and a lab binary refuses to run when a build turned it on
 //! ([`test_support_enabled`]).
 
+pub mod apart;
 mod contacting;
 mod decision;
 pub mod lab;
 mod log;
 mod membership;
+#[cfg(feature = "personal")]
+pub mod personal;
 mod post_read;
 mod target;
 
@@ -52,9 +59,9 @@ pub use log::{
 pub use membership::{
     AFD_HOSTS, ChatCredential, CredentialFuture, CredentialSource, FETCH_TIMEOUT, LiveMembershipSource,
     LiveSourceError, MAX_BODY, REGIONAL_SUFFIX, chat_service_path, is_chat_id, is_group_chat_id, is_meeting_chat_id,
-    one_to_one_id, one_to_one_pair, parse_members, parse_thread,
+    one_to_one_id, one_to_one_pair, parse_listing, parse_members, parse_thread,
 };
-pub use post_read::{PostReadDenied, PostReadDenyReason, PostReadPermit};
+pub use post_read::{ChatPeople, PostReadDenied, PostReadDenyReason, PostReadPermit};
 pub use target::{Mri, Scope, Target, WriteKind};
 
 /// Whether this build has the `test-support` feature, which lets any code build a fence over any roster and log and
@@ -64,4 +71,13 @@ pub use target::{Mri, Scope, Target, WriteKind};
 #[must_use]
 pub const fn test_support_enabled() -> bool {
     cfg!(feature = "test-support")
+}
+
+/// Whether this build has the `personal` feature: the personal build's fence ([`Fence::open_personal`], the
+/// `personal` module). Only `crates/teams` enables it, but cargo unifies features across one build, so a lab binary
+/// built in one cargo invocation with `teams` (`--workspace`, `--all-features`) gets it too; every lab binary checks
+/// this and refuses to run.
+#[must_use]
+pub const fn personal_enabled() -> bool {
+    cfg!(feature = "personal")
 }

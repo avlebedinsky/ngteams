@@ -8,7 +8,7 @@ use teams_auth::signin::{WindowAnswer, WindowRequest, read_line};
 use teams_fence::FenceLog;
 use teams_fence::lab::LabLocations;
 use teams_signin::cli::{self, NOT_LIVE};
-use teams_signin::window::{self, WindowConfig};
+use teams_signin::window::{self, Bound, WindowConfig};
 
 fn main() -> ExitCode {
     // stdout is the answer's alone from here: everything else printed goes to stderr
@@ -47,6 +47,9 @@ fn prepare() -> Result<WindowConfig, String> {
     if let Some(refusal) = cli::test_support_refusal() {
         return Err(refusal.into());
     }
+    if let Some(refusal) = cli::personal_refusal() {
+        return Err(refusal.into());
+    }
     let line = read_line(io::stdin().lock())
         .map_err(|error| format!("the request can't be read: {error}"))?
         .ok_or("no request on stdin")?;
@@ -66,6 +69,7 @@ fn prepare() -> Result<WindowConfig, String> {
         .ok_or_else(|| format!("no {} beside {}", window::EXTENSION_FILE, exe.display()))?;
     Ok(WindowConfig {
         request,
+        bound: Bound::Loopback,
         extension,
         log,
         setup: Box::new(|guard| guard),

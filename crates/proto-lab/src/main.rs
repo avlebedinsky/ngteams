@@ -217,6 +217,13 @@ fn main() -> ExitCode {
         eprintln!("proto-lab: built with teams-fence's test-support feature; rebuild with `cargo build -p proto-lab`");
         return ExitCode::FAILURE;
     }
+    if teams_fence::personal_enabled() {
+        // the personal build's fence came in with `teams` built in the same cargo invocation: a lab binary never has it
+        eprintln!(
+            "proto-lab: built with teams-fence's personal feature (a build with `teams`); rebuild with `cargo build -p proto-lab`"
+        );
+        return ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {

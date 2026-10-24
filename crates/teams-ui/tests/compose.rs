@@ -35,7 +35,7 @@ use teams_ui::compose::{
     matching, mention_query, message_text,
 };
 use teams_ui::sending::{Again, RowState};
-use teams_ui::settings::Settings;
+use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::Shell;
 
 const AB: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
@@ -815,6 +815,34 @@ fn typing_stays_off_with_its_setting_off() {
     );
     type_text(cx, "hello");
     assert_eq!(typing_sent(&rig), 0);
+}
+
+#[test]
+fn typing_waits_for_the_first_run_to_be_confirmed() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hi</p>")]);
+    let parts = parts::parts(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    let settings = parts.settings.clone();
+    rig.cx.update(|cx| {
+        settings.update(cx, |model, _| {
+            *model = std::mem::replace(model, SettingsModel::in_memory(Settings::default())).requiring_first_run();
+        });
+    });
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, AB.to_owned(), window, cx));
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    focus_compose(&view, cx);
+    type_text(cx, "hello");
+    assert_eq!(
+        typing_sent(&rig),
+        0,
+        "nothing on its own before the first run is confirmed"
+    );
+    cx.update(|_, cx| settings.update(cx, SettingsModel::confirm_first_run));
+    cx.executor().advance_clock(TYPING_EVERY);
+    type_text(cx, "!");
+    assert_eq!(typing_sent(&rig), 1);
 }
 
 fn receipts(rig: &Rig) -> Vec<String> {

@@ -24,6 +24,11 @@ pub enum OwnKind {
     Authz,
     /// Entra's sign-in form: the username lookup, the password and "Stay signed in?".
     EntraSignIn,
+    /// Entra's multi-factor and federation return paths (the personal sign-in window only, `personal`): no capture has
+    /// shown them; they change only the account's own sign-in.
+    EntraMultiFactor,
+    /// A `POST` to the federated identity provider's hosts the user named (the personal sign-in window only).
+    IdentityProvider,
 }
 
 impl OwnKind {
@@ -34,6 +39,8 @@ impl OwnKind {
             Self::EntraToken => "entra_token",
             Self::Authz => "authz",
             Self::EntraSignIn => "entra_sign_in",
+            Self::EntraMultiFactor => "entra_multi_factor",
+            Self::IdentityProvider => "identity_provider",
         }
     }
 }
@@ -241,10 +248,25 @@ pub const TOKEN_QUERY: QueryRule = QueryRule::OneOf(&[
 /// of multi-factor sign-in (`SAS/*`) or of the account's security info is on it.
 const SIGN_IN: [&str; 4] = ["/*/GetCredentialType", "/*/login", "/kmsi", "/*/kmsi"];
 
-/// The classifier: the own-state list.
+/// Entra's multi-factor sign-in (`SAS/*`: the method's start, its end and the answer's processing) and the federation
+/// return paths, on `login.microsoftonline.com` (`*` a tenant or `common`): the personal sign-in window's, which the
+/// lab never showed (`docs/personal-build.md`, "Its sign-in").
+#[cfg(feature = "personal")]
+const MULTI_FACTOR: [&str; 5] = [
+    "/*/SAS/BeginAuth",
+    "/*/SAS/EndAuth",
+    "/*/SAS/ProcessAuth",
+    "/*/reprocess",
+    "/login.srf",
+];
+
+/// The classifier: the own-state list, and the identity provider's origins whose `POST`s are own-state too (the
+/// personal sign-in window's; none in the lab's).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Classifier {
     own: Vec<OwnRule>,
+    /// `https://<host>` of each identity provider host: a mutating request there is [`OwnKind::IdentityProvider`].
+    idp: Vec<String>,
 }
 
 impl Classifier {
@@ -266,7 +288,7 @@ impl Classifier {
                 .iter()
                 .map(|(origin, path)| OwnRule::new(OwnKind::Authz, "POST", origin, path)),
         );
-        Self { own }
+        Self { own, idp: Vec::new() }
     }
 
     /// The seeded list plus Entra's sign-in form ([`OwnKind::EntraSignIn`]): what the sign-in window needs to show
@@ -279,6 +301,26 @@ impl Classifier {
             OwnRule::new(OwnKind::EntraSignIn, "POST", "https://login.microsoftonline.com", path)
                 .with_query(QueryRule::Any)
         }));
+        classifier
+    }
+
+    /// The personal sign-in window's rules (`personal`): [`Classifier::sign_in`], Entra's multi-factor and federation
+    /// return paths ([`OwnKind::EntraMultiFactor`], any query: no capture showed them), and a `POST` to any path of the
+    /// identity provider's hosts `hosts` names ([`OwnKind::IdentityProvider`]).
+    #[cfg(feature = "personal")]
+    #[must_use]
+    pub fn personal(hosts: &crate::hosts::SignInHosts) -> Self {
+        let mut classifier = Self::sign_in();
+        classifier.own.extend(MULTI_FACTOR.iter().map(|path| {
+            OwnRule::new(
+                OwnKind::EntraMultiFactor,
+                "POST",
+                "https://login.microsoftonline.com",
+                path,
+            )
+            .with_query(QueryRule::Any)
+        }));
+        classifier.idp = hosts.idp_hosts().iter().map(|host| format!("https://{host}")).collect();
         classifier
     }
 
@@ -300,6 +342,9 @@ impl Classifier {
         let Ok(url) = Url::parse(url) else {
             return Classification::Unknown;
         };
+        if method == "POST" && self.idp.contains(&url.origin().ascii_serialization()) {
+            return Classification::Own(OwnKind::IdentityProvider);
+        }
         self.own
             .iter()
             .find(|rule| rule.matches(&method, &url))

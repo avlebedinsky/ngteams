@@ -1573,21 +1573,31 @@ task replaces that with one logger of our own. `teams-headless`'s `TEAMS_HEADLES
 - Modify: `crates/teams-fence/src/*` (the personal fence), `crates/teams-auth/src/*`, `crates/teams-ui/src/*`,
   `crates/teams-app/src/main.rs` (its refusal), `crates/fence-seal/tests/ui/*`, `README.md`
 
-- [ ] only after Task 26's approval, and as the approved CLAUDE.md text says
-- [ ] tests first (on `teams-mock`, the binary's lib): the personal fence permits a write to a chat with an outsider
+- [x] only after Task 26's approval, and as the approved CLAUDE.md text says
+- [x] tests first (on `teams-mock`, the binary's lib): the personal fence permits a write to a chat with an outsider
       that the lab fence denies, and denies one to a conversation the account isn't a member of (by a fresh member
       read), an unknown target or a partial read; a `PostRead` for a non-lab MRI the account's chats name is allowed,
       a search shape is not; a `fence-seal` case that only the personal binary's start can open the personal fence
-- [ ] tests first: the keep-apart rules of Task 26 (the manifest test, `teams-app`'s refusal, each binary refusing the
+- [x] tests first: the keep-apart rules of Task 26 (the manifest test, `teams-app`'s refusal, each binary refusing the
       other's data dir, `lab.toml` and keyring items, both refusing `test-support`)
-- [ ] tests first: `teams` signs in through `teams-signin`, stores its tokens under `teams-personal` on the desktop's
+- [x] tests first: `teams` signs in through `teams-signin`, stores its tokens under `teams-personal` on the desktop's
       Secret Service, opens its store under `~/.local/share/teams/`; on an invalid grant it shows "signed out" and
       reopens the sign-in window, and nothing is sent until it is signed in again
-- [ ] the settings that make writes happen on their own (read receipts, typing, presence) shown on the first run, with
+- [x] the settings that make writes happen on their own (read receipts, typing, presence) shown on the first run, with
       their defaults; nothing else goes out without a user action
-- [ ] `packaging/teams.desktop` and `scripts/install-personal.sh` (a release build installed under `~/.local/`), for
+- [x] `packaging/teams.desktop` and `scripts/install-personal.sh` (a release build installed under `~/.local/`), for
       the user to run; agents don't run it
-- [ ] `cargo test -p teams -p teams-fence -p teams-auth -p teams-ui -p teams-app -p fence-seal` and the gate pass
+- [x] `cargo test -p teams -p teams-fence -p teams-auth -p teams-ui -p teams-app -p fence-seal` and the gate pass
+- Done (2026-10-24): the approved CLAUDE.md text applied (reconciled with the lab fence's rewrite: no date, the reads
+  sentence for a build that sends no plain request) and the backlog item removed; `teams-fence`'s `personal` feature
+  (`Fence::open_personal`, the personal policy, `PersonalMembershipSource` answering `Membership::Listed`,
+  `check_post_read_among` with `ChatPeople`, `apart` for both sides' data dirs), `teams-signin`'s (host gate, guard and
+  navigation bound to Entra's and the identity provider's hosts), `crates/teams` (both binaries, the install marker,
+  `teams --account`/`--forget`, the sign-out that reopens the window and restarts), `teams_core::account` shared with
+  the lab, the first run's screen and a presence switch in `teams-ui`, the personal transport refusing plain requests
+  and logging frames, `LazyKeyring` moved to `teams-auth`. No runnable personal binary was built; the install script
+  wasn't run. How the code reads the approved text where the lab rewrite changed it: `docs/personal-build.md`, "How
+  the implementation reads it".
 
 ### Task 28: [Final] Update documentation
 - [ ] README.md: the M2 crates, `teams-app`, `teams`, the UI sandbox, the live UI test, the UI kit and its licence

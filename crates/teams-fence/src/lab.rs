@@ -289,11 +289,14 @@ pub fn record_abc_chat(paths: &LabPaths, id: &str) -> Result<ChatRecord, ChatsEr
     Ok(ChatRecord::Recorded)
 }
 
-/// Where the config file and the default data dir are.
+/// Where the config file and the default data dir are, and where the personal build's data dir is, which no lab data
+/// dir may be, contain or lie inside ([`crate::apart`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LabLocations {
     pub config_file: PathBuf,
     pub data_dir: PathBuf,
+    /// The personal build's data dir (`$XDG_DATA_HOME/teams`, [`crate::apart::PersonalLocations`]).
+    pub personal_data_dir: PathBuf,
 }
 
 impl LabLocations {
@@ -325,10 +328,27 @@ impl LabLocations {
                 .or_else(|| home.as_ref().map(|home| home.join(fallback)))
                 .ok_or(ConfigError::NoHome)
         };
+        let data_home = base(data_home, ".local/share")?;
         Ok(Self {
             config_file: base(config_home, ".config")?.join("teams-lab/lab.toml"),
-            data_dir: base(data_home, ".local/share")?.join("teams-lab"),
+            data_dir: data_home.join("teams-lab"),
+            personal_data_dir: data_home.join(crate::apart::PERSONAL_DIR),
         })
+    }
+
+    /// `paths` unless their data dir is, contains or lies inside the personal build's data dir
+    /// ([`crate::apart::overlapping`]): every lab path is made through this, so no lab binary writes there.
+    ///
+    /// # Errors
+    /// [`ConfigError::PersonalDataDir`] when they overlap.
+    fn apart(&self, paths: LabPaths) -> Result<LabPaths, ConfigError> {
+        if crate::apart::overlapping(paths.data_dir(), &self.personal_data_dir) {
+            return Err(ConfigError::PersonalDataDir {
+                lab: paths.data_dir().to_path_buf(),
+                personal: self.personal_data_dir.clone(),
+            });
+        }
+        Ok(paths)
     }
 
     /// The lab directories in effect: those of `lab.toml` (whose `data_dir` overrides the default) when the file exists,
@@ -336,12 +356,13 @@ impl LabLocations {
     /// this way with or without a lab config.
     ///
     /// # Errors
-    /// When `lab.toml` exists but can't be read or is invalid (see [`LabConfig::load`]).
+    /// When `lab.toml` exists but can't be read or is invalid (see [`LabConfig::load`]), or the data dir in effect is,
+    /// contains or lies inside the personal build's ([`ConfigError::PersonalDataDir`]).
     pub fn lab_paths(&self) -> Result<LabPaths, ConfigError> {
         match LabConfig::load(self) {
             Ok(config) => Ok(config.paths().clone()),
             Err(ConfigError::Read { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-                Ok(LabPaths::new(self.data_dir.clone()))
+                self.apart(LabPaths::new(self.data_dir.clone()))
             }
             Err(error) => Err(error),
         }
@@ -397,6 +418,13 @@ pub enum ConfigError {
     UnknownAlias(String),
     #[error("HOME is unset or relative, so the lab directories can't be found")]
     NoHome,
+    /// The lab's data dir is, contains or lies inside the personal build's: no lab binary writes there.
+    #[error(
+        "the lab's data dir {} overlaps the personal build's {}: a lab binary never uses the personal build's data",
+        lab.display(),
+        personal.display()
+    )]
+    PersonalDataDir { lab: PathBuf, personal: PathBuf },
 }
 
 #[derive(Deserialize)]
@@ -423,13 +451,16 @@ impl LabConfig {
     /// Reads and validates `locations.config_file`; `locations.data_dir` applies unless the file sets `data_dir`.
     ///
     /// # Errors
-    /// When the file can't be read or is invalid (see [`LabConfig::parse`]).
+    /// When the file can't be read or is invalid (see [`LabConfig::parse`]), or its data dir is, contains or lies inside
+    /// the personal build's ([`ConfigError::PersonalDataDir`]).
     pub fn load(locations: &LabLocations) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(&locations.config_file).map_err(|source| ConfigError::Read {
             path: locations.config_file.clone(),
             source,
         })?;
-        Self::parse(&text, &locations.data_dir)
+        let mut config = Self::parse(&text, &locations.data_dir)?;
+        config.paths = locations.apart(config.paths)?;
+        Ok(config)
     }
 
     /// Parses and validates `lab.toml` text. `default_data_dir` applies unless the text sets `data_dir`.

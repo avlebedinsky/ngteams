@@ -90,7 +90,7 @@ use std::task::{Context, Poll};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
-use teams_fence::Mri;
+use teams_fence::{ChatPeople, Mri};
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
     Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, ManualAvailability, RegisteredEndpoint, Transport,
@@ -892,6 +892,9 @@ struct Core<C, T> {
     losses: Vec<MessageLoss>,
     /// The search backfill of the messages stored before ([`crate::search`]), until it is over or failed.
     backfill: Option<Backfill>,
+    /// The people of the account's chats the reads' transport may name in a read by `POST` through the personal
+    /// build's fence; `None` through a lab fence, which never reads it.
+    people: Option<Arc<ChatPeople>>,
 }
 
 impl<C, T> Core<C, T>
@@ -909,6 +912,11 @@ where
         );
         let teams = Teams::new(Arc::clone(&parts.client), parts.options.teams_retry);
         let presences = Presences::new(Arc::clone(&parts.client), parts.options.presence_poll);
+        let people = parts
+            .client
+            .transport()
+            .is_personal()
+            .then(|| Arc::clone(parts.client.transport().chat_people()));
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
         Self {
             store: parts.store,
@@ -926,6 +934,20 @@ where
             retry_at: None,
             losses: Vec::new(),
             backfill: Some(Backfill::new(parts.options.index_batch)),
+            people,
+        }
+    }
+
+    /// Before a read by `POST` may start (a profile lookup, a presence read): through the personal build's fence, the
+    /// people it may name are made those of the account's chats as the store holds them now (`teams_fence::ChatPeople`).
+    /// A store that can't be read leaves the last ones.
+    fn refresh_people(&self) {
+        let Some(people) = &self.people else {
+            return;
+        };
+        match self.store.all_members() {
+            Ok(members) => people.replace(members.into_iter().map(Mri::new)),
+            Err(error) => log::warn!("the people of the account's chats can't be read: {error}"),
         }
     }
 
@@ -1098,6 +1120,7 @@ where
                 let _ = reply.send(logged(synced, || format!("sync of {conversation}")));
             }
             Request::Person(mri, reply) => {
+                self.refresh_people();
                 let person = self.profiles.person(&self.store, &mri);
                 let _ = reply.send(person.map_err(EngineError::from));
             }
@@ -1456,6 +1479,7 @@ where
         if self.up && self.retry_at.is_some_and(|at| Instant::now() >= at) {
             self.auto_catch_up(Cause::Retry).await;
         }
+        self.refresh_people();
         // profile lookups that failed on the way, their wait over
         self.profiles.retry_due();
         // the watched people's presence, when a read is due

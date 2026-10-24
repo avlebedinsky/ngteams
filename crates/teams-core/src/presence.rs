@@ -1,8 +1,9 @@
 //! Others' presence (M2 Task 17): the availability the views show beside people, read from UPS in the background by
 //! polling, never stored.
 //!
-//! - **What is read**: UPS's presence read ([`PresenceRead`], `v1/presence/getpresence/`), a read sent as a `POST`,
-//!   which the transport sends whoever it names, once the reads' transport has the presence base (the GTM
+//! - **What is read**: UPS's presence read ([`PresenceRead`], `v1/presence/getpresence/`), a read sent as a `POST`
+//!   by [`Client::lookup`] (whoever it names through a lab fence, through the personal build's only people of the
+//!   account's chats), once the reads' transport has the presence base (the GTM
 //!   `presenceUPS`). No pubsub subscription: subscribing changes UPS's state, so it is no read (the web client's other way to hear of a
 //!   change); the views' presence is as fresh as the last poll.
 //! - **Who**: the people the views asked about ([`EngineRequests::presence`](crate::EngineRequests::presence)): a
@@ -270,7 +271,7 @@ async fn read<C: Credentials>(client: Arc<Client<HttpTransport<C>>>, asked: Vec<
     let Some(request) = PresenceRead::new(asked.iter().map(|mri| Mri::new(mri.as_str()))) else {
         return failed(asked, None);
     };
-    let answer = match client.send(&request).await {
+    let answer = match client.lookup(request.clone()).await {
         Ok(answer) => answer,
         Err(HttpError::Status(answer)) => {
             log::debug!("the presence read was answered HTTP {}", answer.status());

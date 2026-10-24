@@ -54,6 +54,9 @@ pub struct Guard {
     redirect: RedirectUri,
     /// Every request off a loopback address denied ([`Guard::local_only`]).
     local_only: bool,
+    /// Every request off the personal sign-in window's host bound denied ([`Guard::hosts_only`]).
+    #[cfg(feature = "personal")]
+    hosts: Option<Arc<crate::hosts::SignInHosts>>,
     /// Armed pages.
     armed: Mutex<BTreeSet<u64>>,
     events: Mutex<mpsc::Sender<GuardEvent>>,
@@ -77,6 +80,8 @@ impl Guard {
             log,
             redirect,
             local_only: false,
+            #[cfg(feature = "personal")]
+            hosts: None,
             armed: Mutex::new(BTreeSet::new()),
             events: Mutex::new(events),
         }
@@ -87,6 +92,16 @@ impl Guard {
     #[must_use]
     pub const fn local_only(mut self) -> Self {
         self.local_only = true;
+        self
+    }
+
+    /// The personal sign-in window's guard (`personal`): its rules ([`Classifier::personal`]), and every request that
+    /// isn't to a page on `hosts`' bound denied (after catching the redirect, which is still caught and logged as such).
+    #[cfg(feature = "personal")]
+    #[must_use]
+    pub fn hosts_only(mut self, hosts: Arc<crate::hosts::SignInHosts>) -> Self {
+        self.classifier = Classifier::personal(&hosts);
+        self.hosts = Some(hosts);
         self
     }
 
@@ -136,6 +151,11 @@ impl Guard {
             self.refuse(method, url);
             return Decision::Deny;
         }
+        #[cfg(feature = "personal")]
+        if self.hosts.as_ref().is_some_and(|hosts| !hosts.admits_url(url)) {
+            self.refuse(method, url);
+            return Decision::Deny;
+        }
         let outcome = match self.classifier.classify(method, url) {
             Classification::Read => RequestOutcome::Read,
             Classification::Own(kind) => RequestOutcome::Own(kind.as_str()),
@@ -159,6 +179,13 @@ impl Guard {
     /// or a connection the window's egress proxy refused ([`crate::egress`]).
     pub fn refuse(&self, method: &str, url: &str) {
         self.record(method, url, RequestOutcome::Unclassified);
+    }
+
+    /// Logs a tunnel the personal window's host gate opened to `host` (`crate::egress::HostGate`); `false` when it
+    /// couldn't be (the gate then opens none).
+    #[cfg(feature = "personal")]
+    pub fn tunnel(&self, host: &str, port: u16) -> bool {
+        self.record("CONNECT", &format!("https://{host}:{port}/"), RequestOutcome::Tunnel)
     }
 
     /// Logs one decision; `false` when it couldn't be.

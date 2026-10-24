@@ -1,4 +1,4 @@
-//! The settings view, in the conversation pane: switches for sending typing and read receipts, which messages notify,
+//! The settings view, in the conversation pane: switches for sending typing, read receipts and the account's availability, which messages notify,
 //! the idle time, the account's manual status, the diagnostic log's level and "Copy diagnostics", and what was wrong
 //! with the settings file (or the log). Each change goes to the [`SettingsModel`] (and so to the file) at once.
 
@@ -71,6 +71,12 @@ impl SettingsView {
                 "Send read receipts",
                 settings.send_read_receipts,
                 |settings, on| settings.send_read_receipts = on,
+            ))
+            .child(self.switch(
+                "send-presence",
+                "Report my availability",
+                settings.send_presence,
+                |settings, on| settings.send_presence = on,
             ))
     }
 

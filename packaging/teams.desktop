@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Teams
+GenericName=Chat
+Comment=Microsoft Teams chats for your own account, under the personal build's fence
+Exec=teams
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+StartupWMClass=ms-teams
+StartupNotify=true

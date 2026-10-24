@@ -142,6 +142,29 @@ fn a_build_with_test_support_refuses_to_run_before_it_touches_the_lab() -> TestR
 }
 
 #[test]
+fn a_build_with_the_personal_fence_refuses_to_run() {
+    // `cargo test -p teams-app` builds without it; a workspace build with `teams` unifies it in
+    let refusal = teams_app::guard::personal_refusal();
+    assert_eq!(refusal.is_some(), teams_fence::personal_enabled());
+    if let Some(refusal) = refusal {
+        assert!(
+            refusal.contains("personal") && refusal.contains("cargo build -p teams-app"),
+            "{refusal}"
+        );
+    }
+    let main = include_str!("../src/main.rs");
+    let (test_support, personal) = (
+        main.find("guard::test_support_refusal()").unwrap(),
+        main.find("guard::personal_refusal()").unwrap(),
+    );
+    let prepared = main.find("prepare(alias").unwrap();
+    assert!(
+        test_support < personal && personal < prepared,
+        "both refusals before the app touches anything"
+    );
+}
+
+#[test]
 fn a_window_opens_only_on_the_sandbox_s_compositor_and_never_with_display_set() {
     let sandbox = Some("/tmp/.tmpSandbox".as_ref());
     let inside = Some("/tmp/.tmpSandbox/niri-run/wayland-1".as_ref());

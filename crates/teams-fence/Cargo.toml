@@ -12,6 +12,10 @@ publish.workspace = true
 # mock). A lab binary never enables it, and refuses to run when a build that unified it in (`cargo test`,
 # `--all-targets`, `--all-features`) produced it.
 test-support = []
+# The personal build's fence (`Fence::open_personal`, the `personal` module: docs/personal-build.md). Only
+# crates/teams enables it (a manifest test checks every workspace manifest); every lab binary refuses to run when a
+# build unified it in (`teams_fence::personal_enabled`).
+personal = []
 
 [dependencies]
 # decodes the chat service path the write mapping reads its targets from
@@ -31,8 +35,8 @@ zeroize.workspace = true
 [dev-dependencies]
 fixture-guard.workspace = true
 tempfile.workspace = true
-# this crate's own integration tests build fences over test rosters and fake sources
-teams-fence = { workspace = true, features = ["test-support"] }
+# this crate's own integration tests build fences over test rosters and fake sources, and personal fences
+teams-fence = { workspace = true, features = ["test-support", "personal"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 wiremock.workspace = true
 

@@ -60,6 +60,16 @@ pub fn test_support_refusal() -> Option<&'static str> {
     )
 }
 
+/// Why a lab window may not run: a build with the personal build's features (`teams-signin`'s or `teams-fence`'s
+/// `personal`), which a lab binary built in one cargo invocation with `teams` gets unified in.
+#[must_use]
+pub fn personal_refusal() -> Option<&'static str> {
+    (cfg!(feature = "personal") || teams_fence::personal_enabled()).then_some(
+        "built with the personal build's `personal` feature (unified in by a build with `teams`): build it with \
+         `cargo build -p teams-signin`",
+    )
+}
+
 /// Takes stdout for the answer: a private copy of the descriptor (close-on-exec, so no child inherits it) is returned,
 /// and stdout itself now writes to stderr, so nothing GTK, `WebKit` or their processes print can reach the answer.
 ///

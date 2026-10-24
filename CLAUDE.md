@@ -9,7 +9,9 @@ and layout are in [README.md](README.md).
 
 These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
 else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
-this rule.
+this rule. The rules about writes, calls and the browser fence govern the lab and every lab binary; the personal build
+(`teams`) has a fence of its own and the two rules about it below. The rules on the native client's sealed types,
+captures and tokens, agents and protocol notes hold for both builds.
 
 - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
@@ -43,7 +45,8 @@ this rule.
   A write is never resent by the transport (the HTTP client's own retries stay off: an HTTP/2 retry could post
   twice). A mock origin (HTTP or socket) exists only under a `test-support` feature, which a lab binary refuses to
   run with. No write ever comes from a `cargo test` process: a live test spawns a normally built lab binary (built
-  with `--target-dir target/lab`) and reads its output and `fence.log`.
+  with `--target-dir target/lab`) and reads its output and `fence.log`. This holds for the personal build too; only
+  its fence's policy differs.
 - **Captures and tokens never enter the repo, not even sanitized.** Captures live under
   `~/.local/share/teams-lab/captures/`. `proto-lab export` only writes a sanitized local reference copy under
   `~/.local/share/teams-lab/reference/` (it refuses any destination inside a git work tree). Committed fixtures are
@@ -53,11 +56,36 @@ this rule.
   `tests/fixtures/` (top-level, crates', spikes') and `docs/`, and every fixture in them must carry the marker, apart
   from the non-Teams test inputs listed in `fixture_guard::synthetic::TEST_INPUTS`. The sanitizer is
   defence in depth, not permission to commit its output. Tokens never reach logs or stdout: print only aud, exp,
-  scopes and tenant.
-- **Agents never build or run a personal build and never receive the user's tokens.** Lab binaries get a
-  `WritePermit` only from `teams-fence`: their fence comes from `Fence::open_lab` or `Fence::open_lab_account`
-  (roster from `lab.toml`, the lab's `fence.log`), and `teams-fence`'s `test-support` feature (any roster, any log,
-  fake membership sources) is enabled only under `[dev-dependencies]`, never as a normal dependency.
+  scopes and tenant. This holds for the personal build too; it makes no captures.
+- **Lab binaries get a `WritePermit` only from `teams-fence`'s lab policy**: their fence comes from `Fence::open_lab`
+  or `Fence::open_lab_account` (roster from `lab.toml`, the lab's `fence.log`), and `teams-fence`'s `test-support`
+  feature (any roster, any log, fake membership sources) is enabled only under `[dev-dependencies]`, never as a
+  normal dependency.
+- **The personal build (`teams`) has a fence of its own, and only it.** It is the user's own account on the user's
+  desktop: the `teams` and `teams-signin-personal` binaries, its data under `~/.local/share/teams/` and
+  `~/.config/teams/`, its Secret Service items under `teams-personal`, no broker, no sandbox. Its fence is
+  `teams-fence`'s personal policy, behind the `personal` feature only `crates/teams` enables, opened only by
+  `Fence::open_personal`. A write goes out only as a sealed `Mutating` type sent as `Authorized<_>` through the outbox,
+  with a `WritePermit` from `Fence::check` for its exact target; only the kinds `docs/personal-build.md` lists
+  (messages, edits, deletes, reactions, typing, read receipts); only to a 1:1 or group chat whose thread, read fresh
+  when the fence decides, unpaged and in a shape a capture showed (every member in a captured MRI form), lists the
+  account as a member (never a channel, a meeting chat, a `48:` stream, a new chat, a paged answer or an unknown
+  shape), or, the one exception, the account's own availability on its own registered endpoint in a captured value;
+  only from an explicit action in the UI or a setting the user turned on (typing, read receipts and presence only
+  after the first run's screen is confirmed); logged to its `fence.log` before it goes. Its reads are `GET`s and the
+  sealed lists: `OwnState`, and `PostRead` naming only the account or people the account's stored chats list, never
+  a search or a suggestion list; it sends no plain request, and logs its Trouter frames. Its sign-in window reaches
+  only Entra's sign-in hosts and the identity provider's hosts `account.toml` names, through its egress gate. The
+  rules that hold for both builds hold for it; nothing in it changes a lab rule: every lab binary keeps the lab
+  fence, refuses the personal data dir, keyring items and accounts, and refuses to run with `personal` or
+  `test-support` built in; `teams` refuses the lab's.
+- **Agents never produce, install or run a runnable personal binary, and never touch its data.** Agents may compile
+  the `teams` crate in the gate and test it on `teams-mock`; any `teams` or `teams-signin-personal` binary they leave
+  is a `test-support` one, which refuses to run. They never build either without `test-support` (debug or release, a
+  plain `cargo build -p teams` included; the root's `default-members` leave it out), never set the install marker,
+  never run `scripts/install-personal.sh` or either binary, and never read or write `~/.local/share/teams/` (its
+  diagnostic log included), `~/.config/teams/` or the `teams-personal` items. They never receive the user's tokens,
+  chat ids or logs; the user reports a problem by its reason.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
 
 ## Patterns
@@ -166,9 +194,12 @@ What the code does and why. A change that undoes one of these needs a new reason
   is sealed only to keep raw text out: no other crate makes frame text, and a new frame type in `teams-proto` (say
   `user.activity`) is an ordinary change. A request that can't be logged isn't sent. Each service has one base
   (`Service`; a new one is a code change: its base and its token's audience), and every URL is built on it and
-  checked against it. The personal build's sealed `OwnState` and `PostRead` lists stay beside them
-  (`HttpTransport::own_state`, `HttpTransport::post_read` under a `Fence::check_post_read` permit), and so does
-  `teams_fence::FrameRecord` for its frame log; a lab binary sends their entries as plain requests. There is no raw
+  checked against it. The personal build's sealed `OwnState` and `PostRead` lists stay beside them: through a
+  personal fence (`Fence::is_personal`) the transport refuses every plain request (`Refusal::Personal`), the
+  registration goes as its own-state entry (`Transport::send_own`), a read by `POST` only through `Client::lookup`
+  under a `Fence::check_post_read_among` permit against the people of the account's chats (`ChatPeople`, which the
+  engine refreshes from its store), and its sink logs each frame (`FrameSink::logging`, `teams_fence::FrameRecord`);
+  a lab binary sends their entries as plain requests and its sink logs no frame. There is no raw
   frame, no answer to a delivery (one may come only as a typed response for a call the fence permitted), and no retry
   the transport didn't decide.
 - **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
@@ -271,6 +302,7 @@ What the code does and why. A change that undoes one of these needs a new reason
 
 - From a normal build, headless (`--headless`), under the armed fence, **one browser per lab profile at a time**;
   no browser is left running afterwards. Writes reach only the 3 lab accounts and the approved echo service.
+- The personal build is never a live run of an agent's; the live lock is the lab's.
 - Every live command, a lab browser's or a native client's, holds the live lock (`flock
   ~/.local/share/teams-lab/live.lock`) and runs under an outer `timeout --signal=INT`. Every page call and navigation
   is bounded (a `beforeunload` dialog holding a navigation is accepted after 5 s), and SIGINT or SIGTERM kills the

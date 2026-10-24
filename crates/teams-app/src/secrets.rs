@@ -22,9 +22,8 @@ use std::os::unix::net::UnixStream;
 use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::net::{AddressFamily, SocketType, sockopt};
 use teams_auth::broker::{BrokerScope, Note, Outcome, ServeError, serve};
-use teams_auth::secrets::{KeyringSecretStore, Secret, SecretError, SecretKey, SecretStore};
+use teams_auth::secrets::SecretStore;
 use teams_fence::lab::{Alias, LabConfig, LabPaths};
-use tokio::sync::OnceCell;
 
 /// The first descriptor past stdin, stdout and stderr: the lowest the broker takes as its socket.
 pub const FIRST_PASSED_FD: RawFd = 3;
@@ -83,49 +82,9 @@ pub fn lab_scope(config: &LabConfig, alias: Alias) -> BrokerScope {
     BrokerScope::new(LabPaths::KEYRING_APPLICATION, config.account(alias).upn.clone())
 }
 
-/// The Secret Service store of `application`, connected on its first use and kept from then on; a failed connection
-/// is tried again on the next request.
-#[derive(Debug)]
-pub struct LazyKeyring {
-    application: String,
-    keyring: OnceCell<KeyringSecretStore>,
-}
-
-impl LazyKeyring {
-    #[must_use]
-    pub fn new(application: impl Into<String>) -> Self {
-        Self {
-            application: application.into(),
-            keyring: OnceCell::new(),
-        }
-    }
-
-    /// Whether the Secret Service has been connected.
-    #[must_use]
-    pub fn connected(&self) -> bool {
-        self.keyring.initialized()
-    }
-
-    async fn keyring(&self) -> Result<&KeyringSecretStore, SecretError> {
-        self.keyring
-            .get_or_try_init(|| KeyringSecretStore::new(self.application.clone()))
-            .await
-    }
-}
-
-impl SecretStore for LazyKeyring {
-    async fn put(&self, key: &SecretKey, secret: &Secret) -> Result<(), SecretError> {
-        self.keyring().await?.put(key, secret).await
-    }
-
-    async fn get(&self, key: &SecretKey) -> Result<Option<Secret>, SecretError> {
-        self.keyring().await?.get(key).await
-    }
-
-    async fn delete(&self, key: &SecretKey) -> Result<(), SecretError> {
-        self.keyring().await?.delete(key).await
-    }
-}
+/// The Secret Service store connected on its first use (`teams_auth::secrets::LazyKeyring`, shared with the personal
+/// build).
+pub use teams_auth::secrets::LazyKeyring;
 
 /// Serves `store`'s items in `scope` on `socket` until it closes (see the module docs), noting each refused or failed
 /// request on `log`. Runs on the caller's tokio runtime.

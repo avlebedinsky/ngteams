@@ -99,6 +99,10 @@ pub enum PartialReason {
     NoCredential,
     /// The source can't read this kind of scope in full (yet).
     Unsupported,
+    /// The answer holds something in a form no capture showed: a member's MRI of another kind (a guest, another
+    /// tenant's user, a consumer account), or a thread of another type. Never guessed: the write is denied
+    /// (`docs/personal-build.md`, Choice B).
+    UnknownForm,
 }
 
 impl fmt::Display for PartialReason {
@@ -111,6 +115,7 @@ impl fmt::Display for PartialReason {
             Self::NoSource => f.write_str("no membership source (the fence runs fail-closed)"),
             Self::NoCredential => f.write_str("the membership source has no credential yet"),
             Self::Unsupported => f.write_str("the membership source can't read this scope in full"),
+            Self::UnknownForm => f.write_str("the answer holds a member or a thread in a form no capture showed"),
         }
     }
 }
@@ -124,6 +129,11 @@ pub enum Membership {
     Partial(PartialReason),
     /// An org-wide team or one of its channels: everyone in the tenant takes part.
     OrgWide,
+    /// The members one fresh, unpaged read of a thread lists, in a shape a capture showed, without proof that nobody
+    /// is left out: the personal fence's answer to "is the account a member?" (`docs/personal-build.md`, Choice A),
+    /// given only by its own source (`personal::PersonalMembershipSource`). The lab fence, which needs the whole
+    /// membership, denies it as [`PartialReason::Unsupported`].
+    Listed(Vec<Mri>),
 }
 
 /// The future a [`MembershipSource`] returns.
@@ -162,6 +172,8 @@ mod sealed {
     impl Sealed for super::FailClosed {}
     #[cfg(not(feature = "test-support"))]
     impl Sealed for crate::membership::LiveMembershipSource {}
+    #[cfg(all(feature = "personal", not(feature = "test-support")))]
+    impl Sealed for crate::personal::PersonalMembershipSource {}
 
     /// Tests only: any type may be a membership source.
     #[cfg(feature = "test-support")]
@@ -206,6 +218,16 @@ pub enum DenyReason {
     AccountScope,
     /// The write would be allowed, but its decision couldn't be written to `fence.log`.
     LogUnavailable,
+    /// The personal fence: a kind of write the personal build doesn't send (only messages, edits, deletes,
+    /// reactions, typing, read receipts and the account's own availability).
+    NotPersonalKind,
+    /// The personal fence: a target that isn't a 1:1 chat naming the account or a group chat (a channel, a team, a
+    /// call, a meeting chat, a stream, anything else).
+    NotPersonalScope,
+    /// The personal fence: a write that adds participants (none of the kinds it sends does).
+    AddsParticipants,
+    /// The personal fence: the conversation's fresh read doesn't list the account as a member.
+    NotAMember,
 }
 
 impl fmt::Display for DenyReason {
@@ -219,6 +241,10 @@ impl fmt::Display for DenyReason {
             Self::NotOwnAccount => f.write_str("not the fence's own account's availability"),
             Self::AccountScope => f.write_str("only the account's own availability lands on the account itself"),
             Self::LogUnavailable => f.write_str("fence.log can't be written"),
+            Self::NotPersonalKind => f.write_str("a kind of write the personal build doesn't send"),
+            Self::NotPersonalScope => f.write_str("not a 1:1 chat of the account's or a group chat"),
+            Self::AddsParticipants => f.write_str("the write adds participants"),
+            Self::NotAMember => f.write_str("the conversation's fresh read doesn't list the account"),
         }
     }
 }
@@ -264,12 +290,22 @@ pub enum OpenError {
 /// account) exist only with the `test-support` feature.
 #[derive(Debug)]
 pub struct Fence {
+    rules: Rules,
     roster: Roster,
     log: FenceLog,
     /// The account this fence is a client's of ([`Fence::open_lab_account`]): the one account whose own availability
     /// it permits. `None` for a fence of no account ([`Fence::open_lab`], the browser fence's) or of an account whose
     /// MRI `lab.toml` doesn't know yet: it permits no own availability.
     own: Option<Mri>,
+}
+
+/// Which rules a fence decides by: the lab's, or (only with the `personal` feature, through
+/// `Fence::open_personal`) the personal build's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rules {
+    Lab,
+    #[cfg(feature = "personal")]
+    Personal,
 }
 
 impl Fence {
@@ -315,6 +351,7 @@ impl Fence {
         let path = config.paths().fence_log();
         let log = FenceLog::open(&path).map_err(|source| OpenError::Log { path, source })?;
         Ok(Self {
+            rules: Rules::Lab,
             roster: Roster::from_lab(config),
             log,
             own: None,
@@ -331,7 +368,38 @@ impl Fence {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn new(roster: Roster, log: FenceLog) -> Self {
-        Self { roster, log, own: None }
+        Self {
+            rules: Rules::Lab,
+            roster,
+            log,
+            own: None,
+        }
+    }
+
+    /// The personal fence of the account `own` over any log. Tests only (`test-support` and `personal`).
+    #[cfg(all(feature = "test-support", feature = "personal"))]
+    #[must_use]
+    pub fn personal(own: Mri, log: FenceLog) -> Self {
+        Self::of_personal(own, log)
+    }
+
+    /// The personal fence of the account `own`, logging to `log`.
+    #[cfg(feature = "personal")]
+    pub(crate) fn of_personal(own: Mri, log: FenceLog) -> Self {
+        Self {
+            rules: Rules::Personal,
+            roster: Roster::default(),
+            log,
+            own: Some(own),
+        }
+    }
+
+    /// Whether this is the personal build's fence (`Fence::open_personal`, only with the `personal` feature); `false`
+    /// for every lab fence. The native transport sends no plain request through a personal fence, and its reads by
+    /// `POST` go under its permits ([`Fence::check_post_read_among`]).
+    #[must_use]
+    pub fn is_personal(&self) -> bool {
+        self.rules != Rules::Lab
     }
 
     /// The fence with `mri` as its own account (see [`Fence::own_account`]). Tests only (`test-support`).
@@ -382,6 +450,11 @@ impl Fence {
     /// a kind that doesn't create a target names [`Scope::New`], when an own availability isn't the fence's own
     /// account's or another write names [`Scope::Account`], or when an allow can't be logged.
     pub async fn check(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
+        #[cfg(feature = "personal")]
+        if self.rules == Rules::Personal {
+            let verdict = self.judge_personal(&target, source).await;
+            return self.decided(target, verdict);
+        }
         let membership = match target.scope() {
             Scope::New | Scope::Account { .. } => Membership::Complete(Vec::new()),
             _ if target.kind() == WriteKind::OwnAvailability || is_signal_on_a_chat(&target) => {
@@ -390,6 +463,11 @@ impl Fence {
             scope => source.members(scope).await,
         };
         let verdict = self.judge(&target, membership);
+        self.decided(target, verdict)
+    }
+
+    /// Logs `verdict` on `target` and gives the permit when it allows and was logged.
+    fn decided(&self, target: Target, verdict: Verdict) -> Result<WritePermit, Denied> {
         let logged = self.log.record(&target, verdict);
         match (verdict, logged) {
             (Verdict::Allow, Ok(())) => Ok(WritePermit { target }),
@@ -416,6 +494,8 @@ impl Fence {
             Membership::Complete(members) => members,
             Membership::Partial(reason) => return Verdict::Deny(DenyReason::Partial(reason)),
             Membership::OrgWide => return Verdict::Deny(DenyReason::OrgWide),
+            // a listing proves nobody is left out, which the lab's rule needs
+            Membership::Listed(_) => return Verdict::Deny(DenyReason::Partial(PartialReason::Unsupported)),
         };
         if fetched && current.is_empty() {
             return Verdict::Deny(DenyReason::NoMembers);

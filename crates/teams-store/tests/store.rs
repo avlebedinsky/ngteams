@@ -394,6 +394,28 @@ fn members_are_replaced_only_by_a_newer_roster() {
 }
 
 #[test]
+fn everyone_of_every_member_list_is_listed_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = open(&dir).expect("open the store");
+    assert!(store.all_members().expect("none").is_empty());
+    store
+        .upsert_conversation(&conversation(GROUP, ConversationKind::Group, 1))
+        .expect("group");
+    store
+        .upsert_conversation(&conversation(CHAT, ConversationKind::OneToOne, 1))
+        .expect("chat");
+    store
+        .replace_members(GROUP, 1, &[Member::new(ME, None), Member::new(THIRD, None)])
+        .expect("group roster");
+    store
+        .replace_members(CHAT, 1, &[Member::new(ME, None), Member::new(PEER, None)])
+        .expect("chat roster");
+    let mut everyone = vec![ME.to_owned(), PEER.to_owned(), THIRD.to_owned()];
+    everyone.sort();
+    assert_eq!(store.all_members().expect("everyone"), everyone);
+}
+
+#[test]
 fn members_of_an_unknown_conversation_are_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = open(&dir).expect("open the store");
