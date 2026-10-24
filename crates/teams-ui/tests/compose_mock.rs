@@ -410,13 +410,20 @@ impl Walk {
         theirs
     }
 
-    /// b's message comes in and is read: a's receipt goes once its wait is over, through a's fence. Its id.
+    /// b's message comes in and is read: a's receipt goes once its wait is over, through a's fence, and reaches the
+    /// mock. Its id.
     fn b_s_message_is_read(&mut self) -> String {
         let theirs = self.b_posts("hi a, read me");
         assert!(self.verdicts("read_receipt").is_empty(), "not before its wait is over");
+        let horizons = self.lab.bodies("PUT", "/properties").len();
         self.cx.executor().advance_clock(READ_DEBOUNCE);
         let log = self.a_log.clone();
-        settle(self.cx, |_| log.verdicts("read_receipt", AB_CHAT) == ["allow"]);
+        let lab = &self.lab;
+        // the fence logs its verdict before the receipt is sent: wait for the receipt itself too, so a later step
+        // counting what reached the mock doesn't count this one
+        settle(self.cx, |_| {
+            log.verdicts("read_receipt", AB_CHAT) == ["allow"] && lab.bodies("PUT", "/properties").len() > horizons
+        });
         theirs
     }
 

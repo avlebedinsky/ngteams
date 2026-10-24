@@ -1600,13 +1600,21 @@ task replaces that with one logger of our own. `teams-headless`'s `TEAMS_HEADLES
   the implementation reads it".
 
 ### Task 28: [Final] Update documentation
-- [ ] README.md: the M2 crates, `teams-app`, `teams`, the UI sandbox, the live UI test, the UI kit and its licence
-- [ ] CLAUDE.md: the patterns M2 settled (the UI sandbox, the bridge, the engine lock, the outbox's transient kind,
+- [x] README.md: the M2 crates, `teams-app`, `teams`, the UI sandbox, the live UI test, the UI kit and its licence
+- [x] CLAUDE.md: the patterns M2 settled (the UI sandbox, the bridge, the engine lock, the outbox's transient kind,
       the credential broker, the view trace, the UI kit's audit, `PostRead`, own presence, the diagnostic log and its
       redaction, the personal build's rules as approved)
-- [ ] `docs/protocol/endpoints.md` checked against every endpoint M2 touched
-- [ ] write the M3 plan (calls), informed by M2; the calendar in the roadmap
-- [ ] move this plan to `docs/plans/completed/`
+- [x] `docs/protocol/endpoints.md` checked against every endpoint M2 touched
+- [x] write the M3 plan (calls), informed by M2; the calendar in the roadmap
+- [x] move this plan to `docs/plans/completed/` (left to the plan runner, which moves it once every phase is done)
+- Done (2026-10-24): README's status (M2 done, M3 next), the missing crates (`teams-signin`,
+  `teams-signin-extension`), `probe profile` and `probe teams`, the live UI test and `TEAMS_APP_BIN`, the personal
+  build's script and desktop entry, and the kit's licence note (no Zed code); CLAUDE.md gains "The app" (the sandbox,
+  the broker, the bridge, the view trace, own presence as the app's policy, the kit's audit, the sign-in window), the
+  transient writes and the engine lock (`PostRead`, own presence's writes, the diagnostic log and the personal build's
+  rules were already there); `endpoints.md`'s only gaps were the personal sign-in window's (the authorize page, the
+  redirect, the form, multi-factor and federation paths, the identity provider's hosts, Entra's static hosts); the M3
+  plan is `docs/plans/20261024-native-teams-m3-calls.md`, the calendar in its M4.
 
 ## Validation commands
 

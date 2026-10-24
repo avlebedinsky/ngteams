@@ -1,9 +1,8 @@
 # ms-teams
 
 A native Microsoft Teams client for Linux in Rust + GPUI, written against Teams' internal APIs with the web client as
-the reference. The work in progress is the GPUI daily driver
-(`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`); finished plans are in `docs/plans/completed/`. Commands
-and layout are in [README.md](README.md).
+the reference. The work in progress is M3, calls (`docs/plans/20261024-native-teams-m3-calls.md`); finished plans
+are in `docs/plans/completed/`. Commands and layout are in [README.md](README.md).
 
 ## Hard rules
 
@@ -186,6 +185,12 @@ What the code does and why. A change that undoes one of these needs a new reason
   `clientmessageid`, never stored twice. **No resend across runs**: each open store is a run holding a lock; rows of
   an earlier run go out only after an explicit `Store::resend`, never a row of a run still open (the web client
   resends a failed send on a later load; this rules that out).
+- **Transient writes** (typing, the account's own availability) go through the outbox too, as no row (`Transient`,
+  `Outbox::send_transient`): each send is a fresh `Fence::check` with its `fence.log` line, and nothing of it is
+  stored, checked for, retried after an unknown outcome or sent by a later run; a throttled one waits in memory once
+  and briefly (`MAX_TRANSIENT_WAIT`), the newest of the same takes its place, and a post to its conversation drops it.
+  A durable row for `Control/Typing` would never settle (`Control/*` never settles a row) and would go out at a moment
+  the user didn't choose.
 - **What the native client sends** (`teams-proto`): a read (`Read`: `GET`, no body), a plain request (`Request`, an
   open trait: any method and body, sent by `Transport::send` only when `teams_fence::contacting` calls it `None`,
   logged `allowed` before it goes: the registration, profile lookups and presence reads whoever they name, the
@@ -251,7 +256,59 @@ What the code does and why. A change that undoes one of these needs a new reason
   channel, each answered by a `Reply`; events out (`next_event`). A write answers with its row (`Ok`) even when the row
   waits or failed, and every change of a row is told once as `Event::Outbox`, whichever read settled it. A catch-up
   runs on the push channel's first connect, on every connect after a drop and after a message-loss report (and on
-  demand without a push channel); a failed one is retried from the tick.
+  demand without a push channel); a failed one is retried from the tick. **One engine per account**: `engine::start`
+  takes `Store::engine_lock` (`flock` on `<store>-runs/engine.lock`) without waiting and is refused
+  (`EngineError::AlreadyRunning`) while another engine holds it, in any process (`teams-app`, `teams-headless`,
+  `teams`): two would mean two Trouter sockets and doubled typing, read receipts and presence. The store's run locks
+  are apart from it.
+
+### The app (`crates/teams-ui`, `teams-app`, `ui-sandbox`, `teams-signin`)
+
+- **No window, bus or opener of the user's desktop for a lab or test process.** Every GUI test and every lab run of
+  the app is in the UI sandbox (`ui-sandbox`: a niri nested in a headless weston, a private D-Bus session bus without
+  service activation holding a fake notification server and tray watcher, a no-op URI opener first on `PATH`, a
+  virtual keyboard and pointer); a child's environment is built from scratch (`clean_command`) and inherits only the
+  descriptors its caller names (`spawn`). A sandboxed binary refuses to open a window unless `WAYLAND_DISPLAY` is an
+  absolute socket inside the dir `UI_SANDBOX_DIR` names (`ui_sandbox::in_sandbox`), and `teams-app` refuses a set
+  `DISPLAY` too (the UI kit's GPUI features would let it fall back to X11). Notifications and the tray go over `zbus`
+  only to the session bus the app is given (`DBUS_SESSION_BUS_ADDRESS`), never `$XDG_RUNTIME_DIR/bus`; links open only
+  through GPUI's `open_url`. The personal build runs on the user's desktop, and agents never run it.
+- **The credential broker** (`teams_auth::broker`, `teams-app secrets --lab <alias> --fd <n>`). The sandboxed app holds
+  no connection to the user's bus, so the lab's Secret Service items reach it only through a broker started outside
+  the sandbox on one end of a socket pair; the app (`--secrets-fd`) uses the other end as its `BrokerSecretStore` and
+  has no fallback (no `KeyringSecretStore`, no bus from its environment for secrets). The broker serves `get`, `put`
+  and `delete` of that one account's `teams-lab` items, answers anything else "refused" without reaching a store,
+  names only the operation, account and audience, and exits when the socket closes; the starter keeps no copy of its
+  end.
+- **The bridge** (`teams-ui/src/bridge.rs`): the engine stays on its own thread and runtime. The `Bridge` owns the
+  `EngineHandle` (the one event receiver and the shutdown), and one task on GPUI's foreground drains its events into
+  the `Models`; views reach the engine only through the `Core` trait (the request side, `EngineRequests`; a fake in
+  view tests) and await each `Reply`. Shutdown and sign-out join the engine on GPUI's background executor, never the
+  foreground, and every request after them answers `Stopped`. **No view builds a request**: the app crates depend on
+  no HTTP or WebSocket client, GPUI keeps its `NullHttpClient` (no `set_http_client`), and pictures reach a view only
+  as bytes from the engine.
+- **The view trace** (`teams-ui/src/trace.rs`, `--trace-fd`): one JSON line per view change, for the live test to read
+  what each view shows, never text: view and change names are fixed in the code, and an id passes only as a `TraceId`
+  in a service id shape the captures showed (anything else is left out and counted). The live test drives the apps
+  only by the keyboard (no screen coordinates) and reads them through their traces, the sandbox's bus and `fence.log`.
+- **Own presence is the app's policy** (`teams-ui/src/own_presence.rs` over `teams-core`'s `OwnPresencePolicy`):
+  Available while the window was used within the idle time or a manual status is chosen, refreshed on a timer; nothing
+  once idle and nothing on quit (no captured request reports Away or Offline for one endpoint); a manual status when
+  chosen and its reset when Automatic is chosen again. A failed report is shown and never sent again on its own.
+- **The UI kit** is `gpui-component` (Apache-2.0), held to its audit by `crates/teams-ui/tests/reach.rs`: its host tree
+  has no HTTP or WebSocket client and only licences an Apache-2.0/MIT project can take, its default GPUI features give
+  Linux no X11 backend, the only logger is `teams-log` (installed by the app), and its theme watcher
+  (`ThemeRegistry::watch_dir`) is never called. Message text is drawn only from `teams-proto`'s sanitized `RichText`
+  by our own renderer, never by the kit's Markdown or HTML view. A kit upgrade reruns the audit. Zed is a design
+  reference only: its UI crates are GPL-3.0, and no Zed code is copied.
+- **The sign-in window** (`teams-signin`): Microsoft's page in a `WebKitGTK` webview in a process of its own, behind a
+  guard that `teams-signin-extension` asks about every request a page sends (classified by `teams_signin::classify`,
+  logged to `fence.log` before it is answered; the `nativeclient` redirect caught, never loaded). It isn't a complete
+  fence: a synchronous load's redirects, and a kept-alive load's after its page is gone, never reach the guard
+  (`docs/backlog/webkit-sign-in-guard-redirects.md`). So the lab's window opens only a loopback page and stays on
+  loopback (`cli::NOT_LIVE`; off loopback the guard and the navigation policy refuse everything and the network
+  session's only way out is `egress::BlackHole`), and the lab signs in through `proto-lab auth`. The personal window
+  (`personal`) is bound to Entra's hosts and the identity provider's instead, its only way out `egress::HostGate`.
 
 ### Captures, reference copies, fixtures
 

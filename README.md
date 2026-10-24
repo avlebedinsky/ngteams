@@ -14,7 +14,14 @@ Status:
   store, sends, edits, deletes and reacts under the fence, and receives over Teams' push channel (Trouter): native
   a → b in p95 1.4 s, edits, reactions, the lab's a–b–c group chat and a catch-up after a disconnect, all checked live.
   Plan `docs/plans/completed/20261020-native-teams-m1-headless-chat-core.md`, outcome `docs/m1-acceptance.md`.
-- **Next: M2**, the GPUI daily driver (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
+- **M2 is done**: the GPUI daily driver. A three-pane GPUI app (`teams-app`) on the M1 core: the chat list, the chat
+  view and compose, desktop notifications and a tray item, local search, names, pictures and presence (others' shown,
+  the account's own set), teams and channels read-only, and the app's diagnostic log; checked live for a, b and c in
+  the UI sandbox (send → shown p95 1.85 s). Beside it the personal build (`teams`) for the user's own account under the
+  rules the user approved (`docs/personal-build.md`), built, installed and first run by the user alone. Images and
+  files are a placeholder with a link to the web client (sending stays deferred). Plan
+  `docs/plans/completed/20261021-native-teams-m2-gpui-daily-driver.md`, outcome `docs/m2-acceptance.md`.
+- **Next: M3**, calls (`docs/plans/20261024-native-teams-m3-calls.md`).
 
 Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
@@ -33,6 +40,8 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-log` | the app's diagnostic log: one file per account (`0600` in a `0700` dir, rotated at 8 MiB, 4 older kept), our own crates' records only, written from a thread of its own; every line redacted by the logger itself (credential headers, token fields, sign-in's codes, Trouter's `user.authenticate`, then JWT-shaped strings, `skypetoken=`, `Bearer `); full requests and frames only at `debug`; the "copy diagnostics" text |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; clients reach it through the `test-support` mock origins |
 | `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
+| `crates/teams-signin` | the sign-in window: Microsoft's sign-in page in a `WebKitGTK` 6.0 webview, in a process of its own, behind a request guard that classifies every request a page sends (`teams_signin::classify`: reads, the token endpoint and authz in their captured queries, Entra's sign-in form) and logs it to `fence.log` before it goes; the `nativeclient` redirect is caught in the navigation policy and its code handed to the parent on a channel of its own, and `teams-auth` redeems it. Not a complete fence (two kinds of redirect never reach the guard, `docs/backlog/webkit-sign-in-guard-redirects.md`), so the lab's `teams-signin` binary opens only a loopback page and reaches nothing else; the `personal` feature (only `crates/teams` enables it) binds the same window to Entra's and the identity provider's hosts through a host gate |
+| `crates/teams-signin-extension` | the sign-in window's `WebKitGTK` web process extension (a `cdylib`, hand FFI on the GLib `-sys` crates): connects every page's `send-request` to the guard's socket and drops each request the guard doesn't allow, every one when it has no guard |
 | `crates/teams` | the personal build (`docs/personal-build.md`): `teams`, the user's own account on the user's desktop under the personal fence (`teams-fence`'s `personal` feature, which only this crate enables), and `teams-signin-personal`, its sign-in window bound to Entra's and the identity provider's hosts through a host gate. No broker, no sandbox; its data under `~/.local/share/teams/` and `~/.config/teams/`, its tokens under `teams-personal` on the Secret Service. Left out of the root's `default-members`; both binaries refuse a `test-support` build and one `scripts/install-personal.sh` didn't make. Agents compile and mock-test it only |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
@@ -43,13 +52,15 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `spikes/echo-call` | the native echo call: a TURN client (RFC 8656), `str0m` through the relay, the test call's signaling from the capture, the call through the fence (M0 Task 19; the start sends nothing yet, see `docs/spikes/echo-call.md`) |
 | `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike: `auth/` (Entra and authz answers), `calling/` (the echo call's signaling), `chatsvc/` (the chat service), `csa/` (the account's teams), `graph/` (a profile), `mt/` (the profile lookup's answer), `trouter/` (the push channel), `ups/` (presence) |
 | `docs/protocol/` | protocol notes in our own words: `auth.md`, `chat.md` (the chat service's reads and writes as captured), `channels.md`, `graph.md`, `fence-targets.md` (the contacting services, the classifier's rows, member reads), `trouter.md`, `calling-echo.md`, and `endpoints.md`, one row for every endpoint seen or used, whether it is contacting and how the native client sends it |
-| `docs/m0-acceptance.md`, `docs/m1-acceptance.md` | each milestone's acceptance check: numbers, the fence's picture, every live run |
+| `docs/m0-acceptance.md`, `docs/m1-acceptance.md`, `docs/m2-acceptance.md` | each milestone's acceptance check: numbers, the fence's picture, every live run |
+| `docs/personal-build.md` | the personal build's rules as the user approved them, and how the code reads them |
 | `docs/spikes/` | spike write-ups: `ca-probe.md`, `auth.md`, `gpui-video.md` (+ raw runs), `echo-call.md` |
 | `docs/backlog/` | deferred work, one file per item |
 | `docs/plans/` | milestone plans; finished ones in `docs/plans/completed/` |
 | `build/patches/`, `vendor/`, `scripts/vendor-gpui.sh` | GPUI (`gpui-pre` 0.3.9) vendored with agterm-rs's external-surfaces patches, used through `[patch.crates-io]`; `scripts/vendor-gpui.sh --check` verifies it |
 | `scripts/lint-report.sh` | refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s |
 | `scripts/own-presence-run.sh` | one `own-presence-*` live run with b's presence reads of a sampled beside it (M2 Task 18) |
+| `scripts/install-personal.sh`, `packaging/teams.desktop` | the personal build's release build and install under `~/.local` (its binaries, the install marker, the desktop entry), for the user to run; agents never run it |
 | `scripts/own-availability-native-run.sh` | one native own-availability run (`teams-headless a availability`) with b's presence reads of a sampled beside it (M2 Task 19) |
 | `tools/` | interim Node tools: `ca-probe` (the Conditional Access probe), `lab-login` (the first sign-in of the profiles) |
 
@@ -57,7 +68,8 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
 The views are built on [`gpui-component`](https://crates.io/crates/gpui-component) 0.8 (Longbridge's GPUI Kit,
 Apache-2.0), the UI kit for `gpui-pre` 0.3.9; it resolves to the vendored, patched GPUI above. Its audit (M2 Task 7,
-in the plan) found:
+`docs/plans/completed/20261021-native-teams-m2-gpui-daily-driver.md`) found, and `crates/teams-ui/tests/reach.rs` keeps
+checking:
 
 - It takes `gpui-pre` with its default features (`x11`, `font-kit`, `windows-manifest`), so the workspace's GPUI has
   them on. In `gpui-pre` 0.3.9 `x11` only lets GPUI name an X11 display it could use and `font-kit` switches nothing;
@@ -71,6 +83,9 @@ in the plan) found:
   on the bus the app is given (the sandbox's private bus, which has none). Its `tracing` and `log` lines go nowhere:
   the app crates install no logger and no subscriber (`reach.rs` checks the sources).
 - We don't use its Markdown/HTML text view: message text is rendered from `teams-proto`'s `RichText` only.
+
+No Zed code is in the repo: Zed's UI crates are GPL-3.0 and served as a design reference only. The rest of the UI is our
+own, on the kit's widgets and gpui-pre's examples (Apache-2.0).
 
 The kit's `Textarea` (the compose box) is tested on GPUI's test context (`crates/teams-ui/tests/kit.rs`: typing,
 selection, the clipboard with plain text only, undo, soft wrap, IME composition, Enter and Shift-Enter) and on the
@@ -127,6 +142,8 @@ proto-lab status [a b c] [--timeout 120]  # ok / login needed / refused, per acc
 proto-lab auth a [--audiences] [--no-skypetoken] [--timeout 120]   # native sign-in, tokens, skypetoken
 proto-lab probe chat a [--with b] [--save <name>]                  # read-only: does the chat service take our ic3 token
 proto-lab probe thread a [--save <name>]                           # read-only: the group chat's member reads
+proto-lab probe profile a                                          # read-only: the lab accounts' names and pictures from Graph
+proto-lab probe teams a                                            # read-only: CSA's teams and channels, a channel's posts and reply chain
 proto-lab probe object a <id> [--save <name>]                      # read-only: one AMS object as the account reads it
 proto-lab run <scenario> --headless [--timeout 180]                # a scenario under the armed fence (list below)
 proto-lab export <capture> <name> [--strict]                       # a capture -> a local reference copy
@@ -156,7 +173,10 @@ also asks for a token for each other Teams audience, `--no-skypetoken` stops aft
 and token claims only, never a token or a body. `probe chat` refreshes the account's `ic3` token and reads one page of
 the conversation list in each header form, then the 1:1 chat's thread the way the fence reads it (M1 Task 3). `probe
 thread` reads the group chat `chats.toml` records: the thread, the batch read, the member list in one page and paged,
-the filtered view, the account's own view, then the fence's read (M1 Task 8). `probe object` reads one media service
+the filtered view, the account's own view, then the fence's read (M1 Task 8). `probe profile` reads each lab account's
+Graph user record (whole, and as the native client selects it) and picture with the account's Graph token (M2 Task 12).
+`probe teams` reads CSA's teams with the `chatsvcagg` token, the conversation list, and up to two channels of the first
+team: the thread, the newest messages and one post's reply chain (M2 Task 16). `probe object` reads one media service
 object by its id and prints its answer's outline, lab ids named for what they are (M2 Task 21). `--save <name>`
 writes the answers as a sanitized reference copy through `export`'s checks, never inside a git work tree.
 
@@ -359,6 +379,20 @@ registered again with a new one, opening it again and quitting it) and keeps its
 under `target/ui-shots/`: `teams-app-window.png` (the window as the catch-up filled it) and `teams-app-chat.png` (the
 chat opened).
 
+The live acceptance test (M2 Task 25, `tests/ui_live.rs`, `docs/m2-acceptance.md`) is an orchestrator only: it opens no
+fence, holds no token and sends nothing. It starts a UI sandbox per lab account, each app's broker outside it with the
+user's bus, spawns the normally built app for a, b and c, drives them by keyboard (the switcher, the compose box, the
+message list's keys, the search, the switcher's status commands) and reads their view traces and `fence.log`;
+screenshots go to `<data_dir>/screenshots/<time>/`, traces and outputs to `<data_dir>/ui-live/<time>/`. Run it under the
+live lock:
+
+```sh
+cargo build -p teams-app --target-dir target/lab
+flock ~/.local/share/teams-lab/live.lock timeout --signal=INT --kill-after=60 1800 \
+  env TEAMS_APP_BIN=$PWD/target/lab/debug/teams-app PROTO_LAB_LIVE=1 \
+  cargo test -p teams-app --features live --test ui_live -- --nocapture
+```
+
 ## `teams` (the personal build)
 
 The user's own Teams account, built and installed only by the user (`docs/personal-build.md`; agents never build a
@@ -448,8 +482,9 @@ fence_ws --test fence_targets --test calling --test expected_denies`.
 | `PROTO_LAB_CHROME=<binary>` | the Chrome the browser tests use; by default the pinned install in the lab's `chrome/` dir (`proto-lab chrome install`) |
 | `PROTO_LAB_REQUIRE_CHROME=1` | without a Chrome the browser tests fail instead of skipping |
 | `GPUI_SMOKE_REQUIRE=1` | without weston ≥ 15.0 (for `--fake-seat`), niri and `dbus-daemon` on `PATH` the UI sandbox's and the GPUI smoke tests fail instead of skipping |
-| `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests: `crates/proto-lab/tests/auth_live.rs` (a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory) and `crates/teams-headless/tests/chat_live.rs` (M1's acceptance: it only spawns the normally built `teams-headless` and reads its output and `fence.log`); without the feature they aren't built, without the variable they skip |
+| `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests: `crates/proto-lab/tests/auth_live.rs` (a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory), `crates/teams-headless/tests/chat_live.rs` (M1's acceptance: it only spawns the normally built `teams-headless` and reads its output and `fence.log`) and `crates/teams-app/tests/ui_live.rs` (M2's acceptance: the normally built `teams-app` for a, b and c, each in a UI sandbox of its own with its broker outside, driven by the keyboard and read through its view trace and `fence.log`); without the feature they aren't built, without the variable they skip |
 | `TEAMS_HEADLESS_BIN=<binary>` | the normally built `teams-headless` that `chat_live` spawns (required: a test build refuses to run) |
+| `TEAMS_APP_BIN=<binary>` | the normally built `teams-app` that `ui_live` spawns, and whose `secrets` subcommand it starts as each app's broker (required, as above) |
 | `TEAMS_HEADLESS_LOG=debug` | `teams-headless` logs our own crates' debug lines on stderr, never a payload or a token |
 | `TEAMS_APP_LOG=<level>` | `teams-app`'s diagnostic log at `error`, `warn`, `info` or `debug` for this run, over the settings' `log_level` (`debug`: full requests, responses and frames, credentials redacted; never share such a log) |
 | `ECHO_CALL_TURN_SERVER`, `ECHO_CALL_TURN_USER`, `ECHO_CALL_TURN_PASSWORD` | also run `spikes/echo-call/tests/relay.rs`'s echo through a real TURN server (coturn on loopback) |
@@ -457,7 +492,8 @@ fence_ws --test fence_targets --test calling --test expected_denies`.
 
 The machine's own gate run: `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 cargo test --workspace`. The live tests
 run one at a time under the live lock: `flock ~/.local/share/teams-lab/live.lock env PROTO_LAB_LIVE=1 cargo test -p
-proto-lab --features live --test auth_live`, and `chat_live` as in [`teams-headless`](#teams-headless). No write ever
+proto-lab --features live --test auth_live`, `chat_live` as in [`teams-headless`](#teams-headless) and `ui_live` as in
+[`teams-app`](#teams-app). No write ever
 comes from a `cargo test` process: a live test that needs one spawns a normally built lab binary, which writes under
 its own fence.
 
