@@ -7,8 +7,10 @@ added: 2026-10-20
 
 Status: the echo call's follow-ups are mapped on the call registry and `echo-call` completes (the echo joins and plays
 the tone back, the run exits 0); the start from a 1:1 or group chat to lab callees is mapped and registers its call
-(M3 Task 5, `docs/protocol/calling.md`); the callee's ring-time sends, answering, declining and joining are what is
-left.
+(M3 Task 5, `docs/protocol/calling.md`); the callee's ring-time sends, answering, declining and joining a lab-only
+call are mapped on offered invitations and run live in the browser, with video and media renegotiation on registered
+and answered calls (M3 Task 6). What is left: the native side's feeding of the registry and the follow-ups no page
+has sent yet (hold, `updateCallState`, `controlVideoStreaming`, screen sharing).
 
 M0 Task 18: `proto-lab run echo-call` places the web client's test call and the fence allows the call start (a new
 call of lab account a and the approved echo service). Every later request lands on the call that now exists, is no
@@ -47,9 +49,9 @@ Done so far: the call registry in `teams-fence` and the echo call's follow-ups (
 `applyChannelParameters`, `acknowledge`, `add` per invitee, `leave`, and the acceptance's acknowledgement over
 Trouter), fed by the browser fence ([fence-targets.md](../protocol/fence-targets.md#the-call-registry)); the start to
 lab callees from a 1:1 or group chat (on the chat it carries, not `Scope::Call`), and the caller's `leave` while its
-callee still rings. Still to map: the callee's ring-time sends (the invitation's delivery response and its `attach`:
-without them the web client shows no incoming call, `docs/protocol/calling.md`), answering, declining, joining, the
-other follow-ups, and the native side's feeding of the registry.
+callee still rings; the callee's ring-time sends (the invitation's delivery response, `attach`, `progress`), its
+answer and the answered call's follow-ups, its decline, a join of a running call bound by an invitation, and media
+renegotiation both ways. Still to map: the other follow-ups and the native side's feeding of the registry.
 
 So M3 adds, each a row of the calling family and a test (no new mechanism): the call start to lab callees, the
 `acceptance` and its typed delivery response, the follow-ups above on a registered call, `add` per invitee, and the

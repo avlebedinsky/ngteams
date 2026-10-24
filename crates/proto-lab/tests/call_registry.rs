@@ -339,3 +339,119 @@ async fn a_permitted_start_pends_once_whichever_layer_permits_it_first() -> Test
     );
     Ok(())
 }
+
+// --- an incoming call's invitation, offered to the browser's own account ---
+
+const LAB_B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
+const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
+const INVITATION_PATH: &str = "/v4/f/SyntheticEndpoint00001/";
+const ATTACH_URL: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall1/27/i1/1/attach?i=10-0-0-1";
+const INVITED_CONVERSATION: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1?i=10-0-0-2&e=1";
+const B_CALLBACKS: &str =
+    "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/agent-b";
+
+/// b's lab: a, b and c, its fence b's own.
+fn lab_of_b() -> TestResult<Lab> {
+    let dir = tempfile::tempdir()?;
+    let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]);
+    let fence = Fence::new(roster, FenceLog::open(&dir.path().join("fence.log"))?).with_own_account(Mri::new(LAB_B));
+    Ok(Lab {
+        _dir: dir,
+        fence: Arc::new(fence),
+    })
+}
+
+/// A 1:1 call's invitation from `from` to `to`, delivered with `id`.
+fn invitation_frame(id: i64, from: &str, to: &str) -> String {
+    let gp = json!({
+        "callNotification": {
+            "from": {"id": from},
+            "to": {"id": to},
+            "links": {"attach": ATTACH_URL},
+        },
+        "conversationInvitation": {"conversationController": INVITED_CONVERSATION, "isMultiParty": false},
+    });
+    let body = json!({"evt": 107, "gp": base64::engine::general_purpose::STANDARD.encode(gp.to_string())});
+    let message = json!({
+        "id": id,
+        "method": "POST",
+        "url": INVITATION_PATH,
+        "headers": {"trouter-request": TROUTER_REQUEST},
+        "body": body.to_string(),
+    });
+    format!("3:::{message}")
+}
+
+fn receipt_frame(id: i64) -> String {
+    let message = json!({
+        "id": id,
+        "status": 200,
+        "headers": {"MS-CV": "SyntheticCv.1.0", "trouter-request": TROUTER_REQUEST, "trouter-client": "{\"cd\":46}"},
+        "body": "",
+    });
+    format!("3:::{message}")
+}
+
+fn attach_body(from: &str) -> String {
+    json!({
+        "attach": {"requireMediaContent": false, "links": {"end": format!("{B_CALLBACKS}/0a0a0a0a/call/end/")}},
+        "capabilities": null,
+        "endpointCapabilities": 73463,
+        "additionalActions": [{
+            "input": {
+                "conversationRequest": {
+                    "roster": {"type": "Delta", "rosterUpdate": format!("{B_CALLBACKS}/0b0b0b0b/conversation/rosterUpdate/")},
+                    "links": {"conversationEnd": format!("{B_CALLBACKS}/0c0c0c0c/conversation/conversationEnd/")},
+                },
+                "endpointMetadata": {},
+                "participants": {"from": {"id": from}},
+            },
+            "name": "join",
+            "url": INVITED_CONVERSATION,
+            "waitForResponse": true,
+        }],
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn an_offered_invitation_s_receipt_and_attach_pass_and_nothing_for_another_s() -> TestResult {
+    let lab = lab_of_b()?;
+    let ws = ws_fence(&lab)?;
+    let http = http_fence(&lab);
+    ws.observe(&created("S1", "ws-1", TROUTER));
+    // an invitation to c (the fence is b's): ignored, its receipt denied by the frame rule, its attach unregistered
+    ws.observe(&received("S1", "ws-1", &invitation_frame(7, LAB_A, LAB_C)));
+    assert_eq!(
+        ws.decide_on(Some(&session("S1")), &text(TROUTER, &receipt_frame(7)))
+            .await,
+        Verdict::Deny(DenyCause::Unclassified)
+    );
+    assert_eq!(
+        http.decide(&paused("POST", ATTACH_URL, &attach_body(LAB_C))).await,
+        Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::UnregisteredCall)))
+    );
+    // a's invitation to b: offered
+    ws.observe(&received("S1", "ws-1", &invitation_frame(8, LAB_A, LAB_B)));
+    assert_eq!(
+        ws.decide_on(Some(&session("S1")), &text(TROUTER, &receipt_frame(8)))
+            .await,
+        Verdict::Allow
+    );
+    assert_eq!(
+        ws.decide_on(Some(&session("S1")), &text(TROUTER, &receipt_frame(8)))
+            .await,
+        Verdict::Deny(DenyCause::Unclassified),
+        "once"
+    );
+    assert_eq!(
+        http.decide(&paused("POST", ATTACH_URL, &attach_body(LAB_B))).await,
+        Verdict::Allow
+    );
+    assert_eq!(
+        http.decide(&paused("POST", ATTACH_URL, &attach_body(LAB_A))).await,
+        Verdict::Deny(DenyCause::Fenced(DenyReason::CallMismatch)),
+        "sent as the caller"
+    );
+    Ok(())
+}

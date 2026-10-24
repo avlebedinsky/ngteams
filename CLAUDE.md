@@ -152,14 +152,16 @@ What the code does and why. A change that undoes one of these needs a new reason
   socket (any host under `trouter.teams.microsoft.com`) only socket.io 0.9 types `0`, `1`, `2` and `5` pass, so a
   delivery response (`3`), a JSON message, an acknowledgement, a binary frame and anything unparsable are denied; on a
   contacting service's socket (`teams_fence::on_contacting_service`) every frame is denied; anywhere else a frame
-  passes. A frame let through is logged `allowed` (method `SEND`). The one delivery response that passes is the
-  acknowledgement of a registered call's acceptance: the page's received Trouter frames
+  passes. A frame let through is logged `allowed` (method `SEND`). Two delivery responses pass: the acknowledgement
+  of a registered call's acceptance and an offered invitation's receipt. The page's received Trouter frames
   (`Network.webSocketFrameReceived`, observed in event order, before any send they cause) go to the call registry,
-  and a `3:::` answering a pending acceptance on the same connection (the socket's session and `Network` id) is
-  decided by `Fence::check_delivery_response`: the captured envelope, `trouter-request` equal to the delivery's, an
-  acknowledgement whose links are all the start's own callbacks, once, while the call is live. The browser session
-  also pauses the call start's answer at the response stage (`CALL_START_URL`), registers the call from it (tied to
-  the permitted start by `Network` id) and only then continues it.
+  and a `3:::` answering a pending acceptance or an offered invitation's delivery on the same connection (the socket's
+  session and `Network` id) is decided by `Fence::check_delivery_response`: the captured envelope, `trouter-request`
+  equal to the delivery's, an acknowledgement whose links are all the start's own callbacks or a receipt with an empty
+  body, once, while the call is live or the invitation rings (a group call's chat read fresh). The browser session
+  also pauses at the response stage the answers that bind links: a call start's (`CALL_START_URL`) and a join's,
+  which register the call (`register_start`, tied to the permitted start or join by `Network` id), and an offered
+  invitation's `attach` and `accept` answers (`bind_answer`); each is continued only then.
 - **Service workers only through the browser.** Target-level auto-attach filters them out: one attached twice while
   paused answers nothing until it runs. At run start they are unregistered and their caches cleared
   (`Storage.clearDataForOrigin` works only on a page session), and pages bypass them (`Network.setBypassServiceWorker`
@@ -181,7 +183,8 @@ What the code does and why. A change that undoes one of these needs a new reason
 ### The sealed fence API (`crates/teams-fence`, `crates/fence-seal`)
 
 - A lab binary's fence is `Fence::open_lab()` (roster from `lab.toml`, the lab's `fence.log`), or for one account's
-  native client `Fence::open_lab_account(alias)`, the same with that account as its own; its membership source
+  native client or browser session `Fence::open_lab_account(alias)`, the same with that account as its own (whose
+  invitations it offers); its membership source
   is `FailClosed` (every fetched scope `Partial(NoSource)`) or `LiveMembershipSource::for_fence(&fence)` (1:1 chats,
   complete only when the members are exactly the two the chat id names; group and meeting chats, any of them, from one
   fresh member-list read, complete only in the shape `parse_members` takes: no paging key, the count equal to the
@@ -239,6 +242,19 @@ What the code does and why. A change that undoes one of these needs a new reason
   only that `leave` passing; a delivery at the start's `conversationEnd` or call `end` callback ends the call for good.
   `fence.log` never holds the sender. The native `AddToCall` is still an `Invite` on `Scope::Call` (the conversation
   URL), which no source reads: `Partial`. A `conversationUpdate` binds nothing.
+- **Offered invitations** (`crates/teams-fence/src/calls/offer.rs`): an invitation delivery (Trouter `evt` 107 or
+  109, `callNotification`) to the fence's own account (`Fence::open_lab_account`) from a lab caller is offered by
+  `observe_delivery`; a group call's invitation names only its caller, callee and group chat, so every decision on it
+  also reads that chat fresh. On it pass, each to exactly a link the invitation or an answer bound
+  (`Scope::CallOperation`, `joins` naming the conversation an `attach` subscribes to): its receipt, the `attach`
+  (`CallRinging`: its one roster-only conversation join joins no call), `progress` (`ringing`), the endpoint state,
+  the answer (`accept`, `CallAnswer`) and the decline (`reject` `603`, `CallDecline`) while it rings; once answered,
+  the answered call's follow-ups until the callee leaves. A permitted `accept`, `reject` or `leave` passes again (the
+  browser decides a request on two layers). A join (`POST` to a conversation controller with a call invitation) is a
+  `Call` start on the group chat the conversation's invitation bound it to, from that invitation's callee, and its
+  answer registers the call; a roster-only conversation join passes on the same binding. A renegotiation or its answer
+  delivered at a call's own `mediaRenegotiation` or `mediaAnswer` callback binds the `answer` or `acknowledge` link it
+  names; the caller's `renegotiate` and `updateMediaDescriptions` come from the acceptance.
 - A group or meeting chat is judged like a 1:1 chat, by its fresh member list: a lab-only one is writable, a group
   chat the native client creates included. `chats.toml` is lab data for the scenarios and clients (`abc-chat` records
   the lab's a–b–c chat in it, once); the fence doesn't read it.
@@ -422,8 +438,10 @@ What the code does and why. A change that undoes one of these needs a new reason
   of requests (`ForcedDeny`) or of frames (`ForcedFrameDeny`: `ab-trouter-quiet` and `own-presence-endpoint` hold
   back `user.activity`, the other `own-presence` runs the endpoint `PUT` or the manual status; `ab-call` and
   `abc-call` a's call starts in `--call start-held`, and in their other steps everything each callee's page sends to
-  the calling services and every delivery response it sends, labelled by the moment: ringing, after its answer click,
-  after its decline click), expected by its label.
+  the calling services but what the fence maps for that moment, labelled by the moment: ringing (all but the
+  `attach` and `progress`; its delivery responses go to the fence), after its answer click (all but the answer and
+  the answered call's sends), after its decline click (all but the rejection), around its join click (all but the
+  join and the joined call's sends), and a's own conversation join after its group call), expected by its label.
 - The sign-in window (`teams-signin`) keeps default-deny rules of its own (`teams_signin::classify`): reads, the
   token endpoint and authz in their captured queries, and Entra's sign-in form, which still takes any query
   (`docs/backlog/seeded-own-rules-ignore-the-query.md`). An own-state rule (`OwnRule`) matches the method, the
@@ -445,14 +463,14 @@ What the code does and why. A change that undoes one of these needs a new reason
   ~/.local/share/teams-lab/live.lock`) and runs under an outer `timeout --signal=INT`. Every page call and navigation
   is bounded (a `beforeunload` dialog holding a navigation is accepted after 5 s), and SIGINT or SIGTERM kills the
   run's browsers and lets the fence's decisions still running land in `fence.log` (`crates/proto-lab/src/stop.rs`).
-- **No call is answered.** A scenario clicks answer or decline only on an invitation naming only lab accounts or the
-  echo service, and only in a scenario that exists to do it (`ab-call`, `abc-call`: the lab's accounts calling each
-  other). The fence maps neither `acceptance` nor a decline and denies Trouter delivery responses (but for the
-  acknowledgement of the acceptance of a call the page itself started and the fence registered), and such a scenario
-  holds back everything the callee's page sends to the calling services and every delivery response it sends, from
-  before the call rings, with labelled forced denies, so the click answers and declines nothing. Every other incoming
-  call is ignored, never clicked. The native Trouter client ignores incoming calls and has no path to answer any
-  delivery.
+- **Only the lab's own calls are answered or declined.** A scenario clicks answer, decline or join only in a
+  scenario that exists to do it (`ab-call`, `abc-call`: the lab's accounts calling each other), only on the run's own
+  call (every invitation the page received is that run's call from the caller to that callee in the run's chat, and
+  the page shows one incoming call, or for a join the run's chat with one join), and the fence decides what the click
+  sends again on its own: an answer, a decline or a join passes only on the account's own offered invitation from a
+  lab caller (a group call's chat read fresh), everything else the callee's page sends to the calling services stays
+  held back by labelled forced denies. Every other incoming call is ignored, never clicked, and nothing is sent for
+  it. The native Trouter client ignores incoming calls and has no path to answer, decline or join any call.
 - Live tests are built only with `--features live` and run only with `PROTO_LAB_LIVE=1`.
 - Tokens: our client is the native `1fec8e78-…` with the `nativeclient` redirect. The chat service takes
   `Authorization: Bearer` with an `https://ic3.teams.office.com` token, not a skypetoken, and a skypetoken expires with

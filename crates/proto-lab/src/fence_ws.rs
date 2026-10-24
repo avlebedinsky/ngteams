@@ -571,7 +571,7 @@ impl WsFence {
             });
             return Verdict::Deny(cause);
         }
-        if let Some(verdict) = self.delivery_response(session, frame) {
+        if let Some(verdict) = self.delivery_response(session, frame).await {
             return verdict;
         }
         self.judge(classify_frame(frame), &frame.url).await
@@ -579,7 +579,7 @@ impl WsFence {
 
     /// The fence's decision on a delivery response answering a pending call delivery (see [`Self::decide_on`]); `None`
     /// for any other frame, and for one whose socket isn't exactly one open socket of `session` with its URL.
-    fn delivery_response(&self, session: Option<&SessionId>, frame: &Frame) -> Option<Verdict> {
+    async fn delivery_response(&self, session: Option<&SessionId>, frame: &Frame) -> Option<Verdict> {
         let Payload::Text(text) = &frame.payload else {
             return None;
         };
@@ -598,7 +598,11 @@ impl WsFence {
                 _ => return None,
             }
         };
-        match self.fence.check_delivery_response(&connection, response.as_bytes()) {
+        match self
+            .fence
+            .check_delivery_response(&connection, response.as_bytes(), self.members.as_ref())
+            .await
+        {
             DeliveryDecision::NotPending => None,
             DeliveryDecision::Permitted(_) => Some(Verdict::Allow),
             DeliveryDecision::Denied(reason) => {

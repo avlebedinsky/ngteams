@@ -23,6 +23,13 @@ pub enum WriteKind {
     Call,
     /// Answering an incoming call.
     CallAnswer,
+    /// What the callee's client sends by itself while an offered invitation rings ([`Scope::CallOperation`] on the
+    /// invitation, judged like an answer by the call registry): never one that answers, declines, joins a call or
+    /// adds anyone.
+    CallRinging,
+    /// Declining an offered invitation: the captured rejection of its call leg, so the ringing stops everywhere and the
+    /// caller sees it declined; judged like an answer.
+    CallDecline,
     /// A captured operation on a call this run's fence registered ([`Scope::CallOperation`], other than an `add`, which
     /// is an [`WriteKind::Invite`]): judged by the call registry, never by a member read.
     CallFollowUp,
@@ -39,7 +46,7 @@ pub enum WriteKind {
 }
 
 impl WriteKind {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::Message,
         Self::Edit,
         Self::Delete,
@@ -48,6 +55,8 @@ impl WriteKind {
         Self::ReadReceipt,
         Self::Call,
         Self::CallAnswer,
+        Self::CallRinging,
+        Self::CallDecline,
         Self::CallFollowUp,
         Self::Invite,
         Self::Meeting,
@@ -70,6 +79,8 @@ impl WriteKind {
             Self::ReadReceipt => "read_receipt",
             Self::Call => "call",
             Self::CallAnswer => "call_answer",
+            Self::CallRinging => "call_ringing",
+            Self::CallDecline => "call_decline",
             Self::CallFollowUp => "call_follow_up",
             Self::Invite => "invite",
             Self::Meeting => "meeting",
@@ -141,8 +152,10 @@ pub enum Scope {
     /// the write goes to, one of the links the call's services handed out for that operation, and `from` the
     /// participant the body names as its sender (`participants.from.id`), for the operations that carry one, and
     /// `callbacks` the endpoint callback links the body hands the call's services (an acknowledgement's
-    /// `callAcceptanceAcknowledgement.links`, an `add`'s `links`), each of which must be on the call start's own
-    /// endpoint and call agent. The call registry resolves it; nothing else is fetched.
+    /// `callAcceptanceAcknowledgement.links`, an `add`'s `links`, an `attach`'s), each of which must be on the call's
+    /// own endpoint and call agent, and `joins` the conversation an `attach` subscribes to (its one `join` action's
+    /// URL), which must be the invitation's. The call registry resolves it; nothing else is fetched but the group
+    /// chat an incoming group call names.
     CallOperation {
         operation: CallOperation,
         url: String,
@@ -152,6 +165,8 @@ pub enum Scope {
         // the endpoint's push URLs; `fence.log` keeps the operation and its URL
         #[serde(skip)]
         callbacks: Box<[String]>,
+        #[serde(skip)]
+        joins: Option<String>,
     },
     /// Something the write creates: a new chat, call or meeting. It has no members to fetch yet: its participants are
     /// exactly the target's added participants. Only kinds that [create a target](WriteKind::creates_target) may use
@@ -177,9 +192,10 @@ impl fmt::Display for Scope {
     }
 }
 
-/// A captured operation on an existing call, each from the echo call's capture (`docs/protocol/calling-echo.md`). Its
-/// method and the link it goes to are fixed: the conversation service's links from the call start's answer, the call
-/// controller's from the acceptance delivered for the call.
+/// A captured operation on an existing call or an offered invitation, each from a capture
+/// (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`). Its method and the link it goes to are fixed: the
+/// conversation service's links from the call start's answer, the call controller's from the acceptance delivered for
+/// the call, an invitation's from the invitation itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallOperation {
@@ -193,15 +209,63 @@ pub enum CallOperation {
     Acknowledge,
     /// `POST …/cc/v1/mcProxy/<call>/…/applyChannelParameters`: a media line's send capabilities.
     ApplyChannelParameters,
+    /// `POST …/cc/v1/forked/<call>/…/attach`: the callee's endpoint attached to its ringing call leg, with a
+    /// roster-only subscription to the call's conversation (no media, no answer): sent by the callee's client while an
+    /// offered invitation rings.
+    Attach,
+    /// `POST …/cc/v1/incoming/<call>/…/progress`: the callee's endpoint tells the call controller it rings (the link the
+    /// permitted `attach`'s answer handed out): sent by the callee's client while an offered invitation rings.
+    Progress,
+    /// `POST …/conv/<id>/updateEndpointState`: the callee's endpoint state (muted or not) in the call's conversation, at
+    /// the link the `attach`'s conversation subscription handed out: sent when the callee answers, and on its call.
+    UpdateEndpointState,
+    /// `POST …/cc/v1/incoming/<call>/…/accept`: the callee answers (its media answer and its call's callbacks), at the
+    /// `acceptance` link the `attach`'s answer handed out.
+    Accept,
+    /// `DELETE …/cc/v1/incoming/<call>/…/reject`: the callee declines, at the `callLeg` link the `attach`'s answer
+    /// handed out.
+    Reject,
+    /// `POST …/conv/<id>/updateParticipantProperties`: the callee's own participant properties (its AI voice consent)
+    /// in the call's conversation, once it answered.
+    UpdateParticipantProperties,
+    /// `POST …/cc/v1/negotiations/<call>/…/answer`: the callee's answer to a media renegotiation of its answered call,
+    /// at the `mediaAnswer` link the renegotiation delivered to its own `mediaRenegotiation` callback handed out.
+    MediaAnswer,
+    /// `POST …/cc/v1/active/<call>/…/renegotiate`: a media renegotiation of the call (its camera turned on, say), at the
+    /// `mediaRenegotiation` link the call controller handed out (the caller's acceptance, the callee's acceptance's
+    /// acknowledgement).
+    Renegotiate,
+    /// `POST …/cc/v1/mediaAnswers/<call>/…/acknowledge`, with no body: the answer to the sender's renegotiation
+    /// acknowledged, at the `mediaAcknowledgement` link that answer, delivered to its own `mediaAnswer` callback, handed
+    /// out.
+    MediaAcknowledge,
+    /// `POST …/cc/v1/active/<call>/…/updateMediaDescriptions`: which media lines the sender sends and receives (its
+    /// camera on: its main video line `sendrecv`), at the `updateMediaDescriptions` link the call controller handed out.
+    UpdateMediaDescriptions,
+    /// `POST …/conv/<id>`: a join of a running call's conversation from the chat it belongs to: with a call invitation
+    /// (media) the sender enters the call; without one it subscribes to the conversation's roster only (the client does
+    /// so by itself once its own ring ended, to show the chat's join). Judged like a start in that chat.
+    Join,
 }
 
 impl CallOperation {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 16] = [
         Self::UpdateEndpointMetadata,
         Self::Add,
         Self::Leave,
         Self::Acknowledge,
         Self::ApplyChannelParameters,
+        Self::Attach,
+        Self::Progress,
+        Self::UpdateEndpointState,
+        Self::Accept,
+        Self::Reject,
+        Self::UpdateParticipantProperties,
+        Self::MediaAnswer,
+        Self::Renegotiate,
+        Self::MediaAcknowledge,
+        Self::UpdateMediaDescriptions,
+        Self::Join,
     ];
 
     /// The name used in `fence.log`.
@@ -213,6 +277,17 @@ impl CallOperation {
             Self::Leave => "leave",
             Self::Acknowledge => "acknowledge",
             Self::ApplyChannelParameters => "apply_channel_parameters",
+            Self::Attach => "attach",
+            Self::Progress => "progress",
+            Self::UpdateEndpointState => "update_endpoint_state",
+            Self::Accept => "accept",
+            Self::Reject => "reject",
+            Self::UpdateParticipantProperties => "update_participant_properties",
+            Self::MediaAnswer => "media_answer",
+            Self::Renegotiate => "renegotiate",
+            Self::MediaAcknowledge => "media_acknowledge",
+            Self::UpdateMediaDescriptions => "update_media_descriptions",
+            Self::Join => "join",
         }
     }
 
@@ -221,7 +296,21 @@ impl CallOperation {
     pub fn method(self) -> &'static str {
         match self {
             Self::UpdateEndpointMetadata => "PUT",
-            Self::Add | Self::Leave | Self::Acknowledge | Self::ApplyChannelParameters => "POST",
+            Self::Reject => "DELETE",
+            Self::Add
+            | Self::Leave
+            | Self::Acknowledge
+            | Self::ApplyChannelParameters
+            | Self::Attach
+            | Self::Progress
+            | Self::UpdateEndpointState
+            | Self::Accept
+            | Self::UpdateParticipantProperties
+            | Self::MediaAnswer
+            | Self::Renegotiate
+            | Self::MediaAcknowledge
+            | Self::UpdateMediaDescriptions
+            | Self::Join => "POST",
         }
     }
 
@@ -232,24 +321,63 @@ impl CallOperation {
             Self::UpdateEndpointMetadata => "updateEndpointMetadata",
             Self::Add => "add",
             Self::Leave => "leave",
-            Self::Acknowledge => "acknowledge",
+            Self::Acknowledge | Self::MediaAcknowledge => "acknowledge",
             Self::ApplyChannelParameters => "applyChannelParameters",
+            Self::Attach => "attach",
+            Self::Progress => "progress",
+            Self::UpdateEndpointState => "updateEndpointState",
+            Self::Accept => "accept",
+            Self::Reject => "reject",
+            Self::UpdateParticipantProperties => "updateParticipantProperties",
+            Self::MediaAnswer => "answer",
+            Self::Renegotiate => "renegotiate",
+            Self::UpdateMediaDescriptions => "updateMediaDescriptions",
+            // the conversation's own URL: no segment after it
+            Self::Join => "",
         }
     }
 
-    /// The kind of write it is: an `add` invites, the rest follow up.
+    /// The kind of write it is: an `add` invites, an `attach` and a `progress` are ring-time sends, an `accept` answers,
+    /// a `reject` declines, the rest follow up.
     #[must_use]
     pub fn kind(self) -> WriteKind {
         match self {
             Self::Add => WriteKind::Invite,
+            Self::Attach | Self::Progress => WriteKind::CallRinging,
+            Self::Accept => WriteKind::CallAnswer,
+            Self::Reject => WriteKind::CallDecline,
+            Self::Join => WriteKind::Call,
             _ => WriteKind::CallFollowUp,
         }
     }
 
-    /// Whether its body names its sender (`participants.from`): the conversation service's operations do.
+    /// Whether its body names its sender: the conversation service's operations do (`participants.from`, an endpoint
+    /// state's `from`), an `attach` in its `join` action, a `progress` as its `callProgress.sender` and an `accept` as
+    /// its `callAcceptance.acceptedBy`.
     #[must_use]
     pub fn names_sender(self) -> bool {
-        matches!(self, Self::UpdateEndpointMetadata | Self::Add | Self::Leave)
+        !matches!(
+            self,
+            Self::Acknowledge
+                | Self::ApplyChannelParameters
+                | Self::Reject
+                | Self::MediaAcknowledge
+                | Self::UpdateMediaDescriptions
+        )
+    }
+
+    /// Whether it acts on an offered invitation (the callee's side) rather than on a call this fence registered.
+    #[must_use]
+    pub fn on_invitation(self) -> bool {
+        matches!(
+            self,
+            Self::Attach
+                | Self::Progress
+                | Self::UpdateEndpointState
+                | Self::Accept
+                | Self::Reject
+                | Self::UpdateParticipantProperties
+        )
     }
 }
 

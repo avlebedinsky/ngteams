@@ -835,11 +835,15 @@ fn refuse_nothing(_method: &str, _session: Option<&str>) -> bool {
     false
 }
 
-/// The browser session's `Fetch.enable` params: every request, and the call start's answer at the response stage.
+/// The browser session's `Fetch.enable` params: every request, and the call start's, a conversation's, the attach's
+/// and the accept's answers at the response stage.
 fn browser_fetch_patterns() -> Value {
     json!({"patterns": [
         {"urlPattern": "*"},
         {"urlPattern": teams_fence::CALL_START_URL, "requestStage": "Response"},
+        {"urlPattern": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/*/conv/*", "requestStage": "Response"},
+        {"urlPattern": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/*/cc/v1/forked/*/attach*", "requestStage": "Response"},
+        {"urlPattern": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/*/cc/v1/incoming/*/accept*", "requestStage": "Response"},
     ]})
 }
 
@@ -986,6 +990,68 @@ async fn a_permitted_call_start_s_answer_registers_its_call_before_the_page_gets
 }
 
 #[tokio::test]
+async fn the_capture_says_whether_a_call_answer_the_fence_waited_for_registered_its_call() -> TestResult {
+    let fake = FakeBrowser::start(refuse_nothing).await?;
+    let dir = tempfile::tempdir()?;
+    let roster = Roster::new([Mri::new(CALLER)], [Mri::new(ECHO)]);
+    let fence = Arc::new(Fence::new(roster, FenceLog::open(&dir.path().join("fence.log"))?));
+    let classifier = Classifier::new().with_test_call_callee(Mri::new(ECHO));
+    let members = Arc::new(Fixed(Membership::Complete(Vec::new())));
+    let http = HttpFence::new(classifier, Arc::clone(&fence), members.clone());
+    let ws = WsFence::new(Arc::clone(&fence), members, GuardScript::generate()?);
+    let recorder = Arc::new(Recorder::create(&dir.path().join("captures"), "test")?);
+    let capture = Capture::new(Arc::clone(&recorder), RtcHooks::new(Duration::from_secs(1)));
+    let options = ArmOptions {
+        service_worker_origins: Vec::new(),
+    };
+    let armed = ArmedBrowser::arm_capturing(fake.launch().await?, http, ws, &options, capture).await?;
+    // an answer nothing waited for, a failed answer to a permitted start, a success that registers its call
+    fake.event(None, "Fetch.requestPaused", &answer_paused("job-0", "N0", 201))?;
+    fake.sent(
+        "the stray answer continued",
+        answered("Fetch.continueResponse", "job-0"),
+    )
+    .await?;
+    fake.event(None, "Fetch.requestPaused", &start_paused("job-1", "N1"))?;
+    fake.sent("the start continued", answered("Fetch.continueRequest", "job-1"))
+        .await?;
+    fake.event(None, "Fetch.requestPaused", &answer_paused("job-2", "N1", 500))?;
+    fake.sent(
+        "the failed answer continued",
+        answered("Fetch.continueResponse", "job-2"),
+    )
+    .await?;
+    fake.event(None, "Fetch.requestPaused", &start_paused("job-3", "N3"))?;
+    fake.sent("the start continued", answered("Fetch.continueRequest", "job-3"))
+        .await?;
+    fake.event(None, "Fetch.requestPaused", &answer_paused("job-4", "N3", 201))?;
+    fake.sent("the answer continued", answered("Fetch.continueResponse", "job-4"))
+        .await?;
+    armed.close(Duration::from_secs(5)).await?;
+    recorder.finish()?;
+    let bound: Vec<(String, Value)> = std::fs::read_to_string(recorder.events_file())?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["type"] == "response_continued")
+        .map(|entry| {
+            (
+                entry["network_id"].as_str().unwrap_or_default().to_owned(),
+                entry["bound"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        bound,
+        [
+            ("N0".to_owned(), Value::Null),
+            ("N1".to_owned(), json!(false)),
+            ("N3".to_owned(), json!(true))
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_call_start_s_preflight_response_is_continued_and_leaves_its_start_pending() -> TestResult {
     let fake = FakeBrowser::start(refuse_nothing).await?;
     let (armed, _dir) = arm_call_fence(&fake).await?;
@@ -1029,6 +1095,67 @@ async fn a_call_start_s_preflight_response_is_continued_and_leaves_its_start_pen
         answered("Fetch.continueRequest", "job-4"),
     )
     .await?;
+    assert!(armed.denials().is_empty(), "nothing denied: {:?}", armed.denials());
+    armed.close(Duration::from_secs(5)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_paused_response_that_failed_is_continued_as_a_request() -> TestResult {
+    let fake = FakeBrowser::start(refuse_nothing).await?;
+    let (armed, _dir) = arm_call_fence(&fake).await?;
+    // a preflight whose response failed has no response to continue: `continueResponse` would refuse it and leave the
+    // request paused until the page gave up on it
+    let failed = json!({
+        "requestId": "job-0",
+        "networkId": "N0",
+        "responseErrorReason": "Failed",
+        "request": {"method": "OPTIONS", "url": teams_fence::CALL_START_URL, "headers": {}},
+    });
+    fake.event(None, "Fetch.requestPaused", &failed)?;
+    fake.sent(
+        "the failed preflight continued as a request",
+        answered("Fetch.continueRequest", "job-0"),
+    )
+    .await?;
+    assert!(armed.denials().is_empty(), "nothing denied: {:?}", armed.denials());
+    armed.close(Duration::from_secs(5)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_attach_s_answer_is_read_and_continued_and_a_stray_one_only_continued() -> TestResult {
+    let fake = FakeBrowser::start(refuse_nothing).await?;
+    let (armed, _dir) = arm_call_fence(&fake).await?;
+    let attach = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/c1/27/i1/1/attach?i=1";
+    // no attach was permitted under this `Network` id: its answer is continued, nothing read
+    let stray = json!({
+        "requestId": "job-0",
+        "networkId": "N0",
+        "responseStatusCode": 200,
+        "request": {"method": "POST", "url": attach, "headers": {}},
+    });
+    fake.event(None, "Fetch.requestPaused", &stray)?;
+    fake.sent(
+        "the stray answer continued",
+        answered("Fetch.continueResponse", "job-0"),
+    )
+    .await?;
+    // a conversation's answers pause too (a join's registers its call): any other is only continued, never failed
+    for (id, url) in [
+        ("job-1", format!("{CONVERSATION}?i=1&e=2")),
+        ("job-2", format!("{CONVERSATION}/leave?i=1&e=2")),
+    ] {
+        let paused = json!({
+            "requestId": id,
+            "networkId": format!("N-{id}"),
+            "responseStatusCode": 200,
+            "request": {"method": "POST", "url": url, "headers": {}},
+        });
+        fake.event(None, "Fetch.requestPaused", &paused)?;
+        fake.sent(&format!("{url} continued"), answered("Fetch.continueResponse", id))
+            .await?;
+    }
     assert!(armed.denials().is_empty(), "nothing denied: {:?}", armed.denials());
     armed.close(Duration::from_secs(5)).await?;
     Ok(())

@@ -376,6 +376,7 @@ fn expected_at(name: &str, url: &str, body: &serde_json::Value) -> Option<Classi
         url: url::Url::parse(url).ok()?.to_string(),
         from,
         callbacks,
+        joins: None,
     };
     Some(Classification::Write(
         Target::new(operation.kind(), scope).with_added(parts.map(Mri::new)),

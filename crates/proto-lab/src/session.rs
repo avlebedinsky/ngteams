@@ -598,8 +598,9 @@ impl LabSession {
     }
 
     /// Launches the pinned Chrome on `alias`'s profile and arms it before any page loads: the fence from `lab.toml`
-    /// ([`Fence::open_lab`]), the membership source and request classifier `options` name, and the frame rule;
-    /// recording into a new capture when asked. Then opens one armed tab on `about:blank`.
+    /// (the account's own, [`Fence::open_lab_account`], which offers it the incoming calls addressed to it), the
+    /// membership source and request classifier `options` name, and the frame rule; recording into a new capture when
+    /// asked. Then opens one armed tab on `about:blank`.
     ///
     /// # Errors
     /// When Chrome isn't installed, the fence, the live source or the capture can't be made, or the browser can't be
@@ -627,7 +628,8 @@ impl LabSession {
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
         }
-        let fence = Arc::new(Fence::open_lab()?);
+        // the account's own fence: an incoming call is offered only when it is addressed to this account
+        let fence = Arc::new(Fence::open_lab_account(alias)?);
         let (members, http): (Arc<dyn MembershipSource + Send>, _) = if options.live_members {
             let live = Arc::new(LiveMembershipSource::for_fence(&fence)?);
             let http =

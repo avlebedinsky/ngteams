@@ -47,10 +47,16 @@ fn fence(lab: &Lab, catch: Option<RedirectCatch>) -> HttpFence {
 fn only_a_fence_with_a_catch_pauses_responses_of_the_login_origins() {
     // every fence pauses the call start's answer, which the call registry reads (`tests/call_registry.rs`)
     let call_start_answer = json!({"urlPattern": teams_fence::CALL_START_URL, "requestStage": "Response"});
+    // a conversation's answers (a join's), and an invitation's attach and accept answers, which bind the links they hand
+    // out
+    let response = |pattern: &str| json!({"urlPattern": pattern, "requestStage": "Response"});
+    let conversation_answer = response("https://api.flightproxy.teams.microsoft.com/api/v2/ep/*/conv/*");
+    let attach_answer = response("https://api.flightproxy.teams.microsoft.com/api/v2/ep/*/cc/v1/forked/*/attach*");
+    let accept_answer = response("https://api.flightproxy.teams.microsoft.com/api/v2/ep/*/cc/v1/incoming/*/accept*");
     let lab = lab().unwrap();
     assert_eq!(
         fence(&lab, None).fetch_patterns(),
-        json!({"patterns": [{"urlPattern": "*"}, call_start_answer]})
+        json!({"patterns": [{"urlPattern": "*"}, call_start_answer, conversation_answer, attach_answer, accept_answer]})
     );
     let config = EntraConfig::teams_native();
     let (catch, _caught) = RedirectCatch::new(&config.authorize_endpoint(), config.redirect_uri()).unwrap();
@@ -59,6 +65,9 @@ fn only_a_fence_with_a_catch_pauses_responses_of_the_login_origins() {
         json!({"patterns": [
             {"urlPattern": "*"},
             call_start_answer,
+            conversation_answer,
+            attach_answer,
+            accept_answer,
             {"urlPattern": "https://login.microsoftonline.com/*", "requestStage": "Response"},
         ]})
     );

@@ -18,6 +18,8 @@ test-support = []
 personal = []
 
 [dependencies]
+# decodes a call invitation's `gp` (base64 JSON) the call registry reads
+base64.workspace = true
 # decodes the chat service path the write mapping reads its targets from
 percent-encoding.workspace = true
 # the live membership source's own HTTPS client: it reads member lists from the chat service itself

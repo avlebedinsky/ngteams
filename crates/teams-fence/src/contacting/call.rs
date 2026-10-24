@@ -1,9 +1,13 @@
 //! The calling family's rows (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`): the web client's test call
 //! start, a new call of the caller and the echo service; its call start from a 1:1 or group chat's header
-//! ([`chat_call_start`]), a call in the chat it carries; and the captured operations on a call that exists ([`follow_up`]: the endpoint's
-//! metadata, an `add`, the `leave`, the acceptance's acknowledgement and a media line's channel parameters), each a
-//! write on [`Scope::CallOperation`] that the call registry resolves (`crate::calls`). Only their captured shapes map;
-//! every other mutating request on a calling host is unreadable until a row maps it.
+//! ([`chat_call_start`]), a call in the chat it carries; and the captured operations ([`follow_up`]) on a call that
+//! exists (the endpoint's state and metadata, an `add`, the `leave`, the acceptance's acknowledgement, the participant's
+//! own properties, the media negotiation: a renegotiation, a negotiation's answer, a media answer's acknowledgement,
+//! media descriptions, a media line's channel parameters), on an incoming call's offered invitation (the callee's
+//! `attach` and `progress` while it rings, its `accept` or its `reject`, and the answered call's operations as above),
+//! and the join of a running call (a `POST` to its conversation), each a write on [`Scope::CallOperation`] that the
+//! call registry resolves (`crate::calls`). Only their captured shapes map; every other mutating request on a calling
+//! host is unreadable until a row maps it.
 
 use serde_json::{Map, Value};
 use url::{Position, Url};
@@ -30,6 +34,8 @@ pub(crate) enum Shape {
     /// call into.
     Null,
     Bool,
+    /// A string or `null`: what the captures had both of (a join's subject).
+    TextOrNull,
     /// A non-negative integer.
     Count,
     Text,
@@ -312,6 +318,7 @@ pub(crate) fn fits(value: &Value, shape: Shape) -> bool {
         Shape::Bool => value.is_boolean(),
         Shape::Count => value.is_u64(),
         Shape::Text => value.is_string(),
+        Shape::TextOrNull => value.is_string() || value.is_null(),
         Shape::Texts => value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
         Shape::Object(fields) => value.as_object().is_some_and(|object| fits_fields(object, fields)),
         Shape::NullOr(fields) => value.is_null() || fits(value, Shape::Object(fields)),
@@ -450,6 +457,11 @@ pub(crate) fn start_target(target: &Target, body: &[u8], caller: &Mri) -> Option
             call_start("POST", &url, Some(body), Some(echo))
         }
         Scope::Conversation { .. } => chat_call_start("POST", &url, Some(body)),
+        Scope::CallOperation {
+            operation: CallOperation::Join,
+            url,
+            ..
+        } => follow_up("POST", &Url::parse(url).ok()?, Some(body)),
         _ => None,
     }
 }
@@ -465,10 +477,12 @@ pub(crate) struct StartEvidence {
 }
 
 /// The evidence of a call start in a captured shape (the test call's, as [`call_start`] reads it, or a chat's, as
-/// [`chat_call_start`] does); `None` for anything else.
+/// [`chat_call_start`] does), or of a join with a call invitation ([`JOIN`]); `None` for anything else.
 pub(crate) fn start_evidence(body: &[u8]) -> Option<StartEvidence> {
     let start = strict_json(body)?;
-    if !fits(&start, Shape::Object(CALL_START)) && !fits(&start, Shape::Object(CHAT_CALL_START)) {
+    // a join enters a call only with a call invitation; one without subscribes to the roster and starts nothing
+    let join = fits(&start, Shape::Object(JOIN)) && start.get("callInvitation").is_some();
+    if !fits(&start, Shape::Object(CALL_START)) && !fits(&start, Shape::Object(CHAT_CALL_START)) && !join {
         return None;
     }
     let links = |at: &str| {
@@ -595,23 +609,91 @@ const APPLY_CHANNEL_PARAMETERS: &[Field] = &[required(
     )]),
 )];
 
-/// The captured operation `url`'s path names: `/api/v2/ep/<host>/conv/<id>/<op>` for the conversation service's,
-/// `/api/v2/ep/<host>/cc/v1/<callAcceptance|mcProxy>/<call>/…/<op>` for the call controller's. Its link in the call
-/// registry is what ties it to a call; this only tells which operation it is.
+/// `POST …/cc/v1/forked/<call>/…/attach` (seen 2026-10-24, `ab-call` and `abc-call`): the callee's endpoint attaches
+/// to its ringing call leg, handing the leg its `end` callback, and in its one additional action (`join`, waiting for
+/// the response) subscribes to the call's conversation for its roster: the conversation's callbacks and the callee as
+/// `participants.from`, with no call invitation and no media.
+const ATTACH: &[Field] = &[
+    required(
+        "attach",
+        Shape::Object(&[
+            field("requireMediaContent", Shape::Bool),
+            required("links", Shape::Object(&[required("end", Shape::Text)])),
+            field("locationContent", Shape::Null),
+            field("networkContent", Shape::Null),
+            field("areaContent", Shape::Null),
+        ]),
+    ),
+    field("capabilities", Shape::Null),
+    field("endpointCapabilities", Shape::Count),
+    required("additionalActions", Shape::Objects(ATTACH_ACTION)),
+    field("debugContent", Shape::Object(DEBUG_CONTENT)),
+];
+
+/// An `attach`'s additional action: the roster-only subscription to the call's conversation.
+const ATTACH_ACTION: &[Field] = &[
+    required(
+        "input",
+        Shape::Object(&[
+            field("capabilities", Shape::Null),
+            field("endpointCapabilities", Shape::Count),
+            required(
+                "conversationRequest",
+                Shape::Object(&[
+                    required("roster", Shape::Object(ROSTER)),
+                    required("links", Shape::Object(CONVERSATION_LINKS)),
+                ]),
+            ),
+            field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
+            required("participants", Shape::Object(FROM_ONLY)),
+        ]),
+    ),
+    required("name", Shape::Text),
+    required("url", Shape::Text),
+    required("waitForResponse", Shape::Bool),
+];
+
+/// `POST …/cc/v1/incoming/<call>/…/progress` (seen 2026-10-24, `ab-call`): the callee's endpoint tells the call
+/// controller it rings, at the `progress` link its `attach`'s answer handed out.
+const PROGRESS: &[Field] = &[required(
+    "callProgress",
+    Shape::Object(&[
+        required("sender", Shape::Object(FROM)),
+        required("status", Shape::Text),
+        field("phrase", Shape::Text),
+    ]),
+)];
+
+/// The captured operation `url`'s path names: `/api/v2/ep/<host>/conv/<id>` for a join of the conversation,
+/// `/api/v2/ep/<host>/conv/<id>/<op>` for the conversation service's operations,
+/// `/api/v2/ep/<host>/cc/v1/<kind>/<call>/…/<op>` for the call controller's (`kind` one of `callAcceptance`,
+/// `mcProxy`, `forked`, `incoming`, `negotiations`, `active`, `mediaAnswers`). Its link in the call registry is what
+/// ties it to a call; this only tells which operation it is.
 fn operation_of(url: &Url) -> Option<CallOperation> {
     let segments = decoded_segments(url)?;
     let path: Vec<&str> = segments.iter().map(String::as_str).collect();
     match path.as_slice() {
+        ["api", "v2", "ep", host, "conv", id] if !host.is_empty() && !id.is_empty() => Some(CallOperation::Join),
         ["api", "v2", "ep", host, "conv", id, op] if !host.is_empty() && !id.is_empty() => match *op {
             "updateEndpointMetadata" => Some(CallOperation::UpdateEndpointMetadata),
             "add" => Some(CallOperation::Add),
             "leave" => Some(CallOperation::Leave),
+            "updateEndpointState" => Some(CallOperation::UpdateEndpointState),
+            "updateParticipantProperties" => Some(CallOperation::UpdateParticipantProperties),
             _ => None,
         },
         ["api", "v2", "ep", host, "cc", "v1", kind, call, .., op] if !host.is_empty() && !call.is_empty() => {
             match (*kind, *op) {
                 ("callAcceptance", "acknowledge") => Some(CallOperation::Acknowledge),
                 ("mcProxy", "applyChannelParameters") => Some(CallOperation::ApplyChannelParameters),
+                ("forked", "attach") => Some(CallOperation::Attach),
+                ("incoming", "progress") => Some(CallOperation::Progress),
+                ("incoming", "accept") => Some(CallOperation::Accept),
+                ("incoming", "reject") => Some(CallOperation::Reject),
+                ("negotiations", "answer") => Some(CallOperation::MediaAnswer),
+                ("active", "renegotiate") => Some(CallOperation::Renegotiate),
+                ("mediaAnswers", "acknowledge") => Some(CallOperation::MediaAcknowledge),
+                ("active", "updateMediaDescriptions") => Some(CallOperation::UpdateMediaDescriptions),
                 _ => None,
             }
         }
@@ -627,15 +709,182 @@ fn shape_of(operation: CallOperation) -> &'static [Field] {
         CallOperation::Leave => LEAVE,
         CallOperation::Acknowledge => ACKNOWLEDGE,
         CallOperation::ApplyChannelParameters => APPLY_CHANNEL_PARAMETERS,
+        CallOperation::Attach => ATTACH,
+        CallOperation::Progress => PROGRESS,
+        CallOperation::UpdateEndpointState => UPDATE_ENDPOINT_STATE,
+        CallOperation::Accept => ACCEPT,
+        CallOperation::Reject => REJECT,
+        CallOperation::UpdateParticipantProperties => UPDATE_PARTICIPANT_PROPERTIES,
+        CallOperation::MediaAnswer => MEDIA_ANSWER,
+        CallOperation::Renegotiate => RENEGOTIATE,
+        // no body: `follow_up` takes it only without one
+        CallOperation::MediaAcknowledge => &[],
+        CallOperation::UpdateMediaDescriptions => UPDATE_MEDIA_DESCRIPTIONS,
+        CallOperation::Join => JOIN,
     }
 }
+
+/// `POST …/cc/v1/active/<call>/…/updateMediaDescriptions` (seen 2026-10-24, `abc-call --call video` when a page turns
+/// its camera on): the sender's media lines, each by its `mid` and direction.
+const UPDATE_MEDIA_DESCRIPTIONS: &[Field] = &[required(
+    "UpdateMediaDescriptions",
+    Shape::Object(&[required(
+        "mediaDescriptions",
+        Shape::Object(&[
+            field(
+                "descriptions",
+                Shape::Objects(&[
+                    field("mid", Shape::Text),
+                    field("direction", Shape::Text),
+                    field("label", Shape::Text),
+                ]),
+            ),
+            field("negotiationTag", Shape::Text),
+            field("requestId", Shape::Count),
+        ]),
+    )]),
+)];
+
+/// `POST …/cc/v1/active/<call>/…/renegotiate` (seen 2026-10-24, `ab-call --call video` when a page turns its camera on):
+/// the sender's new offer, its callbacks for the answer and the rejection.
+const RENEGOTIATE: &[Field] = &[required(
+    "mediaNegotiation",
+    Shape::Object(&[
+        field("callModalities", Shape::Texts),
+        required("sender", Shape::Object(FROM)),
+        field(
+            "links",
+            Shape::Object(&[field("mediaAnswer", Shape::Text), field("rejection", Shape::Text)]),
+        ),
+        field(
+            "mediaContent",
+            Shape::Object(&[
+                field("blob", Shape::Text),
+                field("contentType", Shape::Text),
+                field("requiredFeatures", Shape::Text),
+                field("clientLocation", Shape::Text),
+                field("negotiationTag", Shape::Text),
+                field("mediaDescriptions", Shape::Object(MEDIA_DESCRIPTIONS)),
+                field("applyChannelParameters", Shape::Object(CHANNEL_PARAMETERS)),
+                field("mediaLegId", Shape::Text),
+            ]),
+        ),
+    ]),
+)];
+
+/// `POST …/cc/v1/negotiations/<call>/…/answer` (seen 2026-10-24, `abc-call` once the callees answered): the sender's
+/// answer to a media renegotiation, its callbacks for the media acknowledgement and the media controller.
+const MEDIA_ANSWER: &[Field] = &[
+    required(
+        "mediaAnswer",
+        Shape::Object(&[
+            field("callModalities", Shape::Texts),
+            required("sender", Shape::Object(FROM)),
+            field("links", Shape::Object(&[field("mediaAcknowledgement", Shape::Text)])),
+            field(
+                "clientContentForMediaController",
+                Shape::Object(MEDIA_CONTROLLER_CONTENT),
+            ),
+            field("mediaContent", Shape::Object(CHAT_MEDIA_CONTENT)),
+        ]),
+    ),
+    field(
+        "debugContent",
+        Shape::Object(&[field("callId", Shape::Text), field("endpointId", Shape::Text)]),
+    ),
+];
+
+/// `POST …/conv/<id>/updateParticipantProperties` (seen 2026-10-24, `ab-call` once the callee answered): the sender's
+/// own participant properties (its AI voice consent), with the callback for the update's status.
+const UPDATE_PARTICIPANT_PROPERTIES: &[Field] = &[
+    required(
+        "from",
+        Shape::Object(&[
+            required("id", Shape::Text),
+            field("endpointId", Shape::Text),
+            field("participantId", Shape::Text),
+        ]),
+    ),
+    required(
+        "to",
+        Shape::Objects(&[
+            required("id", Shape::Text),
+            field("propertyBag", Shape::Object(PROPERTY_BAG)),
+        ]),
+    ),
+    field(
+        "links",
+        Shape::Object(&[field("updateParticipantPropertiesStatus", Shape::Text)]),
+    ),
+    field("operationId", Shape::Text),
+];
+
+/// `POST …/conv/<id>/updateEndpointState` (seen 2026-10-24, `ab-call` and `abc-call` when the callee answers): the
+/// callee's endpoint state in the call's conversation, its sender `from`.
+const UPDATE_ENDPOINT_STATE: &[Field] = &[
+    required("from", Shape::Object(FROM)),
+    required(
+        "endpointState",
+        Shape::Object(&[
+            field("state", Shape::Object(&[field("isMuted", Shape::Bool)])),
+            field(
+                "endpointProperties",
+                Shape::Object(&[field(
+                    "additionalEndpointProperties",
+                    Shape::Object(&[field("infoShownInReportMode", Shape::Text)]),
+                )]),
+            ),
+            field("endpointStateSequenceNumber", Shape::Count),
+        ]),
+    ),
+];
+
+/// `POST …/cc/v1/incoming/<call>/…/accept` (seen 2026-10-24, `ab-call` and `abc-call`): the callee answers, naming
+/// itself as `acceptedBy`, the modalities it accepts, its media answer, and its endpoint's callbacks for the call (the
+/// same names as an acknowledgement's) and for the media controller.
+const ACCEPT: &[Field] = &[required(
+    "callAcceptance",
+    Shape::Object(&[
+        required("acceptedBy", Shape::Object(FROM)),
+        field("acceptedCallModalities", Shape::Texts),
+        field("capabilities", Shape::Null),
+        field("endpointCapabilities", Shape::Count),
+        field("clientEndpointCapabilities", Shape::Count),
+        field("links", Shape::Object(ACKNOWLEDGEMENT_LINKS)),
+        field(
+            "clientContentForMediaController",
+            Shape::Object(MEDIA_CONTROLLER_CONTENT),
+        ),
+        field("mediaContent", Shape::Object(CHAT_MEDIA_CONTENT)),
+        field("pstnContent", Shape::Object(PSTN_CONTENT)),
+        field("callKeepAliveInterval", Shape::Null),
+    ]),
+)];
+
+/// `DELETE …/cc/v1/incoming/<call>/…/reject` (seen 2026-10-24, `ab-call` and `abc-call` when the callee declines): the
+/// call's end, as the callee's decline sends it.
+const REJECT: &[Field] = &[required(
+    "callEnd",
+    Shape::Object(&[
+        required("code", Shape::Count),
+        field("subCode", Shape::Count),
+        required("phrase", Shape::Text),
+        field("resultCategories", Shape::Texts),
+    ]),
+)];
+
+/// The decline's call end: the code and phrase of the callee's own decline (a reject after a failed answer, say, ends
+/// the leg for another reason and isn't a decline).
+const DECLINE_CODE: u64 = 603;
+const DECLINE_PHRASE: &str = "CallEndReasonLocalUserInitiated";
 
 /// The write a captured operation on an existing call makes: [`Scope::CallOperation`] with the operation, the exact URL,
 /// the sender its body names and the callback links it hands out, of the operation's kind ([`CallOperation::kind`]); an
 /// `add` adds the participants of its `to`. Only `https` to the flight proxy ([`PROXY_HOST`]), the operation's captured
 /// method and path, and its body in the captured shape map (every key one the capture had, its value of the captured
 /// type), an `add` only naming its sender's own chat and meeting ([`names_own_chat`]); anything else is `None`
-/// (unreadable). Which call the URL belongs to, whether the sender is that call's caller and whether the callbacks are
+/// (unreadable). Which call the URL belongs to, whether the sender is that call's caller (on a call the account
+/// started) or the invitation's callee (on an offered invitation, or a join it binds), and whether the callbacks are
 /// its endpoint's, is the call registry's to judge (`Fence::check`): this row reads only the request.
 #[must_use]
 pub(crate) fn follow_up(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
@@ -646,10 +895,70 @@ pub(crate) fn follow_up(method: &str, url: &Url, body: Option<&[u8]>) -> Option<
     if method != operation.method() {
         return None;
     }
+    if operation == CallOperation::Join {
+        return join_target(url, &strict_json(body?)?);
+    }
+    if operation == CallOperation::MediaAcknowledge {
+        // captured with no body at all
+        return body
+            .is_none_or(<[u8]>::is_empty)
+            .then(|| invitation_operation(operation, url, None, Vec::new()));
+    }
     let request = strict_json(body?)?;
     if !fits(&request, Shape::Object(shape_of(operation))) {
         return None;
     }
+    match operation {
+        CallOperation::Attach => attach_target(url, &request),
+        CallOperation::Progress => progress_target(url, &request),
+        CallOperation::Accept => accept_target(url, &request),
+        CallOperation::Reject => reject_target(url, &request),
+        CallOperation::Renegotiate | CallOperation::MediaAnswer => negotiation_target(operation, url, &request),
+        CallOperation::UpdateEndpointState | CallOperation::UpdateParticipantProperties => {
+            conversation_target(operation, url, &request)
+        }
+        _ => caller_target(operation, url, &request),
+    }
+}
+
+/// A media negotiation's write, its body read (the shape fits): a `renegotiate`'s `mediaNegotiation` or a negotiation
+/// answer's `mediaAnswer`, its sender and the callbacks it hands out (an answer's media controller content too).
+fn negotiation_target(operation: CallOperation, url: &Url, request: &Value) -> Option<Target> {
+    let (negotiation, content) = if operation == CallOperation::Renegotiate {
+        (request.get("mediaNegotiation")?, None)
+    } else {
+        let answer = request.get("mediaAnswer")?;
+        (answer, Some(answer.get("clientContentForMediaController")))
+    };
+    let from = Mri::new(negotiation.pointer("/sender/id")?.as_str()?);
+    let mut callbacks = links_of(negotiation.get("links"))?;
+    if let Some(content) = content {
+        callbacks.extend(links_of(content)?);
+    }
+    Some(invitation_operation(operation, url, Some(from), callbacks))
+}
+
+/// A callee's write in the call's conversation, its body read (the shape fits): its endpoint state, or its own
+/// participant properties (one entry, the sender itself) with the callbacks they hand out.
+fn conversation_target(operation: CallOperation, url: &Url, request: &Value) -> Option<Target> {
+    let from = request.pointer("/from/id")?.as_str()?;
+    if operation == CallOperation::UpdateEndpointState {
+        return Some(invitation_operation(operation, url, Some(Mri::new(from)), Vec::new()));
+    }
+    let [own] = request.get("to")?.as_array()?.as_slice() else {
+        return None;
+    };
+    if own.get("id")?.as_str()? != from {
+        return None;
+    }
+    let callbacks = links_of(request.get("links"))?;
+    Some(invitation_operation(operation, url, Some(Mri::new(from)), callbacks))
+}
+
+/// A caller's follow-up on its registered call, its body read (the shape fits): the sender its `participants.from`
+/// names, an `add`'s invitees (naming its sender's own chat and meeting), and an acknowledgement's or an `add`'s
+/// callbacks.
+fn caller_target(operation: CallOperation, url: &Url, request: &Value) -> Option<Target> {
     let from = match request.pointer("/participants/from/id") {
         Some(id) => Some(Mri::new(id.as_str()?)),
         None => None,
@@ -663,8 +972,7 @@ pub(crate) fn follow_up(method: &str, url: &Url, body: Option<&[u8]>) -> Option<
             .collect::<Option<_>>()?,
         _ => Vec::new(),
     };
-    if operation == CallOperation::Add && (invitees.is_empty() || !names_own_chat(&request, from.as_ref()?, &invitees))
-    {
+    if operation == CallOperation::Add && (invitees.is_empty() || !names_own_chat(request, from.as_ref()?, &invitees)) {
         return None;
     }
     let callbacks = match operation {
@@ -677,8 +985,157 @@ pub(crate) fn follow_up(method: &str, url: &Url, body: Option<&[u8]>) -> Option<
         url: url.as_str().to_owned(),
         from,
         callbacks: callbacks.into(),
+        joins: None,
     };
     Some(Target::new(operation.kind(), scope).with_added(invitees))
+}
+
+/// `POST …/conv/<id>` (seen 2026-10-24, `abc-call`: the callee whose ring ended subscribing to the running group call's
+/// roster, and the caller's join of a running call in its group chat): the conversation's callbacks, the group chat
+/// the call belongs to, the sender, its endpoint, the chat's meeting, and with a call invitation the media it enters
+/// the call with.
+const JOIN: &[Field] = &[
+    required("conversationRequest", Shape::Object(JOIN_CONVERSATION_REQUEST)),
+    field("groupContext", Shape::Null),
+    required(
+        "groupChat",
+        Shape::Object(&[required("threadId", Shape::Text), field("messageId", Shape::Text)]),
+    ),
+    required("participants", Shape::Object(FROM_ONLY)),
+    field("capabilities", Shape::Null),
+    field("endpointCapabilities", Shape::Count),
+    field("clientEndpointCapabilities", Shape::Count),
+    field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
+    field(
+        "meetingInfo",
+        Shape::Object(&[
+            field("organizerId", Shape::Text),
+            field("tenantId", Shape::Text),
+            field("isBroadcast", Shape::Bool),
+        ]),
+    ),
+    field("meetingData", Shape::Null),
+    field("endpointState", Shape::Object(ENDPOINT_STATE)),
+    field("callInvitation", Shape::Object(CHAT_CALL_INVITATION)),
+    field("participantPropertyBag", Shape::Object(PROPERTY_BAG)),
+    field(
+        "debugContent",
+        Shape::Object(&[field("ecsEtag", Shape::Text), field("causeId", Shape::Text)]),
+    ),
+];
+
+/// The conversation a join names: as a chat's call start's, its subject `null` or a string.
+const JOIN_CONVERSATION_REQUEST: &[Field] = &[
+    field("conversationType", Shape::Null),
+    field("subject", Shape::TextOrNull),
+    field("suppressDialout", Shape::Bool),
+    field("roster", Shape::Object(ROSTER)),
+    field("properties", Shape::Object(CONVERSATION_PROPERTIES)),
+    field("links", Shape::Object(CONVERSATION_LINKS)),
+];
+
+/// A join in its captured shape ([`JOIN`]) as a write: the conversation's URL, the sender, the group chat it names as
+/// `joins` (a group chat's id), and every callback it hands out (the conversation's, the roster's, and with a call
+/// invitation the call's and the media controller's). Anything else is `None` (unreadable).
+fn join_target(url: &Url, request: &Value) -> Option<Target> {
+    if !fits(request, Shape::Object(JOIN)) {
+        return None;
+    }
+    let chat = request.pointer("/groupChat/threadId")?.as_str()?;
+    if !is_group_chat_id(chat) {
+        return None;
+    }
+    let from = Mri::new(request.pointer("/participants/from/id")?.as_str()?);
+    let conversation = request.get("conversationRequest")?;
+    let mut callbacks = links_of(conversation.get("links"))?;
+    if let Some(roster) = conversation.pointer("/roster/rosterUpdate") {
+        callbacks.push(roster.as_str()?.to_owned());
+    }
+    callbacks.extend(links_of(request.pointer("/callInvitation/links"))?);
+    callbacks.extend(links_of(
+        request.pointer("/callInvitation/clientContentForMediaController"),
+    )?);
+    let scope = Scope::CallOperation {
+        operation: CallOperation::Join,
+        url: url.as_str().to_owned(),
+        from: Some(from),
+        callbacks: callbacks.into(),
+        joins: Some(chat.to_owned()),
+    };
+    Some(Target::new(CallOperation::Join.kind(), scope))
+}
+
+/// An operation on an offered invitation as a write: [`Scope::CallOperation`] with its exact URL, the sender its body
+/// names and the callbacks it hands out, joining nothing, adding nobody.
+fn invitation_operation(operation: CallOperation, url: &Url, from: Option<Mri>, callbacks: Vec<String>) -> Target {
+    let scope = Scope::CallOperation {
+        operation,
+        url: url.as_str().to_owned(),
+        from,
+        callbacks: callbacks.into(),
+        joins: None,
+    };
+    Target::new(operation.kind(), scope)
+}
+
+/// An `accept` in its captured shape ([`ACCEPT`]) as a write: its sender `callAcceptance.acceptedBy`, its callbacks
+/// those of `links` and `clientContentForMediaController`.
+fn accept_target(url: &Url, request: &Value) -> Option<Target> {
+    let acceptance = request.get("callAcceptance")?;
+    let from = Mri::new(acceptance.pointer("/acceptedBy/id")?.as_str()?);
+    let mut callbacks = links_of(acceptance.get("links"))?;
+    callbacks.extend(links_of(acceptance.get("clientContentForMediaController"))?);
+    Some(invitation_operation(CallOperation::Accept, url, Some(from), callbacks))
+}
+
+/// A `reject` in its captured shape ([`REJECT`]) as a write, only as the callee's own decline ([`DECLINE_CODE`],
+/// [`DECLINE_PHRASE`]); any other call end is `None` (unreadable).
+fn reject_target(url: &Url, request: &Value) -> Option<Target> {
+    let end = request.get("callEnd")?;
+    let decline = end.get("code")?.as_u64()? == DECLINE_CODE && end.get("phrase")?.as_str()? == DECLINE_PHRASE;
+    decline.then(|| invitation_operation(CallOperation::Reject, url, None, Vec::new()))
+}
+
+/// A `progress` in its captured shape ([`PROGRESS`]) as a write: only the status the capture had, `ringing`, its sender
+/// `callProgress.sender`. Any other status (a call forwarded, say) is `None` (unreadable).
+fn progress_target(url: &Url, request: &Value) -> Option<Target> {
+    if request.pointer("/callProgress/status")?.as_str()? != "ringing" {
+        return None;
+    }
+    let from = Mri::new(request.pointer("/callProgress/sender/id")?.as_str()?);
+    Some(invitation_operation(
+        CallOperation::Progress,
+        url,
+        Some(from),
+        Vec::new(),
+    ))
+}
+
+/// An `attach` in its captured shape ([`ATTACH`]) as a write: exactly one additional action, a `join` that waits for its
+/// response, its URL the conversation it subscribes to (`joins`), its `participants.from` the sender, and every
+/// callback it hands out (the leg's `end`, the roster's and the conversation's) for the registry to hold to the
+/// invitation's endpoint. Anything else is `None` (unreadable).
+fn attach_target(url: &Url, request: &Value) -> Option<Target> {
+    let [action] = request.get("additionalActions")?.as_array()?.as_slice() else {
+        return None;
+    };
+    if action.get("name")?.as_str()? != "join" || !action.get("waitForResponse")?.as_bool()? {
+        return None;
+    }
+    let joins = action.get("url")?.as_str()?.to_owned();
+    let from = Mri::new(action.pointer("/input/participants/from/id")?.as_str()?);
+    let conversation = action.pointer("/input/conversationRequest")?;
+    let mut callbacks = links_of(request.pointer("/attach/links"))?;
+    callbacks.extend(links_of(conversation.get("links"))?);
+    callbacks.push(conversation.pointer("/roster/rosterUpdate")?.as_str()?.to_owned());
+    let scope = Scope::CallOperation {
+        operation: CallOperation::Attach,
+        url: url.as_str().to_owned(),
+        from: Some(from),
+        callbacks: callbacks.into(),
+        joins: Some(joins),
+    };
+    Some(Target::new(CallOperation::Attach.kind(), scope))
 }
 
 /// The links of a body's `links` object, each a string; none when there is no such object.

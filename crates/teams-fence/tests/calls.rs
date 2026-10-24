@@ -196,6 +196,8 @@ fn body(operation: CallOperation, sender: &Value, invitees: &[&str]) -> Vec<u8> 
         CallOperation::ApplyChannelParameters => json!({
             "applyChannelParameters": {"multiChannelParameter": {"mids": ["1"], "mediaParameter": "{\"maxVideoSendCapabilities\":{}}"}}
         }),
+        // the callee's side and the media negotiation: `tests/offers.rs`, `tests/negotiation.rs`
+        _ => Value::Null,
     };
     body.to_string().into_bytes()
 }
@@ -248,6 +250,15 @@ async fn verdict(fence: &Fence, target: Target) -> Result<(), DenyReason> {
         .map_err(|denied| *denied.reason())
 }
 
+/// The operations the echo call's capture showed on the caller's call.
+const ECHO_OPERATIONS: [CallOperation; 5] = [
+    CallOperation::UpdateEndpointMetadata,
+    CallOperation::Add,
+    CallOperation::Leave,
+    CallOperation::Acknowledge,
+    CallOperation::ApplyChannelParameters,
+];
+
 const UNREGISTERED: DenyReason = DenyReason::Partial(PartialReason::UnregisteredCall);
 const ENDED: DenyReason = DenyReason::Partial(PartialReason::CallEnded);
 
@@ -255,7 +266,7 @@ const ENDED: DenyReason = DenyReason::Partial(PartialReason::CallEnded);
 
 #[test]
 fn each_captured_follow_up_is_a_call_operation_on_its_exact_url() -> TestResult {
-    for operation in CallOperation::ALL {
+    for operation in ECHO_OPERATIONS {
         let url = match operation {
             CallOperation::Acknowledge => acknowledge_url("call-1"),
             CallOperation::ApplyChannelParameters => channel_url("call-1"),
@@ -277,6 +288,7 @@ fn each_captured_follow_up_is_a_call_operation_on_its_exact_url() -> TestResult 
             url,
             from,
             callbacks: callbacks.into(),
+            joins: None,
         };
         let expected = Target::new(operation.kind(), scope).with_added(invitees.iter().copied().map(Mri::new));
         assert_eq!(target, expected, "{operation}");
@@ -967,12 +979,14 @@ async fn a_follow_up_must_be_its_operation_s_kind_from_the_caller_adding_nobody(
         url: url.clone(),
         from: from.map(Mri::new),
         callbacks: Box::default(),
+        joins: None,
     };
     let handing = Scope::CallOperation {
         operation: CallOperation::UpdateEndpointMetadata,
         url: url.clone(),
         from: Some(Mri::new(LAB_A)),
         callbacks: Box::new([format!("{CALLBACKS}/08080808/call/mediaRenegotiation/")]),
+        joins: None,
     };
     for target in [
         Target::new(WriteKind::CallFollowUp, scope(Some(LAB_B))),
@@ -995,6 +1009,7 @@ async fn a_follow_up_must_be_its_operation_s_kind_from_the_caller_adding_nobody(
             url: op_url(CallOperation::Leave, "conv-1"),
             from: Some(Mri::new(LAB_A)),
             callbacks: Box::default(),
+            joins: None,
         },
     );
     assert_eq!(verdict(&lab.fence, swapped).await, Err(UNREGISTERED));
@@ -1158,21 +1173,29 @@ async fn the_acceptance_s_acknowledgement_answers_its_delivery_once() -> TestRes
         .observe_delivery(&delivery(-7, ACCEPTANCE_PATH, acceptance("call-1")));
     assert!(matches!(
         lab.fence
-            .check_delivery_response("session-2/socket-1", &response(-7, TROUTER_REQUEST, CALLBACKS)),
+            .check_delivery_response(
+                "session-2/socket-1",
+                &response(-7, TROUTER_REQUEST, CALLBACKS),
+                &FailClosed
+            )
+            .await,
         DeliveryDecision::NotPending
     ));
     assert!(matches!(
         lab.fence
-            .check_delivery_response(CONNECTION, &response(8, TROUTER_REQUEST, CALLBACKS)),
+            .check_delivery_response(CONNECTION, &response(8, TROUTER_REQUEST, CALLBACKS), &FailClosed)
+            .await,
         DeliveryDecision::NotPending
     ));
     let decision = lab
         .fence
-        .check_delivery_response(CONNECTION, &response(-7, TROUTER_REQUEST, CALLBACKS));
+        .check_delivery_response(CONNECTION, &response(-7, TROUTER_REQUEST, CALLBACKS), &FailClosed)
+        .await;
     assert!(permitted(&decision), "{decision:?}");
     assert!(matches!(
         lab.fence
-            .check_delivery_response(CONNECTION, &response(-7, TROUTER_REQUEST, CALLBACKS)),
+            .check_delivery_response(CONNECTION, &response(-7, TROUTER_REQUEST, CALLBACKS), &FailClosed)
+            .await,
         DeliveryDecision::NotPending
     ));
     let entries = fs::read_to_string(&lab.log)?;
@@ -1218,14 +1241,15 @@ async fn a_response_off_the_captured_acknowledgement_is_denied_and_used_up() -> 
     ] {
         lab.fence
             .observe_delivery(&delivery(id, ACCEPTANCE_PATH, acceptance("call-1")));
-        let decision = lab.fence.check_delivery_response(CONNECTION, &sent);
+        let decision = lab.fence.check_delivery_response(CONNECTION, &sent, &FailClosed).await;
         assert!(
             matches!(decision, DeliveryDecision::Denied(denied) if denied == reason),
             "{id}: {decision:?}"
         );
         let again = lab
             .fence
-            .check_delivery_response(CONNECTION, &response(id, TROUTER_REQUEST, CALLBACKS));
+            .check_delivery_response(CONNECTION, &response(id, TROUTER_REQUEST, CALLBACKS), &FailClosed)
+            .await;
         assert!(matches!(again, DeliveryDecision::NotPending), "{id}: used up");
     }
     Ok(())
@@ -1240,7 +1264,8 @@ async fn a_closed_connection_or_a_call_no_longer_live_answers_nothing() -> TestR
     lab.fence.close_connection(CONNECTION);
     assert!(matches!(
         lab.fence
-            .check_delivery_response(CONNECTION, &response(1, TROUTER_REQUEST, CALLBACKS)),
+            .check_delivery_response(CONNECTION, &response(1, TROUTER_REQUEST, CALLBACKS), &FailClosed)
+            .await,
         DeliveryDecision::NotPending
     ));
     // a pending call's acceptance waits for the answer, and its response finds the call not live
@@ -1251,7 +1276,8 @@ async fn a_closed_connection_or_a_call_no_longer_live_answers_nothing() -> TestR
         .observe_delivery(&delivery(2, ACCEPTANCE_PATH, acceptance("call-1")));
     let decision = other
         .fence
-        .check_delivery_response(CONNECTION, &response(2, TROUTER_REQUEST, CALLBACKS));
+        .check_delivery_response(CONNECTION, &response(2, TROUTER_REQUEST, CALLBACKS), &FailClosed)
+        .await;
     assert!(
         matches!(decision, DeliveryDecision::Denied(DeliveryDenyReason::NotLive)),
         "{decision:?}"
@@ -1266,7 +1292,8 @@ async fn a_closed_connection_or_a_call_no_longer_live_answers_nothing() -> TestR
     assert!(matches!(
         other
             .fence
-            .check_delivery_response(CONNECTION, &response(3, TROUTER_REQUEST, CALLBACKS)),
+            .check_delivery_response(CONNECTION, &response(3, TROUTER_REQUEST, CALLBACKS), &FailClosed)
+            .await,
         DeliveryDecision::NotPending
     ));
     Ok(())
@@ -1290,5 +1317,67 @@ async fn the_follow_ups_are_logged_by_kind_scope_and_operation_never_the_sender(
     assert_eq!(last["scope"]["call_operation"]["operation"], "update_endpoint_metadata");
     assert!(last["scope"]["call_operation"].get("from").is_none(), "{last}");
     assert!(!text.contains(LAB_A), "{text}");
+    Ok(())
+}
+
+// --- the caller's media negotiation (`ab-call --call video`, `abc-call --call video`) ---
+
+#[tokio::test]
+async fn the_caller_s_renegotiation_and_media_lines_go_to_the_links_its_acceptance_bound() -> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    let renegotiate = format!("{PROXY}/{CC_HOST}/cc/v1/active/call-1/1/a1/1/renegotiate?i=10-0-0-2&e=1");
+    let lines = format!("{PROXY}/{CC_HOST}/cc/v1/active/call-1/1/a1/1/updateMediaDescriptions?i=10-0-0-2&e=1");
+    let mut body: Value = serde_json::from_slice(&acceptance("call-1"))?;
+    body["callAcceptance"]["links"]["mediaRenegotiation"] = json!(renegotiate);
+    body["callAcceptance"]["links"]["updateMediaDescriptions"] = json!(lines);
+    let negotiation = json!({"mediaNegotiation": {
+        "callModalities": ["Audio", "Video"],
+        "sender": from(),
+        "links": {"mediaAnswer": format!("{CALLBACKS}/0b0b0b0b/call/mediaAnswer/")},
+        "mediaContent": {"blob": "v=0\r\n", "contentType": "application/sdp-ngc-1.0", "negotiationTag": "t;v_1"},
+    }})
+    .to_string()
+    .into_bytes();
+    let media_lines = json!({"UpdateMediaDescriptions": {"mediaDescriptions": {
+        "descriptions": [{"mid": "1", "direction": "sendrecv", "label": "main-video"}],
+        "requestId": 2,
+    }}})
+    .to_string()
+    .into_bytes();
+    let write = |url: &str, body: &[u8]| match classify("POST", url, body) {
+        Contact::Write(target) => Ok(target),
+        other => Err(format!("{url} isn't a write: {other:?}")),
+    };
+    // before the acceptance bound them, the links are nobody's
+    assert_eq!(
+        verdict(&lab.fence, write(&renegotiate, &negotiation)?).await,
+        Err(UNREGISTERED)
+    );
+    lab.fence
+        .observe_delivery(&delivery(1, ACCEPTANCE_PATH, body.to_string().into_bytes()));
+    assert_eq!(verdict(&lab.fence, write(&renegotiate, &negotiation)?).await, Ok(()));
+    assert_eq!(verdict(&lab.fence, write(&lines, &media_lines)?).await, Ok(()));
+    // the peer's renegotiation, delivered at the caller's own callback, hands out where its answer goes
+    let answer_url = format!("{PROXY}/{CC_HOST}/cc/v1/negotiations/call-1/1/t/2/answer?i=10-0-0-2");
+    let answer = json!({"mediaAnswer": {
+        "sender": from(),
+        "mediaContent": {"blob": "v=0\r\n", "contentType": "application/sdp-ngc-1.0"},
+    }})
+    .to_string()
+    .into_bytes();
+    assert_eq!(
+        verdict(&lab.fence, write(&answer_url, &answer)?).await,
+        Err(UNREGISTERED)
+    );
+    let renegotiation = json!({"mediaNegotiation": {"links": {"mediaAnswer": answer_url}}})
+        .to_string()
+        .into_bytes();
+    let at = "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/0c0c0c0c/call/mediaRenegotiation/";
+    assert_eq!(
+        lab.fence.observe_delivery(&delivery(2, at, renegotiation)),
+        Observed::Renegotiation
+    );
+    assert_eq!(verdict(&lab.fence, write(&answer_url, &answer)?).await, Ok(()));
     Ok(())
 }

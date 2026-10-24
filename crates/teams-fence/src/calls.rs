@@ -37,7 +37,21 @@
 //! ([`crate::Fence::check_delivery_response`]): the captured envelope (`id`, `status` 200, exactly the headers `MS-CV`,
 //! `trouter-client`, and `trouter-request`, `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID` each equal
 //! to the delivery's own), and a `callAcceptanceAcknowledgement` whose links are all callbacks on the start's own
-//! endpoint and call agent. Every other delivery response stays denied.
+//! endpoint and call agent. Every other delivery response stays denied but an offered invitation's own ([`offer`]).
+//!
+//! **Offered invitations** ([`offer`]): the callee's side. An incoming call the fence would let the account answer is
+//! offered: its ring-time sends pass on it (its delivery response, the `attach`, `progress`), and the user's answer or
+//! decline, until its ring ends; an answered one's follow-ups pass to the links its answers handed out; and a join of
+//! the running call it bound to its group chat registers that call as a start does.
+//!
+//! **Media negotiation.** A renegotiation or a renegotiation's answer delivered at a registered call's or an answered
+//! invitation's own `mediaRenegotiation` or `mediaAnswer` callback binds the link it names (`answer`, `acknowledge`)
+//! of that call.
+
+mod offer;
+
+pub use offer::INVITATION_EVENTS;
+pub(crate) use offer::{Invitation, read_invitation};
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
@@ -68,6 +82,27 @@ impl PendingStart {
     /// The pending call it stands for, using it up.
     fn into_call(self) -> usize {
         self.call
+    }
+}
+
+/// An `attach` or an `accept` the fence permitted on an offered invitation, waiting for its answer: what
+/// [`crate::Fence::pend_answer`] gives and [`crate::Fence::bind_answer`] takes, once. Only the fence that made it can
+/// bind it.
+#[derive(Debug)]
+pub struct PendingAnswer {
+    fence: u64,
+    offer: usize,
+    operation: CallOperation,
+}
+
+impl PendingAnswer {
+    pub(crate) fn fence(&self) -> u64 {
+        self.fence
+    }
+
+    /// The offer and the operation it stands for, using it up.
+    fn into_parts(self) -> (usize, CallOperation) {
+        (self.offer, self.operation)
     }
 }
 
@@ -122,6 +157,17 @@ pub enum Observed {
     AcceptanceUnbound,
     /// The end of a call: it has ended.
     Ended,
+    /// An incoming call's invitation the fence offers (or another delivery of one it offers): its ring-time sends may
+    /// go.
+    Offered,
+    /// An incoming call's invitation the fence doesn't offer (not addressed to the account, a caller outside the lab, a
+    /// ring that ended): nothing may be sent for it.
+    Ignored,
+    /// The end of an offered invitation's ring (or of its answered call): nothing passes on it any more.
+    RingEnded,
+    /// A media negotiation delivery of a live call or an answered invitation's (a renegotiation, an answer): the link
+    /// its answer or acknowledgement goes to is bound.
+    Renegotiation,
 }
 
 /// What [`crate::Fence::check_delivery_response`] decided.
@@ -158,9 +204,13 @@ impl DeliveryPermit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryDenyReason {
-    /// Its call isn't live (still waiting for its answer, ending or ended).
+    /// Its call isn't live (still waiting for its answer, ending or ended), or its invitation's ring ended.
     #[error("its call isn't live")]
     NotLive,
+    /// An offered group call's chat isn't lab-only by a fresh, complete member read (or can't be read), or the
+    /// invitation names someone outside the lab.
+    #[error("the invitation's parties or group chat aren't lab-only by a fresh, complete read")]
+    Parties,
     /// Not the captured envelope or acknowledgement, or a link that isn't a callback of the call's own endpoint.
     #[error("not the captured acknowledgement of the call's acceptance")]
     Shape,
@@ -225,6 +275,60 @@ struct Call {
     deliveries: Vec<PendingDelivery>,
 }
 
+impl Call {
+    /// Whether a delivery at `path` carries a link of this live call's media negotiation ([`media_link`]): at a
+    /// `mediaRenegotiation` or `mediaAnswer` callback on the start's own call agent.
+    fn negotiates_at(&self, path: &str) -> bool {
+        self.state == State::Live && self.agent.as_ref().is_some_and(|agent| is_media_callback(agent, path))
+    }
+
+    /// Binds the link [`media_link`] reads from a delivery at `path`, of the call the acceptance bound. Whether it bound.
+    fn bind_media(&mut self, path: &str, body: &[u8]) -> bool {
+        let Some(link) = self
+            .controller
+            .as_ref()
+            .and_then(|(_, call)| media_link(path, body, call))
+        else {
+            return false;
+        };
+        if !self.links.contains(&link) {
+            self.links.push(link);
+        }
+        true
+    }
+}
+
+/// Whether `path` is a media negotiation callback (`…/call/mediaRenegotiation/`, `…/call/mediaAnswer/`) on `agent`.
+fn is_media_callback(agent: &Callback, path: &str) -> bool {
+    path.starts_with(&agent.path)
+        && (path.ends_with("/call/mediaRenegotiation/") || path.ends_with("/call/mediaAnswer/"))
+}
+
+/// The link a media negotiation delivery at `path` hands out for the call `call` (the call controller's call id), on
+/// the flight proxy: a renegotiation's (at a `mediaRenegotiation` callback) `mediaNegotiation.links.mediaAnswer`,
+/// `…/cc/v1/negotiations/<call>/…/answer`; an answer's (at a `mediaAnswer` callback)
+/// `mediaAnswer.links.mediaAcknowledgement`, `…/cc/v1/mediaAnswers/<call>/…/acknowledge`. `None` for anything else.
+fn media_link(path: &str, body: &[u8], call: &str) -> Option<Link> {
+    let (operation, pointer, kind) = if path.ends_with("/call/mediaRenegotiation/") {
+        (
+            CallOperation::MediaAnswer,
+            "/mediaNegotiation/links/mediaAnswer",
+            "negotiations",
+        )
+    } else if path.ends_with("/call/mediaAnswer/") {
+        (
+            CallOperation::MediaAcknowledge,
+            "/mediaAnswer/links/mediaAcknowledgement",
+            "mediaAnswers",
+        )
+    } else {
+        return None;
+    };
+    let url = proxy_link(strict_json(body)?.pointer(pointer)?)?;
+    let (_, at, of, last) = controller_path(&url)?;
+    (at == call && of == kind && last == operation.segment()).then(|| (operation, url.as_str().to_owned()))
+}
+
 /// The registry. One per fence.
 #[derive(Default)]
 pub(crate) struct CallRegistry {
@@ -234,6 +338,7 @@ pub(crate) struct CallRegistry {
 #[derive(Default)]
 struct Inner {
     calls: Vec<Call>,
+    offers: Vec<offer::Offer>,
     /// The serials of the permits already taken by [`CallRegistry::pend`].
     taken: HashSet<u64>,
 }
@@ -246,11 +351,44 @@ impl fmt::Debug for CallRegistry {
     }
 }
 
-/// What a call operation resolved to: the call's participants, and the call to move on after a permitted `leave`.
+/// What a call operation resolved to: the call's participants (with the group chat to read fresh, for an offered group
+/// call's invitation), and what to move on once it is permitted.
 pub(crate) struct Resolved {
     pub(crate) participants: BTreeSet<Mri>,
-    call: usize,
-    leave: bool,
+    /// The group chat an offered invitation names: every decision on it reads it fresh.
+    pub(crate) chat: Option<String>,
+    subject: Subject,
+}
+
+/// What a resolved operation acts on.
+enum Subject {
+    /// A registered call; `leave` when the operation is its `leave`.
+    Call { index: usize, leave: bool },
+    /// An offered invitation, and the callbacks the operation hands out.
+    Offer {
+        index: usize,
+        operation: CallOperation,
+        callbacks: Box<[String]>,
+    },
+    /// A join of a running call an invitation bound to its chat: nothing to move on (a join with media pends as a
+    /// start does, `crate::Fence::pend_start`).
+    Join,
+}
+
+/// A delivery response the registry found waiting (see [`CallRegistry::respond`]).
+pub(crate) enum Response {
+    /// A call's acceptance acknowledgement, decided: the delivery's id, or why it is denied.
+    Acknowledgement(Result<i64, DeliveryDenyReason>),
+    /// An offered invitation's delivery response in its captured shape, its receipt taken: still to be judged by the
+    /// invitation's parties and group chat, and then only while it still rings ([`CallRegistry::still_ringing`]).
+    Receipt {
+        delivery: i64,
+        offer: usize,
+        participants: BTreeSet<Mri>,
+        chat: Option<String>,
+    },
+    /// An offered invitation's delivery response, denied.
+    ReceiptDenied(DeliveryDenyReason),
 }
 
 impl CallRegistry {
@@ -260,7 +398,7 @@ impl CallRegistry {
 
     /// A pending call from a call start permit (its `serial`, never taken before) and the start's evidence; `None`
     /// when the permit was taken already.
-    pub(crate) fn pend(&self, fence: u64, serial: u64, target: &Target, start: StartEvidence) -> Option<PendingStart> {
+    pub(crate) fn pend(&self, fence: u64, serial: u64, target: &Target, start: &StartEvidence) -> Option<PendingStart> {
         let mut inner = self.lock();
         if !inner.taken.insert(serial) {
             return None;
@@ -276,8 +414,9 @@ impl CallRegistry {
         let agent = acceptance.as_ref().and_then(agent_of);
         inner.calls.push(Call {
             state: State::Pending,
-            caller: start.caller,
-            participants: target.added().clone(),
+            caller: start.caller.clone(),
+            // a join adds nobody: its call's participants are the one who joined (the chat was read when it was judged)
+            participants: target.added().iter().chain([&start.caller]).cloned().collect(),
             acceptance,
             ends,
             agent,
@@ -309,9 +448,93 @@ impl CallRegistry {
         Ok(())
     }
 
+    /// A pending answer from an `attach` or an `accept` permit (its `serial`, never taken before) for the invitation
+    /// holding `url` for that `operation` (still ringing for an `attach`; answered for an `accept`, which its permit
+    /// answered); `None` when the permit was taken already or no such invitation holds it.
+    pub(crate) fn pend_answer(
+        &self,
+        fence: u64,
+        serial: u64,
+        operation: CallOperation,
+        url: &str,
+    ) -> Option<PendingAnswer> {
+        let mut inner = self.lock();
+        let state = match operation {
+            CallOperation::Attach => offer::OfferState::Ringing,
+            CallOperation::Accept => offer::OfferState::Answered,
+            _ => return None,
+        };
+        let offer = inner
+            .offers
+            .iter()
+            .position(|offer| offer.state == state && offer.holds(operation, url))?;
+        inner.taken.insert(serial).then_some(PendingAnswer {
+            fence,
+            offer,
+            operation,
+        })
+    }
+
+    /// Binds the links the pending answer hands out to its invitation: an `attach`'s while the invitation rings
+    /// ([`offer::Offer::bind_answer`]), an `accept`'s once it was answered ([`offer::Offer::bind_acceptance`]).
+    pub(crate) fn bind_answer(&self, pending: PendingAnswer, answer: &[u8]) -> Result<(), RegisterError> {
+        let (offer, operation) = pending.into_parts();
+        let mut inner = self.lock();
+        let offer = inner.offers.get_mut(offer).ok_or(RegisterError::NotPending)?;
+        let bound = match (operation, offer.state) {
+            (CallOperation::Attach, offer::OfferState::Ringing) => offer.bind_answer(answer),
+            (CallOperation::Accept, offer::OfferState::Answered) => offer.bind_acceptance(answer),
+            _ => return Err(RegisterError::NotPending),
+        };
+        if bound { Ok(()) } else { Err(RegisterError::Unreadable) }
+    }
+
+    /// Offers `invitation`, delivered as `delivery` (the fence decided it may be offered): a new offer, or another
+    /// delivery of one already offered, whose response then waits too. An invitation whose ring ended stays ignored.
+    pub(crate) fn offer(&self, invitation: Invitation, delivery: &Delivery) -> Observed {
+        let mut inner = self.lock();
+        if let Some(offer) = inner.offers.iter_mut().find(|offer| offer.is_redelivery(&invitation)) {
+            if offer.state == offer::OfferState::Ended {
+                return Observed::Ignored;
+            }
+            offer.expect_receipt(delivery);
+            return Observed::Offered;
+        }
+        let mut offer = offer::Offer::new(invitation);
+        offer.expect_receipt(delivery);
+        inner.offers.push(offer);
+        Observed::Offered
+    }
+
     /// What `delivery` does (see the module docs).
     pub(crate) fn observe(&self, delivery: &Delivery) -> Observed {
         let mut inner = self.lock();
+        if let Some(offer) = inner
+            .offers
+            .iter_mut()
+            .find(|offer| offer.state != offer::OfferState::Ended && offer.ends_at(&delivery.path))
+        {
+            offer.end();
+            return Observed::RingEnded;
+        }
+        if let Some(offer) = inner
+            .offers
+            .iter_mut()
+            .find(|offer| offer.negotiates_at(&delivery.path))
+        {
+            return if offer.bind_media(&delivery.path, &delivery.body) {
+                Observed::Renegotiation
+            } else {
+                Observed::Nothing
+            };
+        }
+        if let Some(call) = inner.calls.iter_mut().find(|call| call.negotiates_at(&delivery.path)) {
+            return if call.bind_media(&delivery.path, &delivery.body) {
+                Observed::Renegotiation
+            } else {
+                Observed::Nothing
+            };
+        }
         let found = inner.calls.iter_mut().find_map(|call| {
             if call.state == State::Ended {
                 return None;
@@ -338,8 +561,12 @@ impl CallRegistry {
 
     /// Drops the pending deliveries of a connection that closed: a response on a later connection never answers them.
     pub(crate) fn close_connection(&self, connection: &str) {
-        for call in &mut self.lock().calls {
+        let mut inner = self.lock();
+        for call in &mut inner.calls {
             call.deliveries.retain(|delivery| delivery.connection != connection);
+        }
+        for offer in &mut inner.offers {
+            offer.close_connection(connection);
         }
     }
 
@@ -350,11 +577,25 @@ impl CallRegistry {
             url,
             from,
             callbacks,
+            joins,
         } = target.scope()
         else {
             return Err(DenyReason::CallMismatch);
         };
         let inner = self.lock();
+        let on_a_call = inner
+            .calls
+            .iter()
+            .any(|call| call.links.iter().any(|(held, link)| held == operation && link == url));
+        if *operation == CallOperation::Join {
+            return resolve_join(&inner.offers, target);
+        }
+        if !on_a_call {
+            return resolve_on_offer(&inner.offers, target, *operation, url);
+        }
+        if joins.is_some() {
+            return Err(DenyReason::CallMismatch);
+        }
         let mut holding = inner
             .calls
             .iter()
@@ -374,7 +615,10 @@ impl CallRegistry {
             from.is_none()
         };
         let added_fits = (*operation == CallOperation::Add) != target.added().is_empty();
-        let hands_callbacks = matches!(operation, CallOperation::Acknowledge | CallOperation::Add);
+        let hands_callbacks = matches!(
+            operation,
+            CallOperation::Acknowledge | CallOperation::Add | CallOperation::Renegotiate | CallOperation::MediaAnswer
+        );
         let callbacks_fit = (hands_callbacks || callbacks.is_empty())
             && callbacks
                 .iter()
@@ -384,30 +628,89 @@ impl CallRegistry {
         }
         Ok(Resolved {
             participants: call.participants.clone(),
-            call: index,
-            leave: *operation == CallOperation::Leave,
+            chat: None,
+            subject: Subject::Call {
+                index,
+                leave: *operation == CallOperation::Leave,
+            },
         })
     }
 
-    /// After a permitted operation: a `leave` moves its call to ending.
-    pub(crate) fn permitted(&self, resolved: &Resolved) {
-        if !resolved.leave {
-            return;
-        }
-        if let Some(call) = self.lock().calls.get_mut(resolved.call)
-            && call.state == State::Live
-        {
-            call.state = State::Ending;
-            call.deliveries.clear();
+    /// Whether what `resolved` acts on may still be acted on once its group chat was read: an invitation still
+    /// ringing (a ring can end during the read). A call's operation needs no read, so it is still as resolved.
+    pub(crate) fn still_open(&self, resolved: &Resolved) -> bool {
+        match &resolved.subject {
+            Subject::Call { .. } | Subject::Join => true,
+            Subject::Offer { index, operation, .. } => self
+                .lock()
+                .offers
+                .get(*index)
+                .is_some_and(|offer| offer.open_for(*operation)),
         }
     }
 
-    /// Decides a delivery response sent on `connection` (see the module docs): `None` when no pending delivery there
-    /// has its id. A decided one takes its pending delivery.
-    pub(crate) fn respond(&self, connection: &str, response: &[u8]) -> Option<Result<i64, DeliveryDenyReason>> {
+    /// After a permitted operation: a `leave` moves its call to ending; an `attach` binds its invitation's call agent
+    /// and the callbacks its ring ends at.
+    pub(crate) fn permitted(&self, resolved: &Resolved) {
+        let mut inner = self.lock();
+        match &resolved.subject {
+            Subject::Call { index, leave: true } => {
+                if let Some(call) = inner.calls.get_mut(*index)
+                    && call.state == State::Live
+                {
+                    call.state = State::Ending;
+                    call.deliveries.clear();
+                }
+            }
+            Subject::Call { leave: false, .. } | Subject::Join => {}
+            Subject::Offer {
+                index,
+                operation,
+                callbacks,
+            } => {
+                if let Some(offer) = inner.offers.get_mut(*index) {
+                    if *operation == CallOperation::Attach {
+                        offer.attached(callbacks);
+                    }
+                    offer.decided(*operation);
+                }
+            }
+        }
+    }
+
+    /// Whether the offered invitation `offer` still rings.
+    pub(crate) fn still_ringing(&self, offer: usize) -> bool {
+        self.lock()
+            .offers
+            .get(offer)
+            .is_some_and(|offer| offer.state == offer::OfferState::Ringing)
+    }
+
+    /// Finds the delivery a response sent on `connection` answers (see the module docs) and takes it: a call's
+    /// acceptance, decided; an offered invitation's, judged by its envelope and left for the fence to judge by the
+    /// invitation's parties. `None` when no pending delivery there has its id.
+    pub(crate) fn respond(&self, connection: &str, response: &[u8]) -> Option<Response> {
         let envelope = strict_json(response)?;
         let id = envelope.get("id")?.as_i64()?;
         let mut inner = self.lock();
+        if let Some((index, offer)) = inner
+            .offers
+            .iter_mut()
+            .enumerate()
+            .find(|(_, offer)| offer.awaits(connection, id))
+        {
+            let judged = offer.take_receipt(connection, id, &envelope);
+            return Some(match (judged, offer.state) {
+                (Err(reason), _) => Response::ReceiptDenied(reason),
+                (Ok(()), offer::OfferState::Ringing) => Response::Receipt {
+                    delivery: id,
+                    offer: index,
+                    participants: offer.parties(),
+                    chat: offer.invitation.group_chat.clone(),
+                },
+                (Ok(()), _) => Response::ReceiptDenied(DeliveryDenyReason::NotLive),
+            });
+        }
         let call = inner.calls.iter_mut().find(|call| {
             call.deliveries
                 .iter()
@@ -419,10 +722,86 @@ impl CallRegistry {
             .position(|delivery| delivery.connection == connection && delivery.id == id)?;
         let delivery = call.deliveries.remove(at);
         if call.state != State::Live {
-            return Some(Err(DeliveryDenyReason::NotLive));
+            return Some(Response::Acknowledgement(Err(DeliveryDenyReason::NotLive)));
         }
-        Some(judge_response(&envelope, &delivery, call.agent.as_ref()).map(|()| id))
+        Some(Response::Acknowledgement(
+            judge_response(&envelope, &delivery, call.agent.as_ref()).map(|()| id),
+        ))
     }
+}
+
+/// [`CallRegistry::resolve`] of a join ([`CallOperation::Join`]): an invitation this fence offered binds the call's
+/// conversation (its controller, exactly the join's URL) to the group chat it names (the join's `joins`), whatever
+/// its ring did since; the sender is the account the invitation was addressed to, every callback it hands out is on
+/// that account's endpoint, and the join adds nobody. The chat is then read fresh (`crate::Fence::check`).
+fn resolve_join(offers: &[offer::Offer], target: &Target) -> Result<Resolved, DenyReason> {
+    let Scope::CallOperation {
+        url,
+        from,
+        callbacks,
+        joins,
+        ..
+    } = target.scope()
+    else {
+        return Err(DenyReason::CallMismatch);
+    };
+    let bound = offers
+        .iter()
+        .find(|offer| offer.binds(url, joins.as_deref()))
+        .ok_or(DenyReason::Partial(PartialReason::UnregisteredCall))?;
+    if target.kind() != CallOperation::Join.kind()
+        || !target.added().is_empty()
+        || !bound.fits_join(from.as_ref(), callbacks)
+    {
+        return Err(DenyReason::CallMismatch);
+    }
+    Ok(Resolved {
+        participants: from.iter().cloned().collect(),
+        chat: joins.clone(),
+        subject: Subject::Join,
+    })
+}
+
+/// [`CallRegistry::resolve`] of an operation on an offered invitation: the one offer holding exactly `url` for
+/// `operation`, open for the operation in its state ([`offer::Offer::open_for`]), the write of its kind, adding nobody,
+/// and fitting the invitation ([`offer::Offer::fits`]).
+fn resolve_on_offer(
+    offers: &[offer::Offer],
+    target: &Target,
+    operation: CallOperation,
+    url: &str,
+) -> Result<Resolved, DenyReason> {
+    let Scope::CallOperation {
+        from, callbacks, joins, ..
+    } = target.scope()
+    else {
+        return Err(DenyReason::CallMismatch);
+    };
+    let mut holding = offers
+        .iter()
+        .enumerate()
+        .filter(|(_, offer)| offer.holds(operation, url));
+    let (Some((index, offer)), None) = (holding.next(), holding.next()) else {
+        return Err(DenyReason::Partial(PartialReason::UnregisteredCall));
+    };
+    if !offer.open_for(operation) {
+        return Err(DenyReason::Partial(PartialReason::CallEnded));
+    }
+    let fits = target.kind() == operation.kind()
+        && target.added().is_empty()
+        && offer.fits(operation, from.as_ref(), joins.as_deref(), callbacks);
+    if !fits {
+        return Err(DenyReason::CallMismatch);
+    }
+    Ok(Resolved {
+        participants: offer.parties(),
+        chat: offer.invitation.group_chat.clone(),
+        subject: Subject::Offer {
+            index,
+            operation,
+            callbacks: callbacks.clone(),
+        },
+    })
 }
 
 impl Callback {
@@ -540,12 +919,18 @@ fn bind_acceptance(call: &mut Call, delivery: &Delivery) -> Observed {
 /// The call controller (host, call id) and the links of a mapped operation an acceptance's body names; `None` unless
 /// every link under `callAcceptance.links` that names a call names the same one, and at least one does.
 fn acceptance_links(body: &[u8]) -> Option<(Controller, Vec<Link>)> {
-    const NAMES: [(CallOperation, &str, &str); 2] = [
+    const NAMES: [(CallOperation, &str, &str); 4] = [
         (CallOperation::Acknowledge, "acknowledgement", "callAcceptance"),
         (
             CallOperation::ApplyChannelParameters,
             "applyChannelParameters",
             "mcProxy",
+        ),
+        (CallOperation::Renegotiate, "mediaRenegotiation", "active"),
+        (
+            CallOperation::UpdateMediaDescriptions,
+            "updateMediaDescriptions",
+            "active",
         ),
     ];
     let body = strict_json(body)?;

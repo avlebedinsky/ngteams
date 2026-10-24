@@ -10,38 +10,49 @@
 //!   start is held back by a forced deny labelled [`START_HELD`], so nobody is invited and nothing rings. The capture
 //!   keeps the starts' bodies: what a start to a lab callee names (its `participants.to`) and what it names of its
 //!   chat.
-//! - `answer`, `decline`, `cancel`, `timeout`: a's browser and each callee's. Each callee opens the Calls app (the
-//!   client starts its calling stack only then) and, before a calls, holds back everything its page sends to the
-//!   calling services and every Trouter delivery response it sends ([`hold_callee`], labelled [`RING_SENDS`]). a's
-//!   audio call start goes to the fence, which permits it only as a start to lab callees in a lab-only chat; each callee
-//!   must show the incoming call within [`RING_WAIT`]. Then:
-//!   - `answer`: each callee clicks answer ([`ACCEPT_AUDIO`]); what its page sends from then on is held back under
-//!     [`ANSWER_HELD`], so the call isn't answered, and rings on until a hangs up after [`AFTER_ACTION`];
-//!   - `decline`: each callee clicks decline ([`DECLINE`]), held back under [`DECLINE_HELD`]; a hangs up after
-//!     [`AFTER_ACTION`];
+//! - `answer`, `decline`, `cancel`, `timeout`, `video`, `dropped`, `join`: a's browser and each callee's. Each callee
+//!   opens the Calls app (the client starts its calling stack only then), waits for its calling Trouter socket and,
+//!   before a calls, holds back everything its page sends to the calling services but its ring-time sends
+//!   ([`ring_rules`], labelled [`RING_SENDS`]: the fence decides its `attach`, `progress` and the invitation's
+//!   delivery response on the offered invitation). a's audio call start goes to the fence, which permits it only as a
+//!   start to lab callees in a lab-only chat; each callee must show the incoming call within [`RING_WAIT`]. Then:
+//!   - `answer`: each callee clicks answer ([`ACCEPT_AUDIO`]); its answer and the answered call's sends go to the fence
+//!     (everything else held back under [`ANSWER_HELD`]); the call must connect with audio both ways on every page
+//!     (getStats; whether each page heard the other side's tone is only noted), and then every participant hangs up;
+//!   - `decline`: each callee clicks decline ([`DECLINE`]); its rejection goes to the fence (everything else held back
+//!     under [`DECLINE_HELD`]) and must have been let through; a hangs up after [`AFTER_ACTION`];
 //!   - `cancel`: a hangs up after [`RING_BEFORE_CANCEL`] while the callees ring: the caller's cancel as they receive it;
 //!   - `timeout`: nobody acts for [`UNANSWERED`] (an unanswered call goes to the callee's voicemail, a service of
-//!     the callee's own account, which accepts it for a); then a hangs up.
+//!     the callee's own account, which accepts it for a); then a hangs up;
+//!   - `video`: as `answer`, and once the call is up every page turns its camera on and must receive video frames;
+//!   - `dropped`: as `answer`, and once the call is up the last callee's page goes offline (new requests fail) and the
+//!     run closes its calling Trouter socket itself, which must close; once the page is back every page must still
+//!     show the call;
+//!   - `join` (`abc-call` only): every callee but the last answers; once the last one's ring ended it loads the chat
+//!     and clicks the header's join of the running call, its join decided by the fence (everything else held back
+//!     under [`JOIN_HELD`]); it must then show the call screen, and its capture the join's answer registering the call.
 //!
 //!   The run records [`AFTER_RING`] more and notes when each callee's incoming call went.
 //!
 //! Before anything loads, every page force-denies an earlier chat scenario's unsent probe ([`probe_rules`]), as
-//! `echo-call` does. A callee clicks answer or decline only on the run's own call, naming only lab accounts
+//! `echo-call` does. A callee clicks answer, decline or join only on the run's own call, naming only lab accounts
 //! ([`ring_check`]): every invitation its page received is a's call placed in this run (from a, to this callee, in the
-//! run's chat, nobody else named), all of one call, and the page shows one incoming call. Any other invitation, or a
-//! second incoming call, and the step fails without a click. The fence maps neither an answer nor a decline: both stay
-//! held back.
+//! run's chat, nobody else named), all of one call; for an answer or a decline the page shows one incoming call, for a
+//! join the page shows the run's chat ([`chat_shown`]) with one join. Anything else and the step fails without a
+//! click. Whatever a click sends, the fence decides it again on its own: an answer, a decline or a join passes only on
+//! the account's own offered invitation from a lab caller.
 //!
 //! Judged by [`policy`] per account: no deny but the reviewed expected-deny list's and the run's own forced ones; a's
-//! start allowed, and each callee's page receiving the run's own call's invitation ([`own_invitations`]).
-//! A failed run leaves each page's screenshot as `failure.png` in its capture.
+//! start allowed, each callee's page receiving the run's own call's invitation ([`own_invitations`]) and its attach let
+//! through, and what its step sends ([`judge_step_sends`]: a decline's rejection let through, a join registering its
+//! call). A failed run leaves each page's screenshot as `failure.png` in its capture.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use clap::ValueEnum;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::browser::Media;
 use crate::capture::EVENTS_FILE;
@@ -51,11 +62,11 @@ use crate::fence_http::{Denial, DenyCause, ForcedDeny};
 use crate::fence_ws::ForcedFrameDeny;
 use crate::session::{LabSession, SessionOptions, TEAMS_URL};
 
-use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, setup};
+use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, save_screenshot_as, setup};
 use super::dsl::{Driver, Selector, js_string};
 use super::echo_call::{
-    CALL_START, CALL_START_URL, CALLS_APP, CALLS_APP_WARM, CONTROL_WAIT, HANG_UP, PAGE_OPEN, PAGE_STEADY, USER_AGENT,
-    call_starts, linger, size_page, write_tone,
+    AudioSummary, CALL_START, CALL_START_URL, CALLS_APP, CALLS_APP_WARM, CONTROL_WAIT, HANG_UP, PAGE_OPEN, PAGE_STEADY,
+    ToneWait, USER_AGENT, call_starts, linger, size_page, turn_off_noise_suppression, wait_for_tone, write_burst_tone,
 };
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
@@ -65,15 +76,23 @@ use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport}
 pub enum CallStep {
     /// a calls with audio, then with video; each start held back.
     StartHeld,
-    /// a calls with audio; the callees click answer, held back.
+    /// a calls with audio; the callees click answer, and the call runs with audio both ways.
     #[default]
     Answer,
-    /// a calls with audio; the callees click decline, held back.
+    /// a calls with audio; the callees click decline.
     Decline,
     /// a calls with audio and hangs up while the callees ring.
     Cancel,
     /// a calls with audio; nobody acts until the ring ends by itself.
     Timeout,
+    /// As `answer`, and once the call is up every page turns its camera on.
+    Video,
+    /// As `answer`, and once the call is up the last callee's page drops off the network for a while (its new
+    /// requests fail and the run closes its calling Trouter socket; the call's media isn't affected) and comes back.
+    Dropped,
+    /// `abc-call` only: a calls, every callee but the last answers, and once the last one's ring ended it joins the
+    /// running call from the chat's header (what else its page sends held back under [`JOIN_HELD`]).
+    Join,
 }
 
 impl CallStep {
@@ -86,22 +105,26 @@ impl CallStep {
             Self::Decline => "decline",
             Self::Cancel => "cancel",
             Self::Timeout => "timeout",
+            Self::Video => "video",
+            Self::Dropped => "dropped",
+            Self::Join => "join",
         }
     }
 
-    /// What each callee does in this step: answer ([`ACCEPT_AUDIO`], what its page sends from then on held back under
-    /// [`ANSWER_HELD`]) or decline ([`DECLINE`], under [`DECLINE_HELD`]); `None` for a step where no callee acts.
+    /// What each callee does in this step: answer ([`ACCEPT_AUDIO`], what its page sends from then on but the
+    /// answered call's mapped sends held back under [`ANSWER_HELD`]) or decline ([`DECLINE`], under [`DECLINE_HELD`]);
+    /// `None` for a step where no callee acts.
     #[must_use]
     pub fn callee_action(self) -> Option<CalleeAction> {
         match self {
-            Self::Answer => Some(CalleeAction {
+            Self::Answer | Self::Video | Self::Dropped | Self::Join => Some(CalleeAction {
                 label: ANSWER_HELD,
-                button: ACCEPT_AUDIO_TID,
+                button: ACCEPT_AUDIO_CSS,
                 what: "answer",
             }),
             Self::Decline => Some(CalleeAction {
                 label: DECLINE_HELD,
-                button: DECLINE_TID,
+                button: DECLINE_CSS,
                 what: "decline",
             }),
             Self::StartHeld | Self::Cancel | Self::Timeout => None,
@@ -114,7 +137,7 @@ impl CallStep {
 pub struct CalleeAction {
     /// The label of what its page sends once it clicked.
     pub label: &'static str,
-    /// The `data-tid` of the button it clicks.
+    /// The CSS selector of the button it clicks.
     pub button: &'static str,
     /// The action, for the notes.
     pub what: &'static str,
@@ -143,15 +166,22 @@ const GROUP_CALL_CONFIRM_CSS: &str = r#"[data-tid="group-start-call-confirmation
 /// How long a group call's confirmation gets to show after the call button was clicked.
 pub const CONFIRM_WAIT: Duration = Duration::from_secs(6);
 
-/// The incoming call as the web client shows it, and its answer (camera off) and decline buttons.
+/// The incoming call as the web client shows it (seen 2026-10-24): a calling notification in the in-app notifications
+/// area (`notification-wrapper`, labelled by the calling notification's content), its buttons named only by their
+/// labels (the lab accounts' client is in English): accept with video, accept with audio, decline.
 pub const INCOMING_CALL: Selector<'static> = Selector::Css(INCOMING_CALL_CSS);
-const INCOMING_CALL_CSS: &str =
-    r#"[data-tid="incoming-call-screen-wrapper"], [data-tid="accept-video-off-call-button"]"#;
-pub const ACCEPT_AUDIO: Selector<'static> = Selector::Tid(ACCEPT_AUDIO_TID);
-pub const ACCEPT_AUDIO_TID: &str = "accept-video-off-call-button";
-pub const DECLINE: Selector<'static> = Selector::Tid(DECLINE_TID);
-pub const DECLINE_TID: &str = "reject-call-button";
-const INCOMING_SCREEN_CSS: &str = r#"[data-tid="incoming-call-screen-wrapper"]"#;
+const INCOMING_CALL_CSS: &str = r#"[data-testid="notification-wrapper"][aria-labelledby*="cn-calling-main-content"]"#;
+pub const ACCEPT_AUDIO: Selector<'static> = Selector::Css(ACCEPT_AUDIO_CSS);
+pub const ACCEPT_AUDIO_CSS: &str = concat!(
+    r#"[data-testid="notification-wrapper"][aria-labelledby*="cn-calling-main-content"] "#,
+    r#"button[aria-label="Accept with audio"]"#
+);
+pub const DECLINE: Selector<'static> = Selector::Css(DECLINE_CSS);
+pub const DECLINE_CSS: &str = concat!(
+    r#"[data-testid="notification-wrapper"][aria-labelledby*="cn-calling-main-content"] "#,
+    r#"button[aria-label="Decline call"]"#
+);
+const INCOMING_SCREEN_CSS: &str = INCOMING_CALL_CSS;
 /// How long a callee's capture gets to show the run's call's invitation once the page shows the incoming call.
 pub const INVITATION_WAIT: Duration = Duration::from_secs(5);
 
@@ -163,6 +193,8 @@ pub const RING_SENDS: &str = "a callee's sends while ringing, held back";
 pub const ANSWER_HELD: &str = "a callee's answer, held back";
 /// The label of what a callee's page sends once it clicked decline.
 pub const DECLINE_HELD: &str = "a callee's decline, held back";
+/// The label of what the last callee's page sends once it clicked the chat's join (`join`).
+pub const JOIN_HELD: &str = "a callee's join of the running call, held back";
 /// The label of a's own join of the running call ([`caller_join_rule`]).
 pub const CALLER_JOIN_HELD: &str = "the caller's join of the running call, held back";
 
@@ -179,6 +211,8 @@ pub const DELIVERY_RESPONSE: &str = "3:::";
 
 /// How long a callee gets to show the incoming call after a's start went out.
 pub const RING_WAIT: Duration = Duration::from_secs(45);
+/// How long a callee gets to show the incoming call before the run takes a screenshot of what it shows instead.
+pub const RING_SHOT: Duration = Duration::from_secs(12);
 /// How long the callees ring before a hangs up in `cancel`.
 pub const RING_BEFORE_CANCEL: Duration = Duration::from_secs(8);
 /// How long the run records after the callees acted, before a hangs up.
@@ -201,27 +235,104 @@ pub fn start_held_rule() -> Result<ForcedDeny, regex::Error> {
     Ok(ForcedDeny::new("POST", &format!("^{}(\\?|$)", regex::escape(CALL_START_URL)))?.labelled(START_HELD))
 }
 
+/// What a callee's page sends once it clicked answer that the fence maps on the offered invitation, as a URL pattern
+/// (`POST`): its endpoint state in the call's conversation and its acceptance.
+pub const ANSWER_SENDS: &str = concat!(
+    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/",
+    r"(cc/v1/incoming/[^?]+/accept|cc/v1/negotiations/[^?]+/answer|cc/v1/active/[^?]+/renegotiate|",
+    r"cc/v1/mediaAnswers/[^?]+/acknowledge|cc/v1/active/[^?]+/updateMediaDescriptions|",
+    r"cc/v1/mcProxy/[^?]+/applyChannelParameters|",
+    r"conv/[^/?]+/(updateEndpointState|updateParticipantProperties|leave))(\?|$)"
+);
+
+/// What the page that joins a running call sends that the fence maps, as a URL pattern (`POST`): the join itself (the
+/// roster-only one and the one that enters the call, both to the conversation), and then its call's operations as an
+/// answered call's ([`ANSWER_SENDS`]) and the acceptance's acknowledgement.
+pub const JOIN_SENDS: &str = concat!(
+    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/",
+    r"(conv/[^/?]+|conv/[^/?]+/(updateEndpointState|updateParticipantProperties|leave)|cc/v1/callAcceptance/[^?]+/acknowledge|",
+    r"cc/v1/negotiations/[^?]+/answer|cc/v1/active/[^?]+/(renegotiate|updateMediaDescriptions)|",
+    r"cc/v1/mediaAnswers/[^?]+/acknowledge|cc/v1/mcProxy/[^?]+/applyChannelParameters)(\?|$)"
+);
+
+/// What a callee's page `PUT`s once it answered that the fence maps on the answered invitation, as a URL pattern: its
+/// endpoint metadata in the call's conversation.
+pub const ANSWER_PUTS: &str =
+    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/conv/[^/?]+/updateEndpointMetadata(\?|$)";
+
+/// What a callee's page sends once it clicked decline that the fence maps on the offered invitation, as a URL pattern
+/// (`DELETE`): the rejection of its call leg.
+pub const DECLINE_SENDS: &str =
+    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/cc/v1/incoming/[^?]+/reject(\?|$)";
+
 /// The forced denies of everything a callee's page sends to the calling services ([`CALLING_HOSTS`]: every method
-/// that can write) and of every Trouter delivery response it sends, all labelled `label`.
+/// that can write) and of every Trouter delivery response it sends, all labelled `label`; once it clicked answer
+/// ([`ANSWER_HELD`]) but its answer's `POST`s ([`ANSWER_SENDS`]), once it clicked decline ([`DECLINE_HELD`]) but its
+/// decline's `DELETE` ([`DECLINE_SENDS`]), which the fence decides.
 ///
 /// # Errors
 /// Never: the patterns are fixed.
 pub fn callee_rules(label: &str) -> Result<(Vec<ForcedDeny>, ForcedFrameDeny), regex::Error> {
-    let requests = ["POST", "PUT", "PATCH", "DELETE"]
+    let requests: Vec<ForcedDeny> = ["POST", "PUT", "PATCH", "DELETE"]
         .into_iter()
-        .map(|method| Ok(ForcedDeny::new(method, CALLING_HOSTS)?.labelled(label)))
+        .map(|method| {
+            let rule = ForcedDeny::new(method, CALLING_HOSTS)?;
+            let rule = match (label, method) {
+                (ANSWER_HELD, "POST") => rule.except(ANSWER_SENDS)?,
+                (ANSWER_HELD | JOIN_HELD, "PUT") => rule.except(ANSWER_PUTS)?,
+                (DECLINE_HELD, "DELETE") => rule.except(DECLINE_SENDS)?,
+                (JOIN_HELD, "POST") => rule.except(JOIN_SENDS)?,
+                _ => rule,
+            };
+            Ok(rule.labelled(label))
+        })
         .collect::<Result<_, regex::Error>>()?;
+
     let frames = ForcedFrameDeny::new(TROUTER_SOCKETS)?
         .with_text_starting_with(DELIVERY_RESPONSE)
         .labelled(label);
     Ok((requests, frames))
 }
 
+/// An invitation's `attach` link (`…/cc/v1/forked/<call>/…/attach`), as a URL pattern.
+pub const ATTACH: &str =
+    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/cc/v1/forked/[^?]+/attach(\?|$)";
+
+/// What a callee's page sends while it rings that the fence maps on the offered invitation, as a URL pattern: its
+/// `attach` ([`ATTACH`]) and its `progress` (`…/cc/v1/incoming/<call>/…/progress`, the link the attach's answer
+/// handed out).
+pub const RING_TIME: &str = concat!(
+    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/cc/v1/",
+    r"(forked/[^?]+/attach|incoming/[^?]+/progress)(\?|$)"
+);
+
+/// The forced denies of a callee's page while it rings, labelled [`RING_SENDS`]: everything it sends to the calling
+/// services ([`callee_rules`]) but its `POST`s to [`RING_TIME`], which the fence decides; and no frame rule, so its
+/// delivery responses go to the fence too (the offered invitation's receipt passes; any other one on a Trouter socket
+/// is denied by the frame rule).
+///
+/// # Errors
+/// Never: the patterns are fixed.
+pub fn ring_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
+    ["POST", "PUT", "PATCH", "DELETE"]
+        .into_iter()
+        .map(|method| {
+            let rule = ForcedDeny::new(method, CALLING_HOSTS)?;
+            let rule = if method == "POST" {
+                rule.except(RING_TIME)?
+            } else {
+                rule
+            };
+            Ok(rule.labelled(RING_SENDS))
+        })
+        .collect()
+}
+
 /// The forced deny of a's join of a running call (a `POST` to a conversation controller itself,
 /// `…/api/v2/ep/<conv host>/conv/<id>`), labelled [`CALLER_JOIN_HELD`]: after a hangs up a group call its callees
 /// still ring in, the client joins the call's conversation again by itself (seen 2026-10-24, `abc-call --call
-/// cancel`). A join isn't mapped (CLAUDE.md: only in a chat a fresh member read finds lab-only, once a capture binds
-/// the call to it), so it stays denied; the rule only names it.
+/// cancel`). No invitation of a's binds that conversation to a chat (a join maps only on an offered invitation's
+/// binding), so it stays denied; the rule only names it.
 ///
 /// # Errors
 /// Never: the pattern is fixed.
@@ -248,7 +359,8 @@ pub fn caller_forced(step: CallStep) -> &'static [&'static str] {
 #[must_use]
 pub fn callee_forced(step: CallStep) -> &'static [&'static str] {
     match step {
-        CallStep::Answer => &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD],
+        CallStep::Answer | CallStep::Video | CallStep::Dropped => &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD],
+        CallStep::Join => &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD, JOIN_HELD],
         CallStep::Decline => &[EARLIER_RUN_PROBE, RING_SENDS, DECLINE_HELD],
         _ => &[EARLIER_RUN_PROBE, RING_SENDS],
     }
@@ -334,7 +446,7 @@ pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<Scenar
     report
         .notes
         .push(format!("{}: step {}", plan.scenario, plan.step.as_str()));
-    let tone = write_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?;
+    let tone = write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?;
     let options = SessionOptions {
         classifier: Classifier::new(),
         live_members: true,
@@ -382,7 +494,8 @@ async fn diagnose(sessions: &[(Alias, LabSession)], report: &mut ScenarioReport)
 }
 
 /// Closes every browser and finishes every capture, whatever happened to any, each account judged by its step's
-/// forced denies and its capture (a callee's by the invitations of the call a placed at `placed`, Unix ms).
+/// forced denies and its capture (a callee's by the invitations of the call a placed at `placed`, Unix ms, and by what
+/// its role in the step sends).
 async fn close_all(
     sessions: Vec<(Alias, LabSession)>,
     plan: &CallPlan,
@@ -402,7 +515,9 @@ async fn close_all(
             if alias == CALLER {
                 judge_caller(&dir, step, report);
             } else {
-                judge_callee(alias, plan.callee_mri(alias), &plan.call, placed, &dir, report);
+                let last = plan.callees.last().is_some_and(|(callee, _)| *callee == alias);
+                let callee = (alias, plan.callee_mri(alias), CalleeRole::of(step, last));
+                judge_callee(callee, &plan.call, placed, &dir, report);
             }
             report.notes.push(format!("{alias}: recorded into {}", dir.display()));
         }
@@ -449,13 +564,44 @@ impl CallPlan {
             .split_first_mut()
             .ok_or_else(|| setup("no caller's browser".to_owned()))?;
         let caller = &mut caller.1;
+        self.load_pages(caller, callees, report).await?;
+        if self.step == CallStep::StartHeld {
+            return start_held(caller, self.held_starts, report).await;
+        }
+        wait_calling_socket(CALLER, caller, report).await?;
+        for (alias, session) in callees.iter_mut() {
+            wait_calling_socket(*alias, session, report).await?;
+        }
+        caller.force_deny(caller_join_rule().map_err(|error| setup(error.to_string()))?);
+        for (alias, session) in callees.iter() {
+            hold_callee(session, RING_SENDS)?;
+            watch_controls(*alias, session).await?;
+        }
+        self.ring(caller, callees, placed, report).await
+    }
+
+    /// Loads every page (a's at the chat, the callees' at the client's start, a joiner's at the chat) and stands up
+    /// each one's calling stack.
+    async fn load_pages(
+        &self,
+        caller: &mut LabSession,
+        callees: &mut [(Alias, LabSession)],
+        report: &mut ScenarioReport,
+    ) -> Result<(), ScenarioError> {
         load_at(CALLER, caller, &self.chat_link, self.options.load_timeout).await?;
         size_page(caller).await?;
         report
             .notes
             .push(format!("{CALLER}: the web client loaded at the chat"));
-        for (alias, session) in callees.iter_mut() {
-            load_at(*alias, session, TEAMS_URL, self.options.load_timeout).await?;
+        let joiner = (self.step == CallStep::Join).then(|| callees.len().saturating_sub(1));
+        for (index, (alias, session)) in callees.iter_mut().enumerate() {
+            // the one who joins later starts at the chat, which the Chat app shows again after the Calls app
+            let at = if joiner == Some(index) {
+                self.chat_link.as_str()
+            } else {
+                TEAMS_URL
+            };
+            load_at(*alias, session, at, self.options.load_timeout).await?;
             size_page(session).await?;
             report.notes.push(format!("{alias}: the web client loaded"));
         }
@@ -464,15 +610,7 @@ impl CallPlan {
         for (alias, session) in callees.iter_mut() {
             stand_up_calling(*alias, &mut session.driver(), report).await?;
         }
-        if self.step == CallStep::StartHeld {
-            return start_held(caller, self.held_starts, report).await;
-        }
-        caller.force_deny(caller_join_rule().map_err(|error| setup(error.to_string()))?);
-        for (alias, session) in callees.iter() {
-            hold_callee(session, RING_SENDS)?;
-            watch_controls(*alias, session).await?;
-        }
-        self.ring(caller, callees, placed, report).await
+        Ok(())
     }
 
     /// a calls with audio (the moment it does into `placed`, Unix ms), each callee must ring, and the step plays out.
@@ -519,16 +657,27 @@ impl CallPlan {
         callees: &mut [(Alias, LabSession)],
         report: &mut ScenarioReport,
     ) -> Result<(), ScenarioError> {
-        for (alias, session) in callees.iter_mut() {
+        let answering = if self.step == CallStep::Join {
+            callees.len().saturating_sub(1)
+        } else {
+            callees.len()
+        };
+        for (alias, session) in callees.iter_mut().take(answering) {
             hold_callee(session, action.label)?;
             self.check_ring(*alias, session, action, placed).await?;
             session
                 .driver()
-                .click(&format!("{alias} clicks {}", action.what), Selector::Tid(action.button))
+                .click(&format!("{alias} clicks {}", action.what), Selector::Css(action.button))
                 .await?;
             report
                 .notes
                 .push(format!("{alias}: clicked {} at {}", action.what, unix_ms()));
+        }
+        if matches!(self.step, CallStep::Answer | CallStep::Video | CallStep::Dropped) {
+            converse(self.step, caller, callees, report).await?;
+        }
+        if self.step == CallStep::Join {
+            self.join_late(placed, callees, report).await?;
         }
         linger(caller, AFTER_ACTION).await;
         hang_up(caller, report).await
@@ -573,7 +722,7 @@ impl CallPlan {
                 &format!(
                     "document.querySelectorAll({}).length <= 1 && document.querySelectorAll({}).length === 1",
                     js_string(INCOMING_SCREEN_CSS),
-                    js_string(&format!(r#"[data-tid="{}"]"#, action.button))
+                    js_string(action.button)
                 ),
             )
             .await?;
@@ -584,13 +733,39 @@ impl CallPlan {
     }
 }
 
-/// Waits up to [`RING_WAIT`] for each callee to show the incoming call.
+/// Waits up to [`RING_WAIT`] for each callee to show the incoming call; one that doesn't within [`RING_SHOT`] leaves a
+/// screenshot of what it shows while it rings (`ringing.png` in its capture).
 async fn wait_incoming(callees: &mut [(Alias, LabSession)], report: &mut ScenarioReport) -> Result<(), ScenarioError> {
     for (alias, session) in callees.iter_mut() {
-        session
+        let what = format!("{alias} shows the incoming call");
+        if session
             .driver()
-            .wait_for(&format!("{alias} shows the incoming call"), INCOMING_CALL, RING_WAIT)
-            .await?;
+            .wait_for(&what, INCOMING_CALL, RING_SHOT)
+            .await
+            .is_err()
+        {
+            if let Some(note) = save_screenshot_as(*alias, session, "ringing.png").await {
+                report.notes.push(note);
+            }
+            let toast = session
+                .driver()
+                .evaluate(
+                    "the in-app notifications' controls",
+                    "JSON.stringify([...document.querySelectorAll('[data-tid=\"app-layout-area--in-app-notifications\"] \
+                     button, [data-tid=\"app-layout-area--in-app-notifications\"] [role]')].slice(0, 40)\
+                     .map(e => Object.fromEntries([...e.attributes].filter(a => a.name !== 'style' && a.name !== 'class')\
+                     .map(a => [a.name, a.value.slice(0, 80)]))))",
+                )
+                .await
+                .unwrap_or_default();
+            report
+                .notes
+                .push(format!("{alias}: the in-app notifications' controls: {toast}"));
+            session
+                .driver()
+                .wait_for(&what, INCOMING_CALL, RING_WAIT.saturating_sub(RING_SHOT))
+                .await?;
+        }
         report
             .notes
             .push(format!("{alias}: the incoming call showed at {}", unix_ms()));
@@ -598,20 +773,30 @@ async fn wait_incoming(callees: &mut [(Alias, LabSession)], report: &mut Scenari
     Ok(())
 }
 
-/// From now on, everything `session`'s page sends to the calling services and every Trouter delivery response it
-/// sends is denied under `label` ([`callee_rules`]); the probe rules stay, and the earlier label's rules go.
+/// From now on, `session`'s page is held under `label`: while it rings ([`RING_SENDS`]) everything it sends to the
+/// calling services but what the fence maps on an offered invitation ([`ring_rules`]), once it acted everything it
+/// sends to the calling services but what the fence maps for that action, and every Trouter delivery response it sends
+/// ([`callee_rules`]); the probe rules stay,
+/// and the earlier label's rules go.
 ///
 /// # Errors
 /// Never: the patterns are fixed.
 pub(crate) fn hold_callee(session: &LabSession, label: &str) -> Result<(), ScenarioError> {
-    let (requests, frames) = callee_rules(label).map_err(|error| setup(error.to_string()))?;
+    let (requests, frames) = if label == RING_SENDS {
+        (ring_rules().map_err(|error| setup(error.to_string()))?, None)
+    } else {
+        let (requests, frames) = callee_rules(label).map_err(|error| setup(error.to_string()))?;
+        (requests, Some(frames))
+    };
     let probes = probe_rules(None).map_err(|error| setup(error.to_string()))?;
     session.clear_forced();
     probes
         .into_iter()
         .chain(requests)
         .for_each(|rule| session.force_deny(rule));
-    session.force_deny_frames(frames);
+    if let Some(frames) = frames {
+        session.force_deny_frames(frames);
+    }
     Ok(())
 }
 
@@ -775,6 +960,73 @@ async fn stand_up_calling(alias: Alias, driver: &mut Driver, report: &mut Scenar
     Ok(())
 }
 
+/// How long a page's calling stack gets to connect its own Trouter socket once the Calls app started it.
+pub const CALLING_SOCKET_WAIT: Duration = Duration::from_secs(60);
+
+/// Whether a capture's `events.jsonl` text shows the calling stack's Trouter socket connected and still open: a socket
+/// whose URL names the calling stack's client (`SkypeSpaces`), that received `trouter.connected` and wasn't closed
+/// after. Calls placed or rung before it is up reach nobody (seen 2026-10-24: a callee whose calling socket wasn't up
+/// got no invitation; a caller whose socket reconnected mid-call missed its acceptance).
+#[must_use]
+pub fn calling_socket_up(text: &str) -> bool {
+    let mut calling: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    let trouter = regex::Regex::new(TROUTER_SOCKETS).ok();
+    for entry in text.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()) {
+        if entry["type"] != "cdp" {
+            continue;
+        }
+        let params = &entry["params"];
+        let id = params["requestId"].as_str().unwrap_or_default().to_owned();
+        match entry["method"].as_str() {
+            Some("Network.webSocketCreated") => {
+                let url = params["url"].as_str().unwrap_or_default();
+                if trouter.as_ref().is_some_and(|socket| socket.is_match(url)) && url.contains("SkypeSpaces") {
+                    calling.insert(id, false);
+                }
+            }
+            Some("Network.webSocketClosed") => {
+                calling.remove(&id);
+            }
+            Some("Network.webSocketFrameReceived") => {
+                let connected = params["response"]["payloadData"]
+                    .as_str()
+                    .is_some_and(|data| data.contains("\"name\":\"trouter.connected\""));
+                if let (true, Some(up)) = (connected, calling.get_mut(&id)) {
+                    *up = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    calling.values().any(|up| *up)
+}
+
+/// Waits up to [`CALLING_SOCKET_WAIT`] until `alias`'s capture shows its calling socket up ([`calling_socket_up`]).
+async fn wait_calling_socket(
+    alias: Alias,
+    session: &mut LabSession,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    let file = session
+        .capture_dir()
+        .map(|dir| dir.join(EVENTS_FILE))
+        .ok_or_else(|| setup(format!("{alias}'s run records no capture to see its calling socket in")))?;
+    let deadline = tokio::time::Instant::now() + CALLING_SOCKET_WAIT;
+    loop {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        if calling_socket_up(&text) {
+            report.notes.push(format!("{alias}: the calling socket is up"));
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(setup(format!(
+                "{alias}'s calling socket wasn't up within {CALLING_SOCKET_WAIT:?}"
+            )));
+        }
+        linger(session, Duration::from_millis(500)).await;
+    }
+}
+
 /// Back from the Calls app to the chat the page loaded at, in the same document: the Chat app shows the chat it showed
 /// last, and its header's call buttons.
 async fn back_to_chat(driver: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
@@ -783,6 +1035,543 @@ async fn back_to_chat(driver: &mut Driver, report: &mut ScenarioReport) -> Resul
         .wait_for("the chat's call buttons", CALL_BUTTONS, PAGE_OPEN)
         .await?;
     report.notes.push(format!("{CALLER}: back at the chat"));
+    Ok(())
+}
+
+/// The chat header's join of a running call (any control there whose `data-tid` names a join).
+const CHAT_JOIN: Selector<'static> = Selector::Css(CHAT_JOIN_CSS);
+const CHAT_JOIN_CSS: &str = r#"[data-tid="chat-calling-meeting-buttons"] [data-tid*="join" i]"#;
+/// How long a running call gets to show its join in the chat's header.
+pub const JOIN_WAIT: Duration = Duration::from_secs(30);
+
+/// The open chat's send button, which names the chat it sends to (`data-track-thread-id`, seen 2026-10-25: the page's
+/// URL and the chat list's selection don't name the open chat).
+const CHAT_SEND_CSS: &str = r#"[data-tid="sendMessageCommands-send"]"#;
+
+/// The page script that reads what a page shows of the chat `chat` (a chat id) and of its header's joins
+/// ([`CHAT_JOIN_CSS`]), as JSON for [`chat_shown`]: how many send buttons ([`CHAT_SEND_CSS`]) the page shows
+/// (`sends`), how many of them name `chat` exactly (`ours`), how many joins the header shows (`joins`), and where the
+/// page names the chat (each element's tag, `data-tid` and attribute name; at most 12, ids only, no page text).
+fn chat_shown_script(chat: &str, joins: &str) -> String {
+    format!(
+        "(() => {{ const chat = {chat}; \
+         const sends = [...document.querySelectorAll({sends})]; \
+         const where = [...document.querySelectorAll('*')].flatMap((e) => [...e.attributes]\
+         .filter((a) => a.value.includes(chat))\
+         .map((a) => `${{e.tagName.toLowerCase()}}[${{e.getAttribute('data-tid') ?? ''}}].${{a.name}}`)).slice(0, 12); \
+         return JSON.stringify({{ sends: sends.length, \
+         ours: sends.filter((e) => e.getAttribute('data-track-thread-id') === chat).length, \
+         joins: document.querySelectorAll({joins}).length, where }}); }})()",
+        chat = js_string(chat),
+        sends = js_string(CHAT_SEND_CSS),
+        joins = js_string(joins),
+    )
+}
+
+/// Whether a page shows the run's chat with one join to click, by what [`chat_shown_script`] read (`reading`, its
+/// JSON): the header shows exactly one join, and the page shows one open chat's send button, naming the run's chat.
+///
+/// # Errors
+/// The reason, when the page doesn't show the run's chat with one join, or the reading doesn't read.
+pub fn chat_shown(reading: &str) -> Result<(), String> {
+    let reading: Value = serde_json::from_str(reading).map_err(|error| format!("the page's reading: {error}"))?;
+    let count = |key: &str| reading[key].as_u64().unwrap_or(0);
+    if count("joins") != 1 {
+        return Err(format!("the header shows {} join(s), not one", count("joins")));
+    }
+    match (count("sends"), count("ours")) {
+        (1, 1) => Ok(()),
+        (sends, ours) => Err(format!(
+            "the page shows {sends} open chat(s), {ours} of them the run's (the chat named at {})",
+            reading["where"]
+        )),
+    }
+}
+
+impl CallPlan {
+    /// `join`: every callee but the last answered; the last one's ring ends unanswered ([`RING_END`]), its page goes
+    /// back to the chat (the Chat app shows the chat it loaded at), holds everything it sends to the calling services
+    /// under [`JOIN_HELD`], and, only on the run's own call ([`Self::check_join`]), clicks the header's join of the
+    /// running call ([`CHAT_JOIN`]); its call screen must then show within [`CONNECT_WAIT`]. Then the others hang up.
+    async fn join_late(
+        &self,
+        placed: u64,
+        callees: &mut [(Alias, LabSession)],
+        report: &mut ScenarioReport,
+    ) -> Result<(), ScenarioError> {
+        let Some(last) = callees.len().checked_sub(1) else {
+            return Ok(());
+        };
+        for (other, session) in &mut callees[..last] {
+            session
+                .driver()
+                .wait_for(&format!("{other}'s call screen"), HANG_UP, CONNECT_WAIT)
+                .await?;
+            report.notes.push(format!("{other}: in the call at {}", unix_ms()));
+        }
+        wait_ring_end(&mut callees[last..], RING_END, report).await;
+        let (alias, joiner) = &mut callees[last];
+        let alias = *alias;
+        hold_callee(joiner, JOIN_HELD)?;
+        open_join(alias, joiner, report).await?;
+        self.check_join(alias, joiner, placed, report).await?;
+        let mut driver = joiner.driver();
+        driver
+            .click(&format!("{alias} joins the running call"), CHAT_JOIN)
+            .await?;
+        report.notes.push(format!("{alias}: clicked join at {}", unix_ms()));
+        driver
+            .wait_for(&format!("{alias}'s call screen after the join"), HANG_UP, CONNECT_WAIT)
+            .await?;
+        report.notes.push(format!("{alias}: in the call at {}", unix_ms()));
+        linger(joiner, AFTER_ACTION).await;
+        if let Some(note) = save_screenshot_as(alias, joiner, "joined.png").await {
+            report.notes.push(note);
+        }
+        for (other, session) in &mut callees[..last] {
+            hang_up_page(*other, session, report).await?;
+        }
+        Ok(())
+    }
+
+    /// Whether `alias` may click the chat's join: its capture must pass [`ring_check`] (every invitation the page
+    /// received is the run's call, placed at `placed`, and there is one) and its page must show the run's group chat
+    /// with one join ([`chat_shown`]). Anything else fails the step, nothing clicked.
+    async fn check_join(
+        &self,
+        alias: Alias,
+        session: &LabSession,
+        placed: u64,
+        report: &mut ScenarioReport,
+    ) -> Result<(), ScenarioError> {
+        let refuse = |reason: String| setup(format!("{alias} doesn't click join: {reason}"));
+        let chat = self
+            .call
+            .group_chat
+            .as_deref()
+            .ok_or_else(|| refuse("the run calls no group chat".to_owned()))?;
+        let text = session
+            .capture_dir()
+            .map(|dir| std::fs::read_to_string(dir.join(EVENTS_FILE)))
+            .ok_or_else(|| refuse("the run records no capture to bind the running call to".to_owned()))?
+            .map_err(|error| refuse(format!("can't read the capture: {error}")))?;
+        match ring_check(&invitations(&text), &self.call, self.callee_mri(alias), placed) {
+            RingCheck::Ready => {}
+            RingCheck::Refused(reason) => return Err(refuse(reason)),
+            RingCheck::Pending => return Err(refuse("no invitation of the run's call reached the page".to_owned())),
+        }
+        let reading = session
+            .driver()
+            .evaluate(&format!("{alias}'s chat"), &chat_shown_script(chat, CHAT_JOIN_CSS))
+            .await?;
+        chat_shown(reading.as_str().unwrap_or_default()).map_err(refuse)?;
+        report
+            .notes
+            .push(format!("{alias}: the page shows the run's chat and one join"));
+        Ok(())
+    }
+}
+
+/// `alias`'s page opens the Chat app (the chat it showed last) and waits up to [`JOIN_WAIT`] for its header's join of
+/// the running call; the call controls it shows go into the notes.
+async fn open_join(alias: Alias, joiner: &LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+    let mut driver = joiner.driver();
+    driver.click(&format!("{alias} opens the Chat app"), CHAT_APP).await?;
+    driver
+        .wait_for(&format!("{alias}'s chat call buttons"), CALL_BUTTONS, PAGE_OPEN)
+        .await?;
+    let shown = driver
+        .wait_for(&format!("{alias}'s join of the running call"), CHAT_JOIN, JOIN_WAIT)
+        .await;
+    if let Some(note) = call_controls(alias, joiner).await {
+        report.notes.push(note);
+    }
+    shown.map_err(ScenarioError::from)
+}
+
+/// How long an answered call gets to show its call screen on every callee.
+pub const CONNECT_WAIT: Duration = Duration::from_secs(30);
+/// How long each page gets to hear the other side's tone once its noise suppression is off.
+pub const TONE_WAIT: Duration = Duration::from_secs(25);
+
+/// The answered call: every callee shows the call screen within [`CONNECT_WAIT`], every page turns its noise
+/// suppression off and its call to another microphone (the client takes the steady tone for noise, and its microphone
+/// starts silent), whether each page heard the other side's tone within [`TONE_WAIT`] is noted (the WebRTC hooks'
+/// audio tap, in each capture) and its call audio must go both ways by the WebRTC statistics ([`judge_audio`]); in
+/// `video` every page then turns its camera on and must decode video ([`VIDEO_WAIT`]), in `dropped` the last callee
+/// drops off the network for [`DROPPED_FOR`], its calling socket closed, and the call must still show on every page
+/// [`AFTER_DROP`] after it came back ([`drop_off`]); then each callee hangs up.
+async fn converse(
+    step: CallStep,
+    caller: &mut LabSession,
+    callees: &mut [(Alias, LabSession)],
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    for (alias, session) in callees.iter_mut() {
+        session
+            .driver()
+            .wait_for(&format!("{alias}'s call screen"), HANG_UP, CONNECT_WAIT)
+            .await?;
+        report.notes.push(format!("{alias}: in the call at {}", unix_ms()));
+    }
+    open_microphones(caller, callees, report).await?;
+    note_tones(caller, callees, report).await;
+    judge_audio(caller, callees, report);
+    match step {
+        CallStep::Video => show_video(caller, callees, report).await?,
+        CallStep::Dropped => drop_off(caller, callees, report).await?,
+        _ => {}
+    }
+    for (alias, session) in callees.iter_mut() {
+        if !hang_up_page(*alias, session, report).await? {
+            report
+                .notes
+                .push(format!("{alias}: the call screen was gone: nothing to hang up"));
+        }
+    }
+    Ok(())
+}
+
+/// Every page turns its noise suppression off and its call to another microphone, and notes what its microphone
+/// button says.
+async fn open_microphones(
+    caller: &mut LabSession,
+    callees: &mut [(Alias, LabSession)],
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    turn_off_noise_suppression(CALLER, &mut caller.driver(), report).await?;
+    switch_microphone(CALLER, &mut caller.driver(), report).await?;
+    for (alias, session) in callees.iter_mut() {
+        turn_off_noise_suppression(*alias, &mut session.driver(), report).await?;
+        switch_microphone(*alias, &mut session.driver(), report).await?;
+    }
+    note_microphone(CALLER, caller, report).await;
+    for (alias, session) in callees.iter_mut() {
+        note_microphone(*alias, session, report).await;
+    }
+    Ok(())
+}
+
+/// Notes whether each page heard the other side's tone within [`TONE_WAIT`].
+async fn note_tones(caller: &mut LabSession, callees: &mut [(Alias, LabSession)], report: &mut ScenarioReport) {
+    let mut heard = vec![(CALLER, wait_for_tone(caller, TONE_WAIT).await)];
+    for (alias, session) in callees.iter_mut() {
+        heard.push((*alias, wait_for_tone(session, TONE_WAIT).await));
+    }
+    for (alias, tone) in heard {
+        report.notes.push(match tone {
+            ToneWait::Back(after) => format!("{alias}: heard the other side's tone {after:?} into the wait"),
+            // the client's audio processing silences the fake microphone's tone in many runs (seen 2026-10-24):
+            // the audio is judged by the statistics, the tone only noted
+            other => format!("{alias}: didn't hear the other side's tone ({other:?})"),
+        });
+    }
+}
+
+/// Each page's call audio must go both ways by the WebRTC statistics in its capture; notes the packets and energy.
+fn judge_audio(caller: &mut LabSession, callees: &mut [(Alias, LabSession)], report: &mut ScenarioReport) {
+    let mut pages: Vec<(Alias, &mut LabSession)> = vec![(CALLER, &mut *caller)];
+    pages.extend(callees.iter_mut().map(|(alias, session)| (*alias, session)));
+    for (alias, session) in pages {
+        let text = session
+            .capture_dir()
+            .and_then(|dir| std::fs::read_to_string(dir.join(EVENTS_FILE)).ok())
+            .unwrap_or_default();
+        let audio = AudioSummary::from_events(&text);
+        report.notes.push(format!(
+            "{alias}: audio {} packet(s) sent, {} received, energy {:.4}",
+            audio.packets_sent, audio.packets_received, audio.received_energy
+        ));
+        if !audio.both_ways() {
+            report
+                .failures
+                .push(format!("{alias}'s call audio didn't go both ways (WebRTC statistics)"));
+        }
+    }
+}
+
+/// Notes what `alias`'s call screen says of its microphone (the microphone button's label: muted or not).
+async fn note_microphone(alias: Alias, session: &LabSession, report: &mut ScenarioReport) {
+    let mut driver = session.driver();
+    driver.set_call_timeout(Duration::from_secs(10));
+    let label = driver
+        .evaluate(
+            &format!("{alias}'s microphone button"),
+            "document.querySelector('#microphone-button')?.getAttribute('aria-label') ?? null",
+        )
+        .await
+        .unwrap_or_default();
+    report
+        .notes
+        .push(format!("{alias}: the microphone button says {label}"));
+}
+
+/// The call screen's camera button.
+const CAMERA: Selector<'static> = Selector::Css("#video-button");
+/// How long every page gets to decode the others' video once the cameras are on.
+pub const VIDEO_WAIT: Duration = Duration::from_secs(45);
+/// How long the run records with the cameras on.
+pub const VIDEO_FOR: Duration = Duration::from_secs(15);
+
+/// `video`: every page turns its camera on (Chrome's fake camera); then each page's capture must show video frames
+/// decoded ([`video_frames`]) within [`VIDEO_WAIT`].
+async fn show_video(
+    caller: &mut LabSession,
+    callees: &mut [(Alias, LabSession)],
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    caller.driver().click("a turns its camera on", CAMERA).await?;
+    report.notes.push(format!("{CALLER}: camera on at {}", unix_ms()));
+    for (alias, session) in callees.iter_mut() {
+        session
+            .driver()
+            .click(&format!("{alias} turns its camera on"), CAMERA)
+            .await?;
+        report.notes.push(format!("{alias}: camera on at {}", unix_ms()));
+    }
+    linger(caller, VIDEO_FOR).await;
+    let mut pages: Vec<(Alias, &mut LabSession)> = vec![(CALLER, caller)];
+    pages.extend(callees.iter_mut().map(|(alias, session)| (*alias, session)));
+    for (alias, session) in pages {
+        let file = session.capture_dir().map(|dir| dir.join(EVENTS_FILE));
+        let deadline = tokio::time::Instant::now() + VIDEO_WAIT;
+        loop {
+            let frames = file.as_ref().map_or(0, |file| {
+                video_frames(&std::fs::read_to_string(file).unwrap_or_default())
+            });
+            if frames > 0 {
+                report.notes.push(format!("{alias}: decoded {frames} video frame(s)"));
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                report
+                    .failures
+                    .push(format!("{alias} decoded no video within {VIDEO_WAIT:?}"));
+                break;
+            }
+            linger(session, Duration::from_secs(1)).await;
+        }
+    }
+    Ok(())
+}
+
+/// The most video frames a capture's WebRTC statistics report decoded (`inbound-rtp`, kind `video`,
+/// `framesDecoded`).
+#[must_use]
+pub fn video_frames(text: &str) -> u64 {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["type"] == "rtc" && entry["payload"]["event"] == "stats")
+        .flat_map(|entry| entry["payload"]["data"].as_array().cloned().unwrap_or_default())
+        .filter(|stat| stat["type"] == "inbound-rtp" && stat["kind"] == "video")
+        .filter_map(|stat| stat["framesDecoded"].as_u64())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Closes the calling stack's Trouter sockets in `session`'s page (every open `WebSocket` of the page whose URL names
+/// the calling stack's client, `SkypeSpaces`), found through `DevTools` `Runtime.queryObjects`: a close sends no data,
+/// only the socket's closing handshake. How many it closed (0 when it couldn't look).
+async fn close_calling_socket(session: &LabSession) -> u64 {
+    let (cdp, page) = (session.cdp(), session.page());
+    let group = json!("lab-dropped");
+    let Ok(prototype) = cdp
+        .call(
+            Some(page),
+            "Runtime.evaluate",
+            json!({"expression": "WebSocket.prototype", "objectGroup": group}),
+        )
+        .await
+    else {
+        return 0;
+    };
+    let Some(prototype) = prototype["result"]["objectId"].as_str() else {
+        return 0;
+    };
+    let Ok(sockets) = cdp
+        .call(
+            Some(page),
+            "Runtime.queryObjects",
+            json!({"prototypeObjectId": prototype, "objectGroup": group}),
+        )
+        .await
+    else {
+        return 0;
+    };
+    let Some(sockets) = sockets["objects"]["objectId"].as_str() else {
+        return 0;
+    };
+    let closed = cdp
+        .call(
+            Some(page),
+            "Runtime.callFunctionOn",
+            json!({
+                "objectId": sockets,
+                "functionDeclaration": "function () { const calling = this.filter(s => s.readyState === 1 && \
+                    String(s.url).includes('SkypeSpaces')); calling.forEach(s => s.close()); return calling.length; }",
+                "returnByValue": true,
+            }),
+        )
+        .await
+        .ok()
+        .and_then(|answer| answer["result"]["value"].as_u64())
+        .unwrap_or(0);
+    let _ = cdp
+        .call(Some(page), "Runtime.releaseObjectGroup", json!({"objectGroup": group}))
+        .await;
+    closed
+}
+
+/// How long the last callee's page stays off the network in `dropped`.
+pub const DROPPED_FOR: Duration = Duration::from_secs(10);
+/// How long the run waits after the page came back before it looks at the call.
+pub const AFTER_DROP: Duration = Duration::from_secs(25);
+
+/// How long the closed calling socket gets to show closed in the capture.
+pub const SOCKET_CLOSE_WAIT: Duration = Duration::from_secs(5);
+
+/// `dropped`: the last callee's page goes off the network for [`DROPPED_FOR`] (the `DevTools` network emulation: its
+/// new requests fail, but its open sockets stay, so the run closes its calling socket itself, [`drop_calling_socket`];
+/// the call's media goes on) and comes back; [`AFTER_DROP`] later every page must still show the call. No calling
+/// socket closed fails the step: the run wouldn't test the interruption.
+async fn drop_off(
+    caller: &mut LabSession,
+    callees: &mut [(Alias, LabSession)],
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    let Some((alias, session)) = callees.last_mut() else {
+        return Ok(());
+    };
+    let alias = *alias;
+    let offline =
+        |offline: bool| json!({"offline": offline, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1});
+    session
+        .cdp()
+        .call(Some(session.page()), "Network.emulateNetworkConditions", offline(true))
+        .await
+        .map_err(|error| setup(format!("{alias} can't go off the network: {error}")))?;
+    report.notes.push(format!("{alias}: off the network at {}", unix_ms()));
+    let dropped = drop_calling_socket(alias, session, report).await;
+    if dropped.is_ok() {
+        linger(session, DROPPED_FOR).await;
+    }
+    session
+        .cdp()
+        .call(Some(session.page()), "Network.emulateNetworkConditions", offline(false))
+        .await
+        .map_err(|error| setup(format!("{alias} can't come back on the network: {error}")))?;
+    report
+        .notes
+        .push(format!("{alias}: back on the network at {}", unix_ms()));
+    dropped?;
+    linger(caller, AFTER_DROP).await;
+    let mut pages: Vec<(Alias, &mut LabSession)> = vec![(CALLER, caller)];
+    pages.extend(callees.iter_mut().map(|(alias, session)| (*alias, session)));
+    for (alias, session) in pages {
+        let up = session
+            .driver()
+            .evaluate(
+                &format!("{alias}'s call screen"),
+                &format!("document.querySelector({}) !== null", js_string(HANG_UP_CSS)),
+            )
+            .await?;
+        if up == Value::Bool(true) {
+            report.notes.push(format!("{alias}: the call is still up"));
+        } else {
+            report
+                .failures
+                .push(format!("{alias}'s call didn't outlive the dropped page"));
+        }
+    }
+    Ok(())
+}
+
+/// Closes `alias`'s calling socket ([`close_calling_socket`]; the network emulation keeps open sockets) and waits up
+/// to [`SOCKET_CLOSE_WAIT`] for its capture to show no calling socket up ([`calling_socket_up`]).
+///
+/// # Errors
+/// When it closed none, or the capture still shows one up.
+async fn drop_calling_socket(
+    alias: Alias,
+    session: &mut LabSession,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    let closed = close_calling_socket(session).await;
+    report
+        .notes
+        .push(format!("{alias}: closed {closed} calling socket(s) at {}", unix_ms()));
+    if closed == 0 {
+        return Err(setup(format!(
+            "{alias}'s page closed no calling socket: the run can't test the interruption"
+        )));
+    }
+    let file = session.capture_dir().map(|dir| dir.join(EVENTS_FILE)).ok_or_else(|| {
+        setup(format!(
+            "{alias}'s run records no capture to see its calling socket close in"
+        ))
+    })?;
+    let deadline = tokio::time::Instant::now() + SOCKET_CLOSE_WAIT;
+    loop {
+        if !calling_socket_up(&std::fs::read_to_string(&file).unwrap_or_default()) {
+            report
+                .notes
+                .push(format!("{alias}: the calling socket closed by {}", unix_ms()));
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(setup(format!(
+                "{alias}'s calling socket didn't close within {SOCKET_CLOSE_WAIT:?}"
+            )));
+        }
+        linger(session, Duration::from_millis(250)).await;
+    }
+}
+
+/// The call screen's microphone choices (in its audio options) and one not chosen.
+const MICROPHONE_CHOICE: Selector<'static> =
+    Selector::Css(r#"[data-tid="microphone-settings"] [role="option"][aria-selected="false"]"#);
+const MICROPHONE_CHOSEN_CSS: &str = r#"[data-tid="microphone-settings"] [role="option"][aria-selected="true"]"#;
+
+/// Switches `alias`'s call to another (fake) microphone from the call screen's audio options: the call's microphone
+/// stays silent until it is opened again with the noise suppression off (seen 2026-10-24: the level meter flat and
+/// the sent track silent while Chrome's fake input plays the tone), and choosing another one opens it again. A setting
+/// of the account's own client, reaching nobody.
+pub(crate) async fn switch_microphone(
+    alias: Alias,
+    driver: &mut Driver,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    driver
+        .click(
+            &format!("{alias} opens the audio options"),
+            super::echo_call::AUDIO_OPTIONS,
+        )
+        .await?;
+    driver
+        .wait_for(&format!("{alias}'s other microphone"), MICROPHONE_CHOICE, CONTROL_WAIT)
+        .await?;
+    let before = format!("document.querySelector({})?.id", js_string(MICROPHONE_CHOSEN_CSS));
+    let chosen = driver.evaluate(&format!("{alias}'s microphone"), &before).await?;
+    driver
+        .click(&format!("{alias} chooses another microphone"), MICROPHONE_CHOICE)
+        .await?;
+    driver
+        .wait_until_true(
+            &format!("{alias}'s microphone"),
+            &format!("{before} !== {chosen}"),
+            "another microphone chosen",
+            CONTROL_WAIT,
+        )
+        .await?;
+    driver
+        .click(
+            &format!("{alias} closes the audio options"),
+            super::echo_call::AUDIO_OPTIONS,
+        )
+        .await?;
+    report
+        .notes
+        .push(format!("{alias}: switched the call to another microphone"));
     Ok(())
 }
 
@@ -798,18 +1587,23 @@ async fn hang_up(caller: &mut LabSession, report: &mut ScenarioReport) -> Result
 
 /// Clicks a's hang-up button if the call screen shows it; whether it did.
 async fn hang_up_if_up(caller: &mut LabSession, report: &mut ScenarioReport) -> Result<bool, ScenarioError> {
-    let mut driver = caller.driver();
+    hang_up_page(CALLER, caller, report).await
+}
+
+/// Clicks `alias`'s hang-up button if its call screen shows it; whether it did.
+async fn hang_up_page(alias: Alias, session: &LabSession, report: &mut ScenarioReport) -> Result<bool, ScenarioError> {
+    let mut driver = session.driver();
     let up = driver
         .evaluate(
-            "a's call screen",
+            &format!("{alias}'s call screen"),
             &format!("document.querySelector({}) !== null", js_string(HANG_UP_CSS)),
         )
         .await?;
     if up != Value::Bool(true) {
         return Ok(false);
     }
-    driver.click("a hangs up", HANG_UP).await?;
-    report.notes.push(format!("{CALLER}: hung up at {}", unix_ms()));
+    driver.click(&format!("{alias} hangs up"), HANG_UP).await?;
+    report.notes.push(format!("{alias}: hung up at {}", unix_ms()));
     Ok(true)
 }
 
@@ -838,10 +1632,10 @@ async fn wait_ring_end(callees: &mut [(Alias, LabSession)], limit: Duration, rep
     }
 }
 
-/// The page script that records, from now on, the first moment each element `data-tid` naming a call, a ring, an
-/// answer, a decline or a toast shows in the page (`window.__labRingControls`): what a callee's page showed while it
-/// rang, however briefly. Ids of the client's own, no text of the page.
-const WATCH_CONTROLS: &str = "(() => { const seen = window.__labRingControls = window.__labRingControls || {};      const note = () => document.querySelectorAll('[data-tid]').forEach(e => { const t = e.getAttribute('data-tid');        if (/call|ring|accept|reject|incoming|toast|notif/i.test(t) && !(t in seen)) seen[t] = Date.now(); });      note(); new MutationObserver(note).observe(document.documentElement, {subtree: true, childList: true, attributes: true,        attributeFilter: ['data-tid']}); return true; })()";
+/// The page script that records, from now on, the first moment each element `data-tid` the page didn't show when it
+/// started shows in the page (`window.__labRingControls`, at most 300): what a callee's page showed while it rang,
+/// however briefly. Ids of the client's own, no text of the page.
+const WATCH_CONTROLS: &str = "(() => { const seen = window.__labRingControls = window.__labRingControls || {};      let count = 0; const note = (at) => document.querySelectorAll('[data-tid]').forEach(e => {        const t = e.getAttribute('data-tid'); if (!(t in seen) && count < 300) { seen[t] = at; if (at) count++; } });      note(0); new MutationObserver(() => note(Date.now())).observe(document.documentElement, {subtree: true,        childList: true, attributes: true, attributeFilter: ['data-tid']}); return true; })()";
 
 /// Starts recording what `alias`'s page shows while it rings ([`WATCH_CONTROLS`]).
 async fn watch_controls(alias: Alias, session: &LabSession) -> Result<(), ScenarioError> {
@@ -860,7 +1654,7 @@ async fn note_ring_controls(callees: &[(Alias, LabSession)], report: &mut Scenar
         if let Ok(seen) = driver
             .evaluate(
                 &format!("{alias}'s ring controls"),
-                "JSON.stringify(window.__labRingControls || {})",
+                "JSON.stringify(Object.fromEntries(Object.entries(window.__labRingControls || {}).filter(([, at]) => at)))",
             )
             .await
         {
@@ -922,11 +1716,10 @@ fn judge_caller(capture: &Path, step: CallStep, report: &mut ScenarioReport) {
     }
 }
 
-/// A callee's capture: the run's call's invitation must have reached its page ([`own_invitations`]); any other is only
-/// noted.
+/// A callee's capture: the run's call's invitation must have reached its page ([`own_invitations`]; any other is only
+/// noted), its attach let through, and what its `role` sends ([`judge_step_sends`]).
 fn judge_callee(
-    alias: Alias,
-    callee: &str,
+    (alias, callee, role): (Alias, &str, CalleeRole),
     call: &RunCall,
     placed: Option<u64>,
     capture: &Path,
@@ -945,8 +1738,132 @@ fn judge_callee(
                     .failures
                     .push(format!("{alias}'s page received no invitation of the run's call"));
             }
+            let sends = ring_sends(&text);
+            report.notes.push(format!(
+                "{alias}: the fence let {} attach(es) and {} invitation receipt(s) through",
+                sends.attaches, sends.receipts
+            ));
+            if own > 0 && sends.attaches == 0 {
+                report
+                    .failures
+                    .push(format!("{alias}'s fence let no attach of the run's call through"));
+            }
+            match judge_step_sends(role, &text) {
+                Ok(Some(note)) => report.notes.push(format!("{alias}: {note}")),
+                Ok(None) => {}
+                Err(failure) => report.failures.push(format!("{alias}: {failure}")),
+            }
         }
         Err(error) => report.failures.push(format!("can't read {alias}'s capture: {error}")),
+    }
+}
+
+/// What a callee does in a run, for what its capture must show it sent ([`judge_step_sends`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalleeRole {
+    /// It declines (`decline`).
+    Declines,
+    /// It joins the running call late (`join`'s last callee).
+    Joins,
+    /// Anything else: its sends are judged elsewhere (an answered call's by the call itself) or it sends nothing.
+    Other,
+}
+
+impl CalleeRole {
+    /// The role of a callee in `step`, `last` when it is the run's last callee.
+    #[must_use]
+    pub fn of(step: CallStep, last: bool) -> Self {
+        match step {
+            CallStep::Decline => Self::Declines,
+            CallStep::Join if last => Self::Joins,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// What a callee's capture (`text`, its `events.jsonl`) must show it sent in its `role`: one that declines, its
+/// rejection let through by the fence ([`DECLINE_SENDS`], [`allowed_requests`]); one that joins, its join with media
+/// registering its call ([`registered_joins`]). A note of what it shows, or the failure.
+///
+/// # Errors
+/// The failure, when the capture doesn't show it.
+pub fn judge_step_sends(role: CalleeRole, text: &str) -> Result<Option<String>, String> {
+    match role {
+        CalleeRole::Declines => match allowed_requests(text, "DELETE", DECLINE_SENDS) {
+            0 => Err("the fence let no rejection of the call through".to_owned()),
+            rejects => Ok(Some(format!("the fence let {rejects} rejection(s) through"))),
+        },
+        CalleeRole::Joins => match registered_joins(text) {
+            0 => Err("no join of the running call registered its call".to_owned()),
+            joins => Ok(Some(format!("{joins} join(s) of the running call registered its call"))),
+        },
+        CalleeRole::Other => Ok(None),
+    }
+}
+
+/// The requests a capture's `events.jsonl` text shows its fence letting through: each `method` request whose URL
+/// matches `pattern`, allowed, once per `Network` request (the browser decides a request on two layers).
+#[must_use]
+pub fn allowed_requests(text: &str, method: &str, pattern: &str) -> usize {
+    let Ok(pattern) = regex::Regex::new(pattern) else {
+        return 0;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["type"] == "verdict" && entry["verdict"] == "allow" && entry["channel"] == "http")
+        .filter(|entry| entry["method"] == method && pattern.is_match(entry["url"].as_str().unwrap_or_default()))
+        .map(|entry| entry["network_id"].to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// The joins with media a capture's `events.jsonl` text shows registering their call: each answer to a `POST` to a
+/// conversation ([`CONVERSATION_JOIN`]) that the fence permitted and waited for, read with a success status and
+/// registering the call (a `response_continued` entry with `"bound": true`), once per `Network` request.
+#[must_use]
+pub fn registered_joins(text: &str) -> usize {
+    let Ok(join) = regex::Regex::new(CONVERSATION_JOIN) else {
+        return 0;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["type"] == "response_continued" && entry["method"] == "POST")
+        .filter(|entry| entry["bound"] == true && entry["status"].as_u64().is_some_and(|s| (200..300).contains(&s)))
+        .filter(|entry| join.is_match(entry["url"].as_str().unwrap_or_default()))
+        .map(|entry| entry["network_id"].to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// What a callee's fence let through while it rang ([`ring_sends`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RingSends {
+    /// `attach` requests allowed (each `Network` request once).
+    pub attaches: usize,
+    /// Delivery responses (`3:::`) allowed on a Trouter socket.
+    pub receipts: usize,
+}
+
+/// The ring-time sends a capture's `events.jsonl` text shows its fence letting through: each `POST` to an `attach`
+/// link ([`ATTACH`]) allowed, and each delivery response allowed on a Trouter socket.
+#[must_use]
+pub fn ring_sends(text: &str) -> RingSends {
+    let trouter = regex::Regex::new(TROUTER_SOCKETS).ok();
+    let receipts = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["type"] == "verdict" && entry["verdict"] == "allow" && entry["channel"] == "web_socket")
+        .filter(|entry| {
+            let response = entry["frame"]["data"]
+                .as_str()
+                .is_some_and(|data| data.starts_with(DELIVERY_RESPONSE));
+            let url = entry["url"].as_str().unwrap_or_default();
+            response && trouter.as_ref().is_some_and(|socket| socket.is_match(url))
+        })
+        .count();
+    RingSends {
+        attaches: allowed_requests(text, "POST", ATTACH),
+        receipts,
     }
 }
 
@@ -1089,7 +2006,14 @@ pub const INVITATION_EVENTS: [u64; 2] = [107, 109];
 
 /// The held-back counts by label, per account, into the notes; `start-held` must have held back both starts.
 fn judge_held(step: CallStep, report: &mut ScenarioReport) {
-    let labels = [START_HELD, RING_SENDS, ANSWER_HELD, DECLINE_HELD, CALLER_JOIN_HELD];
+    let labels = [
+        START_HELD,
+        RING_SENDS,
+        ANSWER_HELD,
+        DECLINE_HELD,
+        CALLER_JOIN_HELD,
+        JOIN_HELD,
+    ];
     let mut notes = Vec::new();
     for run in &report.accounts {
         for label in labels {

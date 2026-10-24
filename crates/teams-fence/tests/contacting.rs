@@ -12,6 +12,9 @@ use url::Url;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// A named change to a captured body.
+type BodyEdit = Box<dyn Fn(&mut Value)>;
+
 const GUID_A: &str = "00000000-0000-4000-8000-00000000000a";
 const GUID_B: &str = "00000000-0000-4000-8000-00000000000b";
 const GUID_X: &str = "00000000-0000-4000-8000-0000000000ff";
@@ -695,16 +698,84 @@ fn the_caller_s_cancel_while_its_callee_rings_is_its_leave() -> TestResult {
 }
 
 #[test]
-fn the_callee_s_attach_while_it_rings_is_unreadable_until_a_row_maps_it() -> TestResult {
+fn the_callee_s_attach_while_it_rings_is_a_ring_time_send_on_its_exact_url() -> TestResult {
     let fixture: Value = serde_json::from_str(&fill(CHAT_FOLLOW_UPS))?;
     let case = &fixture["cases"][1];
-    let body = case["body"].to_string();
-    let request = Request::new(
+    let (method, url) = (
         case["method"].as_str().ok_or("method")?,
         case["url"].as_str().ok_or("url")?,
-    )
-    .with_body(Some(body.as_bytes()));
-    assert_eq!(contacting(&request, &policy()), Contact::Unreadable);
+    );
+    let verdict = |method: &str, body: &Value| {
+        let body = body.to_string();
+        contacting(&Request::new(method, url).with_body(Some(body.as_bytes())), &policy())
+    };
+    let Contact::Write(target) = verdict(method, &case["body"]) else {
+        return Err("the attach isn't a write".into());
+    };
+    assert_eq!(target.kind(), WriteKind::CallRinging);
+    assert!(target.added().is_empty());
+    let Scope::CallOperation {
+        operation,
+        url: at,
+        from,
+        callbacks,
+        joins,
+    } = target.scope()
+    else {
+        return Err("the attach isn't a call operation".into());
+    };
+    assert_eq!(*operation, CallOperation::Attach);
+    assert_eq!(at.as_str(), Url::parse(url)?.as_str());
+    assert_eq!(from.as_ref(), Some(&lab_mri(GUID_B)));
+    let action = &case["body"]["additionalActions"][0];
+    assert_eq!(joins.as_deref(), action["url"].as_str());
+    // the leg's end, the roster's and the conversation's six callbacks
+    assert_eq!(callbacks.len(), 8);
+    assert!(callbacks.iter().any(|link| link.ends_with("/call/end/")));
+    // only the captured method and shape: one `join` action that waits, no media, no other action, no other key
+    assert_eq!(verdict("PUT", &case["body"]), Contact::Unreadable);
+    let edits: [(&str, BodyEdit); 7] = [
+        (
+            "a second action",
+            Box::new(|body| {
+                let action = body["additionalActions"][0].clone();
+                if let Some(actions) = body["additionalActions"].as_array_mut() {
+                    actions.push(action);
+                }
+            }),
+        ),
+        (
+            "no action",
+            Box::new(|body| body["additionalActions"] = Value::Array(Vec::new())),
+        ),
+        (
+            "another action",
+            Box::new(|body| body["additionalActions"][0]["name"] = Value::from("accept")),
+        ),
+        (
+            "not waiting",
+            Box::new(|body| body["additionalActions"][0]["waitForResponse"] = Value::from(false)),
+        ),
+        (
+            "media in the join",
+            Box::new(|body| {
+                body["additionalActions"][0]["input"]["callInvitation"] = serde_json::json!({"mediaContent": {}});
+            }),
+        ),
+        (
+            "an acceptance",
+            Box::new(|body| body["callAcceptance"] = serde_json::json!({})),
+        ),
+        (
+            "no sender",
+            Box::new(|body| body["additionalActions"][0]["input"]["participants"] = serde_json::json!({})),
+        ),
+    ];
+    for (name, edit) in edits {
+        let mut body = case["body"].clone();
+        edit(&mut body);
+        assert_eq!(verdict(method, &body), Contact::Unreadable, "{name}");
+    }
     Ok(())
 }
 
@@ -755,10 +826,17 @@ fn the_echo_call_s_follow_ups_are_operations_on_their_exact_urls() -> TestResult
         operations.push(*operation);
     }
     operations.sort();
+    let mut echo = vec![
+        CallOperation::UpdateEndpointMetadata,
+        CallOperation::Add,
+        CallOperation::Leave,
+        CallOperation::Acknowledge,
+        CallOperation::ApplyChannelParameters,
+    ];
+    echo.sort();
     assert_eq!(
-        operations,
-        CallOperation::ALL.to_vec(),
-        "every captured operation has its row"
+        operations, echo,
+        "every operation the echo call's capture showed has its row"
     );
     Ok(())
 }

@@ -185,6 +185,32 @@ pub fn tone_wav(frequency: u32, seconds: u32, rate: u32) -> Vec<u8> {
     wav
 }
 
+/// [`tone_wav`] in bursts: `on_ms` of the tone (faded in and out over 10 ms), then `off_ms` of silence, over and over.
+/// A call's audio processing takes a steady tone for noise within a few seconds and fades it out (seen 2026-10-24 in
+/// `ab-call`: the sent level fell from 0.23 to 0.05 in two seconds); bursts with silence between them keep it a signal.
+#[must_use]
+pub fn burst_tone_wav(frequency: u32, seconds: u32, rate: u32, on_ms: u32, off_ms: u32) -> Vec<u8> {
+    let mut wav = tone_wav(frequency, seconds, rate);
+    let per_ms = rate / 1000;
+    let (on, period, fade) = (on_ms * per_ms, (on_ms + off_ms) * per_ms, 10 * per_ms);
+    for (index, frame) in wav[44..].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let at = u32::try_from(index).unwrap_or(u32::MAX) % period.max(1);
+        let gain = if at >= on {
+            0.0
+        } else {
+            f64::from(at.min(on - at).min(fade)) / f64::from(fade.max(1))
+        };
+        let sample = f64::from(i16::from_le_bytes(*frame)) * gain;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the gain is at most 1, so the value stays an i16"
+        )]
+        let scaled = sample.round() as i16;
+        *frame = scaled.to_le_bytes();
+    }
+    wav
+}
+
 /// The echo service's MRI in `config`, if `lab.toml` records one.
 #[must_use]
 pub fn echo_mri(config: &LabConfig) -> Option<&str> {
@@ -201,17 +227,41 @@ pub fn echo_mri(config: &LabConfig) -> Option<&str> {
 /// # Errors
 /// When the file can't be written.
 pub fn write_tone(paths: &LabPaths) -> std::io::Result<PathBuf> {
+    write_media(
+        paths,
+        &format!("tone-{TONE_HZ}.wav"),
+        &tone_wav(TONE_HZ, TONE_SECONDS, TONE_RATE),
+    )
+}
+
+/// Writes the tone in bursts ([`burst_tone_wav`]: [`BURST_ON_MS`] on, [`BURST_OFF_MS`] off) as
+/// `media/tone-<Hz>-bursts.wav`, as [`write_tone`] does: what a lab-to-lab call's fake microphones play.
+///
+/// # Errors
+/// When the file can't be written.
+pub fn write_burst_tone(paths: &LabPaths) -> std::io::Result<PathBuf> {
+    let wav = burst_tone_wav(TONE_HZ, TONE_SECONDS, TONE_RATE, BURST_ON_MS, BURST_OFF_MS);
+    write_media(paths, &format!("tone-{TONE_HZ}-bursts.wav"), &wav)
+}
+
+/// A burst of the tone, and the silence after it: a burst holds the [`TONE_READINGS`] readings in a row the audio tap
+/// needs.
+pub const BURST_ON_MS: u32 = 1_600;
+pub const BURST_OFF_MS: u32 = 900;
+
+/// Writes `bytes` as `media/<name>` (mode `0600`, its dir `0700`) under the lab's data dir, replacing it whole.
+fn write_media(paths: &LabPaths, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     let dir = paths.data_dir().join("media");
     fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
-    let path = dir.join(format!("tone-{TONE_HZ}.wav"));
-    let temporary = dir.join(format!("tone-{TONE_HZ}.wav.{}.new", std::process::id()));
+    let path = dir.join(name);
+    let temporary = dir.join(format!("{name}.{}.new", std::process::id()));
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(&temporary)?;
-    file.write_all(&tone_wav(TONE_HZ, TONE_SECONDS, TONE_RATE))?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(&temporary, &path)?;
     Ok(path)
@@ -477,7 +527,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         ));
         Classifier::new()
     };
-    let tone = write_tone(paths).map_err(|error| ScenarioError::Setup(format!("can't write the tone: {error}")))?;
+    let tone =
+        write_burst_tone(paths).map_err(|error| ScenarioError::Setup(format!("can't write the tone: {error}")))?;
     let session_options = SessionOptions {
         classifier,
         live_members: true,
@@ -519,7 +570,8 @@ async fn call(session: &mut LabSession, options: RunOptions, report: &mut Scenar
     driver.click("a makes a test call", TEST_CALL_BUTTON).await?;
     driver.wait_for("the call screen", HANG_UP, CALL_START).await?;
     report.notes.push(format!("{ACCOUNT}: the call screen is up"));
-    turn_off_noise_suppression(&mut driver, report).await?;
+    turn_off_noise_suppression(ACCOUNT, &mut driver, report).await?;
+    super::ab_call::switch_microphone(ACCOUNT, &mut driver, report).await?;
     let waited = wait_for_tone(session, ECHO_WAIT).await;
     report.notes.push(match waited {
         ToneWait::Back(after) => format!("{ACCOUNT}: the tone came back {after:?} after the call screen showed"),
@@ -567,8 +619,14 @@ pub(crate) async fn size_page(session: &LabSession) -> Result<(), ScenarioError>
 /// [`NOISE_SUPPRESSION`]), so the tone reaches the echo service: the client's own suppression takes a steady tone for
 /// noise and sends silence (seen 2026-10-24: the sent track's level stayed at about -84 dBFS with it on, in the M0
 /// runs too). A setting of the account's own client, reaching nobody.
-async fn turn_off_noise_suppression(driver: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
-    driver.click("a opens the audio options", AUDIO_OPTIONS).await?;
+pub(crate) async fn turn_off_noise_suppression(
+    alias: Alias,
+    driver: &mut Driver,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    driver
+        .click(&format!("{alias} opens the audio options"), AUDIO_OPTIONS)
+        .await?;
     driver
         .wait_for("the noise suppression switch", NOISE_SUPPRESSION, CONTROL_WAIT)
         .await?;
@@ -576,9 +634,24 @@ async fn turn_off_noise_suppression(driver: &mut Driver, report: &mut ScenarioRe
         "document.querySelector({}).getAttribute('aria-checked')",
         js_string(NOISE_SUPPRESSION_CSS)
     );
-    if driver.evaluate("the noise suppression switch", &checked).await? == Value::String("true".to_owned()) {
-        driver.click("a turns noise suppression off", NOISE_SUPPRESSION).await?;
+    if driver.evaluate("the noise suppression switch", &checked).await? != Value::String("true".to_owned()) {
+        // off already (the account's client remembers it): the call's microphone still starts silent until the setting
+        // changes (seen 2026-10-24), so it is turned on and off again
+        driver
+            .click(&format!("{alias} turns noise suppression on"), NOISE_SUPPRESSION)
+            .await?;
+        driver
+            .wait_until_true(
+                "the noise suppression switch",
+                &format!("{checked} === 'true'"),
+                "noise suppression on",
+                CONTROL_WAIT,
+            )
+            .await?;
     }
+    driver
+        .click(&format!("{alias} turns noise suppression off"), NOISE_SUPPRESSION)
+        .await?;
     driver
         .wait_until_true(
             "the noise suppression switch",
@@ -587,10 +660,12 @@ async fn turn_off_noise_suppression(driver: &mut Driver, report: &mut ScenarioRe
             CONTROL_WAIT,
         )
         .await?;
-    driver.click("a closes the audio options", AUDIO_OPTIONS).await?;
+    driver
+        .click(&format!("{alias} closes the audio options"), AUDIO_OPTIONS)
+        .await?;
     report
         .notes
-        .push(format!("{ACCOUNT}: the call's noise suppression is off"));
+        .push(format!("{alias}: the call's noise suppression is off"));
     Ok(())
 }
 
@@ -743,7 +818,7 @@ pub enum ToneWait {
 
 /// [`wait_for_tone_in`] on the session's capture, keeping its events flowing ([`linger`]). [`ToneWait::TimedOut`] at
 /// once when the run doesn't record.
-async fn wait_for_tone(session: &mut LabSession, limit: Duration) -> ToneWait {
+pub(crate) async fn wait_for_tone(session: &mut LabSession, limit: Duration) -> ToneWait {
     let Some(dir) = session.capture_dir() else {
         return ToneWait::TimedOut;
     };

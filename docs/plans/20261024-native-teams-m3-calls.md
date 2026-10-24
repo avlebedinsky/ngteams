@@ -533,35 +533,71 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 - Modify: `crates/proto-lab/src/scenario/{ab_call.rs,abc_call.rs,expected.rs}`, `crates/teams-fence/src/*`,
   `crates/teams-fence/tests/*`, `docs/protocol/{calling.md,fence-targets.md,endpoints.md}`, CLAUDE.md
 
-- [ ] ➕ (moved from Task 5) capture the answer and the decline held back: first map and let through the callee's
+- [x] ➕ (moved from Task 5) capture the answer and the decline held back: first map and let through the callee's
       ring-time sends on an offered invitation (the invitation's delivery response and its `attach`, Task 5's capture;
       without them the page shows no incoming call), after settling whether `attach`'s `additionalActions` `join` joins
       the call or only attaches the callee's signaling (CLAUDE.md's ring-time exception excludes anything that joins);
       then `ab-call`/`abc-call --call answer|decline` click with the answer or decline held back, captured and written
-      into `docs/protocol/calling.md`, before the items below map them
-- [ ] tests first: answering judged by the invitation's caller and participants, permitted only when all are lab
+      → done: `attach`'s `join` is a roster-only subscription of the call's conversation, no media, no answer, so
+      it joins no call (codex agreed, transcript `discussions/task-6-attach-join/`); the invitation's receipt,
+      `attach` and `progress` mapped on an offered invitation (`calls/offer.rs`), the answer and decline captured
+      held back (`ab-call` 20261024T190935Z answer, 20261024T191148Z decline; `abc-call` 20261024T191341Z,
+      20261024T191616Z), written into calling.md ("What the callee sends while it rings", "The answer",
+      "The decline")
+- [x] tests first: answering judged by the invitation's caller and participants, permitted only when all are lab
       accounts or the echo service; the typed delivery responses for that call; a registered answered call's
       follow-ups; how the invitation and the acceptance carry media (the caller's offer, our answer, or as captured)
       written into `docs/protocol/calling.md` for Task 7
-- [ ] `ab-call` and `abc-call` let the answers through: b (and c) answer by the scenario's click, the call connects,
+      → done: `crates/teams-fence/tests/offers.rs` (offered only for the fence's own account from a lab caller, a
+      group call's chat read fresh as an additional gate; receipt and acceptance acknowledgement typed and judged
+      by `check_delivery_response`; answered call's follow-ups bound by the attach and accept answers); media for
+      Task 7 in calling.md ("The answer": the invitation carries the caller's offer, our `accept` carries the
+      answer, the accept's answer the call leg's links)
+- [x] `ab-call` and `abc-call` let the answers through: b (and c) answer by the scenario's click, the call connects,
       audio flows both ways (`getStats()`), every participant leaves; exit 0
-- [ ] both reruns with video on: the video follow-ups (`controlVideoStreaming`, `mediaRenegotiation` each way)
+      → done: `ab-call --call answer` 20261024T202159Z, `abc-call --call answer` 20261024T215314Z, exit 0.
+      ⚠️ the client's audio processing silences the fake microphone's steady tone in many runs: the scenarios turn
+      noise suppression off, switch the microphone and play a burst tone, judge audio by `getStats()` both ways
+      and only note the tone (echo-call adjusted the same way, rerun 20261024T224818Z exit 0)
+- [x] both reruns with video on: the video follow-ups (`controlVideoStreaming`, `mediaRenegotiation` each way)
       captured, then mapped on registered calls, tests first (cases in `contacting.rs`); in `abc-call`, how a
       participant chooses whose video it receives (the `m=x-data` line, a data channel's messages, or signaling alone)
       captured and written into `docs/protocol/calling.md` (Technical Details, "Group video sources")
-- [ ] capture the join (no approval needed: nothing is sent): `abc-call` with a and b connected; how c's page learns
+      → done: `ab-call --call video` 20261024T213710Z (1:1: `renegotiate`, negotiation `answer`, `mediaAnswers`
+      `acknowledge`), `abc-call --call video` 20261024T220851Z (group: `updateMediaDescriptions` + `mcProxy`
+      `applyChannelParameters`), frames decoded on every page; mapped on registered calls and answered
+      invitations, cases in `contacting.rs`/`offers.rs`/`calls.rs`. ⚠️ no page sent `controlVideoStreaming`
+      (only named in the acceptance's links), so it stays unmapped; whose video a page receives is named in no
+      signaling: it travels over the group call's data channel, which the hooks don't read (calling.md "Video")
+- [x] capture the join (no approval needed: nothing is sent): `abc-call` with a and b connected; how c's page learns
       the group chat has a running call (a thread property, a delivery, a call event message) captured; c clicks Join
       and the join is held back by a labelled forced deny; both written into `docs/protocol/calling.md`
-- [ ] capture a call held past a dropped socket: `ab-call` connected, the scenario closes b's calling Trouter socket
+      → done: `abc-call --call join` 20261024T223131Z: c's page learns of the running call from its own roster-only
+      join of the invitation's conversation (sent when its ring ends; its answer makes the header show the join),
+      the media join held back under `JOIN_HELD`; calling.md "Joining a running call"
+- [x] capture a call held past a dropped socket: `ab-call` connected, the scenario closes b's calling Trouter socket
       (and, if the run lasts, lets a token renewal pass); what b's page re-sends, whether it re-registers and whether
       the call's links change, written into `docs/protocol/calling.md`
-- [ ] once Task 2's lab wording is approved and in CLAUDE.md, tests first, then live: the callee's ring-time sends
+      → done: `ab-call --call dropped` 20261024T214902Z: a new Trouter allocation, the endpoint registered again,
+      XHR polling, nothing re-sent to the call, no link changed, the call stayed up. ⚠️ DevTools' network emulation
+      keeps open sockets, so the scenario closes the calling socket itself (`Runtime.queryObjects`); no token
+      renewal fell inside the run
+- [x] once Task 2's lab wording is approved and in CLAUDE.md, tests first, then live: the callee's ring-time sends
       (Task 5's capture) mapped on an offered lab-only invitation; the decline mapped on an offered lab-only
       invitation (denied for any other) and `ab-call`'s decline run let through (a sees it declined, b's ring ends);
       the join mapped as a start in that chat and let through, a permitted join registering its call
-- [ ] CLAUDE.md's "Live runs" line rewritten for what the code now does (still: nothing outside the lab is answered or
+      → done: ring-time sends and the decline (`reject` `603` only) mapped on offered lab-only invitations, denied
+      for others (`offers.rs`); `ab-call --call decline` 20261024T202343Z and `abc-call --call decline`
+      20261024T215654Z let through (a 1:1 decline goes on to the callee's voicemail); the join a `Call` start on the
+      group chat the invitation bound its conversation to, its chat read fresh, registering its call from the
+      join's answer: `abc-call --call join` 20261024T224058Z exit 0. ⚠️ an invitation answered elsewhere (another
+      endpoint of the same account) wasn't captured: the lab runs one browser per account
+- [x] CLAUDE.md's "Live runs" line rewritten for what the code now does (still: nothing outside the lab is answered or
       declined, no scenario clicks either on any other call); `endpoints.md`, `fence-targets.md`
-- [ ] the gate passes
+      → done: CLAUDE.md's live-run bullet, the WebSocket guard, the call registry and offered invitations, the
+      scenarios' holds; endpoints.md's calling rows, fence-targets.md's call registry
+- [x] the gate passes
+      → done: fmt, clippy (`-D warnings`), `scripts/lint-report.sh`, `cargo test --workspace`, fixture-guard
 
 ### Task 7: `sdp-ngc-1.0` both ways
 **Files:**

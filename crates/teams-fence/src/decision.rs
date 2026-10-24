@@ -14,7 +14,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
-use crate::calls::{CallRegistry, Delivery, DeliveryDecision, DeliveryPermit, Observed, PendingStart, RegisterError};
+use crate::calls::{
+    CallRegistry, Delivery, DeliveryDecision, DeliveryPermit, Observed, PendingAnswer, PendingStart, RegisterError,
+    Response, read_invitation,
+};
 use crate::contacting::call::{start_evidence, start_target};
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
@@ -272,7 +275,8 @@ impl fmt::Display for DenyReason {
 #[derive(Debug, thiserror::Error)]
 #[error("fence denied {target}: {reason}")]
 pub struct Denied {
-    target: Target,
+    // boxed: a call operation's target is large, and every write's result carries this
+    target: Box<Target>,
     reason: DenyReason,
 }
 
@@ -496,7 +500,7 @@ impl Fence {
             return self.decided(target, verdict);
         }
         let membership = match target.scope() {
-            Scope::CallOperation { .. } => return self.check_call_operation(target),
+            Scope::CallOperation { .. } => return self.check_call_operation(target, source).await,
             Scope::New | Scope::Account { .. } => Membership::Complete(Vec::new()),
             _ if target.kind() == WriteKind::OwnAvailability || is_signal_on_a_chat(&target) => {
                 Membership::Complete(Vec::new())
@@ -517,22 +521,46 @@ impl Fence {
                 serial: self.serial.fetch_add(1, Ordering::Relaxed),
             }),
             (Verdict::Allow, Err(_)) => Err(Denied {
-                target,
+                target: Box::new(target),
                 reason: DenyReason::LogUnavailable,
             }),
-            (Verdict::Deny(reason), _) => Err(Denied { target, reason }),
+            (Verdict::Deny(reason), _) => Err(Denied {
+                target: Box::new(target),
+                reason,
+            }),
         }
     }
 
-    /// The decision on an operation on a registered call ([`Scope::CallOperation`]): the call registry resolves its link
-    /// to a live call this fence registered ([`crate::calls`]), and the call's participants together with any invitee
-    /// must all be lab accounts or approved services; a permitted `leave` moves its call to ending.
-    fn check_call_operation(&self, target: Target) -> Result<WritePermit, Denied> {
+    /// The decision on an operation on a registered call, an offered invitation or a join ([`Scope::CallOperation`]):
+    /// the call registry resolves its link to a live call this fence registered, an invitation it offered in a state
+    /// open for the operation (ringing, answered, leaving or declined), or, for a join, the group chat an offered
+    /// invitation bound the conversation to ([`crate::calls`]); the participants (the call's; the invitation's caller and
+    /// callee, or the joiner, with every member of the group chat, read fresh and complete) together with any invitee
+    /// must all be lab accounts or approved services, and an invitation must still be open for the operation once the
+    /// chat was read. A permitted `leave` moves its call (or its answered invitation) to leaving, a permitted `attach`
+    /// binds its invitation's call agent and the callbacks its ring ends at, a permitted `accept` answers its invitation
+    /// and a permitted `reject` declines it.
+    async fn check_call_operation(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
         let resolved = match self.calls.resolve(&target) {
             Ok(resolved) => resolved,
             Err(reason) => return self.decided(target, Verdict::Deny(reason)),
         };
-        let participants: BTreeSet<&Mri> = resolved.participants.iter().chain(target.added()).collect();
+        let chat = match self
+            .chat_members(resolved.chat.as_deref(), &resolved.participants, source)
+            .await
+        {
+            Ok(members) => members,
+            Err(reason) => return self.decided(target, Verdict::Deny(reason)),
+        };
+        if !self.calls.still_open(&resolved) {
+            return self.decided(target, Verdict::Deny(DenyReason::Partial(PartialReason::CallEnded)));
+        }
+        let participants: BTreeSet<&Mri> = resolved
+            .participants
+            .iter()
+            .chain(&chat)
+            .chain(target.added())
+            .collect();
         let verdict = if participants.is_empty() {
             Verdict::Deny(DenyReason::NoMembers)
         } else {
@@ -543,11 +571,35 @@ impl Fence {
         Ok(permit)
     }
 
-    /// Takes a permit this fence issued for a call start ([`WriteKind::Call`]: the test call's on [`Scope::New`], or a
-    /// chat's call start on the chat it carries), once, with the start's body, which must read, by the same row, as
-    /// the start the permit was issued for: the call is then pending, waiting for its answer
-    /// ([`Fence::register_start`]), and grants nothing yet ([`crate::calls`]). `None` for another fence's permit, one
-    /// taken already, another kind of write, or a body that doesn't give the permit's target.
+    /// The members of the group chat an offered invitation names (`chat`), read fresh from `source`: complete, and
+    /// listing every one of `parties` (its caller and callee). No chat, no read.
+    async fn chat_members(
+        &self,
+        chat: Option<&str>,
+        parties: &BTreeSet<Mri>,
+        source: &dyn MembershipSource,
+    ) -> Result<Vec<Mri>, DenyReason> {
+        let Some(chat) = chat else {
+            return Ok(Vec::new());
+        };
+        let scope = Scope::Conversation { id: chat.to_owned() };
+        match source.members(&scope).await {
+            Membership::Complete(members) if parties.iter().all(|party| members.contains(party)) => Ok(members),
+            Membership::Complete(members) if members.is_empty() => Err(DenyReason::NoMembers),
+            // a group call's invitation whose chat doesn't list its own caller and callee isn't bound to that chat
+            Membership::Complete(_) => Err(DenyReason::CallMismatch),
+            Membership::Partial(reason) => Err(DenyReason::Partial(reason)),
+            Membership::OrgWide => Err(DenyReason::OrgWide),
+            Membership::Listed(_) => Err(DenyReason::Partial(PartialReason::Unsupported)),
+        }
+    }
+
+    /// Takes a permit this fence issued for a call start ([`WriteKind::Call`]: the test call's on [`Scope::New`], a
+    /// chat's call start on the chat it carries, or a join with media of a running call on the group chat an offered
+    /// invitation bound its conversation to), once, with the start's body, which must read, by the same row, as the
+    /// start the permit was issued for: the call is then pending, waiting for its answer ([`Fence::register_start`]),
+    /// and grants nothing yet ([`crate::calls`]). `None` for another fence's permit, one taken already, another kind of
+    /// write, a join without media (it starts no call), or a body that doesn't give the permit's target.
     #[must_use]
     pub fn pend_start(&self, permit: &WritePermit, start_body: &[u8]) -> Option<PendingStart> {
         let target = permit.target();
@@ -558,7 +610,7 @@ impl Fence {
         if start_target(target, start_body, &evidence.caller).as_ref() != Some(target) {
             return None;
         }
-        self.calls.pend(self.id, permit.serial, target, evidence)
+        self.calls.pend(self.id, permit.serial, target, &evidence)
     }
 
     /// Registers a pending call with its start's answer, read in full ([`crate::calls`]): its conversation's links
@@ -574,11 +626,54 @@ impl Fence {
         self.calls.register(pending, answer)
     }
 
+    /// Takes a permit this fence issued for an `attach` or an `accept` on an offered invitation
+    /// ([`crate::CallOperation::Attach`], [`crate::CallOperation::Accept`]), once: its answer is then pending
+    /// ([`Fence::bind_answer`]). `None` for another fence's permit, one taken already, another write, or an invitation
+    /// no longer in the state the permit left it in.
+    #[must_use]
+    pub fn pend_answer(&self, permit: &WritePermit) -> Option<PendingAnswer> {
+        let Scope::CallOperation { operation, url, .. } = permit.target().scope() else {
+            return None;
+        };
+        if permit.issuer != self.id {
+            return None;
+        }
+        self.calls.pend_answer(self.id, permit.serial, *operation, url)
+    }
+
+    /// Binds the links a pending answer hands out (read in full) to its invitation ([`crate::calls`]): an `attach`'s
+    /// answer the call leg's links (its `progress`, its `acceptance`, its rejection) and the subscribed conversation's;
+    /// an `accept`'s answer the answered call's `mediaRenegotiation`, `updateMediaDescriptions` and
+    /// `applyChannelParameters` links.
+    ///
+    /// # Errors
+    /// [`RegisterError`] when the pending answer is another fence's, its invitation moved on, or the answer binds
+    /// nothing.
+    pub fn bind_answer(&self, pending: PendingAnswer, answer: &[u8]) -> Result<(), RegisterError> {
+        if pending.fence() != self.id {
+            return Err(RegisterError::OtherFence);
+        }
+        self.calls.bind_answer(pending, answer)
+    }
+
     /// Reads a Trouter delivery the account's socket received ([`crate::calls`]): a pending or registered call's
-    /// acceptance binds its call controller's links, and the end of a call ends it. It sends nothing and permits
-    /// nothing by itself.
+    /// acceptance binds its call controller's links, and the end of a call ends it; an incoming call's invitation is
+    /// offered when it is addressed to this fence's [own account](Fence::own_account), a lab account, and its caller
+    /// is a lab account or an approved service (a fence of no account offers none), and a delivery at an offered
+    /// invitation's end callback ends its ring. It sends nothing and permits nothing by itself.
     pub fn observe_delivery(&self, delivery: &Delivery) -> Observed {
-        self.calls.observe(delivery)
+        let Some(invitation) = read_invitation(delivery) else {
+            return self.calls.observe(delivery);
+        };
+        let offered = self.own.as_ref() == Some(&invitation.callee)
+            && self.roster.is_lab_account(&invitation.callee)
+            && self.roster.admits(&invitation.caller)
+            && invitation.caller != invitation.callee;
+        if offered {
+            self.calls.offer(invitation, delivery)
+        } else {
+            Observed::Ignored
+        }
     }
 
     /// Forgets the pending deliveries of a connection that closed.
@@ -587,16 +682,48 @@ impl Fence {
     }
 
     /// Decides a Trouter delivery response sent on `connection` (`response`: the socket.io message's JSON, after
-    /// `3:::`): permitted only as the captured acknowledgement of a pending acceptance delivery of a live call on that
-    /// connection, once ([`crate::calls`]). A decision is logged; a response to no pending delivery is
-    /// [`DeliveryDecision::NotPending`], neither decided nor logged.
-    pub fn check_delivery_response(&self, connection: &str, response: &[u8]) -> DeliveryDecision {
-        const KIND: &str = "call_acceptance_acknowledgement";
-        let Some(decided) = self.calls.respond(connection, response) else {
-            return DeliveryDecision::NotPending;
+    /// `3:::`), once per delivery ([`crate::calls`]): permitted only as the captured acknowledgement of a pending
+    /// acceptance delivery of a live call on that connection, or as the captured response to an offered invitation's
+    /// delivery on that connection while it rings, its caller and callee lab accounts or approved services and the
+    /// group chat it names, if any, lab-only by a fresh, complete read from `source` (listing both). A decision is
+    /// logged; a response to no pending delivery is [`DeliveryDecision::NotPending`], neither decided nor logged.
+    pub async fn check_delivery_response(
+        &self,
+        connection: &str,
+        response: &[u8],
+        source: &dyn MembershipSource,
+    ) -> DeliveryDecision {
+        const ACKNOWLEDGEMENT: &str = "call_acceptance_acknowledgement";
+        const RECEIPT: &str = "call_invitation_receipt";
+        let (kind, decided) = match self.calls.respond(connection, response) {
+            None => return DeliveryDecision::NotPending,
+            Some(Response::Acknowledgement(decided)) => (ACKNOWLEDGEMENT, decided),
+            Some(Response::ReceiptDenied(reason)) => (RECEIPT, Err(reason)),
+            Some(Response::Receipt {
+                delivery,
+                offer,
+                participants,
+                chat,
+            }) => {
+                let judged = match self.chat_members(chat.as_deref(), &participants, source).await {
+                    Ok(members) if !self.calls.still_ringing(offer) => {
+                        drop(members);
+                        Err(crate::calls::DeliveryDenyReason::NotLive)
+                    }
+                    Ok(members) => {
+                        let all = participants.iter().chain(&members);
+                        match self.admits_all(all) {
+                            Verdict::Allow => Ok(delivery),
+                            Verdict::Deny(_) => Err(crate::calls::DeliveryDenyReason::Parties),
+                        }
+                    }
+                    Err(_) => Err(crate::calls::DeliveryDenyReason::Parties),
+                };
+                (RECEIPT, judged)
+            }
         };
         let reason = decided.as_ref().err().copied();
-        let logged = self.log.record_delivery_response(KIND, reason);
+        let logged = self.log.record_delivery_response(kind, reason);
         match (decided, logged) {
             (Ok(delivery), Ok(())) => DeliveryDecision::Permitted(DeliveryPermit::new(delivery)),
             (Ok(_), Err(_)) => DeliveryDecision::Denied(crate::calls::DeliveryDenyReason::LogUnavailable),

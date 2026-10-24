@@ -243,15 +243,20 @@ chat other than its forced denies, one for a partial or refused membership, or a
   coming back in the page, hangs up, and exits 0 only when the start, the `add`, the acknowledgement and the `leave`
   were permitted, the statistics show audio both ways and the tone came back, with no deny off the expected-deny
   list. An incoming call is never answered.
-- `ab-call`, `abc-call` (`--call start-held|answer|decline|cancel|timeout`): account a calls b from their 1:1 chat,
-  or the recorded a–b–c group chat, every page with fake devices, muted. `start-held` (a alone) holds back each call
-  start with a labelled forced deny; the other steps let a's start through (a call in the chat it carries, the caller
-  and its callees all lab accounts: `docs/protocol/calling.md`), hold back everything each callee's page sends to the
-  calling services and every delivery response it sends, and play out the ring: `cancel` (a hangs up), `timeout`
-  (nobody acts). `answer` and `decline` click only on the run's own call (every invitation the callee's page received is
-  a's call of this run, from a to that callee in the run's chat, and the page shows one incoming call), the click held
-  back too; with the callee's sends held back its page shows no incoming call yet, so they fail at that step until the
-  ring-time sends are mapped (M3 Task 6).
+- `ab-call`, `abc-call` (`--call start-held|answer|decline|cancel|timeout|video|dropped|join`): account a calls b
+  from their 1:1 chat, or the recorded a–b–c group chat, every page with fake devices, muted. `start-held` (a alone)
+  holds back each call start with a labelled forced deny; the other steps let a's start through (a call in the chat it
+  carries, the caller and its callees all lab accounts: `docs/protocol/calling.md`), let each callee's ring-time sends
+  go to the fence (its `attach`, `progress` and the invitation's delivery response, mapped on its offered invitation),
+  hold back everything else its page sends to the calling services, and play out the ring: `cancel` (a hangs up),
+  `timeout` (nobody acts), `decline` (each callee declines; its rejection must have been let through), `answer` (each
+  callee answers; the call must carry audio both ways on every page, then everyone hangs up), `video` (as `answer`,
+  every camera on), `dropped` (as `answer`, the last callee's calling socket closed for a while, which must close),
+  `join` (`abc-call` only: c lets its ring end and joins the running call from the chat's header; it must reach the
+  call screen and its join register the call). A callee clicks only on the run's own call (every invitation its page
+  received is a's call of this run, from a to that callee in the run's chat, and the page shows one incoming call, or
+  for a join the run's chat with one join), and the fence decides each answer, decline and join again on the account's
+  own offered invitation.
 
 Every lab browser runs with its output muted and Chrome's fake audio manager (`--mute-audio`,
 `--disable-audio-output`): nothing is played aloud and the desktop's audio server is never opened; a call scenario's

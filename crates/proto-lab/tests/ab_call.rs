@@ -7,9 +7,11 @@ use base64::Engine as _;
 use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
 use proto_lab::fence_ws::{Frame, Payload};
 use proto_lab::scenario::ab_call::{
-    ACCEPT_AUDIO_TID, ANSWER_HELD, CALLER_JOIN_HELD, CallStep, CalleeAction, DECLINE_HELD, DECLINE_TID,
-    INVITATION_EVENTS, Modality, RING_SENDS, RingCheck, RunCall, START_HELD, callee_forced, callee_rules,
-    caller_forced, caller_join_rule, held_back, invitations, own_invitations, ring_check, start_held_rule,
+    ACCEPT_AUDIO_CSS, ANSWER_HELD, CALLER_JOIN_HELD, CallStep, CalleeAction, CalleeRole, DECLINE_CSS, DECLINE_HELD,
+    DECLINE_SENDS, INVITATION_EVENTS, JOIN_HELD, Modality, RING_SENDS, RingCheck, RingSends, RunCall, START_HELD,
+    allowed_requests, callee_forced, callee_rules, caller_forced, caller_join_rule, calling_socket_up, chat_shown,
+    held_back, invitations, judge_step_sends, own_invitations, registered_joins, ring_check, ring_rules, ring_sends,
+    start_held_rule, video_frames,
 };
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 use serde_json::json;
@@ -124,6 +126,72 @@ fn a_callee_holds_back_every_write_to_the_calling_services_and_every_delivery_re
 }
 
 #[test]
+fn while_it_rings_a_callee_holds_back_every_write_to_the_calling_services_but_its_attach_and_progress() -> TestResult {
+    let requests = ring_rules()?;
+    assert!(requests.iter().all(|rule| rule.label() == Some(RING_SENDS)));
+    let denied = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
+    // the attach and the progress go to the fence, which maps them on the offered invitation
+    assert!(!denied("POST", FORKED));
+    assert!(!denied(
+        "POST",
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/call-1/27/t/2/progress?i=1"
+    ));
+    assert!(!denied(
+        "POST",
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/call-1/27/i1/1/attach"
+    ));
+    for (method, url) in [
+        ("POST", FORKED.replace("/attach", "/progress")),
+        (
+            "POST",
+            FORKED.replace("forked", "incoming").replace("/attach", "/accept"),
+        ),
+        (
+            "POST",
+            FORKED.replace("forked", "incoming").replace("/attach", "/reject"),
+        ),
+        ("DELETE", FORKED.replace("/attach", "")),
+        ("POST", FORKED.replace("/attach", "/acceptance")),
+        ("POST", FORKED.replace("forked", "callAcceptance")),
+        ("POST", FORKED.replace("/attach?", "/attach/x?")),
+        ("POST", FORKED.replace("api.flightproxy", "api.fl")),
+        ("PUT", FORKED.to_owned()),
+        ("POST", CALL_START_URL.to_owned()),
+        (
+            "POST",
+            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/y"
+                .to_owned(),
+        ),
+    ] {
+        assert!(denied(method, &url), "{method} {url}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_callee_s_capture_counts_the_ring_time_sends_its_fence_let_through() {
+    let verdict = |entry: serde_json::Value| entry.to_string();
+    let text = [
+        verdict(json!({"type": "verdict", "channel": "http", "method": "POST", "url": FORKED, "network_id": "1.1", "verdict": "allow"})),
+        // the same request on the browser's session too
+        verdict(json!({"type": "verdict", "channel": "http", "method": "POST", "url": FORKED, "network_id": "1.1", "verdict": "allow"})),
+        verdict(json!({"type": "verdict", "channel": "http", "method": "POST", "url": FORKED, "network_id": "1.2", "verdict": "deny"})),
+        verdict(json!({"type": "verdict", "channel": "http", "method": "POST", "url": FORKED.replace("/attach", "/progress"), "network_id": "1.3", "verdict": "allow"})),
+        verdict(json!({"type": "verdict", "channel": "web_socket", "url": TROUTER, "frame": {"data": "3:::{\"id\":1}"}, "verdict": "allow"})),
+        verdict(json!({"type": "verdict", "channel": "web_socket", "url": TROUTER, "frame": {"data": "5:::{}"}, "verdict": "allow"})),
+        verdict(json!({"type": "verdict", "channel": "web_socket", "url": TROUTER, "frame": {"data": "3:::{\"id\":2}"}, "verdict": "deny"})),
+    ]
+    .join("\n");
+    assert_eq!(
+        ring_sends(&text),
+        RingSends {
+            attaches: 1,
+            receipts: 1
+        }
+    );
+}
+
+#[test]
 fn each_account_expects_only_its_step_s_own_forced_denies() {
     assert_eq!(caller_forced(CallStep::StartHeld), [EARLIER_RUN_PROBE, START_HELD]);
     for step in [CallStep::Answer, CallStep::Decline, CallStep::Cancel, CallStep::Timeout] {
@@ -159,7 +227,7 @@ fn a_callee_s_click_is_held_back_under_a_label_its_run_expects() {
         CallStep::Answer.callee_action(),
         Some(CalleeAction {
             label: ANSWER_HELD,
-            button: ACCEPT_AUDIO_TID,
+            button: ACCEPT_AUDIO_CSS,
             what: "answer"
         })
     );
@@ -167,7 +235,7 @@ fn a_callee_s_click_is_held_back_under_a_label_its_run_expects() {
         CallStep::Decline.callee_action(),
         Some(CalleeAction {
             label: DECLINE_HELD,
-            button: DECLINE_TID,
+            button: DECLINE_CSS,
             what: "decline"
         })
     );
@@ -533,4 +601,228 @@ fn a_callee_s_verdict_counts_only_the_run_s_own_call_s_invitations() -> TestResu
     let unrelated = invitations(&capture_of(&[(direct, &outsider, PLACED + 1)]));
     assert_eq!(own_invitations(&unrelated, &one_to_one(), B, PLACED), 0);
     Ok(())
+}
+
+// --- once a callee acted: what goes to the fence, what stays held ---
+
+const CC: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1";
+const CONV: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/c1";
+
+#[test]
+fn once_it_answered_a_callee_s_mapped_sends_go_to_the_fence_and_the_rest_stays_held() -> TestResult {
+    let (requests, frames) = callee_rules(ANSWER_HELD)?;
+    let held = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
+    for (method, url) in [
+        ("POST", format!("{CC}/incoming/call-1/27/t/2/accept?i=1")),
+        ("POST", format!("{CONV}/updateEndpointState?i=1")),
+        ("POST", format!("{CONV}/updateParticipantProperties?i=1")),
+        ("POST", format!("{CONV}/leave?i=1")),
+        ("PUT", format!("{CONV}/updateEndpointMetadata?i=1")),
+        ("POST", format!("{CC}/negotiations/call-1/27/t/3/answer?i=1")),
+        ("POST", format!("{CC}/active/call-1/27/a4/3/renegotiate?i=1")),
+        (
+            "POST",
+            format!("{CC}/active/call-1/27/a4/3/updateMediaDescriptions?i=1"),
+        ),
+        ("POST", format!("{CC}/mediaAnswers/call-1/27/t/4/acknowledge?i=1")),
+        (
+            "POST",
+            format!("{CC}/mcProxy/call-1/27/k27/3/applyChannelParameters?i=1"),
+        ),
+    ] {
+        assert!(!held(method, &url), "{method} {url}");
+    }
+    for (method, url) in [
+        ("POST", format!("{CC}/incoming/call-1/27/t/2/progress?i=1")),
+        ("DELETE", format!("{CC}/incoming/call-1/27/t/2/reject?i=1")),
+        ("POST", CONV.to_owned()),
+        ("POST", format!("{CONV}/add?i=1")),
+        ("POST", format!("{CC}/active/call-1/27/a4/3/transfer?i=1")),
+        ("PUT", format!("{CONV}/leave?i=1")),
+    ] {
+        assert!(held(method, &url), "{method} {url}");
+    }
+    assert!(frames.matches(&text(TROUTER, r#"3:::{"id":1,"status":200}"#)));
+    Ok(())
+}
+
+#[test]
+fn once_it_declined_only_its_decline_goes_to_the_fence() -> TestResult {
+    let (requests, _) = callee_rules(DECLINE_HELD)?;
+    let held = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
+    assert!(!held("DELETE", &format!("{CC}/incoming/call-1/27/t/2/reject?i=1")));
+    assert!(held("POST", &format!("{CC}/incoming/call-1/27/t/2/accept?i=1")));
+    assert!(held("DELETE", &format!("{CC}/active/call-1/27/a4/3?i=1")));
+    Ok(())
+}
+
+#[test]
+fn the_one_who_joins_late_sends_its_joins_and_its_call_s_operations_to_the_fence() -> TestResult {
+    let (requests, _) = callee_rules(JOIN_HELD)?;
+    let held = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
+    for (method, url) in [
+        ("POST", format!("{CONV}?i=1&e=2")),
+        ("POST", format!("{CC}/callAcceptance/call-1/1/a3/2/acknowledge?i=1")),
+        ("PUT", format!("{CONV}/updateEndpointMetadata?i=1")),
+        ("POST", format!("{CONV}/leave?i=1")),
+    ] {
+        assert!(!held(method, &url), "{method} {url}");
+    }
+    assert!(held("POST", &format!("{CONV}/add?i=1")));
+    assert!(held("POST", &format!("{CC}/incoming/call-1/27/t/2/accept?i=1")));
+    assert_eq!(callee_forced(CallStep::Join).last(), Some(&JOIN_HELD));
+    Ok(())
+}
+
+#[test]
+fn a_page_s_calling_socket_is_up_once_connected_and_until_it_closes() {
+    let event = |method: &str, params: serde_json::Value| {
+        json!({"type": "cdp", "method": method, "params": params}).to_string()
+    };
+    let calling = "wss://go.trouter.teams.microsoft.com/v4/c?tc=%7B%22ua%22:%22SkypeSpaces%22%7D";
+    let messaging = "wss://go.trouter.teams.microsoft.com/v4/c?tc=%7B%22ua%22:%22TeamsCDL%22%7D";
+    let created = |id: &str, url: &str| event("Network.webSocketCreated", json!({"requestId": id, "url": url}));
+    let connected = |id: &str| {
+        event(
+            "Network.webSocketFrameReceived",
+            json!({"requestId": id, "response": {"payloadData": "5:1::{\"name\":\"trouter.connected\",\"args\":[]}"}}),
+        )
+    };
+    let closed = |id: &str| event("Network.webSocketClosed", json!({"requestId": id}));
+    assert!(!calling_socket_up(&created("1", calling)));
+    assert!(calling_socket_up(&[created("1", calling), connected("1")].join("\n")));
+    assert!(!calling_socket_up(
+        &[created("2", messaging), connected("2")].join("\n")
+    ));
+    assert!(!calling_socket_up(
+        &[created("1", calling), connected("1"), closed("1")].join("\n")
+    ));
+    assert!(calling_socket_up(
+        &[
+            created("1", calling),
+            connected("1"),
+            closed("1"),
+            created("3", calling),
+            connected("3")
+        ]
+        .join("\n")
+    ));
+}
+
+#[test]
+fn a_capture_s_decoded_video_is_the_most_frames_any_statistics_report_named() {
+    let stats = |frames: u64, kind: &str| {
+        json!({"type": "rtc", "payload": {"event": "stats", "data": [
+            {"type": "inbound-rtp", "kind": kind, "framesDecoded": frames},
+        ]}})
+        .to_string()
+    };
+    assert_eq!(video_frames(""), 0);
+    assert_eq!(
+        video_frames(&[stats(10, "video"), stats(40, "video"), stats(500, "audio")].join("\n")),
+        40
+    );
+}
+
+// --- what a callee's step must have sent, and the join's click gate ---
+
+const REJECT: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/call-1/27/t/2/reject?i=10-0-0-1";
+const JOIN: &str =
+    "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/c1?i=10-0-0-2&e=1";
+
+fn verdict(method: &str, url: &str, network_id: &str, verdict: &str) -> String {
+    json!({"type": "verdict", "channel": "http", "method": method, "url": url, "network_id": network_id, "verdict": verdict})
+        .to_string()
+}
+
+fn continued(url: &str, network_id: &str, status: u16, bound: Option<bool>) -> String {
+    let mut entry =
+        json!({"type": "response_continued", "method": "POST", "url": url, "network_id": network_id, "status": status});
+    if let Some(bound) = bound {
+        entry["bound"] = json!(bound);
+    }
+    entry.to_string()
+}
+
+#[test]
+fn a_callee_s_role_is_its_step_s() {
+    assert_eq!(CalleeRole::of(CallStep::Decline, false), CalleeRole::Declines);
+    assert_eq!(CalleeRole::of(CallStep::Decline, true), CalleeRole::Declines);
+    assert_eq!(CalleeRole::of(CallStep::Join, true), CalleeRole::Joins);
+    assert_eq!(CalleeRole::of(CallStep::Join, false), CalleeRole::Other);
+    for step in [
+        CallStep::Answer,
+        CallStep::Video,
+        CallStep::Dropped,
+        CallStep::Cancel,
+        CallStep::Timeout,
+    ] {
+        assert_eq!(CalleeRole::of(step, true), CalleeRole::Other, "{step:?}");
+    }
+}
+
+#[test]
+fn a_decline_passes_only_with_its_rejection_let_through() {
+    // denied, to another link, or another method: no rejection went out
+    let none = [
+        verdict("DELETE", REJECT, "1.1", "deny"),
+        verdict("DELETE", &REJECT.replace("/reject", "/progress"), "1.2", "allow"),
+        verdict("POST", REJECT, "1.3", "allow"),
+    ]
+    .join("\n");
+    assert!(judge_step_sends(CalleeRole::Declines, &none).is_err());
+    // one let through, seen on both layers: one rejection
+    let sent = [
+        none,
+        verdict("DELETE", REJECT, "1.4", "allow"),
+        verdict("DELETE", REJECT, "1.4", "allow"),
+    ]
+    .join("\n");
+    assert_eq!(allowed_requests(&sent, "DELETE", DECLINE_SENDS), 1);
+    assert_eq!(
+        judge_step_sends(CalleeRole::Declines, &sent),
+        Ok(Some("the fence let 1 rejection(s) through".to_owned()))
+    );
+    // nobody else's sends are judged here
+    assert_eq!(judge_step_sends(CalleeRole::Other, ""), Ok(None));
+}
+
+#[test]
+fn a_join_passes_only_once_its_answer_registered_its_call() {
+    // a join allowed but its answer not read (no media: nothing waited for it), read without registering, failed, or
+    // elsewhere: no join registered
+    let none = [
+        verdict("POST", JOIN, "2.1", "allow"),
+        continued(JOIN, "2.1", 200, None),
+        continued(JOIN, "2.2", 200, Some(false)),
+        continued(JOIN, "2.3", 500, Some(true)),
+        continued(&format!("{CALL_START_URL}?x=1"), "2.4", 201, Some(true)),
+        continued(&JOIN.replace("/conv/c1", "/conv/c1/leave"), "2.5", 200, Some(true)),
+    ]
+    .join("\n");
+    assert_eq!(registered_joins(&none), 0);
+    assert!(judge_step_sends(CalleeRole::Joins, &none).is_err());
+    let joined = [none, continued(JOIN, "2.6", 201, Some(true))].join("\n");
+    assert_eq!(registered_joins(&joined), 1);
+    assert!(judge_step_sends(CalleeRole::Joins, &joined).is_ok());
+}
+
+fn reading(sends: u64, ours: u64, joins: u64) -> String {
+    json!({"sends": sends, "ours": ours, "joins": joins, "where": []}).to_string()
+}
+
+#[test]
+fn the_join_is_clicked_only_with_the_run_s_chat_shown_and_one_join() {
+    assert_eq!(chat_shown(&reading(1, 1, 1)), Ok(()));
+    for (name, refused) in [
+        ("no join", reading(1, 1, 0)),
+        ("two joins", reading(1, 1, 2)),
+        ("another chat open", reading(1, 0, 1)),
+        ("no chat open", reading(0, 0, 1)),
+        ("two chats open, one the run's", reading(2, 1, 1)),
+        ("no reading", "not json".to_owned()),
+        ("an empty reading", "{}".to_owned()),
+    ] {
+        assert!(chat_shown(&refused).is_err(), "{name}");
+    }
 }

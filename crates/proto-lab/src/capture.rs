@@ -469,6 +469,27 @@ impl Capture {
         self.recorder.record(entry);
     }
 
+    /// Records a paused request or response the fence couldn't answer (the browser refused the answer): its stage,
+    /// method, URL, the response's status or error, and the browser's error. Such a request stays paused until the page
+    /// gives it up; nothing of it was sent past the pause.
+    pub(crate) fn unanswered(&self, event: &Event, error: &str) {
+        let mut entry = paused_entry("unanswered", event);
+        entry["error"] = json!(error);
+        self.recorder.record(entry);
+    }
+
+    /// Records a response the fence paused at the response stage and continued (a call answer: a call start's, a
+    /// conversation's (a join's among them), an `attach`'s or an `accept`'s, their preflights'; the login origin's): its
+    /// method, URL and status or error, and, for a call answer the fence read (`bound`: Some), whether it registered
+    /// its call or bound its links (`"bound"`).
+    pub(crate) fn continued(&self, event: &Event, bound: Option<bool>) {
+        let mut entry = paused_entry("response_continued", event);
+        if let Some(bound) = bound {
+            entry["bound"] = json!(bound);
+        }
+        self.recorder.record(entry);
+    }
+
     /// Records a target the fence couldn't arm, as `fence.log` does, plus its session, target id and error.
     pub(crate) fn arming_failure(&self, session: Option<&SessionId>, failure: &ArmingFailure) {
         let record = failure.record();
@@ -521,6 +542,29 @@ fn strip_body(request: &mut Value) {
         request.remove("postData");
         request.remove("postDataEntries");
     }
+}
+
+/// A capture entry of `kind` for a paused request or response: its session, ids, stage, method, URL and the response's
+/// status or error (no header, no body).
+fn paused_entry(kind: &str, event: &Event) -> Value {
+    let params = &event.params;
+    let request = &params["request"];
+    let stage = if params.get("responseStatusCode").is_some() || params.get("responseErrorReason").is_some() {
+        "response"
+    } else {
+        "request"
+    };
+    json!({
+        "type": kind,
+        "session": session(event),
+        "request_id": params["requestId"],
+        "network_id": params["networkId"],
+        "stage": stage,
+        "method": request["method"],
+        "url": request["url"],
+        "status": params["responseStatusCode"],
+        "response_error": params["responseErrorReason"],
+    })
 }
 
 fn session(event: &Event) -> Value {

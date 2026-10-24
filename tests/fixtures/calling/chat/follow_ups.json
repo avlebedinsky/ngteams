@@ -1,5 +1,5 @@
 {
- "_synthetic": "Made up, shaped like the ab-call captures of 2026-10-24 (read locally from the captures; docs/protocol/calling.md): the requests on a call from a chat that the echo call's capture didn't show: the caller's cancel, and the callee's attach while it rings (held back; no row maps it yet). <guid:a> and <guid:b> are lab accounts a and b, other <guid:\u2026> made-up ids; tests fill in made-up GUIDs. Hosts, ids, routes and callbacks are made up.",
+ "_synthetic": "Made up, shaped like the ab-call and abc-call captures of 2026-10-24 (read locally from the captures; docs/protocol/calling.md): the requests on a call from a chat that the echo call's capture didn't show: the caller's cancel, the callee's attach while it rings, the attach's answer (`attach_answer`: the call leg's links and the conversation subscription's output, trimmed), the callee's progress while it rings at the progress link that answer handed out, on the callee's click its endpoint state, its acceptance (the SDP a stub on documentation addresses) and its decline, the acceptance's answer (`accept_answer`), the answered call's operations (endpoint metadata, own participant properties, leave), the media negotiation (a renegotiation, its delivery at the peer's callback in `deliveries`, the answer to one, an answer's delivery and its acknowledgement, the media lines' update) and the join of a running group call (the roster-only one and the one with media). <guid:a> and <guid:b> are lab accounts a and b, <group> the group chat's id, other <guid:\u2026> made-up ids; tests fill in made-up GUIDs. Hosts, ids, routes and callbacks are made up.",
  "cases": [
   {
    "name": "the caller hangs up while the callee rings: the leave carries how long it rang",
@@ -85,6 +85,595 @@
     ],
     "debugContent": {
      "ecsEtag": "\"synthetic-etag\""
+    }
+   }
+  },
+  {
+   "name": "the callee tells the call controller it rings (the attach answer's progress link)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/progress?i=10-0-0-1",
+   "body": {
+    "callProgress": {
+     "sender": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": "Lab B",
+      "endpointId": "<guid:4>",
+      "participantId": "<guid:bb>",
+      "languageId": "en-us"
+     },
+     "status": "ringing",
+     "phrase": "ringing"
+    }
+   }
+  },
+  {
+   "name": "the callee's endpoint state when it answers (the conversation subscription's updateEndpointState link)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/updateEndpointState?i=10-0-0-2&e=1",
+   "body": {
+    "from": {
+     "id": "8:orgid:<guid:b>",
+     "displayName": "Lab B",
+     "endpointId": "<guid:4>",
+     "participantId": "<guid:bb>",
+     "languageId": "en-us"
+    },
+    "endpointState": {
+     "state": {
+      "isMuted": false
+     },
+     "endpointProperties": {
+      "additionalEndpointProperties": {
+       "infoShownInReportMode": "FullInformation"
+      }
+     },
+     "endpointStateSequenceNumber": 1
+    }
+   }
+  },
+  {
+   "name": "the callee answers (the attach answer's acceptance link)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/accept?i=10-0-0-1",
+   "body": {
+    "callAcceptance": {
+     "acceptedBy": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": "Lab B",
+      "endpointId": "<guid:4>",
+      "participantId": "<guid:bb>",
+      "languageId": "en-us"
+     },
+     "acceptedCallModalities": [
+      "Audio"
+     ],
+     "capabilities": null,
+     "endpointCapabilities": 73463,
+     "clientEndpointCapabilities": 114259690,
+     "links": {
+      "mediaRenegotiation": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/20202020/call/mediaRenegotiation/",
+      "transfer": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/21212121/call/transfer/",
+      "replacement": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/22222222/call/replacement/",
+      "balanceUpdate": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/23232323/call/balanceUpdate/",
+      "retargetCompletion": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/24242424/call/retargetCompletion/",
+      "controlVideoStreaming": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/25252525/call/controlVideoStreaming/",
+      "updateMediaDescriptions": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/26262626/call/updateMediaDescriptions"
+     },
+     "clientContentForMediaController": {
+      "controlVideoStreaming": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/27272727/call/controlVideoStreaming/",
+      "csrcInfo": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/28282828/call/csrcInfo/"
+     },
+     "mediaContent": {
+      "blob": "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=audio 50002 RTP/SAVP 111\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:111 opus/48000/2\r\na=setup:active\r\na=mid:0\r\na=sendrecv\r\na=label:main-audio\r\na=candidate:1 1 udp 2122194687 192.0.2.12 50002 typ host\r\n",
+      "contentType": "application/sdp-ngc-1.0",
+      "clientLocation": "ZZ",
+      "applyChannelParameters": {
+       "multiChannelParameter": {
+        "mids": [
+         "*"
+        ],
+        "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":600000}}"
+       }
+      },
+      "mediaLegId": "0000000000000000000000000000000B"
+     },
+     "pstnContent": {
+      "emergencyCallCountry": "",
+      "platformName": "SyntheticClient/1.0",
+      "publicApiCall": false
+     },
+     "callKeepAliveInterval": null
+    }
+   }
+  },
+  {
+   "name": "the callee declines (the attach answer's callLeg link)",
+   "method": "DELETE",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/reject?i=10-0-0-1",
+   "body": {
+    "callEnd": {
+     "code": 603,
+     "subCode": 0,
+     "phrase": "CallEndReasonLocalUserInitiated",
+     "resultCategories": [
+      "Success"
+     ]
+    }
+   }
+  },
+  {
+   "name": "the callee's endpoint metadata once it answered (the conversation subscription's link)",
+   "method": "PUT",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/updateEndpointMetadata?i=10-0-0-2&e=1",
+   "body": {
+    "participants": {
+     "from": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": "Lab B",
+      "endpointId": "<guid:4>",
+      "participantId": "<guid:bb>",
+      "languageId": "en-us"
+     }
+    },
+    "endpointMetadata": {
+     "holographicCapabilities": 3
+    }
+   }
+  },
+  {
+   "name": "the callee's own participant properties once it answered",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/updateParticipantProperties?i=10-0-0-2&e=1",
+   "body": {
+    "from": {
+     "id": "8:orgid:<guid:b>",
+     "endpointId": "<guid:4>",
+     "participantId": "<guid:bb>"
+    },
+    "to": [
+     {
+      "id": "8:orgid:<guid:b>",
+      "propertyBag": {
+       "aiVoiceConsent": {
+        "sequenceNumber": 1,
+        "value": {
+         "aiVoiceConsentValue": "0"
+        }
+       }
+      }
+     }
+    ],
+    "links": {
+     "updateParticipantPropertiesStatus": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/30303030/conversation/updateParticipantPropertiesStatus/"
+    },
+    "operationId": "<guid:call>"
+   }
+  },
+  {
+   "name": "the callee hangs up (the conversation subscription's leave)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/leave?i=10-0-0-2&e=1",
+   "body": {
+    "participants": {
+     "from": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": "Lab B",
+      "endpointId": "<guid:4>",
+      "participantId": "<guid:bb>",
+      "languageId": "en-us"
+     }
+    },
+    "conversationTransactionEnd": {
+     "reason": "noError",
+     "code": 0,
+     "phrase": "ConversationEndNoModalityConnected"
+    },
+    "callTransactionEnd": {
+     "code": 0,
+     "subCode": 0,
+     "phrase": "CallEndReasonLocalUserInitiated",
+     "resultCategories": [
+      "Success"
+     ]
+    }
+   }
+  },
+  {
+   "name": "the callee renegotiates its answered call (the acceptance answer's mediaRenegotiation link)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/a4/3/renegotiate?i=10-0-0-1",
+   "body": {
+    "mediaNegotiation": {
+     "callModalities": [
+      "Audio",
+      "Video"
+     ],
+     "sender": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": "Lab B",
+      "endpointId": "<guid:4>",
+      "participantId": "<guid:bb>",
+      "languageId": "en-us"
+     },
+     "links": {
+      "mediaAnswer": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/31313131/call/mediaAnswer/",
+      "rejection": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/31313131/call/rejection/"
+     },
+     "mediaContent": {
+      "blob": "v=0\r\no=- 1 3 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 50002 RTP/SAVP 111\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:111 opus/48000/2\r\na=mid:0\r\na=sendrecv\r\nm=video 50002 RTP/SAVP 107\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:107 H264/90000\r\na=mid:1\r\na=sendrecv\r\na=label:main-video\r\n",
+      "contentType": "application/sdp-ngc-1.0",
+      "requiredFeatures": "nonByPass",
+      "clientLocation": "ZZ",
+      "negotiationTag": "<guid:call>;v_1",
+      "applyChannelParameters": {
+       "multiChannelParameter": {
+        "mids": [
+         "*"
+        ],
+        "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":500000}}"
+       }
+      },
+      "mediaLegId": "0000000000000000000000000000000B"
+     }
+    }
+   }
+  },
+  {
+   "name": "the callee answers a renegotiation (the delivered renegotiation's mediaAnswer link)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/negotiations/SyntheticCall1/27/t/4/answer?i=10-0-0-1",
+   "body": {
+    "mediaAnswer": {
+     "callModalities": [
+      "Audio",
+      "Video"
+     ],
+     "sender": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": "Lab B",
+      "endpointId": "<guid:4>",
+      "participantId": "<guid:bb>",
+      "languageId": "en-us"
+     },
+     "links": {
+      "mediaAcknowledgement": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/32323232/call/mediaAcknowledgement/"
+     },
+     "clientContentForMediaController": {
+      "controlVideoStreaming": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/33333333/call/controlVideoStreaming/",
+      "csrcInfo": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/34343434/call/csrcInfo/"
+     },
+     "mediaContent": {
+      "blob": "v=0\r\no=- 1 3 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 50002 RTP/SAVP 111\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:111 opus/48000/2\r\na=mid:0\r\na=sendrecv\r\nm=video 50002 RTP/SAVP 107\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:107 H264/90000\r\na=mid:1\r\na=sendrecv\r\na=label:main-video\r\n",
+      "contentType": "application/sdp-ngc-1.0",
+      "clientLocation": "ZZ",
+      "mediaDescriptions": {
+       "descriptions": [
+        {
+         "mid": "1",
+         "direction": "recvonly"
+        }
+       ],
+       "requestId": 2
+      },
+      "applyChannelParameters": {
+       "multiChannelParameter": {
+        "mids": [
+         "*"
+        ],
+        "mediaParameter": "{\"sendSideBWSeed\":{\"seedValueBitsPerSec\":500000}}"
+       }
+      },
+      "mediaLegId": "0000000000000000000000000000000B"
+     }
+    },
+    "debugContent": {
+     "callId": "<guid:call>",
+     "endpointId": "<guid:4>"
+    }
+   }
+  },
+  {
+   "name": "the callee acknowledges the answer to its renegotiation (the delivered answer's link, no body)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/mediaAnswers/SyntheticCall1/27/t/5/acknowledge?i=10-0-0-1",
+   "body": null
+  },
+  {
+   "name": "the callee's media lines once its camera is on (the acceptance answer's link)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/a4/3/updateMediaDescriptions?i=10-0-0-1",
+   "body": {
+    "UpdateMediaDescriptions": {
+     "mediaDescriptions": {
+      "descriptions": [
+       {
+        "mid": "1",
+        "direction": "sendrecv",
+        "label": "main-video"
+       },
+       {
+        "mid": "2",
+        "direction": "recvonly"
+       }
+      ],
+      "negotiationTag": "<guid:call>;v_1",
+      "requestId": 2
+     }
+    }
+   }
+  },
+  {
+   "name": "the callee whose ring ended subscribes to the running group call's roster",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation2?i=10-0-0-2&e=1",
+   "body": {
+    "conversationRequest": {
+     "subject": null,
+     "roster": {
+      "type": "Delta",
+      "rosterUpdate": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/40404040/conversation/rosterUpdate/"
+     },
+     "properties": {
+      "allowConversationWithoutHost": true,
+      "enableGroupCallEventMessages": true,
+      "enableGroupCallUpgradeMessage": false,
+      "enableGroupCallMeetupGeneration": false
+     },
+     "links": {
+      "conversationEnd": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/41414141/conversation/conversationEnd/",
+      "conversationUpdate": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/42424242/conversation/conversationUpdate/"
+     }
+    },
+    "groupContext": null,
+    "groupChat": {
+     "threadId": "19:<group>@thread.v2",
+     "messageId": "0"
+    },
+    "participants": {
+     "from": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": "Lab B",
+      "endpointId": "<guid:4>",
+      "participantId": "<guid:bb>",
+      "languageId": "en-us"
+     }
+    },
+    "capabilities": null,
+    "endpointCapabilities": 73463,
+    "clientEndpointCapabilities": 114259690,
+    "endpointMetadata": {
+     "holographicCapabilities": 3
+    },
+    "meetingInfo": {
+     "organizerId": "<guid:a>",
+     "tenantId": "<guid:tenant>",
+     "isBroadcast": false
+    },
+    "endpointState": {
+     "endpointStateSequenceNumber": 0,
+     "endpointProperties": {
+      "additionalEndpointProperties": {
+       "infoShownInReportMode": "FullInformation"
+      }
+     }
+    },
+    "debugContent": {
+     "ecsEtag": "\"synthetic-etag\"",
+     "causeId": "0a0b0c0d"
+    }
+   }
+  },
+  {
+   "name": "the callee joins the running group call from the chat",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation2?i=10-0-0-2&e=1",
+   "body": {
+    "conversationRequest": {
+     "subject": "",
+     "roster": {
+      "type": "Delta",
+      "rosterUpdate": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/40404040/conversation/rosterUpdate/"
+     },
+     "properties": {
+      "allowConversationWithoutHost": true,
+      "enableGroupCallEventMessages": true,
+      "enableGroupCallUpgradeMessage": false,
+      "enableGroupCallMeetupGeneration": false
+     },
+     "links": {
+      "conversationEnd": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/41414141/conversation/conversationEnd/",
+      "conversationUpdate": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/42424242/conversation/conversationUpdate/"
+     }
+    },
+    "groupContext": null,
+    "groupChat": {
+     "threadId": "19:<group>@thread.v2",
+     "messageId": "0"
+    },
+    "participants": {
+     "from": {
+      "id": "8:orgid:<guid:b>",
+      "displayName": "Lab B",
+      "endpointId": "<guid:4>",
+      "participantId": "<guid:bb>",
+      "languageId": "en-us"
+     }
+    },
+    "capabilities": null,
+    "endpointCapabilities": 73463,
+    "clientEndpointCapabilities": 114259690,
+    "endpointMetadata": {
+     "holographicCapabilities": 3
+    },
+    "meetingInfo": {
+     "organizerId": "<guid:a>",
+     "tenantId": "<guid:tenant>",
+     "isBroadcast": false
+    },
+    "endpointState": {
+     "endpointStateSequenceNumber": 0,
+     "endpointProperties": {
+      "additionalEndpointProperties": {
+       "infoShownInReportMode": "FullInformation"
+      }
+     }
+    },
+    "debugContent": {
+     "ecsEtag": "\"synthetic-etag\"",
+     "causeId": "0a0b0c0d"
+    },
+    "callInvitation": {
+     "replaces": null,
+     "transferor": null,
+     "links": {
+      "acceptance": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/43434343/call/acceptance/",
+      "end": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/44444444/call/end/"
+     },
+     "clientContentForMediaController": {
+      "controlVideoStreaming": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/45454545/call/controlVideoStreaming/"
+     },
+     "mediaContent": {
+      "blob": "v=0\r\no=- 1 3 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 50002 RTP/SAVP 111\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:111 opus/48000/2\r\na=mid:0\r\na=sendrecv\r\nm=video 50002 RTP/SAVP 107\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:107 H264/90000\r\na=mid:1\r\na=sendrecv\r\na=label:main-video\r\n",
+      "contentType": "application/sdp-ngc-1.0",
+      "clientLocation": "ZZ",
+      "mediaLegId": "0000000000000000000000000000000C"
+     },
+     "pstnContent": {
+      "emergencyCallCountry": "",
+      "platformName": "SyntheticClient/1.0",
+      "publicApiCall": false
+     },
+     "locationContent": null,
+     "networkContent": null,
+     "areaContent": null,
+     "callModalities": [
+      "Audio",
+      "ScreenViewer"
+     ]
+    },
+    "participantPropertyBag": {
+     "aiVoiceConsent": {
+      "sequenceNumber": 1,
+      "value": {
+       "aiVoiceConsentValue": "0"
+      }
+     }
+    }
+   }
+  }
+ ],
+ "attach_answer": {
+  "participants": {
+   "from": {
+    "id": "8:orgid:<guid:a>",
+    "displayName": "Lab A",
+    "endpointId": "<guid:3>"
+   },
+   "to": {
+    "id": "8:orgid:<guid:b>",
+    "displayName": "Lab B",
+    "endpointId": "<guid:4>"
+   }
+  },
+  "callInvitation": {
+   "callModalities": [
+    "audio"
+   ],
+   "links": {
+    "progress": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/progress?i=10-0-0-1",
+    "newOffer": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/mediaOfferRequest?i=10-0-0-1",
+    "mediaAnswer": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/mediaAnswer?i=10-0-0-1",
+    "acceptance": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/accept?i=10-0-0-1",
+    "redirection": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/redirect?i=10-0-0-1",
+    "callController": "http://callcontroller.invalid",
+    "callLeg": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/reject?i=10-0-0-1",
+    "subscribe": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/broker-zz-01-prod-aks.broker.skype.com/api/v1/subscribe/<guid:call>/0?i=10-0-0-3",
+    "brokerHttpTransport": "http://203.0.113.30/enc"
+   },
+   "mediaContent": null,
+   "replaces": null,
+   "voicemailSettings": {}
+  },
+  "additionalActionResponses": [
+   {
+    "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1?i=10-0-0-2&e=1",
+    "output": {
+     "conversationController": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1?i=10-0-0-2&e=1",
+     "sequenceNumber": 1,
+     "roster": {
+      "type": "Delta",
+      "sequenceNumber": 0,
+      "participants": {}
+     },
+     "state": {
+      "isMultiParty": false,
+      "groupCallInitiator": null,
+      "isBroadcast": false
+     },
+     "links": {
+      "leave": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/leave?i=10-0-0-2&e=1",
+      "addParticipant": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/addParticipant?i=10-0-0-2&e=1",
+      "updateEndpointMetadata": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/updateEndpointMetadata?i=10-0-0-2&e=1",
+      "updateEndpointState": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/updateEndpointState?i=10-0-0-2&e=1",
+      "notificationLinks": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/notificationLinks?i=10-0-0-2&e=1",
+      "updateParticipantProperties": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1/updateParticipantProperties?i=10-0-0-2&e=1"
+     }
+    }
+   }
+  ]
+ },
+ "accept_answer": {
+  "callAcceptanceAcknowledgement": {
+   "links": {
+    "callLeg": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/a4/3?i=10-0-0-1",
+    "mediaRenegotiation": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/a4/3/renegotiate?i=10-0-0-1",
+    "updateMediaDescriptions": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/a4/3/updateMediaDescriptions?i=10-0-0-1",
+    "applyChannelParameters": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/mcProxy/SyntheticCall1/27/k27/3/applyChannelParameters?i=10-0-0-1",
+    "controlVideoStreaming": "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/<guid:agentb>/35353535/call/controlVideoStreaming/"
+   },
+   "callKeepAliveInterval": 2700
+  },
+  "debugContent": null
+ },
+ "deliveries": [
+  {
+   "name": "a renegotiation of the answered call, at the callee's own mediaRenegotiation callback",
+   "callback": "20202020/call/mediaRenegotiation/",
+   "body": {
+    "mediaNegotiation": {
+     "sender": null,
+     "mediaContent": {
+      "contentType": "application/sdp-ngc-1.0",
+      "blob": "v=0\r\no=- 1 3 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 50002 RTP/SAVP 111\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:111 opus/48000/2\r\na=mid:0\r\na=sendrecv\r\nm=video 50002 RTP/SAVP 107\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:107 H264/90000\r\na=mid:1\r\na=sendrecv\r\na=label:main-video\r\n",
+      "mediaLegId": "<guid:leg>"
+     },
+     "callModalities": [],
+     "links": {
+      "mediaAnswer": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/negotiations/SyntheticCall1/27/t/4/answer?i=10-0-0-1",
+      "rejection": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/negotiations/SyntheticCall1/27/t/4/reject?i=10-0-0-1"
+     }
+    }
+   }
+  },
+  {
+   "name": "the answer to the callee's renegotiation, at its own mediaAnswer callback",
+   "callback": "31313131/call/mediaAnswer/",
+   "body": {
+    "mediaAnswer": {
+     "sender": {
+      "id": "8:orgid:<guid:a>"
+     },
+     "mediaContent": {
+      "contentType": "application/sdp-ngc-1.0",
+      "blob": "v=0\r\no=- 1 3 IN IP4 127.0.0.1\r\ns=-\r\nb=CT:4000\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 50002 RTP/SAVP 111\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:111 opus/48000/2\r\na=mid:0\r\na=sendrecv\r\nm=video 50002 RTP/SAVP 107\r\nc=IN IP4 192.0.2.12\r\na=rtpmap:107 H264/90000\r\na=mid:1\r\na=sendrecv\r\na=label:main-video\r\n"
+     },
+     "callModalities": [
+      "audio",
+      "video"
+     ],
+     "links": {
+      "mediaAcknowledgement": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/mediaAnswers/SyntheticCall1/27/t/5/acknowledge?i=10-0-0-1"
+     }
     }
    }
   }
