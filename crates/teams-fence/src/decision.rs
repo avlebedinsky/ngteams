@@ -10,9 +10,13 @@ use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
+use crate::calls::{CallRegistry, Delivery, DeliveryDecision, DeliveryPermit, Observed, PendingStart, RegisterError};
+use crate::contacting::CALL_START_URL;
+use crate::contacting::call::{call_start, start_evidence};
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
 use crate::membership::is_chat_id;
@@ -103,6 +107,11 @@ pub enum PartialReason {
     /// tenant's user, a consumer account), or a thread of another type. Never guessed: the write is denied
     /// (`docs/personal-build.md`, Choice B).
     UnknownForm,
+    /// A call operation whose link no call of this run's registry holds (live): a call this fence didn't permit,
+    /// whose answer or acceptance wasn't read, or of another run.
+    UnregisteredCall,
+    /// A call operation on a call that ended (or is ending, for anything but its `leave`).
+    CallEnded,
 }
 
 impl fmt::Display for PartialReason {
@@ -116,6 +125,8 @@ impl fmt::Display for PartialReason {
             Self::NoCredential => f.write_str("the membership source has no credential yet"),
             Self::Unsupported => f.write_str("the membership source can't read this scope in full"),
             Self::UnknownForm => f.write_str("the answer holds a member or a thread in a form no capture showed"),
+            Self::UnregisteredCall => f.write_str("no call this run's fence registered holds this link"),
+            Self::CallEnded => f.write_str("the call ended"),
         }
     }
 }
@@ -181,10 +192,13 @@ mod sealed {
 }
 
 /// The proof that one write passed the fence. Only [`Fence::check`] makes one: it has no public constructor, is not
-/// `Clone`, and is bound to the target it was issued for.
+/// `Clone`, and is bound to the target it was issued for and to the fence that issued it (its run-unique id and the
+/// permit's serial, so the call registry takes a call start's permit only from its own fence, and only once).
 #[derive(Debug)]
 pub struct WritePermit {
     target: Target,
+    issuer: u64,
+    serial: u64,
 }
 
 impl WritePermit {
@@ -228,6 +242,9 @@ pub enum DenyReason {
     AddsParticipants,
     /// The personal fence: the conversation's fresh read doesn't list the account as a member.
     NotAMember,
+    /// A call operation that doesn't fit the registered call holding its link: another kind of write, a sender other
+    /// than the call's caller, or participants added by anything but an `add`.
+    CallMismatch,
 }
 
 impl fmt::Display for DenyReason {
@@ -245,6 +262,7 @@ impl fmt::Display for DenyReason {
             Self::NotPersonalScope => f.write_str("not a 1:1 chat of the account's or a group chat"),
             Self::AddsParticipants => f.write_str("the write adds participants"),
             Self::NotAMember => f.write_str("the conversation's fresh read doesn't list the account"),
+            Self::CallMismatch => f.write_str("the write doesn't fit the registered call"),
         }
     }
 }
@@ -298,7 +316,16 @@ pub struct Fence {
     /// the account every conversation it writes to must list. `None` for a fence of no account ([`Fence::open_lab`],
     /// the browser fence's) or of an account whose MRI `lab.toml` doesn't know yet: it permits no own availability.
     own: Option<Mri>,
+    /// This fence's run-unique id, which its permits carry.
+    id: u64,
+    /// The serial of the next permit.
+    serial: AtomicU64,
+    /// The calls this fence permitted, and the links their services handed out ([`crate::calls`]).
+    calls: CallRegistry,
 }
+
+/// The id of the next fence made in this process.
+static NEXT_FENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Which rules a fence decides by: the lab's, or (only with the `personal` feature, through
 /// `Fence::open_personal`) the personal build's.
@@ -351,12 +378,20 @@ impl Fence {
     fn from_config(config: &LabConfig) -> Result<Self, OpenError> {
         let path = config.paths().fence_log();
         let log = FenceLog::open(&path).map_err(|source| OpenError::Log { path, source })?;
-        Ok(Self {
-            rules: Rules::Lab,
-            roster: Roster::from_lab(config),
+        Ok(Self::of(Rules::Lab, Roster::from_lab(config), log, None))
+    }
+
+    /// A fence of `rules`, with its own id, no permit issued yet and no call registered.
+    fn of(rules: Rules, roster: Roster, log: FenceLog, own: Option<Mri>) -> Self {
+        Self {
+            rules,
+            roster,
             log,
-            own: None,
-        })
+            own,
+            id: NEXT_FENCE.fetch_add(1, Ordering::Relaxed),
+            serial: AtomicU64::new(0),
+            calls: CallRegistry::default(),
+        }
     }
 
     fn from_account(config: &LabConfig, alias: Alias) -> Result<Self, OpenError> {
@@ -369,12 +404,7 @@ impl Fence {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn new(roster: Roster, log: FenceLog) -> Self {
-        Self {
-            rules: Rules::Lab,
-            roster,
-            log,
-            own: None,
-        }
+        Self::of(Rules::Lab, roster, log, None)
     }
 
     /// The personal fence of the account `own` over any log. Tests only (`test-support` and `personal`).
@@ -387,12 +417,7 @@ impl Fence {
     /// The personal fence of the account `own`, logging to `log`.
     #[cfg(feature = "personal")]
     pub(crate) fn of_personal(own: Mri, log: FenceLog) -> Self {
-        Self {
-            rules: Rules::Personal,
-            roster: Roster::default(),
-            log,
-            own: Some(own),
-        }
+        Self::of(Rules::Personal, Roster::default(), log, Some(own))
     }
 
     /// Whether this is the personal build's fence (`Fence::open_personal`, only with the `personal` feature); `false`
@@ -435,14 +460,17 @@ impl Fence {
     }
 
     /// Fetches the target scope's members from `source` (never from a cache) and allows the write only when every
-    /// participant, current or added, is in the roster. Every write is fetched so but three:
+    /// participant, current or added, is in the roster. Every write is fetched so but four:
     /// - a [`Scope::New`] target, judged by its added participants alone, and only for a kind that
     ///   [creates a target](crate::WriteKind::creates_target);
     /// - typing and a read receipt on a chat by its id ([`is_chat_id`]: a 1:1, group or meeting chat), allowed with
     ///   only lab accounts or approved services added (if any); off a chat (a channel, a chat id in another form) they
     ///   are fetched and judged like any write;
     /// - the account's own availability, allowed only on [`Scope::Account`] naming the fence's
-    ///   [own account](Fence::own_account), a lab account, with nobody added.
+    ///   [own account](Fence::own_account), a lab account, with nobody added;
+    /// - an operation on a call ([`Scope::CallOperation`]), with no member read: the call registry ([`crate::calls`])
+    ///   resolves it to a live call this fence permitted and registered, and the call's participants with any invitee
+    ///   must all be lab accounts or approved services.
     ///
     /// Nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
     /// logged is denied.
@@ -455,7 +483,11 @@ impl Fence {
     /// # Errors
     /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, when
     /// a kind that doesn't create a target names [`Scope::New`], when an own availability isn't the fence's own
-    /// account's or another write names [`Scope::Account`], or when an allow can't be logged. A personal fence denies
+    /// account's or another write names [`Scope::Account`], or when an allow can't be logged. A call operation is also
+    /// denied as [`PartialReason::UnregisteredCall`] when no registered call holds its link,
+    /// [`PartialReason::CallEnded`] when its call is ending (other than its `leave`) or ended, and
+    /// [`DenyReason::CallMismatch`] when it isn't its operation's kind, from the call's caller, adding exactly its
+    /// invitees and handing out only the call's own callbacks. A personal fence denies
     /// with its own reasons too: [`DenyReason::NotPersonalKind`], [`DenyReason::NotPersonalScope`],
     /// [`DenyReason::AddsParticipants`] and [`DenyReason::NotAMember`].
     pub async fn check(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
@@ -465,6 +497,7 @@ impl Fence {
             return self.decided(target, verdict);
         }
         let membership = match target.scope() {
+            Scope::CallOperation { .. } => return self.check_call_operation(target),
             Scope::New | Scope::Account { .. } => Membership::Complete(Vec::new()),
             _ if target.kind() == WriteKind::OwnAvailability || is_signal_on_a_chat(&target) => {
                 Membership::Complete(Vec::new())
@@ -479,12 +512,100 @@ impl Fence {
     fn decided(&self, target: Target, verdict: Verdict) -> Result<WritePermit, Denied> {
         let logged = self.log.record(&target, verdict);
         match (verdict, logged) {
-            (Verdict::Allow, Ok(())) => Ok(WritePermit { target }),
+            (Verdict::Allow, Ok(())) => Ok(WritePermit {
+                target,
+                issuer: self.id,
+                serial: self.serial.fetch_add(1, Ordering::Relaxed),
+            }),
             (Verdict::Allow, Err(_)) => Err(Denied {
                 target,
                 reason: DenyReason::LogUnavailable,
             }),
             (Verdict::Deny(reason), _) => Err(Denied { target, reason }),
+        }
+    }
+
+    /// The decision on an operation on a registered call ([`Scope::CallOperation`]): the call registry resolves its link
+    /// to a live call this fence registered ([`crate::calls`]), and the call's participants together with any invitee
+    /// must all be lab accounts or approved services; a permitted `leave` moves its call to ending.
+    fn check_call_operation(&self, target: Target) -> Result<WritePermit, Denied> {
+        let resolved = match self.calls.resolve(&target) {
+            Ok(resolved) => resolved,
+            Err(reason) => return self.decided(target, Verdict::Deny(reason)),
+        };
+        let participants: BTreeSet<&Mri> = resolved.participants.iter().chain(target.added()).collect();
+        let verdict = if participants.is_empty() {
+            Verdict::Deny(DenyReason::NoMembers)
+        } else {
+            self.admits_all(participants.into_iter())
+        };
+        let permit = self.decided(target, verdict)?;
+        self.calls.permitted(&resolved);
+        Ok(permit)
+    }
+
+    /// Takes a permit this fence issued for a call start ([`WriteKind::Call`] on [`Scope::New`]), once, with the start's
+    /// body, which must read as the start the permit was issued for: the call is then pending, waiting for its answer
+    /// ([`Fence::register_start`]), and grants nothing yet ([`crate::calls`]). `None` for another fence's permit, one
+    /// taken already, another kind of write, or a body that doesn't give the permit's target.
+    #[must_use]
+    pub fn pend_start(&self, permit: &WritePermit, start_body: &[u8]) -> Option<PendingStart> {
+        let target = permit.target();
+        if permit.issuer != self.id || target.kind() != WriteKind::Call || target.scope() != &Scope::New {
+            return None;
+        }
+        let evidence = start_evidence(start_body)?;
+        let mut others = target.added().iter().filter(|mri| **mri != evidence.caller);
+        let (Some(echo), None) = (others.next(), others.next()) else {
+            return None;
+        };
+        let url = url::Url::parse(CALL_START_URL).ok()?;
+        if call_start("POST", &url, Some(start_body), Some(echo)).as_ref() != Some(target) {
+            return None;
+        }
+        self.calls.pend(self.id, permit.serial, target, evidence)
+    }
+
+    /// Registers a pending call with its start's answer, read in full ([`crate::calls`]): its conversation's links
+    /// become the links its operations may go to.
+    ///
+    /// # Errors
+    /// [`RegisterError`] when the pending start is another fence's, isn't pending any more, or the answer isn't a
+    /// conversation in the captured shape (the call then never registers).
+    pub fn register_start(&self, pending: PendingStart, answer: &[u8]) -> Result<(), RegisterError> {
+        if pending.fence() != self.id {
+            return Err(RegisterError::OtherFence);
+        }
+        self.calls.register(pending, answer)
+    }
+
+    /// Reads a Trouter delivery the account's socket received ([`crate::calls`]): a pending or registered call's
+    /// acceptance binds its call controller's links, and the end of a call ends it. It sends nothing and permits
+    /// nothing by itself.
+    pub fn observe_delivery(&self, delivery: &Delivery) -> Observed {
+        self.calls.observe(delivery)
+    }
+
+    /// Forgets the pending deliveries of a connection that closed.
+    pub fn close_connection(&self, connection: &str) {
+        self.calls.close_connection(connection);
+    }
+
+    /// Decides a Trouter delivery response sent on `connection` (`response`: the socket.io message's JSON, after
+    /// `3:::`): permitted only as the captured acknowledgement of a pending acceptance delivery of a live call on that
+    /// connection, once ([`crate::calls`]). A decision is logged; a response to no pending delivery is
+    /// [`DeliveryDecision::NotPending`], neither decided nor logged.
+    pub fn check_delivery_response(&self, connection: &str, response: &[u8]) -> DeliveryDecision {
+        const KIND: &str = "call_acceptance_acknowledgement";
+        let Some(decided) = self.calls.respond(connection, response) else {
+            return DeliveryDecision::NotPending;
+        };
+        let reason = decided.as_ref().err().copied();
+        let logged = self.log.record_delivery_response(KIND, reason);
+        match (decided, logged) {
+            (Ok(delivery), Ok(())) => DeliveryDecision::Permitted(DeliveryPermit::new(delivery)),
+            (Ok(_), Err(_)) => DeliveryDecision::Denied(crate::calls::DeliveryDenyReason::LogUnavailable),
+            (Err(reason), _) => DeliveryDecision::Denied(reason),
         }
     }
 

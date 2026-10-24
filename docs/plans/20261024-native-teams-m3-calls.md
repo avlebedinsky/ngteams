@@ -412,19 +412,33 @@ ui-sandbox (+ a private PipeWire: a tone source, a recorded sink, a fake camera)
   `crates/proto-lab/src/{classify.rs,fence_http.rs,fence_ws.rs}`, `crates/fence-seal/tests/ui/*`,
   `docs/protocol/{calling-echo.md,fence-targets.md,endpoints.md}`, CLAUDE.md
 
-- [ ] decide with Codex: the registry's keys and how each is bound (the start's answer, the acceptance, a
+- [x] decide with Codex: the registry's keys and how each is bound (the start's answer, the acceptance, a
       `conversationUpdate`), how the browser fence observes them (a response-stage pause for the start's URL, the
-      page's received Trouter frames), offered invitations, and what a registered call's end does
-- [ ] tests first: `CallRegistry` in `teams-fence`: a permitted start registers its conversation once its answer is
+      page's received Trouter frames), offered invitations, and what a registered call's end does (decided, Codex
+      signed off; transcript
+      `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-3-call-registry/transcript.md`;
+      written up in `docs/protocol/fence-targets.md`, "The call registry"): a follow-up passes only to exactly a link
+      the call's own services handed out for that operation (never by a bare id); a call start's permit (this
+      fence's, taken once) plus its body pends the call, the start's answer read at the response stage (tied to the
+      permitted request by `Network` id) registers it with the answer's operation links, and the acceptance delivered
+      at the start's own `acceptance` callback path binds the call controller's links (one call id); a follow-up is
+      `Scope::CallOperation { operation, url, from }`, its sender the call's caller; a permitted `leave` leaves only
+      that `leave` passing, the start's `conversationEnd`/call `end` delivery ends the call for good; the one delivery
+      response is the acceptance's acknowledgement on its own connection, once. ⚠️ Deviations: a `conversationUpdate`
+      binds nothing yet (none of the captured operations needs it; Task 6 adds it if the callee/join captures do);
+      offered invitations are decided but not built (Task 6); the native `AddToCall` stays on `Scope::Call` (denied as
+      partial) until Task 11 moves the sealed call writes onto `Scope::CallOperation`
+- [x] tests first: `CallRegistry` in `teams-fence`: a permitted start registers its conversation once its answer is
       read; a call id is bound only as the capture binds it; a follow-up on a registered call is permitted, on another
       conversation, host or run `Partial`; an observation that doesn't read binds nothing
-- [ ] tests first: the follow-ups' rows from the M0 capture (`updateEndpointMetadata`, `applyChannelParameters`,
+- [x] tests first: the follow-ups' rows from the M0 capture (`updateEndpointMetadata`, `applyChannelParameters`,
       `acknowledge`, `leave`) and `add` judged per invitee (the echo service permitted, anyone else denied); the
       acknowledgement's delivery response over Trouter as a typed frame for a registered call only (the browser's frame
-      rule lets exactly that through, every other type `3` stays denied)
-- [ ] the browser fence feeds the registry; `fence-seal` cases for the new types
-- [ ] CLAUDE.md's patterns ("The sealed fence API", the frame rule) updated with the code; `endpoints.md` rows
-- [ ] `cargo test -p teams-fence -p proto-lab -p fence-seal` and the gate pass
+      rule lets exactly that through, every other type `3` stays denied) (the native typed frame comes with the
+      native call writes, Tasks 11–12; the fence's decision, `Fence::check_delivery_response`, is in)
+- [x] the browser fence feeds the registry; `fence-seal` cases for the new types
+- [x] CLAUDE.md's patterns ("The sealed fence API", the frame rule) updated with the code; `endpoints.md` rows
+- [x] `cargo test -p teams-fence -p proto-lab -p fence-seal` and the gate pass
 
 ### Task 4: The echo call completes in the browser (live)
 **Files:**

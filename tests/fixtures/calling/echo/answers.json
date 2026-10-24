@@ -14,6 +14,7 @@
     "links": {
       "leave": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/leave?i=0-0-0-0&e=1",
       "addParticipant": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/addParticipant?i=0-0-0-0&e=1",
+      "addParticipantAndModality": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/add?i=0-0-0-0&e=1",
       "updateEndpointMetadata": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/updateEndpointMetadata?i=0-0-0-0&e=1",
       "getAllParticipants": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/getAllParticipants?i=0-0-0-0&e=1",
       "subscribe": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/broker-zz-01-prod-aks.broker.skype.com/api/v1/subscribe/<guid:1>/0?i=0-0-0-0"

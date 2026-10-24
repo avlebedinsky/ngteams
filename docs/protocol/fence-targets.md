@@ -55,7 +55,7 @@ lower case on a dot boundary (the host or any host under it), a trailing dot dro
 | Service | Hosts | What isn't `Unreadable` there |
 |---|---|---|
 | Chat service | a Teams origin's `/api/chatsvc/…`; `*.msg.teams.microsoft.com` | [its rows](#the-chat-services-rows) |
-| Calling | `*.flightproxy.teams.microsoft.com` (whose `ep/<host>/…` forms reach the hosts behind it), `api.fl.teams.microsoft.com`, every `*.skype.com` host but AMS's (`*.conv.skype.com`, `*.cc.skype.com`, `*.broker.skype.com` and any other: a Skype host whose purpose is unknown counts as contacting) | the web client's test call start in its captured shape (`CALL_START_URL`, no query), `Write(Call)` to `New` with the caller and the echo service, only when the policy names the echo callee (`Policy::with_echo_callee`; the browser's `Classifier::with_test_call_callee`): [calling-echo.md](calling-echo.md) |
+| Calling | `*.flightproxy.teams.microsoft.com` (whose `ep/<host>/…` forms reach the hosts behind it), `api.fl.teams.microsoft.com`, every `*.skype.com` host but AMS's (`*.conv.skype.com`, `*.cc.skype.com`, `*.broker.skype.com` and any other: a Skype host whose purpose is unknown counts as contacting) | the web client's test call start in its captured shape (`CALL_START_URL`, no query), `Write(Call)` to `New` with the caller and the echo service, only when the policy names the echo callee (`Policy::with_echo_callee`; the browser's `Classifier::with_test_call_callee`): [calling-echo.md](calling-echo.md); the captured operations on a call (`updateEndpointMetadata`, `add`, `leave`, `acknowledge`, `applyChannelParameters`), each in its captured method, path and body, a write on `Scope::CallOperation` that [the call registry](#the-call-registry) resolves |
 | Graph | `*.graph.microsoft.com`, every version, `$batch` included | nothing |
 | Outlook, OWA and Substrate | `*.outlook.office.com`, `*.outlook.office365.com`, `*.outlook.cloud.microsoft`, `*.outlook.live.com`, `*.substrate.office.com` | `POST /search/api/<version>/suggestions` and `…/query` on Substrate: search reads |
 | SharePoint and OneDrive | `*.sharepoint.com`, `*.sharepoint-df.com`, `*.microsoftpersonalcontent.com`, `*.onedrive.com`, `onedrive.live.com`, the media hosts `*.svc.ms` | nothing |
@@ -80,7 +80,8 @@ its static hosts. [endpoints.md](endpoints.md) lists every endpoint seen with it
 A WebSocket's URL is read the same way (`teams_fence::on_contacting_service`, any scheme): the lab browser denies
 every frame on a contacting service's socket, and on a Trouter socket judges each frame by its socket.io type (`0`,
 `1`, `2` and `5` pass; `3`, the answer to a delivery, `4`, `6`, a binary frame and anything that doesn't parse are
-denied: [trouter.md](trouter.md#answering-deliveries)). Frames on any other socket pass.
+denied: [trouter.md](trouter.md#answering-deliveries)), but for the acknowledgement of a registered call's acceptance,
+which the call registry decides ([the call registry](#the-call-registry)). Frames on any other socket pass.
 
 ## The chat service
 
@@ -246,9 +247,61 @@ Rules that keep the mapping fail-closed:
   and binding it to that chat would take a registry of what the fence permitted or an authoritative read of the
   object's current readers, which no capture has shown and which `forward` could widen. So images aren't sent
   (`docs/backlog/ams-image-sending.md`, [chat.md](chat.md)).
-- Calls map only the test call's start, as a new call of its caller and the echo service; every write on an existing
-  call and any answer stay unreadable ([calling-echo.md](calling-echo.md), `docs/backlog/fence-call-follow-ups.md`
-  for what M3 maps). Meetings, invites, mail and channel posts aren't mapped.
+- Calls map the test call's start, as a new call of its caller and the echo service, and the captured operations on a
+  call the fence registered ([the call registry](#the-call-registry)); any other write on a call and any answer stay
+  unreadable ([calling-echo.md](calling-echo.md), `docs/backlog/fence-call-follow-ups.md` for what M3 maps next).
+  Meetings, invites, mail and channel posts aren't mapped.
+
+## The call registry
+
+A call's follow-ups reach its participants, and no source reads a call's members (the conversation's
+`getAllParticipants` answered an empty list for a call that had its caller in it:
+[calling-echo.md](calling-echo.md#open)).
+So the fence trusts only the calls it permitted itself (CLAUDE.md, "Calls go only to the lab, both ways"): each fence
+holds a call registry (`crates/teams-fence/src/calls.rs`), and a follow-up passes only as a captured operation sent to
+exactly a link the call's own services handed out for that operation. Decided with Codex (M3 Task 3, transcript under
+`~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-3-call-registry/`).
+
+**The bindings**, each only as the echo call's capture shows it:
+
+| Step | What binds | How |
+|---|---|---|
+| the start | a pending call: its caller (`participants.from.id`), its participants (the permit's), the endpoint's own callbacks (`callInvitation.links`, `conversationRequest.links`) | `Fence::pend_start(&permit, start body)`: the permit must be this fence's (it carries the fence's run-unique id) and is taken once (by its serial); the body must read as the start the permit was issued for |
+| the start's answer | the call is registered: of the answer's `links`, `updateEndpointMetadata`, `leave` and `addParticipantAndModality` (the `/add` the client posts to, not `addParticipant`), each only when it is `conversationController`'s path plus the operation's segment, with its query | `Fence::register_start(pending, answer)`; the browser pauses the answer to `CALL_START_URL` at the response stage on its own session, ties it to the permitted start by the request's `Network` id, reads it and only then continues it |
+| the acceptance | the call controller's links: `acknowledgement` (`…/cc/v1/callAcceptance/<call>/…/acknowledge`) and `applyChannelParameters` (`…/cc/v1/mcProxy/<call>/…/applyChannelParameters`), when every link of `callAcceptance.links` names one call controller host and one call id (a redelivery naming another binds nothing) | `Fence::observe_delivery`: a Trouter delivery at exactly the path of the start's own `acceptance` callback (the endpoint, call agent and random segment), its body decoded (gzip and base64, as the call controller sends it). One that arrives before the answer waits on the pending call |
+| a `conversationUpdate` | nothing | none of the captured operations needs it; binding the call controller's call from `activeModalities.call.links` waits for a capture that needs it (the callee's side, a join) |
+
+Every link is `https` on the flight proxy (`api.flightproxy.teams.microsoft.com`, no port) and is compared whole:
+scheme, host, path and query. A follow-up is `Scope::CallOperation { operation, url, from, callbacks }`
+(`WriteKind::CallFollowUp`, or `Invite` for an `add`, its invitees added); `Fence::check` resolves it in the registry,
+never by a member read: a live call holding that URL for that operation, its sender (`participants.from.id`, where the
+operation's body names one) the call's caller, invitees only on an `add`, and every callback link the body hands the
+call's services (an acknowledgement's `callAcceptanceAcknowledgement.links`, an `add`'s `links`) on the start's own
+endpoint and call agent, as the acceptance's delivery response must be (below; a call whose start named no call agent
+takes none); the call's participants and any invitee must all be lab accounts or approved services. Otherwise
+`Partial(UnregisteredCall)` (a call this fence didn't permit, whose answer or acceptance wasn't read, or another
+run's), `Partial(CallEnded)` or `CallMismatch`. An `add` maps only naming its sender's own chat and meeting: a
+`groupChat` must name exactly the 1:1 chat of the sender and the add's one invitee (`19:<id>_<id>@unq.gbl.spaces`,
+the two ids in either order), and a `meetingInfo` must name the sender's object id as its organizer; any other chat
+or organizer is unreadable. `fence.log` holds the operation and its URL, never the sender or the callbacks.
+
+**The end.** A permitted `leave` moves the call to ending, where only that `leave` passes again (the web client resent
+it); a delivery at the start's own `conversationEnd` or call `end` callback ends it, and nothing passes on it any more.
+An ended call is never restored, whatever arrives after.
+
+**The acceptance's delivery response** is the one Trouter delivery response the fence lets through
+(`Fence::check_delivery_response`, logged as a `delivery_response` entry): it answers a pending acceptance delivery of
+a live call on the same connection (in the browser: the socket's session and `Network` id; a closed socket's pending
+deliveries are dropped), once, in the captured envelope (`id` the delivery's, `status` 200, exactly the headers
+`MS-CV`, `trouter-request` equal to the delivery's, `trouter-client`), its body a `callAcceptanceAcknowledgement` whose
+links are all callbacks on the start's own endpoint and call agent (same authority, same path prefix). Every other
+delivery response stays denied, the empty acknowledgements of a `conversationUpdate` included.
+
+**Offered invitations** (decided now, built when answering is mapped): a record of their own beside the registered
+calls, made only for a readable invitation addressed to the account whose caller and participants are all lab
+accounts or the echo service (by MRI, no roster read), with the invitation's captured links and the delivery that
+brought it; an answer or a decline is a fresh decision on a still-offered invitation, a permitted answer registers its
+call through the captured bindings, and the ring's end revokes the offer.
 
 ## Reading a chat's members
 

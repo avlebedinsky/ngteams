@@ -27,6 +27,15 @@
 //! `SEND`), never a frame's content. A run can force a deny on frames too ([`ForcedFrameDeny`], before the rule), as it
 //! can on requests.
 //!
+//! **The call registry's one delivery response.** Trouter deliveries the page receives on a Trouter socket
+//! (`Network.webSocketFrameReceived`, socket.io `3:::` requests, their bodies decoded: [`delivery_of`]) go to the
+//! fence's call registry ([`Fence::observe_delivery`]), on a connection keyed by the socket's session and `Network`
+//! id: a registered call's acceptance binds its call controller's links and waits for its response; the end of a call
+//! ends it. A closed socket's pending deliveries are dropped. A `3:::` frame the page sends on a Trouter socket that
+//! answers such a pending delivery on its connection (the one open socket of its session with its URL) is the
+//! fence's to decide ([`Fence::check_delivery_response`]: the captured acknowledgement of a live call's acceptance,
+//! once); every other `3` stays denied by the frame rule.
+//!
 //! **The audit** compares what the browser reports as sent (`Network.webSocketFrameSent`, on the session of the target
 //! that sent it) with the guard's allows: each allow covers one frame with the same opcode and content on the same
 //! session, and a frame no allow covers is a breach — logged (`breach`, `sent_without_allow`) and kept, and it fails
@@ -39,10 +48,13 @@ use std::fmt;
 use std::io::{self, Read as _};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use base64::Engine as _;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
-use teams_fence::{Channel, Fence, MembershipSource, RequestOutcome, RequestRecord, on_contacting_service};
+use teams_fence::{
+    Channel, Delivery, DeliveryDecision, Fence, MembershipSource, RequestOutcome, RequestRecord, on_contacting_service,
+};
 use url::{Host, Url};
 
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
@@ -226,6 +238,51 @@ pub fn trouter_type(text: &str) -> Option<u8> {
     let rest = &rest[id_len..];
     let rest = rest.strip_prefix(b"+").unwrap_or(rest);
     (kind.is_ascii_digit() && rest.starts_with(b":")).then_some(kind)
+}
+
+/// The connection a socket of the browser is to the call registry: the session it was reported on and its `Network`
+/// request id, so a socket made again at the same URL is another connection.
+fn connection_key((session, request): &(Option<SessionId>, String)) -> String {
+    let session = session.as_ref().map_or("browser", SessionId::as_str);
+    format!("{session}/{request}")
+}
+
+/// The most a delivery's body may hold once decoded; a larger one is no delivery the fence reads.
+const MAX_DELIVERY: u64 = 4 << 20;
+
+/// A Trouter delivery a socket received on `connection`, as the fence's call registry reads it: a socket.io message
+/// `3:::` whose JSON has a signed `id`, the `url` path it was delivered to, its `headers` (their `trouter-request`)
+/// and its `body`, decoded from base64 and gzip when `X-Microsoft-Skype-Content-Encoding` (any case) is `gzip`, as the
+/// call controller sends it. `None` for anything else, or a body that doesn't decode within [`MAX_DELIVERY`].
+#[must_use]
+pub fn delivery_of(connection: &str, text: &str) -> Option<Delivery> {
+    let message = crate::classify::strict_json(text.strip_prefix("3:::")?.as_bytes())?;
+    let headers = message.get("headers")?.as_object()?;
+    let header = |wanted: &str| {
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+            .and_then(|(_, value)| value.as_str())
+    };
+    let body = message.get("body")?.as_str()?;
+    let body = if header("X-Microsoft-Skype-Content-Encoding").is_some_and(|value| value.eq_ignore_ascii_case("gzip")) {
+        let compressed = base64::engine::general_purpose::STANDARD.decode(body).ok()?;
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(compressed.as_slice())
+            .take(MAX_DELIVERY + 1)
+            .read_to_end(&mut decoded)
+            .ok()?;
+        (decoded.len() as u64 <= MAX_DELIVERY).then_some(decoded)?
+    } else {
+        body.as_bytes().to_vec()
+    };
+    Some(Delivery {
+        connection: connection.to_owned(),
+        id: message.get("id")?.as_i64()?,
+        path: message.get("url")?.as_str()?.to_owned(),
+        trouter_request: header("trouter-request").map(str::to_owned),
+        body,
+    })
 }
 
 /// A deny a run asks for on purpose on WebSocket frames: every frame on a socket whose URL the pattern finds a match in
@@ -444,10 +501,18 @@ impl WsFence {
         self.forced.lock().unwrap_or_else(PoisonError::into_inner).clear();
     }
 
-    /// Classifies a frame and decides it. Every deny is logged and kept. A [`Payload::Foreign`] frame is denied
-    /// unclassified ([`DenyCause::ForeignSocket`]; `fence.log` has it as `unclassified`); a forced one comes next
-    /// ([`DenyCause::Forced`], logged as `forced`; [`DenyCause::LogUnavailable`] when the log won't take it).
+    /// Classifies a frame and decides it, as a frame of no known session ([`Self::decide_on`]).
     pub async fn decide(&self, frame: &Frame) -> Verdict {
+        self.decide_on(None, frame).await
+    }
+
+    /// Classifies a frame sent on `session` and decides it. Every deny is logged and kept. A [`Payload::Foreign`] frame
+    /// is denied unclassified ([`DenyCause::ForeignSocket`]; `fence.log` has it as `unclassified`); a forced one comes
+    /// next ([`DenyCause::Forced`], logged as `forced`; [`DenyCause::LogUnavailable`] when the log won't take it). A
+    /// delivery response (`3:::`) on a Trouter socket that answers a pending call delivery of that socket is the
+    /// fence's to decide ([`Fence::check_delivery_response`], which logs it; [`DenyCause::DeliveryResponse`] when it
+    /// refuses); any other frame goes by the frame rule ([`classify_frame`]).
+    pub async fn decide_on(&self, session: Option<&SessionId>, frame: &Frame) -> Verdict {
         if frame.payload == Payload::Foreign {
             let record = RequestRecord {
                 channel: Channel::WebSocket,
@@ -485,7 +550,42 @@ impl WsFence {
             });
             return Verdict::Deny(cause);
         }
+        if let Some(verdict) = self.delivery_response(session, frame) {
+            return verdict;
+        }
         self.judge(classify_frame(frame), &frame.url).await
+    }
+
+    /// The fence's decision on a delivery response answering a pending call delivery (see [`Self::decide_on`]); `None`
+    /// for any other frame, and for one whose socket isn't exactly one open socket of `session` with its URL.
+    fn delivery_response(&self, session: Option<&SessionId>, frame: &Frame) -> Option<Verdict> {
+        let Payload::Text(text) = &frame.payload else {
+            return None;
+        };
+        let response = text.strip_prefix("3:::")?;
+        if !Url::parse(&frame.url).is_ok_and(|url| is_trouter_socket(&url)) {
+            return None;
+        }
+        let connection = {
+            let audit = self.audit();
+            let mut open = audit
+                .sockets
+                .iter()
+                .filter(|((owner, _), url)| owner.as_ref() == session && **url == frame.url);
+            match (open.next(), open.next()) {
+                (Some((socket, _)), None) => connection_key(socket),
+                _ => return None,
+            }
+        };
+        match self.fence.check_delivery_response(&connection, response.as_bytes()) {
+            DeliveryDecision::NotPending => None,
+            DeliveryDecision::Permitted(_) => Some(Verdict::Allow),
+            DeliveryDecision::Denied(reason) => {
+                let cause = DenyCause::DeliveryResponse(reason);
+                self.keep(FrameDenial::new(&frame.url, cause));
+                Some(Verdict::Deny(cause))
+            }
+        }
     }
 
     /// Decides a frame already classified, sent on the socket at `url`. Every deny is logged and kept.
@@ -560,7 +660,7 @@ impl WsFence {
             return Ok(Some(Verdict::Deny(DenyCause::Malformed)));
         };
         let session = event.session_id.as_ref();
-        let verdict = self.decide(&request.frame).await;
+        let verdict = self.decide_on(session, &request.frame).await;
         if request.frame.payload == Payload::Foreign {
             return Ok(Some(verdict));
         }
@@ -594,7 +694,23 @@ impl WsFence {
                 self.audit().sockets.insert(socket(), url);
             }
             "Network.webSocketClosed" => {
-                self.audit().sockets.remove(&socket());
+                let socket = socket();
+                self.audit().sockets.remove(&socket);
+                self.fence.close_connection(&connection_key(&socket));
+            }
+            "Network.webSocketFrameReceived" => {
+                let socket = socket();
+                let url = self.audit().sockets.get(&socket).cloned();
+                let on_trouter = url
+                    .as_deref()
+                    .and_then(|url| Url::parse(url).ok())
+                    .is_some_and(|url| is_trouter_socket(&url));
+                let text = params["response"]["payloadData"].as_str();
+                if let (true, Some(text)) = (on_trouter, text)
+                    && let Some(delivery) = delivery_of(&connection_key(&socket), text)
+                {
+                    self.fence.observe_delivery(&delivery);
+                }
             }
             "Network.webSocketFrameSent" => {
                 let response = &params["response"];

@@ -7,10 +7,12 @@ and from the web bundle `26260.1717.5229.7049`. The captures stay outside the re
 `tests/fixtures/calling/echo/` are synthetic, shaped like them. Ids, tokens, hosts' numbers and addresses below are
 placeholders.
 
-The code: the scenario is `crates/proto-lab/src/scenario/echo_call.rs`; the call start is the calling family's one
-mapped row in `teams_fence::contacting` (`crates/teams-fence/src/contacting/call.rs`, `CALL_START_URL`), mapped only
-with the echo service's MRI (`Classifier::with_test_call_callee`); every other mutating request on a calling host is
-denied ([fence-targets.md](fence-targets.md#the-contacting-services)), and what M3 maps next is in
+The code: the scenario is `crates/proto-lab/src/scenario/echo_call.rs`; the call start is a row of the calling family
+in `teams_fence::contacting` (`crates/teams-fence/src/contacting/call.rs`, `CALL_START_URL`), mapped only with the
+echo service's MRI (`Classifier::with_test_call_callee`); the follow-ups below are rows there too, each a write the
+fence's call registry resolves to exactly a link of a call it permitted (M3 Task 3,
+[fence-targets.md](fence-targets.md#the-call-registry)); every other mutating request on a calling host is denied
+([fence-targets.md](fence-targets.md#the-contacting-services)), and what M3 maps next is in
 `docs/backlog/fence-call-follow-ups.md`. Audio worklets are armed by `TargetKind::Worklet`
 (`crates/proto-lab/src/arming.rs`).
 
@@ -68,7 +70,9 @@ fence of the time, which allowed each as the account's own state in its captured
   empty body for most, the call's `callAcceptanceAcknowledgement` for the acceptance callback. **These responses stay
   unknown and denied**: a response goes back to whoever sent the delivery, and which deliveries an empty success only
   acknowledges (and which it might answer: an incoming call's) isn't established (Codex and Claude, 2026-10-20). The
-  service redelivers; the calls still reached the media controller without them.
+  service redelivers; the calls still reached the media controller without them. The one exception: the
+  acceptance's acknowledgement for a call the fence registered passes once, on its own connection
+  ([fence-targets.md](fence-targets.md#the-call-registry)); every other response stays denied.
 - **Endpoint registration.** `POST <teams>/registrar/prod/V2/registrations` with `clientDescription` (`appId`,
   `templateKey`, …), a `registrationId` and `transports.TROUTER: [{"context":"","path":"<push url>","ttl":3600}]`;
   `202`. The messaging stack registers as `TeamsCDLWebWorker`; the calling stack opens a second Trouter socket and
@@ -135,7 +139,9 @@ each URL handed out by the service before it is used.
    `callKeepAliveInterval`. The page turns it into standard SDP (below), `setRemoteDescription` applies it and ICE
    connects (the remote candidates are the media controller's, `typ relay` on port 3478, UDP and TCP passive, IPv4
    and IPv6).
-6. **Follow-ups the client sends next** (all denied today, see [Open](#open)):
+6. **Follow-ups the client sends next** (denied in M0; since M3 Task 3 each passes on a call the fence registered, to
+   exactly the link the start's answer or the acceptance handed out for it:
+   [fence-targets.md](fence-targets.md#the-call-registry)):
    - `PUT …/conv/<conversation id>/updateEndpointMetadata` (the caller's `participants.from` and `endpointMetadata`);
    - `POST …/cc/v1/mcProxy/<call id>/…/applyChannelParameters` (send capabilities of a media line);
    - `POST …/cc/v1/callAcceptance/<call id>/…/acknowledge` (`callAcceptanceAcknowledgement.links`: more callbacks:
@@ -176,8 +182,11 @@ server-reflexive candidate to the controller's relay candidate.
 
 ## Open
 
-1. **Fencing a call's follow-ups.** `updateEndpointMetadata`, `applyChannelParameters`, `acknowledge`, `add` and
-   `leave` land on a call that exists. The fence requires its members read fresh and complete; neither the chat
+1. **Fencing a call's follow-ups.** Settled in M3 Task 3 by the call registry, not by a membership read
+   ([fence-targets.md](fence-targets.md#the-call-registry)): the fence trusts the calls it permitted itself, and a
+   follow-up passes only to a link that call's services handed out. The `add` posts to the answer's
+   `addParticipantAndModality` link (`…/add`), not `addParticipant`. What follows is the M0 state.
+   `updateEndpointMetadata`, `applyChannelParameters`, `acknowledge`, `add` and `leave` land on a call that exists. The fence requires its members read fresh and complete; neither the chat
    service read nor anything else gives that for a call yet. Candidates: the conversation's `getAllParticipants` link
    (method and answer not captured), or protocol evidence that a test call's membership can only change through the
    caller's own fenced `add` (Codex and Claude, 2026-10-20: the evidence so far doesn't establish it). Backlog:

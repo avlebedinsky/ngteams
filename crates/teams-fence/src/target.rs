@@ -23,6 +23,9 @@ pub enum WriteKind {
     Call,
     /// Answering an incoming call.
     CallAnswer,
+    /// A captured operation on a call this run's fence registered ([`Scope::CallOperation`], other than an `add`, which
+    /// is an [`WriteKind::Invite`]): judged by the call registry, never by a member read.
+    CallFollowUp,
     Invite,
     Meeting,
     MemberChange,
@@ -36,7 +39,7 @@ pub enum WriteKind {
 }
 
 impl WriteKind {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Message,
         Self::Edit,
         Self::Delete,
@@ -45,6 +48,7 @@ impl WriteKind {
         Self::ReadReceipt,
         Self::Call,
         Self::CallAnswer,
+        Self::CallFollowUp,
         Self::Invite,
         Self::Meeting,
         Self::MemberChange,
@@ -66,6 +70,7 @@ impl WriteKind {
             Self::ReadReceipt => "read_receipt",
             Self::Call => "call",
             Self::CallAnswer => "call_answer",
+            Self::CallFollowUp => "call_follow_up",
             Self::Invite => "invite",
             Self::Meeting => "meeting",
             Self::MemberChange => "member_change",
@@ -130,8 +135,24 @@ pub enum Scope {
     Channel { team: String, channel: String },
     /// A team as a whole (membership, settings).
     Team { id: String },
-    /// A call, placed or incoming.
+    /// A call, placed or incoming, by an id: judged by its fetched members, which no source reads yet.
     Call { id: String },
+    /// A captured operation on a call this run's fence registered (`crate::Fence::pend_start`): `url` is the exact URL
+    /// the write goes to, one of the links the call's services handed out for that operation, and `from` the
+    /// participant the body names as its sender (`participants.from.id`), for the operations that carry one, and
+    /// `callbacks` the endpoint callback links the body hands the call's services (an acknowledgement's
+    /// `callAcceptanceAcknowledgement.links`, an `add`'s `links`), each of which must be on the call start's own
+    /// endpoint and call agent. The call registry resolves it; nothing else is fetched.
+    CallOperation {
+        operation: CallOperation,
+        url: String,
+        // never in `fence.log`, which holds no participant's MRI
+        #[serde(skip)]
+        from: Option<Mri>,
+        // the endpoint's push URLs; `fence.log` keeps the operation and its URL
+        #[serde(skip)]
+        callbacks: Box<[String]>,
+    },
     /// Something the write creates: a new chat, call or meeting. It has no members to fetch yet: its participants are
     /// exactly the target's added participants. Only kinds that [create a target](WriteKind::creates_target) may use
     /// it; the fence denies any other kind on `New`.
@@ -149,9 +170,92 @@ impl fmt::Display for Scope {
             Self::Channel { team, channel } => write!(f, "channel {channel} of team {team}"),
             Self::Team { id } => write!(f, "team {id}"),
             Self::Call { id } => write!(f, "call {id}"),
+            Self::CallOperation { operation, url, .. } => write!(f, "{operation} on the call at {url}"),
             Self::New => f.write_str("a new target"),
             Self::Account { mri } => write!(f, "account {mri}"),
         }
+    }
+}
+
+/// A captured operation on an existing call, each from the echo call's capture (`docs/protocol/calling-echo.md`). Its
+/// method and the link it goes to are fixed: the conversation service's links from the call start's answer, the call
+/// controller's from the acceptance delivered for the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallOperation {
+    /// `PUT …/conv/<id>/updateEndpointMetadata`: the caller's endpoint metadata.
+    UpdateEndpointMetadata,
+    /// `POST …/conv/<id>/add`: an invitation into the call (the answer's `addParticipantAndModality` link).
+    Add,
+    /// `POST …/conv/<id>/leave`: the caller leaves.
+    Leave,
+    /// `POST …/cc/v1/callAcceptance/<call>/…/acknowledge`: the acceptance acknowledged.
+    Acknowledge,
+    /// `POST …/cc/v1/mcProxy/<call>/…/applyChannelParameters`: a media line's send capabilities.
+    ApplyChannelParameters,
+}
+
+impl CallOperation {
+    pub const ALL: [Self; 5] = [
+        Self::UpdateEndpointMetadata,
+        Self::Add,
+        Self::Leave,
+        Self::Acknowledge,
+        Self::ApplyChannelParameters,
+    ];
+
+    /// The name used in `fence.log`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UpdateEndpointMetadata => "update_endpoint_metadata",
+            Self::Add => "add",
+            Self::Leave => "leave",
+            Self::Acknowledge => "acknowledge",
+            Self::ApplyChannelParameters => "apply_channel_parameters",
+        }
+    }
+
+    /// The method the capture sends it with.
+    #[must_use]
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::UpdateEndpointMetadata => "PUT",
+            Self::Add | Self::Leave | Self::Acknowledge | Self::ApplyChannelParameters => "POST",
+        }
+    }
+
+    /// The last path segment of its link.
+    #[must_use]
+    pub fn segment(self) -> &'static str {
+        match self {
+            Self::UpdateEndpointMetadata => "updateEndpointMetadata",
+            Self::Add => "add",
+            Self::Leave => "leave",
+            Self::Acknowledge => "acknowledge",
+            Self::ApplyChannelParameters => "applyChannelParameters",
+        }
+    }
+
+    /// The kind of write it is: an `add` invites, the rest follow up.
+    #[must_use]
+    pub fn kind(self) -> WriteKind {
+        match self {
+            Self::Add => WriteKind::Invite,
+            _ => WriteKind::CallFollowUp,
+        }
+    }
+
+    /// Whether its body names its sender (`participants.from`): the conversation service's operations do.
+    #[must_use]
+    pub fn names_sender(self) -> bool {
+        matches!(self, Self::UpdateEndpointMetadata | Self::Add | Self::Leave)
+    }
+}
+
+impl fmt::Display for CallOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

@@ -34,6 +34,7 @@
 //! ([`test_support_enabled`]).
 
 pub mod apart;
+mod calls;
 mod contacting;
 mod decision;
 pub mod lab;
@@ -44,6 +45,9 @@ pub mod personal;
 mod post_read;
 mod target;
 
+pub use calls::{
+    Delivery, DeliveryDecision, DeliveryDenyReason, DeliveryPermit, Observed, PendingStart, RegisterError,
+};
 pub use contacting::{
     CALL_START_URL, Contact, OVERRIDE_HEADERS, OWN_VIEW_PROPERTIES, Policy, Request, Service, TEST_CALL_SCENARIO,
     contacting, on_contacting_service, service_of,
@@ -62,7 +66,7 @@ pub use membership::{
     one_to_one_id, one_to_one_pair, parse_listing, parse_members, parse_thread,
 };
 pub use post_read::{ChatPeople, PostReadDenied, PostReadDenyReason, PostReadPermit};
-pub use target::{Mri, Scope, Target, WriteKind};
+pub use target::{CallOperation, Mri, Scope, Target, WriteKind};
 
 /// Whether this build has the `test-support` feature, which lets any code build a fence over any roster and log and
 /// implement [`MembershipSource`]. Only dev-dependencies enable it, but cargo unifies features across one build, so a

@@ -1,12 +1,19 @@
-//! The calling family's one mapped write: the web client's test call start, a new call of the caller and the echo
-//! service (`docs/protocol/calling-echo.md`). Only its captured shape maps; every other mutating request on a calling
-//! host is unreadable until a row maps it.
+//! The calling family's rows (`docs/protocol/calling-echo.md`): the web client's test call start, a new call of the
+//! caller and the echo service, and the captured operations on a call that exists ([`follow_up`]: the endpoint's
+//! metadata, an `add`, the `leave`, the acceptance's acknowledgement and a media line's channel parameters), each a
+//! write on [`Scope::CallOperation`] that the call registry resolves (`crate::calls`). Only their captured shapes map;
+//! every other mutating request on a calling host is unreadable until a row maps it.
 
 use serde_json::{Map, Value};
 use url::{Position, Url};
 
+use super::decoded_segments;
 use super::json::strict_json;
-use crate::{Mri, Scope, Target, WriteKind};
+use crate::membership::{ONE_TO_ONE_SUFFIX, is_guid};
+use crate::{CallOperation, Mri, Scope, Target, WriteKind};
+
+/// The flight proxy every call request goes through: the call start, and every link the call's services hand out.
+pub(crate) const PROXY_HOST: &str = "api.flightproxy.teams.microsoft.com";
 
 /// The call controller's conversations endpoint, where a call starts (its URL without a query).
 pub const CALL_START_URL: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/epconv";
@@ -17,7 +24,7 @@ pub const TEST_CALL_SCENARIO: &str = "UserInitiatedTestCall";
 
 /// What a value of a call start may be: the type the capture had there (every call start of 2026-10-20 alike).
 #[derive(Clone, Copy)]
-enum Shape {
+pub(crate) enum Shape {
     /// `null` only: what the capture left empty, such as a call to replace or transfer, or a group, chat or meeting to
     /// call into.
     Null,
@@ -34,14 +41,14 @@ enum Shape {
 }
 
 /// A reviewed key of an object, the shape of its value, and whether it must be there.
-struct Field {
+pub(crate) struct Field {
     key: &'static str,
     shape: Shape,
     required: bool,
 }
 
 /// A key that may be missing.
-const fn field(key: &'static str, shape: Shape) -> Field {
+pub(crate) const fn field(key: &'static str, shape: Shape) -> Field {
     Field {
         key,
         shape,
@@ -50,7 +57,7 @@ const fn field(key: &'static str, shape: Shape) -> Field {
 }
 
 /// A key that must be there.
-const fn required(key: &'static str, shape: Shape) -> Field {
+pub(crate) const fn required(key: &'static str, shape: Shape) -> Field {
     Field {
         key,
         shape,
@@ -226,7 +233,7 @@ const PROPERTY_BAG: &[Field] = &[field(
 )];
 
 /// Whether `value` has `shape`, all the way down.
-fn fits(value: &Value, shape: Shape) -> bool {
+pub(crate) fn fits(value: &Value, shape: Shape) -> bool {
     match shape {
         Shape::Null => value.is_null(),
         Shape::Bool => value.is_boolean(),
@@ -291,4 +298,285 @@ pub(crate) fn call_start(
         _ => false,
     };
     echo_only.then(|| Target::new(WriteKind::Call, Scope::New).with_added([caller, echo.clone()]))
+}
+
+/// What a permitted call start tells the call registry beyond its target: who places it (`participants.from.id`) and
+/// the endpoint's own callback links for the call, by name, as the start names them.
+pub(crate) struct StartEvidence {
+    pub(crate) caller: Mri,
+    /// `callInvitation.links` (`acceptance`, `end`, …).
+    pub(crate) call_links: Map<String, Value>,
+    /// `conversationRequest.links` (`conversationEnd`, `conversationUpdate`, …).
+    pub(crate) conversation_links: Map<String, Value>,
+}
+
+/// The evidence of a call start in its captured shape (as [`call_start`] reads it); `None` for anything else.
+pub(crate) fn start_evidence(body: &[u8]) -> Option<StartEvidence> {
+    let start = strict_json(body)?;
+    if !fits(&start, Shape::Object(CALL_START)) {
+        return None;
+    }
+    let links = |at: &str| {
+        start
+            .pointer(at)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    Some(StartEvidence {
+        caller: Mri::new(start.pointer("/participants/from/id")?.as_str()?),
+        call_links: links("/callInvitation/links"),
+        conversation_links: links("/conversationRequest/links"),
+    })
+}
+
+/// The sender of a conversation service operation, as the capture names it: the caller's participant.
+const FROM: &[Field] = &[
+    required("id", Shape::Text),
+    field("displayName", Shape::Text),
+    field("endpointId", Shape::Text),
+    field("participantId", Shape::Text),
+    field("languageId", Shape::Text),
+];
+
+/// `participants` with the sender alone.
+const FROM_ONLY: &[Field] = &[required("from", Shape::Object(FROM))];
+
+/// `PUT …/conv/<id>/updateEndpointMetadata` (seen 2026-10-20).
+const UPDATE_ENDPOINT_METADATA: &[Field] = &[
+    required("participants", Shape::Object(FROM_ONLY)),
+    field(
+        "endpointMetadata",
+        Shape::Object(&[field("holographicCapabilities", Shape::Count)]),
+    ),
+];
+
+/// `POST …/conv/<id>/leave` (seen 2026-10-20).
+const LEAVE: &[Field] = &[
+    required("participants", Shape::Object(FROM_ONLY)),
+    field(
+        "conversationTransactionEnd",
+        Shape::Object(&[
+            field("reason", Shape::Text),
+            field("code", Shape::Count),
+            field("phrase", Shape::Text),
+        ]),
+    ),
+    field(
+        "callTransactionEnd",
+        Shape::Object(&[
+            field("code", Shape::Count),
+            field("subCode", Shape::Count),
+            field("phrase", Shape::Text),
+            field("resultCategories", Shape::Texts),
+        ]),
+    ),
+];
+
+/// `POST …/conv/<id>/add` (seen 2026-10-20): the caller invites the participants of `to` into its call, naming the chat
+/// the call belongs to (the 1:1 chat of the caller and its one invitee, [`names_own_chat`]) and the caller as the
+/// meeting's organizer. Nothing to replace, no group context.
+const ADD: &[Field] = &[
+    required(
+        "participants",
+        Shape::Object(&[
+            required("from", Shape::Object(FROM)),
+            required(
+                "to",
+                Shape::Objects(&[required("id", Shape::Text), field("participantId", Shape::Text)]),
+            ),
+        ]),
+    ),
+    field("disableUnmute", Shape::Bool),
+    field(
+        "participantInvitationData",
+        Shape::Object(&[field(
+            "invitationData",
+            Shape::Object(&[field(
+                "meetingInfo",
+                Shape::Object(&[field("organizerId", Shape::Text), field("tenantId", Shape::Text)]),
+            )]),
+        )]),
+    ),
+    field("replacementDetails", Shape::Null),
+    field("groupContext", Shape::Null),
+    field(
+        "groupChat",
+        Shape::Object(&[field("threadId", Shape::Text), field("messageId", Shape::Null)]),
+    ),
+    field(
+        "links",
+        Shape::Object(&[
+            field("addParticipantSuccess", Shape::Text),
+            field("addParticipantFailure", Shape::Text),
+        ]),
+    ),
+];
+
+/// The endpoint's callbacks an acknowledgement hands the call controller (seen 2026-10-20), in the request and in the
+/// acknowledgement's delivery response (`crate::calls`).
+const ACKNOWLEDGEMENT_LINKS: &[Field] = &[
+    field("balanceUpdate", Shape::Text),
+    field("controlVideoStreaming", Shape::Text),
+    field("mediaRenegotiation", Shape::Text),
+    field("replacement", Shape::Text),
+    field("retargetCompletion", Shape::Text),
+    field("transfer", Shape::Text),
+    field("updateMediaDescriptions", Shape::Text),
+];
+
+/// `POST …/cc/v1/callAcceptance/<call>/…/acknowledge`, and the body of the acceptance's delivery response (seen
+/// 2026-10-20).
+pub(crate) const ACKNOWLEDGE: &[Field] = &[required(
+    "callAcceptanceAcknowledgement",
+    Shape::Object(&[required("links", Shape::Object(ACKNOWLEDGEMENT_LINKS))]),
+)];
+
+/// `POST …/cc/v1/mcProxy/<call>/…/applyChannelParameters` (seen 2026-10-20).
+const APPLY_CHANNEL_PARAMETERS: &[Field] = &[required(
+    "applyChannelParameters",
+    Shape::Object(&[required(
+        "multiChannelParameter",
+        Shape::Object(&[field("mediaParameter", Shape::Text), field("mids", Shape::Texts)]),
+    )]),
+)];
+
+/// The captured operation `url`'s path names: `/api/v2/ep/<host>/conv/<id>/<op>` for the conversation service's,
+/// `/api/v2/ep/<host>/cc/v1/<callAcceptance|mcProxy>/<call>/…/<op>` for the call controller's. Its link in the call
+/// registry is what ties it to a call; this only tells which operation it is.
+fn operation_of(url: &Url) -> Option<CallOperation> {
+    let segments = decoded_segments(url)?;
+    let path: Vec<&str> = segments.iter().map(String::as_str).collect();
+    match path.as_slice() {
+        ["api", "v2", "ep", host, "conv", id, op] if !host.is_empty() && !id.is_empty() => match *op {
+            "updateEndpointMetadata" => Some(CallOperation::UpdateEndpointMetadata),
+            "add" => Some(CallOperation::Add),
+            "leave" => Some(CallOperation::Leave),
+            _ => None,
+        },
+        ["api", "v2", "ep", host, "cc", "v1", kind, call, .., op] if !host.is_empty() && !call.is_empty() => {
+            match (*kind, *op) {
+                ("callAcceptance", "acknowledge") => Some(CallOperation::Acknowledge),
+                ("mcProxy", "applyChannelParameters") => Some(CallOperation::ApplyChannelParameters),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The body shape of `operation`, as captured.
+fn shape_of(operation: CallOperation) -> &'static [Field] {
+    match operation {
+        CallOperation::UpdateEndpointMetadata => UPDATE_ENDPOINT_METADATA,
+        CallOperation::Add => ADD,
+        CallOperation::Leave => LEAVE,
+        CallOperation::Acknowledge => ACKNOWLEDGE,
+        CallOperation::ApplyChannelParameters => APPLY_CHANNEL_PARAMETERS,
+    }
+}
+
+/// The write a captured operation on an existing call makes: [`Scope::CallOperation`] with the operation, the exact URL,
+/// the sender its body names and the callback links it hands out, of the operation's kind ([`CallOperation::kind`]); an
+/// `add` adds the participants of its `to`. Only `https` to the flight proxy ([`PROXY_HOST`]), the operation's captured
+/// method and path, and its body in the captured shape map (every key one the capture had, its value of the captured
+/// type), an `add` only naming its sender's own chat and meeting ([`names_own_chat`]); anything else is `None`
+/// (unreadable). Which call the URL belongs to, whether the sender is that call's caller and whether the callbacks are
+/// its endpoint's, is the call registry's to judge (`Fence::check`): this row reads only the request.
+#[must_use]
+pub(crate) fn follow_up(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
+    if url.scheme() != "https" || url.host_str() != Some(PROXY_HOST) || url.port().is_some() {
+        return None;
+    }
+    let operation = operation_of(url)?;
+    if method != operation.method() {
+        return None;
+    }
+    let request = strict_json(body?)?;
+    if !fits(&request, Shape::Object(shape_of(operation))) {
+        return None;
+    }
+    let from = match request.pointer("/participants/from/id") {
+        Some(id) => Some(Mri::new(id.as_str()?)),
+        None => None,
+    };
+    let invitees: Vec<Mri> = match operation {
+        CallOperation::Add => request
+            .pointer("/participants/to")?
+            .as_array()?
+            .iter()
+            .map(|invitee| invitee.get("id").and_then(Value::as_str).map(Mri::new))
+            .collect::<Option<_>>()?,
+        _ => Vec::new(),
+    };
+    if operation == CallOperation::Add && (invitees.is_empty() || !names_own_chat(&request, from.as_ref()?, &invitees))
+    {
+        return None;
+    }
+    let callbacks = match operation {
+        CallOperation::Acknowledge => links_of(request.pointer("/callAcceptanceAcknowledgement/links"))?,
+        CallOperation::Add => links_of(request.get("links"))?,
+        _ => Vec::new(),
+    };
+    let scope = Scope::CallOperation {
+        operation,
+        url: url.as_str().to_owned(),
+        from,
+        callbacks: callbacks.into(),
+    };
+    Some(Target::new(operation.kind(), scope).with_added(invitees))
+}
+
+/// The links of a body's `links` object, each a string; none when there is no such object.
+fn links_of(links: Option<&Value>) -> Option<Vec<String>> {
+    let Some(links) = links else {
+        return Some(Vec::new());
+    };
+    links
+        .as_object()?
+        .values()
+        .map(|link| link.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The id a 1:1 chat's id carries for a participant: a work account's object id (`8:orgid:<guid>`) or a bot's
+/// (`28:<guid>`), lowercase. `None` for any other form.
+fn chat_member_id(mri: &Mri) -> Option<String> {
+    let mri = mri.as_str();
+    let id = mri.strip_prefix("8:orgid:").or_else(|| mri.strip_prefix("28:"))?;
+    is_guid(id).then(|| id.to_ascii_lowercase())
+}
+
+/// Whether an `add`'s chat and meeting are its sender's own (`from`, whom the call registry holds to the call's caller):
+/// a `groupChat` must name exactly the 1:1 chat of `from` and the add's one invitee (`19:<id>_<id>@unq.gbl.spaces`, the
+/// two ids in either order: the capture doesn't show which order a bot's chat takes), and a `meetingInfo` must name
+/// `from`'s object id as its organizer. An add naming a chat with two or more invitees, any other chat, an `add` whose
+/// ids aren't the forms a 1:1 chat id carries, or another organizer names something the fence never reads: unreadable.
+fn names_own_chat(request: &Value, from: &Mri, invitees: &[Mri]) -> bool {
+    let caller = chat_member_id(from);
+    let chat_fits = match request.get("groupChat") {
+        None => true,
+        Some(chat) => {
+            let ([invitee], Some(caller)) = (invitees, caller.as_deref()) else {
+                return false;
+            };
+            let Some(invitee) = chat_member_id(invitee).filter(|invitee| invitee != caller) else {
+                return false;
+            };
+            let own = [
+                format!("19:{caller}_{invitee}{ONE_TO_ONE_SUFFIX}"),
+                format!("19:{invitee}_{caller}{ONE_TO_ONE_SUFFIX}"),
+            ];
+            chat.get("threadId")
+                .and_then(Value::as_str)
+                .is_some_and(|thread| own.iter().any(|id| id == thread))
+        }
+    };
+    let meeting_fits = match request.pointer("/participantInvitationData/invitationData/meetingInfo") {
+        None => true,
+        Some(meeting) => {
+            caller.is_some_and(|caller| meeting.get("organizerId").and_then(Value::as_str) == Some(&caller))
+        }
+    };
+    chat_fits && meeting_fits
 }

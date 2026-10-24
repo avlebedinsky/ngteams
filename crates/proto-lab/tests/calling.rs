@@ -6,7 +6,7 @@
 use proto_lab::classify::{Classification, Classifier};
 use proto_lab::fence_ws::{Frame, Payload, classify_frame};
 use proto_lab::scenario::ab_trouter::hold_activity;
-use teams_fence::{Mri, Scope, Target, WriteKind};
+use teams_fence::{CallOperation, Mri, Scope, Target, WriteKind};
 
 const TROUTER: &str = "wss://go.trouter.teams.microsoft.com/v4/c/?tc=%7B%22cv%22%3A%220.0%22%7D&auth=true&epid=00000000-0000-4000-8000-000000000001";
 
@@ -344,6 +344,44 @@ fn expected(name: &str) -> Option<Classification> {
     })
 }
 
+/// What a request fixture case's `expected` names, its URL `url` and body `body`: [`expected`]'s, or an operation on a
+/// registered call (`call_operation|<operation>[|<sender>[|<invitee>…]]`), its scope that operation on `url`, with the
+/// callback links its body hands out (an acknowledgement's or an `add`'s).
+fn expected_at(name: &str, url: &str, body: &serde_json::Value) -> Option<Classification> {
+    let Some(rest) = name.strip_prefix("call_operation|") else {
+        return expected(name);
+    };
+    let mut parts = rest.split('|');
+    let name = parts.next()?;
+    let operation = CallOperation::ALL
+        .into_iter()
+        .find(|operation| operation.as_str() == name)?;
+    let from = parts.next().map(Mri::new);
+    let links = match operation {
+        CallOperation::Acknowledge => body.pointer("/callAcceptanceAcknowledgement/links"),
+        CallOperation::Add => body.get("links"),
+        _ => None,
+    };
+    let callbacks: Box<[String]> = links
+        .and_then(serde_json::Value::as_object)
+        .map(|links| {
+            links
+                .values()
+                .filter_map(|link| link.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let scope = Scope::CallOperation {
+        operation,
+        url: url::Url::parse(url).ok()?.to_string(),
+        from,
+        callbacks,
+    };
+    Some(Classification::Write(
+        Target::new(operation.kind(), scope).with_added(parts.map(Mri::new)),
+    ))
+}
+
 #[test]
 fn every_captured_request_of_the_test_call_is_what_the_fixture_says() {
     let fixture: serde_json::Value = serde_json::from_str(&filled(REQUESTS)).unwrap();
@@ -358,7 +396,12 @@ fn every_captured_request_of_the_test_call_is_what_the_fixture_says() {
             &[],
             body.as_deref().map(str::as_bytes),
         );
-        let want = expected(case["expected"].as_str().unwrap()).expect("an expectation the test knows");
+        let want = expected_at(
+            case["expected"].as_str().unwrap(),
+            case["url"].as_str().unwrap(),
+            &case["body"],
+        )
+        .expect("an expectation the test knows");
         assert_eq!(got, want, "{}", case["name"]);
     }
 }

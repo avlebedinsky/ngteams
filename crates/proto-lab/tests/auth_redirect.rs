@@ -44,11 +44,13 @@ fn fence(lab: &Lab, catch: Option<RedirectCatch>) -> HttpFence {
 }
 
 #[test]
-fn only_a_fence_with_a_catch_pauses_responses_and_only_the_login_origins() {
+fn only_a_fence_with_a_catch_pauses_responses_of_the_login_origins() {
+    // every fence pauses the call start's answer, which the call registry reads (`tests/call_registry.rs`)
+    let call_start_answer = json!({"urlPattern": teams_fence::CALL_START_URL, "requestStage": "Response"});
     let lab = lab().unwrap();
     assert_eq!(
         fence(&lab, None).fetch_patterns(),
-        json!({"patterns": [{"urlPattern": "*"}]})
+        json!({"patterns": [{"urlPattern": "*"}, call_start_answer]})
     );
     let config = EntraConfig::teams_native();
     let (catch, _caught) = RedirectCatch::new(&config.authorize_endpoint(), config.redirect_uri()).unwrap();
@@ -56,6 +58,7 @@ fn only_a_fence_with_a_catch_pauses_responses_and_only_the_login_origins() {
         fence(&lab, Some(catch)).fetch_patterns(),
         json!({"patterns": [
             {"urlPattern": "*"},
+            call_start_answer,
             {"urlPattern": "https://login.microsoftonline.com/*", "requestStage": "Response"},
         ]})
     );

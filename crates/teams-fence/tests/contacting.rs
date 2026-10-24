@@ -5,8 +5,8 @@
 
 use serde_json::Value;
 use teams_fence::{
-    CALL_START_URL, Contact, Mri, OWN_VIEW_PROPERTIES, Policy, Request, Scope, Service, TEST_CALL_SCENARIO, Target,
-    WriteKind, contacting, is_chat_id, on_contacting_service, service_of,
+    CALL_START_URL, CallOperation, Contact, Mri, OWN_VIEW_PROPERTIES, Policy, Request, Scope, Service,
+    TEST_CALL_SCENARIO, Target, WriteKind, contacting, is_chat_id, on_contacting_service, service_of,
 };
 use url::Url;
 
@@ -502,6 +502,61 @@ fn a_call_start_off_the_captured_shape_or_to_anyone_else_is_unreadable() {
         ),
         Contact::Unreadable
     );
+}
+
+// --- the operations on a call (the call registry resolves them: `tests/calls.rs`) ---
+
+const ECHO_REQUESTS: &str = include_str!("../../../tests/fixtures/calling/echo/requests.json");
+
+#[test]
+fn the_echo_call_s_follow_ups_are_operations_on_their_exact_urls() -> TestResult {
+    let fixture: Value = serde_json::from_str(
+        &fill(ECHO_REQUESTS)
+            .replace("<guid:echo>", "00000000-0000-4000-8000-0000000000e0")
+            .replace("<guid:5>", GUID_X),
+    )?;
+    let mut operations = Vec::new();
+    for case in fixture["cases"].as_array().ok_or("cases")? {
+        let Some(expected) = case["expected"]
+            .as_str()
+            .and_then(|name| name.strip_prefix("call_operation|"))
+        else {
+            continue;
+        };
+        let (method, url) = (
+            case["method"].as_str().ok_or("method")?,
+            case["url"].as_str().ok_or("url")?,
+        );
+        let body = case["body"].to_string();
+        let Contact::Write(target) = contacting(&Request::new(method, url).with_body(Some(body.as_bytes())), &policy())
+        else {
+            return Err(format!("{} isn't a write", case["name"]).into());
+        };
+        let Scope::CallOperation {
+            operation,
+            url: at,
+            from,
+            ..
+        } = target.scope()
+        else {
+            return Err(format!("{} isn't a call operation", case["name"]).into());
+        };
+        let mut parts = expected.split('|');
+        assert_eq!(Some(operation.as_str()), parts.next(), "{}", case["name"]);
+        assert_eq!(at.as_str(), Url::parse(url)?.as_str());
+        assert_eq!(from.as_ref().map(Mri::as_str), parts.next(), "{}", case["name"]);
+        let invitees: Vec<&str> = target.added().iter().map(Mri::as_str).collect();
+        assert_eq!(invitees, parts.collect::<Vec<_>>(), "{}", case["name"]);
+        assert_eq!(target.kind(), operation.kind());
+        operations.push(*operation);
+    }
+    operations.sort();
+    assert_eq!(
+        operations,
+        CallOperation::ALL.to_vec(),
+        "every captured operation has its row"
+    );
+    Ok(())
 }
 
 // --- the services, the method and the write kinds ---

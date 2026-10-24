@@ -1080,7 +1080,8 @@ async fn dispatch_events(cdp: Cdp, mut events: Events, shared: &Arc<Shared>) {
 }
 
 /// Handles one event. The audit's events are handled here, in arrival order: an allow is recorded before the guard
-/// hears of it, so the frame it lets out is always reported after it.
+/// hears of it, so the frame it lets out is always reported after it; and a received Trouter delivery is handed to the
+/// fence's call registry before the guard can ask about the page's response to it, which comes later in the stream.
 fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
     shared.tap(&event);
     if let Some(capture) = &shared.capture {
@@ -1110,7 +1111,10 @@ fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
                 }
             });
         }
-        "Network.webSocketCreated" | "Network.webSocketClosed" | "Network.webSocketFrameSent" => {
+        "Network.webSocketCreated"
+        | "Network.webSocketClosed"
+        | "Network.webSocketFrameSent"
+        | "Network.webSocketFrameReceived" => {
             shared.ws.observe(&event);
         }
         "Target.attachedToTarget" => {

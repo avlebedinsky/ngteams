@@ -534,5 +534,8 @@ fn cause_value(cause: DenyCause) -> Value {
         DenyCause::ForeignSocket => json!("foreign_socket"),
         DenyCause::Forced => json!("forced"),
         DenyCause::Fenced(reason) => json!({"fenced": serde_json::to_value(reason).unwrap_or(Value::Null)}),
+        DenyCause::DeliveryResponse(reason) => {
+            json!({"delivery_response": serde_json::to_value(reason).unwrap_or(Value::Null)})
+        }
     }
 }

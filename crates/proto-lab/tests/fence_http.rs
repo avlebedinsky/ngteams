@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures_util::{SinkExt as _, StreamExt as _};
 use page::evaluate;
 use proto_lab::arming::{
@@ -803,6 +804,11 @@ fn fake_reply(command: &Value, refuse: fn(&str, Option<&str>) -> bool) -> Value 
             json!({"result": {"type": "string", "value": "no binding"}})
         }
         "Runtime.evaluate" => json!({"result": {"type": "string", "value": "armed"}}),
+        // the call start's answer, read at the response stage (in base64, as Chrome may give it)
+        "Fetch.getResponseBody" => json!({
+            "body": base64::engine::general_purpose::STANDARD.encode(CALL_START_ANSWER),
+            "base64Encoded": true,
+        }),
         _ => json!({}),
     };
     json!({"id": id, "result": result})
@@ -827,6 +833,205 @@ async fn arm_fake(fake: &FakeBrowser, origins: &[&str]) -> TestResult<(ArmedBrow
 
 fn refuse_nothing(_method: &str, _session: Option<&str>) -> bool {
     false
+}
+
+/// The browser session's `Fetch.enable` params: every request, and the call start's answer at the response stage.
+fn browser_fetch_patterns() -> Value {
+    json!({"patterns": [
+        {"urlPattern": "*"},
+        {"urlPattern": teams_fence::CALL_START_URL, "requestStage": "Response"},
+    ]})
+}
+
+// --- the call start's answer, read at the response stage ---
+
+const CALLER: &str = "8:orgid:lab-a";
+const ECHO: &str = "28:echo-service";
+const CONVERSATION: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0";
+/// The fake browser's answer to every call start (made up, shaped like the echo-call capture's).
+const CALL_START_ANSWER: &str = r#"{"conversationController":"https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0?i=10-0-0-1&e=1","links":{"leave":"https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/leave?i=10-0-0-1&e=1"}}"#;
+
+/// A request paused on the browser session.
+fn request_paused(id: &str, network_id: &str, method: &str, url: &str, body: &str) -> Value {
+    json!({
+        "requestId": id,
+        "networkId": network_id,
+        "request": {"method": method, "url": url, "headers": {}, "postData": body},
+    })
+}
+
+/// A call start's answer paused on the browser session, with `status`.
+fn answer_paused(id: &str, network_id: &str, status: u16) -> Value {
+    response_paused(id, network_id, "POST", status)
+}
+
+/// A response to `method` at the call start's URL paused on the browser session, with `status`.
+fn response_paused(id: &str, network_id: &str, method: &str, status: u16) -> Value {
+    json!({
+        "requestId": id,
+        "networkId": network_id,
+        "responseStatusCode": status,
+        "request": {"method": method, "url": teams_fence::CALL_START_URL, "headers": {}},
+    })
+}
+
+fn leave_body() -> String {
+    json!({"participants": {"from": {"id": CALLER}}}).to_string()
+}
+
+/// Whether the fake browser was told `method` for the paused request `id`.
+fn answered(method: &'static str, id: &'static str) -> impl Fn(&Value) -> bool {
+    move |command| command["method"] == method && command["params"]["requestId"] == id
+}
+
+/// A browser armed with a fence of `CALLER` and the echo service, the echo the classifier's test call callee; the
+/// directory holds its `fence.log`.
+async fn arm_call_fence(fake: &FakeBrowser) -> TestResult<(ArmedBrowser, tempfile::TempDir)> {
+    let dir = tempfile::tempdir()?;
+    let roster = Roster::new([Mri::new(CALLER)], [Mri::new(ECHO)]);
+    let fence = Arc::new(Fence::new(roster, FenceLog::open(&dir.path().join("fence.log"))?));
+    let classifier = Classifier::new().with_test_call_callee(Mri::new(ECHO));
+    let http = HttpFence::new(
+        classifier,
+        Arc::clone(&fence),
+        Arc::new(Fixed(Membership::Complete(Vec::new()))),
+    );
+    let members = Arc::new(Fixed(Membership::Complete(Vec::new())));
+    let ws = WsFence::new(Arc::clone(&fence), members, GuardScript::generate()?);
+    let options = ArmOptions {
+        service_worker_origins: Vec::new(),
+    };
+    let armed = ArmedBrowser::arm(fake.launch().await?, http, ws, &options).await?;
+    Ok((armed, dir))
+}
+
+/// The test call start `id`, paused on the browser session under the `Network` id `network_id`.
+fn start_paused(id: &str, network_id: &str) -> Value {
+    let start = json!({
+        "conversationRequest": {"scenario": teams_fence::TEST_CALL_SCENARIO},
+        "participants": {"from": {"id": CALLER}, "to": []},
+        "callInvitation": {"links": {}},
+    })
+    .to_string();
+    request_paused(id, network_id, "POST", teams_fence::CALL_START_URL, &start)
+}
+
+fn leave_url() -> String {
+    format!("{CONVERSATION}/leave?i=10-0-0-1&e=1")
+}
+
+#[tokio::test]
+async fn a_permitted_call_start_s_answer_registers_its_call_before_the_page_gets_it() -> TestResult {
+    let fake = FakeBrowser::start(refuse_nothing).await?;
+    let (armed, _dir) = arm_call_fence(&fake).await?;
+    let leave = leave_url();
+
+    // an answer to a start the fence never saw is continued and registers nothing
+    fake.event(None, "Fetch.requestPaused", &answer_paused("job-0", "N0", 201))?;
+    fake.sent(
+        "the stray answer continued",
+        answered("Fetch.continueResponse", "job-0"),
+    )
+    .await?;
+    fake.event(
+        None,
+        "Fetch.requestPaused",
+        &request_paused("job-1", "N1", "POST", &leave, &leave_body()),
+    )?;
+    fake.sent("the unregistered leave failed", answered("Fetch.failRequest", "job-1"))
+        .await?;
+
+    // a failed answer registers nothing either
+    fake.event(None, "Fetch.requestPaused", &start_paused("job-2", "N2"))?;
+    fake.sent("the start continued", answered("Fetch.continueRequest", "job-2"))
+        .await?;
+    fake.event(None, "Fetch.requestPaused", &answer_paused("job-3", "N2", 500))?;
+    fake.sent(
+        "the failed answer continued",
+        answered("Fetch.continueResponse", "job-3"),
+    )
+    .await?;
+    fake.event(
+        None,
+        "Fetch.requestPaused",
+        &request_paused("job-4", "N4", "POST", &leave, &leave_body()),
+    )?;
+    fake.sent("the leave still failed", answered("Fetch.failRequest", "job-4"))
+        .await?;
+
+    // the permitted start's success registers its call, read before the page gets it
+    fake.event(None, "Fetch.requestPaused", &start_paused("job-5", "N5"))?;
+    fake.sent("the start continued", answered("Fetch.continueRequest", "job-5"))
+        .await?;
+    fake.event(None, "Fetch.requestPaused", &answer_paused("job-6", "N5", 201))?;
+    let read = fake
+        .sent("the answer read", answered("Fetch.getResponseBody", "job-6"))
+        .await?;
+    let continued = fake
+        .sent("the answer continued", answered("Fetch.continueResponse", "job-6"))
+        .await?;
+    assert!(read["id"].as_u64() < continued["id"].as_u64(), "read before continued");
+    fake.event(
+        None,
+        "Fetch.requestPaused",
+        &request_paused("job-7", "N7", "POST", &leave, &leave_body()),
+    )?;
+    fake.sent(
+        "the registered leave continued",
+        answered("Fetch.continueRequest", "job-7"),
+    )
+    .await?;
+    armed.close(Duration::from_secs(5)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_call_start_s_preflight_response_is_continued_and_leaves_its_start_pending() -> TestResult {
+    let fake = FakeBrowser::start(refuse_nothing).await?;
+    let (armed, _dir) = arm_call_fence(&fake).await?;
+    // the CORS preflight's response pauses on the same pattern as the start's answer: it is continued, not failed
+    fake.event(
+        None,
+        "Fetch.requestPaused",
+        &response_paused("job-0", "N0", "OPTIONS", 204),
+    )?;
+    fake.sent(
+        "the preflight's response continued",
+        answered("Fetch.continueResponse", "job-0"),
+    )
+    .await?;
+    // nor does it take the start's pending call, even under the start's own `Network` id
+    fake.event(None, "Fetch.requestPaused", &start_paused("job-1", "N1"))?;
+    fake.sent("the start continued", answered("Fetch.continueRequest", "job-1"))
+        .await?;
+    fake.event(
+        None,
+        "Fetch.requestPaused",
+        &response_paused("job-2", "N1", "OPTIONS", 204),
+    )?;
+    fake.sent(
+        "the second preflight's response continued",
+        answered("Fetch.continueResponse", "job-2"),
+    )
+    .await?;
+    fake.event(None, "Fetch.requestPaused", &answer_paused("job-3", "N1", 201))?;
+    fake.sent("the answer read", answered("Fetch.getResponseBody", "job-3"))
+        .await?;
+    fake.sent("the answer continued", answered("Fetch.continueResponse", "job-3"))
+        .await?;
+    fake.event(
+        None,
+        "Fetch.requestPaused",
+        &request_paused("job-4", "N4", "POST", &leave_url(), &leave_body()),
+    )?;
+    fake.sent(
+        "the registered leave continued",
+        answered("Fetch.continueRequest", "job-4"),
+    )
+    .await?;
+    assert!(armed.denials().is_empty(), "nothing denied: {:?}", armed.denials());
+    armed.close(Duration::from_secs(5)).await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -854,7 +1059,7 @@ async fn the_browser_is_fenced_then_cleaned_through_a_blank_armed_tab() {
             "Target.closeTarget"
         ]
     );
-    assert_eq!(browser[0]["params"], json!({"patterns": [{"urlPattern": "*"}]}));
+    assert_eq!(browser[0]["params"], browser_fetch_patterns());
     assert_eq!(
         browser[1]["params"],
         json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true})

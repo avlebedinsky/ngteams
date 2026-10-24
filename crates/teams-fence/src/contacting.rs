@@ -19,9 +19,9 @@
 //! unreadable), path segments percent-decoded, query values exact, and a query key twice (in any case) makes a chat
 //! service request unreadable.
 
-mod call;
+pub(crate) mod call;
 mod chat;
-mod json;
+pub(crate) mod json;
 
 use std::fmt;
 
@@ -261,6 +261,7 @@ pub fn contacting(request: &Request<'_>, policy: &Policy) -> Contact {
         Service::ChatService if parsed.has_duplicate_key() => Contact::Unreadable,
         Service::ChatService => chat::classify(&parsed, policy),
         Service::Calling => call::call_start(&parsed.method, &url, parsed.body, policy.echo_callee.as_ref())
+            .or_else(|| call::follow_up(&parsed.method, &url, parsed.body))
             .map_or(Contact::Unreadable, Contact::Write),
         Service::Graph | Service::SharePoint => Contact::Unreadable,
         Service::Outlook => none_if(is_substrate_search(&parsed)),

@@ -38,6 +38,12 @@ a contacting write whose participants are its callees, its caller and whoever it
 - **Media** (TURN, ICE, DTLS-SRTP, over UDP or TCP to the relay hosts) isn't classified: it carries a call the
   signaling fence permitted.
 
+Done so far: the call registry in `teams-fence` and the echo call's follow-ups (`updateEndpointMetadata`,
+`applyChannelParameters`, `acknowledge`, `add` per invitee, `leave`, and the acceptance's acknowledgement over
+Trouter), fed by the browser fence ([fence-targets.md](../protocol/fence-targets.md#the-call-registry)). Still to map:
+the start to lab callees, answering, declining, joining and the ring-time sends, the other follow-ups, and the native
+side's feeding of the registry.
+
 So M3 adds, each a row of the calling family and a test (no new mechanism): the call start to lab callees, the
 `acceptance` and its typed delivery response, the follow-ups above on a registered call, `add` per invitee, and the
 decline, the join and the ring-time sends below; and the registry in `teams-fence`, which the browser fence and the

@@ -56,7 +56,7 @@ pub const MAX_BODY: usize = 1024 * 1024;
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The suffix of a 1:1 chat's conversation id.
-const ONE_TO_ONE_SUFFIX: &str = "@unq.gbl.spaces";
+pub(crate) const ONE_TO_ONE_SUFFIX: &str = "@unq.gbl.spaces";
 
 /// A read the chat service refused the credential of (HTTP 401).
 const REFUSED: PartialReason = PartialReason::FetchFailed(FetchFailure::Status(401));
@@ -680,7 +680,7 @@ fn has_meeting_prefix(inner: &str) -> bool {
         .is_some_and(|start| start.eq_ignore_ascii_case(MEETING_PREFIX))
 }
 
-fn is_guid(text: &str) -> bool {
+pub(crate) fn is_guid(text: &str) -> bool {
     let groups: Vec<&str> = text.split('-').collect();
     groups.len() == 5
         && groups

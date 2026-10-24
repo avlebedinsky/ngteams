@@ -152,7 +152,14 @@ What the code does and why. A change that undoes one of these needs a new reason
   socket (any host under `trouter.teams.microsoft.com`) only socket.io 0.9 types `0`, `1`, `2` and `5` pass, so a
   delivery response (`3`), a JSON message, an acknowledgement, a binary frame and anything unparsable are denied; on a
   contacting service's socket (`teams_fence::on_contacting_service`) every frame is denied; anywhere else a frame
-  passes. A frame let through is logged `allowed` (method `SEND`).
+  passes. A frame let through is logged `allowed` (method `SEND`). The one delivery response that passes is the
+  acknowledgement of a registered call's acceptance: the page's received Trouter frames
+  (`Network.webSocketFrameReceived`, observed in event order, before any send they cause) go to the call registry,
+  and a `3:::` answering a pending acceptance on the same connection (the socket's session and `Network` id) is
+  decided by `Fence::check_delivery_response`: the captured envelope, `trouter-request` equal to the delivery's, an
+  acknowledgement whose links are all the start's own callbacks, once, while the call is live. The browser session
+  also pauses the call start's answer at the response stage (`CALL_START_URL`), registers the call from it (tied to
+  the permitted start by `Network` id) and only then continues it.
 - **Service workers only through the browser.** Target-level auto-attach filters them out: one attached twice while
   paused answers nothing until it runs. At run start they are unregistered and their caches cleared
   (`Storage.clearDataForOrigin` works only on a page session), and pages bypass them (`Network.setBypassServiceWorker`
@@ -201,16 +208,30 @@ What the code does and why. A change that undoes one of these needs a new reason
   every plain request (`Transport::send`: `None` is sent, logged; `Write` and `Unreadable` are refused before anything
   is sent, `Refusal::Write` and `Refusal::Unreadable`).
 - `Fence::check` reads the target's members for every write except a new target (`Scope::New`, a chat or call
-  created, judged by its added participants alone), typing and read receipts on a chat, and the account's own
-  availability (which keeps its own-account check). Typing and read receipts reach nobody: on a chat
+  created, judged by its added participants alone), an operation on a registered call (`Scope::CallOperation`,
+  resolved by the call registry), typing and read receipts on a chat, and the account's own availability (which keeps
+  its own-account check). Typing and read receipts reach nobody: on a chat
   id `is_chat_id` takes (1:1, group or meeting, the rule `contacting` carves them out by) they are permitted without a
   member read, judged only by the participants they name, and logged like every decision; anywhere else (a channel, a
   chat id in another form) they are judged like any write. So a caller hands it a `Typing` or `ReadReceipt` target
   only for the content-free signal: `contacting` carves typing out only in its captured body (`content` empty or
   absent, no key but `content`, `contenttype`, `messagetype`) and a read receipt only with `name` its one query key.
-- Writes on an existing call are denied: the follow-ups aren't mapped, and the native `add` (`AddToCall`, an `Invite`
-  on `Scope::Call`) is `Partial`, since no membership source reads a call's members
-  (`docs/backlog/fence-call-follow-ups.md`).
+- **The call registry** (`crates/teams-fence/src/calls.rs`, one per fence): no source reads a call's members, so a
+  follow-up passes only on a call this fence permitted, to exactly a link the call's own services handed out. A call
+  start's permit (this fence's, taken once: `WritePermit` carries the fence's run-unique id and a serial) and the
+  start's body make a pending call (`Fence::pend_start`); a readable answer registers it (`Fence::register_start`:
+  `conversationController` and the answer's `updateEndpointMetadata`, `leave` and `addParticipantAndModality` links,
+  each the controller's path plus its segment with its query); a Trouter delivery at exactly the start's own
+  `acceptance` callback path binds the call controller's `acknowledgement` and `applyChannelParameters` links, all of
+  one call (`Fence::observe_delivery`). A follow-up is `Scope::CallOperation { operation, url, from, callbacks }`
+  (`WriteKind::CallFollowUp`, `Invite` for an `add`), resolved by the registry with no member read: a live call
+  holding that exact URL for that operation, its sender the call's caller, invitees only on an `add`, judged per
+  invitee, and every callback link it hands out (an acknowledgement's, an `add`'s) on the start's own endpoint and
+  call agent; an `add` maps only when its `groupChat` is the 1:1 chat of the sender and its one invitee and its
+  `meetingInfo` names the sender as organizer; otherwise `Partial(UnregisteredCall)`, `Partial(CallEnded)` or `CallMismatch`. A permitted `leave` leaves
+  only that `leave` passing; a delivery at the start's `conversationEnd` or call `end` callback ends the call for good.
+  `fence.log` never holds the sender. The native `AddToCall` is still an `Invite` on `Scope::Call` (the conversation
+  URL), which no source reads: `Partial`. A `conversationUpdate` binds nothing.
 - A group or meeting chat is judged like a 1:1 chat, by its fresh member list: a lab-only one is writable, a group
   chat the native client creates included. `chats.toml` is lab data for the scenarios and clients (`abc-chat` records
   the lab's a–b–c chat in it, once); the fence doesn't read it.
@@ -411,7 +432,8 @@ What the code does and why. A change that undoes one of these needs a new reason
   is bounded (a `beforeunload` dialog holding a navigation is accepted after 5 s), and SIGINT or SIGTERM kills the
   run's browsers and lets the fence's decisions still running land in `fence.log` (`crates/proto-lab/src/stop.rs`).
 - **No call is answered.** No scenario clicks answer, the fence doesn't map `acceptance`, and Trouter delivery
-  responses are denied. The native Trouter client ignores incoming calls the same way and has no path to answer any
+  responses are denied, but for the acknowledgement of the acceptance of a call the page itself started and the
+  fence registered. The native Trouter client ignores incoming calls the same way and has no path to answer any
   delivery.
 - Live tests are built only with `--features live` and run only with `PROTO_LAB_LIVE=1`.
 - Tokens: our client is the native `1fec8e78-…` with the `nativeclient` redirect. The chat service takes

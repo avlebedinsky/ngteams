@@ -42,7 +42,7 @@
       "expected": "unknown"
     },
     {
-      "name": "the call acceptance answered over the socket, with the call's next links in the body (a call follow-up: unknown)",
+      "name": "the call acceptance answered over the socket, with the call's next links in the body (unknown to the frame rule alone: the fence lets it through only as the response to a pending acceptance delivery of a registered call)",
       "socket": "first",
       "frame": "3:::{\"id\":7654321,\"status\":200,\"headers\":{\"MS-CV\":\"SyntheticCorrelation00.1.0\",\"trouter-request\":\"{\\\"id\\\":\\\"x\\\",\\\"src\\\":\\\"y\\\"}\",\"trouter-client\":\"{\\\"cd\\\":2}\"},\"body\":\"{\\\"callAcceptanceAcknowledgement\\\":{\\\"links\\\":{\\\"mediaRenegotiation\\\":\\\"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/x/1/call/mediaRenegotiation/\\\"}}}\"}",
       "expected": "unknown"

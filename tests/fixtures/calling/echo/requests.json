@@ -107,25 +107,25 @@
       "expected": "read"
     },
     {
-      "name": "the caller's endpoint metadata on the call (a call follow-up: unknown until a row maps it)",
+      "name": "the caller's endpoint metadata on the call (a call follow-up: an operation the call registry resolves)",
       "method": "PUT",
       "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation0/updateEndpointMetadata?i=0-0-0-0&e=1",
       "body": {"participants": {"from": {"id": "8:orgid:<guid:a>", "displayName": "Lab A", "endpointId": "<guid:3>", "participantId": "<guid:4>", "languageId": "en-us"}}, "endpointMetadata": {"holographicCapabilities": 3}},
-      "expected": "unknown"
+      "expected": "call_operation|update_endpoint_metadata|8:orgid:<guid:a>"
     },
     {
       "name": "a media line's channel parameters (a call follow-up)",
       "method": "POST",
       "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/mcProxy/<guid:5>/1/k1/1/applyChannelParameters?i=0-0-0-0&e=1",
       "body": {"applyChannelParameters": {"multiChannelParameter": {"mids": ["1"], "mediaParameter": "{\"maxVideoSendCapabilities\":{\"caps\":{\"max-width\":1280}}}"}}},
-      "expected": "unknown"
+      "expected": "call_operation|apply_channel_parameters"
     },
     {
       "name": "the acknowledgement of the call's acceptance (a call follow-up)",
       "method": "POST",
       "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/callAcceptance/<guid:5>/1/a1/1/acknowledge?i=0-0-0-0",
       "body": {"callAcceptanceAcknowledgement": {"links": {"mediaRenegotiation": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/06060606/call/mediaRenegotiation/"}}},
-      "expected": "unknown"
+      "expected": "call_operation|acknowledge"
     },
     {
       "name": "adding the echo bot to the call (a call follow-up: where the echo joins)",
@@ -143,7 +143,7 @@
         "groupChat": {"threadId": "19:<guid:a>_<guid:echo>@unq.gbl.spaces", "messageId": null},
         "links": {"addParticipantSuccess": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/<guid:2>/07070707/conversation/addParticipantSuccess/"}
       },
-      "expected": "unknown"
+      "expected": "call_operation|add|8:orgid:<guid:a>|28:<guid:echo>"
     },
     {
       "name": "leaving the call (a call follow-up)",
@@ -154,7 +154,7 @@
         "conversationTransactionEnd": {"reason": "noError", "code": 0, "phrase": "ConversationEndNoModalityConnected"},
         "callTransactionEnd": {"code": 0, "subCode": 0, "phrase": "CallEndReasonLocalUserInitiated", "resultCategories": ["Success"]}
       },
-      "expected": "unknown"
+      "expected": "call_operation|leave|8:orgid:<guid:a>"
     }
   ]
 }

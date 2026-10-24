@@ -45,6 +45,13 @@
 //! {"ts_ms":1760000000000,"verdict":"allow","event":"post_read_decision","post_read":"short_profile","names":2}
 //! ```
 //!
+//! The fence's decision on a call delivery response (`Fence::check_delivery_response`: the acceptance's acknowledgement
+//! answered over Trouter) is logged by its kind and the verdict, never its id, headers or body:
+//!
+//! ```json
+//! {"ts_ms":1760000000000,"verdict":"allow","event":"delivery_response","response":"call_acceptance_acknowledgement"}
+//! ```
+//!
 //! A mutating request the fence lets through because it reaches nobody (`contacting` called it
 //! [`Contact::None`](crate::Contact::None)) is logged as `allowed` ([`AllowedRecord`]), by the browser fence and the
 //! native transport alike: its method, its host and its path's shape, every id in the path replaced by its kind
@@ -89,6 +96,7 @@ use percent_encoding::percent_decode_str;
 use serde::Serialize;
 use url::Url;
 
+use crate::calls::DeliveryDenyReason;
 use crate::decision::DenyReason;
 use crate::post_read::PostReadDenyReason;
 use crate::target::{Scope, Target, WriteKind};
@@ -122,6 +130,18 @@ struct PostReadDecisionEntry {
     names: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<PostReadDenyReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DeliveryResponseEntry {
+    ts_ms: u64,
+    verdict: &'static str,
+    event: &'static str,
+    response: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<DeliveryDenyReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
 }
@@ -438,6 +458,23 @@ impl FenceLog {
             event: "post_read_decision",
             post_read: kind,
             names,
+            reason: verdict,
+            message: verdict.map(|reason| reason.to_string()),
+        })
+    }
+
+    /// Appends the fence's decision on one call delivery response (`response` names its kind; `None` allows) as a single
+    /// line, and flushes it: never its id, headers or body. Once an append has failed, every later one fails too.
+    pub(crate) fn record_delivery_response(
+        &self,
+        response: &'static str,
+        verdict: Option<DeliveryDenyReason>,
+    ) -> io::Result<()> {
+        self.append(&DeliveryResponseEntry {
+            ts_ms: now_ms(),
+            verdict: if verdict.is_some() { "deny" } else { "allow" },
+            event: "delivery_response",
+            response,
             reason: verdict,
             message: verdict.map(|reason| reason.to_string()),
         })

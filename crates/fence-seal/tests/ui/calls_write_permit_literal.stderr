@@ -1,0 +1,8 @@
+error[E0451]: fields `target`, `issuer` and `serial` of struct `WritePermit` are private
+ --> tests/ui/calls_write_permit_literal.rs:7:32
+  |
+7 |     let permit = WritePermit { target, issuer: 1, serial: 0 };
+  |                                ^^^^^^  ^^^^^^     ^^^^^^ private field
+  |                                |       |
+  |                                |       private field
+  |                                private field
