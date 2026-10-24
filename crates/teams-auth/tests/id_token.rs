@@ -39,6 +39,28 @@ fn the_account_claims_are_read() {
     assert_eq!(parsed.tenant, "00000000-0000-4000-8000-0000000000ff");
     assert_eq!(parsed.preferred_username.as_deref(), Some("a@lab.example.test"));
     assert_eq!(parsed.upn, None);
+    assert_eq!(parsed.name, None);
+}
+
+#[test]
+fn the_display_name_is_read_and_carried_to_the_bound_account() {
+    let mut claims = claims();
+    claims["name"] = json!("Made-Up Person");
+    let parsed = parse(&claims).expect("readable");
+    assert_eq!(parsed.name.as_deref(), Some("Made-Up Person"));
+    let authorization = teams_auth::token::Authorization::new(
+        &teams_auth::token::EntraConfig::teams_native(),
+        "a@lab.example.test",
+        teams_auth::token::Scope::spaces(),
+    )
+    .expect("an authorization");
+    let mut claims = claims;
+    claims["aud"] = json!(teams_auth::token::TEAMS_NATIVE_CLIENT_ID);
+    let account = parse(&claims)
+        .expect("readable")
+        .bind(&authorization, teams_auth::token::TEAMS_NATIVE_CLIENT_ID)
+        .expect("the asked account");
+    assert_eq!(account.display_name.as_deref(), Some("Made-Up Person"));
 }
 
 #[test]

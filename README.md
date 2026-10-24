@@ -368,7 +368,7 @@ runnable one, install it, run it or touch its data):
 scripts/install-personal.sh          # a release build of teams and teams-signin-personal, installed under ~/.local
 teams --account you@your-tenant.com  # the first run: the account to sign in, through the sign-in window
 teams                                # afterwards
-teams --forget                       # sign out and forget the account (the store stays)
+teams --forget                       # sign out and forget the account (quit Teams first; the store stays)
 ```
 
 The first run shows what the app sends on its own (typing, read receipts, presence) and sends none of it until that

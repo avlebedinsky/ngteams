@@ -4,14 +4,18 @@
 //! [`Classifier::classify`] sorts a request into:
 //! - [`Classification::Read`]: `GET`, `HEAD` or `OPTIONS`, which change nothing anyone else sees;
 //! - [`Classification::Own`]: a mutating request on the own-state list, which changes only the signed-in account's own
-//!   session: the Entra token endpoint, Teams' authz exchange and Entra's sign-in form ([`Classifier::sign_in`]);
+//!   session: the Entra token endpoint, Teams' authz exchange and Entra's sign-in form ([`Classifier::sign_in`]), and
+//!   in the personal sign-in window (`Classifier::personal`, `personal` feature) also Entra's multi-factor and
+//!   federation return paths and a `POST` to the identity provider's hosts the user named;
 //! - [`Classification::Unknown`]: everything else, denied.
 //!
 //! An own-state rule matches the method, the exact origin (scheme, host and port), the path segment by segment (a `*`
 //! segment stands for exactly one non-empty segment, an Entra tenant) and the query ([`QueryRule`]): the token
 //! endpoint takes one of its two captured parameter sets and authz none, and any other query, a repeated parameter
-//! among them, makes the request [`Classification::Unknown`]. Entra's sign-in form alone still takes any query
-//! ([`QueryRule::Any`]): no capture has shown its queries yet.
+//! among them, makes the request [`Classification::Unknown`]. Entra's sign-in form still takes any query
+//! ([`QueryRule::Any`]): no capture has shown its queries yet. The personal window's rules are wider still: its
+//! multi-factor and federation paths take any query too, and a `POST` to an identity provider host is own-state on any
+//! path and any query.
 
 use url::Url;
 

@@ -1,7 +1,8 @@
 //! The personal account's engine, assembled as every binary builds one (`teams_core::account::start`) from the personal
 //! build's parts: the fence the binary opened (`Fence::open_personal`, its account from `account.toml`), its own
 //! membership source (`PersonalMembershipSource`: a chat's thread read fresh at every decision, its credential the chat
-//! transport's), the store at `~/.local/share/teams/store.sqlite`, the region the sign-in saved, the push channel.
+//! transport's), the account's own store at `~/.local/share/teams/store/<oid>.sqlite` (never another account's: a store
+//! kept after `teams --forget` stays its account's), the region the sign-in saved, the push channel.
 //! Nothing is sent while it is built: the session asks its store for a token only when a request needs one.
 
 use std::sync::Arc;
@@ -39,12 +40,13 @@ pub fn start<S: SecretStore + 'static>(
     push: bool,
 ) -> Result<PersonalEngine<S>, StartError> {
     let mri = account.mri().ok_or(StartError::NotSignedIn)?;
+    let store_file = paths.store_file(account).ok_or(StartError::NotSignedIn)?;
     let region = Region::load(&paths.region_file())?;
     let parts = Account {
         upn: account.upn.clone(),
         mri: mri.as_str().to_owned(),
-        display_name: display_name(&account.upn).to_owned(),
-        store_file: paths.store_file(),
+        display_name: display_name(account).to_owned(),
+        store_file,
         region,
         secrets,
         push,
@@ -58,8 +60,12 @@ pub fn start<S: SecretStore + 'static>(
     Ok(account::start(parts, fence, membership)?)
 }
 
-/// The name a post carries (`imdisplayname`) until the service gives the account's own: the UPN's local part.
+/// The name the account's posts carry (`imdisplayname`): the display name the sign-in's ID token gave (`account.toml`'s
+/// `name`), else, from an `account.toml` without one, the UPN's local part.
 #[must_use]
-pub fn display_name(upn: &str) -> &str {
-    upn.split_once('@').map_or(upn, |(local, _)| local)
+pub fn display_name(account: &PersonalAccount) -> &str {
+    account.name.as_deref().unwrap_or_else(|| {
+        let upn = account.upn.as_str();
+        upn.split_once('@').map_or(upn, |(local, _)| local)
+    })
 }

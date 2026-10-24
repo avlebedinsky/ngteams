@@ -5,8 +5,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use teams_store::{
-    Applied, AttemptOutcome, CheckFailed, Conversation, ConversationKind, Member, Message, NewOutboxEntry, OutboxKind,
-    OutboxState, ReactionChange, ReadHorizon, SCHEMA_VERSION, Store, StoreError, SyncState,
+    Applied, AttemptOutcome, CheckFailed, Conversation, ConversationKind, EngineLock, Member, Message, NewOutboxEntry,
+    OutboxKind, OutboxState, ReactionChange, ReadHorizon, SCHEMA_VERSION, Store, StoreError, SyncState,
 };
 
 const ME: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -1620,6 +1620,26 @@ fn a_second_engine_lock_in_the_process_is_refused_at_once_and_free_once_dropped(
     drop(again);
     drop(first);
     third.engine_lock().expect("free with its store closed too");
+}
+
+#[test]
+fn the_engine_lock_is_held_by_path_without_opening_the_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // no store yet: the lock is taken, and no store file is made
+    let held = EngineLock::hold(&store_path(&dir)).expect("hold by path");
+    assert!(!store_path(&dir).exists());
+    let store = open(&dir).expect("open the store");
+    assert!(matches!(store.engine_lock(), Err(StoreError::EngineRunning { .. })));
+    drop(held);
+
+    let engine = store.engine_lock().expect("the engine's lock");
+    let error = EngineLock::hold(&store_path(&dir)).expect_err("an engine holds it");
+    assert!(
+        matches!(&error, StoreError::EngineRunning { path } if path == engine.path()),
+        "{error}"
+    );
+    drop(engine);
+    EngineLock::hold(&store_path(&dir)).expect("free once the engine's lock is dropped");
 }
 
 #[test]

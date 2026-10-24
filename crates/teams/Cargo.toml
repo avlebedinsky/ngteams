@@ -33,6 +33,8 @@ teams-fence = { workspace = true, features = ["personal"] }
 teams-log.workspace = true
 # the personal sign-in window: only this crate enables `personal`
 teams-signin = { workspace = true, features = ["personal"] }
+# `teams --forget` takes the account's engine lock before it deletes anything
+teams-store.workspace = true
 # the views and the bridge over the engine
 teams-ui.workspace = true
 thiserror.workspace = true
@@ -49,7 +51,6 @@ tempfile.workspace = true
 teams-fence = { workspace = true, features = ["test-support", "personal"] }
 teams-mock.workspace = true
 teams-proto = { workspace = true, features = ["test-support"] }
-teams-store.workspace = true
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 # the manifest tests read every workspace manifest

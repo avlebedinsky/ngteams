@@ -8,7 +8,7 @@
 //! 3. the code redeemed only for that account: the refresh token stored under the account's UPN in the store handed in
 //!    (the desktop's Secret Service under [`crate::KEYRING_APPLICATION`]); a sign-in that lands in another account or
 //!    tenant stores nothing; a lab account (by its MRI, now known) has its token deleted again and is refused;
-//! 4. `account.toml` given the object id and tenant the ID token named, and the region from authz saved
+//! 4. `account.toml` given the object id, tenant and display name the ID token named, and the region from authz saved
 //!    (`region.json`, `0600`, never a token).
 //!
 //! An `AADSTS` refusal (Conditional Access, a device requirement, a multi-factor registration) comes back as the
@@ -117,7 +117,11 @@ pub async fn sign_in<S: SecretStore>(
         authorization = authorization.expect_object_id(oid).expect_tenant(tid);
     }
     let signed = sign_in_with_window(&clients.token, store, &authorization, window).await?;
-    let named = account.signed_in_as(&signed.account.object_id, &signed.account.tenant)?;
+    let named = account.signed_in_as(
+        &signed.account.object_id,
+        &signed.account.tenant,
+        signed.account.display_name.as_deref(),
+    )?;
     if let Err(error) = named.check_not_lab(&setup.lab) {
         // a lab account is never driven by the personal fence: what was just stored goes again
         store.delete(&refresh_token_key(&account.upn)).await?;

@@ -26,6 +26,7 @@ use teams_app::trace::{TraceFdError, adopt_trace};
 use teams_auth::broker::{BrokerScope, BrokerSecretStore, Op, serve};
 use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::SignedOut;
+use teams_core::account::AccountError;
 use teams_core::lab::{self, LabEngine, LabError};
 use teams_core::{EngineError, Reply};
 use teams_fence::Fence;
@@ -314,7 +315,10 @@ fn another_engine_on_the_account_is_reported_and_this_one_exits() -> TestResult 
     let refused = start(&lab, second).expect_err("one engine per account");
 
     assert!(
-        matches!(&refused, LabError::Engine(EngineError::AlreadyRunning { .. })),
+        matches!(
+            &refused,
+            LabError::Account(AccountError::Engine(EngineError::AlreadyRunning { .. }))
+        ),
         "{refused:?}"
     );
     let message = start_failure(Alias::A, &refused);

@@ -45,6 +45,8 @@ pub struct IdTokenClaims {
     pub preferred_username: Option<String>,
     /// `upn`, an optional claim.
     pub upn: Option<String>,
+    /// `name`: the account's display name (the `profile` scope), when given.
+    pub name: Option<String>,
 }
 
 /// The account a code exchange signed in, as its ID token named it once it matched the request.
@@ -54,6 +56,8 @@ pub struct Account {
     pub username: String,
     pub object_id: String,
     pub tenant: String,
+    /// The display name the ID token gave (`name`), if any.
+    pub display_name: Option<String>,
 }
 
 impl IdTokenClaims {
@@ -70,6 +74,7 @@ impl IdTokenClaims {
             tenant: text(&claims, "tid").ok_or(IdTokenError::MissingClaim("tid"))?,
             preferred_username: text(&claims, "preferred_username"),
             upn: text(&claims, "upn"),
+            name: text(&claims, "name"),
         })
     }
 
@@ -109,6 +114,7 @@ impl IdTokenClaims {
             username,
             object_id: self.object_id,
             tenant: self.tenant,
+            display_name: self.name,
         })
     }
 }

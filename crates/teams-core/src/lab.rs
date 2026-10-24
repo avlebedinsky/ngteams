@@ -18,17 +18,13 @@
 
 use std::sync::Arc;
 
-use teams_auth::authz::{AuthzError, Region, RegionFileError};
+use teams_auth::authz::{Region, RegionFileError};
 use teams_auth::secrets::SecretStore;
-use teams_auth::token::TokenError;
 use teams_fence::lab::{Alias, LabConfig};
-use teams_fence::{Fence, LiveMembershipSource, LiveSourceError};
-use teams_proto::BuildError;
-use teams_store::StoreError;
+use teams_fence::{Fence, LiveMembershipSource};
 
 use crate::account::{self, Account, AccountEngine, AccountError, Membership};
 pub use crate::account::{CSA_GTM, MIDDLE_TIER_GTM, PRESENCE_GTM};
-use crate::engine::EngineError;
 
 /// Why a lab account's engine couldn't be built or started.
 #[derive(Debug, thiserror::Error)]
@@ -37,37 +33,8 @@ pub enum LabError {
     NoMri(Alias),
     #[error("{source} (run `proto-lab auth {alias}`)")]
     Region { alias: Alias, source: RegionFileError },
-    #[error("the region has neither a chatServiceAfd nor a chatService GTM")]
-    NoChatBase,
-    #[error("the chat transport can't be built: {0}")]
-    Transport(#[from] BuildError),
-    #[error("the push channel can't be built: {0}")]
-    Push(#[from] teams_trouter::BuildError),
-    #[error("the member read can't be built: {0}")]
-    Membership(#[from] LiveSourceError),
     #[error(transparent)]
-    Token(#[from] TokenError),
-    #[error(transparent)]
-    Authz(#[from] AuthzError),
-    #[error(transparent)]
-    Store(#[from] StoreError),
-    #[error(transparent)]
-    Engine(#[from] EngineError),
-}
-
-impl From<AccountError> for LabError {
-    fn from(error: AccountError) -> Self {
-        match error {
-            AccountError::NoChatBase => Self::NoChatBase,
-            AccountError::Transport(error) => Self::Transport(error),
-            AccountError::Push(error) => Self::Push(error),
-            AccountError::Membership(error) => Self::Membership(error),
-            AccountError::Token(error) => Self::Token(error),
-            AccountError::Authz(error) => Self::Authz(error),
-            AccountError::Store(error) => Self::Store(error),
-            AccountError::Engine(error) => Self::Engine(error),
-        }
-    }
+    Account(#[from] AccountError),
 }
 
 /// A lab account's running engine and the session its requests take their tokens from (the app watches it for a
@@ -78,7 +45,9 @@ pub type LabEngine<S> = AccountEngine<S>;
 /// starts it ([`account::start`]: refused while another engine runs on the account).
 ///
 /// # Errors
-/// See [`LabError`]; [`LabError::Engine`] with [`EngineError::AlreadyRunning`] when another engine holds the account.
+/// See [`LabError`]; [`LabError::Account`] with [`AccountError::Engine`] and
+/// [`EngineError::AlreadyRunning`](crate::engine::EngineError::AlreadyRunning) when
+/// another engine holds the account.
 pub fn start<S: SecretStore + 'static>(
     config: &LabConfig,
     alias: Alias,

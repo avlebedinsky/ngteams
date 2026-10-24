@@ -88,6 +88,26 @@ pub struct EngineLock {
 }
 
 impl EngineLock {
+    /// Takes the engine lock of the store at `store` as [`Store::engine_lock`] does, without opening the store (it
+    /// need not exist): for a command that must not run beside the account's engine, holding it for as long as it
+    /// runs.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::EngineRunning`] when another holds it, [`StoreError::File`] when it can't be made or locked.
+    pub fn hold(store: &Path) -> Result<Self, StoreError> {
+        Self::hold_in(&runs::dir(store))
+    }
+
+    fn hold_in(runs: &Path) -> Result<Self, StoreError> {
+        match runs::try_hold_engine(runs)? {
+            Some((file, path)) => Ok(Self { _file: file, path }),
+            None => Err(StoreError::EngineRunning {
+                path: runs::engine_lock_path(runs),
+            }),
+        }
+    }
+
     /// The lock file: `<store>-runs/engine.lock`.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -205,12 +225,7 @@ impl Store {
     ///
     /// [`StoreError::EngineRunning`] when another holds it, [`StoreError::File`] when it can't be made or locked.
     pub fn engine_lock(&self) -> Result<EngineLock, StoreError> {
-        match runs::try_hold_engine(&self.runs)? {
-            Some((file, path)) => Ok(EngineLock { _file: file, path }),
-            None => Err(StoreError::EngineRunning {
-                path: runs::engine_lock_path(&self.runs),
-            }),
-        }
+        EngineLock::hold_in(&self.runs)
     }
 
     /// The schema version the store is at.

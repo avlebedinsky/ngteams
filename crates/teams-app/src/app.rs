@@ -24,6 +24,7 @@ use std::rc::Rc;
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
 use teams_auth::session::SignedOut;
 use teams_core::EngineError;
+use teams_core::account::AccountError;
 use teams_core::lab::LabError;
 use teams_core::{EngineHandle, Event};
 use teams_fence::lab::Alias;
@@ -280,7 +281,7 @@ pub fn quit_after(stopped: Task<()>, cx: &mut App) {
 #[must_use]
 pub fn start_failure(alias: Alias, error: &LabError) -> String {
     match error {
-        LabError::Engine(EngineError::AlreadyRunning { lock }) => format!(
+        LabError::Account(AccountError::Engine(EngineError::AlreadyRunning { lock })) => format!(
             "another engine runs on lab account {alias} (a teams-app or teams-headless holds {}): only one at a \
              time; this one exits",
             lock.display()

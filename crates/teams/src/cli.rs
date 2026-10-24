@@ -1,6 +1,6 @@
 //! The command line: `teams` (the app for the account `account.toml` holds), `teams --account <UPN>` (the first run:
 //! the account to sign in), `teams --forget` (signs out and forgets the account: its `teams-personal` items,
-//! `account.toml` and the saved region; the store stays, to delete by hand).
+//! `account.toml` and the saved region, refused while Teams runs for it; the store stays, to delete by hand).
 
 use clap::Parser;
 
@@ -14,7 +14,8 @@ pub struct Cli {
     /// account `account.toml` holds.
     #[arg(long, value_name = "UPN")]
     pub account: Option<String>,
-    /// Sign out and forget the account: its Secret Service items, `account.toml` and the saved region. The store stays.
+    /// Sign out and forget the account: its Secret Service items, `account.toml` and the saved region. Refused while
+    /// Teams runs for it (quit it first). The store stays.
     #[arg(long, conflicts_with = "account")]
     pub forget: bool,
 }

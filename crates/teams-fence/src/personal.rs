@@ -87,10 +87,13 @@ impl PersonalPaths {
         self.data_dir.join("fence.log")
     }
 
-    /// The account's store (`teams-store`).
+    /// `account`'s store (`teams-store`): `store/<oid>.sqlite`, one per account, so a store kept after
+    /// `teams --forget` is never another account's; `None` before a sign-in named its object id (or for one that isn't
+    /// a GUID).
     #[must_use]
-    pub fn store_file(&self) -> PathBuf {
-        self.data_dir.join("store.sqlite")
+    pub fn store_file(&self, account: &PersonalAccount) -> Option<PathBuf> {
+        let oid = account.oid.as_deref().filter(|oid| is_guid(oid))?;
+        Some(self.data_dir.join("store").join(format!("{oid}.sqlite")))
     }
 
     /// The account's region as authz gave it (never a token).
@@ -157,13 +160,15 @@ fn lab_config(lab: &LabLocations) -> Result<Option<LabConfig>, PersonalError> {
 }
 
 /// The account the personal build signs in (`account.toml`): the UPN the user gave (`teams --account`), and once the
-/// first sign-in went through, the object id and tenant its ID token named, which every later sign-in must match.
-/// Never a token.
+/// first sign-in went through, the object id and tenant its ID token named, which every later sign-in must match, and
+/// the display name it gave (`name`, refreshed by every sign-in; what the account's posts carry as their sender's
+/// name). Never a token.
 ///
 /// ```toml
 /// upn = "someone@example.com"
 /// oid = "<the account's object id>"   # written by the first sign-in
 /// tid = "<its tenant id>"             # written by the first sign-in
+/// name = "Someone Example"            # written by a sign-in whose ID token gave one
 /// idp_hosts = ["sso.example.com"]     # optional: the federated identity provider's hosts the sign-in window may reach
 /// ```
 #[derive(Clone, PartialEq, Eq, Deserialize)]
@@ -174,6 +179,8 @@ pub struct PersonalAccount {
     pub oid: Option<String>,
     #[serde(default)]
     pub tid: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub idp_hosts: Vec<String>,
 }
@@ -223,6 +230,7 @@ impl PersonalAccount {
             upn: upn.to_owned(),
             oid: None,
             tid: None,
+            name: None,
             idp_hosts: Vec::new(),
         };
         account.validate()?;
@@ -238,20 +246,24 @@ impl PersonalAccount {
             upn: upn.to_owned(),
             oid: Some(oid.to_ascii_lowercase()),
             tid: Some(tid.to_ascii_lowercase()),
+            name: None,
             idp_hosts: Vec::new(),
         };
         account.validate()?;
         Ok(account)
     }
 
-    /// The same account with the object id and tenant a sign-in named.
+    /// The same account with the object id and tenant a sign-in named, and the display name its ID token gave (kept as
+    /// it was when the token gave none, or one a post can't carry).
     ///
     /// # Errors
     /// As [`PersonalAccount::parse`].
-    pub fn signed_in_as(&self, oid: &str, tid: &str) -> Result<Self, PersonalError> {
+    pub fn signed_in_as(&self, oid: &str, tid: &str, name: Option<&str>) -> Result<Self, PersonalError> {
+        let name = name.map(str::trim).filter(|name| is_display_name(name));
         let account = Self {
             oid: Some(oid.to_ascii_lowercase()),
             tid: Some(tid.to_ascii_lowercase()),
+            name: name.map(str::to_owned).or_else(|| self.name.clone()),
             ..self.clone()
         };
         account.validate()?;
@@ -278,6 +290,9 @@ impl PersonalAccount {
             (Some(oid), Some(tid)) if is_guid(oid) && is_guid(tid) => {}
             (None, None) => {}
             _ => return bad("oid and tid must be GUIDs, both or neither"),
+        }
+        if !self.name.as_deref().is_none_or(is_display_name) {
+            return bad("name is empty, has control characters or is padded with spaces");
         }
         if !self.idp_hosts.iter().all(|host| is_host(host)) {
             return bad("an idp_hosts entry isn't a lowercase DNS name");
@@ -334,9 +349,14 @@ impl PersonalAccount {
                 ),
                 _ => String::new(),
             };
+            let name = self
+                .name
+                .as_ref()
+                .map(|name| format!("name = {}\n", toml::Value::String(name.clone())))
+                .unwrap_or_default();
             let text = format!(
                 "# The account the personal build signs in (its first sign-in adds oid and tid). Never a token.\n\
-                 upn = {}\n{ids}idp_hosts = {}\n",
+                 upn = {}\n{ids}{name}idp_hosts = {}\n",
                 toml::Value::String(self.upn.clone()),
                 toml::Value::Array(hosts),
             );
@@ -554,6 +574,12 @@ fn is_guid(text: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
+}
+
+/// A display name as a post may carry it: not empty, no control character, no leading or trailing space, at most 256
+/// characters.
+fn is_display_name(text: &str) -> bool {
+    !text.is_empty() && text.trim() == text && text.chars().count() <= 256 && !text.chars().any(char::is_control)
 }
 
 /// A lowercase DNS name: labels of letters, digits and `-`, at least two of them, none empty.

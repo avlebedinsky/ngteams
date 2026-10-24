@@ -50,43 +50,32 @@ impl PersonalLocations {
 }
 
 /// Whether `one` and `other` are the same directory, or one lies inside the other, after resolving symlinks: each path
-/// is resolved as far as it exists (its longest existing ancestor canonicalized, the rest appended with `.` and `..`
-/// taken lexically), so a directory not made yet is compared where it would be made.
+/// is resolved component by component as the filesystem would ([`resolved`]), so a `..` after a symlink leaves the
+/// symlink's target, and a directory not made yet is compared where it would be made.
 #[must_use]
 pub fn overlapping(one: &Path, other: &Path) -> bool {
     let (one, other) = (resolved(one), resolved(other));
     one.starts_with(&other) || other.starts_with(&one)
 }
 
-/// `path` with `.` dropped and `..` taking one component off (lexically), then its longest existing ancestor
-/// canonicalized and the rest appended.
+/// `path` resolved one component at a time: while the path so far exists it is canonicalized after each component
+/// (its symlinks followed, as the filesystem does before it takes the next `..`); past the last existing component the
+/// rest is appended with `.` dropped and `..` taking one component off.
 fn resolved(path: &Path) -> PathBuf {
-    let mut lexical = PathBuf::new();
+    let mut out = PathBuf::new();
     for component in path.components() {
         match component {
             Component::ParentDir => {
-                lexical.pop();
+                out.pop();
             }
             Component::CurDir => {}
-            other => lexical.push(other.as_os_str()),
-        }
-    }
-    let mut existing = lexical;
-    let mut rest = Vec::new();
-    let mut out = loop {
-        if let Ok(canonical) = existing.canonicalize() {
-            break canonical;
-        }
-        match (existing.file_name().map(ToOwned::to_owned), existing.parent()) {
-            (Some(name), Some(parent)) => {
-                rest.push(name);
-                existing = parent.to_path_buf();
+            other => {
+                out.push(other.as_os_str());
+                if let Ok(canonical) = out.canonicalize() {
+                    out = canonical;
+                }
             }
-            _ => break existing,
         }
-    };
-    for name in rest.into_iter().rev() {
-        out.push(name);
     }
     out
 }
@@ -123,5 +112,20 @@ mod tests {
         assert!(overlapping(&real.join("a/../teams"), &link.join("teams/store")));
         assert!(!overlapping(&real.join("teams-lab"), &real.join("teams")));
         assert!(!overlapping(&dir.path().join("other"), &real));
+    }
+
+    #[test]
+    fn a_parent_after_a_symlink_leaves_the_symlinks_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let personal = dir.path().join("data/teams");
+        std::fs::create_dir_all(personal.join("sub")).unwrap();
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        let link = scratch.join("link");
+        std::os::unix::fs::symlink(personal.join("sub"), &link).unwrap();
+        // `scratch/link/..` is `data/teams` on the filesystem, not `scratch`
+        assert!(overlapping(&link.join("../lab"), &personal));
+        assert!(!overlapping(&scratch.join("lab"), &personal));
+        assert!(overlapping(&link.join("../not/yet/../lab"), &personal));
     }
 }

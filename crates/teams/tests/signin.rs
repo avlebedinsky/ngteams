@@ -17,6 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 use teams::KEYRING_APPLICATION;
+use teams::forget::{self, ForgetError, Forgot};
 use teams::setup::{Setup, SetupError};
 use teams::signin::{self, SignInClients, SignInError};
 use teams_auth::authz::AuthzClient;
@@ -34,6 +35,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const UPN: &str = "someone@example.test";
 const OID: &str = "00000000-0000-4000-8000-0000000000ff";
 const TENANT: &str = "00000000-0000-4000-8000-000000000001";
+const DISPLAY_NAME: &str = "Made-Up Person";
 const OTHER_OID: &str = "00000000-0000-4000-8000-0000000000ee";
 const LAB_A_OID: &str = "00000000-0000-4000-8000-00000000000a";
 const AUTHZ_FIXTURE: &str = include_str!("../../../tests/fixtures/auth/authz-ok.json");
@@ -73,7 +75,13 @@ fn setup_in(dir: &tempfile::TempDir) -> Setup {
 /// An unsigned ID token naming `upn`, `oid`, the tenant, for the native client.
 fn id_token(upn: &str, oid: &str) -> String {
     let header = URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"RS256","kid":"test"}"#);
-    let claims = json!({"aud": TEAMS_NATIVE_CLIENT_ID, "oid": oid, "tid": TENANT, "preferred_username": upn});
+    let claims = json!({
+        "aud": TEAMS_NATIVE_CLIENT_ID,
+        "oid": oid,
+        "tid": TENANT,
+        "preferred_username": upn,
+        "name": DISPLAY_NAME,
+    });
     format!(
         "{header}.{}.c2lnbmF0dXJlLW5vdC1jaGVja2Vk",
         URL_SAFE_NO_PAD.encode(claims.to_string())
@@ -139,6 +147,8 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
         .unwrap();
     assert_eq!(signed.oid.as_deref(), Some(OID));
     assert_eq!(signed.tid.as_deref(), Some(TENANT));
+    assert_eq!(signed.name.as_deref(), Some(DISPLAY_NAME));
+    assert_eq!(teams::engine::display_name(&signed), DISPLAY_NAME);
     let stored = store.get(&refresh_token_key(UPN)).await.unwrap();
     assert_eq!(stored.as_ref().map(Secret::expose), Some("made-up-refresh-token"));
     assert_eq!(PersonalAccount::load(&setup.paths).unwrap(), Some(signed.clone()));
@@ -156,8 +166,12 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
     // the engine: the personal fence from account.toml, the store under the personal data dir; nothing is sent
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
     let engine = teams::engine::start(&setup.paths, &signed, fence, MemorySecretStore::new(), false).unwrap();
-    assert!(setup.paths.store_file().is_file());
-    assert!(setup.paths.store_file().starts_with(setup.paths.data_dir()));
+    let store_file = setup.paths.store_file(&signed).unwrap();
+    assert!(store_file.is_file());
+    assert_eq!(
+        store_file,
+        setup.paths.data_dir().join("store").join(format!("{OID}.sqlite"))
+    );
     engine.handle.shutdown();
     assert_eq!(KEYRING_APPLICATION, "teams-personal");
 }
@@ -240,4 +254,61 @@ fn the_account_is_given_once_and_only_repeated_afterwards() {
         setup.account(Some("other@example.test")),
         Err(SetupError::OtherAccount { .. })
     ));
+}
+
+#[tokio::test]
+async fn forget_is_refused_while_the_engine_runs_and_the_next_account_never_opens_the_kept_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir);
+    let server = MockServer::start().await;
+    let first_clients = clients(&server, UPN, OID).await;
+    let secrets = MemorySecretStore::new();
+    let account = setup.account(Some(UPN)).unwrap();
+    let signed = signin::sign_in(&setup, &account, &first_clients, &secrets, window())
+        .await
+        .unwrap();
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
+    let engine = teams::engine::start(&setup.paths, &signed, fence, MemorySecretStore::new(), false).unwrap();
+
+    // the engine runs: nothing is deleted
+    let error = forget::forget(&setup, &secrets).await.unwrap_err();
+    assert!(
+        matches!(&error, ForgetError::Running { upn, .. } if upn == UPN),
+        "{error}"
+    );
+    assert!(error.to_string().contains("quit it"), "{error}");
+    assert!(secrets.get(&refresh_token_key(UPN)).await.unwrap().is_some());
+    assert_eq!(PersonalAccount::load(&setup.paths).unwrap(), Some(signed.clone()));
+    assert!(setup.paths.region_file().is_file());
+
+    // once it has stopped, the account goes and its store stays
+    engine.handle.shutdown();
+    let kept = setup.paths.store_file(&signed).unwrap();
+    assert_eq!(
+        forget::forget(&setup, &secrets).await.unwrap(),
+        Forgot::Account {
+            upn: UPN.to_owned(),
+            store: Some(kept.clone()),
+        }
+    );
+    assert!(secrets.get(&refresh_token_key(UPN)).await.unwrap().is_none());
+    assert_eq!(PersonalAccount::load(&setup.paths).unwrap(), None);
+    assert!(!setup.paths.region_file().exists());
+    assert!(kept.is_file());
+    assert_eq!(forget::forget(&setup, &secrets).await.unwrap(), Forgot::Nothing);
+
+    // another account signed in next has a store of its own
+    let other_upn = "someone-else@example.test";
+    let server = MockServer::start().await;
+    let other_clients = clients(&server, other_upn, OTHER_OID).await;
+    let account = setup.account(Some(other_upn)).unwrap();
+    let other = signin::sign_in(&setup, &account, &other_clients, &secrets, window())
+        .await
+        .unwrap();
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
+    let engine = teams::engine::start(&setup.paths, &other, fence, MemorySecretStore::new(), false).unwrap();
+    let own = setup.paths.store_file(&other).unwrap();
+    assert_ne!(own, kept);
+    assert!(own.is_file());
+    engine.handle.shutdown();
 }

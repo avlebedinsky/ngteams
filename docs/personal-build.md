@@ -37,7 +37,7 @@ personal build widens what a lab account may do.
 | account | one lab alias per process, from `lab.toml` | the user's own work account, the one the sign-in window signs in |
 | config | `~/.config/teams-lab/lab.toml` | `~/.config/teams/account.toml` (written by the first sign-in, below) |
 | data dir | `$XDG_DATA_HOME/teams-lab/` (or `lab.toml`'s `data_dir`) | `$XDG_DATA_HOME/teams/` (`~/.local/share/teams/`), `0700` |
-| store | `<lab data>/store/<alias>.sqlite` | `~/.local/share/teams/store.sqlite` (`0600`, as `teams-store` makes it) |
+| store | `<lab data>/store/<alias>.sqlite` | `~/.local/share/teams/store/<oid>.sqlite` (`0600`, as `teams-store` makes it) |
 | fence log | `<lab data>/fence.log` | `~/.local/share/teams/fence.log` (`0600`) |
 | region (no token) | `<lab data>/auth/<alias>.json` | `~/.local/share/teams/region.json` |
 | UI settings | `<lab data>/ui/<alias>.toml` | `~/.local/share/teams/settings.toml` |
@@ -454,7 +454,12 @@ Written after the approval and the lab fence's rewrite, by Task 27:
 - **`account.toml`.** `teams --account <UPN>` writes the UPN (and the user may add `idp_hosts`) before the first
   sign-in, which adds the object id and tenant; the personal fence opens only once both are there.
 - **Changing account** is `teams --forget` (the `teams-personal` items, `account.toml`, the region; the store stays, to
-  delete by hand), a command line flag rather than an item in the app.
+  delete by hand), a command line flag rather than an item in the app. It is refused while the account's engine runs
+  (it takes the account's engine lock first and holds it until everything is deleted), so a running app's session
+  can't keep sending or store a renewed token again. Each account has a store of its own (`store/<oid>.sqlite`), so a
+  store kept after a forget is never opened for another account.
+- **The display name** a post carries (`imdisplayname`) is the ID token's `name`, kept in `account.toml` by every
+  sign-in that gives one; an `account.toml` without one falls back to the UPN's local part.
 - **The lab's credential broker** (`teams-app secrets`) builds no fence and refuses neither `test-support` nor
   `personal`, as before; the app itself refuses both.
 - **CLAUDE.md** carries the approved text without its date (CLAUDE.md holds current rules only), its references to

@@ -12,11 +12,10 @@ use gpui::{App, AppContext as _, AsyncApp, WindowingModes};
 use teams::KEYRING_APPLICATION;
 use teams::app::{self, Launch, SignInAgain};
 use teams::cli::Cli;
+use teams::forget::Forgot;
 use teams::setup::Setup;
 use teams::signin::{self, SignInClients};
-use teams_auth::authz::{skypetoken_expiry_key, skypetoken_key};
-use teams_auth::refresh::refresh_token_key;
-use teams_auth::secrets::{LazyKeyring, SecretStore};
+use teams_auth::secrets::LazyKeyring;
 use teams_fence::Fence;
 use teams_fence::personal::PersonalAccount;
 use teams_ui::SettingsFile;
@@ -151,36 +150,23 @@ fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>
     })
 }
 
-/// Signs out and forgets the account (see `cli`).
+/// Signs out and forgets the account (see [`teams::forget`]): refused while Teams runs for it.
 fn forget(setup: &Setup) -> Result<(), String> {
-    let account = PersonalAccount::load(&setup.paths).map_err(|error| error.to_string())?;
-    let Some(account) = account else {
-        eprintln!("teams: no account to forget");
-        return Ok(());
-    };
-    runtime()?.block_on(async {
-        let store = LazyKeyring::new(KEYRING_APPLICATION);
-        for key in [
-            refresh_token_key(&account.upn),
-            skypetoken_key(&account.upn),
-            skypetoken_expiry_key(&account.upn),
-        ] {
-            store.delete(&key).await.map_err(|error| error.to_string())?;
-        }
-        Ok::<(), String>(())
-    })?;
-    for file in [setup.paths.account_file(), setup.paths.region_file()] {
-        match std::fs::remove_file(&file) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("{}: {error}", file.display())),
-        }
+    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    let forgot = runtime()?
+        .block_on(teams::forget::forget(setup, &store))
+        .map_err(|error| error.to_string())?;
+    match forgot {
+        Forgot::Nothing => eprintln!("teams: no account to forget"),
+        Forgot::Account {
+            upn,
+            store: Some(store),
+        } => eprintln!(
+            "teams: {upn} is forgotten; its store stays at {} (delete it by hand)",
+            store.display()
+        ),
+        Forgot::Account { upn, store: None } => eprintln!("teams: {upn} is forgotten"),
     }
-    eprintln!(
-        "teams: {} is forgotten; its store stays at {} (delete it by hand)",
-        account.upn,
-        setup.paths.store_file().display()
-    );
     Ok(())
 }
 

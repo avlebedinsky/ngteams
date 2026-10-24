@@ -4,23 +4,27 @@
 //! - the web process extension (`teams-signin-extension`) copied alone into a private directory `WebKit` loads it from,
 //!   given the guard's socket; the guard ([`crate::guard`]) serving on that socket;
 //! - an ephemeral network session (no website data kept), Intelligent Tracking Prevention off, downloads cancelled,
-//!   and its proxy set so that it reaches numeric loopback addresses directly and anything else only through
-//!   [`crate::egress::BlackHole`], which refuses it;
-//! - the guard in loopback-only mode ([`Guard::local_only`]);
+//!   and its proxy set by the window's [`Bound`]: with [`Bound::Loopback`] it reaches numeric loopback addresses
+//!   directly and anything else only through [`crate::egress::BlackHole`], which refuses it; with `Bound::Hosts` (the
+//!   personal sign-in window, `personal` feature) nothing goes direct and every connection goes through
+//!   `crate::egress::HostGate`, which lets out only the sign-in hosts;
+//! - the guard in the bound's mode: loopback-only ([`Guard::local_only`]) or bound to the sign-in hosts
+//!   (`Guard::hosts_only`);
 //! - the `WebKit` features the guard can't see or that would send on their own switched off ([`FEATURES_OFF`]), WebRTC,
 //!   developer extras, the page cache and script-opened windows off (`WebKitGTK` 2.50 dropped the hyperlink auditing
 //!   setting and 2.48 the DNS prefetching one; an `<a ping>` goes through the cached-resource loader, so the guard
 //!   decides it like any other request);
 //! - `decide-policy`: no new window, no response `WebKit` can't show (a download), no navigation before the page is
-//!   armed, none to anything but a page on a loopback address or `about:blank` (refused and logged), and the redirect
-//!   to the registered redirect URI caught before it loads.
+//!   armed, none off the bound (refused and logged: anything but a page on a loopback address or `about:blank` for
+//!   the loopback window, anything `SignInHosts::admits_url` doesn't take for the personal one), and the redirect to
+//!   the registered redirect URI caught before it loads.
 //!
 //! Then it loads `about:blank`, which makes `WebKit` create the page, and opens the authorize URL only once that page
 //! has told the guard it is armed. The redirect, from `decide-policy` or from the guard, whichever comes first, ends the
 //! run with [`WindowAnswer::Redirect`]; closing the window with [`WindowAnswer::Closed`]; the page's web process
 //! ending (a crash: a process `WebKit` started again might not be armed) with [`WEB_PROCESS_ENDED`]. However the run
-//! ends, the view's web process is then terminated and the window destroyed (the black hole keeps refusing whatever a
-//! kept-alive load still sends from the network process).
+//! ends, the view's web process is then terminated and the window destroyed (the black hole, or the host gate, keeps
+//! deciding whatever a kept-alive load still sends from the network process).
 //!
 //! Not a complete fence (the plan's Task 24): a synchronous load's redirects and a kept-alive load's redirects after
 //! its page is gone never reach the guard (on this machine only the black hole gets them), and only the view's first
@@ -114,7 +118,7 @@ pub struct WindowConfig {
     pub bound: Bound,
     /// The extension module (`libteams_signin_extension.so`).
     pub extension: PathBuf,
-    /// Where the guard's decisions go (the lab's `fence.log`).
+    /// Where the guard's decisions go (the lab's `fence.log`, or the personal build's for the personal window).
     pub log: FenceLog,
     pub setup: GuardSetup,
 }

@@ -293,9 +293,10 @@ pub struct Fence {
     rules: Rules,
     roster: Roster,
     log: FenceLog,
-    /// The account this fence is a client's of ([`Fence::open_lab_account`]): the one account whose own availability
-    /// it permits. `None` for a fence of no account ([`Fence::open_lab`], the browser fence's) or of an account whose
-    /// MRI `lab.toml` doesn't know yet: it permits no own availability.
+    /// The account this fence is a client's of ([`Fence::open_lab_account`], or the personal build's signed-in account
+    /// through `Fence::open_personal`): the one account whose own availability it permits, and for a personal fence
+    /// the account every conversation it writes to must list. `None` for a fence of no account ([`Fence::open_lab`],
+    /// the browser fence's) or of an account whose MRI `lab.toml` doesn't know yet: it permits no own availability.
     own: Option<Mri>,
 }
 
@@ -411,7 +412,8 @@ impl Fence {
     }
 
     /// The account whose own availability this fence permits: the account a [`Fence::open_lab_account`] was opened
-    /// for, when `lab.toml` knows its MRI; `None` otherwise.
+    /// for, when `lab.toml` knows its MRI, or the signed-in account of a personal fence (`Fence::open_personal`, which
+    /// opens only once `account.toml` holds its object id); `None` otherwise.
     #[must_use]
     pub fn own_account(&self) -> Option<&Mri> {
         self.own.as_ref()
@@ -445,10 +447,17 @@ impl Fence {
     /// Nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
     /// logged is denied.
     ///
+    /// A personal fence (`Fence::open_personal`, only with the `personal` feature) decides by the personal build's
+    /// rules instead (`docs/personal-build.md`): the roster plays no part; only the kinds the personal build sends, on
+    /// a 1:1 chat of the account's or a group chat, adding nobody, each one (typing and read receipts included) after
+    /// one fresh read of the conversation that lists the account; and the account's own availability as above.
+    ///
     /// # Errors
     /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, when
     /// a kind that doesn't create a target names [`Scope::New`], when an own availability isn't the fence's own
-    /// account's or another write names [`Scope::Account`], or when an allow can't be logged.
+    /// account's or another write names [`Scope::Account`], or when an allow can't be logged. A personal fence denies
+    /// with its own reasons too: [`DenyReason::NotPersonalKind`], [`DenyReason::NotPersonalScope`],
+    /// [`DenyReason::AddsParticipants`] and [`DenyReason::NotAMember`].
     pub async fn check(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
         #[cfg(feature = "personal")]
         if self.rules == Rules::Personal {
@@ -494,7 +503,7 @@ impl Fence {
             Membership::Complete(members) => members,
             Membership::Partial(reason) => return Verdict::Deny(DenyReason::Partial(reason)),
             Membership::OrgWide => return Verdict::Deny(DenyReason::OrgWide),
-            // a listing proves nobody is left out, which the lab's rule needs
+            // a listing doesn't prove nobody is left out, which the lab's rule needs
             Membership::Listed(_) => return Verdict::Deny(DenyReason::Partial(PartialReason::Unsupported)),
         };
         if fetched && current.is_empty() {

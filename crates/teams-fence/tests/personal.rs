@@ -114,6 +114,16 @@ async fn serve(server: &MockServer, id: &str, status: u16, body: &Value) {
         .await;
 }
 
+/// A membership source with one fixed answer.
+struct Fixed(Membership);
+
+impl MembershipSource for Fixed {
+    fn members<'a>(&'a self, _: &'a Scope) -> teams_fence::MembershipFuture<'a> {
+        let answer = self.0.clone();
+        Box::pin(async move { answer })
+    }
+}
+
 fn message(id: &str) -> Target {
     Target::new(WriteKind::Message, Scope::Conversation { id: id.to_owned() })
 }
@@ -136,12 +146,16 @@ async fn a_chat_with_an_outsider_that_lists_the_account_is_writable_where_the_la
     let entries = log.entries();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["verdict"], "allow");
-    // the lab fence, which needs every member to be a lab account, denies the same write
+    // the lab fence, which needs every member to be a lab account, denies the same members read in full for X alone
     let lab = Fence::new(
         Roster::new([mri(GUID_A), mri(GUID_B)], []),
         FenceLog::from_writer(std::io::sink()),
     );
-    assert!(lab.check(message(&chat), &source(&server)?).await.is_err());
+    let complete = Fixed(Membership::Complete(vec![mri(GUID_A), mri(GUID_X)]));
+    assert_eq!(
+        lab.check(message(&chat), &complete).await.unwrap_err().reason(),
+        &DenyReason::Outsiders { count: 1 }
+    );
     Ok(())
 }
 
@@ -320,13 +334,6 @@ async fn the_account_s_own_availability_is_its_only_write_without_a_conversation
 
 #[tokio::test]
 async fn a_lab_fence_denies_a_listing_and_a_personal_fence_a_complete_list() -> TestResult {
-    struct Fixed(Membership);
-    impl MembershipSource for Fixed {
-        fn members<'a>(&'a self, _: &'a Scope) -> teams_fence::MembershipFuture<'a> {
-            let answer = self.0.clone();
-            Box::pin(async move { answer })
-        }
-    }
     let lab = Fence::new(Roster::new([mri(GUID_A)], []), FenceLog::from_writer(std::io::sink()));
     let listed = Fixed(Membership::Listed(vec![mri(GUID_A)]));
     assert_eq!(
@@ -534,9 +541,36 @@ fn account_toml_is_strict() {
     ] {
         assert!(PersonalAccount::parse(&bad).is_err(), "{bad}");
     }
+    for bad_name in ["", " padded", "line\\nbreak"] {
+        let bad = format!("{good}name = \"{bad_name}\"\n");
+        assert!(PersonalAccount::parse(&bad).is_err(), "{bad}");
+    }
     let hosts = format!("{good}idp_hosts = [\"sso.example.test\"]\n");
     assert_eq!(
         PersonalAccount::parse(&hosts).map(|account| account.idp_hosts).ok(),
         Some(vec!["sso.example.test".to_owned()])
     );
+}
+
+#[test]
+fn a_sign_in_s_display_name_is_kept_in_account_toml() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let paths = paths_in(&dir);
+    let pending = PersonalAccount::pending("someone@example.test")?;
+    let named = pending.signed_in_as(GUID_X, TENANT, Some("Made-Up Person"))?;
+    assert_eq!(named.name.as_deref(), Some("Made-Up Person"));
+    named.save(&paths)?;
+    assert_eq!(PersonalAccount::load(&paths)?, Some(named.clone()));
+    // a later sign-in without one, or with one a post can't carry, keeps it
+    let again = named.signed_in_as(GUID_X, TENANT, None)?;
+    assert_eq!(again.name.as_deref(), Some("Made-Up Person"));
+    let again = named.signed_in_as(GUID_X, TENANT, Some("bad\u{7}name"))?;
+    assert_eq!(again.name.as_deref(), Some("Made-Up Person"));
+    // the store is the account's own
+    assert_eq!(
+        paths.store_file(&named),
+        Some(paths.data_dir().join("store").join(format!("{GUID_X}.sqlite")))
+    );
+    assert_eq!(paths.store_file(&pending), None);
+    Ok(())
 }

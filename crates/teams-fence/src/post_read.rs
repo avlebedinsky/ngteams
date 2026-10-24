@@ -5,8 +5,9 @@
 //! its limit to the lab's own accounts.
 //!
 //! The limit: the fence denies a list that is empty, that names an MRI twice, or that names anyone but the lab
-//! accounts of its roster, an approved service participant included ([`Fence::lab_accounts_only`]). It fetches
-//! nothing.
+//! accounts of its roster, an approved service participant included ([`Fence::lab_accounts_only`]). A personal fence
+//! (`Fence::open_personal`) has a limit of its own instead: the account itself and the people of its chats as the
+//! store holds them ([`Fence::check_post_read_among`]), never a service's `28:` id. It fetches nothing.
 //!
 //! Every decision is appended to `fence.log` (the entry's kind, how many MRIs it names, the verdict and the reason;
 //! never the MRIs), and an allow that can't be logged is denied. What the request looks like on the wire (its
@@ -175,12 +176,13 @@ impl Fence {
 
     /// Decides one read by `POST` of the entry `kind` naming `names`, in that order: a permit for exactly them when
     /// they are at least one MRI, none twice, and every one a lab account of the roster
-    /// ([`Fence::lab_accounts_only`]); otherwise denied. The decision is appended to `fence.log` before the permit is
-    /// made; an allow that can't be logged is denied.
+    /// ([`Fence::lab_accounts_only`]); otherwise denied. A personal fence judges it as [`Fence::check_post_read_among`]
+    /// does with nobody's chats, which leaves only the account itself. The decision is appended to `fence.log` before
+    /// the permit is made; an allow that can't be logged is denied.
     ///
     /// # Errors
-    /// [`PostReadDenied`] for an empty list, a duplicate MRI, any MRI that isn't a lab account, or an allow that
-    /// can't be logged.
+    /// [`PostReadDenied`] for an empty list, a duplicate MRI, any MRI that isn't a lab account (for a personal fence,
+    /// any MRI but the account's own, [`PostReadDenyReason::NotInChats`]), or an allow that can't be logged.
     pub fn check_post_read(&self, kind: &'static str, names: &[Mri]) -> Result<PostReadPermit, PostReadDenied> {
         self.check_post_read_among(kind, names, &ChatPeople::new())
     }
