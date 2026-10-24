@@ -8,7 +8,8 @@
 //! capture: the same email, MRI, GUID or name gets the same placeholder in every event.
 //! - **Secrets are removed**: JWTs, skypetokens, `Bearer`/`Basic` credentials, cookie values, and any value under a
 //!   secret-looking key (`*token*`, `*secret*`, `*password*`, `*cookie*`, `*credential*`, `authorization`, `sig`, the
-//!   ICE `pwd`/`ufrag`/`usernameFragment`, the TURN `username`, …), in JSON, in form and query strings, and in text.
+//!   ICE `pwd`/`ufrag`/`usernameFragment`, the TURN `username`, …), in JSON, in form and query strings, and in text;
+//!   so is a DTLS certificate fingerprint (`a=fingerprint:sha-256 AB:CD:…`, 20 colon-separated hex bytes or more).
 //!   Each becomes `<token:N>`; a scheme is kept (`Bearer <token:1>`, `skypetoken=<token:2>`), and so is a cookie's
 //!   name. A long value under a generic key (`code`, `key`, `state`) is a secret too, as is any long high-entropy run
 //!   of letters and digits nothing else recognized. Raw header text (`headersText`) is dropped, and binary content
@@ -278,6 +279,7 @@ struct Rules {
     ipv4_run: Regex,
     ipv6_run: Regex,
     ufrag: Regex,
+    fingerprint: Regex,
     field: Regex,
     field_value: Regex,
     opaque_run: Regex,
@@ -319,6 +321,8 @@ impl Rules {
             ipv4_run: Regex::new(r"[0-9.]+")?,
             ipv6_run: Regex::new(r"[0-9A-Fa-f:.]+")?,
             ufrag: Regex::new(r"(?i)(\bufrag\s+)([^\s<>]+)")?,
+            // a DTLS certificate's digest as SDP writes it: SHA-1 is 20 bytes, SHA-256 32
+            fingerprint: Regex::new(r"\b(?:[0-9A-Fa-f]{2}:){19,}[0-9A-Fa-f]{2}\b")?,
             // the key of a `key=value` or `"key": "value"` in text (group 1), up to its value ...
             field: Regex::new(r#"(?:^|[^A-Za-z0-9_\-])([A-Za-z][A-Za-z0-9_\-]*)["']?\s*[:=]\s*"#)?,
             // ... and the value: quoted (group 1, 2) or bare (3), up to the next delimiter
@@ -972,10 +976,11 @@ type Rule = fn(&Rules, &mut State, &str) -> Edits;
 
 /// The rules for free text, in order: secrets first (so a token is never taken apart; meetings' passcodes and codes
 /// with them), then identifiers, then personal fields, names, and whatever still looks like a token.
-const TEXT_RULES: [Rule; 17] = [
+const TEXT_RULES: [Rule; 18] = [
     bearer,
     secret_values,
     jwts,
+    fingerprints,
     meetings,
     meetings_learned,
     mris,
@@ -1096,6 +1101,13 @@ fn meetings(rules: &Rules, state: &mut State, text: &str) -> Edits {
 
 fn meetings_learned(rules: &Rules, state: &mut State, text: &str) -> Edits {
     meeting::learned(&rules.meeting, state, text)
+}
+
+fn fingerprints(rules: &Rules, state: &mut State, text: &str) -> Edits {
+    edits_each(&rules.fingerprint, text, |captures| {
+        let fingerprint = captures.get(0)?;
+        Some((fingerprint.range(), state.token(fingerprint.as_str())))
+    })
 }
 
 fn jwts(rules: &Rules, state: &mut State, text: &str) -> Edits {

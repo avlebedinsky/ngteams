@@ -223,6 +223,185 @@ fn a_digit_prefixed_passcode_and_a_german_invitation_without_a_link_are_detected
     assert_detected(&Guard::new().unwrap(), &cases);
 }
 
+/// A made-up SHA-256 digest, as `a=fingerprint:` writes one.
+const FINGERPRINT: &str =
+    "3A:9F:01:C4:7B:22:E8:5D:90:16:AF:43:6C:D7:08:B1:5E:72:9A:0C:E3:48:F6:21:8D:B9:34:60:CA:17:F2:5B";
+
+#[test]
+fn a_calls_network_data_is_detected() {
+    let sha1 = FINGERPRINT.split(':').take(20).collect::<Vec<_>>().join(":");
+    let cases = [
+        // a public address: an ICE candidate's, an SDP's, a relay's, in a URL, in JSON, at a sentence's end
+        (
+            "a=candidate:1 1 UDP 54788863 52.113.10.5 3478 typ relay raddr 52.113.10.5 rport 3478",
+            Kind::IpAddress,
+        ),
+        ("c=IN IP4 20.202.1.7", Kind::IpAddress),
+        (
+            r"m=audio 3478 RTP/SAVP 111\r\nc=IN IP4 52.113.10.5\r\na=rtcp:3478",
+            Kind::IpAddress,
+        ),
+        (r#"{"address":"13.107.64.2","port":3478}"#, Kind::IpAddress),
+        ("the relay answered from 52.113.10.5.", Kind::IpAddress),
+        ("http://52.113.10.5/x and //52.113.10.5:443", Kind::IpAddress),
+        ("c=IN IP6 2a01:111:f100:3000::a83e:1a2b", Kind::IpAddress),
+        ("turn:[2603:1063:2:f::5]:3478?transport=udp", Kind::IpAddress),
+        (r#"{"ip":"2a01:111:f100::1"}"#, Kind::IpAddress),
+        // ... glued to the word before it
+        ("port:2a01:111:f100::1", Kind::IpAddress),
+        (r#"{"urls":"turn:2a01:111:f100::1?transport=udp"}"#, Kind::IpAddress),
+        ("host=2a01%3A111%3Af100%3A%3A1", Kind::IpAddress),
+        ("mapped ::ffff:52.113.10.5 and ::ffff:3471:a05", Kind::IpAddress),
+        ("translated 64:ff9b::3471:a05", Kind::IpAddress),
+        // an ICE username fragment and password: in SDP, in SDP inside a JSON string, in a candidate string, under a
+        // JSON key
+        ("a=ice-ufrag:Xk3f", Kind::IceCredential),
+        ("a=ice-pwd:Zq8hTn2vW5yR7mP1sD4fG6jK", Kind::IceCredential),
+        (
+            r#"{"blob":"v=0\r\na=ice-ufrag:Xk3f\r\na=ice-pwd:Zq8hTn2vW5yR7mP1sD4fG6jK\r\n"}"#,
+            Kind::IceCredential,
+        ),
+        (
+            r#"{"candidate":"candidate:1 1 udp 2122260223 127.0.0.1 54321 typ host generation 0 ufrag Qx7Zk network-id 1"}"#,
+            Kind::IceCredential,
+        ),
+        (
+            r#"{"candidate":"candidate:1 1 udp 1 192.0.2.1 9 typ host","usernameFragment":"Xk3f"}"#,
+            Kind::IceCredential,
+        ),
+        // a DTLS fingerprint, SHA-256 and SHA-1, in SDP and inside a JSON string
+        (
+            &format!("a=fingerprint:sha-256 {FINGERPRINT}") as &str,
+            Kind::DtlsFingerprint,
+        ),
+        (&format!("a=fingerprint:sha-1 {sha1}"), Kind::DtlsFingerprint),
+        (
+            &format!(r#"{{"blob":"a=setup:passive\r\na=fingerprint:sha-256 {FINGERPRINT}\r\n"}}"#),
+            Kind::DtlsFingerprint,
+        ),
+        (
+            &format!(r#"{{"fingerprint":"{}"}}"#, FINGERPRINT.to_lowercase()),
+            Kind::DtlsFingerprint,
+        ),
+        // a TURN credential: a `trap/tokens` answer on one line and pretty-printed, an ICE server, a query
+        (
+            r#"{"tokens":[{"realm":"\"rtcmedia\"","username":"Ab12Cd34","password":"Zq8hTn2vW5yR7mP1"}],"expires":604800}"#,
+            Kind::TurnCredential,
+        ),
+        (r#"      "password": "Zq8hTn2vW5yR7mP1","#, Kind::TurnCredential),
+        (
+            r#"      "username": "AgAAJAAAAAAAAAAAbCdEfGhIjKlMnOpQ","#,
+            Kind::TurnCredential,
+        ),
+        (r#"{"realm":"rtcmedia","username":"ab12cd"}"#, Kind::TurnCredential),
+        (
+            r#"{"urls":"turn:relay.example.net:3478","username":"1700000000:laba","credential":"c2VjcmV0dmFsdWU="}"#,
+            Kind::TurnCredential,
+        ),
+        ("?username=ab12cd&password=Zq8hTn2v", Kind::TurnCredential),
+        (
+            r#"{"body":"{\"tokens\":[{\"username\":\"Ab12Cd34\",\"password\":\"Zq8hTn2v\"}]}"}"#,
+            Kind::TurnCredential,
+        ),
+    ];
+    assert_detected(&Guard::new().unwrap(), &cases);
+}
+
+#[test]
+fn made_up_network_data_and_what_only_looks_like_it_pass() {
+    let made_up = "AB:".repeat(31) + "AB";
+    let clean = [
+        // the documentation ranges, IPv4 and IPv6
+        "c=IN IP4 198.51.100.20, a=candidate:1 1 udp 2122194687 192.0.2.10 50000 typ host, 203.0.113.7",
+        "c=IN IP6 2001:db8::1, [2001:db8:85a3::8a2e:370:7334]:443, 3fff:0:1::5, 2001:DB8:0:0:0:0:0:1",
+        // ranges no public host has
+        "10.0.0.1 172.16.5.4 172.31.255.254 192.168.1.20 127.0.0.1 169.254.1.1 100.64.0.1 0.0.0.0",
+        "255.255.255.255 224.0.0.251 240.0.0.1 192.0.0.8 198.18.0.1 198.19.255.1",
+        "::1 fe80::1 fd00::1 fc00:1::2 ff02::1 :: ::ffff:192.168.1.1 64:ff9b::c000:20a 1:2:3:4:5:6:7:8",
+        // Rust paths, socket.io frames, a MAC address, times
+        "teams_fence::contacting, a::b, Kind::Jwt, std::net::Ipv6Addr, add::cafe, beef::dead, <a as B>::c",
+        // a word glued to an address no public host has, and a hex group that only makes an address of that kind
+        "port:2001:db8::1, turn:fd00::1, face:2a01::1",
+        r#"5:::{"name":"ping"}, 3:::{"id":1}, 0::, 1::, 2::"#,
+        "aa:bb:cc:dd:ee:ff at 12:30:45 and 2026-10-24T08:00:00",
+        // dotted versions and section numbers
+        r#"<Identity Name="SyntheticTeams" Version="1.2.3.4" />, OpenID Connect Core 3.1.3.7"#,
+        "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0.0.0 Safari/537.36",
+        "OID 1.3.6.1.4.1.311, bundle 26260.1717.5229.7049, v10.20.30.40, 2.10.0.1.5",
+        // placeholders and prose
+        r"a=ice-ufrag:<token:3>\r\na=ice-pwd:<token:4>\r\na=fingerprint:sha-256 <token:5>",
+        r#"{"tokens":[{"realm":"\"rtcmedia\"","username":"<token:1>","password":"<token:2>"}],"expires":604800}"#,
+        r#"{"realm":"\"rtcmedia\"","username":"<user>","password":"<password>"}"#,
+        "an ICE `a=ice-ufrag`/`a=ice-pwd` pair, a DTLS `a=fingerprint`, a TURN `username`/`password` pair",
+        "the sign-in form: username lookup, password, \"stay signed in\"; Credential: the web client sends",
+        // values that say they are made up, and a fingerprint of one byte repeated
+        "a=ice-ufrag:SyntheticUfrag a=ice-pwd:SyntheticIcePassword0000000",
+        "a=candidate:1 1 udp 2122260223 192.0.2.10 50000 typ host generation 0 ufrag SyntheticUfrag network-id 1",
+        "a=candidate:1 1 udp 2122260223 192.0.2.10 50000 typ host generation 0 ufrag <token:3> network-id 1",
+        &format!("a=fingerprint:sha-256 {made_up}"),
+        &format!("a=fingerprint:sha-256 {}", made_up.to_lowercase()),
+        r#"{"username":"SyntheticTurnUsername00000","password":"SyntheticTurnPassword","credential":""}"#,
+        r#"{"username":"lab-a","displayName":"Lab A"}"#,
+    ];
+    let guard = Guard::new().unwrap();
+    for text in clean {
+        assert_eq!(kinds(&guard, text), Vec::<Kind>::new(), "{text:?}");
+    }
+}
+
+#[test]
+fn the_reserved_ranges_end_where_they_should() {
+    use fixture_guard::network::{is_public_ipv4, is_public_ipv6};
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let v4 = |text: &str| is_public_ipv4(text.parse::<Ipv4Addr>().unwrap());
+    let v6 = |text: &str| is_public_ipv6(text.parse::<Ipv6Addr>().unwrap());
+    for public in [
+        "1.0.0.1",
+        "9.255.255.255",
+        "11.0.0.0",
+        "100.63.255.255",
+        "100.128.0.0",
+        "126.255.255.255",
+        "128.0.0.0",
+        "169.253.0.1",
+        "172.15.255.255",
+        "172.32.0.0",
+        "192.0.1.1",
+        "192.0.3.1",
+        "192.169.0.1",
+        "198.17.255.255",
+        "198.20.0.0",
+        "198.51.99.1",
+        "198.51.101.1",
+        "203.0.112.1",
+        "203.0.114.1",
+        "223.255.255.255",
+    ] {
+        assert!(v4(public), "{public} is public");
+    }
+    for public in [
+        "2000::1",
+        "2001:db7::1",
+        "2001:db9::1",
+        "3ffe::1",
+        "3fff:1000::1",
+        "3fff:ffff::1",
+        "2002::1",
+    ] {
+        assert!(v6(public), "{public} is public");
+    }
+    for reserved in [
+        "1fff:ffff::1",
+        "4000::1",
+        "2001:db8:ffff::1",
+        "3fff:fff::1",
+        "::ffff:10.1.2.3",
+    ] {
+        assert!(!v6(reserved), "{reserved} is not public");
+    }
+}
+
 #[test]
 fn placeholders_and_prose_pass() {
     let clean = [

@@ -45,7 +45,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams` | the personal build (`docs/personal-build.md`): `teams`, the user's own account on the user's desktop under the personal fence (`teams-fence`'s `personal` feature, which only this crate enables), and `teams-signin-personal`, its sign-in window bound to Entra's and the identity provider's hosts through a host gate. No broker, no sandbox; its data under `~/.local/share/teams/` and `~/.config/teams/`, its tokens under `teams-personal` on the Secret Service. Left out of the root's `default-members`; both binaries refuse a `test-support` build and one `scripts/install-personal.sh` didn't make. Agents compile and mock-test it only |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
-| `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and checks each fixture's `_synthetic` marker |
+| `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and a call's network data (public IP addresses, ICE credentials, DTLS fingerprints, TURN credentials), and checks each fixture's `_synthetic` marker |
 | `crates/ui-sandbox` | tests and lab runs only: the UI sandbox every GUI process runs in, never the desktop's: a headless weston with a niri nested in it (screenshots and window control through `niri msg`), a private D-Bus session bus with no service activation and a fake notification server and tray watcher that record what they get, a virtual keyboard and pointer in the nested niri, a no-op URI opener first on `PATH`, a spawn that passes only the descriptors its caller names; `ui-sandbox-probe`, the window its own tests drive |
 | `spikes/gpui-video` | GPUI on niri (smoke window in a private weston + nested niri), then a 3×3 grid of 720p video (M0 Tasks 15–16) |
 | `spikes/media-loop` | two `str0m` peers on loopback carrying an Opus tone, checked with Goertzel (M0 Task 17) |
@@ -451,7 +451,10 @@ has locale strings for, and the fixture guard flags a join link, a meeting id or
 sanitizer is defence in depth, with known gaps (`docs/backlog/sanitizer-defence-in-depth-known-gaps.md`).
 
 Committed fixtures are written **synthetic-from-capture**: an agent reads the reference copy locally and writes a
-fixture of the same shape with made-up values. Fixtures live in any `tests/fixtures/` of the workspace: the top-level
+fixture of the same shape with made-up values. A call's fixture holds made-up network data: addresses in the
+documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`), placeholders or values
+that say they are made up (`SyntheticUfrag`) for ICE and TURN credentials, and a placeholder or one byte repeated
+(`AA:AA:…`) for a DTLS fingerprint; the guard flags anything else. Fixtures live in any `tests/fixtures/` of the workspace: the top-level
 one, a crate's, a spike's (`spikes/*/tests/fixtures/`). Every fixture declares itself synthetic: a JSON file has a
 top-level `"_synthetic"` note (what it is shaped like, that the values are made up), a JSONL file has one on its first
 line (a header line of its own, or on every line), and any other text file starts with a `_synthetic: …` line, bare or

@@ -2,9 +2,10 @@
 //! reference copies for what must never be committed, such as JWTs, `Bearer` and skypetoken values, OAuth tokens,
 //! email addresses, real MRIs, GUIDs (other than Microsoft's public app ids), signed URLs' signatures, and Teams
 //! meetings' join credentials (a join link's code or `p` passcode, a meeting id or a passcode under its key or label,
-//! in any language Teams writes an invitation in: [`labels`]). It is the backstop behind the sanitizer and behind
-//! hand-written fixtures: what either lets through fails instead of being committed. Every committed fixture also has
-//! to declare itself synthetic ([`synthetic`]).
+//! in any language Teams writes an invitation in: [`labels`]), and a call's network data (a public IP address, an ICE
+//! username fragment or password, a DTLS fingerprint, a TURN credential: [`network`]). It is the backstop behind the
+//! sanitizer and behind hand-written fixtures: what either lets through fails instead of being committed. Every
+//! committed fixture also has to declare itself synthetic ([`synthetic`]).
 //!
 //! Each line is scanned twice: as written, and decoded the way captures hide text, layer after layer: `%XX` percent
 //! escapes (`8%3Aorgid%3A…`, `someone%40contoso.com`), backslash escapes of a JSON or JavaScript string (`\"`,
@@ -26,9 +27,11 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 
 pub mod labels;
+pub mod network;
 pub mod synthetic;
 
 use self::labels::{Label, Labels, is_passcode_value};
+use self::network::Network;
 
 /// What a finding looks like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +64,26 @@ pub enum Kind {
     /// invitation's `Passcode: …` or `Code secret : …`, HTML tags between): 4 to 64 letters and digits of any mix,
     /// other than a literal or a setting ([`labels::NOT_A_PASSCODE`]).
     Passcode,
+    /// A public IPv4 or IPv6 address, outside the documentation ranges and the ranges no public host has
+    /// ([`network`]).
+    IpAddress,
+    /// An ICE username fragment or password (`a=ice-ufrag:`, `a=ice-pwd:`, a candidate string's `ufrag …`, or under a
+    /// JSON key).
+    IceCredential,
+    /// A DTLS certificate fingerprint (`a=fingerprint:sha-256 …`): 20 colon-separated hex bytes or more.
+    DtlsFingerprint,
+    /// A TURN credential: a `password` or `credential` value, or a relay's `username` (a `trap/tokens` answer, an ICE
+    /// server).
+    TurnCredential,
 }
+
+/// The kinds [`Network`] finds.
+const NETWORK_KINDS: [Kind; 4] = [
+    Kind::IpAddress,
+    Kind::IceCredential,
+    Kind::DtlsFingerprint,
+    Kind::TurnCredential,
+];
 
 /// GUIDs that may appear anywhere: Microsoft's first-party app ids, the same in every tenant and published in
 /// Microsoft's own documentation and clients (the protocol notes name them), and the nil GUID. Nothing else: a tenant,
@@ -108,6 +130,8 @@ pub struct Guard {
     rules: Vec<(Kind, Regex)>,
     /// The values after labels: [`Kind::MeetingId`] and [`Kind::Passcode`].
     labels: Labels,
+    /// A call's network data: the [`NETWORK_KINDS`].
+    network: Network,
 }
 
 impl Guard {
@@ -159,6 +183,7 @@ impl Guard {
         Ok(Self {
             rules,
             labels: Labels::new()?,
+            network: Network::new()?,
         })
     }
 
@@ -180,6 +205,11 @@ impl Guard {
                     found.push((index + 1, kind));
                 }
             }
+            for kind in NETWORK_KINDS {
+                if forms.clone().any(|form| self.networked(kind, form)) {
+                    found.push((index + 1, kind));
+                }
+            }
         }
         found
     }
@@ -195,6 +225,17 @@ impl Guard {
             }
             _ => false,
         })
+    }
+
+    /// Whether `line` holds a call's network data of `kind` (one of the [`NETWORK_KINDS`]).
+    fn networked(&self, kind: Kind, line: &str) -> bool {
+        match kind {
+            Kind::IpAddress => self.network.has_public_address(line),
+            Kind::IceCredential => self.network.has_ice_credential(line),
+            Kind::DtlsFingerprint => self.network.has_fingerprint(line),
+            Kind::TurnCredential => self.network.has_turn_credential(line),
+            _ => false,
+        }
     }
 
     /// Scans each root, a file or a directory walked recursively, and returns every hit in path order. Symlinks are

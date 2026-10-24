@@ -367,13 +367,14 @@ ui-sandbox (+ a private PipeWire: a tone source, a recorded sink, a fake camera)
 **Files:**
 - Modify: `crates/fixture-guard/src/*`, `crates/fixture-guard/tests/*`
 
-- [ ] tests first: the guard flags a public IPv4 or IPv6 address outside the documentation ranges, an ICE
+- [x] tests first: the guard flags a public IPv4 or IPv6 address outside the documentation ranges, an ICE
       `a=ice-ufrag`/`a=ice-pwd` pair, a DTLS `a=fingerprint`, a TURN `username`/`password` pair and a `trap/tokens`
       answer's credential in any `tests/fixtures/` or `docs/`, and passes the documentation ranges, placeholders and
       Rust paths (`teams_fence::contacting`, `a::b`) that look like IPv6
-- [ ] the existing calling fixtures (`tests/fixtures/calling/echo/`, `spikes/echo-call/tests/fixtures/`) checked and
-      rewritten where they need it
-- [ ] `cargo test -p fixture-guard` and the gate pass
+- [x] the existing calling fixtures (`tests/fixtures/calling/echo/`, `spikes/echo-call/tests/fixtures/`) checked and
+      rewritten where they need it (checked: documentation addresses, loopback and placeholders only; none needed a
+      rewrite)
+- [x] `cargo test -p fixture-guard` and the gate pass
 
 ### Task 2: The call rules' wording: the proposal, then the user approves it
 **Files:**

@@ -317,7 +317,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   find (`--strict` refuses instead). Neither is ever copied into the repo.
 - A committed fixture is written by hand from a reference copy: the same shape, made-up values, a `_synthetic` marker.
   Run `cargo test -p fixture-guard` after touching any `tests/fixtures/` or `docs/`: it checks the marker and scans
-  for tokens, signatures, emails, MRIs, GUIDs (except `PUBLIC_GUIDS`), meeting links and passcodes.
+  for tokens, signatures, emails, MRIs, GUIDs (except `PUBLIC_GUIDS`), meeting links and passcodes, and a call's network
+  data: public IP addresses (a call's fixture uses the documentation ranges), ICE ufrag and password, DTLS fingerprints
+  and TURN credentials (placeholders, or values that say they are made up: `fixture_guard::network`).
 - `fence.log` keeps scope ids verbatim (a 1:1 chat id names both object ids): it is lab data, not sanitized material.
 - **The endpoint catalog**: `docs/protocol/endpoints.md` lists every endpoint seen or used, with how the browser
   fence and the native client treat it. A task that captures, maps, allowlists or uses a new endpoint, or changes how

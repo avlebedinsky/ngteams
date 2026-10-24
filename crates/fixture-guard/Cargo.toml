@@ -1,6 +1,6 @@
 [package]
 name = "fixture-guard"
-description = "Scans committed fixtures and docs for tokens, email addresses and real MRIs, and checks fixtures are synthetic"
+description = "Scans committed fixtures and docs for tokens, email addresses, real MRIs and calls' network data, and checks fixtures are synthetic"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

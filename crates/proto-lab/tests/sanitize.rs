@@ -38,11 +38,13 @@ const SET_COOKIE_VALUE: &str = "SetCookieSecretValue_0987654321";
 const ICE_PWD: &str = "IcePasswordValue0123456789ab";
 const TURN_SECRET: &str = "turn-credential-secret";
 const TURN_USER: &str = "1729351234:lab-turn-user";
+const DTLS_FINGERPRINT: &str =
+    "3A:7F:C2:19:8B:E4:5D:06:A1:F3:92:4C:6E:D8:0B:57:21:9A:E6:3F:B4:70:C5:1D:88:2E:F9:63:0A:BD:47:C1";
 const SAS_SIG: &str = "SasSignatureValue%2Bxyz%3D";
 const OPAQUE_PATH_TOKEN: &str = "AbCdEfGh1234567890IjKlMnOpQrStUvWxYz0987";
 const THREAD_BODY: &str = "aBcDeF0123456789aBcDeF0123456789";
 const MEETING_BODY: &str = "meeting_MjA4ZmVlNjYtYWJjZC00";
-const PUBLIC_IP: &str = "203.0.113.77";
+const PUBLIC_IP: &str = "52.113.10.5";
 const PRIVATE_IP: &str = "192.168.1.23";
 const IPV6: &str = "2001:db8:85a3::8a2e:370:7334";
 const COWORKER_NAME: &str = "Jane Doe";
@@ -164,7 +166,7 @@ fn frame_event() -> Value {
 /// What the WebRTC hooks report: a configuration with TURN credentials, an SDP and a candidate.
 fn rtc_events() -> [Value; 2] {
     let sdp = format!(
-        "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\nc=IN IP6 {IPV6}\r\na=ice-ufrag:abcd\r\na=ice-pwd:{ICE_PWD}\r\na=candidate:1 1 udp 2122260223 {PRIVATE_IP} 54321 typ host generation 0 ufrag abcd network-id 1\r\na=candidate:2 1 udp 1686052607 {PUBLIC_IP} 61000 typ srflx raddr {PRIVATE_IP} rport 54321\r\n"
+        "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\nc=IN IP6 {IPV6}\r\na=ice-ufrag:abcd\r\na=ice-pwd:{ICE_PWD}\r\na=fingerprint:sha-256 {DTLS_FINGERPRINT}\r\na=candidate:1 1 udp 2122260223 {PRIVATE_IP} 54321 typ host generation 0 ufrag abcd network-id 1\r\na=candidate:2 1 udp 1686052607 {PUBLIC_IP} 61000 typ srflx raddr {PRIVATE_IP} rport 54321\r\n"
     );
     [
         json!({"type": "rtc", "session": "S1", "context": 3, "payload": {
@@ -273,6 +275,7 @@ fn secrets_are_removed() {
         ICE_PWD,
         TURN_SECRET,
         TURN_USER,
+        DTLS_FINGERPRINT,
         SAS_SIG,
         OPAQUE_PATH_TOKEN,
         "eyJ1aWQiOiJsYWIiLCJ1dGlkIjoibGFiIn0",
@@ -527,8 +530,11 @@ fn the_fixture_guard_finds_nothing_in_a_sanitized_capture() {
         kinds,
         [
             Kind::Bearer,
+            Kind::DtlsFingerprint,
             Kind::Email,
             Kind::Guid,
+            Kind::IceCredential,
+            Kind::IpAddress,
             Kind::Jwt,
             Kind::MeetingId,
             Kind::MeetingLink,
@@ -536,7 +542,8 @@ fn the_fixture_guard_finds_nothing_in_a_sanitized_capture() {
             Kind::OauthToken,
             Kind::Passcode,
             Kind::Signature,
-            Kind::Skypetoken
+            Kind::Skypetoken,
+            Kind::TurnCredential
         ]
     );
     assert_eq!(guard.scan_text(&as_jsonl(&sanitized().unwrap())), []);
@@ -684,6 +691,21 @@ fn an_ice_username_fragment_is_a_token_like_the_ufrag_it_is() {
         data["candidate"].as_str().unwrap().contains(&format!("ufrag {token}")),
         "{data}"
     );
+}
+
+#[test]
+fn a_dtls_fingerprint_is_a_token_and_its_algorithm_stays() {
+    let sha1 = DTLS_FINGERPRINT.split(':').take(20).collect::<Vec<_>>().join(":");
+    let sdp = format!(
+        "a=fingerprint:sha-256 {DTLS_FINGERPRINT}\r\na=fingerprint:sha-1 {}",
+        sha1.to_lowercase()
+    );
+    let event = json!({"type": "rtc", "payload": {"event": "setRemoteDescription", "data": {"sdp": sdp}}});
+    let out = sanitize_events(&[event], &Identities::default()).unwrap().remove(0);
+    let sdp = out["payload"]["data"]["sdp"].as_str().unwrap();
+    assert!(sdp.starts_with("a=fingerprint:sha-256 <token:"), "{sdp}");
+    assert!(sdp.contains("a=fingerprint:sha-1 <token:"), "{sdp}");
+    assert!(!sdp.to_lowercase().contains(&sha1.to_lowercase()), "{sdp}");
 }
 
 #[test]
