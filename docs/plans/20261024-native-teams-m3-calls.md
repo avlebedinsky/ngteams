@@ -381,11 +381,11 @@ ui-sandbox (+ a private PipeWire: a tone source, a recorded sink, a fake camera)
 - Modify: `docs/personal-build.md`, `docs/backlog/fence-call-follow-ups.md` (the lab's proposal), CLAUDE.md (on
   approval)
 
-- [ ] the lab's additions, proposed as CLAUDE.md text in `docs/backlog/fence-call-follow-ups.md`: a decline judged
+- [x] the lab's additions, proposed as CLAUDE.md text in `docs/backlog/fence-call-follow-ups.md`: a decline judged
       like an answer (an invitation naming only lab accounts or the echo service); a join of a running call judged
       like a start in that chat (a chat whose fresh member read lists only lab accounts); what the callee's client
       sends by itself while a call rings, judged like an answer, on an offered invitation, with no click
-- [ ] the personal build's calls written into `docs/personal-build.md` as the user decided on 2026-10-24 (Technical
+- [x] the personal build's calls written into `docs/personal-build.md` as the user decided on 2026-10-24 (Technical
       Details, "The personal build's calls"): the writes (start, join, answer, decline, follow-ups; `add` only of the
       echo service); to whom (a start or join in a chat whose fresh thread read lists the account, every callee in it;
       an answer or decline of any invitation addressed to the account); how a start is tied to its chat (Technical
@@ -395,14 +395,16 @@ ui-sandbox (+ a private PipeWire: a tone source, a recorded sink, a fake camera)
       registration as an `OwnState` entry and its frames logged; media unclassified; one call at a time; the microphone
       and the camera (off at start, the desktop portal); the `fence.log` lines; what the lab can't show (colleagues'
       desktop clients, callers outside the tenant) and how Task 23 covers it; the doc's "calls" row
-- [ ] the CLAUDE.md text the personal build's calls need, as a proposal in the doc (current rules only: no dates, no
+- [x] the CLAUDE.md text the personal build's calls need, as a proposal in the doc (current rules only: no dates, no
       task numbers)
-- [ ] ⚠️ ask the user to approve the wording. The run doesn't wait: Tasks 3–21 go on while it is pending, captures
-      included (a held-back write sends nothing). What waits for it: Task 6's mapping and let-through of the decline,
+- [x] ⚠️ ask the user to approve the wording (approved via codex-discussion, delegated by the user; transcript
+      `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-2-call-rules/transcript.md`;
+      the approved text is in CLAUDE.md, so what waited for it below may go ahead). The run doesn't wait: Tasks
+      3–21 go on while it is pending, captures included (a held-back write sends nothing). What waits for it: Task 6's mapping and let-through of the decline,
       the join and the ring-time sends; the live steps that need them (Task 16's late join, Task 19's late join,
       Task 21's decline and rejoin), run once it is in; and all of Task 22. On approval CLAUDE.md gets the approved
       text
-- [ ] `cargo test -p fixture-guard` passes
+- [x] `cargo test -p fixture-guard` passes
 
 ### Task 3: The call registry and the echo call's follow-ups
 **Files:**

@@ -39,9 +39,27 @@ a contacting write whose participants are its callees, its caller and whoever it
   signaling fence permitted.
 
 So M3 adds, each a row of the calling family and a test (no new mechanism): the call start to lab callees, the
-`acceptance` and its typed delivery response, the follow-ups above on a registered call, `add` per invitee; and the
-registry in `teams-fence`, which the browser fence and the native transport share like the classifier. Then
-`echo-call` runs until the tone comes back.
+`acceptance` and its typed delivery response, the follow-ups above on a registered call, `add` per invitee, and the
+decline, the join and the ring-time sends below; and the registry in `teams-fence`, which the browser fence and the
+native transport share like the classifier. Then `echo-call` runs until the tone comes back.
+
+## Decline, join and the ring-time sends (in CLAUDE.md)
+
+The rest of the lab's call rule is settled and written into CLAUDE.md's "Calls go only to the lab, both ways"
+(M3 Task 2, approved 2026-10-24 through a codex-discussion the user delegated the approval to; transcript under
+`~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-2-call-rules/`). CLAUDE.md holds
+the text; in short, for the mapping:
+
+- an invitation is **offered** only when readable, addressed to the account, and naming a caller and participants
+  that are all lab accounts or the echo service; only an offered invitation is answered or **declined** (the
+  captured rejection), and its offer ends with its ring;
+- a **join** only in a chat whose fresh, complete member read lists only lab accounts, with a captured answer or
+  delivery binding the running call to that chat; it registers its call like a start;
+- **what the callee's client sends by itself while it rings** goes without a click, only as captured sends bound to
+  an offered invitation, never one that answers, declines, joins or adds;
+- a start is tied to its chat by what it carries and that chat must be lab-only; registry writes are bound to the
+  conversation, call and service as the captures bind them, only captured operations, only until the call ends;
+  delivery responses only as typed `OwnFrame`s bound to their delivery. No transfer, forwarding or replacement.
 
 ## What was tried before
 

@@ -8,6 +8,11 @@ where that rewrite changed what a sentence here assumed, [How the implementation
 says how. The current CLAUDE.md wins on everything about the lab; this text wins on the personal build's own rules,
 and nothing was loosened.
 
+[Calls](#calls) was added for M3 (`docs/plans/20261024-native-teams-m3-calls.md`, Task 2) from the user's decisions
+of 2026-10-24; its wording was approved on 2026-10-24 through a codex-discussion the user delegated the approval to
+(transcript: `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-2-call-rules/`), and
+CLAUDE.md carries its rule. Until M3 Task 22 implements it the personal build keeps calling off.
+
 It writes up the direction the user gave on 2026-10-21 (the plan's "Decisions of 2026-10-21", last bullet) against
 the code as it stands after M2 Tasks 1–16 and 24: `teams-fence` (`Fence`, `Fence::open_lab`, `LiveMembershipSource`,
 `Fence::check_post_read`), `teams-app` (the lab app and its broker), `teams-signin` (the sign-in window, still
@@ -90,7 +95,9 @@ A write is permitted only when all of these hold, each checked when the fence de
 2. **Its kind is one the personal build sends in M2**: `Message`, `Edit`, `Delete`, `Reaction` (the keys a capture
    showed), `Typing`, `ReadReceipt`, and the account's own availability once Tasks 18–19 have mapped it. Every other
    kind (`ChatCreate`, `MemberChange`, `Invite`, `ChannelPost`, `Call`, `CallAnswer`, `Meeting`, `BotReply`) is
-   denied by kind, and so is any `Scope::New` target.
+   denied by kind, and so is any `Scope::New` target. M3 adds the call writes, each only as [Calls](#calls) allows
+   (the test call's chat create its only `ChatCreate`, its `add` of the echo bot its only `Invite`, and its chat
+   create and start its only `Scope::New` writes).
 3. **Its target is a conversation the account is a member of, by a fresh member read**: the fence's personal
    membership source (a new sealed source in `teams-fence`) reads the conversation's thread from the chat service at
    decision time (`GET v1/threads/<id>?view=msnp24Equivalent`, the read `LiveMembershipSource` already sends) and the
@@ -107,17 +114,21 @@ A write is permitted only when all of these hold, each checked when the fence de
    type or member shape no capture showed are denied.
 5. **It comes from an explicit action in the UI, or from a setting the user turned on.** A message, an edit, a
    delete, a reaction or "send again" is a key or a click on that one item; typing, read receipts and the account's
-   availability go out only while their setting is on (below). Nothing is sent on a timer the user didn't enable,
-   and nothing replays an earlier run's row without `resend`.
+   availability go out only while their setting is on (below). The one exception is the call's own sends
+   [Calls](#calls) names (a registered call's setup, keep-alive and end writes, and an offered invitation's ring-time
+   sends), which go without a further action. Nothing else is sent on a timer the user didn't enable, and nothing
+   replays an earlier run's row without `resend`.
 6. **It is logged first**: the decision goes to the personal `fence.log` before the request is sent, and an allow
    that can't be logged is denied, as in the lab.
 
-**The one write without a conversation: the account's own availability.** Rules 3 and 4 hold for every write but
-this one. Task 19 gives it a scope of its own, "the account itself", which `Fence::judge` permits without a member
-read only for the fence's own account; in the personal build it is permitted only for the account `account.toml`
-names, only on its own Trouter endpoint (the one the push channel registered this run, any other id `Unknown`), only
-with the availability values a capture showed, and only while the presence setting is on (rule 5). Rules 1, 2, 5
-and 6 hold for it as for every write. A status note, out-of-office or a profile field is not part of it: those stay
+**The account's own availability, a write without a conversation.** Rules 3 and 4 hold for every write but this
+one and the call writes [Calls](#calls) gives targets of their own (an invitation addressed to the account, a
+registered call, the test call); a call's start and join are held to them, as that section says. Task 19 gives the
+availability a scope of its own, "the account itself", which `Fence::judge` permits without a member read only for
+the fence's own account; in the personal build it is permitted only for the account `account.toml` names, only on
+its own Trouter endpoint (the one the push channel registered this run, any other id `Unknown`), only with the
+availability values a capture showed, and only while the presence setting is on (rule 5). Rules 1, 2, 5 and 6 hold
+for it as for every write. A status note, out-of-office or a profile field is not part of it: those stay
 unmapped and denied.
 
 **Choice A: membership, not roster completeness.** The lab fence needs a complete member list, because it must
@@ -165,7 +176,7 @@ and Adaptive Card actions stay unmapped and denied (`docs/backlog/bot-invokes-an
 | meeting chats | none in the lab | read shown, writes denied until a capture shows the thread's shape |
 | chats with guests or other tenants | none in the lab | read shown, writes denied until a capture shows the member form (Choice B) |
 | images and files | as Tasks 21–23 end | the same: shown or a placeholder with a web link |
-| calls | M3 | incoming calls ignored, never answered; the user's other clients still ring |
+| calls | M3 (lab-only calls) | until M3 Task 22: incoming calls ignored, never answered, the user's other clients still ring; then [Calls](#calls) |
 | own presence | Tasks 18–20 | the same writes and policy, behind the presence setting |
 | status note, out-of-office, profile | never | never in M2 |
 
@@ -180,6 +191,117 @@ shows the three with Teams' own defaults pre-selected (typing on, read receipts 
 **sends none of them until the user confirms that screen**; afterwards each is a setting in `settings.toml`. A read
 receipt the native client sends moves the service's horizon but not the web client's "last read" mark (M1), so the
 user's other clients may open a chat at an older mark.
+
+## Calls
+
+The personal build makes, answers, declines and joins 1:1 and group-chat calls with the user's colleagues, audio and
+video. Every call write is first mapped in the lab from a capture (M3), as a sealed type in `teams-proto`; the
+personal build sends the same sealed writes, under its own rule. Meetings, screen and content sharing, transfer,
+forwarding, replacement, call park, PSTN and call waiting are not part of it.
+
+### The writes, and to whom
+
+| write | when it may go | its target |
+|---|---|---|
+| start | on the user's action in that chat ("Call") | an existing 1:1 or group chat whose one fresh, unpaged thread read in a captured shape lists the account, and every callee the start names |
+| join | on the user's action on that chat's running call ("Join") | the same kind of chat, read the same way, and a captured answer or delivery binding the running call to that chat |
+| answer | on the user's explicit action on that still-offered invitation (its banner or notification) | any readable invitation addressed to the account, whoever it is from |
+| decline | the same | the same; the captured rejection, so the ringing stops everywhere and the caller sees it declined (a dismissed banner is no decline) |
+| the user's own writes in a call (mute, camera, hang up) | on the user's action | a registered call (below) |
+| the call's own writes (acknowledgements, channel parameters, renegotiation, keep-alives, `leave` on a failure) | without a further action | a registered call, as that call's captured setup, keep-alive and end writes |
+| the ring-time sends | without a click | an offered invitation, as the captured sends the callee's client makes by itself while it rings, bound to it; never one that answers, declines, joins or adds |
+| the test call: the chat with the bot, the start, the bot's `add` | on the user's action ("Test call") | the echo service only (below) |
+| any other `add`, a new chat, a transfer, a forward | never | |
+
+What each row holds, beside its own condition:
+
+- **Every call write** is a sealed type in a captured shape, sent as `Authorized<_>` through the outbox with a fresh
+  `Fence::check` for its exact target, logged to the personal `fence.log` before it goes (an allow that can't be
+  logged is denied), never resent after an unknown outcome (a call controller acting twice is worse than a failed
+  step) and never sent by a later run.
+- **A start is tied to its chat by what it carries**: the chat the start names, or, for a 1:1 start that names only
+  its callee, the two accounts' 1:1 chat as the chat service names it. The fence reads that chat, never one taken
+  from the engine's or the view's context. Rules 3 and 4 above hold for it: no channel, meeting chat, `48:` stream,
+  paged answer or member form no capture showed.
+- **A registered call** is one the user started, joined or answered in this run, which the fence permitted and
+  registered (the call registry the lab's fence uses, keyed as the captures bind the start's answer, the acceptance and
+  the deliveries). Every follow-up on an entered call, whether requested by the user or generated by the call's
+  machinery, names its registered call by its conversation, call and service as the captures bind them, never by a bare
+  id; only an operation a capture showed; and only until the call ends, its captured end exchange included. A reconnect
+  keeps a live call's registration and never restores an ended call.
+- **An offered invitation** is a readable invitation addressed to the account, arriving while no call is up and no
+  other invitation rings. The engine offers it (`Event::IncomingCall`) and the app shows it: a ringtone, a
+  notification with Answer and Decline, a banner in the window, the caller's name as the invitation gives it (no
+  profile lookup for a caller outside the account's chats). It stops being offered when its ring ends: answered,
+  declined, cancelled, answered elsewhere (the user's phone, say) or timed out. Nothing answers or declines it by
+  itself: not a delivery, a timer, a setting, a reconnect or an action on another invitation.
+- **One call or ringing invitation at a time**: an invitation arriving during a call or another ring isn't offered,
+  and nothing is sent for it (no busy decline); it rings on the user's other clients.
+- **A call delivery response** (a Trouter frame answering a delivery) goes only as a captured, typed `OwnFrame` bound
+  to the delivery it answers, under the same rules as the write it stands for: none for an invitation that isn't
+  offered, and no acceptance before the user's action.
+
+### The test call
+
+A named exception for the echo service alone, the one place the personal build creates a chat, starts a call in no
+chat and adds anyone. On the user's "Test call": the 1:1 chat of exactly the account and the echo bot, created in
+its captured shape (`POST v1/threads`, `docs/protocol/calling-echo.md`); the start in the test call's captured shape
+(`UserInitiatedTestCall`, no callee, no chat); and the `add` of exactly that bot to that call. The bot's MRI is a
+constant in `teams-proto`, taken from the web bundle's `teamsEchoBotMri`, never from the network, a delivery or the
+UI. Every other `add` and every other new chat stay denied.
+
+### What else the calls bring
+
+- **The calling stack's Trouter socket**: its registration (`SkypeSpacesWeb`) goes as an `OwnState` entry through
+  `Transport::send_own`, and its frames are logged (`FrameSink::logging`), as the messaging socket's are. The
+  personal build still sends no plain request: each read a call needs is a `GET`, an `OwnState` entry or a
+  `PostRead`.
+- **Media** (TURN, ICE, DTLS-SRTP) isn't classified, as in the lab: it carries a call the signaling fence permitted,
+  on `teams-media`'s own sockets, relayed candidates only (no local address in an offer).
+- **The microphone** opens only after the user's start, join or answer passed the fence. **The camera** is off at
+  every start, join and answer, and only the user turns it on; it comes through the desktop portal, whose permission
+  the desktop asks once. Which PipeWire the build opens (the desktop's) is fixed when it is built.
+- **`fence.log`**: every call write and every call frame has its line, as chat writes do.
+
+### What the fence can't see
+
+- **The call's roster isn't read or watched.** The fence trusts the calls it permitted itself. A participant the
+  service brings in (a tenant policy bot, forwarding on a callee's account, a colleague's client adding someone) isn't
+  seen; for the personal build that is accepted, since the user is talking to whoever the call has, as in any client.
+  It permits no write of its own beyond the rule above.
+- **A caller in a form no capture showed** (a federated caller of another tenant, a consumer account) makes the
+  invitation unreadable: it is ignored, not offered, until a lab capture shows that form (as Choice B treats member
+  forms).
+
+### The lab accounts as test callees
+
+The user may call the lab accounts from the personal build: the user creates a 1:1 chat with each lab account once
+from their own client, and the personal rule (a call in a chat that lists the account) covers those calls with no
+exception of its own. No lab permission changes: the lab never calls, answers, declines or sends a ring-time send to
+the user's account, no lab config names it, and the lab fence denies every contacting write in those chats. Such a
+call rings on the lab account and is ignored, unless the user answers it on a device of their own signed in as that
+account. The user places it when no lab live run holds the live lock.
+
+### What the lab can't show
+
+- **Colleagues' desktop and mobile clients**: the lab proves the native client against the web client in the armed
+  browser, both directions; the desktop clients' own stacks only the user's checklist (M3 Task 23) meets: 1:1 audio
+  and video with a colleague both ways, a group-chat call, a late join, a decline the colleague sees, a device switch
+  mid-call, a call answered on the user's phone, a call across a token renewal.
+- **Callers outside the account's chats and outside the tenant**: the checklist's incoming call from someone outside
+  the user's chats covers the first; a caller of another tenant is met only if one calls, and until a capture shows
+  its form, its invitation is ignored (above).
+- **Real colleagues as callees and callers at all**: the policy is tested on `teams-mock` (M3 Task 22); agents never
+  run the personal build, and the user reports a problem by its reason (the `fence.log` line's kind, never a chat id
+  or a log).
+
+### The CLAUDE.md text
+
+CLAUDE.md's hard rules carry this section as the rule "The personal build's calls are the user's, in the account's
+own chats", with three edits to the personal fence's rule (its kinds include the calls of the next rule; a call write
+is a target beside the chats and the account's availability; the call's own sends are the exception to "only from an
+explicit action"). The lab's side ("Calls go only to the lab, both ways") gained the decline, the join and the
+ring-time sends in the same change. CLAUDE.md holds the current text; nothing here loosens it.
 
 ## Its sign-in
 

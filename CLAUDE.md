@@ -9,7 +9,7 @@ are in `docs/plans/completed/`. Commands and layout are in [README.md](README.md
 These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
 else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
 this rule. The rules about writes, calls and the browser fence govern the lab and every lab binary; the personal build
-(`teams`) has a fence of its own and the two rules about it below. The rules on the native client's sealed types,
+(`teams`) has a fence of its own and the three rules about it below. The rules on the native client's sealed types,
 captures and tokens, agents and protocol notes hold for both builds.
 
 - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
@@ -28,12 +28,27 @@ captures and tokens, agents and protocol notes hold for both builds.
   own feed, settings and endpoints); one the fence can't read is denied, never let through.
 - **No token or credential goes to a third party** (a bot, an app's backend): a bot invoke stays denied. Sign-in and
   token renewal stay in `teams-auth`'s own clients and touch only the account's own credentials.
-- **Calls go only to the lab, both ways.** A call may be started when every callee is a lab account or the echo
-  service, and answered when its invitation names only lab accounts or the echo service; every other incoming call
-  is ignored, never answered (no `acceptance`, no delivery response for it, no scenario click). A write on an
-  existing call is allowed only on a call the fence itself permitted a start or an answer for in this run; an `add`
-  is judged per invitee. The roster isn't watched. Media (TURN, ICE, DTLS-SRTP) isn't classified: it carries a call
-  the signaling fence permitted.
+- **Calls go only to the lab, both ways.** A call is a contacting write whose participants are its caller, its callees
+  and whoever it adds; every call write is mapped only from a capture, in its captured shape. A start is permitted when
+  every callee it names is a lab account or the echo service and the chat it is tied to is lab-only by a fresh, complete
+  member read; a start is tied to its chat by what it carries (the chat it names, or for a 1:1 start naming only its
+  callee, the two accounts' 1:1 chat as the chat service names it), never by the client's context, and the test call's
+  start, which names no chat, passes only in its captured shape. A running call is joined only in a chat whose fresh,
+  complete member read lists only lab accounts, and only when a captured answer or delivery binds that call to that
+  chat. An incoming call's invitation is **offered** only when it is readable, addressed to the account, and names a
+  caller and participants that are all lab accounts or the echo service; every other incoming call (the user's own
+  account's included) is ignored: no answer, decline, delivery response or other send for it, and no scenario click. An
+  offered invitation may be answered or declined (a decline rejects the call as the web client does), each a fresh fence
+  decision; what the callee's client sends by itself while it rings goes without a click, only as captured sends bound
+  to that invitation, never one that answers, declines, joins or adds. An invitation stops being offered when its ring
+  ends (answered, declined, cancelled, answered elsewhere, timed out). A start, a join or an answer the fence permitted
+  registers its call for this run; a follow-up on an entered call, including an `add`, is allowed only on a registered
+  call, bound to its conversation, call and service as the captures bind them (never by a bare id), only for a captured
+  operation, and only until the call ends (its captured end exchange included); a reconnect keeps a live call's
+  registration and never restores an ended call or invitation. No transfer, forwarding or replacement is mapped. An
+  `add` is judged per invitee like a start. A call delivery response goes only as a captured, typed `OwnFrame` bound to
+  the delivery it answers, under the same rules as the write it stands for. The roster isn't watched. Media (TURN, ICE,
+  DTLS-SRTP) isn't classified: it carries a call the signaling fence permitted.
 - **Nothing runs live against the tenant before the browser fence is armed**: HTTP interception on every host and
   target, the WebSocket guard, the service worker neutralized.
 - **The native client sends a contacting write only as `Authorized<_>`** with a `WritePermit` from `Fence::check`
@@ -66,18 +81,47 @@ captures and tokens, agents and protocol notes hold for both builds.
   `teams-fence`'s personal policy, behind the `personal` feature only `crates/teams` enables, opened only by
   `Fence::open_personal`. A write goes out only as a sealed `Mutating` type sent as `Authorized<_>` through the outbox,
   with a `WritePermit` from `Fence::check` for its exact target; only the kinds `docs/personal-build.md` lists
-  (messages, edits, deletes, reactions, typing, read receipts); only to a 1:1 or group chat whose thread, read fresh
-  when the fence decides, unpaged and in a shape a capture showed (every member in a captured MRI form), lists the
-  account as a member (never a channel, a meeting chat, a `48:` stream, a new chat, a paged answer or an unknown
-  shape), or, the one exception, the account's own availability on its own registered endpoint in a captured value;
-  only from an explicit action in the UI or a setting the user turned on (typing, read receipts and presence only
-  after the first run's screen is confirmed); logged to its `fence.log` before it goes. Its reads are `GET`s and the
-  sealed lists: `OwnState`, and `PostRead` naming only the account or people the account's stored chats list, never
-  a search or a suggestion list; it sends no plain request, and logs its Trouter frames. Its sign-in window reaches
-  only Entra's sign-in hosts and the identity provider's hosts `account.toml` names, through its egress gate. The
-  rules that hold for both builds hold for it; nothing in it changes a lab rule: every lab binary keeps the lab
-  fence, refuses the personal data dir, keyring items and accounts, and refuses to run with `personal` or
-  `test-support` built in; `teams` refuses the lab's.
+  (messages, edits, deletes, reactions, typing, read receipts, and the calls of the next rule); only to a 1:1 or group
+  chat whose thread, read fresh when the fence decides, unpaged and in a shape a capture showed (every member in a
+  captured MRI form), lists the account as a member (never a channel, a meeting chat, a `48:` stream, a new chat, a
+  paged answer or an unknown shape), or the account's own availability on its own registered endpoint in a captured
+  value, or a call write as the next rule allows; only from an explicit action in the UI or a setting the user turned on
+  (typing, read receipts and presence only after the first run's screen is confirmed), save the call's own sends the
+  next rule names; logged to its `fence.log` before it goes. Its reads are `GET`s and the sealed lists: `OwnState`, and
+  `PostRead` naming only the account or people the account's stored chats list, never a search or a suggestion list; it
+  sends no plain request, and logs its Trouter frames. Its sign-in window reaches only Entra's sign-in hosts and the
+  identity provider's hosts `account.toml` names, through its egress gate. The rules that hold for both builds hold for
+  it; nothing in it changes a lab rule: every lab binary keeps the lab fence, refuses the personal data dir, keyring
+  items and accounts, and refuses to run with `personal` or `test-support` built in; `teams` refuses the lab's.
+- **The personal build's calls are the user's, in the account's own chats.** Only 1:1 and group-chat calls (no meetings,
+  screen or content sharing, transfer, forwarding, replacement, call park or PSTN), every call write a sealed type in a
+  captured shape sent as `Authorized<_>` through the outbox, a fresh `Fence::check` logged to its `fence.log` before it
+  goes, never resent after an unknown outcome or by a later run. A start or a join goes out only on the user's action in
+  that chat: an existing 1:1 or group chat whose one fresh, unpaged thread read in a captured shape lists the account
+  and every callee the start names; the chat is the one the write carries, as the lab's rule ties it, never the client's
+  context, and a join also needs a captured answer or delivery binding the running call to that chat. Any readable
+  invitation addressed to the account may be offered, whoever it is from; it is answered or declined only on the user's
+  explicit action on that still-offered invitation (its banner or notification), never by a delivery, a timer, a setting
+  or a reconnect, and a decline is the captured rejection, not a dismissed banner. An invitation stops being offered
+  when its ring ends (answered, declined, cancelled, answered elsewhere, timed out). One call or ringing invitation at a
+  time: another invitation isn't offered and nothing is sent for it. Every follow-up on an entered call, whether
+  requested by the user (mute, camera, hang up) or generated by the call's machinery, needs this run's registration of a
+  call the user started, joined or answered, bound to its conversation, call and service as the captures bind them
+  (never by a bare id), and only a captured operation, until the call ends (its captured end exchange included); a
+  reconnect keeps a live call's registration and never restores an ended call or invitation. Without a further user
+  action only these go: that call's captured setup, keep-alive and end writes (acknowledgements, channel parameters,
+  renegotiation, `leave` on a failure), and the captured sends the client makes by itself while an offered invitation
+  rings, bound to it, never one that answers, declines, joins or adds. No `add` and no new chat but the test call's, a
+  named exception for the echo service alone, each from the user's "Test call": the 1:1 chat of exactly the account and
+  the bot created in its captured shape, the start in the test call's captured shape, and the `add` of exactly that bot
+  to that call (its MRI a constant in `teams-proto` from the web bundle's `teamsEchoBotMri`, never taken from the
+  network or the UI). The calling registration is an `OwnState` entry and the calling socket's frames are logged; a call
+  delivery response goes only as a captured, typed `OwnFrame` bound to the delivery it answers, under the same rules as
+  the write it stands for. The call roster isn't read or watched. Media isn't classified: it carries only a call the
+  signaling fence permitted, through relayed candidates only, with no local address in an offer. The personal build's
+  PipeWire is the desktop's, fixed when it is built. The microphone opens only after the user's start, join or answer
+  passed the fence; the camera is off at every start, join and answer, and only the user turns it on, through the
+  desktop portal.
 - **Agents never produce, install or run a runnable personal binary, and never touch its data.** Agents may compile
   the `teams` crate in the gate and test it on `teams-mock`; any `teams` or `teams-signin-personal` binary they leave
   is a `test-support` one, which refuses to run. They never build either without `test-support` (debug or release, a
