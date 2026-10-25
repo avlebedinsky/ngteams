@@ -4,60 +4,73 @@
 
 - A native Microsoft Teams client for Linux (Rust + GPUI) written against Teams' internal APIs, with the web client
   as the reference. Personal project, one maintainer, most code written by agents.
-- M0 (the protocol lab: Chrome for Testing under an armed fence) and M1 (the headless chat core: `teams-auth`,
-  `teams-proto`, `teams-store`, `teams-trouter`, `teams-core`, `teams-headless`) are done. M2, the GPUI client, is
-  next.
-- It runs live against a **real company tenant** through three dedicated lab accounts (a, b, c). Nobody else may
-  ever notice anything it does.
+- Done: the protocol lab (Chrome for Testing under an armed fence), the headless chat core, and the GPUI client the
+  user drives daily. In progress: calls (the plan in `docs/plans/` that isn't under `completed/`).
+- It runs live against a **real company tenant** through three dedicated lab accounts (a, b, c). Its writes reach
+  only those accounts and the echo service; the fence (`teams-fence`, the browser fence) enforces that, and its
+  design is settled.
+- The lab accounts are known bot accounts. Nobody outside the lab calls, messages or invites them. A failure that
+  needs an outsider to contact a lab account is not a realistic case.
 
 ## What a real failure looks like
 
-- **A fence escape (always critical).** A request or frame that others in the tenant could notice goes out without
-  passing through the fence. That covers a message, edit, delete, reaction, typing, read receipt, presence, call,
-  invite or member change. Also critical:
-  - anything that mints a `WritePermit` outside `Fence::check`;
-  - a path-only allowance that ignores the query or body;
-  - a shape treated as known that no capture showed;
-  - an `Unknown` treated as allowed;
-  - a group chat other than the recorded `abc` admitted.
-- **A request outside the sealed policy.** The native client may send only reads, sealed `OwnState` entries
-  (logged before they're sent) and `Authorized<_>` writes. Anything else is a defect: a raw request, a hidden retry,
-  an answer to a Trouter delivery, a redirect or proxy, a host outside the allowlist.
+- **A fence escape (always critical).** A contacting write (CLAUDE.md's list: a message, edit, delete, reaction, call
+  start, join or answer, chat created, member added or removed, invite) actually leaves without passing the fence,
+  on a path the change makes reachable. Also critical: anything that mints a `WritePermit` outside `Fence::check`;
+  an `Unknown` treated as allowed; a chat admitted without its fresh, complete member read.
+- **A request outside the sealed policy.** The native client sends reads, plain requests `teams_fence::contacting`
+  calls `None` (logged before they go), `Authorized<_>` writes, and, for a call, typed delivery responses through
+  `FrameSink::respond`; the personal build only its sealed lists. A raw request, a hidden retry, a redirect or
+  proxy, a host outside the allowlist is a defect.
 - **A leak.** A token, cookie or payload reaching a log, stdout, an error, `Debug` or the repo. Captures and
   tokens never enter the repo, not even sanitized; committed fixtures are synthetic, marked `_synthetic`.
-- **A message sent twice or lost.**
-  - The outbox resends without its arrival check.
-  - A row of another run is sent without an explicit `Store::resend`.
-  - An older version overwrites a newer one.
-  - A field in a form no capture showed is read as absent, 0 or newer instead of kept as `Unknown`.
+- **A message sent twice or lost.** The outbox resends without its arrival check; a row of another run is sent
+  without an explicit `Store::resend`; an older version overwrites a newer one; a field in a form no capture showed
+  is read as absent, 0 or newer instead of kept as `Unknown`.
 - **A token trusted past its expiry**, or a credential handed to a third party (a bot, an app backend).
 - **A lab browser target resumed unarmed.** Arming order and close-or-kill containment are in `CLAUDE.md`. A breach
   is never a flake.
-- **A test that only covers the mock's form of a field.** Two M1 bugs lost messages live this way. A fixture must
-  hold every form the captures show.
+- **The feature doesn't work.** A call that doesn't connect, audio that doesn't flow, a view that shows the wrong
+  state, a crash, a hang. This is the task's actual job and weighs as much as the fence.
+- **A test that only covers the mock's form of a field.** Live bugs have come from this. A fixture must hold every
+  form the captures show.
+
+## What is not a major finding
+
+- A failure that needs someone outside the lab to call, message or invite a lab account.
+- A gap in a defence-in-depth layer (a scenario's own click guard, a harness check, a log, a second check beside the
+  fence) while the fence still decides and blocks the write.
+- A guard that could be stricter, a check that could be added, or a rule's wording the code could follow more
+  literally, with no reachable write escaping and nothing broken.
+- New fence tightening, new denials or new guards the task didn't ask for. Don't propose them as fixes.
+
+These are minor at most, and only worth reporting when the fix is small.
 
 ## Blast radius
 
-- Fence, policy, auth and secrets code: the user's employer tenant and colleagues. This is the reason the project
-  exists in this shape. Treat any doubt here as material.
-- Store, outbox and sync: the lab accounts' data and the correctness of what the client shows.
-- `proto-lab` scenarios, spikes and `tools/`: lab harness only. A defect matters when it weakens the fence, misjudges
-  a run (a breach recorded as a pass) or leaks; ergonomics are minor.
+- Fence, policy, auth and secrets code: the user's employer tenant and colleagues. A defect here is material when it
+  has a reachable failing sequence; doubt alone isn't a finding.
+- Calling, media, store, outbox and sync: whether calls and chats work and what the client shows.
+- `proto-lab` scenarios, spikes, `scripts/` and `tools/`: lab harness only. A defect matters when it lets a write past
+  the fence, misjudges a run (a breach recorded as a pass, a failed call recorded as passed) or leaks; ergonomics and
+  extra guards are minor.
 
 ## The reporting bar
 
-- Material, not merely true. Report a defect with a concrete failing sequence, a deviation from a written rule, or a
-  test that can't catch what it claims to.
+- Material, not merely true. Report a defect with a concrete, realistic failing sequence, or a test that can't catch
+  what it claims to.
 - Noise here: style preferences rustfmt and clippy already settle; asking for more comments; suggesting a
-  dependency or an abstraction for its own sake; "consider handling X" with no reachable X.
-- Severity: critical for anything in the first two failure classes above; major for loss, duplication, a trusted
-  stale token, or a broken documented rule; minor for the rest.
+  dependency or an abstraction for its own sake; "consider handling X" with no reachable X; hardening for a case
+  that needs an outsider to contact the lab.
+- Severity: critical for a fence escape, a request outside the sealed policy, or a leak; major for loss,
+  duplication, a trusted stale token, or a defect that breaks what the task delivers; minor for the rest, a deviation
+  from a written rule with no reachable consequence included.
 - Finding nothing is a valid answer.
 
 ## Where the rules live
 
-- `CLAUDE.md`: the hard rules (fence, allowances, native request policy, captures and fixtures, live runs),
-  the patterns learned in M0/M1, the lint rules and the gate. A deviation is always worth reporting.
+- `CLAUDE.md`: the hard rules (fence, allowances, native request policy, calls, captures and fixtures, live runs),
+  the patterns, the lint rules and the gate.
 - `docs/protocol/*.md`: protocol notes in our own words. `endpoints.md` must gain or update a row in the same change
   that captures, maps, allowlists, uses or re-treats an endpoint.
 - `docs/backlog/`: accepted, known gaps (one file each). Don't re-report one as new; do report a change that widens
@@ -68,12 +81,13 @@
 
 ## Conventions that are deliberate
 
-- Fail closed everywhere: unknown, partial, paginated or unreadable means denied, unstored or untrusted, never
-  guessed. A value no capture showed is kept as `Field::Unknown(raw)`.
-- No hidden retries: `reqwest` retries are off, the transport retries a read once, and the outbox owns the write
-  retry table. An extra retry is a defect, not robustness.
-- Trouter deliveries are never answered, presence is never set and an incoming call is never answered: all by
-  design.
+- Fail closed in the fence: unknown, partial, paginated or unreadable means denied, never guessed. A value no
+  capture showed is kept as `Field::Unknown(raw)`.
+- No hidden retries: `reqwest` retries are off, the transport retries a read once, the outbox owns the write retry
+  table, and a call write is never resent after an unknown outcome. An extra retry is a defect, not robustness.
+- Trouter deliveries are answered only by a call's typed response (`FrameSink::respond`); own availability goes only
+  as its sealed writes; an incoming call is answered only by its `CallAction` (in the lab also
+  `teams-headless watch --answer-lab-calls`, for an invitation the fence offered).
 - `#[allow]` and inner `#![allow]`/`#![expect]` are refused. The only exception is an outer
   `#[expect(clippy::…, reason = "…")]` on one item. Over-limit functions are split. `clippy.toml` thresholds only go
   down.
