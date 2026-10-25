@@ -34,6 +34,10 @@
 //!   [`notify`] notifications of messages that come (as the "notifications" setting says; a chat shown in a focused
 //!   window never notifies; activating one opens its chat) and the [`tray`] item (the unread total, open, quit;
 //!   closing the window keeps the app in the tray), both on the bus the app is given ([`bus`]) and nowhere else.
+//! - [`calls`] (M3 Task 17): the account's calls as the views show them, in a build that shows them (the lab app; the
+//!   personal build shows none yet), and the user's asks; [`call_view`] the incoming call's banner and the in-call bar,
+//!   [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification with
+//!   Answer and Decline.
 //! - [`view`]: the window's root view; [`window`] opens it inside the kit's root, which applies the theme to the
 //!   window (its font size as the rem size, its font family and colours) and hosts the kit's dialogs and tooltips.
 //! - [`theme`]: the UI kit's (`gpui-component`) theme in Teams-like colours and compact sizes, light and dark
@@ -47,6 +51,9 @@
 
 pub mod bridge;
 pub mod bus;
+pub mod call_alert;
+pub mod call_view;
+pub mod calls;
 pub mod channel_view;
 pub mod chat_list;
 pub mod chat_view;
@@ -59,6 +66,7 @@ pub mod own_presence;
 pub mod people;
 pub mod presence;
 pub mod rich_text;
+pub mod ringtone;
 pub mod search;
 pub mod sending;
 pub mod settings;
@@ -73,6 +81,9 @@ pub mod view;
 pub mod window;
 
 pub use bridge::{Bridge, Core, EventSource, StoppedCore};
+pub use call_alert::{CallAlert, CallAlertEvent};
+pub use call_view::CallBar;
+pub use calls::{ActiveCall, Ask, CallKind, Calls};
 pub use channel_view::ChannelView;
 pub use chat_list::{ChatList, ChatListEvent, ChatRow};
 pub use chat_view::{ChatView, ChatViewEvent, MessageAction};
@@ -84,6 +95,7 @@ pub use notify::{Notice, NoticeKind, NotificationServer, Notifier, NotifierEvent
 pub use own_presence::OwnPresence;
 pub use people::Shown;
 pub use presence::Presences;
+pub use ringtone::{DeviceRinger, Ringer, Ringtone};
 pub use search::{Hit, HitTarget, Search, SearchEvent};
 pub use settings::{Copied, FirstRunState, LogLevel, Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};

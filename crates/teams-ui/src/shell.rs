@@ -19,6 +19,14 @@
 //! shell shows is traced (`chat opened`, `channel opened`, `settings opened`, `switcher opened`/`closed`, `search
 //! opened`/`closed`, `status-menu opened`/`closed`/`chosen` with the status's key, and `header shown`: the chat's
 //! header's presence and whether its name and avatar came from people's names and a picture, never the name).
+//!
+//! Calls (M3 Task 17), in a build that shows them (in one that doesn't, the call keys do nothing here): the chat's
+//! header has Call (or Join, when an invitation named a running call in that group chat) while the calling endpoint is
+//! registered and no call is up, ringing or being set up; the [`CallBar`] above the panes shows the incoming call's
+//! banner (Answer, Decline) and the in-call bar (Mute, Hang up). The keys: Ctrl+Shift+C calls the chat shown,
+//! Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers and Ctrl+Shift+D declines the call that rings,
+//! Ctrl+Shift+M mutes or unmutes and Ctrl+Shift+H hangs up; the switcher offers the same as commands, with "Test call".
+//! Traced: `call-button shown` (the chat, and `call`, `join` or `none`).
 
 use std::sync::Arc;
 
@@ -34,6 +42,8 @@ use teams_core::{Availability, Reporting};
 use teams_proto::ManualAvailability;
 
 use crate::bridge::Core;
+use crate::call_view::CallBar;
+use crate::calls::{self, Ask};
 use crate::channel_view::ChannelView;
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView};
@@ -44,12 +54,16 @@ use crate::presence;
 use crate::search::{HitTarget, Search, SearchEvent};
 use crate::settings::{ManualStatus, SettingsModel};
 use crate::settings_view::SettingsView;
-use crate::switcher::{Switcher, SwitcherEvent};
+use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
 use crate::teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
 actions!(teams_ui, [ToggleSwitcher, ToggleSearch]);
+actions!(
+    teams_ui,
+    [CallChat, JoinCall, AnswerCall, DeclineCall, HangUpCall, ToggleMuteCall]
+);
 
 /// The shell's key context.
 pub const CONTEXT: &str = "Shell";
@@ -77,8 +91,17 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-k", ToggleSwitcher, None),
         KeyBinding::new("ctrl-shift-f", ToggleSearch, None),
+        KeyBinding::new("ctrl-shift-c", CallChat, None),
+        KeyBinding::new("ctrl-shift-j", JoinCall, None),
+        KeyBinding::new("ctrl-shift-s", AnswerCall, None),
+        KeyBinding::new("ctrl-shift-d", DeclineCall, None),
+        KeyBinding::new("ctrl-shift-h", HangUpCall, None),
+        KeyBinding::new("ctrl-shift-m", ToggleMuteCall, None),
     ]);
 }
+
+/// What a button of the shell does.
+type ShellAction = fn(&mut Shell, &mut Context<Shell>);
 
 /// What the rail has chosen for the list pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,7 +156,11 @@ pub struct Shell {
     status_menu: bool,
     /// What the chat's header was last traced showing.
     header_traced: Option<HeaderShown>,
-    _subscriptions: [Subscription; 7],
+    /// The incoming call's banner and the in-call bar.
+    call_bar: Entity<CallBar>,
+    /// The chat whose call button was last traced, and which it showed.
+    call_button_traced: Option<(String, &'static str)>,
+    _subscriptions: [Subscription; 8],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -187,24 +214,16 @@ impl Shell {
         // the list's rows built again (a name or a picture read): the header shows what its row shows
         let renamed = cx.observe(&list, |this: &mut Self, _, cx| this.trace_header(cx));
         let typed = Self::keystrokes_are_use(window, cx);
+        let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        if let Some(id) = &selected {
-            trace.record(&TraceLine::new("chat", "opened").conversation(id));
-        }
         let chat_parts = ShellParts {
             core: Arc::clone(&core),
             models: models.clone(),
             settings: settings.clone(),
             trace: Arc::clone(&trace),
         };
-        let chat = selected
-            .clone()
-            .map(|id| cx.new(|cx| ChatView::new(chat_parts, id, window, cx)));
-        if let Some(chat) = &chat {
-            let compose = chat.read(cx).compose().clone();
-            compose.update(cx, |compose, cx| compose.focus(window, cx));
-        }
+        let chat = Self::kept_chat(chat_parts, selected.clone(), window, cx);
         Self {
             core,
             models,
@@ -225,8 +244,155 @@ impl Shell {
             own_presence: None,
             status_menu: false,
             header_traced: None,
-            _subscriptions: [opened, channel_opened, kept_channel, presence, typed, renamed, settled],
+            call_bar,
+            call_button_traced: None,
+            _subscriptions: [
+                opened,
+                channel_opened,
+                kept_channel,
+                presence,
+                typed,
+                renamed,
+                settled,
+                calling,
+            ],
         }
+    }
+
+    /// The chat view of `selected`, the chat the settings kept, opened again and taking what is typed.
+    fn kept_chat(
+        parts: ShellParts,
+        selected: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ChatView>> {
+        let id = selected?;
+        parts.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
+        let chat = cx.new(|cx| ChatView::new(parts, id, window, cx));
+        let compose = chat.read(cx).compose().clone();
+        compose.update(cx, |compose, cx| compose.focus(window, cx));
+        Some(chat)
+    }
+
+    /// The call bar over `models`' calls, and the observation that keeps the header's call button up to date.
+    fn calls(
+        core: &Arc<dyn Core>,
+        models: &Models,
+        list: &Entity<ChatList>,
+        trace: &Arc<ViewTrace>,
+        cx: &mut Context<Self>,
+    ) -> (Entity<CallBar>, Subscription) {
+        let (core, list, trace, calls) = (Arc::clone(core), list.clone(), Arc::clone(trace), models.calls.clone());
+        let call_bar = cx.new(|cx| CallBar::new(core, calls, list, trace, cx));
+        // a call up, rung or ended: the header's call button follows
+        let calling = cx.observe(&models.calls, |this: &mut Self, _, cx| {
+            this.trace_call_button(cx);
+            cx.notify();
+        });
+        (call_bar, calling)
+    }
+
+    /// The incoming call's banner and the in-call bar.
+    #[must_use]
+    pub fn call_bar(&self) -> &Entity<CallBar> {
+        &self.call_bar
+    }
+
+    /// The call button the chat shown has: `call`, `join` (a running call there, from an invitation), or `none` (no
+    /// chat shown, calls not shown, the calling endpoint not registered, or a call up or ringing).
+    #[must_use]
+    pub fn call_button(&self, cx: &App) -> &'static str {
+        let Main::Chat(id) = &self.main else {
+            return "none";
+        };
+        let calls = self.models.calls.read(cx);
+        if !calls.idle() || !calls.registered() {
+            "none"
+        } else if calls.joinable(id) {
+            "join"
+        } else {
+            "call"
+        }
+    }
+
+    /// Traces the chat's call button (`call-button shown`) when it changed; nothing while calls aren't shown.
+    fn trace_call_button(&mut self, cx: &App) {
+        let Main::Chat(id) = &self.main else {
+            return;
+        };
+        if !self.models.calls.read(cx).shows() {
+            return;
+        }
+        let shown = (id.clone(), self.call_button(cx));
+        if self.call_button_traced.as_ref() == Some(&shown) {
+            return;
+        }
+        self.trace.record(
+            &TraceLine::new("call-button", "shown")
+                .conversation(&shown.0)
+                .kind(shown.1),
+        );
+        self.call_button_traced = Some(shown);
+    }
+
+    /// The user asks `ask` of the calls (a key, a button, a command).
+    pub fn ask_call(&mut self, ask: Ask, cx: &mut Context<Self>) {
+        calls::ask(&self.models.calls, &self.core, &self.trace, ask, cx);
+    }
+
+    /// Calls the chat shown (a 1:1 chat's other member, a group chat's members).
+    pub fn call_chat(&mut self, cx: &mut Context<Self>) {
+        if let Main::Chat(id) = &self.main {
+            let chat = id.clone();
+            self.ask_call(Ask::Call { chat }, cx);
+        } else {
+            let ask = Ask::Call { chat: String::new() };
+            calls::refuse_here(&self.models.calls, &self.trace, &ask, "no-chat", cx);
+        }
+    }
+
+    /// Joins the running call of the chat shown.
+    pub fn join_call(&mut self, cx: &mut Context<Self>) {
+        if let Main::Chat(id) = &self.main {
+            let chat = id.clone();
+            self.ask_call(Ask::Join { chat }, cx);
+        } else {
+            let ask = Ask::Join { chat: String::new() };
+            calls::refuse_here(&self.models.calls, &self.trace, &ask, "no-chat", cx);
+        }
+    }
+
+    /// What a call command of the switcher asks.
+    fn call_command(&mut self, command: CallCommand, cx: &mut Context<Self>) {
+        match command {
+            CallCommand::CallChat => self.call_chat(cx),
+            CallCommand::Join => self.join_call(cx),
+            CallCommand::TestCall => self.ask_call(Ask::TestCall, cx),
+            CallCommand::Answer => self.ask_call(Ask::Answer, cx),
+            CallCommand::Decline => self.ask_call(Ask::Decline, cx),
+            CallCommand::HangUp => self.ask_call(Ask::HangUp, cx),
+            CallCommand::ToggleMute => self.ask_call(Ask::ToggleMute, cx),
+        }
+    }
+
+    /// The chat header's call button (Call, or Join), when it has one.
+    fn call_header_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (id, label, on): (&'static str, &'static str, ShellAction) = match self.call_button(cx) {
+            "call" => ("chat-call", "Call", Self::call_chat),
+            "join" => ("chat-join", "Join", Self::join_call),
+            _ => return None,
+        };
+        let button = Button::new(id)
+            .label(label)
+            .compact()
+            .primary()
+            .on_click(cx.listener(move |this, _, _, cx| on(this, cx)));
+        Some(
+            div()
+                .debug_selector(move || id.to_owned())
+                .child(button)
+                .into_any_element(),
+        )
     }
 
     /// Traces what the chat's header shows (`header shown`: the chat; its other member's presence, `none` for a chat
@@ -465,6 +631,7 @@ impl Shell {
         self.rail = RailItem::Chats;
         self.main = Main::Chat(id);
         self.trace_header(cx);
+        self.trace_call_button(cx);
         self.close_switcher(window, cx);
         self.close_search(window, cx);
         // the chat opened takes what is typed next, and is shown (read receipts may go)
@@ -551,7 +718,12 @@ impl Shell {
         self.close_search(window, cx);
         let (list, teams) = (self.list.clone(), self.teams.clone());
         let core = Arc::clone(&self.core);
-        let switcher = cx.new(|cx| Switcher::new(list, teams, core, window, cx));
+        let shown = match &self.main {
+            Main::Chat(id) => Some(id.clone()),
+            _ => None,
+        };
+        let calls = (self.models.calls.clone(), shown);
+        let switcher = cx.new(|cx| Switcher::new(list, teams, core, calls, window, cx));
         let events = cx.subscribe_in(&switcher, window, |this: &mut Self, _, event, window, cx| match event {
             SwitcherEvent::Open(id) => this.open_chat(id.clone(), window, cx),
             SwitcherEvent::OpenChannel(id) => this.open_channel_id(id.clone(), window, cx),
@@ -561,6 +733,10 @@ impl Shell {
             SwitcherEvent::SetStatus(status) => {
                 this.choose_status(*status, cx);
                 this.close_switcher(window, cx);
+            }
+            SwitcherEvent::Call(command) => {
+                this.close_switcher(window, cx);
+                this.call_command(*command, cx);
             }
         });
         switcher.update(cx, |switcher, cx| switcher.focus(window, cx));
@@ -794,7 +970,7 @@ impl Shell {
         }
     }
 
-    fn main_pane(&self, palette: Palette, cx: &App) -> AnyElement {
+    fn main_pane(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let pane = div()
             .debug_selector(|| "conversation-pane".to_owned())
             .size_full()
@@ -816,9 +992,12 @@ impl Shell {
                 let presence = self.header_presence(cx).map(|availability| {
                     presence::labelled(&availability, palette).debug_selector(|| "chat-header-presence".to_owned())
                 });
+                let call = self.call_header_button(cx);
                 let header = pane_header(name, palette)
                     .gap_2()
                     .children(presence)
+                    .child(div().flex_1())
+                    .children(call)
                     .debug_selector(|| "chat-header".to_owned());
                 pane.child(header)
                     .child(div().flex_1().min_h_0().children(chat))
@@ -913,11 +1092,30 @@ impl Render for Shell {
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| this.toggle_search(window, cx)))
+            // the call keys only in a build that shows calls: elsewhere they reach whatever else takes them
+            .when(self.models.calls.read(cx).shows(), |shell| {
+                shell
+                    .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
+                    .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
+                    .on_action(cx.listener(|this, _: &AnswerCall, _, cx| this.ask_call(Ask::Answer, cx)))
+                    .on_action(cx.listener(|this, _: &DeclineCall, _, cx| this.ask_call(Ask::Decline, cx)))
+                    .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask_call(Ask::HangUp, cx)))
+                    .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask_call(Ask::ToggleMute, cx)))
+            })
             .relative()
             .size_full()
             .flex()
             .child(self.rail_view(palette, cx))
-            .child(div().flex_1().h_full().min_w_0().child(panes))
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.call_bar.clone())
+                    .child(div().flex_1().min_h_0().child(panes)),
+            )
             .children(switcher)
             .children(search)
             .children(status_menu)

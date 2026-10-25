@@ -134,6 +134,8 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
                 app_name: TITLE.into(),
                 title: TITLE.into(),
                 shell: parts,
+                // no call rings in the personal build until its call rule is built (M3 Task 22)
+                ringer: None,
             },
             cx,
         )
@@ -168,7 +170,8 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     })
 }
 
-/// The models and the bridge holding `engine`.
+/// The models and the bridge holding `engine`. The models show no call: the personal build keeps calling off until its
+/// call rule is built (M3 Task 22), so whatever the engine told of a call would be left out.
 pub fn bridge(engine: EngineHandle, cx: &mut App) -> (Models, Entity<Bridge>) {
     let models = Models::new(cx);
     let core: Arc<dyn Core> = Arc::new(engine.requests());

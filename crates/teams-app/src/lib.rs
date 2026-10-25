@@ -20,9 +20,13 @@
 //! user's bus, and serves that account's own `teams-lab` items, nothing else, on descriptor `n`, one end of a socket
 //! pair; the app gets the other end.
 //!
+//! Its calls (M3 Task 17, [`calling`]): the engine's calling and the window's on the UI sandbox's PipeWire (the only
+//! one a lab build may open), the ringtone on its speaker; without it the app runs without calls.
+//!
 //! [`cli`] is the command line. M2 Tasks 4, 6 and 14 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod app;
+pub mod calling;
 pub mod cli;
 pub mod guard;
 pub mod secrets;

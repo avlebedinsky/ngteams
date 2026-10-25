@@ -12,7 +12,8 @@
 //! - **The callee** (on an invitation's links): `attach` (answered with `follow_ups.json`'s attach answer for its leg),
 //!   `progress`, the endpoint state, `accept` (answered with its acknowledgement; the caller's acceptance carries the
 //!   callee's answer, and every other endpoint of the callee that attached gets the call's end: answered elsewhere),
-//!   `reject` (in a 1:1 call the caller is forwarded to the callee's voicemail, which accepts, as captured).
+//!   `reject` (in a 1:1 call the caller is forwarded to the callee's voicemail, which accepts, as captured; with the
+//!   media on, the voicemail's peer answers the caller's offer).
 //! - **The call**: the acceptance's acknowledgement, the endpoint metadata, `add` (the echo's success delivered), and
 //!   `leave` (while it rings, a cancel: every attached callee endpoint gets the call's end with the leave's code; once
 //!   up, the call's end to everyone in it). A join (`POST conv/<id>`) with media enters a running call and is accepted
@@ -768,7 +769,18 @@ fn forward_to_voicemail(state: &mut State, index: usize, callee: &str) {
         .map(|case| fixture(&case["body"].to_string(), &[("<guid:b>", object_id(callee))]))
         .unwrap_or_default();
     state.call_back(links.progress.as_deref(), progress);
-    let acceptance = acceptance_body(&call, callee, Some("voicemail"), None);
+    // with the media on, the voicemail answers the caller's offer as a peer of the mock's (it records what it hears);
+    // without, its acceptance carries no media
+    let answer = call
+        .offer
+        .as_ref()
+        .and_then(|offer| state.peer_answer(&call.id, &call.caller, offer));
+    let mut acceptance = acceptance_body(&call, callee, Some("voicemail"), answer.clone());
+    if answer.is_none()
+        && let Some(accepted) = acceptance["callAcceptance"].as_object_mut()
+    {
+        accepted.remove("mediaContent");
+    }
     state.call_back(links.acceptance.as_deref(), acceptance);
     state.calling.calls[index].phase = CallPhase::Connected;
 }

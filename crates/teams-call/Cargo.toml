@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Tests only, through dev-dependencies: a call's id made without a machine (`CallId::for_tests`), for a view's test.
+test-support = []
+
 [dependencies]
 # an invitation's payload (`gp`) is base64 JSON; a delivery response's correlation vector
 base64.workspace = true

@@ -2,7 +2,9 @@
 //! touches the lab (a `test-support` build, a window outside the UI sandbox or with `DISPLAY` set, a trace
 //! descriptor it can't write), its engine built as `teams-headless` builds one (`teams_core::lab::start`) with its
 //! tokens only through the broker's socket, another engine on the account reported, and the signed-out state: a
-//! session that can't renew its tokens shows the account signed out and stops the engine, so nothing more is sent.
+//! session that can't renew its tokens shows the account signed out and stops the engine, so nothing more is sent; its
+//! calls (M3 Task 17) relayed through Teams' relay and processed as a call's, on the UI sandbox's PipeWire only, the
+//! test call's echo lab.toml's.
 //!
 //! The lab here is a made-up one in a temp dir (the mock's `lab.toml`, a region record with the mock's chat base), and
 //! the broker serves a `MemorySecretStore` holding no refresh token: every token request ends at the session, which
@@ -20,6 +22,7 @@ use std::time::{Duration, Instant};
 use clap::Parser as _;
 use gpui::{AppContext as _, TestAppContext};
 use teams_app::app::{AppEngine, sign_in_hint, start_failure, watch_sign_out};
+use teams_app::calling;
 use teams_app::cli::{Cli, Mode, ModeError};
 use teams_app::guard::window_allowed;
 use teams_app::trace::{TraceFdError, adopt_trace};
@@ -208,6 +211,63 @@ fn the_trace_descriptor_must_be_handed_in_open_for_writing() -> TestResult {
     let mut read = String::new();
     std::io::Read::read_to_string(&mut &reader, &mut read)?;
     assert_eq!(read, "{}\n");
+    Ok(())
+}
+
+// --- the calls (M3 Task 17) ---
+
+#[test]
+fn the_app_s_calls_go_through_teams_relay_processed_as_a_call_its_client_the_web_client_s() {
+    let devices = Arc::new(teams_media::devices::file::FileDevices {
+        input: teams_media::devices::file::AudioInput::Silence,
+        recording: None,
+        camera: teams_media::devices::file::PatternCamera::default(),
+        pacing: teams_media::devices::file::Pacing::RealTime,
+    });
+    let echo = teams_fence::Mri::new("28:00000000-0000-4000-8000-0000000000ec");
+    let (engine, window) = calling::on_devices(devices, Some(echo.clone()));
+    assert_eq!(engine.media.relay, teams_core::Relay::Teams);
+    assert_eq!(
+        engine.media.session.processing,
+        teams_media::processing::ProcessingConfig::CALL,
+        "echo cancellation, noise suppression and gain control on"
+    );
+    assert_eq!(engine.client, lab::web_client_info());
+    assert_eq!(engine.language_id.as_deref(), Some(lab::LAB_LANGUAGE));
+    assert!(window.ringer.is_some(), "the ringtone on the same devices");
+    assert_eq!(window.echo, Some(echo));
+}
+
+#[test]
+fn the_test_call_s_echo_is_lab_toml_s() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let without = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
+    assert_eq!(calling::echo_of(&without), None, "not recorded yet");
+    let recorded = format!(
+        "{}\n[[service_participants]]\nname = \"echo\"\nmri = \"28:00000000-0000-4000-8000-0000000000ec\"\n",
+        lab_toml(dir.path())
+    );
+    let with = LabConfig::parse(&recorded, dir.path())?;
+    assert_eq!(
+        calling::echo_of(&with).map(|mri| mri.as_str().to_owned()).as_deref(),
+        Some("28:00000000-0000-4000-8000-0000000000ec")
+    );
+    Ok(())
+}
+
+#[test]
+fn outside_the_sandbox_s_pipewire_the_app_has_no_calls() -> TestResult {
+    // a test process has no UI sandbox: its PipeWire is the only one a lab build may open
+    if std::env::var_os(ui_sandbox::SANDBOX_ENV).is_some() {
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
+    let refused = calling::open(&config).err().ok_or("calls opened outside the sandbox")?;
+    assert!(
+        matches!(refused, teams_media::devices::DeviceError::Refused(_)),
+        "{refused}"
+    );
     Ok(())
 }
 

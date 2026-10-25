@@ -42,6 +42,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
+# a call's id for the call events the personal app's models are shown (`CallId::for_tests`)
+teams-call = { workspace = true, features = ["test-support"] }
 base64.workspace = true
 gpui-pre = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true

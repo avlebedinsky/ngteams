@@ -355,6 +355,9 @@ pub enum Event {
     RingEnded { call: CallId, end: RemoteEnd },
     /// A call of the account's moved on ([`CallStatus`]); every call ends with [`CallStatus::Ended`], once.
     Call { call: CallId, status: CallStatus },
+    /// The account's call was taken by the callee's voicemail (a 1:1 call the callee declined or didn't answer, as
+    /// captured: the call controller forwards it there); told once it is up, and it runs on until it is hung up.
+    Voicemail { call: CallId },
 }
 
 /// What the engine's requests can fail with.

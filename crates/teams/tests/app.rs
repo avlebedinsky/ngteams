@@ -1,6 +1,8 @@
 //! The personal app's sign-out on GPUI's test context: once the session can't renew its tokens the window shows
 //! "signed out", the engine is stopped (nothing more is sent: every request answers that it stopped) and the sign-in
-//! window is opened again, once; the settings ask for the first run's screen. The engine is the personal build's own
+//! window is opened again, once; the settings ask for the first run's screen. And the personal build shows no call
+//! (M3 Task 17, until its call rule is built in Task 22): its engine has no calling, and its models leave out whatever
+//! of a call they would be told. The engine is the personal build's own
 //! (`teams::engine::start`) over a `MemorySecretStore` holding no refresh token, so no request leaves the process.
 
 // test code throughout (its helpers unwrap like the tests do)
@@ -16,7 +18,7 @@ use gpui::TestAppContext;
 use teams::app::{self, SIGNED_OUT_HINT, SignInAgain};
 use teams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
-use teams_core::EngineError;
+use teams_core::{CallAction, CallActionError, CallId, EngineError, Event, IncomingCall, RegistrationReport};
 use teams_fence::Fence;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
@@ -98,6 +100,53 @@ fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
     assert!(matches!(after, Err(EngineError::Stopped)), "{after:?}");
     cx.run_until_parked();
     assert_eq!(asked.get(), 1, "the sign-in window is opened again once");
+}
+
+#[test]
+fn the_personal_build_shows_no_call_and_its_engine_places_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let (setup, account) = signed_in_setup(&dir);
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
+    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false).unwrap();
+    let core = engine.handle.requests();
+    let refused = core
+        .call(CallAction::Call {
+            chat: "19:00000000-0000-4000-8000-0000000000ff_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces"
+                .to_owned(),
+        })
+        .blocking_wait();
+    assert!(
+        matches!(refused, Err(EngineError::Call(CallActionError::NoCalling))),
+        "no calling: {refused:?}"
+    );
+    let cx = TestAppContext::single();
+    let (models, _bridge) = cx.update(|cx| app::bridge(engine.handle, cx));
+    cx.update(|cx| {
+        models.apply(Event::CallingRegistration(RegistrationReport::Registered), cx);
+        models.apply(
+            Event::IncomingCall(IncomingCall {
+                call: CallId::for_tests(1),
+                caller: teams_fence::Mri::new("8:orgid:00000000-0000-4000-8000-00000000000b"),
+                caller_name: Some("Someone Else".to_owned()),
+                group_chat: None,
+            }),
+            cx,
+        );
+    });
+    let calls = cx.read(|cx| {
+        let calls = models.calls.read(cx);
+        (
+            calls.shows(),
+            calls.registered(),
+            calls.ringing().is_some(),
+            calls.idle(),
+        )
+    });
+    assert_eq!(
+        calls,
+        (false, false, false, false),
+        "nothing of a call is kept, shown or offered"
+    );
 }
 
 #[test]

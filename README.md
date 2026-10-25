@@ -443,6 +443,21 @@ registered again with a new one, opening it again and quitting it) and keeps its
 under `target/ui-shots/`: `teams-app-window.png` (the window as the catch-up filled it) and `teams-app-chat.png` (the
 chat opened).
 
+Calls (M3 Task 17): the app's engine gets its calling on the UI sandbox's PipeWire (the only one a lab build may
+open; without it the app runs without calls). A chat's header has Call once the calling endpoint is registered (Join
+where an invitation named a running call in that group chat); an invitation the engine offered rings with a ringtone on
+the default output, a banner (Answer, Decline) and a notification with Answer and Decline on the bus the app is given,
+the caller named as the invitation names them, all gone once its ring ends; the in-call bar above the panes shows who
+the call is with, its state and duration, Mute and Hang up, and how it ended (a 1:1 call the callee declined is taken by
+their voicemail, as captured, and says so). Keys: Ctrl+Shift+C calls the chat shown, Ctrl+Shift+J joins its running
+call, Ctrl+Shift+S answers, Ctrl+Shift+D declines, Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+H hangs up; the switcher
+(Ctrl+K) offers the commands that fit the moment ("Call", "Test call", "Join call", "Answer call", "Decline call",
+"Hang up", "Mute or unmute"). Nothing answers or declines a call but the user. The personal build shows no call yet.
+`crates/teams-app/tests/call_window.rs` runs a's and b's apps in two sandboxes, each with its private PipeWire's tone,
+on `teams-mock` with its calling media: a calls b by the keyboard, b's ringtone is in b's recording, b answers from the
+notification, each tone is in the other's recording, a hangs up; b declines a second call and a's bar says it went to
+voicemail; screenshots `teams-app-call-incoming.png`, `teams-app-call-connected.png`, `teams-app-call-declined.png`.
+
 The live acceptance test (M2 Task 25, `tests/ui_live.rs`, `docs/m2-acceptance.md`) is an orchestrator only: it opens no
 fence, holds no token and sends nothing. It starts a UI sandbox per lab account, each app's broker outside it with the
 user's bus, spawns the normally built app for a, b and c, drives them by keyboard (the switcher, the compose box, the

@@ -7,7 +7,8 @@
 //! opens read-only, as from the Teams list. Then the messages the query finds in the store ([`crate::search`]): one
 //! chosen opens its chat at the message. Last come the app's commands the query matches ([`COMMANDS`]: "Copy
 //! diagnostics", and "Set status: …" for each status the account menu offers, so the account's status is set from the
-//! keyboard too).
+//! keyboard too), and in a build that shows calls the call commands that fit the moment ([`CallCommand`]: "Call" the
+//! chat shown, "Test call", "Join call", "Answer call", "Decline call", "Hang up", "Mute or unmute", M3 Task 17).
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use gpui_component::IndexPath;
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 
 use crate::bridge::Core;
+use crate::calls::Calls;
 use crate::chat_list::ChatList;
 use crate::search::{self, Hit, HitTarget};
 use crate::settings::ManualStatus;
@@ -110,6 +112,64 @@ pub enum SwitcherEvent {
     CopyDiagnostics,
     /// Set the account's status, as the account menu does (a "Set status: …" command).
     SetStatus(ManualStatus),
+    /// A call command.
+    Call(CallCommand),
+}
+
+/// A call command the palette offers (in a build that shows calls), when it fits the moment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallCommand {
+    /// Call the chat shown.
+    CallChat,
+    TestCall,
+    /// Join the running call of the chat shown.
+    Join,
+    Answer,
+    Decline,
+    HangUp,
+    ToggleMute,
+}
+
+impl CallCommand {
+    /// What the palette calls it, and matches the query on.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CallChat => "Call",
+            Self::TestCall => "Test call",
+            Self::Join => "Join call",
+            Self::Answer => "Answer call",
+            Self::Decline => "Decline call",
+            Self::HangUp => "Hang up",
+            Self::ToggleMute => "Mute or unmute",
+        }
+    }
+
+    /// The commands that fit `calls` now, `chat` the chat shown.
+    #[must_use]
+    pub fn fitting(calls: &Calls, chat: Option<&str>) -> Vec<Self> {
+        if !calls.shows() {
+            return Vec::new();
+        }
+        if calls.ringing().is_some() {
+            return vec![Self::Answer, Self::Decline];
+        }
+        if calls.call().is_some() {
+            return vec![Self::HangUp, Self::ToggleMute];
+        }
+        let mut fitting = Vec::new();
+        if let Some(chat) = chat {
+            fitting.push(if calls.joinable(chat) {
+                Self::Join
+            } else {
+                Self::CallChat
+            });
+        }
+        if calls.has_test_call() {
+            fitting.push(Self::TestCall);
+        }
+        fitting
+    }
 }
 
 /// The palette's sections in order (an empty one is hidden, and keeps its number).
@@ -123,6 +183,7 @@ const COMMAND_SECTION: usize = 3;
 pub enum PaletteCommand {
     CopyDiagnostics,
     SetStatus(ManualStatus),
+    Call(CallCommand),
 }
 
 impl PaletteCommand {
@@ -136,6 +197,7 @@ impl PaletteCommand {
             Self::SetStatus(ManualStatus::Busy) => "Set status: Busy",
             Self::SetStatus(ManualStatus::DoNotDisturb) => "Set status: Do not disturb",
             Self::SetStatus(ManualStatus::Away) => "Set status: Appear away",
+            Self::Call(command) => command.name(),
         }
     }
 
@@ -143,6 +205,7 @@ impl PaletteCommand {
         match self {
             Self::CopyDiagnostics => SwitcherEvent::CopyDiagnostics,
             Self::SetStatus(status) => SwitcherEvent::SetStatus(status),
+            Self::Call(command) => SwitcherEvent::Call(command),
         }
     }
 }
@@ -171,7 +234,9 @@ pub struct Switcher {
     hits: Vec<Hit>,
     /// The search for the latest query: a later query drops it.
     searching: Option<Task<()>>,
-    _observing: [Subscription; 2],
+    /// The call commands that fit the moment, first of the commands.
+    call_commands: Vec<CallCommand>,
+    _observing: [Subscription; 3],
     /// Escape, before the palette's own binding (which first clears the query).
     _escape: Subscription,
 }
@@ -179,17 +244,26 @@ pub struct Switcher {
 impl EventEmitter<SwitcherEvent> for Switcher {}
 
 impl Switcher {
+    /// The switcher over the chat list's rows and the Teams list's channels; with the call commands that fit `calls`
+    /// now, `chat` the chat shown.
     pub fn new(
         list: Entity<ChatList>,
         teams: Entity<TeamsList>,
         core: Arc<dyn Core>,
+        (calls, chat): (Entity<Calls>, Option<String>),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let state = cx.new(|cx| CommandState::new(window, cx));
+        let fitting = move |calls: &Calls| CallCommand::fitting(calls, chat.as_deref());
+        let call_commands = fitting(calls.read(cx));
         let observing = [
             cx.observe(&list, |this: &mut Self, _, cx| this.refilter(cx)),
             cx.observe(&teams, |this: &mut Self, _, cx| this.refilter(cx)),
+            cx.observe(&calls, move |this: &mut Self, calls, cx| {
+                this.call_commands = fitting(calls.read(cx));
+                this.refilter(cx);
+            }),
         ];
         let this = cx.weak_entity();
         let escape = cx.intercept_keystrokes(move |event, _window, cx| {
@@ -211,6 +285,7 @@ impl Switcher {
             channels: Vec::new(),
             hits: Vec::new(),
             searching: None,
+            call_commands,
             _observing: observing,
             _escape: escape,
         };
@@ -253,8 +328,11 @@ impl Switcher {
     }
 
     fn matching_commands(&self) -> Vec<PaletteCommand> {
-        COMMANDS
-            .into_iter()
+        self.call_commands
+            .iter()
+            .copied()
+            .map(PaletteCommand::Call)
+            .chain(COMMANDS)
             .filter(|command| fuzzy_score(&self.query, command.name()).is_some())
             .collect()
     }

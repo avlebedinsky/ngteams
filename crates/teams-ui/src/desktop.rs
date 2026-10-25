@@ -14,6 +14,8 @@
 //! - The account's own presence ([`OwnPresence`], M2 Task 20) lives as long as the app, not the window: its refresh goes
 //!   on while the app stays in the tray, the shell of each window it opens tells it of the window's use and shows it
 //!   in the account menu, and the quit stops it before the app asks for its shutdown (nothing is sent on quit).
+//! - An incoming call (M3 Task 17) rings through the [`CallAlert`]: its ringtone on the default output and its
+//!   notification with Answer and Decline on the same bus; its body shows the window, where the banner is.
 //! - [`Desktop::connect`] connects to the bus the app is given ([`crate::bus`]) and puts the notifications and the
 //!   tray item on it; without one, neither is there and nothing else is tried.
 //!
@@ -31,8 +33,11 @@ use tokio::sync::mpsc;
 use zbus::Connection;
 
 use crate::bus::{self, BusError};
+use crate::call_alert::{CallAlert, CallAlertEvent};
+use crate::notify::DEFAULT_ACTION;
 use crate::notify::{BusNotifications, Notifier, NotifierEvent};
 use crate::own_presence::OwnPresence;
+use crate::ringtone::Ringer;
 use crate::shell::{Main, Shell, ShellParts};
 use crate::trace::TraceLine;
 use crate::tray::{BusTray, Hosted, Tray, TrayEvent};
@@ -49,6 +54,8 @@ pub struct DesktopParts {
     /// The window's title.
     pub title: SharedString,
     pub shell: ShellParts,
+    /// What plays an incoming call's ringtone (the app's speaker); `None` plays none.
+    pub ringer: Option<Arc<dyn Ringer>>,
 }
 
 /// What the desktop asks of the app.
@@ -63,13 +70,14 @@ pub struct Desktop {
     parts: DesktopParts,
     window: Option<WindowHandle<KitRoot>>,
     notifier: Entity<Notifier>,
+    call_alert: Entity<CallAlert>,
     tray: Entity<Tray>,
     own_presence: Entity<OwnPresence>,
     /// The tray item is up: closing the window keeps the app.
     in_tray: bool,
     /// The connection to the bus the app is given, kept for the notifications and the tray item on it.
     bus: Option<Connection>,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl EventEmitter<DesktopEvent> for Desktop {}
@@ -117,6 +125,19 @@ impl Desktop {
             NotifierEvent::Open(id) => this.open_chat(id.clone(), cx),
             NotifierEvent::OpenChannel(id) => this.open_channel(id.clone(), cx),
         });
+        let ringer = parts.ringer.clone();
+        let call_alert = cx.new(|cx| {
+            CallAlert::new(
+                Arc::clone(&shell.core),
+                shell.models.calls.clone(),
+                Arc::clone(&shell.trace),
+                ringer,
+                cx,
+            )
+        });
+        let alerted = cx.subscribe(&call_alert, |this: &mut Self, _, event, cx| match event {
+            CallAlertEvent::ShowWindow => this.show(cx),
+        });
         let tray = cx.new(|cx| {
             Tray::new(
                 Arc::clone(&shell.core),
@@ -143,17 +164,24 @@ impl Desktop {
             parts,
             window: None,
             notifier,
+            call_alert,
             tray,
             own_presence,
             in_tray: false,
             bus: None,
-            _subscriptions: [opening, closing],
+            _subscriptions: [opening, closing, alerted],
         }
     }
 
     #[must_use]
     pub fn notifier(&self) -> &Entity<Notifier> {
         &self.notifier
+    }
+
+    /// The incoming call's ringtone and notification.
+    #[must_use]
+    pub fn call_alert(&self) -> &Entity<CallAlert> {
+        &self.call_alert
     }
 
     #[must_use]
@@ -307,7 +335,8 @@ impl Desktop {
     }
 }
 
-/// The notifications on `connection`: the server handed to the notifier, its activations to the notifier.
+/// The notifications on `connection`: the server handed to the notifier and the call alert, each activation to the
+/// call alert when it is an incoming call's, else (its body's) to the notifier.
 async fn notifications(
     this: &WeakEntity<Desktop>,
     connection: &Connection,
@@ -315,15 +344,24 @@ async fn notifications(
     cx: &mut AsyncApp,
 ) -> zbus::Result<()> {
     let (server, mut activations) = BusNotifications::start(connection, app_name).await?;
-    let Ok(notifier) = this.update(cx, |this, cx| {
+    let server = Arc::new(server);
+    let Ok((notifier, call_alert)) = this.update(cx, |this, cx| {
         this.notifier
-            .update(cx, |notifier, _| notifier.set_server(Arc::new(server)));
-        this.notifier.downgrade()
+            .update(cx, |notifier, _| notifier.set_server(server.clone()));
+        this.call_alert
+            .update(cx, |alert, cx| alert.set_server(server.clone(), cx));
+        (this.notifier.downgrade(), this.call_alert.downgrade())
     }) else {
         return Ok(());
     };
     cx.spawn(async move |cx: &mut AsyncApp| {
-        while let Some(id) = activations.next().await {
+        while let Some((id, action)) = activations.next().await {
+            let Ok(calls) = call_alert.update(cx, |alert, cx| alert.activated(id, &action, cx)) else {
+                break;
+            };
+            if calls || action != DEFAULT_ACTION {
+                continue;
+            }
             if notifier.update(cx, |notifier, cx| notifier.activated(id, cx)).is_err() {
                 break;
             }

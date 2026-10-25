@@ -27,6 +27,8 @@ teams-fence.workspace = true
 teams-proto.workspace = true
 # the rows the engine's queries answer with
 teams-store.workspace = true
+# the incoming call's ringtone: the device seam's speaker (the PipeWire the build allows) and its tones
+teams-media.workspace = true
 # the diagnostic log's level in the settings (changed live) and the "copy diagnostics" text; never installed here
 teams-log.workspace = true
 # the settings file's problems
@@ -39,6 +41,8 @@ toml.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+# a call's id for the fake engine's call events (`CallId::for_tests`)
+teams-call = { workspace = true, features = ["test-support"] }
 # the views on GPUI's test context (`TestAppContext`): a fake core and a fake event source, no window system
 gpui-pre = { workspace = true, features = ["test-support"] }
 # the kit's widgets on GPUI's test context

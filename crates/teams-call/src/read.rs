@@ -154,8 +154,8 @@ pub(crate) fn accept_answer(body: &[u8]) -> AcceptAnswer {
 }
 
 /// The acceptance of a call the account placed or joined: its `acknowledgement` link (for an acknowledgement by
-/// request), the answer to the account's offer, the keep-alive interval and the call controller's
-/// `mediaRenegotiation` link.
+/// request), the answer to the account's offer, the keep-alive interval, the call controller's `mediaRenegotiation`
+/// link, and whether the callee's voicemail took the call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Acceptance {
     pub(crate) acknowledgement: Option<CallLink>,
@@ -164,6 +164,9 @@ pub(crate) struct Acceptance {
     pub(crate) renegotiation: Option<CallLink>,
     /// The call leg's own link: where the keep-alive goes.
     pub(crate) call_leg: Option<CallLink>,
+    /// The callee's voicemail took the call (`acceptedBy.endpointType` `voicemail`, as captured for a 1:1 call the
+    /// callee declined or didn't answer).
+    pub(crate) voicemail: bool,
 }
 
 /// The acceptance delivery `body`; `None` unless it is a `callAcceptance`.
@@ -176,6 +179,7 @@ pub(crate) fn acceptance(body: &[u8]) -> Option<Acceptance> {
         keep_alive: keep_alive(acceptance),
         renegotiation: link(acceptance, "/links/mediaRenegotiation"),
         call_leg: link(acceptance, "/links/callLeg"),
+        voicemail: acceptance.pointer("/acceptedBy/endpointType").and_then(Value::as_str) == Some("voicemail"),
     })
 }
 
@@ -377,7 +381,10 @@ mod tests {
         assert_eq!(read.keep_alive, Some(2700));
         assert!(read.answer.is_some());
         assert_eq!(read.renegotiation, None);
+        assert!(!read.voicemail, "taken by the callee");
         assert!(acceptance(b"{}").is_none());
+        let voicemail = json!({"callAcceptance": {"acceptedBy": {"endpointType": "voicemail"}}});
+        assert!(acceptance(voicemail.to_string().as_bytes()).unwrap().voicemail);
     }
 
     #[test]

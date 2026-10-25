@@ -1419,3 +1419,32 @@ fn a_shut_down_lets_an_invitation_go_unanswered_and_hangs_up_a_call() {
     calls.shut_down(now);
     assert!(effects(&mut calls).is_empty(), "leaving already");
 }
+
+#[test]
+fn an_acceptance_by_the_callee_s_voicemail_is_told_once_the_call_is_up() {
+    let now = Instant::now();
+    let (mut calls, call) = ringing_call(now);
+    let path = acceptance_path(&calls);
+    let mut voicemail = acceptance();
+    voicemail["callAcceptance"]["acceptedBy"] = json!({"id": B, "endpointType": "voicemail"});
+    calls.on_delivery(&delivery(&path, &voicemail), Observed::Acceptance, now);
+    let told = events(&effects(&mut calls));
+    let connected = CallEvent::State {
+        call,
+        state: CallState::Connected,
+    };
+    let up = told.iter().position(|event| *event == connected).expect("up");
+    let forwarded = told
+        .iter()
+        .position(|event| *event == CallEvent::Voicemail { call })
+        .expect("told");
+    assert!(up < forwarded, "{told:#?}");
+
+    // the callee's own endpoint taking the call is no voicemail
+    let (mut calls, call) = ringing_call(now);
+    let path = acceptance_path(&calls);
+    let mut answered = acceptance();
+    answered["callAcceptance"]["acceptedBy"] = json!({"id": B});
+    calls.on_delivery(&delivery(&path, &answered), Observed::Acceptance, now);
+    assert!(!events(&effects(&mut calls)).contains(&CallEvent::Voicemail { call }));
+}

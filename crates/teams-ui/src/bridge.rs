@@ -24,7 +24,8 @@ use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Availability, EngineHandle, EngineRequests, Event, OwnStatus, Person, Reply, Transient, TransientSent,
+    Action, Availability, CallAction, CallId, EngineHandle, EngineRequests, Event, OwnStatus, Person, Reply, Transient,
+    TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
@@ -92,6 +93,10 @@ pub trait Core: Send + Sync + 'static {
     fn sync_conversation(&self, conversation: String) -> Reply<Synced>;
     /// The post each stored message of a channel belongs to, as (message id, post id).
     fn reply_roots(&self, conversation: String) -> Reply<Vec<(String, String)>>;
+    /// A call action (M3 Task 17): a call from a chat, the test call, a join, the answer or the decline of an
+    /// invitation the engine offered, a hang-up, muting; answered with the call it acted on, or why it was refused
+    /// (nothing sent). Only the user's action asks for one ([`crate::calls`]).
+    fn call(&self, action: CallAction) -> Reply<CallId>;
 }
 
 impl Core for EngineRequests {
@@ -189,6 +194,10 @@ impl Core for EngineRequests {
 
     fn reply_roots(&self, conversation: String) -> Reply<Vec<(String, String)>> {
         EngineRequests::reply_roots(self, conversation)
+    }
+
+    fn call(&self, action: CallAction) -> Reply<CallId> {
+        EngineRequests::call(self, action)
     }
 }
 
@@ -305,6 +314,10 @@ impl Core for StoppedCore {
     }
 
     fn reply_roots(&self, _: String) -> Reply<Vec<(String, String)>> {
+        stopped()
+    }
+
+    fn call(&self, _: CallAction) -> Reply<CallId> {
         stopped()
     }
 }

@@ -1043,17 +1043,50 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-ui/src/*`, `crates/teams-app/src/*`, `crates/teams-ui/tests/*`, `crates/teams-app/tests/*`
 
-- [ ] tests first (fake `Core`): a call button in a chat's header and the switcher's "Call" and "Test call"; "Join" on
+- [x] tests first (fake `Core`): a call button in a chat's header and the switcher's "Call" and "Test call"; "Join" on
       a chat with a running call; the incoming call's ringtone (on the default output), banner and notification
       (Answer, Decline) only for an invitation the engine offers, the caller's name as the invitation gives it, the
       ring ending on `Event::RingEnded`; the in-call view (participants for display, mute, hang up, duration, the
       call's state and failures); trace lines for each (ids and kinds, never names); the personal build shows no call
       UI until Task 22 (a `teams` mock test)
-- [ ] keyboard paths for each (the live test drives them)
-- [ ] the window test on the mock in the sandbox: a calls b, b's ringtone is in b's recording, b answers from the
+      → done: `Core::call(CallAction)`; `teams-ui/src/calls.rs` (the calls' model in `Models`, shown only by
+      `Models::with_calls`, the lab app's; `Models::new`, the personal build's, keeps nothing of a call; the user's
+      asks, `calls::ask`), `call_view.rs` (`CallBar` above the panes: the banner, the in-call bar with who it is with,
+      state, duration, Mute, Hang up, how it ended, a refusal), `call_alert.rs` (the ringtone and the notification with
+      Answer and Decline, `NoticeKind::Call`; the bus's activations now carry their action), `ringtone.rs`
+      (`DeviceRinger`: two tones and a pause on the device seam's speaker, the app's PipeWire); the header's Call/Join
+      (`Shell::call_button`); the switcher's call commands as they fit the moment. Join shows where an invitation named
+      a running call (forgotten once a join is refused `NotJoinable`). Trace: `calling registered`, `call
+      asked`/`refused`, `call-button shown`, `call-banner shown`/`hidden`, `in-call shown`/`hidden` (call number,
+      kind, state, end, failed step, mute, voicemail, chat, participants' MRIs), `ringtone started`/`stopped`,
+      `call-notification shown`/`answered`/`declined`/`closed`. Tests: `crates/teams-ui/tests/calls.rs` (9),
+      `tests/ringtone.rs` (the ringtone recorded by the file backend), `desktop_bus.rs` (a call notification's actions
+      on the bus), `crates/teams/tests/app.rs` (the personal engine refuses a call `NoCalling`, its models keep none),
+      `crates/teams-app/tests/app.rs` (the app's calls: Teams' relay, `ProcessingConfig::CALL`, the web client's
+      description, lab.toml's echo, refused outside the sandbox's PipeWire). The app (`teams-app/src/calling.rs`):
+      the engine's calling and the ringtone on the sandbox's PipeWire, without it no calls. ➕ "a sees it declined":
+      as captured, a declined 1:1 call goes to the callee's voicemail, which accepts it; `teams-call` now reads the
+      acceptance's `acceptedBy.endpointType` `voicemail` and tells `CallEvent::Voicemail` → `Event::Voicemail`, and the
+      in-call bar says "Declined or not answered: voicemail" (a `teams-call` machine test and a `teams-core` flow
+      test); the mock's voicemail acceptance now carries its peer's answer to the caller's offer (its synthetic SDP
+      failed the caller's media)
+- [x] keyboard paths for each (the live test drives them)
+      → done: Ctrl+Shift+C calls the chat shown, Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers,
+      Ctrl+Shift+D declines, Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+H hangs up; the switcher (Ctrl+K) offers "Call",
+      "Test call", "Join call", "Answer call", "Decline call", "Hang up", "Mute or unmute" as they fit (tested in
+      `tests/calls.rs`; the window test drives a's calls and hang-ups by the keys)
+- [x] the window test on the mock in the sandbox: a calls b, b's ringtone is in b's recording, b answers from the
       notification's action, the tone crosses both ways in the sandbox's recordings, a hangs up; b declines a second
       call and a sees it declined
-- [ ] the gate passes
+      → done (`crates/teams-app/tests/call_window.rs`, `harness = false`): two sandboxes, each with its private
+      PipeWire (a 440 Hz, b 660 Hz), the mock with its calling media in the parent, each app's engine on the mock with
+      its calling on its sandbox's PipeWire (unprocessed, so a steady tone crosses as it is; the lab app's own is
+      processed as a call's). Passes: b's ringtone at 0.18–0.20 in b's recording, each tone at 0.50 in the other's,
+      a's bar shows the voicemail after b's decline, both `fence.log`s all allow; screenshots under
+      `target/ui-shots/`
+- [x] the gate passes
+      → done: fmt, clippy (`--workspace --all-targets --all-features -D warnings`), `scripts/lint-report.sh`,
+      `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 cargo test --workspace` (195 suites, the call window test among them)
 
 ### Task 18: Video, 1:1
 **Files:**

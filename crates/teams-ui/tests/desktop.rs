@@ -174,6 +174,7 @@ impl OnDesktop {
                         app_name: "Teams (test)".into(),
                         title: "Teams (test)".into(),
                         shell,
+                        ringer: None,
                     },
                     cx,
                 )

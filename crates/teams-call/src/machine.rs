@@ -39,6 +39,13 @@ impl CallId {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    /// Call `number`, for a test that tells a view of a call without a machine (`test-support`).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn for_tests(number: u64) -> Self {
+        Self(number)
+    }
 }
 
 /// What the account calls.
@@ -123,6 +130,9 @@ pub enum CallEvent {
     /// The call's keep-alive fell due (every 90 % of the interval the call's services asked for): it went to the call
     /// leg's own link when the call has one (`sent`), else nothing went.
     KeepAliveDue { call: CallId, sent: bool },
+    /// The account's call was taken by the callee's voicemail (as captured for a 1:1 call the callee declined or
+    /// didn't answer: the call controller forwards it there): told once it is up. It runs on as any call up.
+    Voicemail { call: CallId },
 }
 
 /// The Trouter delivery a response answers: its connection (the fence's key for it) and its id.
@@ -1117,6 +1127,10 @@ impl Calls {
             self.out.event(CallEvent::RemoteMedia { call: call.id, media });
         }
         self.connect((acceptance.keep_alive, acceptance.call_leg), now);
+        if let Some(call) = self.call.as_ref().filter(|_| acceptance.voicemail) {
+            let id = call.id;
+            self.out.event(CallEvent::Voicemail { call: id });
+        }
     }
 
     /// The acceptance's acknowledgement as its delivery response; by request when the response can't be built.

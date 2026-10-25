@@ -11,6 +11,7 @@ use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, SharedString};
 use teams_core::{Event, MessageChange, OwnStatus, READING_TEAMS, RegistrationReport, Source, TransientSent};
 use teams_store::{Applied, Message, OutboxEntry};
 
+use crate::calls::Calls;
 use crate::presence::Presences;
 
 /// How long someone is shown typing after their last typing signal, unless they stop (`typing: false`) or a message
@@ -236,16 +237,33 @@ pub struct Models {
     pub feed: Entity<Feed>,
     /// Others' presence as the engine told it (`Event::Presence`).
     pub presence: Entity<Presences>,
+    /// The account's calls as the engine told them ([`crate::calls`]); shown only by a build that asked for them
+    /// ([`Models::with_calls`]).
+    pub calls: Entity<Calls>,
 }
 
 impl Models {
+    /// The models of a build that shows no call (the personal build until its call rule is built): whatever the
+    /// engine tells of calls is left out.
     #[must_use]
     pub fn new(cx: &mut App) -> Self {
+        Self::with(Calls::default(), cx)
+    }
+
+    /// The models of a build that shows calls (the lab app), its test call to `echo` (the echo service's MRI, when
+    /// known).
+    #[must_use]
+    pub fn with_calls(echo: Option<teams_fence::Mri>, cx: &mut App) -> Self {
+        Self::with(Calls::shown(echo), cx)
+    }
+
+    fn with(calls: Calls, cx: &mut App) -> Self {
         Self {
             status: cx.new(|_| Status::default()),
             chats: cx.new(|_| Chats::default()),
             feed: cx.new(|_| Feed),
             presence: cx.new(|_| Presences::default()),
+            calls: cx.new(|_| calls),
         }
     }
 
@@ -305,16 +323,17 @@ impl Models {
                 chats.teams = chats.revision;
                 cx.notify();
             }),
-            // how the push channel's registration went and a waiting transient's send (told on the feed, for the own
-            // presence's policy), the search backfill over: nothing a view shows; and calls, which the app's engine
-            // makes none of yet (M3 Task 17 shows them)
-            Event::Registration(_)
-            | Event::Transient(..)
-            | Event::Indexed { .. }
-            | Event::CallingRegistration(_)
+            // the calls: their own model, which leaves them out in a build that shows none
+            Event::CallingRegistration(_)
             | Event::IncomingCall(_)
             | Event::RingEnded { .. }
-            | Event::Call { .. } => {}
+            | Event::Call { .. }
+            | Event::Voicemail { .. } => {
+                self.calls.update(cx, |calls, cx| calls.apply(&event, cx));
+            }
+            // how the push channel's registration went and a waiting transient's send (told on the feed, for the own
+            // presence's policy), the search backfill over: nothing a view shows
+            Event::Registration(_) | Event::Transient(..) | Event::Indexed { .. } => {}
         }
     }
 
@@ -355,8 +374,9 @@ impl Models {
         self.feed.update(cx, |_, cx| cx.emit(told));
     }
 
-    /// The engine stopped (its events ended, or it was shut down).
+    /// The engine stopped (its events ended, or it was shut down): no call rings or is up any more.
     pub fn engine_stopped(&self, cx: &mut App) {
+        self.calls.update(cx, Calls::stopped);
         self.status.update(cx, |status, cx| {
             if status.engine != Engine::Stopped {
                 status.engine = Engine::Stopped;
@@ -365,8 +385,10 @@ impl Models {
         });
     }
 
-    /// The account is signed out (see [`Account::SignedOut`]).
+    /// The account is signed out (see [`Account::SignedOut`]): the engine is shut down next, and no call event comes
+    /// any more, so no call rings or is up.
     pub fn signed_out(&self, hint: SharedString, cx: &mut App) {
+        self.calls.update(cx, Calls::stopped);
         self.status.update(cx, |status, cx| {
             status.account = Account::SignedOut { hint };
             cx.notify();

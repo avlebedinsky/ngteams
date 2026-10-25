@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Answer, Availability, EngineError, Event, NameFrom, OwnStatus, Person, Reply, Transient, TransientSent,
+    Action, Answer, Availability, CallAction, CallId, EngineError, Event, NameFrom, OwnStatus, Person, Reply,
+    Transient, TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -103,6 +104,15 @@ pub struct FakeCore {
     pub presence_asked: Mutex<Vec<String>>,
     /// Presence as the engine would answer it, by MRI; unknown for anyone else.
     pub presences: Mutex<HashMap<String, Availability>>,
+    /// Every call action asked for, in order.
+    pub call_actions: Mutex<Vec<CallAction>>,
+    /// The answers the next call actions get, in order; once none is left, the call the action names (a start or a
+    /// join: call 1).
+    pub call_answers: Mutex<VecDeque<Result<CallId, EngineError>>>,
+    /// While set, call actions aren't answered (as the engine's while it sets a call's media up): their answers are
+    /// kept in `held_calls` for the test to send.
+    pub hold_calls: Mutex<bool>,
+    pub held_calls: Mutex<Vec<Answer<CallId>>>,
 }
 
 impl Default for FakeCore {
@@ -141,6 +151,10 @@ impl Default for FakeCore {
             synced: Mutex::default(),
             presence_asked: Mutex::default(),
             presences: Mutex::default(),
+            call_actions: Mutex::default(),
+            call_answers: Mutex::default(),
+            hold_calls: Mutex::new(false),
+            held_calls: Mutex::default(),
         }
     }
 }
@@ -457,6 +471,28 @@ impl Core for FakeCore {
             locked(&self.roots).get(&conversation).cloned().unwrap_or_default()
         })
     }
+
+    fn call(&self, action: CallAction) -> Reply<CallId> {
+        locked(&self.call_actions).push(action.clone());
+        locked(&self.asked).push("call");
+        if *locked(&self.stopped) {
+            return Reply::ready(Err(EngineError::Stopped));
+        }
+        if *locked(&self.hold_calls) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_calls).push(answer);
+            return reply;
+        }
+        let named = match action {
+            CallAction::Answer { call }
+            | CallAction::Decline { call }
+            | CallAction::HangUp { call }
+            | CallAction::Mute { call, .. }
+            | CallAction::Renegotiate { call } => call,
+            CallAction::Call { .. } | CallAction::TestCall { .. } | CallAction::Join { .. } => CallId::for_tests(1),
+        };
+        Reply::ready(locked(&self.call_answers).pop_front().unwrap_or(Ok(named)))
+    }
 }
 
 /// Whether `count` was above zero, taking one off it.
@@ -495,6 +531,11 @@ pub struct Rig {
 
 impl Rig {
     pub fn start() -> Self {
+        Self::start_with(Models::new)
+    }
+
+    /// The rig over the models `make` makes (a build that shows calls: `Models::with_calls`).
+    pub fn start_with(make: impl FnOnce(&mut gpui::App) -> Models) -> Self {
         let cx = TestAppContext::single();
         let (events, received) = mpsc::unbounded_channel();
         let shutdowns = Arc::new(AtomicUsize::new(0));
@@ -503,7 +544,7 @@ impl Rig {
             shutdowns: Arc::clone(&shutdowns),
         };
         let core = Arc::new(FakeCore::default());
-        let models = cx.update(Models::new);
+        let models = cx.update(make);
         let shared: Arc<dyn Core> = core.clone();
         let drained = models.clone();
         let bridge = cx.update(|cx| cx.new(|cx| Bridge::start(source, shared, drained, cx)));

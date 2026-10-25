@@ -115,6 +115,41 @@ async fn a_calls_b_b_answers_by_its_action_and_each_hears_the_other() {
 }
 
 #[tokio::test]
+async fn a_call_b_declines_goes_to_b_s_voicemail_and_a_is_told_so() {
+    let lab = Lab::start().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    let requests = a.handle.requests();
+    let call = requests.call(CallAction::Call { chat: AB_CHAT.into() }).await.unwrap();
+    a.status(call, &CallStatus::Ringing).await;
+    let incoming = b.incoming().await;
+    b.handle
+        .requests()
+        .call(CallAction::Decline { call: incoming.call })
+        .await
+        .unwrap();
+    assert_eq!(b.ended(incoming.call).await, End::Declined);
+    // as captured: the call controller forwards a's call to b's voicemail, which takes it
+    a.next(|event| matches!(event, Event::Voicemail { call: of } if *of == call).then_some(()))
+        .await;
+    // it runs on until a hangs up
+    let quiet = a.events_within(Duration::from_secs(2)).await;
+    assert!(
+        !quiet.iter().any(|event| matches!(
+            event,
+            Event::Call {
+                status: CallStatus::Ended(_),
+                ..
+            }
+        )),
+        "{quiet:#?}"
+    );
+    requests.call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+    assert!(a.log.denials().is_empty() && b.log.denials().is_empty());
+}
+
+#[tokio::test]
 async fn an_invitation_s_offer_is_answered_and_a_renegotiation_goes_either_way() {
     let lab = Lab::start().await;
     let mut b = lab.account(LAB_B, B_TONE).await;

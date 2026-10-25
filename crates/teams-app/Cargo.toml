@@ -34,6 +34,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "sync"] }
 # the check that a window opens only on the UI sandbox's compositor
 ui-sandbox.workspace = true
+# the calls' devices (the UI sandbox's PipeWire, the only one a lab build may open) and their media's settings
+teams-media.workspace = true
 
 [dev-dependencies]
 # the sign-out on GPUI's test context
@@ -45,9 +47,12 @@ tempfile.workspace = true
 # the window test's engine reaches the mock chat service and its Trouter through the test-support mock origins; the
 # app's binary refuses to run when a test build unified it in
 teams-fence = { workspace = true, features = ["test-support"] }
-teams-mock.workspace = true
+# the call window test's mock with its calling service's media (a loopback TURN server)
+teams-mock = { workspace = true, features = ["media"] }
 teams-proto = { workspace = true, features = ["test-support"] }
 teams-store.workspace = true
+# the call window test's engine relayed through the mock's TURN server (`Relay::Fixed`)
+teams-core = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
 # the window test's tray host on the sandbox's private bus: the item's title, a click, the menu's "Quit"
@@ -57,6 +62,12 @@ zbus.workspace = true
 # the app's window in the UI sandbox, on the mock: its own `main` (GPUI runs on the main thread), which runs itself
 # again inside the sandbox
 name = "window"
+harness = false
+
+[[test]]
+# calls in the app's window (M3 Task 17): two UI sandboxes, each with its private PipeWire, on the mock: its own `main`
+# (GPUI runs on the main thread), which runs itself again inside each sandbox as a's or b's app
+name = "call_window"
 harness = false
 
 [[test]]

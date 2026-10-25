@@ -1,0 +1,617 @@
+//! The account's calls as the views show them (M3 Task 17): a model the bridge's drain keeps up to date
+//! ([`Calls::apply`], from the engine's call events), and the user's asks ([`ask`]), each one call action through the
+//! engine ([`Core::call`]), which judges it again (one call at a time, an invitation it offered) and sends it under the
+//! fence.
+//!
+//! - **Shown or not**: a build shows calls only when its models were made with them ([`crate::Models::with_calls`]:
+//!   the lab app); the personal build's models are made without (`Models::new`), so it shows no call, rings for none
+//!   and asks for none, whatever the engine tells, until its call rule is built (M3 Task 22).
+//! - **What is kept**: whether the calling endpoint is registered; the invitation that rings (the engine offered it:
+//!   [`IncomingCall`], its caller's name as the invitation gives it); the call up or being set up ([`ActiveCall`]: its
+//!   kind, its chat, its status, when its media connected, muted, taken by voicemail); the group chats an invitation
+//!   named a running call in (a join goes there: [`Calls::joinable`]); how the last call ended and the last ask that
+//!   went nowhere, until the next call.
+//! - **The asks** ([`Ask`]): a call from a chat, the test call (the echo service's MRI the app gave), a join, the
+//!   answer or the decline of the invitation that rings, a hang-up, mute or unmute. Each is the user's: a button, a
+//!   key, the switcher's command or the incoming call's notification. Nothing here answers or declines by itself.
+//!
+//! The asks are traced by the caller's trace (`call asked`, `call refused` with the ask and why), never with a name.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Instant;
+
+use gpui::{App, AsyncApp, Context, Entity};
+use teams_core::{
+    CallAction, CallActionError, CallId, CallStatus, End, EngineError, Event, IncomingCall, RegistrationReport,
+};
+use teams_fence::Mri;
+
+use crate::bridge::Core;
+use crate::trace::{TraceLine, ViewTrace};
+
+/// What kind of call it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    /// A call from a chat (a 1:1 chat's other member, or a group chat's members).
+    Chat,
+    /// The test call of the echo service.
+    TestCall,
+    /// A join of a group chat's running call.
+    Join,
+    /// An invitation the account answered (or declined).
+    Incoming,
+}
+
+impl CallKind {
+    /// The trace's name for it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::TestCall => "test-call",
+            Self::Join => "join",
+            Self::Incoming => "incoming",
+        }
+    }
+}
+
+/// The call up, or being set up, as the views show it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveCall {
+    pub id: CallId,
+    pub kind: CallKind,
+    /// The chat it is in: the chat called or joined, a group call's chat; `None` for the test call and a 1:1
+    /// invitation.
+    pub chat: Option<String>,
+    /// Who called, for an invitation.
+    pub caller: Option<Mri>,
+    /// The caller's name as the invitation gives it.
+    pub caller_name: Option<String>,
+    pub status: CallStatus,
+    /// When its media first connected: the duration counts from there.
+    pub connected_at: Option<Instant>,
+    pub muted: bool,
+    /// The callee's voicemail took it (declined, or not answered).
+    pub voicemail: bool,
+}
+
+/// How the last call ended, shown until the next one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ended {
+    pub id: CallId,
+    pub kind: CallKind,
+    pub chat: Option<String>,
+    pub end: End,
+    pub voicemail: bool,
+}
+
+/// What the user asks of the calls.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// Call the chat: its other member, or a group chat's members.
+    Call { chat: String },
+    /// The test call of the echo service.
+    TestCall,
+    /// Join the running call of the group chat.
+    Join { chat: String },
+    /// Answer the invitation that rings.
+    Answer,
+    /// Decline the invitation that rings.
+    Decline,
+    /// Hang up the call up (or cancel it while it rings at its callees).
+    HangUp,
+    /// Mute the microphone, or unmute it.
+    ToggleMute,
+}
+
+impl Ask {
+    /// The trace's name for it.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Call { .. } => "call",
+            Self::TestCall => "test-call",
+            Self::Join { .. } => "join",
+            Self::Answer => "answer",
+            Self::Decline => "decline",
+            Self::HangUp => "hang-up",
+            Self::ToggleMute => "mute",
+        }
+    }
+
+    fn chat(&self) -> Option<&str> {
+        match self {
+            Self::Call { chat } | Self::Join { chat } => Some(chat),
+            _ => None,
+        }
+    }
+
+    /// The kind and chat of the call it starts, for a start or a join.
+    fn starts(&self) -> Option<(CallKind, Option<String>)> {
+        match self {
+            Self::Call { chat } => Some((CallKind::Chat, Some(chat.clone()))),
+            Self::TestCall => Some((CallKind::TestCall, None)),
+            Self::Join { chat } => Some((CallKind::Join, Some(chat.clone()))),
+            _ => None,
+        }
+    }
+}
+
+/// An ask that went nowhere: which, why (a name for the trace) and what to tell the user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub ask: &'static str,
+    pub why: &'static str,
+    pub text: String,
+}
+
+/// The calls' model (see the module docs). A GPUI entity in [`crate::Models`].
+#[derive(Debug, Default)]
+pub struct Calls {
+    shown: bool,
+    echo: Option<Mri>,
+    registered: bool,
+    ringing: Option<IncomingCall>,
+    call: Option<ActiveCall>,
+    /// The kind and chat of a start or a join asked for, until its call is told (the engine tells every call it
+    /// started, at the latest as it ends), it is refused or the engine stops.
+    asked: Option<(CallKind, Option<String>)>,
+    running: BTreeSet<String>,
+    ended: Option<Ended>,
+    refused: Option<Refused>,
+}
+
+impl Calls {
+    /// The calls of a build that shows them, its test call to `echo` (the echo service's MRI, when known).
+    #[must_use]
+    pub fn shown(echo: Option<Mri>) -> Self {
+        Self {
+            shown: true,
+            echo,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this build shows calls at all.
+    #[must_use]
+    pub fn shows(&self) -> bool {
+        self.shown
+    }
+
+    /// Whether the calling endpoint is registered (invitations come only to a registered one).
+    #[must_use]
+    pub fn registered(&self) -> bool {
+        self.registered
+    }
+
+    /// The invitation that rings, if one does.
+    #[must_use]
+    pub fn ringing(&self) -> Option<&IncomingCall> {
+        self.ringing.as_ref()
+    }
+
+    /// The call up, or being set up.
+    #[must_use]
+    pub fn call(&self) -> Option<&ActiveCall> {
+        self.call.as_ref()
+    }
+
+    /// How the last call ended, until the next one.
+    #[must_use]
+    pub fn ended(&self) -> Option<&Ended> {
+        self.ended.as_ref()
+    }
+
+    /// The last ask that went nowhere, until the next call.
+    #[must_use]
+    pub fn refused(&self) -> Option<&Refused> {
+        self.refused.as_ref()
+    }
+
+    /// Whether the test call can be asked for: the echo service's MRI is known.
+    #[must_use]
+    pub fn has_test_call(&self) -> bool {
+        self.echo.is_some()
+    }
+
+    /// Whether a call can start now: calls shown, none up, none ringing, no start or join asked for and not yet told.
+    #[must_use]
+    pub fn idle(&self) -> bool {
+        self.shown && !self.busy()
+    }
+
+    /// Whether a call is up, rings, or a start or join was asked for and its call not yet told (its media being set
+    /// up): another start waits for it to settle.
+    fn busy(&self) -> bool {
+        self.call.is_some() || self.ringing.is_some() || self.asked.is_some()
+    }
+
+    /// The engine stopped (shut down, or the account signed out): no call event comes any more, so the invitation that
+    /// rang stops ringing, the call up is shown ended (the engine hangs it up as it stops) and nothing is asked.
+    pub fn stopped(&mut self, cx: &mut Context<Self>) {
+        if !self.shown {
+            return;
+        }
+        self.registered = false;
+        self.ringing = None;
+        self.asked = None;
+        if let Some(active) = self.call.take() {
+            self.ended = Some(Ended {
+                id: active.id,
+                kind: active.kind,
+                chat: active.chat,
+                end: End::HungUp,
+                voicemail: active.voicemail,
+            });
+            self.refused = None;
+        }
+        cx.notify();
+    }
+
+    /// Whether an invitation named a running call in the group chat `chat`, so a join can go there.
+    #[must_use]
+    pub fn joinable(&self, chat: &str) -> bool {
+        self.running.contains(chat)
+    }
+
+    /// Clears how the last call ended and the last refusal (the user dismissed them).
+    pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.ended.take().is_some() | self.refused.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Applies one of the engine's call events; nothing while calls aren't shown. Whether it was one.
+    pub fn apply(&mut self, event: &Event, cx: &mut Context<Self>) -> bool {
+        if !self.shown {
+            return matches!(
+                event,
+                Event::CallingRegistration(_)
+                    | Event::IncomingCall(_)
+                    | Event::RingEnded { .. }
+                    | Event::Call { .. }
+                    | Event::Voicemail { .. }
+            );
+        }
+        match event {
+            Event::CallingRegistration(report) => {
+                self.registered = matches!(report, RegistrationReport::Registered);
+            }
+            Event::IncomingCall(incoming) => {
+                if let Some(chat) = &incoming.group_chat {
+                    self.running.insert(chat.clone());
+                }
+                self.ringing = Some(incoming.clone());
+            }
+            Event::RingEnded { call, .. } => {
+                if self.ringing.as_ref().is_some_and(|ringing| ringing.call == *call) {
+                    self.ringing = None;
+                }
+            }
+            Event::Call { call, status } => self.status(*call, status),
+            Event::Voicemail { call } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.voicemail = true;
+                }
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
+    /// A call of the account's moved on.
+    fn status(&mut self, call: CallId, status: &CallStatus) {
+        if self.call.as_ref().is_none_or(|active| active.id != call) {
+            self.call = Some(self.adopt(call));
+            self.ended = None;
+            self.refused = None;
+        }
+        let Some(active) = self.call.as_mut() else { return };
+        active.status = status.clone();
+        if *status == CallStatus::Connected && active.connected_at.is_none() {
+            active.connected_at = Some(Instant::now());
+        }
+        if let CallStatus::Ended(end) = status {
+            self.ended = Some(Ended {
+                id: call,
+                kind: active.kind,
+                chat: active.chat.clone(),
+                end: end.clone(),
+                voicemail: active.voicemail,
+            });
+            // a refusal during the call was shown in its bar: how it ended is what is told now
+            self.refused = None;
+            self.call = None;
+        }
+    }
+
+    /// A call told for the first time: the invitation it answers (or declines), else the start or join asked for.
+    fn adopt(&mut self, call: CallId) -> ActiveCall {
+        let invitation = self.ringing.take_if(|ringing| ringing.call == call);
+        let (kind, chat, caller, caller_name) = if let Some(incoming) = invitation {
+            (
+                CallKind::Incoming,
+                incoming.group_chat,
+                Some(incoming.caller),
+                incoming.caller_name,
+            )
+        } else {
+            let (kind, chat) = self.asked.take().unwrap_or((CallKind::Chat, None));
+            (kind, chat, None, None)
+        };
+        ActiveCall {
+            id: call,
+            kind,
+            chat,
+            caller,
+            caller_name,
+            status: CallStatus::Placing,
+            connected_at: None,
+            muted: false,
+            voicemail: false,
+        }
+    }
+
+    /// The call action `ask` stands for now, or why there is none.
+    fn action_for(&self, ask: &Ask) -> Result<CallAction, &'static str> {
+        if !self.shown {
+            return Err("no-calls");
+        }
+        let busy = self.busy();
+        match ask {
+            Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } if busy => Err("busy"),
+            Ask::Call { chat } => Ok(CallAction::Call { chat: chat.clone() }),
+            Ask::TestCall => self
+                .echo
+                .clone()
+                .map(|echo| CallAction::TestCall { echo })
+                .ok_or("no-echo"),
+            Ask::Join { chat } if !self.joinable(chat) => Err("not-joinable"),
+            Ask::Join { chat } => Ok(CallAction::Join { chat: chat.clone() }),
+            Ask::Answer | Ask::Decline => {
+                let call = self.ringing.as_ref().map(|ringing| ringing.call).ok_or("not-ringing")?;
+                Ok(if *ask == Ask::Answer {
+                    CallAction::Answer { call }
+                } else {
+                    CallAction::Decline { call }
+                })
+            }
+            Ask::HangUp => {
+                let call = self.call.as_ref().ok_or("no-call")?;
+                Ok(CallAction::HangUp { call: call.id })
+            }
+            Ask::ToggleMute => {
+                let call = self.call.as_ref().ok_or("no-call")?;
+                Ok(CallAction::Mute {
+                    call: call.id,
+                    muted: !call.muted,
+                })
+            }
+        }
+    }
+
+    fn refuse(&mut self, ask: &Ask, why: &'static str, text: String, cx: &mut Context<Self>) {
+        if !self.shown {
+            return;
+        }
+        if let Some(chat) = ask.chat().filter(|_| why == "not-joinable") {
+            self.running.remove(chat);
+        }
+        self.refused = Some(Refused {
+            ask: ask.name(),
+            why,
+            text,
+        });
+        cx.notify();
+    }
+
+    /// How the engine answered `ask`'s action.
+    fn answered(
+        &mut self,
+        ask: &Ask,
+        action: &CallAction,
+        answer: Result<CallId, EngineError>,
+        cx: &mut Context<Self>,
+    ) {
+        match answer {
+            Ok(call) => {
+                if let CallAction::Mute { muted, .. } = action
+                    && let Some(active) = self.call.as_mut().filter(|active| active.id == call)
+                {
+                    active.muted = *muted;
+                    cx.notify();
+                }
+            }
+            Err(error) => {
+                if ask.starts().is_some() {
+                    // the one start asked for (another is refused as busy meanwhile)
+                    self.asked = None;
+                }
+                self.refuse(ask, refusal_kind(&error), refusal_text(&error), cx);
+            }
+        }
+    }
+}
+
+/// The trace's name for why the engine refused a call action.
+#[must_use]
+pub fn refusal_kind(error: &EngineError) -> &'static str {
+    match error {
+        EngineError::Call(CallActionError::NoCalling) => "no-calling",
+        EngineError::Call(CallActionError::Busy) => "busy",
+        EngineError::Call(CallActionError::NotAChat) => "not-a-chat",
+        EngineError::Call(CallActionError::NoMedia) => "no-media",
+        EngineError::Call(CallActionError::Media(_)) => "media",
+        EngineError::Call(CallActionError::Call(teams_core::CallError::NotJoinable)) => "not-joinable",
+        EngineError::Call(CallActionError::Call(_)) => "refused",
+        EngineError::Stopped => "stopped",
+        _ => "failed",
+    }
+}
+
+/// What the user is told of a refused call action.
+fn refusal_text(error: &EngineError) -> String {
+    match error {
+        EngineError::Stopped => "the app is offline".to_owned(),
+        EngineError::Call(CallActionError::Call(teams_core::CallError::NotJoinable)) => {
+            "the call there has ended".to_owned()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// What a refusal the views decided themselves tells the user.
+fn local_refusal_text(why: &str) -> String {
+    match why {
+        "busy" => "a call is already up".to_owned(),
+        "no-echo" => "the echo service isn't known".to_owned(),
+        "not-joinable" => "no running call is known there".to_owned(),
+        "not-ringing" => "no call rings".to_owned(),
+        "no-call" => "no call is up".to_owned(),
+        "no-chat" => "no chat is open".to_owned(),
+        _ => "calls aren't available".to_owned(),
+    }
+}
+
+/// The user asks `ask` of the calls: the engine's call action for it, traced (`call asked`, and `call refused` with
+/// why when it goes nowhere: decided here, or refused by the engine). The answer updates `calls`.
+/// Nothing at all in a build that shows no calls: no trace, no refusal, nothing asked of the engine.
+pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, ask: Ask, cx: &mut App) {
+    if !calls.read(cx).shows() {
+        return;
+    }
+    let mut asked = TraceLine::new("call", "asked").kind(ask.name());
+    if let Some(chat) = ask.chat() {
+        asked = asked.conversation(chat);
+    }
+    trace.record(&asked);
+    let action = match calls.read(cx).action_for(&ask) {
+        Ok(action) => action,
+        Err(why) => {
+            refused(trace, &ask, why);
+            calls.update(cx, |calls, cx| calls.refuse(&ask, why, local_refusal_text(why), cx));
+            return;
+        }
+    };
+    if let Some(start) = ask.starts() {
+        // busy until its call is told or it is refused: the header's Call goes, and another start is refused meanwhile
+        calls.update(cx, |calls, cx| {
+            calls.asked = Some(start);
+            cx.notify();
+        });
+    }
+    let reply = core.call(action.clone());
+    let (calls, trace) = (calls.downgrade(), Arc::clone(trace));
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let answer = reply.await;
+        if let Err(error) = &answer {
+            refused(&trace, &ask, refusal_kind(error));
+        }
+        // calls that are gone have nobody left to tell
+        let _ = calls.update(cx, |calls, cx| calls.answered(&ask, &action, answer, cx));
+    })
+    .detach();
+}
+
+/// The user asks that something nothing stands for (no chat open to call or join): traced, and told; nothing in a
+/// build that shows no calls.
+pub fn refuse_here(calls: &Entity<Calls>, trace: &Arc<ViewTrace>, ask: &Ask, why: &'static str, cx: &mut App) {
+    if !calls.read(cx).shows() {
+        return;
+    }
+    trace.record(&TraceLine::new("call", "asked").kind(ask.name()));
+    refused(trace, ask, why);
+    calls.update(cx, |calls, cx| calls.refuse(ask, why, local_refusal_text(why), cx));
+}
+
+fn refused(trace: &ViewTrace, ask: &Ask, why: &'static str) {
+    trace.record(&TraceLine::new("call", "refused").kind(ask.name()).kind(why));
+}
+
+/// The trace's name for a call's status.
+#[must_use]
+pub fn status_name(status: &CallStatus) -> &'static str {
+    match status {
+        CallStatus::Placing => "placing",
+        CallStatus::Ringing => "ringing",
+        CallStatus::Joining => "joining",
+        CallStatus::Answering => "answering",
+        CallStatus::Declining => "declining",
+        CallStatus::Connecting => "connecting",
+        CallStatus::Connected => "connected",
+        CallStatus::Reconnecting => "reconnecting",
+        CallStatus::Leaving => "leaving",
+        CallStatus::Ended(_) => "ended",
+    }
+}
+
+/// The trace's name for how a call ended.
+#[must_use]
+pub fn end_name(end: &End) -> &'static str {
+    match end {
+        End::HungUp => "hung-up",
+        End::Declined => "declined",
+        End::Remote(_) => "remote",
+        End::Failed(_) => "failed",
+    }
+}
+
+/// What the in-call view says of a call's status.
+#[must_use]
+pub fn status_text(active: &ActiveCall) -> String {
+    if active.voicemail {
+        return "Declined or not answered: voicemail".to_owned();
+    }
+    match &active.status {
+        CallStatus::Placing => "Calling…".to_owned(),
+        CallStatus::Ringing => "Ringing…".to_owned(),
+        CallStatus::Joining => "Joining…".to_owned(),
+        CallStatus::Answering => "Answering…".to_owned(),
+        CallStatus::Declining => "Declining…".to_owned(),
+        CallStatus::Connecting => "Connecting…".to_owned(),
+        CallStatus::Connected => "Connected".to_owned(),
+        CallStatus::Reconnecting => "Reconnecting…".to_owned(),
+        CallStatus::Leaving => "Leaving…".to_owned(),
+        CallStatus::Ended(end) => end_text(end, false),
+    }
+}
+
+/// What the in-call view says of how a call ended.
+#[must_use]
+pub fn end_text(end: &End, voicemail: bool) -> String {
+    match end {
+        _ if voicemail => "Call ended (it went to voicemail)".to_owned(),
+        End::HungUp => "Call ended".to_owned(),
+        End::Declined => "Call declined".to_owned(),
+        End::Remote(remote) => match &remote.phrase {
+            Some(phrase) => format!("Call ended by the other side ({phrase})"),
+            None => "Call ended by the other side".to_owned(),
+        },
+        End::Failed(step) => format!("Call failed ({step})"),
+    }
+}
+
+/// A call's duration as the in-call view shows it: `m:ss`, or `h:mm:ss` past an hour.
+#[must_use]
+pub fn duration_text(seconds: u64) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_duration_is_minutes_and_seconds_then_hours() {
+        assert_eq!(duration_text(0), "0:00");
+        assert_eq!(duration_text(75), "1:15");
+        assert_eq!(duration_text(3_725), "1:02:05");
+    }
+}

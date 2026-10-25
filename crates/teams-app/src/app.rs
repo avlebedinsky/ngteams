@@ -38,6 +38,8 @@ use teams_ui::{
 };
 use tokio::sync::watch;
 
+use crate::calling::AppCalls;
+
 /// What the app starts with.
 pub struct Launch {
     pub alias: Alias,
@@ -56,6 +58,8 @@ pub struct Launch {
     /// Where "copy diagnostics" reads from: the diagnostic log [`install_log`] opened (or why it couldn't), the
     /// account's `fence.log`; `None` for an app without them (a test's).
     pub diagnostics: Option<DiagnosticsSource>,
+    /// The window's calls ([`crate::calling`]); `None` shows none (the engine runs without calling).
+    pub calls: Option<AppCalls>,
 }
 
 /// Installs the account's diagnostic log in `dir` (the lab's `LabPaths::app_log_dir`) at the settings' `setting`
@@ -164,12 +168,16 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         settings,
         bus,
         diagnostics,
+        calls,
     } = launch;
     // GPUI would quit on its own as the last window closes (`QuitMode::Default` on Linux), before the engine is shut
     // down, and closing the window keeps the app in the tray: the app quits itself when the desktop asks
     // (`quit_when_asked`), once the engine is shut down
     cx.set_quit_mode(QuitMode::Explicit);
-    let models = Models::new(cx);
+    let (models, ringer) = match calls {
+        Some(calls) => (Models::with_calls(calls.echo, cx), calls.ringer),
+        None => (Models::new(cx), None),
+    };
     let core: Arc<dyn Core> = Arc::new(engine.requests());
     let drained = models.clone();
     let engine = AppEngine::new(engine, broker, SHUTDOWN_GRACE);
@@ -198,6 +206,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
                 app_name: title(alias),
                 title: title(alias),
                 shell: parts,
+                ringer,
             },
             cx,
         )

@@ -591,6 +591,7 @@ where
             CallEvent::RemoteMedia { call, media } => self.on_media(call, |live| media::apply(live, media), now),
             CallEvent::MediaOffer { call, offer } => self.on_media(call, |live| media::answer(live, offer), now),
             CallEvent::Ended { call, end } => self.ended(call, end),
+            CallEvent::Voicemail { call } => self.emit(Event::Voicemail { call }),
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }

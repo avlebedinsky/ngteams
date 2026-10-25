@@ -1,6 +1,7 @@
 //! The view trace: one JSON line per view change, for the live test to read what each view shows without reading the
 //! screen. A line holds the view, the change, the conversation and message ids it concerns (a list's conversations in
-//! its order, with their unread counts), kinds and the time:
+//! its order, with their unread counts), the people it concerns (a call's caller and participants, by their ids), a
+//! call's number, kinds and the time:
 //! `{"at_ms":1767225600000,"view":"window","change":"opened"}`.
 //!
 //! It never holds text: the view and the change are names fixed in the code (`&'static str`), kinds too, and an id
@@ -119,6 +120,10 @@ pub struct TraceLine<'a> {
     /// Of the messages, those that carry reactions, and those that quote another (a reply).
     reacted: Vec<TraceId<'a>>,
     replies: Vec<TraceId<'a>>,
+    /// The people it concerns (a call's caller, its participants), those with an id's shape.
+    people: Vec<TraceId<'a>>,
+    /// The call it concerns: the engine's number for it.
+    call: Option<u64>,
     refused: usize,
 }
 
@@ -136,6 +141,8 @@ impl<'a> TraceLine<'a> {
             unread: Vec::new(),
             reacted: Vec::new(),
             replies: Vec::new(),
+            people: Vec::new(),
+            call: None,
             refused: 0,
         }
     }
@@ -222,6 +229,25 @@ impl<'a> TraceLine<'a> {
         self
     }
 
+    /// The people it concerns (a call's caller, its participants), those with an id's shape.
+    #[must_use]
+    pub fn people<I: IntoIterator<Item = &'a str>>(mut self, ids: I) -> Self {
+        for id in ids {
+            match TraceId::new(id) {
+                Some(id) => self.people.push(id),
+                None => self.refused += 1,
+            }
+        }
+        self
+    }
+
+    /// The call it concerns, by the engine's number for it (a number, never text).
+    #[must_use]
+    pub fn call(mut self, call: u64) -> Self {
+        self.call = Some(call);
+        self
+    }
+
     /// A kind (a message's, a row's state, …), named in the code.
     #[must_use]
     pub fn kind(mut self, kind: &'static str) -> Self {
@@ -251,7 +277,14 @@ impl<'a> TraceLine<'a> {
         if !self.unread.is_empty() {
             line.insert("unread".to_owned(), json!(self.unread));
         }
-        for (key, ids) in [("reacted", &self.reacted), ("replies", &self.replies)] {
+        if let Some(call) = self.call {
+            line.insert("call".to_owned(), json!(call));
+        }
+        for (key, ids) in [
+            ("reacted", &self.reacted),
+            ("replies", &self.replies),
+            ("people", &self.people),
+        ] {
             if !ids.is_empty() {
                 let ids: Vec<&str> = ids.iter().map(TraceId::as_str).collect();
                 line.insert(key.to_owned(), json!(ids));

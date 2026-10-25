@@ -67,6 +67,9 @@ pub const SERVER_NAME: &str = "org.freedesktop.Notifications";
 pub const SERVER_PATH: &str = "/org/freedesktop/Notifications";
 /// The action of a notification's body.
 pub const DEFAULT_ACTION: &str = "default";
+/// An incoming call's notification's actions (M3 Task 17): answer it, decline it.
+pub const ANSWER_ACTION: &str = "answer";
+pub const DECLINE_ACTION: &str = "decline";
 /// What a sender without a name is called.
 pub const SOMEONE: &str = "Someone";
 
@@ -79,6 +82,8 @@ pub enum NoticeKind {
     Mention,
     /// Several messages of one chat, in one.
     Collapsed,
+    /// An incoming call, with Answer and Decline ([`crate::call_alert`]).
+    Call,
 }
 
 impl NoticeKind {
@@ -89,6 +94,7 @@ impl NoticeKind {
             Self::Message => "message",
             Self::Mention => "mention",
             Self::Collapsed => "collapsed",
+            Self::Call => "call",
         }
     }
 }
@@ -644,11 +650,15 @@ pub struct BusNotifications {
 }
 
 impl BusNotifications {
-    /// The server on `connection`, notifying as `app_name`, and its activations: the ids whose body was activated.
+    /// The server on `connection`, notifying as `app_name`, and its activations: each notification's id with the
+    /// action invoked on it (its body's is [`DEFAULT_ACTION`]).
     ///
     /// # Errors
     /// The server isn't on the bus, or the subscription to its signals is refused.
-    pub async fn start(connection: &Connection, app_name: &str) -> zbus::Result<(Self, BoxStream<'static, u32>)> {
+    pub async fn start(
+        connection: &Connection,
+        app_name: &str,
+    ) -> zbus::Result<(Self, BoxStream<'static, (u32, String)>)> {
         let proxy: zbus::Proxy<'static> = zbus::proxy::Builder::new(connection)
             .destination(SERVER_NAME)?
             .path(SERVER_PATH)?
@@ -659,10 +669,7 @@ impl BusNotifications {
         let capabilities: Vec<String> = proxy.call("GetCapabilities", &()).await?;
         let invoked = proxy.receive_signal("ActionInvoked").await?;
         let activations = invoked
-            .filter_map(|signal| async move {
-                let (id, action): (u32, String) = signal.body().deserialize().ok()?;
-                (action == DEFAULT_ACTION).then_some(id)
-            })
+            .filter_map(|signal| async move { signal.body().deserialize::<(u32, String)>().ok() })
             .boxed();
         let server = Self {
             proxy,
@@ -683,18 +690,34 @@ impl NotificationServer for BusNotifications {
         } else {
             notice.body.clone()
         };
+        let call_notice = notice.kind == NoticeKind::Call;
         Box::pin(async move {
-            let hints: HashMap<&str, Value<'_>> =
-                HashMap::from([("category", Value::from("im.received")), ("urgency", Value::U8(1))]);
+            // an incoming call's: Answer and Decline, critical, shown until it is closed (its ring ended)
+            let (actions, hints, expires) = if call_notice {
+                let actions = vec![
+                    DEFAULT_ACTION,
+                    "Open",
+                    ANSWER_ACTION,
+                    "Answer",
+                    DECLINE_ACTION,
+                    "Decline",
+                ];
+                let hints: HashMap<&str, Value<'_>> = HashMap::from([("urgency", Value::U8(2))]);
+                (actions, hints, 0_i32)
+            } else {
+                let hints: HashMap<&str, Value<'_>> =
+                    HashMap::from([("category", Value::from("im.received")), ("urgency", Value::U8(1))]);
+                (vec![DEFAULT_ACTION, "Open"], hints, -1_i32)
+            };
             let call = (
                 app_name.as_str(),
                 replaces,
                 "",
                 summary.as_str(),
                 body.as_str(),
-                vec![DEFAULT_ACTION, "Open"],
+                actions,
                 hints,
-                -1_i32,
+                expires,
             );
             proxy
                 .call::<_, _, u32>("Notify", &call)

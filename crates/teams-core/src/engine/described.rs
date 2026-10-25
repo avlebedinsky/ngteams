@@ -130,6 +130,7 @@ fn plain(event: &Event) -> String {
             format!("call {}: its ring ended ({:?}, {:?})", call.get(), end.code, end.phrase)
         }
         Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
+        Event::Voicemail { call } => format!("call {}: taken by the callee's voicemail", call.get()),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }

@@ -102,11 +102,30 @@ fn notifications_reach_the_server_on_the_bus_given_and_its_activations_come_back
         assert_eq!((got[1].summary.as_str(), got[1].replaces_id), ("Lab trio", first));
         assert_eq!(private.closed_notifications(), [first]);
 
-        // another action is not the body's
+        // every action comes back with its name: the body's is `default`
         private.invoke_action(first, "other").unwrap();
         private.invoke_action(first, "default").unwrap();
+        let other = tokio::time::timeout(WAIT, activations.next()).await.unwrap();
+        assert_eq!(other, Some((first, "other".to_owned())));
         let activated = tokio::time::timeout(WAIT, activations.next()).await.unwrap();
-        assert_eq!(activated, Some(first));
+        assert_eq!(activated, Some((first, "default".to_owned())));
+
+        // an incoming call's: Answer and Decline, critical, until it is closed
+        let ringing = server
+            .show(&notice(NoticeKind::Call, "Bee is calling", "Incoming call"), 0)
+            .await
+            .unwrap();
+        let got = private.notifications();
+        let call = got.iter().find(|shown| shown.id == ringing).unwrap();
+        assert_eq!(
+            call.actions,
+            ["default", "Open", "answer", "Answer", "decline", "Decline"]
+        );
+        assert_eq!(call.hints, ["urgency"]);
+        assert_eq!(call.expire_timeout, 0);
+        private.invoke_action(ringing, "answer").unwrap();
+        let answered = tokio::time::timeout(WAIT, activations.next()).await.unwrap();
+        assert_eq!(answered, Some((ringing, "answer".to_owned())));
     });
 }
 

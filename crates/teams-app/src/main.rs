@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 use gpui::{App, WindowingModes};
 use teams_app::app::{self, Launch};
+use teams_app::calling;
 use teams_app::cli::{Cli, Mode};
 use teams_app::guard;
 use teams_app::secrets::{self, LazyKeyring};
@@ -110,7 +111,16 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
         Arc::new(Fence::open_lab_account(alias).map_err(|error| format!("the fence can't be opened: {error}"))?);
     let secrets = BrokerSecretStore::new(socket, LabPaths::KEYRING_APPLICATION)
         .map_err(|error| format!("the broker's socket: {error}"))?;
-    let lab = teams_core::lab::start(&config, alias, fence, secrets, true, None)
+    // the calls on the sandbox's PipeWire; without it the app runs without calls
+    let (engine_calls, app_calls) = match calling::open(&config) {
+        Ok((engine_calls, app_calls)) => (Some(engine_calls), Some(app_calls)),
+        Err(error) => {
+            eprintln!("teams-app: no calls: {error}");
+            log::warn!("no calls: {error}");
+            (None, None)
+        }
+    };
+    let lab = teams_core::lab::start(&config, alias, fence, secrets, true, engine_calls)
         .map_err(|error| app::start_failure(alias, &error))?;
     Ok(Launch {
         alias,
@@ -122,6 +132,7 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
         // the bus the app is given, read once: nothing else is ever connected to for notifications or the tray
         bus: teams_ui::bus::address_from_env(),
         diagnostics: Some(diagnostics),
+        calls: app_calls,
     })
 }
 
