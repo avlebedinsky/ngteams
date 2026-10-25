@@ -38,7 +38,29 @@ fn changed() -> Settings {
         idle_minutes: 15,
         manual_status: ManualStatus::DoNotDisturb,
         log_level: LogLevel::Debug,
+        video_calls: false,
     }
+}
+
+#[test]
+fn the_calls_video_codec_is_on_by_default_and_its_switch_shown_only_where_the_build_has_it() {
+    assert!(
+        Settings::default().video_calls,
+        "Cisco's OpenH264 on until the user turns it off"
+    );
+    let (read, problems) = parse("video_calls = false").expect("TOML");
+    assert!(!read.video_calls);
+    assert!(problems.is_empty());
+    let (read, problems) = parse("video_calls = \"no\"").expect("TOML");
+    assert!(read.video_calls, "a bad value keeps the default");
+    assert_eq!(problems.len(), 1);
+    assert!(render(&read).contains("video_calls = true"));
+    assert!(!SettingsModel::in_memory(Settings::default()).shows_video_switch());
+    assert!(
+        SettingsModel::in_memory(Settings::default())
+            .with_video_switch()
+            .shows_video_switch()
+    );
 }
 
 #[test]

@@ -4,8 +4,8 @@
 //!
 //! - **Actions** ([`CallAction`], `EngineRequests::call`): a call from a chat or the test call, a join of a chat's
 //!   running call, an answer or a decline of an invitation the engine offered ([`Event::IncomingCall`]), a hang-up,
-//!   muting the microphone, a renegotiation of the call's media. One call at a time: an action while one is up (or
-//!   set up) is refused. Nothing answers or declines an invitation but its action: the engine never does by itself.
+//!   muting the microphone, the camera turned on or off, a renegotiation of the call's media. One call at a time: an
+//!   action while one is up (or set up) is refused. Nothing answers or declines an invitation but its action: the engine never does by itself.
 //! - **The media comes first, the devices last**: a start, a join or an answer goes only once its media is set up
 //!   ([`CallMedia`]: the relay's credentials read, an allocation on the relay, the session started without its devices,
 //!   our offer or our answer in Teams' dialect); a setup that fails refuses the action and sends nothing (an invitation
@@ -22,7 +22,15 @@
 //!   so a follow-up on a call the fence didn't register is refused before it is sent.
 //! - **A renegotiation of the account's** begins in the machine (`Calls::begin_renegotiation`) before the media session
 //!   makes its offer, since a new offer replaces the one the session waits on: a second one, or one while the call
-//!   isn't up or the far end's waits for our answer, is refused with the session untouched.
+//!   isn't up or the far end's waits for our answer, is refused with the session untouched. The camera (a 1:1 call's
+//!   video, [`CallVideo`]; off when a call starts) is one: turned on or off, our video line is offered going that
+//!   way, the call's modalities naming `Video` while a video line is in use. One the call controller turned away
+//!   (`491`) for the far end's (both cameras turned on together) gives way: the far end's is answered with our
+//!   camera's line only receiving, then that line is offered again as the camera goes. A camera that stops by itself
+//!   (its device gone, its encoder failed) is off, told as [`Event::CameraOff`].
+//! - **The media's SDP steps run one at a time, in the order the signaling asked for them** (the far end's answer
+//!   applied, its renegotiation answered, our own offered): each waits for the one before, so an acceptance followed
+//!   at once by a renegotiation reaches the session in that order.
 //! - **The calling socket's deliveries** go to the machine as the fence read them; a delivery response goes only
 //!   through the delivery's own responder, decided by the fence; an invitation the fence doesn't offer never gets here.
 //! - **What the account is told**: [`Event::IncomingCall`], [`Event::RingEnded`] and [`Event::Call`] with the call's
@@ -46,9 +54,9 @@
 
 mod media;
 
-pub use media::{CLOSED_GRACE, CONNECT_WITHIN, CallMedia, RECOVER_WITHIN, Relay};
+pub use media::{CLOSED_GRACE, CONNECT_WITHIN, CallMedia, CallVideo, RECOVER_WITHIN, Relay, VideoOutput};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -68,7 +76,7 @@ use tokio::task::JoinSet;
 
 use crate::engine::{EngineError, Event, Push, emit_to};
 use crate::outbox::{CallRetries, CallTried, Outbox};
-use media::{LiveMedia, MediaChange, MediaDone, Prepared};
+use media::{LiveMedia, MediaChange, MediaDone, Prepared, Setup};
 
 /// How long the engine, stopping, waits for a call's last writes (its `leave`, its decline).
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -131,9 +139,11 @@ pub enum CallAction {
     /// The microphone muted (`true`) or not: silence goes in its place, nothing is sent to the call's services (no
     /// capture shows the web client telling them).
     Mute { call: CallId, muted: bool },
-    /// The call's media offered again (an ICE restart) as a renegotiation: the way a change of the media (the camera)
-    /// goes to the call's services.
+    /// The call's media offered again (an ICE restart) as a renegotiation.
     Renegotiate { call: CallId },
+    /// The camera of a call that takes video turned on (`true`) or off: our video line offered again going that way
+    /// (a renegotiation), the camera's frames sent while it is on.
+    Camera { call: CallId, on: bool },
 }
 
 /// Where a call is, as the account is told ([`Event::Call`]).
@@ -188,6 +198,9 @@ pub enum CallActionError {
     /// No media runs for that call.
     #[error("no media runs for that call")]
     NoMedia,
+    /// That call's media carries no video (a group call's, or one whose codec didn't load).
+    #[error("that call carries no video")]
+    NoVideo,
     /// The call's media couldn't be set up, or its SDP made.
     #[error("the call's media couldn't be set up: {0}")]
     Media(String),
@@ -208,6 +221,7 @@ pub(crate) enum Act {
     HangUp(CallId),
     Mute(CallId, bool),
     Renegotiate(CallId),
+    Camera(CallId, bool),
 }
 
 type Attempt = Pin<Box<dyn Future<Output = CallTried>>>;
@@ -252,8 +266,10 @@ enum CallStep {
     Push(Option<PushEvent>),
     Written(CallTried),
     Due,
-    Prepared(Result<Prepared, String>),
+    Prepared(Box<Result<Prepared, String>>),
     Media(MediaDone),
+    /// A media step ended without its outcome (it panicked).
+    MediaLost,
     Responded(DeliveryKey, bool),
     Look,
 }
@@ -294,10 +310,15 @@ pub(crate) struct Calling<C, T> {
     writing: Option<Writing>,
     preparing: Option<Preparing>,
     media_steps: JoinSet<MediaDone>,
+    /// The SDP steps waiting for the one running to finish, in the order the signaling asked for them.
+    sdp_steps: VecDeque<Box<dyn FnOnce() -> MediaDone + Send>>,
+    /// An SDP step runs now.
+    sdp_running: bool,
     responses: JoinSet<(DeliveryKey, bool)>,
     live: Option<LiveMedia>,
-    /// The offers of invitations the engine offered, by call: an answer answers it.
-    offers: HashMap<CallId, Option<MediaContent>>,
+    /// The offers of invitations the engine offered, by call (an answer answers it), with whether the invitation is
+    /// a group call's.
+    offers: HashMap<CallId, (Option<MediaContent>, bool)>,
     /// The call the signaling says is up: told *connecting* until its media connected.
     up: Option<CallId>,
     look: Option<tokio::time::Interval>,
@@ -343,6 +364,8 @@ where
             writing: None,
             preparing: None,
             media_steps: JoinSet::new(),
+            sdp_steps: VecDeque::new(),
+            sdp_running: false,
             responses: JoinSet::new(),
             live: None,
             offers: HashMap::new(),
@@ -395,10 +418,10 @@ where
                 Landed::Tried(tried) => CallStep::Written(tried),
                 Landed::Due => CallStep::Due,
             },
-            prepared = prepared(self.preparing.as_mut()) => CallStep::Prepared(prepared),
+            prepared = prepared(self.preparing.as_mut()) => CallStep::Prepared(Box::new(prepared)),
             Some(done) = self.media_steps.join_next(), if !self.media_steps.is_empty() => match done {
                 Ok(done) => CallStep::Media(done),
-                Err(_) => CallStep::Look,
+                Err(_) => CallStep::MediaLost,
             },
             Some(done) = self.responses.join_next(), if !self.responses.is_empty() => match done {
                 Ok((key, sent)) => CallStep::Responded(key, sent),
@@ -415,8 +438,12 @@ where
             CallStep::Push(event) => self.pushed(event, now),
             CallStep::Written(tried) => self.written(tried, now),
             CallStep::Due => self.due(now),
-            CallStep::Prepared(prepared) => self.prepared(prepared, now),
+            CallStep::Prepared(prepared) => self.prepared(*prepared, now),
             CallStep::Media(done) => self.media_done(done, now),
+            CallStep::MediaLost => {
+                self.sdp_running = false;
+                self.next_sdp_step();
+            }
             CallStep::Responded(key, sent) => {
                 if !sent {
                     self.calls.on_response_failed(&key);
@@ -575,7 +602,8 @@ where
     fn told(&mut self, event: CallEvent, now: Instant) {
         match event {
             CallEvent::Incoming(incoming) => {
-                self.offers.insert(incoming.call, incoming.offer);
+                let group = incoming.group_chat.is_some();
+                self.offers.insert(incoming.call, (incoming.offer, group));
                 self.emit(Event::IncomingCall(IncomingCall {
                     call: incoming.call,
                     caller: incoming.caller,
@@ -590,6 +618,12 @@ where
             CallEvent::State { call, state } => self.state(call, state),
             CallEvent::RemoteMedia { call, media } => self.on_media(call, |live| media::apply(live, media), now),
             CallEvent::MediaOffer { call, offer } => self.on_media(call, |live| media::answer(live, offer), now),
+            CallEvent::RenegotiationGaveWay { call } => {
+                if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
+                    log::info!("call {}: its renegotiation gave way to the far end's", call.get());
+                    live.reoffer_owed = live.camera.is_some();
+                }
+            }
             CallEvent::Ended { call, end } => self.ended(call, end),
             CallEvent::Voicemail { call } => self.emit(Event::Voicemail { call }),
             CallEvent::KeepAliveDue { call, sent } => {
@@ -649,16 +683,35 @@ where
             .is_some_and(|live| live.call == call && live.connected)
     }
 
-    /// A media step of `call`, off the engine's thread; the call fails when no media runs for it.
+    /// An SDP step of `call`, off the engine's thread, after the ones asked for before it; the call fails when no
+    /// media runs for it.
     fn on_media<F>(&mut self, call: CallId, step: impl FnOnce(&LiveMedia) -> F, now: Instant)
     where
         F: FnOnce() -> MediaDone + Send + 'static,
     {
         match self.live.as_ref().filter(|live| live.call == call) {
             Some(live) => {
-                self.media_steps.spawn_blocking(step(live));
+                let step = step(live);
+                self.sdp_step(step);
             }
             None => self.calls.fail_media(call, now),
+        }
+    }
+
+    /// Queues an SDP step behind the ones asked for before it.
+    fn sdp_step(&mut self, step: impl FnOnce() -> MediaDone + Send + 'static) {
+        self.sdp_steps.push_back(Box::new(step));
+        self.next_sdp_step();
+    }
+
+    /// Starts the next SDP step, unless one runs.
+    fn next_sdp_step(&mut self) {
+        if self.sdp_running {
+            return;
+        }
+        if let Some(step) = self.sdp_steps.pop_front() {
+            self.sdp_running = true;
+            self.media_steps.spawn_blocking(step);
         }
     }
 
@@ -678,6 +731,8 @@ where
 
     /// Closes the running media off the engine's thread (its close joins the session's threads).
     fn close_media(&mut self) {
+        // what waits for the call's media won't run: its answers go unanswered (the action hears the engine stopped)
+        self.sdp_steps.clear();
         if let Some(live) = self.live.take() {
             let (call, session) = (live.call, live.session);
             tokio::task::spawn_blocking(move || close(call, session));
@@ -687,6 +742,14 @@ where
     // --- the media ---
 
     fn media_done(&mut self, done: MediaDone, now: Instant) {
+        if !matches!(done, MediaDone::Opened { .. }) {
+            self.sdp_running = false;
+        }
+        self.media_step_done(done, now);
+        self.next_sdp_step();
+    }
+
+    fn media_step_done(&mut self, done: MediaDone, now: Instant) {
         match done {
             MediaDone::Applied { call, result } => match result {
                 Ok(()) => {
@@ -698,12 +761,14 @@ where
             },
             MediaDone::Answered { call, result } => {
                 let answered = result.and_then(|answer| {
+                    self.calls.set_video(call, answer.carries_video());
                     self.calls
                         .answer_media(call, media::content(&answer))
                         .map_err(|error| error.to_string())
                 });
-                if let Err(why) = answered {
-                    self.media_failed(call, &why, now);
+                match answered {
+                    Ok(()) => self.offer_camera_again(call),
+                    Err(why) => self.media_failed(call, &why, now),
                 }
             }
             MediaDone::Reoffered { call, result, reply } => {
@@ -728,7 +793,83 @@ where
                     self.media_failed(call, &why, now);
                 }
             }
+            MediaDone::Camera {
+                call,
+                on,
+                result,
+                reply,
+            } => {
+                let turned = self.camera_turned(call, on, result, now);
+                let _ = reply.send(turned.map(|()| call).map_err(EngineError::from));
+            }
         }
+    }
+
+    /// Once the far end's renegotiation that ours gave way to is answered (our camera's line only receiving), our
+    /// camera's line offered again as the camera goes, when it is on; tried again after the next answer when another
+    /// renegotiation is under way.
+    fn offer_camera_again(&mut self, call: CallId) {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call && live.reoffer_owed) else {
+            return;
+        };
+        if live.camera != Some(true) {
+            live.reoffer_owed = false;
+            return;
+        }
+        match self.calls.begin_renegotiation(call) {
+            Ok(()) => {
+                live.reoffer_owed = false;
+                // nobody waits for this one's answer
+                let (reply, _) = oneshot::channel();
+                let step = media::offer_camera(live, true, reply);
+                self.sdp_step(step);
+            }
+            Err(error) => log::info!(
+                "call {}: its camera's line waits to be offered again: {error}",
+                call.get()
+            ),
+        }
+    }
+
+    /// The camera of `call` turned (or not), with our renegotiation's offer to send (none when our line already went
+    /// that way). An offer that can't be made turns the camera off: told when it was on (our camera's line offered
+    /// again, [`Self::offer_camera_again`]).
+    fn camera_turned(
+        &mut self,
+        call: CallId,
+        on: bool,
+        result: Result<Option<teams_media::sdp::NgcSdp>, String>,
+        now: Instant,
+    ) -> Result<(), CallActionError> {
+        let turned = match result {
+            Ok(Some(offer)) => {
+                self.calls.set_video(call, offer.carries_video());
+                let sent = self.calls.renegotiate(call, &media::content(&offer));
+                if sent.is_err() {
+                    // the session waits on an offer that won't go
+                    self.media_failed(call, "its renegotiation's offer can't go", now);
+                }
+                sent.map_err(CallActionError::from)
+            }
+            Ok(None) => {
+                self.calls.give_up_renegotiation(call);
+                Ok(())
+            }
+            Err(why) => {
+                self.calls.give_up_renegotiation(call);
+                Err(CallActionError::Media(why))
+            }
+        };
+        if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
+            if turned.is_ok() {
+                live.camera = live.camera.map(|_| on);
+                log::info!("call {}: camera {}", call.get(), if on { "on" } else { "off" });
+            } else if on && live.camera == Some(true) {
+                live.camera = Some(false);
+                self.emit(Event::CameraOff { call });
+            }
+        }
+        turned
     }
 
     fn media_failed(&mut self, call: CallId, why: &str, now: Instant) {
@@ -750,6 +891,10 @@ where
                     status: CallStatus::Reconnecting,
                 }),
                 MediaChange::Connected | MediaChange::Lost => {}
+                MediaChange::CameraOff => {
+                    log::warn!("call {}: its camera went off", call.get());
+                    self.emit(Event::CameraOff { call });
+                }
                 MediaChange::Failed(why) => {
                     self.media_failed(call, &why, now);
                     return;
@@ -777,11 +922,24 @@ where
                 // the machine first: the session's new offer would replace the one it waits on
                 Some(live) => match self.calls.begin_renegotiation(call) {
                     Ok(()) => {
-                        self.media_steps.spawn_blocking(media::reoffer(live, reply));
+                        let step = media::reoffer(live, reply);
+                        self.sdp_step(step);
                         return;
                     }
                     Err(error) => Err(error.into()),
                 },
+                None => Err(CallActionError::NoMedia),
+            },
+            Act::Camera(call, on) => match self.live.as_ref().filter(|live| live.call == call) {
+                Some(live) if live.camera.is_some() => match self.calls.begin_renegotiation(call) {
+                    Ok(()) => {
+                        let step = media::camera(live, Arc::clone(&self.media.devices), on, reply);
+                        self.sdp_step(step);
+                        return;
+                    }
+                    Err(error) => Err(error.into()),
+                },
+                Some(_) => Err(CallActionError::NoVideo),
                 None => Err(CallActionError::NoMedia),
             },
         };
@@ -815,17 +973,19 @@ where
     /// Sets up the media of a start, a join or an answer; the action goes once it is.
     fn set_up(&mut self, act: Act, reply: Waiting) {
         let busy = self.preparing.is_some() || self.live.is_some();
-        let (answering, offer) = match &act {
+        // a 1:1 call takes video; a group call's, a join's and the test call's media don't
+        let (answering, offer, video) = match &act {
             Act::Answer(call) => {
                 let ringing = self.calls.current() == Some((*call, Some(CallState::Offered)));
                 match self.offers.get(call) {
-                    Some(offer) if ringing && !busy => (Some(*call), offer.clone()),
+                    Some((offer, group)) if ringing && !busy => (Some(*call), offer.clone(), !group),
                     _ => return refuse(reply, CallError::NotNow.into()),
                 }
             }
             _ if busy || self.calls.current().is_some() => return refuse(reply, CallActionError::Busy),
             Act::Join(chat) if !self.calls.joinable(chat) => return refuse(reply, CallError::NotJoinable.into()),
-            _ => (None, None),
+            Act::Place(Placement::Chat { group_chat: None, .. }) => (None, None, true),
+            _ => (None, None, false),
         };
         if answering.is_some() && offer.is_none() {
             return refuse(
@@ -838,8 +998,7 @@ where
         let setup = Box::pin(media::prepare(
             Arc::clone(&self.client),
             self.media.clone(),
-            offer,
-            tenant,
+            Setup { offer, tenant, video },
         ));
         self.preparing = Some(Preparing {
             answering,
@@ -927,6 +1086,24 @@ where
 /// in, never what it carried.
 fn close(call: CallId, session: Arc<teams_media::session::MediaSession>) {
     let stats = session.stats();
+    let video = stats.video;
+    log::info!(
+        "call {}: its video closes: {} frames captured, {} encoded ({} keyframes), {} sent, {} unsent; {} received, \
+         {} shown, {} not decoded; keyframes asked {} and requested {}; estimate {} b/s, bitrate {} b/s",
+        call.get(),
+        video.captured,
+        video.encoded,
+        video.keyframes,
+        video.sent,
+        video.unsent,
+        video.received,
+        video.shown,
+        video.undecoded,
+        video.keyframes_asked,
+        video.keyframes_requested,
+        video.estimate,
+        video.bitrate
+    );
     log::info!(
         "call {}: its media closes: {} packets encoded, {} sent, {} unsent; {} received, {} malformed; {} frames \
          played; jitter {:?}",

@@ -8,12 +8,16 @@
 //!   and asks for none, whatever the engine tells, until its call rule is built (M3 Task 22).
 //! - **What is kept**: whether the calling endpoint is registered; the invitation that rings (the engine offered it:
 //!   [`IncomingCall`], its caller's name as the invitation gives it); the call up or being set up ([`ActiveCall`]: its
-//!   kind, its chat, its status, when its media connected, muted, taken by voicemail); the group chats an invitation
+//!   kind, its chat, its status, when its media connected, muted, its camera on, taken by voicemail); the group chats
+//!   an invitation
 //!   named a running call in (a join goes there: [`Calls::joinable`]); how the last call ended and the last ask that
 //!   went nowhere, until the next call.
 //! - **The asks** ([`Ask`]): a call from a chat, the test call (the echo service's MRI the app gave), a join, the
-//!   answer or the decline of the invitation that rings, a hang-up, mute or unmute. Each is the user's: a button, a
-//!   key, the switcher's command or the incoming call's notification. Nothing here answers or declines by itself.
+//!   answer or the decline of the invitation that rings, a hang-up, mute or unmute, the camera on or off (off when a
+//!   call starts; a 1:1 call's video, M3 Task 18). Each is the user's: a button, a key, the switcher's command or the
+//!   incoming call's notification. Nothing here answers, declines or turns the camera on by itself.
+//! - **The video** a build shows ([`Calls::with_video`]: the lab app's, when it has the codec) is the feed the call's
+//!   media draws on ([`crate::video::VideoFeed`]).
 //!
 //! The asks are traced by the caller's trace (`call asked`, `call refused` with the ask and why), never with a name.
 
@@ -29,6 +33,7 @@ use teams_fence::Mri;
 
 use crate::bridge::Core;
 use crate::trace::{TraceLine, ViewTrace};
+use crate::video::VideoFeed;
 
 /// What kind of call it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +77,8 @@ pub struct ActiveCall {
     /// When its media first connected: the duration counts from there.
     pub connected_at: Option<Instant>,
     pub muted: bool,
+    /// The camera is on (off when the call starts; only the user turns it on).
+    pub camera: bool,
     /// The callee's voicemail took it (declined, or not answered).
     pub voicemail: bool,
 }
@@ -103,6 +110,8 @@ pub enum Ask {
     HangUp,
     /// Mute the microphone, or unmute it.
     ToggleMute,
+    /// Turn the camera on, or off.
+    ToggleCamera,
 }
 
 impl Ask {
@@ -117,6 +126,7 @@ impl Ask {
             Self::Decline => "decline",
             Self::HangUp => "hang-up",
             Self::ToggleMute => "mute",
+            Self::ToggleCamera => "camera",
         }
     }
 
@@ -160,6 +170,7 @@ pub struct Calls {
     running: BTreeSet<String>,
     ended: Option<Ended>,
     refused: Option<Refused>,
+    video: Option<VideoFeed>,
 }
 
 impl Calls {
@@ -171,6 +182,19 @@ impl Calls {
             echo,
             ..Self::default()
         }
+    }
+
+    /// The same calls, showing a 1:1 call's video on `feed` (the feed the engine's call media draws on).
+    #[must_use]
+    pub fn with_video(mut self, feed: VideoFeed) -> Self {
+        self.video = Some(feed);
+        self
+    }
+
+    /// The video feed, in a build that shows video.
+    #[must_use]
+    pub fn video(&self) -> Option<&VideoFeed> {
+        self.video.as_ref().filter(|_| self.shown)
     }
 
     /// Whether this build shows calls at all.
@@ -272,6 +296,7 @@ impl Calls {
                     | Event::RingEnded { .. }
                     | Event::Call { .. }
                     | Event::Voicemail { .. }
+                    | Event::CameraOff { .. }
             );
         }
         match event {
@@ -293,6 +318,11 @@ impl Calls {
             Event::Voicemail { call } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
                     active.voicemail = true;
+                }
+            }
+            Event::CameraOff { call } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.camera = false;
                 }
             }
             _ => return false,
@@ -350,6 +380,7 @@ impl Calls {
             status: CallStatus::Placing,
             connected_at: None,
             muted: false,
+            camera: false,
             voicemail: false,
         }
     }
@@ -389,6 +420,14 @@ impl Calls {
                     muted: !call.muted,
                 })
             }
+            Ask::ToggleCamera if self.video.is_none() => Err("no-video"),
+            Ask::ToggleCamera => {
+                let call = self.call.as_ref().ok_or("no-call")?;
+                Ok(CallAction::Camera {
+                    call: call.id,
+                    on: !call.camera,
+                })
+            }
         }
     }
 
@@ -417,12 +456,15 @@ impl Calls {
     ) {
         match answer {
             Ok(call) => {
-                if let CallAction::Mute { muted, .. } = action
-                    && let Some(active) = self.call.as_mut().filter(|active| active.id == call)
-                {
-                    active.muted = *muted;
-                    cx.notify();
+                let Some(active) = self.call.as_mut().filter(|active| active.id == call) else {
+                    return;
+                };
+                match action {
+                    CallAction::Mute { muted, .. } => active.muted = *muted,
+                    CallAction::Camera { on, .. } => active.camera = *on,
+                    _ => return,
                 }
+                cx.notify();
             }
             Err(error) => {
                 if ask.starts().is_some() {
@@ -443,6 +485,7 @@ pub fn refusal_kind(error: &EngineError) -> &'static str {
         EngineError::Call(CallActionError::Busy) => "busy",
         EngineError::Call(CallActionError::NotAChat) => "not-a-chat",
         EngineError::Call(CallActionError::NoMedia) => "no-media",
+        EngineError::Call(CallActionError::NoVideo) => "no-video",
         EngineError::Call(CallActionError::Media(_)) => "media",
         EngineError::Call(CallActionError::Call(teams_core::CallError::NotJoinable)) => "not-joinable",
         EngineError::Call(CallActionError::Call(_)) => "refused",
@@ -458,6 +501,7 @@ fn refusal_text(error: &EngineError) -> String {
         EngineError::Call(CallActionError::Call(teams_core::CallError::NotJoinable)) => {
             "the call there has ended".to_owned()
         }
+        EngineError::Call(CallActionError::NoVideo) => "this call carries no video".to_owned(),
         other => other.to_string(),
     }
 }
@@ -471,6 +515,7 @@ fn local_refusal_text(why: &str) -> String {
         "not-ringing" => "no call rings".to_owned(),
         "no-call" => "no call is up".to_owned(),
         "no-chat" => "no chat is open".to_owned(),
+        "no-video" => "this build has no video codec".to_owned(),
         _ => "calls aren't available".to_owned(),
     }
 }

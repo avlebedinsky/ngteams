@@ -304,10 +304,19 @@ impl Call {
     }
 }
 
-/// Whether `path` is a media negotiation callback (`…/call/mediaRenegotiation/`, `…/call/mediaAnswer/`) on `agent`.
+/// Whether `path` is a media negotiation callback (`…/call/mediaRenegotiation/`, `…/call/mediaAnswer/`, and
+/// `…/call/mediaAcknowledgement/`, where the answerer hears its answer was acknowledged) on `agent`.
 fn is_media_callback(agent: &Callback, path: &str) -> bool {
     path.starts_with(&agent.path)
-        && (path.ends_with("/call/mediaRenegotiation/") || path.ends_with("/call/mediaAnswer/"))
+        && (path.ends_with("/call/mediaRenegotiation/")
+            || path.ends_with("/call/mediaAnswer/")
+            || is_acknowledged_at(path))
+}
+
+/// Whether `path` is a media acknowledgement callback (`…/call/mediaAcknowledgement/`): it binds no link, its
+/// delivery waits only for its receipt.
+fn is_acknowledged_at(path: &str) -> bool {
+    path.ends_with("/call/mediaAcknowledgement/")
 }
 
 /// The link a media negotiation delivery at `path` hands out for the call `call` (the call controller's call id), on
@@ -345,6 +354,8 @@ pub(crate) struct CallRegistry {
 struct Inner {
     calls: Vec<Call>,
     offers: Vec<offer::Offer>,
+    /// Renegotiation deliveries (and their answers') waiting for their receipt.
+    receipts: Vec<NegotiationReceipt>,
     /// The serials of the permits already taken by [`CallRegistry::pend`].
     taken: HashSet<u64>,
 }
@@ -381,8 +392,27 @@ enum Subject {
     Join,
 }
 
+/// A renegotiation delivered at a live call's (or an answered invitation's) own `mediaRenegotiation` or `mediaAnswer`
+/// callback, waiting for its receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NegotiationReceipt {
+    connection: String,
+    id: i64,
+    trouter_request: String,
+    of: Negotiated,
+}
+
+/// What a renegotiation delivery was of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Negotiated {
+    Call(usize),
+    Offer(usize),
+}
+
 /// A delivery response the registry found waiting (see [`CallRegistry::respond`]).
 pub(crate) enum Response {
+    /// A renegotiation's (or its answer's) receipt, decided: the delivery's id, or why it is denied.
+    NegotiationReceipt(Result<i64, DeliveryDenyReason>),
     /// A call's acceptance acknowledgement, decided: the delivery's id, or why it is denied.
     Acknowledgement(Result<i64, DeliveryDenyReason>),
     /// An offered invitation's delivery response in its captured shape, its receipt taken: still to be judged by the
@@ -535,23 +565,39 @@ impl CallRegistry {
             offer.end();
             return Observed::RingEnded;
         }
-        if let Some(offer) = inner
+        let negotiated = if let Some((index, offer)) = inner
             .offers
             .iter_mut()
-            .find(|offer| offer.negotiates_at(&delivery.path))
+            .enumerate()
+            .find(|(_, offer)| offer.negotiates_at(&delivery.path))
         {
-            return if offer.bind_media(&delivery.path, &delivery.body) {
-                Observed::Renegotiation
-            } else {
-                Observed::Nothing
-            };
-        }
-        if let Some(call) = inner.calls.iter_mut().find(|call| call.negotiates_at(&delivery.path)) {
-            return if call.bind_media(&delivery.path, &delivery.body) {
-                Observed::Renegotiation
-            } else {
-                Observed::Nothing
-            };
+            let bound = is_acknowledged_at(&delivery.path) || offer.bind_media(&delivery.path, &delivery.body);
+            Some((bound, Negotiated::Offer(index)))
+        } else {
+            inner
+                .calls
+                .iter_mut()
+                .enumerate()
+                .find(|(_, call)| call.negotiates_at(&delivery.path))
+                .map(|(index, call)| {
+                    let bound = is_acknowledged_at(&delivery.path) || call.bind_media(&delivery.path, &delivery.body);
+                    (bound, Negotiated::Call(index))
+                })
+        };
+        if let Some((bound, of)) = negotiated {
+            if !bound {
+                return Observed::Nothing;
+            }
+            // its receipt may go, once, in the captured shape (a delivery without the header it echoes gets none)
+            if let Some(trouter_request) = &delivery.trouter_request {
+                inner.receipts.push(NegotiationReceipt {
+                    connection: delivery.connection.clone(),
+                    id: delivery.id,
+                    trouter_request: trouter_request.clone(),
+                    of,
+                });
+            }
+            return Observed::Renegotiation;
         }
         let found = inner.calls.iter_mut().find_map(|call| {
             if call.state == State::Ended {
@@ -586,6 +632,7 @@ impl CallRegistry {
         for offer in &mut inner.offers {
             offer.close_connection(connection);
         }
+        inner.receipts.retain(|receipt| receipt.connection != connection);
     }
 
     /// The call `target` (a [`Scope::CallOperation`]) is an operation on, or why it is none (see the module docs).
@@ -711,6 +758,26 @@ impl CallRegistry {
         let envelope = strict_json(response)?;
         let id = envelope.get("id")?.as_i64()?;
         let mut inner = self.lock();
+        if let Some(at) = inner
+            .receipts
+            .iter()
+            .position(|receipt| receipt.connection == connection && receipt.id == id)
+        {
+            let receipt = inner.receipts.remove(at);
+            let live = match receipt.of {
+                Negotiated::Call(index) => inner.calls.get(index).is_some_and(|call| call.state == State::Live),
+                Negotiated::Offer(index) => inner
+                    .offers
+                    .get(index)
+                    .is_some_and(|offer| offer.state == offer::OfferState::Answered),
+            };
+            let judged = if live {
+                offer::judge_receipt(&envelope, &receipt.trouter_request).map(|()| id)
+            } else {
+                Err(DeliveryDenyReason::NotLive)
+            };
+            return Some(Response::NegotiationReceipt(judged));
+        }
         if let Some((index, offer)) = inner
             .offers
             .iter_mut()

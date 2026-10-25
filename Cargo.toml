@@ -101,6 +101,13 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] 
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 # the tree scraper parses into, walked without recursion: the version scraper takes
 ego-tree = "0.11.0"
+# the calls' video codec (teams-media): H.264 through OpenH264 (BSD-2-Clause, its 2.6.0). A normal build only loads
+# Cisco's prebuilt library at run time (`libloading`, its SHA-256 checked against the binding's list), the route
+# Cisco's patent arrangement covers; the bundled source is compiled only for `teams-media`'s `test-support`
+# (`docs/protocol/calling.md`, "The H.264 codec")
+openh264 = { version = "0.9.9", default-features = false, features = ["libloading"] }
+# its raw binding, for the one encoder option the safe API lacks (a running encoder's target bitrate)
+openh264-sys2 = { version = "0.9.9", default-features = false }
 # the system random source: PKCE verifiers and OAuth state
 getrandom = "0.4.3"
 # GPUI as agterm-rs takes it: the crates.io `gpui-pre` snapshot, pinned exactly so agterm-rs's patches apply as they
@@ -233,6 +240,11 @@ allow_attributes_without_reason = "deny"
 # The gpui-video spike converts 1280x720 frames on the CPU; unoptimized, one conversion takes ~250 ms, so even the
 # debug tests of its video grid get optimized code for that crate (its dependencies stay as they are).
 [profile.dev.package.gpui-video]
+opt-level = 3
+
+# OpenH264 (the bundled source the tests build): unoptimized, encoding one 640x360 frame takes longer than a frame
+# lasts, so the debug tests of the calls' video get an optimized codec.
+[profile.dev.package.openh264-sys2]
 opt-level = 3
 
 # GPUI with agterm-rs's external-surfaces patches (M0 Task 16, approach (b) of the video spike):

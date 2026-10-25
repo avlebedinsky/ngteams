@@ -271,7 +271,10 @@ chat other than its forced denies, one for a partial or refused membership, or a
   call); b's page calls a and `teams-headless a watch --answer-lab-calls` answers; then a's native client calls b while
   `teams-headless b watch --calls` rings too, and b's page answers: b's native client's ring must end (answered
   elsewhere). Every side plays the page's tone in bursts and must hear the other's (the page by its audio tap, a native
-  client in its recording); the native clients' output goes into b's capture dir.
+  client in its recording); the native clients' output goes into b's capture dir. The first two calls carry video
+  both ways (`--video`, Cisco's OpenH264 from `scripts/fetch-openh264.sh` in the lab's `openh264/`): the page turns
+  its camera on and must decode the native client's frames, and the native client turns its camera on 5 s in
+  (`--camera-after`) and must decode the page's.
 
 Every lab browser runs with its output muted and Chrome's fake audio manager (`--mute-audio`,
 `--disable-audio-output`): nothing is played aloud and the desktop's audio server is never opened; a call scenario's

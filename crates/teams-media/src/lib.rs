@@ -20,7 +20,10 @@
 //!   a PipeWire backend that opens only the server its build allows (the UI sandbox's, or the desktop's for the
 //!   personal build). [`tone`] makes and measures the test tone.
 //!
-//! The rest of the media (video coding) comes in later, and nothing here sends signaling.
+//! - [`video`]: H.264 through OpenH264 (Cisco's prebuilt library, or the bundled source in a `test-support` build) and
+//!   the frames' conversions; the session runs a call's camera and received video on threads of their own.
+//!
+//! Nothing here sends signaling.
 
 use std::io;
 
@@ -40,6 +43,7 @@ pub mod test_signal;
 pub mod test_turn;
 pub mod tone;
 pub mod turn;
+pub mod video;
 
 /// Everything the media can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +74,9 @@ pub enum Error {
     /// The audio processing module refused its setup or a frame.
     #[error("audio processing: {0}")]
     Processing(String),
+    /// The video codec's library didn't load, refused its setup, or failed on a frame.
+    #[error("video: {0}")]
+    Video(String),
     /// The media session's network thread is gone.
     #[error("the media session ended")]
     SessionEnded,

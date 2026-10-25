@@ -1,4 +1,6 @@
-//! The settings view, in the conversation pane: switches for sending typing, read receipts and the account's availability, which messages notify,
+//! The settings view, in the conversation pane: switches for sending typing, read receipts and the account's
+//! availability, the calls' video (in a build that has the codec: "OpenH264 Video Codec provided by Cisco Systems,
+//! Inc.", as Cisco's binary licence asks beside its control), which messages notify,
 //! the idle time, the account's manual status, the diagnostic log's level and "Copy diagnostics", and what was wrong
 //! with the settings file (or the log). Each change goes to the [`SettingsModel`] (and so to the file) at once.
 
@@ -17,17 +19,24 @@ use crate::theme::{self, Palette};
 /// The idle times offered, in minutes (the one set is offered too, if it isn't one of these).
 pub const IDLE_CHOICES: [u32; 6] = [1, 5, 10, 15, 30, 60];
 
+/// The label of the calls' video switch: the codec named as Cisco's binary licence asks.
+pub const VIDEO_SWITCH: &str = "Video in calls: OpenH264 Video Codec provided by Cisco Systems, Inc.";
+
 /// The settings view (see the module docs).
 pub struct SettingsView {
     model: Entity<SettingsModel>,
+    /// The build has the video codec: its switch is shown.
+    video_switch: bool,
     _observing: Subscription,
 }
 
 impl SettingsView {
     pub fn new(model: Entity<SettingsModel>, cx: &mut Context<Self>) -> Self {
         let observing = cx.observe(&model, |_, _, cx| cx.notify());
+        let video_switch = model.read(cx).shows_video_switch();
         Self {
             model,
+            video_switch,
             _observing: observing,
         }
     }
@@ -78,6 +87,11 @@ impl SettingsView {
                 settings.send_presence,
                 |settings, on| settings.send_presence = on,
             ))
+            .children(self.video_switch.then(|| {
+                self.switch("video-calls", VIDEO_SWITCH, settings.video_calls, |settings, on| {
+                    settings.video_calls = on;
+                })
+            }))
     }
 
     /// One radio of a choice, its test selector `<group>-<key>`.

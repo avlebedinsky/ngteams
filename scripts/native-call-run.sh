@@ -12,6 +12,8 @@
 #        native-call-run.sh ~/.local/share/teams-lab/headless/abc a abc b --join c
 # HOLD (default 45) is how long the caller holds the call once connected; TONE_SECONDS, when set, how long its tone
 # lasts (a long call's tone kept short keeps its files and their analysis small).
+# EXTRA, when set, goes to every native client, and EXTRA_<alias> instead of it to that one's (e.g. EXTRA_a="--video
+# --camera-after 5" EXTRA_b="--video --camera-after 15": a 1:1 call with video both ways, the cameras turned on apart).
 #
 # Run it under the live lock and an outer timeout, from a normal lab build (`cargo build --release -p teams-headless
 # --target-dir target/lab`), as CLAUDE.md's "Live runs" says:
@@ -40,11 +42,16 @@ others() {
     [ "$alias" != "$1" ] && printf -- '--hear %s ' "${TONE[$alias]}"
   done
 }
+# the extra arguments of alias $1: EXTRA_<alias>, else EXTRA
+extra() {
+  local var="EXTRA_$1"
+  printf '%s' "${!var:-${EXTRA:-}}"
+}
 WATCHERS=()
 for CALLEE in "${CALLEES[@]}"; do
   # shellcheck disable=SC2046
   "$BIN" "$CALLEE" watch --answer-lab-calls --tone "${TONE[$CALLEE]}" $(others "$CALLEE") \
-    --record "$OUT/$CALLEE-watch.wav" --tone-seconds 200 >"$OUT/$CALLEE-watch.txt" 2>&1 &
+    --record "$OUT/$CALLEE-watch.wav" --tone-seconds 200 $(extra "$CALLEE") >"$OUT/$CALLEE-watch.txt" 2>&1 &
   WATCHERS+=($!)
 done
 JOINING=""
@@ -66,7 +73,7 @@ done
 echo "caller starts unix_ms $(date +%s%3N)"
 # shellcheck disable=SC2046
 "$BIN" "$CALLER" call "$CHAT" --tone "${TONE[$CALLER]}" $(others "$CALLER") --record "$OUT/$CALLER-call.wav" \
-  --seconds "${HOLD:-45}" --wait 90 ${TONE_SECONDS:+--tone-seconds "$TONE_SECONDS"} >"$OUT/$CALLER-call.txt" 2>&1
+  --seconds "${HOLD:-45}" --wait 90 ${TONE_SECONDS:+--tone-seconds "$TONE_SECONDS"} $(extra "$CALLER") >"$OUT/$CALLER-call.txt" 2>&1
 echo "$CALLER call exit $?"
 if [ -n "$JOINING" ]; then
   wait "$JOINING"

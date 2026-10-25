@@ -269,6 +269,21 @@ pub enum Answering {
     /// engine's [`CallAction::Answer`], under the fence's own judgement again; every other invitation the engine ignored
     /// already (nothing is sent for it). The only sender of an answer but the user's own action, and it lives here alone.
     LabCalls,
+    /// As [`Answering::LabCalls`], each answered call's camera turned on this long after its media connected.
+    LabCallsWithCamera(Duration),
+}
+
+impl Answering {
+    fn answers(self) -> bool {
+        self != Self::Nothing
+    }
+
+    fn camera_after(self) -> Option<Duration> {
+        match self {
+            Self::LabCallsWithCamera(after) => Some(after),
+            Self::Nothing | Self::LabCalls => None,
+        }
+    }
 }
 
 /// Prints each event as it is received, with its receive time: one JSON object per line with `json`
@@ -287,9 +302,17 @@ pub async fn watch(
     stop: impl Future<Output = ()>,
 ) -> Result<WatchEnd, CommandError> {
     tokio::pin!(stop);
+    let mut answered = None;
+    let mut camera_at = None;
     loop {
         tokio::select! {
             () = &mut stop => return Ok(WatchEnd::Stopped),
+            () = crate::call::sleep_until(camera_at) => {
+                camera_at = None;
+                if let Some(call) = answered {
+                    crate::call::camera_on(handle.requests(), call, out).await?;
+                }
+            }
             event = handle.next_event() => {
                 let received = now_ms();
                 let Some(event) = event else {
@@ -304,8 +327,13 @@ pub async fn watch(
                 out.flush()?;
                 match event {
                     Event::PushStopped(why) => return Ok(WatchEnd::PushStopped(why)),
-                    Event::IncomingCall(incoming) if answering == Answering::LabCalls => {
-                        answer(handle.requests(), incoming.call, json, out).await?;
+                    Event::IncomingCall(incoming) if answering.answers() => {
+                        answered = answer(handle.requests(), incoming.call, json, out).await?.or(answered);
+                    }
+                    Event::Call { call, status: teams_core::CallStatus::Connected } if Some(call) == answered => {
+                        camera_at = answering
+                            .camera_after()
+                            .map(|after| tokio::time::Instant::now() + after);
                     }
                     _ => {}
                 }
@@ -315,9 +343,16 @@ pub async fn watch(
 }
 
 /// Answers the offered invitation `call` ([`Answering::LabCalls`]), printing what became of it: a line of text, or
-/// with `json` one JSON object (`call_answer` or `call_answer_refused`, with its time as `received_ms`).
-async fn answer(requests: EngineRequests, call: CallId, json: bool, out: &mut impl Write) -> Result<(), CommandError> {
+/// with `json` one JSON object (`call_answer` or `call_answer_refused`, with its time as `received_ms`). The call
+/// answered, if it was.
+async fn answer(
+    requests: EngineRequests,
+    call: CallId,
+    json: bool,
+    out: &mut impl Write,
+) -> Result<Option<CallId>, CommandError> {
     let answered = requests.call(CallAction::Answer { call }).await;
+    let taken = answered.as_ref().ok().copied();
     let at = now_ms();
     let line = match (answered, json) {
         (Ok(answered), false) => format!("{at} call_answer call={}", answered.get()),
@@ -340,5 +375,5 @@ async fn answer(requests: EngineRequests, call: CallId, json: bool, out: &mut im
     };
     writeln!(out, "{line}")?;
     out.flush()?;
-    Ok(())
+    Ok(taken)
 }

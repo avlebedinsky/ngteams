@@ -25,7 +25,8 @@
 //! registered and no call is up, ringing or being set up; the [`CallBar`] above the panes shows the incoming call's
 //! banner (Answer, Decline) and the in-call bar (Mute, Hang up). The keys: Ctrl+Shift+C calls the chat shown,
 //! Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers and Ctrl+Shift+D declines the call that rings,
-//! Ctrl+Shift+M mutes or unmutes and Ctrl+Shift+H hangs up; the switcher offers the same as commands, with "Test call".
+//! Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+O turns the camera on or off (a build that shows video) and Ctrl+Shift+H
+//! hangs up; the switcher offers the same as commands, with "Test call".
 //! Traced: `call-button shown` (the chat, and `call`, `join` or `none`).
 
 use std::sync::Arc;
@@ -62,7 +63,15 @@ use crate::trace::{TraceLine, ViewTrace};
 actions!(teams_ui, [ToggleSwitcher, ToggleSearch]);
 actions!(
     teams_ui,
-    [CallChat, JoinCall, AnswerCall, DeclineCall, HangUpCall, ToggleMuteCall]
+    [
+        CallChat,
+        JoinCall,
+        AnswerCall,
+        DeclineCall,
+        HangUpCall,
+        ToggleMuteCall,
+        ToggleCameraCall
+    ]
 );
 
 /// The shell's key context.
@@ -97,6 +106,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-d", DeclineCall, None),
         KeyBinding::new("ctrl-shift-h", HangUpCall, None),
         KeyBinding::new("ctrl-shift-m", ToggleMuteCall, None),
+        // Teams' own key for the camera
+        KeyBinding::new("ctrl-shift-o", ToggleCameraCall, None),
     ]);
 }
 
@@ -372,6 +383,7 @@ impl Shell {
             CallCommand::Decline => self.ask_call(Ask::Decline, cx),
             CallCommand::HangUp => self.ask_call(Ask::HangUp, cx),
             CallCommand::ToggleMute => self.ask_call(Ask::ToggleMute, cx),
+            CallCommand::ToggleCamera => self.ask_call(Ask::ToggleCamera, cx),
         }
     }
 
@@ -1101,6 +1113,9 @@ impl Render for Shell {
                     .on_action(cx.listener(|this, _: &DeclineCall, _, cx| this.ask_call(Ask::Decline, cx)))
                     .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask_call(Ask::HangUp, cx)))
                     .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask_call(Ask::ToggleMute, cx)))
+                    .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| {
+                        this.ask_call(Ask::ToggleCamera, cx);
+                    }))
             })
             .relative()
             .size_full()

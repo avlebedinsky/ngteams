@@ -696,8 +696,9 @@ impl Fence {
 
     /// Decides a Trouter delivery response sent on `connection` (`response`: the socket.io message's JSON, after
     /// `3:::`), once per delivery ([`crate::calls`]): permitted only as the captured acknowledgement of a pending
-    /// acceptance delivery of a live call on that connection, or as the captured response to an offered invitation's
-    /// delivery on that connection while it rings, its caller and callee lab accounts or approved services and the
+    /// acceptance delivery of a live call on that connection, as the captured receipt (an empty body) of a renegotiation
+    /// or its answer delivered on that connection at a live call's or an answered invitation's own callback, or as the
+    /// captured response to an offered invitation's delivery on that connection while it rings, its caller and callee lab accounts or approved services and the
     /// group chat it names, if any, lab-only by a fresh, complete read from `source` (listing both). A decision is
     /// logged; a response to no pending delivery is [`DeliveryDecision::NotPending`], neither decided nor logged.
     pub async fn check_delivery_response(
@@ -708,9 +709,11 @@ impl Fence {
     ) -> DeliveryDecision {
         const ACKNOWLEDGEMENT: &str = "call_acceptance_acknowledgement";
         const RECEIPT: &str = "call_invitation_receipt";
+        const NEGOTIATION_RECEIPT: &str = "call_negotiation_receipt";
         let (kind, decided) = match self.calls.respond(connection, response) {
             None => return DeliveryDecision::NotPending,
             Some(Response::Acknowledgement(decided)) => (ACKNOWLEDGEMENT, decided),
+            Some(Response::NegotiationReceipt(decided)) => (NEGOTIATION_RECEIPT, decided),
             Some(Response::ReceiptDenied(reason)) => (RECEIPT, Err(reason)),
             Some(Response::Receipt {
                 delivery,

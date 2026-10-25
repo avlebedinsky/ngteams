@@ -897,7 +897,16 @@ impl<C: Credentials> HttpTransport<C> {
                 .map(Pending::Answer)
                 .ok_or(HttpError::Refused(Refusal::NotPended))?,
         };
+        // a `POST` with nothing to say (an acknowledgement) goes as the web client sends one: an empty JSON body,
+        // `Content-Length: 0` with its `Content-Type` (the `mediaAnswers` acknowledgement, `ab-call --call video`). Sent
+        // with no body at all, the call controller took 22 s to answer it (M3 Task 18, live), and a renegotiation of the
+        // other side's waiting on it was rejected meanwhile
+        let body = body.or_else(|| (call.method() == crate::endpoint::Method::Post).then(Vec::new));
         let mut headers = plain_headers(Service::Calling, body.is_some());
+        if body.as_ref().is_some_and(Vec::is_empty) {
+            // the HTTP client says no length of an empty body by itself
+            headers.push(("content-length".to_owned(), "0".to_owned()));
+        }
         headers.extend(
             call.headers()
                 .iter()

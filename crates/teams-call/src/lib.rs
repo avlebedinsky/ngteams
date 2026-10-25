@@ -53,12 +53,17 @@
 //!   is yet.
 //! - **Renegotiation**: the account's own ([`Calls::renegotiate`]: its new offer to the call controller's
 //!   `mediaRenegotiation` link, from the acceptance or the `accept`'s answer; the answer delivered at its `mediaAnswer`
-//!   callback is told as [`CallEvent::RemoteMedia`] and acknowledged; a rejection fails the call), and one delivered at
-//!   the account's `mediaRenegotiation` callback (told as [`CallEvent::MediaOffer`], answered only by
-//!   [`Calls::answer_media`]; one the fence bound no link for fails the call: no capture shows a refusal). Deliveries
-//!   aren't answered, so either may come again: an answer or a rejection counts only at the callbacks of the account's
-//!   renegotiation that waits for it (each renegotiation hands out its own), and a renegotiation delivered again as
-//!   it was (its answer link and offer the same as the one waiting or one answered) is taken as a replay and ignored.
+//!   callback is told as [`CallEvent::RemoteMedia`] and acknowledged; a rejection fails the call, but one that says
+//!   another negotiation is in progress (`491`), after which the same offer goes again a few seconds later, unless the
+//!   far end's renegotiation came meanwhile: the account's then gives way to it, [`CallEvent::RenegotiationGaveWay`]),
+//!   and one delivered at the account's `mediaRenegotiation` callback (told as [`CallEvent::MediaOffer`], answered only
+//!   by [`Calls::answer_media`]; one the fence bound no link for fails the call: no capture shows a refusal; one that
+//!   comes while the account's is being made or waits for its answer is told once the account's settled). Every renegotiation, answer and acknowledgement delivered at the call's own
+//!   callback gets its receipt (an empty delivery response) as the web client gives it; a delivery may still come
+//!   again: an answer or a rejection counts only at the callbacks of the account's renegotiation that waits for it
+//!   (each renegotiation hands out its own), and a renegotiation delivered again as it was (its answer link and offer
+//!   the same as the one waiting or one answered) is taken as a replay and ignored. While the media carries video, a
+//!   renegotiation and an answer name the `Video` modality ([`Calls::set_video`]).
 //! - **Media and the engine**: the media failing ends the call as a failed step does ([`Calls::fail_media`],
 //!   [`End::Failed`] `"media"`; a call whose start or join is unanswered leaves once it is, as a hang-up then does);
 //!   the engine stopping hangs a call up and lets an invitation that rings go unanswered

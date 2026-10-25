@@ -233,7 +233,7 @@
       "acknowledgement": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/callAcceptance/SyntheticCall1/27/a1/1/acknowledge?i=10-0-0-1",
       "callLeg": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1?i=10-0-0-1&e=1",
       "callControllerHttpTransport": "http://203.0.113.30/enc",
-      "mediaRenegotiation": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/mediaRenegotiation?i=10-0-0-1&e=1",
+      "mediaRenegotiation": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/renegotiate?i=10-0-0-1&e=1",
       "transfer": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/transfer?i=10-0-0-1&e=1",
       "replacement": "https://cc-zz-01-prod-aks.cc.skype.com:443/cc/v1/callParticipant/SyntheticCall1/27/k2/1/replacement?i=10-0-0-1&e=1",
       "retargetCompletion": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1/retargetCompletion?i=10-0-0-1&e=1",

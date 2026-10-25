@@ -3,8 +3,9 @@
 //!
 //! - **What**: the chat shown last ([`Settings::selected_chat`]), whether typing, read receipts and the account's own
 //!   availability are sent, which messages notify ([`Notifications`]), the idle time after which the account's
-//!   availability stops being reported, the account's manual status ([`ManualStatus`]), and whether the first run's
-//!   screen of the writes that happen on their own was confirmed. Tasks 13, 14 and 20 act on the ones Task 8 only kept.
+//!   availability stops being reported, the account's manual status ([`ManualStatus`]), whether calls use Cisco's
+//!   OpenH264 for video ([`Settings::video_calls`], its switch shown only where the build has the codec), and whether
+//!   the first run's screen of the writes that happen on their own was confirmed. Tasks 13, 14 and 20 act on the ones Task 8 only kept.
 //! - **The first run** (the personal build, M2 Task 27, [`SettingsModel::requiring_first_run`]): typing, read receipts
 //!   and the account's availability are the writes that happen without a per-item action; until the user confirms the
 //!   first-run screen ([`Settings::first_run`]) none of them is sent, whatever its switch says
@@ -180,6 +181,10 @@ impl FirstRunState {
 
 /// The settings (see the module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a switch of its own the user turns in the settings, stored under its own key"
+)]
 pub struct Settings {
     /// The chat shown last, opened again at the start.
     pub selected_chat: Option<String>,
@@ -199,6 +204,9 @@ pub struct Settings {
     pub manual_status: ManualStatus,
     /// The diagnostic log's level (`teams-log`), changed live; `TEAMS_APP_LOG` overrides it.
     pub log_level: LogLevel,
+    /// Calls use Cisco's OpenH264 for video: the user's control over the codec Cisco's binary licence asks for (to
+    /// enable it, disable it, and enable it again); off, a call's media starts no video and the codec isn't used.
+    pub video_calls: bool,
 }
 
 impl Default for Settings {
@@ -213,6 +221,7 @@ impl Default for Settings {
             idle_minutes: DEFAULT_IDLE_MINUTES,
             manual_status: ManualStatus::default(),
             log_level: LogLevel::default(),
+            video_calls: true,
         }
     }
 }
@@ -228,6 +237,7 @@ pub mod keys {
     pub const IDLE_MINUTES: &str = "idle_minutes";
     pub const MANUAL_STATUS: &str = "manual_status";
     pub const LOG_LEVEL: &str = "log_level";
+    pub const VIDEO_CALLS: &str = "video_calls";
 }
 
 /// What went wrong with the settings file: the defaults are used, or the one setting's default.
@@ -311,6 +321,9 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
                 .and_then(LogLevel::parse)
                 .ok_or(bad(keys::LOG_LEVEL, "not one of error, warn, info, debug"))?;
         }
+        keys::VIDEO_CALLS => {
+            settings.video_calls = value.as_bool().ok_or(bad(keys::VIDEO_CALLS, "not true or false"))?;
+        }
         other => {
             return Err(Problem::UnknownKey { key: other.to_owned() });
         }
@@ -338,6 +351,7 @@ pub fn render(settings: &Settings) -> String {
         Value::Boolean(settings.send_read_receipts),
     );
     table.insert(keys::SEND_PRESENCE.to_owned(), Value::Boolean(settings.send_presence));
+    table.insert(keys::VIDEO_CALLS.to_owned(), Value::Boolean(settings.video_calls));
     table.insert(
         keys::FIRST_RUN.to_owned(),
         Value::String(settings.first_run.key().to_owned()),
@@ -506,6 +520,8 @@ pub struct SettingsModel {
     copying: Option<Task<()>>,
     /// Typing, read receipts and presence wait for the first run's screen ([`SettingsModel::requiring_first_run`]).
     first_run: bool,
+    /// The build has the video codec: the view shows its switch ([`SettingsModel::with_video_switch`]).
+    video_switch: bool,
 }
 
 impl SettingsModel {
@@ -525,6 +541,7 @@ impl SettingsModel {
             copied: None,
             copying: None,
             first_run: false,
+            video_switch: false,
         }
     }
 
@@ -540,7 +557,22 @@ impl SettingsModel {
             copied: None,
             copying: None,
             first_run: false,
+            video_switch: false,
         }
+    }
+
+    /// The settings with the switch for Cisco's OpenH264 shown ([`Settings::video_calls`]): a build whose calls have the
+    /// codec.
+    #[must_use]
+    pub fn with_video_switch(mut self) -> Self {
+        self.video_switch = true;
+        self
+    }
+
+    /// Whether the view shows the switch for Cisco's OpenH264.
+    #[must_use]
+    pub fn shows_video_switch(&self) -> bool {
+        self.video_switch
     }
 
     /// The settings with the first run's screen asked for (the personal build): until [`Settings::first_run`] is confirmed,

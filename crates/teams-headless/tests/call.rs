@@ -23,13 +23,13 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::lab::{LAB_LANGUAGE, web_client_info};
-use teams_core::{CallAction, CallParts, End, Identity, Outbox, Relay};
+use teams_core::{CallAction, CallParts, CallVideo, End, Identity, Outbox, Relay};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
 use teams_headless::call::{self, CallFiles, Plan, Report, Target};
 use teams_headless::chat::LabNames;
 use teams_headless::cli::{Cli, Command as CliCommand, DEFAULT_TONE_HZ};
 use teams_headless::commands::{self, Answering, WatchEnd};
-use teams_headless::lab::call_media;
+use teams_headless::lab::{VideoCounts, call_media};
 use teams_media::relay::RelayServer;
 use teams_media::turn::Transport as RelayTransport;
 use teams_mock::{
@@ -51,6 +51,7 @@ const PLAN: Plan = Plan {
     connect_within: Duration::from_secs(30),
     hold: Duration::from_secs(4),
     end_within: Duration::from_secs(10),
+    camera_after: None,
 };
 
 // --- the command line ---
@@ -505,6 +506,53 @@ async fn watch_answering_lab_calls_sends_nothing_for_an_outsider_s_call_and_answ
 }
 
 #[tokio::test]
+async fn watch_answering_with_the_camera_turns_it_on_once_connected_and_counts_the_far_end_s_video() {
+    let lab = Lab::start_echo().await;
+    let (mut b, counts) = lab.account_with_video(LAB_B, 660.0);
+    b.ready().await;
+    let watching = b.watch(Answering::LabCallsWithCamera(Duration::from_millis(500)));
+    // a caller the mock plays: its peer (the echo's stand-in, its camera the test pattern) answers b's video sending
+    let ours = lab.mock.ring(LAB_A, LAB_B);
+    watching.until("call_answer call=").await;
+    watching.until("camera_on call=").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while counts.remote.counts().indexed < 15 || lab.mock.peer_stats(&ours, LAB_B).unwrap().video.shown < 15 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} {:?}",
+            counts.line(),
+            lab.mock.peer_stats(&ours, LAB_B)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(lab.mock.hang_up_call(&ours));
+    watching.until("end=").await;
+    let (b, _) = watching.stop().await;
+    let line = counts.line();
+    assert!(line.starts_with("video received=") && line.contains(" sent="), "{line}");
+    assert!(counts.preview.counts().frames >= 15, "{line}");
+    assert!(
+        lab.sent_by(LAB_B).contains(&"renegotiate".to_owned()),
+        "{:?}",
+        lab.sent_by(LAB_B)
+    );
+    let (log, _) = b.shut_down().await;
+    assert!(log.denials().is_empty(), "{:#?}", log.denials());
+}
+
+#[test]
+fn camera_after_needs_video() {
+    let refused = Cli::try_parse_from(["teams-headless", "b", "call", "a", "--camera-after", "5"]);
+    assert!(refused.is_err());
+    let asked = Cli::try_parse_from(["teams-headless", "b", "call", "a", "--video", "--camera-after", "5"]).unwrap();
+    let CliCommand::Call { audio, .. } = asked.command else {
+        panic!("a call");
+    };
+    assert!(audio.video);
+    assert_eq!(audio.camera_after, Some(5));
+}
+
+#[tokio::test]
 async fn watch_without_the_flag_answers_nothing_and_the_call_rings_out() {
     let lab = Lab::start_echo().await;
     let mut b = lab.account(LAB_B, 660.0);
@@ -875,8 +923,28 @@ impl Lab {
         self.account_relayed(mri, hz, self.relay)
     }
 
+    /// [`Self::account`] with its calls taking video (H.264 the bundled source's), what they show counted.
+    fn account_with_video(&self, mri: &'static str, hz: f32) -> (Account, VideoCounts) {
+        let counts = VideoCounts::default();
+        let video = teams_core::lab::call_video(
+            teams_media::video::codec::H264Library::Bundled,
+            Arc::new(counts.clone()),
+        );
+        (self.account_with(mri, hz, self.relay, Some(video)), counts)
+    }
+
     /// [`Self::account`] with its media relayed through the TURN server at `relay`.
     fn account_relayed(&self, mri: &'static str, hz: f32, relay: std::net::SocketAddr) -> Account {
+        self.account_with(mri, hz, relay, None)
+    }
+
+    fn account_with(
+        &self,
+        mri: &'static str,
+        hz: f32,
+        relay: std::net::SocketAddr,
+        video: Option<CallVideo>,
+    ) -> Account {
         let log = SharedLog::default();
         let fence = Arc::new(
             Fence::new(
@@ -925,7 +993,11 @@ impl Lab {
             region: Some("amer".into()),
             partition: Some("amer01".into()),
         };
-        let calls = CallParts::new(calling, identity, call_media(files.devices(), relay));
+        let media = teams_core::CallMedia {
+            video,
+            ..call_media(files.devices(), relay)
+        };
+        let calls = CallParts::new(calling, identity, media);
         let store = tempfile::tempdir().unwrap();
         let handle = engine::start(Parts {
             calls: Some(calls),

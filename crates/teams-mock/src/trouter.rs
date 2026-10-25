@@ -441,8 +441,12 @@ async fn next_text(socket: &mut Socket, shared: &Shared, index: usize) -> Option
         match message {
             Message::Text(text) => {
                 let text = text.as_str().to_owned();
-                if let Some(record) = shared.sockets().records.get_mut(index) {
+                let account = shared.sockets().records.get_mut(index).and_then(|record| {
                     record.frames.push(text.clone());
+                    record.account.clone()
+                });
+                if let Some(account) = account.filter(|_| text.starts_with("3:::")) {
+                    crate::calling::observe_response(&mut shared.world(), &account, &text);
                 }
                 return Some(text);
             }

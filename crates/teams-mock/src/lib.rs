@@ -402,6 +402,13 @@ impl ChatServiceMock {
         calling::renegotiate(&mut self.lock(), id, account)
     }
 
+    /// The peer of call `id` renegotiates with `account` as [`Self::renegotiate`] does, offering its video: its camera
+    /// (the test pattern) on. `false` without such a call, answer or peer.
+    #[must_use = "false says nothing was renegotiated"]
+    pub fn renegotiate_video(&self, id: &str, account: &str) -> bool {
+        calling::renegotiate_video(&mut self.lock(), id, account)
+    }
+
     /// Turns the calling service's media on (see the crate docs): a TURN server on loopback, whose UDP address it
     /// returns (the clients' relay) and whose credentials `/trap/tokens` hands out from now on, and a loopback peer
     /// behind each party the mock plays, playing `tone` and recording what it hears into `dir`.

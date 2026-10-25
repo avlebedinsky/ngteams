@@ -194,6 +194,73 @@ updates name only the lines' directions, and the group call's remote description
 (`m=application … webrtc-datachannel`, `a=sctp-port:5000`; the `m=x-data` line in `sdp-ngc`); the source selection
 travels over that channel, which the hooks don't read (Task 19 reads it).
 
+### The H.264 codec
+
+M3 Task 18's decision (with Codex, 2026-10-25): the calls' H.264 is OpenH264 (Cisco's, BSD-2-Clause, through the
+`openh264` 0.9.9 binding), and which library a build uses is fixed when it is built:
+
+- **A normal build (the lab binaries, the personal build) has no H.264 code of its own.** It loads Cisco's prebuilt
+  library at run time (`libopenh264-2.6.0-linux64.8.so`, from Cisco's own download, `scripts/fetch-openh264.sh` for
+  the lab), and only when its SHA-256 is the one the binding lists for it; a missing or different file means the
+  call has no video and its audio goes on. Never the system's library (a distribution's rebuild is not Cisco's binary).
+- **Only a `test-support` build compiles the bundled source**, so the tests run offline; such a build refuses to run
+  against the tenant.
+- **Copyright and patents are separate questions.** The binding's and OpenH264's BSD-2-Clause licences fit this
+  project; that settles copying, not patents. Cisco's arrangement with the H.264 patent pool (MPEG LA's AVC licence)
+  covers Cisco's own binary, on conditions: it is downloaded to the user's machine apart from the program, the user
+  can turn its use off and on again, the program shows "OpenH264 Video Codec provided by Cisco Systems, Inc." where
+  that control is, and Cisco's licence text is reproduced where licensing information is shown. It covers no build
+  from source and no other copy. Nothing here claims a patent licence for the source the tests build, and neither
+  private use nor this project being unpublished is taken to settle the question.
+- **The lab meets those conditions now**: the script downloads the library from Cisco and saves its licence
+  (`BINARY_LICENSE.txt`) beside it; `teams-headless` loads it only with `--video` (without it the library isn't
+  loaded) and prints the attribution when it does; the lab app's settings show the switch "Video in calls: OpenH264
+  Video Codec provided by Cisco Systems, Inc." (on by default; off, a call starts no video). The personal build's
+  provisioning, switch, attribution and licence text are owed before its calls carry video (M3 Task 22), and whether
+  the user's work calls should rely on Cisco's patent cover is the user's own call
+  (`docs/backlog/openh264-patents-and-the-personal-build.md`).
+- Hardware encoding (VA-API) stays out unless Task 21's CPU numbers call for it.
+
+### Native video
+
+A 1:1 call's video in the native client (M3 Task 18), as the web client's camera-on flow above shows it:
+
+- **The camera is off at every start, join and answer**, and only the account's action turns it on
+  (`CallAction::Camera`). Turned on, the native client offers its video line again (`renegotiate` to the call
+  controller's link, `callModalities` `["Audio", "Video"]`), the far end answers at its `mediaAnswer` callback, and
+  the native client acknowledges; turned off, the line is offered `recvonly`.
+- **What the far end offers is answered by the call's video lines rule**: a 1:1 call takes the main video line (the
+  first video line that isn't the sharing line, then that line for the call's life) and answers it `recvonly` while
+  the camera is off, `sendrecv` while it is on; the sharing line and every other video line are answered rejected
+  (`m=video 0 RTP/SAVP 34`). A group call's media (and a join's, and the test call's) takes no video line, as in Task
+  16: Task 19 builds group video.
+- **H.264** is offered as the web client offers constrained baseline, payload type `108` (`profile-level-id=42e01f`,
+  `packetization-mode=1`) with its retransmissions on `109`; an offer we answer keeps its own numbers. The encoder
+  makes 20-30 fps camera pictures up to 1280 by 720 at a target bitrate that follows `str0m`'s bandwidth estimate
+  (transport-wide congestion control) less what the audio takes, between 100 kb/s and 1.5 Mb/s; an IDR comes first,
+  every 4 s, and whenever the far end asks (PLI or FIR); a receiver that loses a frame asks for one (PLI) and shows
+  nothing until it comes.
+- **A line the far end's offer added names its stream when it begins to send**: our offers name no line-naming
+  header extension (the dialect renames our lines' mids, Task 16), so when a line we only received on turns
+  `sendrecv` (our camera on) the native client declares its sending stream before it offers, and the offer names its
+  SSRCs (and the retransmissions', `ssrc-group:FID`); without them the far end could tell the stream by nothing.
+- **Every negotiation delivery gets its receipt.** The web client answers the renegotiation, the answer and the
+  answer's acknowledgement (delivered at its `mediaAcknowledgement` callback) each with an empty `200` delivery
+  response, as it answers an invitation. Native runs without them showed the call controller holding the call: the
+  acknowledgement came about 22 s after the answer, and a renegotiation in that window was rejected; with the receipts
+  it came in under a second. So the native client sends each receipt (`InvitationReceipt`, decided by
+  `Fence::check_delivery_response` like the other two delivery responses, once per delivery at a live call's own
+  callback).
+- **A renegotiation rejected with `491`** ("Negotiation is in progress": both ends turned their cameras on at once,
+  or the far end's previous negotiation isn't acknowledged yet) goes again with the same offer 3 s later, at most 5
+  times, and no other renegotiation of ours begins meanwhile (the camera's button is refused: the offer waiting to
+  go again is still the media's). A renegotiation of the far end's delivered while ours is being made or waits for
+  its answer is held until ours settles: after our answer is applied it is answered; when ours is then turned away
+  (the controller took the far end's first, as when both cameras went on together) ours gives way to it, and so it
+  does to one delivered while ours waits to go again: the far end's is answered with our camera's line only
+  receiving, then our camera's line is offered again as the camera goes. Any other rejection fails the call. The
+  media's SDP steps (an offer, an answer, an accepted answer) run one at a time, in the order they were asked.
+
 ## Joining a running call
 
 When a group call's callee lets its ring end unanswered, its page at once subscribes to the call's conversation (the

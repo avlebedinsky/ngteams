@@ -8,7 +8,8 @@
 //! chosen opens its chat at the message. Last come the app's commands the query matches ([`COMMANDS`]: "Copy
 //! diagnostics", and "Set status: …" for each status the account menu offers, so the account's status is set from the
 //! keyboard too), and in a build that shows calls the call commands that fit the moment ([`CallCommand`]: "Call" the
-//! chat shown, "Test call", "Join call", "Answer call", "Decline call", "Hang up", "Mute or unmute", M3 Task 17).
+//! chat shown, "Test call", "Join call", "Answer call", "Decline call", "Hang up", "Mute or unmute", M3 Task 17;
+//! "Camera on or off", Task 18).
 
 use std::sync::Arc;
 
@@ -128,6 +129,7 @@ pub enum CallCommand {
     Decline,
     HangUp,
     ToggleMute,
+    ToggleCamera,
 }
 
 impl CallCommand {
@@ -142,6 +144,7 @@ impl CallCommand {
             Self::Decline => "Decline call",
             Self::HangUp => "Hang up",
             Self::ToggleMute => "Mute or unmute",
+            Self::ToggleCamera => "Camera on or off",
         }
     }
 
@@ -155,7 +158,11 @@ impl CallCommand {
             return vec![Self::Answer, Self::Decline];
         }
         if calls.call().is_some() {
-            return vec![Self::HangUp, Self::ToggleMute];
+            let mut up = vec![Self::HangUp, Self::ToggleMute];
+            if calls.video().is_some() {
+                up.push(Self::ToggleCamera);
+            }
+            return up;
         }
         let mut fitting = Vec::new();
         if let Some(chat) = chat {

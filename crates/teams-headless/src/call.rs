@@ -52,6 +52,8 @@ pub struct Plan {
     pub hold: Duration,
     /// How long the hang-up may take to end the call.
     pub end_within: Duration,
+    /// When the camera goes on, after the media connected (`None`: it stays off).
+    pub camera_after: Option<Duration>,
 }
 
 /// How a call went.
@@ -148,6 +150,7 @@ pub async fn run(
         names,
         out: &mut *out,
         phase: Phase::Connecting(placed + plan.connect_within),
+        camera_at: None,
     };
     following.run(stop, &mut report).await?;
     let setup = report
@@ -243,6 +246,8 @@ struct Following<'a, W> {
     names: &'a LabNames,
     out: &'a mut W,
     phase: Phase,
+    /// When the camera goes on, once the media connected.
+    camera_at: Option<tokio::time::Instant>,
 }
 
 impl<W: Write> Following<'_, W> {
@@ -256,6 +261,11 @@ impl<W: Write> Following<'_, W> {
                     if !self.deadline(report).await? {
                         return Ok(());
                     }
+                    continue;
+                }
+                () = sleep_until(self.camera_at) => {
+                    self.camera_at = None;
+                    camera_on(self.handle.requests(), self.call, self.out).await?;
                     continue;
                 }
                 () = &mut stop, if !report.interrupted => {
@@ -275,6 +285,7 @@ impl<W: Write> Following<'_, W> {
                         let now = tokio::time::Instant::now();
                         report.setup = Some(now - self.placed);
                         self.phase = Phase::Held(now + self.plan.hold);
+                        self.camera_at = self.plan.camera_after.map(|after| now + after);
                     }
                     CallStatus::Ended(end) => {
                         report.end = Some(end);
@@ -309,6 +320,38 @@ impl<W: Write> Following<'_, W> {
             log::info!("the hang-up was refused: {error}");
         }
         self.phase = Phase::Ending(tokio::time::Instant::now() + self.plan.end_within);
+    }
+}
+
+/// Turns the camera of `call` on, printing what became of it: `<ms> camera_on call=<id>` or `camera_refused` with why.
+///
+/// # Errors
+/// When the output can't be written.
+pub async fn camera_on(
+    requests: teams_core::EngineRequests,
+    call: CallId,
+    out: &mut impl Write,
+) -> Result<(), CommandError> {
+    let turned = requests.call(CallAction::Camera { call, on: true }).await;
+    let at = now_ms();
+    match turned {
+        Ok(_) => writeln!(out, "{at} camera_on call={}", call.get())?,
+        Err(error) => writeln!(
+            out,
+            "{at} camera_refused call={} why={}",
+            call.get(),
+            json_line(&Value::String(error.to_string()))
+        )?,
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Ready at `at`; never without one.
+pub async fn sleep_until(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 

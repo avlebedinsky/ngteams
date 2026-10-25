@@ -4,7 +4,8 @@
 use proto_lab::scenario::ScenarioName;
 use proto_lab::scenario::ab_call::{ANSWER_HELD, CALLER_JOIN_HELD, RING_SENDS};
 use proto_lab::scenario::ab_call_native::{
-    ANSWERED_ELSEWHERE, FORCED, HEADLESS_BIN, TONE_HZ, is_summary, native_heard, ring_ended_elsewhere,
+    ANSWERED_ELSEWHERE, FORCED, HEADLESS_BIN, NATIVE_FRAMES, PAGE_FRAMES, TONE_HZ, is_summary, native_heard,
+    native_video_frames, ring_ended_elsewhere,
 };
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 
@@ -42,6 +43,9 @@ fn the_run_notes_a_native_client_s_summary_lines_only() {
         "devices microphone_opened_ms=1 speaker_opened_ms=2",
         "1792 call_answer call=1",
         "1792 ring_ended call=1 code=0 phrase=\"x\"",
+        "1792 camera_on call=1",
+        "video_codec \"OpenH264 Video Codec provided by Cisco Systems, Inc.\"",
+        "video received=120 changed=118 indexed=0 gaps=0 last_index=- sent=150",
     ] {
         assert!(is_summary(line), "{line}");
     }
@@ -52,6 +56,20 @@ fn the_run_notes_a_native_client_s_summary_lines_only() {
     ] {
         assert!(!is_summary(line), "{line}");
     }
+}
+
+#[test]
+fn a_native_client_s_video_is_read_from_its_video_line() {
+    let output = "1792 camera_on call=1\nvideo received=120 changed=118 indexed=0 gaps=0 last_index=- sent=150\n";
+    assert_eq!(native_video_frames(output), Some(120));
+    assert_eq!(native_video_frames("video received=x changed=1\n"), None);
+    assert_eq!(
+        native_video_frames("1792 call call=1 note=\"video received=5\"\n"),
+        None
+    );
+    assert_eq!(native_video_frames(""), None);
+    // about two seconds of a camera either way
+    assert_eq!((PAGE_FRAMES, NATIVE_FRAMES), (30, 30));
 }
 
 #[test]

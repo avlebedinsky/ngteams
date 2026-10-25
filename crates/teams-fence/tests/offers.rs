@@ -1170,6 +1170,30 @@ async fn a_renegotiation_and_an_answer_delivered_bind_the_links_their_replies_go
         .await?;
     // an acknowledgement with a body is no acknowledgement the capture showed
     assert!(case_write(MEDIA_ACKNOWLEDGE, |body| *body = json!({})).is_err());
+    // each of the two deliveries gets its receipt, once (M3 Task 18)
+    for id in [90, 91] {
+        assert!(
+            matches!(
+                respond(&lab, &receipt(id), &FailClosed).await,
+                DeliveryDecision::Permitted(_)
+            ),
+            "the receipt of {id}"
+        );
+        assert!(matches!(
+            respond(&lab, &receipt(id), &FailClosed).await,
+            DeliveryDecision::NotPending
+        ));
+    }
+    // once the callee left, a receipt of a renegotiation delivered before is denied
+    assert_eq!(
+        lab.fence.observe_delivery(&negotiation_delivery(0, 94)?),
+        Observed::Renegotiation
+    );
+    lab.fence.check(case_write(LEAVE, |_| ())?, &FailClosed).await?;
+    assert_eq!(
+        denied_reason(&respond(&lab, &receipt(94), &FailClosed).await),
+        Some(DeliveryDenyReason::NotLive)
+    );
     Ok(())
 }
 

@@ -1524,3 +1524,133 @@ async fn the_caller_s_renegotiation_and_media_lines_go_to_the_links_its_acceptan
     assert_eq!(verdict(&lab.fence, write(&answer_url, &answer)?).await, Ok(()));
     Ok(())
 }
+
+/// A receipt, the empty response the web client gives a renegotiation's delivery (`ab-call --call video`): `{"id",
+/// "status": 200, "headers": {"MS-CV", "trouter-request", "trouter-client"}, "body": ""}`.
+fn receipt(id: i64, trouter_request: &str) -> Vec<u8> {
+    json!({
+        "id": id,
+        "status": 200,
+        "headers": {"MS-CV": "SyntheticCv.1.0", "trouter-request": trouter_request, "trouter-client": "{\"cd\":0}"},
+        "body": "",
+    })
+    .to_string()
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn a_renegotiation_or_its_answer_delivered_at_the_call_s_own_callback_gets_one_receipt_while_the_call_is_live()
+-> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    lab.fence
+        .observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("call-1")));
+    let answer_url = format!("{PROXY}/{CC_HOST}/cc/v1/negotiations/call-1/1/t/2/answer?i=10-0-0-2");
+    let renegotiation = json!({"mediaNegotiation": {"links": {"mediaAnswer": answer_url}}})
+        .to_string()
+        .into_bytes();
+    let at = "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/0c0c0c0c/call/mediaRenegotiation/";
+    assert_eq!(
+        lab.fence.observe_delivery(&delivery(2, at, renegotiation.clone())),
+        Observed::Renegotiation
+    );
+    // on another connection, or another delivery's id: no receipt waits
+    for (connection, id) in [("session-2/socket-1", 2), (CONNECTION, 9)] {
+        assert!(matches!(
+            lab.fence
+                .check_delivery_response(connection, &receipt(id, TROUTER_REQUEST), &FailClosed)
+                .await,
+            DeliveryDecision::NotPending
+        ));
+    }
+    let decision = lab
+        .fence
+        .check_delivery_response(CONNECTION, &receipt(2, TROUTER_REQUEST), &FailClosed)
+        .await;
+    assert!(permitted(&decision), "{decision:?}");
+    // once
+    assert!(matches!(
+        lab.fence
+            .check_delivery_response(CONNECTION, &receipt(2, TROUTER_REQUEST), &FailClosed)
+            .await,
+        DeliveryDecision::NotPending
+    ));
+
+    // a receipt that isn't the captured one (a body, another request's id) is denied and used up
+    lab.fence.observe_delivery(&delivery(3, at, renegotiation.clone()));
+    let mut with_body: Value = serde_json::from_slice(&receipt(3, TROUTER_REQUEST))?;
+    with_body["body"] = json!("{\"answer\":1}");
+    assert!(matches!(
+        lab.fence
+            .check_delivery_response(CONNECTION, with_body.to_string().as_bytes(), &FailClosed)
+            .await,
+        DeliveryDecision::Denied(_)
+    ));
+    lab.fence.observe_delivery(&delivery(4, at, renegotiation.clone()));
+    assert!(matches!(
+        lab.fence
+            .check_delivery_response(CONNECTION, &receipt(4, r#"{"id":"another"}"#), &FailClosed)
+            .await,
+        DeliveryDecision::Denied(_)
+    ));
+
+    // a delivery at a callback that isn't the call's binds nothing and waits for no receipt
+    let elsewhere = "/v4/f/SyntheticEndpoint00000/callAgent/agent-2/0c0c0c0c/call/mediaRenegotiation/";
+    assert_eq!(
+        lab.fence
+            .observe_delivery(&delivery(5, elsewhere, renegotiation.clone())),
+        Observed::Nothing
+    );
+    assert!(matches!(
+        lab.fence
+            .check_delivery_response(CONNECTION, &receipt(5, TROUTER_REQUEST), &FailClosed)
+            .await,
+        DeliveryDecision::NotPending
+    ));
+
+    // once the call ended, a receipt waiting is denied
+    lab.fence.observe_delivery(&delivery(6, at, renegotiation));
+    assert_eq!(
+        lab.fence.observe_delivery(&delivery(7, END_PATH, b"{}".to_vec())),
+        Observed::Ended
+    );
+    assert!(matches!(
+        lab.fence
+            .check_delivery_response(CONNECTION, &receipt(6, TROUTER_REQUEST), &FailClosed)
+            .await,
+        DeliveryDecision::Denied(DeliveryDenyReason::NotLive)
+    ));
+    let entries = fs::read_to_string(&lab.log)?;
+    assert!(entries.contains("call_negotiation_receipt"), "{entries}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_acknowledgement_of_the_account_s_answer_binds_no_link_and_gets_its_receipt() -> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    lab.fence
+        .observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("call-1")));
+    // the answerer told its answer was acknowledged (`{"mediaAcknowledgement": {"reason": "noError"}}`): no link,
+    // its receipt alone, once
+    let acknowledged = "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/0d0d0d0d/call/mediaAcknowledgement/";
+    let body = json!({"mediaAcknowledgement": {"reason": "noError"}})
+        .to_string()
+        .into_bytes();
+    assert_eq!(
+        lab.fence.observe_delivery(&delivery(8, acknowledged, body)),
+        Observed::Renegotiation
+    );
+    let decision = lab
+        .fence
+        .check_delivery_response(CONNECTION, &receipt(8, TROUTER_REQUEST), &FailClosed)
+        .await;
+    assert!(permitted(&decision), "{decision:?}");
+    assert!(matches!(
+        lab.fence
+            .check_delivery_response(CONNECTION, &receipt(8, TROUTER_REQUEST), &FailClosed)
+            .await,
+        DeliveryDecision::NotPending
+    ));
+    Ok(())
+}

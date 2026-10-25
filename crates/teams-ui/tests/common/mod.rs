@@ -488,6 +488,7 @@ impl Core for FakeCore {
             | CallAction::Decline { call }
             | CallAction::HangUp { call }
             | CallAction::Mute { call, .. }
+            | CallAction::Camera { call, .. }
             | CallAction::Renegotiate { call } => call,
             CallAction::Call { .. } | CallAction::TestCall { .. } | CallAction::Join { .. } => CallId::for_tests(1),
         };

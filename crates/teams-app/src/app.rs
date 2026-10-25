@@ -34,7 +34,7 @@ use teams_ui::bus::BusError;
 use teams_ui::window::{KitRoot, LAB_APP_ID};
 use teams_ui::{
     Bridge, Core, Desktop, DesktopEvent, DesktopParts, EventSource, Models, SettingsFile, SettingsModel, ShellParts,
-    ViewTrace,
+    VideoFeed, ViewTrace,
 };
 use tokio::sync::watch;
 
@@ -147,6 +147,37 @@ impl EventSource for AppEngine {
     }
 }
 
+/// The account's settings from `file`, with "copy diagnostics" reading from `diagnostics` and, when the calls carry
+/// video, the switch for its codec, which `video` follows.
+fn settings_model(
+    file: SettingsFile,
+    diagnostics: Option<DiagnosticsSource>,
+    video: Option<VideoFeed>,
+    cx: &mut App,
+) -> Entity<SettingsModel> {
+    let mut settings = SettingsModel::load(file);
+    for problem in settings.problems() {
+        eprintln!("teams-app: {problem}");
+        log::warn!("{problem}");
+    }
+    if let Some(diagnostics) = diagnostics {
+        settings = settings.with_diagnostics(diagnostics);
+    }
+    if let Some(feed) = &video {
+        // the user's control over Cisco's OpenH264: its switch, shown beside the attribution its licence asks for
+        settings = settings.with_video_switch();
+        feed.set_enabled(settings.settings().video_calls);
+    }
+    let settings = cx.new(|_| settings);
+    if let Some(feed) = video {
+        cx.observe(&settings, move |model, cx| {
+            feed.set_enabled(model.read(cx).settings().video_calls);
+        })
+        .detach();
+    }
+    settings
+}
+
 /// The window couldn't be opened: why, and the engine's shutdown, which ends once its thread is joined (the caller
 /// quits after it).
 pub struct LaunchFailed {
@@ -174,9 +205,15 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     // down, and closing the window keeps the app in the tray: the app quits itself when the desktop asks
     // (`quit_when_asked`), once the engine is shut down
     cx.set_quit_mode(QuitMode::Explicit);
-    let (models, ringer) = match calls {
-        Some(calls) => (Models::with_calls(calls.echo, cx), calls.ringer),
-        None => (Models::new(cx), None),
+    let (models, ringer, video) = match calls {
+        Some(calls) => {
+            let models = match calls.video.clone() {
+                Some(feed) => Models::with_video_calls(calls.echo, feed, cx),
+                None => Models::with_calls(calls.echo, cx),
+            };
+            (models, calls.ringer, calls.video)
+        }
+        None => (Models::new(cx), None, None),
     };
     let core: Arc<dyn Core> = Arc::new(engine.requests());
     let drained = models.clone();
@@ -185,18 +222,11 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     if let Some(signed_out) = signed_out {
         watch_sign_out(signed_out, bridge.downgrade(), sign_in_hint(alias), cx);
     }
-    let mut settings = SettingsModel::load(settings);
-    for problem in settings.problems() {
-        eprintln!("teams-app: {problem}");
-        log::warn!("{problem}");
-    }
-    if let Some(diagnostics) = diagnostics {
-        settings = settings.with_diagnostics(diagnostics);
-    }
+    let settings = settings_model(settings, diagnostics, video, cx);
     let parts = ShellParts {
         core: bridge.read(cx).core(),
         models,
-        settings: cx.new(|_| settings),
+        settings,
         trace: Arc::new(trace),
     };
     let desktop = cx.new(|cx| {

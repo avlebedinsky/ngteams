@@ -8,7 +8,10 @@ use serde_json::{Value, json};
 use teams_fence::{Delivery, Mri, Observed};
 use teams_proto::{ClientInfo, MediaContent};
 
-use super::{CallError, CallEvent, CallId, CallState, Calls, DeliveryReply, Effect, End, Identity, Outcome, Placement};
+use super::{
+    CallError, CallEvent, CallId, CallState, Calls, DeliveryKey, DeliveryReply, Effect, End, Identity, Outcome,
+    Placement, RENEGOTIATION_RETRY,
+};
 use crate::CallWrite;
 use crate::WriteId;
 use crate::agent::Kind;
@@ -61,6 +64,37 @@ fn delivery(path: &str, body: &Value) -> Delivery {
 
 fn effects(calls: &mut Calls) -> Vec<Effect> {
     std::iter::from_fn(|| calls.poll()).collect()
+}
+
+/// The effects but the receipts: what a delivery changed (every renegotiation delivered at the call's own callback
+/// gets its receipt, a replay's too).
+fn changes(calls: &mut Calls) -> Vec<Effect> {
+    effects(calls)
+        .into_iter()
+        .filter(|effect| {
+            !matches!(
+                effect,
+                Effect::Respond {
+                    reply: DeliveryReply::Receipt(_),
+                    ..
+                }
+            )
+        })
+        .collect()
+}
+
+/// The deliveries `effects` answer with a receipt.
+fn receipts(effects: &[Effect]) -> Vec<DeliveryKey> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Respond {
+                delivery,
+                reply: DeliveryReply::Receipt(_),
+            } => Some(delivery.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The names of the writes among `effects`, with their ids.
@@ -1042,7 +1076,7 @@ fn the_account_s_renegotiation_goes_to_the_controller_s_link_and_its_answer_is_t
     };
     assert_eq!((*of, told_media.blob.as_str()), (call, "v=1\r\n"));
     calls.on_delivery(&delivery(&at, &answer), Observed::Renegotiation, now);
-    assert!(effects(&mut calls).is_empty(), "no renegotiation waits for it");
+    assert!(changes(&mut calls).is_empty(), "no renegotiation waits for it");
     calls.renegotiate(call, &media()).unwrap();
     assert_eq!(names(&effects(&mut calls)), ["renegotiate"], "and another may go");
 }
@@ -1065,17 +1099,117 @@ fn a_renegotiation_begins_before_its_offer_and_takes_no_other_meanwhile() {
         "nor while its answer waits"
     );
 
-    // the far end's renegotiation while the account's is being made fails the call
+    // the far end's renegotiation while the account's is being made waits for it: told once the account's is given
+    // up
     let (mut calls, call) = connected_call(now);
     calls.begin_renegotiation(call).unwrap();
     let at = callback(&calls, "mediaRenegotiation");
     calls.on_delivery(&delivery(&at, &negotiation()), Observed::Renegotiation, now);
-    let failed = effects(&mut calls);
-    assert_eq!(names(&failed), ["leave"]);
-    assert!(events(&failed).contains(&CallEvent::Ended {
-        call,
-        end: End::Failed("media_answer")
-    }));
+    let waits = effects(&mut calls);
+    assert!(sent(&waits).is_empty() && events(&waits).is_empty(), "{waits:#?}");
+    calls.give_up_renegotiation(call);
+    assert!(matches!(
+        events(&effects(&mut calls))[..],
+        [CallEvent::MediaOffer { call: of, .. }] if of == call
+    ));
+    calls.answer_media(call, media()).unwrap();
+    assert_eq!(names(&effects(&mut calls)), ["media_answer"]);
+}
+
+#[test]
+fn the_far_end_s_renegotiation_while_the_account_s_waits_for_its_answer_is_told_after_that_answer() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    calls.begin_renegotiation(call).unwrap();
+    calls.renegotiate(call, &media()).unwrap();
+    drop(effects(&mut calls));
+    let at = callback(&calls, "mediaRenegotiation");
+    calls.on_delivery(&delivery(&at, &negotiation()), Observed::Renegotiation, now);
+    let waits = effects(&mut calls);
+    assert!(
+        events(&waits).is_empty(),
+        "the call goes on, the far end's waits: {waits:#?}"
+    );
+    // delivered again meanwhile: a replay
+    calls.on_delivery(&delivery(&at, &negotiation()), Observed::Renegotiation, now);
+    assert!(events(&effects(&mut calls)).is_empty());
+    // the account's answer comes: applied first, then the far end's is told
+    let answered = latest_callback(&calls, "mediaAnswer");
+    calls.on_delivery(
+        &delivery(&answered, &media_answer("v=1\r\n")),
+        Observed::Renegotiation,
+        now,
+    );
+    let told = events(&effects(&mut calls));
+    assert!(
+        matches!(
+            told[..],
+            [CallEvent::RemoteMedia { .. }, CallEvent::MediaOffer { call: of, .. }] if of == call
+        ),
+        "{told:#?}"
+    );
+    calls.answer_media(call, media()).unwrap();
+    assert_eq!(names(&effects(&mut calls)), ["media_answer"]);
+}
+
+#[test]
+fn the_far_end_s_renegotiation_before_the_account_s_is_turned_away_goes_first_and_the_account_s_gives_way() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    calls.begin_renegotiation(call).unwrap();
+    calls.renegotiate(call, &media()).unwrap();
+    let asked = effects(&mut calls);
+    let [(first, "renegotiate")] = sent(&asked)[..] else {
+        panic!("{asked:#?}");
+    };
+    // both ends turned their cameras on together: the far end's reached the call controller first, which delivers
+    // it, then turns the account's away
+    let at = callback(&calls, "mediaRenegotiation");
+    calls.on_delivery(&delivery(&at, &negotiation()), Observed::Renegotiation, now);
+    assert!(events(&effects(&mut calls)).is_empty(), "the call goes on");
+    calls.on_outcome(first, &ok(&json!({})), now);
+    drop(effects(&mut calls));
+    let rejection = latest_callback(&calls, "rejection");
+    calls.on_delivery(&delivery(&rejection, &in_progress()), Observed::Nothing, now);
+    let gave_way = events(&effects(&mut calls));
+    assert!(
+        matches!(
+            gave_way[..],
+            [CallEvent::RenegotiationGaveWay { call: a }, CallEvent::MediaOffer { call: b, .. }] if a == call && b == call
+        ),
+        "{gave_way:#?}"
+    );
+    calls.tick(now + RENEGOTIATION_RETRY);
+    assert!(sent(&effects(&mut calls)).is_empty(), "the account's doesn't go again");
+    assert!(matches!(calls.begin_renegotiation(call), Err(CallError::NotNow)));
+    calls.answer_media(call, media()).unwrap();
+    assert_eq!(names(&effects(&mut calls)), ["media_answer"]);
+    // once the far end's is answered, the account's media offers again
+    calls.begin_renegotiation(call).unwrap();
+    calls.renegotiate(call, &media()).unwrap();
+    assert_eq!(names(&effects(&mut calls)), ["renegotiate"]);
+}
+
+#[test]
+fn no_renegotiation_of_the_account_s_begins_while_one_turned_away_waits_to_go_again() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    calls.begin_renegotiation(call).unwrap();
+    calls.renegotiate(call, &media()).unwrap();
+    drop(effects(&mut calls));
+    let rejection = latest_callback(&calls, "rejection");
+    calls.on_delivery(&delivery(&rejection, &in_progress()), Observed::Nothing, now);
+    assert!(changes(&mut calls).is_empty());
+    // the camera turned off and on again before the offer turned away goes again: refused, the media untouched
+    assert!(matches!(calls.begin_renegotiation(call), Err(CallError::NotNow)));
+    assert!(matches!(calls.renegotiate(call, &media()), Err(CallError::NotNow)));
+    calls.tick(now + RENEGOTIATION_RETRY);
+    assert_eq!(names(&effects(&mut calls)), ["renegotiate"]);
+    assert!(matches!(calls.begin_renegotiation(call), Err(CallError::NotNow)));
+    let at = latest_callback(&calls, "mediaAnswer");
+    calls.on_delivery(&delivery(&at, &media_answer("v=1\r\n")), Observed::Renegotiation, now);
+    drop(effects(&mut calls));
+    calls.begin_renegotiation(call).unwrap();
 }
 
 #[test]
@@ -1127,12 +1261,132 @@ fn a_rejected_renegotiation_or_one_whose_answer_doesn_t_read_fails_the_call() {
     }));
 }
 
+/// The call controller's rejection of a renegotiation while another negotiation of the call is in progress, as
+/// captured (`ab-call --call video`, both pages' cameras turned on together).
+fn in_progress() -> Value {
+    json!({"mediaNegotiationFailure": {
+        "reason": "clientError", "sender": null, "code": 491, "subCode": 10029,
+        "phrase": "Negotiation is in progress.", "resultCategories": ["ExpectedError"],
+    }, "debugContent": null})
+}
+
+#[test]
+fn a_renegotiation_turned_away_while_another_is_in_progress_goes_again_with_its_offer() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    calls.renegotiate(call, &media()).unwrap();
+    let asked = effects(&mut calls);
+    let [(first, "renegotiate")] = sent(&asked)[..] else {
+        panic!("{asked:#?}");
+    };
+    calls.on_outcome(first, &ok(&json!({})), now);
+    let rejection = latest_callback(&calls, "rejection");
+    calls.on_delivery(&delivery(&rejection, &in_progress()), Observed::Nothing, now);
+    assert!(changes(&mut calls).is_empty(), "the call goes on");
+    assert_eq!(calls.deadline(), Some(now + RENEGOTIATION_RETRY));
+    calls.tick(now + RENEGOTIATION_RETRY / 2);
+    assert!(changes(&mut calls).is_empty(), "not yet");
+    calls.tick(now + RENEGOTIATION_RETRY);
+    let again = effects(&mut calls);
+    let [(second, "renegotiate")] = sent(&again)[..] else {
+        panic!("{again:#?}");
+    };
+    calls.on_outcome(second, &ok(&json!({})), now);
+    // its answer comes at the new renegotiation's own callback
+    let at = latest_callback(&calls, "mediaAnswer");
+    calls.on_delivery(&delivery(&at, &media_answer("v=1\r\n")), Observed::Renegotiation, now);
+    assert!(
+        events(&effects(&mut calls))
+            .iter()
+            .any(|event| matches!(event, CallEvent::RemoteMedia { .. }))
+    );
+
+    // the far end's renegotiation while the account's waits to go again: the far end's goes first, the account's
+    // gives way
+    let (mut calls, call) = connected_call(now);
+    calls.renegotiate(call, &media()).unwrap();
+    drop(effects(&mut calls));
+    let rejection = latest_callback(&calls, "rejection");
+    calls.on_delivery(&delivery(&rejection, &in_progress()), Observed::Nothing, now);
+    let at = callback(&calls, "mediaRenegotiation");
+    calls.on_delivery(&delivery(&at, &negotiation()), Observed::Renegotiation, now);
+    let told = events(&effects(&mut calls));
+    assert!(
+        matches!(
+            told[..],
+            [CallEvent::RenegotiationGaveWay { .. }, CallEvent::MediaOffer { .. }]
+        ),
+        "{told:#?}"
+    );
+    calls.tick(now + RENEGOTIATION_RETRY);
+    assert!(sent(&effects(&mut calls)).is_empty(), "nothing goes again");
+
+    // turned away too often, the call fails
+    let (mut calls, call) = connected_call(now);
+    calls.renegotiate(call, &media()).unwrap();
+    drop(effects(&mut calls));
+    let mut at = now;
+    for _ in 0..5 {
+        let rejection = latest_callback(&calls, "rejection");
+        calls.on_delivery(&delivery(&rejection, &in_progress()), Observed::Nothing, at);
+        at += RENEGOTIATION_RETRY;
+        calls.tick(at);
+        drop(effects(&mut calls));
+    }
+    let rejection = latest_callback(&calls, "rejection");
+    calls.on_delivery(&delivery(&rejection, &in_progress()), Observed::Nothing, at);
+    assert!(events(&effects(&mut calls)).contains(&CallEvent::Ended {
+        call,
+        end: End::Failed("renegotiate")
+    }));
+}
+
 /// A renegotiation of the call delivered to the account, its answer going to `Call1`'s negotiation link.
 fn negotiation() -> Value {
     json!({"mediaNegotiation": {
         "mediaContent": {"blob": "v=2\r\n", "contentType": "application/sdp-ngc-1.0"},
         "links": {"mediaAnswer": cc("negotiations", "answer"), "rejection": cc("negotiations", "reject")},
     }})
+}
+
+#[test]
+fn a_renegotiation_and_its_answer_get_their_receipts_and_a_delivery_the_fence_bound_nothing_of_none() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    // the far end's renegotiation: its receipt at once, beside its telling
+    let at = callback(&calls, "mediaRenegotiation");
+    calls.on_delivery(&delivery(&at, &negotiation()), Observed::Renegotiation, now);
+    let offered = effects(&mut calls);
+    assert_eq!(receipts(&offered), [DeliveryKey::of(&delivery(&at, &negotiation()))]);
+    assert_eq!(events(&offered).len(), 1);
+    calls.answer_media(call, media()).unwrap();
+    drop(effects(&mut calls));
+    // the answer to the account's own renegotiation: its receipt too
+    let (answer_at, _) = renegotiated(&mut calls, call, now);
+    let answer = media_answer("v=1\r\n");
+    calls.on_delivery(&delivery(&answer_at, &answer), Observed::Renegotiation, now);
+    assert_eq!(receipts(&effects(&mut calls)).len(), 1);
+    // a delivery the fence bound nothing of gets none
+    calls.on_delivery(&delivery(&at, &negotiation()), Observed::Nothing, now);
+    assert!(receipts(&effects(&mut calls)).is_empty());
+}
+
+#[test]
+fn a_call_whose_media_carries_video_names_the_video_modality_until_it_doesn_t() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let modalities = |calls: &Calls| calls.call.as_ref().unwrap().modalities.clone();
+    assert_eq!(modalities(&calls), ["Audio"]);
+    calls.set_video(call, true);
+    calls.set_video(call, true);
+    assert_eq!(modalities(&calls), ["Audio", "Video"], "once, after the call's own");
+    calls.renegotiate(call, &media()).unwrap();
+    assert_eq!(names(&effects(&mut calls)), ["renegotiate"]);
+    calls.set_video(call, false);
+    assert_eq!(modalities(&calls), ["Audio"]);
+    let other = CallId(call.get() + 1);
+    calls.set_video(other, true);
+    assert_eq!(modalities(&calls), ["Audio"], "another call's changes nothing");
 }
 
 #[test]
@@ -1197,7 +1451,7 @@ fn renegotiated(calls: &mut Calls, call: CallId, now: Instant) -> (String, Strin
         latest_callback(calls, "rejection"),
     );
     calls.on_outcome(renegotiation, &ok(&json!({})), now);
-    assert!(effects(calls).is_empty());
+    assert!(changes(calls).is_empty());
     paths
 }
 
@@ -1225,9 +1479,9 @@ fn an_answer_or_a_rejection_counts_only_at_the_waiting_renegotiation_s_own_callb
         Observed::Renegotiation,
         now,
     );
-    assert!(effects(&mut calls).is_empty(), "an earlier renegotiation's answer");
+    assert!(changes(&mut calls).is_empty(), "an earlier renegotiation's answer");
     calls.on_delivery(&delivery(&first_rejection, &json!({})), Observed::Nothing, now);
-    assert!(effects(&mut calls).is_empty(), "an earlier renegotiation's rejection");
+    assert!(changes(&mut calls).is_empty(), "an earlier renegotiation's rejection");
     assert_eq!(calls.current(), Some((call, Some(CallState::Connected))));
     assert!(
         matches!(calls.renegotiate(call, &media()), Err(CallError::NotNow)),
@@ -1252,9 +1506,9 @@ fn an_answer_or_a_rejection_counts_only_at_the_waiting_renegotiation_s_own_callb
         Observed::Renegotiation,
         now,
     );
-    assert!(effects(&mut calls).is_empty(), "its answer again");
+    assert!(changes(&mut calls).is_empty(), "its answer again");
     calls.on_delivery(&delivery(&second_rejection, &json!({})), Observed::Nothing, now);
-    assert!(effects(&mut calls).is_empty(), "its rejection once it was answered");
+    assert!(changes(&mut calls).is_empty(), "its rejection once it was answered");
     calls.renegotiate(call, &media()).unwrap();
     assert_eq!(names(&effects(&mut calls)), ["renegotiate"], "and another may go");
 }
@@ -1288,11 +1542,11 @@ fn a_renegotiation_delivered_again_as_it_was_is_a_replay_and_changes_nothing() {
     assert_eq!(offers(&effects(&mut calls)), ["v=2\r\n"]);
 
     calls.on_delivery(&delivery(&at, &first), Observed::Renegotiation, now);
-    assert!(effects(&mut calls).is_empty(), "again while it waits for the answer");
+    assert!(changes(&mut calls).is_empty(), "again while it waits for the answer");
     calls.answer_media(call, media()).unwrap();
     assert_eq!(names(&effects(&mut calls)), ["media_answer"], "still answered once");
     calls.on_delivery(&delivery(&at, &first), Observed::Renegotiation, now);
-    assert!(effects(&mut calls).is_empty(), "again once it was answered");
+    assert!(changes(&mut calls).is_empty(), "again once it was answered");
     assert!(
         matches!(calls.answer_media(call, media()), Err(CallError::NotNow)),
         "nothing waits for an answer"
@@ -1304,11 +1558,11 @@ fn a_renegotiation_delivered_again_as_it_was_is_a_replay_and_changes_nothing() {
     assert_eq!(offers(&effects(&mut calls)), ["v=4\r\n"], "a new one is told");
     calls.on_delivery(&delivery(&at, &first), Observed::Renegotiation, now);
     assert!(
-        effects(&mut calls).is_empty(),
+        changes(&mut calls).is_empty(),
         "the answered one again while another waits"
     );
     calls.on_delivery(&delivery(&at, &second), Observed::Renegotiation, now);
-    assert!(effects(&mut calls).is_empty(), "the waiting one again");
+    assert!(changes(&mut calls).is_empty(), "the waiting one again");
     assert_eq!(calls.current(), Some((call, Some(CallState::Connected))));
     calls.answer_media(call, media()).unwrap();
     assert_eq!(names(&effects(&mut calls)), ["media_answer"]);
@@ -1326,7 +1580,7 @@ fn a_media_failure_fails_the_call_with_a_leave_once() {
     let now = Instant::now();
     let (mut calls, call) = connected_call(now);
     calls.fail_media(CallId(99), now);
-    assert!(effects(&mut calls).is_empty(), "another call's");
+    assert!(changes(&mut calls).is_empty(), "another call's");
     calls.fail_media(call, now);
     let failed = effects(&mut calls);
     assert_eq!(names(&failed), ["leave"]);
@@ -1338,7 +1592,7 @@ fn a_media_failure_fails_the_call_with_a_leave_once() {
         })
     );
     calls.fail_media(call, now);
-    assert!(effects(&mut calls).is_empty(), "it ended already");
+    assert!(changes(&mut calls).is_empty(), "it ended already");
 
     // an invitation that rings here goes away unanswered
     let (mut calls, call) = offered_call(now);

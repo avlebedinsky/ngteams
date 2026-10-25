@@ -539,8 +539,8 @@ impl<W: FrameWriter> FrameSink<W> {
     }
 }
 
-/// A typed response to a call delivery: the acceptance's acknowledgement ([`AcceptanceAcknowledgement`]) or an offered
-/// invitation's receipt ([`InvitationReceipt`]), each built from the delivery it answers in the shape the captures show
+/// A typed response to a call delivery: the acceptance's acknowledgement ([`AcceptanceAcknowledgement`]) or a
+/// delivery's receipt ([`InvitationReceipt`]: an offered invitation's, a live call's negotiation's), each built from the delivery it answers in the shape the captures show
 /// (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`). Not a frame by itself: only [`FrameSink::respond`]
 /// (or [`FrameSink::send_permitted`])
 /// sends one, after the fence permitted exactly its JSON for the sink's connection. Sealed: no other crate makes
@@ -778,9 +778,11 @@ impl DeliveryResponse for AcceptanceAcknowledgement {
     const KIND: &'static str = "call_acceptance_acknowledgement";
 }
 
-/// The response to an offered invitation's delivery, sent at once while it rings: `{"id": <the delivery's>, "status":
-/// 200, "headers": {"trouter-request", "trouter-client"}, "body": ""}`, the request id the delivery's own (the captures
-/// show it with and without `MS-CV`; this sends none). `Debug` shows the delivery's id only.
+/// The receipt of a call delivery: an offered invitation's, sent at once while it rings, and a live call's
+/// renegotiation, answer or acknowledgement delivered at its own callback, as the web client sends it for each:
+/// `{"id": <the delivery's>, "status": 200, "headers": {"trouter-request", "trouter-client"}, "body": ""}`, the
+/// request id the delivery's own (the captures show it with and without `MS-CV`; this sends none). `Debug` shows the
+/// delivery's id only.
 #[derive(Clone, PartialEq, Eq)]
 pub struct InvitationReceipt {
     answered: Answered,

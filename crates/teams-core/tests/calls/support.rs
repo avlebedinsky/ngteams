@@ -18,15 +18,19 @@ use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts, Push};
-use teams_core::{CallId, CallMedia, CallParts, CallStatus, End, Identity, IncomingCall, Outbox, Relay};
+use teams_core::{
+    CallId, CallMedia, CallParts, CallStatus, CallVideo, End, Identity, IncomingCall, Outbox, Relay, VideoOutput,
+};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
-use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
-use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource, wav};
+use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
+use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::{RelayOptions, RelayServer};
 use teams_media::session::SessionConfig;
 use teams_media::tone::{Tone, amplitude_at};
 use teams_media::turn::Transport as RelayTransport;
+use teams_media::video::codec::{EncoderSettings, H264Library};
+use teams_media::video::convert::MaxSize;
 use teams_mock::{CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT, TrouterMock};
 use teams_proto::{Author, Client, ClientInfo, Credentials, HttpTransport};
 use teams_store::Store;
@@ -236,7 +240,26 @@ pub struct Account {
     pub recording: PathBuf,
     /// How often its calls opened the microphone.
     microphones: Arc<AtomicUsize>,
+    /// What its calls showed of the far end's video, and of its own camera.
+    pub video: Shown,
     _store: tempfile::TempDir,
+}
+
+/// The frames an account's calls showed: the far end's, decoded, and its own camera's as sent.
+#[derive(Clone, Default)]
+pub struct Shown {
+    pub remote: FrameCounter,
+    pub preview: FrameCounter,
+}
+
+impl VideoOutput for Shown {
+    fn remote(&self) -> Box<dyn VideoSink> {
+        Box::new(self.remote.clone())
+    }
+
+    fn preview(&self) -> Option<Box<dyn VideoSink>> {
+        Some(Box::new(self.preview.clone()))
+    }
 }
 
 impl Account {
@@ -268,7 +291,14 @@ impl Account {
         let store = tempfile::tempdir().unwrap();
         let recording = lab.dir.path().join(format!("{}.wav", mri.rsplit(':').next().unwrap()));
         let microphones = Arc::new(AtomicUsize::new(0));
-        let media = media(lab.relay, tone, &recording, Arc::clone(&microphones));
+        let video = Shown::default();
+        let mut media = media(lab.relay, tone, &recording, Arc::clone(&microphones));
+        media.video = Some(CallVideo {
+            library: H264Library::Bundled,
+            encoder: EncoderSettings::default(),
+            max_size: MaxSize::HD,
+            output: Arc::new(video.clone()),
+        });
         let calls = CallParts::new(calling, identity(mri, tenant), media);
         let push = Push::new(trouter());
         let client = Arc::new(Client::new(http()));
@@ -292,6 +322,7 @@ impl Account {
             log,
             recording,
             microphones,
+            video,
             _store: store,
         }
     }
@@ -447,6 +478,7 @@ fn media(relay: std::net::SocketAddr, tone: Tone, recording: &Path, microphones:
             processing: ProcessingConfig::OFF,
             ..SessionConfig::default()
         },
+        video: None,
     }
 }
 

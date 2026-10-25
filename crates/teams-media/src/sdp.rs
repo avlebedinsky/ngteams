@@ -30,6 +30,13 @@
 //!   `data`), except the sharing line: the last video line of an offer with more than one, while the call has none,
 //!   is `applicationsharing-video`, as in the web client's 1:1 and group offers.
 //!
+//! - **Video** ([`NgcSession::set_video`], [`VideoLines`]): which of an offer's video lines the call takes is the
+//!   session's to say before `str0m` sees it: an audio-only call (a group call's, until it takes video) reads every
+//!   video line as rejected, so `str0m` answers each one rejected as an audio-only client does; a 1:1 call takes its
+//!   main video line (the first one that isn't the sharing line, then the same line for the call's life) and reads
+//!   the others rejected. While our camera is off, the line taken is read as one the far end only sends on (its
+//!   `sendrecv` as `sendonly`, its `recvonly` as `inactive`), so `str0m` answers that we only receive.
+//!
 //! A browser's SDP (or `str0m`'s as it is) is refused where the dialect is required ([`NgcSdp::new`]).
 
 use std::fmt;
@@ -217,6 +224,14 @@ impl NgcSdp {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.text
+    }
+
+    /// Whether a video line is in use (on a port, whichever way it goes): the media carries video.
+    #[must_use]
+    pub fn carries_video(&self) -> bool {
+        lines(&self.text)
+            .filter_map(media_line)
+            .any(|line| line.media == "video" && line.port != "0")
     }
 }
 
@@ -441,12 +456,24 @@ fn attribute_name(line: &str) -> Option<&str> {
     Some(rest.split_once(':').map_or(rest, |(name, _)| name))
 }
 
-/// One m-line of a call in both namings: `str0m`'s mid, Teams' mid, and the line's label.
+/// One m-line of a call in both namings: `str0m`'s mid, Teams' mid, and the line's label; `ours` when an offer of
+/// ours added it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Line {
     local: String,
     remote: String,
     label: String,
+    ours: bool,
+}
+
+/// Which of the video lines offered to us a call takes ([`NgcSession::set_video`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VideoLines {
+    /// None: every video line is read rejected (an audio-only call's).
+    #[default]
+    None,
+    /// The main video line, receiving; sending too when `sending` (our camera is on).
+    Main { sending: bool },
 }
 
 /// One call's media session as Teams' dialect sees it: the pairs of `str0m`'s and Teams' mids for every m-line and
@@ -455,6 +482,10 @@ struct Line {
 #[derive(Clone, Debug, Default)]
 pub struct NgcSession {
     lines: Vec<Line>,
+    /// Which video lines offered to us the call takes.
+    video: VideoLines,
+    /// The Teams mid of the video line the call took (or our offer added), kept for the call's life.
+    video_line: Option<String>,
     /// The payload types our latest offer gave each codec, by `str0m`'s mid: `(codec, payload type)`, the codec as
     /// its `rtpmap` names it, in lower case.
     offered: Vec<(String, Vec<(String, String)>)>,
@@ -472,6 +503,58 @@ impl NgcSession {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets which of the video lines offered to us the call takes from the next offer read on
+    /// ([`NgcSession::read_offer`]).
+    pub fn set_video(&mut self, lines: VideoLines) {
+        self.video = lines;
+    }
+
+    /// Which of the video lines offered to us the call takes.
+    #[must_use]
+    pub fn video(&self) -> VideoLines {
+        self.video
+    }
+
+    /// `parsed` (an offer to us) with the video lines the call doesn't take read as rejected (and left out of the
+    /// bundle), and the one it takes read as one the far end only sends on while our camera is off.
+    fn with_video_lines(&mut self, mut parsed: Parsed) -> Parsed {
+        let mut refused = Vec::new();
+        for section in &mut parsed.media {
+            if section.kind != Kind::Video || section.rejected() {
+                continue;
+            }
+            let mid = section.mid().map(str::to_owned);
+            let take = match (self.video, &self.video_line) {
+                (VideoLines::None, _) => false,
+                (VideoLines::Main { .. }, Some(line)) => mid.as_ref() == Some(line),
+                (VideoLines::Main { .. }, None) => mid.is_some() && section.value("label") != Some(SHARING_LABEL),
+            };
+            if !take {
+                section.port = 0;
+                refused.extend(mid);
+                continue;
+            }
+            if self.video_line.is_none() {
+                self.video_line = mid;
+            }
+            if self.video == (VideoLines::Main { sending: false }) {
+                only_theirs(section);
+            }
+        }
+        if !refused.is_empty() {
+            for line in &mut parsed.session {
+                if let Some(mids) = line.strip_prefix("a=group:BUNDLE ") {
+                    let kept: Vec<&str> = mids
+                        .split(' ')
+                        .filter(|mid| !refused.iter().any(|r| r == mid))
+                        .collect();
+                    *line = format!("a=group:BUNDLE {}", kept.join(" "));
+                }
+            }
+        }
+        parsed
     }
 
     fn by_local(&self, mid: &str) -> Option<&Line> {
@@ -520,6 +603,7 @@ impl NgcSession {
     /// when the data line's SSRC can't be drawn.
     pub fn write_offer(&mut self, offer: &SdpOffer) -> Result<NgcSdp, SdpError> {
         let parsed = Parsed::standard(&offer.to_sdp_string())?;
+        self.forget_unanswered(&parsed);
         let sharing = self.sharing_place(&parsed);
         let mut names = Vec::new();
         for (place, section) in parsed.media.iter().enumerate() {
@@ -534,17 +618,44 @@ impl NgcSession {
                     local: local.to_owned(),
                     remote: self.next_remote(),
                     label: label.to_owned(),
+                    ours: true,
                 });
             }
-            names.push(
-                self.by_local(local)
-                    .cloned()
-                    .ok_or(SdpError::Unwritable("an m-line without a mid"))?,
-            );
+            let name = self
+                .by_local(local)
+                .cloned()
+                .ok_or(SdpError::Unwritable("an m-line without a mid"))?;
+            if section.kind == Kind::Video && !section.rejected() && name.label != SHARING_LABEL {
+                self.video_line.get_or_insert_with(|| name.remote.clone());
+            }
+            names.push(name);
             self.offered.retain(|(mid, _)| mid != local);
             self.offered.push((local.to_owned(), payloads(section)));
         }
         write(&parsed, &names, Role::Offer)
+    }
+
+    /// Forgets the lines an earlier offer of ours added that `parsed` (our new offer) no longer has: that offer was
+    /// turned away and replaced, so no answer committed them (`str0m` offers every line the session has), and the new
+    /// offer's lines are numbered and its video line taken as if they had never been offered.
+    fn forget_unanswered(&mut self, parsed: &Parsed) {
+        let offered = |line: &Line| {
+            parsed
+                .media
+                .iter()
+                .any(|section| section.mid() == Some(line.local.as_str()))
+        };
+        let (kept, forgotten): (Vec<Line>, Vec<Line>) = std::mem::take(&mut self.lines)
+            .into_iter()
+            .partition(|line| !line.ours || offered(line));
+        self.lines = kept;
+        if self
+            .video_line
+            .as_ref()
+            .is_some_and(|video| forgotten.iter().any(|line| &line.remote == video))
+        {
+            self.video_line = None;
+        }
     }
 
     /// `section` of an answer to our offer's line `local`, with each codec numbered as our offer numbered it.
@@ -598,6 +709,7 @@ impl NgcSession {
     /// [`SdpError::Refused`] when `str0m` refuses what the conversion made.
     pub fn read_offer(&mut self, offer: &NgcSdp) -> Result<SdpOffer, SdpError> {
         let parsed = Parsed::ngc(offer.as_str(), offer.dialect())?;
+        let parsed = self.with_video_lines(parsed);
         let mut kept = Vec::new();
         for (index, section) in parsed.media.iter().enumerate() {
             let remote = match section.mid() {
@@ -617,6 +729,7 @@ impl NgcSession {
                     local: remote.clone(),
                     remote: remote.clone(),
                     label: section.value("label").unwrap_or(section.kind.label()).to_owned(),
+                    ours: false,
                 });
             }
             let local = self.by_remote(&remote).map(|line| line.local.clone()).unwrap_or(remote);
@@ -648,6 +761,24 @@ impl NgcSession {
             })
             .collect::<Result<Vec<_>, _>>()?;
         write(&parsed, &names, Role::Answer)
+    }
+}
+
+/// A video line the far end offered to send and receive on, read as one it only sends on (our camera is off).
+fn only_theirs(section: &mut Section) {
+    let mut found = false;
+    for line in &mut section.lines {
+        let turned = match line.as_str() {
+            "a=sendrecv" => "a=sendonly",
+            "a=recvonly" => "a=inactive",
+            "a=sendonly" | "a=inactive" => line.as_str(),
+            _ => continue,
+        };
+        found = true;
+        *line = turned.to_owned();
+    }
+    if !found {
+        section.lines.push("a=sendonly".to_owned());
     }
 }
 

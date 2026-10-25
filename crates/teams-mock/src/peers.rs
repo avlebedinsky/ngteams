@@ -33,6 +33,10 @@ impl State {
         None
     }
 
+    pub(crate) fn peer_video_offer(&mut self, _call: &str, _account: &str) -> Option<Value> {
+        None
+    }
+
     pub(crate) fn peer_accept(&mut self, _call: &str, _account: &str, _answer: &Value) -> bool {
         false
     }
@@ -189,6 +193,13 @@ mod on {
         pub(crate) fn peer_reoffer(&mut self, call: &str, account: &str) -> Option<Value> {
             self.peers.stats(call, account)?;
             Some(content(&self.peers.peer(call, account)?.reoffer().ok()?))
+        }
+
+        /// The peer's renegotiation offering its video (its camera on) to `account` in call `call`; `None` without
+        /// media or a peer.
+        pub(crate) fn peer_video_offer(&mut self, call: &str, account: &str) -> Option<Value> {
+            self.peers.stats(call, account)?;
+            Some(content(&self.peers.peer(call, account)?.video_offer().ok()?))
         }
 
         /// The peer takes `account`'s answer to its offer; whether it did.

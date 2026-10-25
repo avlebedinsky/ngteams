@@ -257,6 +257,13 @@ impl Models {
         Self::with(Calls::shown(echo), cx)
     }
 
+    /// The models of a build that shows calls with their video (the lab app with its codec), its test call to `echo`
+    /// and its 1:1 calls' video shown on `feed`.
+    #[must_use]
+    pub fn with_video_calls(echo: Option<teams_fence::Mri>, feed: crate::video::VideoFeed, cx: &mut App) -> Self {
+        Self::with(Calls::shown(echo).with_video(feed), cx)
+    }
+
     fn with(calls: Calls, cx: &mut App) -> Self {
         Self {
             status: cx.new(|_| Status::default()),
@@ -328,7 +335,8 @@ impl Models {
             | Event::IncomingCall(_)
             | Event::RingEnded { .. }
             | Event::Call { .. }
-            | Event::Voicemail { .. } => {
+            | Event::Voicemail { .. }
+            | Event::CameraOff { .. } => {
                 self.calls.update(cx, |calls, cx| calls.apply(&event, cx));
             }
             // how the push channel's registration went and a waiting transient's send (told on the feed, for the own

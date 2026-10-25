@@ -14,6 +14,14 @@ use crate::call::{Acknowledgement, Call, Ending, KeepAlive, Negotiation, Phase, 
 use crate::read::{self, Invitation, RemoteEnd};
 use crate::{CallWrite, WriteId, build};
 
+/// The modality a call's renegotiation and answer name beside the call's others once its media carries video (the
+/// web client's camera-on renegotiation and the answer to it: `["Audio", "Video"]`).
+const VIDEO: &str = "Video";
+/// How long after the call controller turned the account's renegotiation away (another negotiation in progress, `491`)
+/// it goes again, and how many times at most.
+pub const RENEGOTIATION_RETRY: Duration = Duration::from_secs(3);
+const RENEGOTIATION_RETRIES: u8 = 5;
+
 /// The account as its calls name it: its MRI and name, the calling endpoint it registered (`endpointId`, the
 /// calling socket's `epid`), its language, its tenant, what the client says of itself, and the account's region and
 /// partition (the call requests' `MS-Teams-Region` and `MS-Teams-Partition`).
@@ -125,6 +133,11 @@ pub enum CallEvent {
     /// The call's services renegotiate its media (a group call's mixer does, once the call is up): `offer` is to be
     /// answered with [`Calls::answer_media`], or the call fails ([`Calls::fail_media`]).
     MediaOffer { call: CallId, offer: MediaContent },
+    /// The account's renegotiation, turned away while another negotiation was in progress (`491`), gave way to the
+    /// far end's, told next ([`CallEvent::MediaOffer`]): no answer to the account's offer comes and it doesn't go
+    /// again. The media answers the far end's as it stands, then offers what it would have offered again (a
+    /// renegotiation begun as any, [`Calls::begin_renegotiation`]).
+    RenegotiationGaveWay { call: CallId },
     /// The call ended. Every call shown ends with this or [`CallEvent::RingEnded`], once.
     Ended { call: CallId, end: End },
     /// The call's keep-alive fell due (every 90 % of the interval the call's services asked for): it went to the call
@@ -407,10 +420,10 @@ impl Calls {
     /// When [`Self::tick`] next has something to do.
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
-        self.call
-            .as_ref()
-            .and_then(|call| call.keep_alive.as_ref())
-            .map(|keep| keep.next)
+        let call = self.call.as_ref()?;
+        let keep = call.keep_alive.as_ref().map(|keep| keep.next);
+        let retry = call.retry;
+        keep.into_iter().chain(retry).min()
     }
 
     /// Whether an invitation named a running call in `chat` that [`Self::join`] can join. It says what the machine
@@ -533,6 +546,9 @@ impl Calls {
         let (write, reoffer) = build::renegotiate(current, &link, offer)?;
         self.out.send(current, Step::Renegotiate, write);
         current.reoffering = false;
+        current.offered = Some(offer.clone());
+        current.retry = None;
+        current.retried = 0;
         // only now: the callbacks a renegotiation that wasn't built made stay the call's, but nothing waits on them
         current.reoffer = Some(reoffer);
         Ok(())
@@ -541,8 +557,9 @@ impl Calls {
     /// The account begins a renegotiation of the media of `call`, up, before its offer is made (a media session's new
     /// offer replaces the one it waits on, so nothing may make one the machine wouldn't take): until the offer goes
     /// ([`Self::renegotiate`]) or is given up ([`Self::give_up_renegotiation`]) the call takes no other renegotiation.
-    /// The account's second one is refused, and the far end's fails the call, as one does while the account's waits
-    /// for its answer.
+    /// The account's second one is refused (as one is while the account's waits for its answer or to go again after a
+    /// `491`), and the far end's waits until the account's settled (told once its answer came, it was turned away or
+    /// given up).
     ///
     /// # Errors
     /// [`CallError`]: the call isn't up, has no renegotiation link, or a renegotiation (either way) is under way;
@@ -553,10 +570,25 @@ impl Calls {
     }
 
     /// The account's renegotiation of `call` it began ([`Self::begin_renegotiation`]) won't go (its offer couldn't be
-    /// made): another may begin.
+    /// made): another may begin, and the far end's that came meanwhile is told.
     pub fn give_up_renegotiation(&mut self, call: CallId) {
         if let Some(current) = self.call.as_mut().filter(|current| current.id == call) {
             current.reoffering = false;
+            self.tell_deferred();
+        }
+    }
+
+    /// Whether the media of `call` carries video now (a video line in use, either way): its next renegotiation and
+    /// answer name the `Video` modality beside the call's others, as the web client's do once a camera is on.
+    pub fn set_video(&mut self, call: CallId, video: bool) {
+        let Some(current) = self.call.as_mut().filter(|current| current.id == call) else {
+            return;
+        };
+        let named = current.modalities.iter().any(|modality| modality == VIDEO);
+        if video && !named {
+            current.modalities.push(VIDEO.to_owned());
+        } else if !video && named {
+            current.modalities.retain(|modality| modality != VIDEO);
         }
     }
 
@@ -590,10 +622,16 @@ fn connected(current: &mut Option<Call>, call: CallId) -> Result<&mut Call, Call
 }
 
 /// The call `call`, if it is up and connected (as signaling goes), has a renegotiation link, and no renegotiation of
-/// it is under way either way (the account's begun or waiting for its answer, the far end's waiting for the account's).
+/// it is under way either way (the account's begun, waiting for its answer or to go again after a `491`, the far
+/// end's waiting for the account's answer): the media's offer that a `491` turned away still waits for its answer
+/// when it goes again, and a new offer would replace it.
 fn renegotiable(current: &mut Option<Call>, call: CallId) -> Result<&mut Call, CallError> {
     let current = connected(current, call)?;
-    if current.renegotiation.is_some() && current.negotiation.is_none() && !current.reoffering {
+    if current.renegotiation.is_some()
+        && current.negotiation.is_none()
+        && !current.reoffering
+        && current.retry.is_none()
+    {
         Ok(current)
     } else {
         Err(CallError::NotNow)
@@ -874,6 +912,12 @@ impl Calls {
         let Some(callback) = self.call.as_ref().and_then(|call| call.callback_at(&delivery.path)) else {
             return;
         };
+        if observed == Observed::Renegotiation {
+            // a renegotiation or its answer, at the call's own callback, gets its receipt at once, as the web client
+            // gives it (M3 Task 18): without one the service delivers it again every few seconds and holds the call's
+            // next negotiation (the acknowledgement answered after 22 s, a renegotiation meanwhile rejected)
+            self.receipt(delivery);
+        }
         match callback {
             (Kind::Call, "acceptance") => self.accepted(delivery, observed, now),
             (Kind::Call, "end") => self.ended(delivery),
@@ -891,8 +935,12 @@ impl Calls {
 
     /// A renegotiation of the call's media delivered to the account: told, to be answered ([`Self::answer_media`]).
     /// One the fence didn't read (it binds no link for the answer) or that doesn't read, or one while the call isn't
-    /// up, answers another or renegotiates itself (the account's begun or waiting for its answer), fails the call: no
-    /// capture shows how one is refused.
+    /// up or the account answers another, fails the call: no capture shows how one is refused.
+    ///
+    /// One while the account's renegotiation is being made or waits for its answer (both ends turned their cameras on
+    /// together: the call controller turns away the one that reached it second) waits until the account's settled
+    /// (`deferred`): the media's offer waits for its answer, which a new answer of the media's would leave without its
+    /// offer. One while the account's waits to go again after a `491` goes first: the account's gives way.
     ///
     /// A delivery of the renegotiation that waits for the account's answer, or of one the account answered, again (its
     /// answer link and its offer both the same) is a replay (deliveries aren't answered, so the service delivers them
@@ -904,21 +952,26 @@ impl Calls {
             .filter(|_| observed == Observed::Renegotiation)
             .map(|(offer, link)| Negotiation { offer, link });
         if let Some(negotiation) = &read {
-            let replay = call.negotiation.as_ref() == Some(negotiation) || call.negotiated.contains(negotiation);
+            let replay = call.negotiation.as_ref() == Some(negotiation)
+                || call.deferred.as_ref() == Some(negotiation)
+                || call.negotiated.contains(negotiation);
             if replay {
                 return;
             }
         }
-        let up = call.phase == Phase::Connected
-            && call.negotiation.is_none()
-            && !call.waits_for_answer()
-            && !call.reoffering;
+        let up = call.phase == Phase::Connected && call.negotiation.is_none();
         match read {
+            Some(negotiation) if up && (call.reoffering || call.waits_for_answer()) => {
+                call.deferred = Some(negotiation);
+            }
             Some(negotiation) if up => {
-                let offer = negotiation.offer.clone();
-                call.negotiation = Some(negotiation);
-                let id = call.id;
-                self.out.event(CallEvent::MediaOffer { call: id, offer });
+                // the account's turned away and waiting to go again gives way to it
+                if call.retry.take().is_some() {
+                    let id = call.id;
+                    self.out.event(CallEvent::RenegotiationGaveWay { call: id });
+                }
+                call.deferred = Some(negotiation);
+                self.tell_deferred();
             }
             _ if matches!(call.phase, Phase::Leaving { .. }) => {}
             _ => self.fail(Step::MediaAnswer, now),
@@ -947,10 +1000,31 @@ impl Calls {
             self.out.send(call, Step::MediaAcknowledge, write);
         }
         self.out.event(CallEvent::RemoteMedia { call: id, media });
+        // the far end's that came meanwhile, after the account's answer is applied
+        self.tell_deferred();
     }
 
-    /// The account's renegotiation was rejected: the call fails (its media waits for an answer that won't come).
-    /// Nothing for a delivery at an earlier renegotiation's `rejection` callback, or while none waits.
+    /// The far end's renegotiation that waited for the account's to settle, told now (the call up and nothing else
+    /// waiting for the account's answer).
+    fn tell_deferred(&mut self) {
+        let Some(call) = self.call.as_mut() else { return };
+        if call.phase != Phase::Connected || call.negotiation.is_some() {
+            return;
+        }
+        let Some(negotiation) = call.deferred.take() else {
+            return;
+        };
+        let offer = negotiation.offer.clone();
+        call.negotiation = Some(negotiation);
+        let id = call.id;
+        self.out.event(CallEvent::MediaOffer { call: id, offer });
+    }
+
+    /// The account's renegotiation was rejected: the call fails (its media waits for an answer that won't come), but
+    /// for a renegotiation turned away while another negotiation was in progress (`491`): the far end's delivered
+    /// meanwhile goes first, the account's giving way to it ([`CallEvent::RenegotiationGaveWay`]); with none, the
+    /// account's goes again [`RENEGOTIATION_RETRY`] later (at most [`RENEGOTIATION_RETRIES`] times), as the web
+    /// client's does. Nothing for a delivery at an earlier renegotiation's `rejection` callback, or while none waits.
     fn reoffer_rejected(&mut self, delivery: &Delivery, now: Instant) {
         let Some(call) = self.call.as_mut() else { return };
         if call
@@ -961,7 +1035,41 @@ impl Calls {
             return;
         }
         call.reoffer = None;
+        let in_progress = read::negotiation_in_progress(&delivery.body);
+        if in_progress && call.deferred.is_some() {
+            let id = call.id;
+            self.out.event(CallEvent::RenegotiationGaveWay { call: id });
+            self.tell_deferred();
+            return;
+        }
+        if in_progress && call.offered.is_some() && call.retried < RENEGOTIATION_RETRIES {
+            call.retry = Some(now + RENEGOTIATION_RETRY);
+            return;
+        }
         self.fail(Step::Renegotiate, now);
+    }
+
+    /// The account's renegotiation turned away goes again, its offer as it was, once its time came and nothing else
+    /// negotiates the call.
+    fn renegotiate_again(&mut self, now: Instant) {
+        let Some(call) = self.call.as_mut() else { return };
+        let Some(at) = call.retry else { return };
+        if now < at {
+            return;
+        }
+        let free = call.negotiation.is_none() && !call.waits_for_answer() && !call.reoffering;
+        let (Some(offer), Some(link), true) = (call.offered.clone(), call.renegotiation.clone(), free) else {
+            return;
+        };
+        match build::renegotiate(call, &link, &offer) {
+            Ok((write, reoffer)) => {
+                self.out.send(call, Step::Renegotiate, write);
+                call.reoffer = Some(reoffer);
+                call.retry = None;
+                call.retried += 1;
+            }
+            Err(_) => self.fail(Step::Renegotiate, now),
+        }
     }
 
     /// An invitation the fence offered (see the crate docs).
@@ -1204,6 +1312,9 @@ impl Calls {
     /// Time passed: a keep-alive that fell due goes to the call leg's own link (only while the call is up), and is
     /// told ([`CallEvent::KeepAliveDue`]).
     pub fn tick(&mut self, now: Instant) {
+        if self.call.as_ref().is_some_and(|call| call.phase == Phase::Connected) {
+            self.renegotiate_again(now);
+        }
         let Some(call) = self.call.as_mut() else { return };
         if call.phase != Phase::Connected {
             return;

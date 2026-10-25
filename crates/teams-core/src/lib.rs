@@ -42,7 +42,9 @@ pub mod search;
 pub mod sync;
 pub mod teams;
 
-pub use calling::{CallAction, CallActionError, CallMedia, CallParts, CallStatus, IncomingCall, Relay};
+pub use calling::{
+    CallAction, CallActionError, CallMedia, CallParts, CallStatus, CallVideo, IncomingCall, Relay, VideoOutput,
+};
 pub use engine::{
     Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, OwnStatus,
     Parts, Push, Reply, Source,

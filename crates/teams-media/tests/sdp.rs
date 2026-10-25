@@ -11,7 +11,7 @@ use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::media::{Direction, MediaKind, Mid};
 use str0m::net::Protocol;
 use str0m::{Candidate, Rtc};
-use teams_media::sdp::{Dialect, NgcSdp, NgcSession, SDP_NGC, SDP_NGC_MIXER, SdpError};
+use teams_media::sdp::{Dialect, NgcSdp, NgcSession, SDP_NGC, SDP_NGC_MIXER, SdpError, VideoLines};
 
 const FIXTURE: &str = include_str!("fixtures/sdp/captured.json");
 /// Our relayed candidate: the allocation (a documentation address) and the socket to the relay.
@@ -111,9 +111,16 @@ fn joined(parts: &[Vec<&str>]) -> String {
     parts.concat().join("\r\n") + "\r\n"
 }
 
+/// A session that takes a call's main video line (a 1:1 call's), as these tests of the lines' naming need one.
+fn video_session() -> NgcSession {
+    let mut session = NgcSession::new();
+    session.set_video(VideoLines::Main { sending: true });
+    session
+}
+
 /// A session that read and answered the mixer's offer, as a callee in a group call.
 fn mixer_session(rtc: &mut Rtc) -> TestResult<NgcSession> {
-    let mut session = NgcSession::new();
+    let mut session = video_session();
     let offer = session.read_offer(&captured("mixer_offer")?)?;
     let answer = rtc.sdp_api().accept_offer(offer)?;
     session.write_answer(&answer)?;
@@ -458,7 +465,7 @@ fn a_mixers_offer_in_its_older_dialect_is_read_and_answered() -> TestResult {
     assert_eq!(mixer.dialect(), Dialect::Mixer);
     assert_eq!(mixer.content_type(), SDP_NGC_MIXER);
     let mut rtc = relayed_peer()?;
-    let mut session = NgcSession::new();
+    let mut session = video_session();
 
     let offer = session.read_offer(&mixer).unwrap();
 
@@ -468,7 +475,9 @@ fn a_mixers_offer_in_its_older_dialect_is_read_and_answered() -> TestResult {
     }
     let parts = sections(&read);
     assert_eq!(parts.len(), 14, "audio, twelve video lines and data");
-    for section in &parts[1..] {
+    // the lines in use: the audio, the main video line the call took, the data line (the other video lines are
+    // read rejected)
+    for section in parts[1..].iter().filter(|section| !section[0].contains(" 0 ")) {
         assert!(
             value(section, "ice-ufrag").is_some(),
             "every line of the mixer's carries its ICE credentials, kept: {section:#?}"
@@ -501,7 +510,7 @@ fn a_mixers_offer_in_its_older_dialect_is_read_and_answered() -> TestResult {
 #[test]
 fn a_renegotiation_offered_to_the_callee_names_the_same_lines() -> TestResult {
     let mut rtc = relayed_peer()?;
-    let mut session = NgcSession::new();
+    let mut session = video_session();
     let offer = session.read_offer(&captured("invitation_offer")?).unwrap();
     let answer = rtc.sdp_api().accept_offer(offer).unwrap();
     session.write_answer(&answer).unwrap();
@@ -520,7 +529,7 @@ fn a_renegotiation_offered_to_the_callee_names_the_same_lines() -> TestResult {
 fn a_renegotiation_offered_to_the_caller_maps_back_to_its_own_mids() -> TestResult {
     let mut rtc = relayed_peer()?;
     let (mids, offer, pending) = one_to_one_offer(&mut rtc)?;
-    let mut session = NgcSession::new();
+    let mut session = video_session();
     session.write_offer(&offer).unwrap();
     rtc.sdp_api()
         .accept_answer(pending, session.read_answer(&captured("callee_answer")?).unwrap())
@@ -597,7 +606,9 @@ fn a_line_we_add_in_a_group_call_is_numbered_past_the_mixers_mids() -> TestResul
     let named = mids(&ours);
     assert_eq!(named.len(), 14, "{}", ngc.as_str());
     assert_eq!(named[13], Some("14"), "one past the mixer's highest mid");
-    for (place, mid) in named.iter().enumerate() {
+    // the lines in use are named once each (the mixer's other video lines, which the call doesn't take, are written
+    // rejected, naming no mid)
+    for (place, mid) in named.iter().enumerate().filter(|(_, mid)| mid.is_some()) {
         assert_eq!(
             named.iter().filter(|other| *other == mid).count(),
             1,
@@ -609,9 +620,13 @@ fn a_line_we_add_in_a_group_call_is_numbered_past_the_mixers_mids() -> TestResul
         .ok_or("no bundle")?
         .split(' ')
         .collect();
-    assert_eq!(bundle.len(), 14);
+    assert_eq!(bundle.len(), named.iter().flatten().count());
     assert_eq!(bundle.iter().filter(|mid| **mid == "14").count(), 1);
-    assert_eq!(bundle.iter().filter(|mid| **mid == "13").count(), 1);
+    assert_eq!(
+        bundle.iter().filter(|mid| **mid == "2").count(),
+        1,
+        "the main video line the call took"
+    );
     assert_eq!(value(&ours[14], "label"), Some("main-video"));
 
     // the mixer's answer to it, made from its later lines in `sdp-ngc-1.0` (its own ICE credentials and

@@ -7,6 +7,10 @@
 //! once a test turned its media on ([`crate::ChatServiceMock::start_media`]): the test call's media controller, a
 //! caller the mock plays, and the renegotiations of their calls. [`EchoDevices`] make a peer the echo service's
 //! stand-in: it plays back what it hears ([`crate::ChatServiceMock::start_echo_media`]).
+//!
+//! **Video** (M3 Task 18): a peer takes the main video line it is offered and sends its camera (the file backend's
+//! test pattern) on it once a video line is in use, its decoded frames counted in its stats; it offers video of its
+//! own in a renegotiation ([`LoopbackPeer::video_offer`]). H.264 is the bundled source's (a `test-support` build).
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -16,16 +20,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teams_media::devices::file::FileDevices;
+use teams_media::devices::file::FrameCounter;
 use teams_media::devices::{
     AudioFrame, AudioSink, AudioSource, DeviceError, Devices, FRAME_DURATION, FRAME_SAMPLES, VideoSource,
 };
 use teams_media::peer::RelayedPeer;
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::{RelayLink, RelayOptions, RelayServer};
-use teams_media::sdp::{NgcSdp, NgcSession, SdpError};
-use teams_media::session::{MediaSession, SessionConfig, SessionEvent, SessionStats};
+use teams_media::sdp::{NgcSdp, NgcSession, SdpError, VideoLines};
+use teams_media::session::{MediaSession, SessionConfig, SessionEvent, SessionStats, VideoParts};
 use teams_media::test_turn::{PASSWORD, TurnServer, USER};
 use teams_media::turn::{Credentials, Transport};
+use teams_media::video::codec::{EncoderSettings, H264Library};
+use teams_media::video::convert::MaxSize;
 
 /// Why the loopback peer couldn't do it.
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +47,8 @@ pub enum PeerError {
 pub struct LoopbackPeer {
     session: MediaSession,
     dialect: NgcSession,
+    /// Its camera, until a video line is in use (then it goes to the session).
+    camera: Option<Box<dyn VideoSource>>,
 }
 
 impl fmt::Debug for LoopbackPeer {
@@ -77,9 +86,19 @@ impl LoopbackPeer {
             ..SessionConfig::default()
         };
         let session = MediaSession::start(RelayedPeer::new(Instant::now(), link)?, devices, config)?;
+        session.start_video(VideoParts {
+            library: H264Library::Bundled,
+            encoder: EncoderSettings::default(),
+            max_size: MaxSize::HD,
+            remote: Box::new(FrameCounter::new()),
+            preview: None,
+        })?;
+        let mut dialect = NgcSession::new();
+        dialect.set_video(VideoLines::Main { sending: true });
         Ok(Self {
             session,
-            dialect: NgcSession::new(),
+            dialect,
+            camera: devices.camera().ok(),
         })
     }
 
@@ -90,7 +109,32 @@ impl LoopbackPeer {
     pub fn answer(&mut self, offer: &NgcSdp) -> Result<NgcSdp, PeerError> {
         let offer = self.dialect.read_offer(offer)?;
         let answer = self.session.accept_offer(offer)?;
-        Ok(self.dialect.write_answer(&answer)?)
+        let answer = self.dialect.write_answer(&answer)?;
+        if answer.carries_video() {
+            self.camera_on()?;
+        }
+        Ok(answer)
+    }
+
+    /// Its renegotiation offering its video line (sending its camera), in `sdp-ngc-1.0`.
+    ///
+    /// # Errors
+    /// [`PeerError`] when the session can't offer or the offer doesn't convert.
+    pub fn video_offer(&mut self) -> Result<NgcSdp, PeerError> {
+        self.camera_on()?;
+        let offer = self
+            .session
+            .offer_video(true)?
+            .ok_or_else(|| teams_media::Error::Rtc("the video line already sends".into()))?;
+        Ok(self.dialect.write_offer(&offer)?)
+    }
+
+    /// Hands its camera to the session, once.
+    fn camera_on(&mut self) -> Result<(), PeerError> {
+        if let Some(camera) = self.camera.take() {
+            self.session.set_camera(Some(camera))?;
+        }
+        Ok(())
     }
 
     /// Its offer of the call's audio, in `sdp-ngc-1.0`.

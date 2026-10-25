@@ -49,6 +49,7 @@ pub(super) fn call(action: &CallAction) -> String {
         CallAction::HangUp { call } => format!("a hang-up of call {}", call.get()),
         CallAction::Mute { call, muted } => format!("call {} muted {muted}", call.get()),
         CallAction::Renegotiate { call } => format!("a renegotiation of call {}", call.get()),
+        CallAction::Camera { call, on } => format!("call {} camera {}", call.get(), if *on { "on" } else { "off" }),
     }
 }
 
@@ -131,6 +132,7 @@ fn plain(event: &Event) -> String {
         }
         Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
         Event::Voicemail { call } => format!("call {}: taken by the callee's voicemail", call.get()),
+        Event::CameraOff { call } => format!("call {}: its camera went off", call.get()),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }

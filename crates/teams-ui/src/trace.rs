@@ -124,6 +124,8 @@ pub struct TraceLine<'a> {
     people: Vec<TraceId<'a>>,
     /// The call it concerns: the engine's number for it.
     call: Option<u64>,
+    /// A count of frames (a video tile's presented so far).
+    frames: Option<u64>,
     refused: usize,
 }
 
@@ -143,6 +145,7 @@ impl<'a> TraceLine<'a> {
             replies: Vec::new(),
             people: Vec::new(),
             call: None,
+            frames: None,
             refused: 0,
         }
     }
@@ -248,6 +251,13 @@ impl<'a> TraceLine<'a> {
         self
     }
 
+    /// A count of frames (a video tile's presented so far: a number, never a picture).
+    #[must_use]
+    pub fn frames(mut self, frames: u64) -> Self {
+        self.frames = Some(frames);
+        self
+    }
+
     /// A kind (a message's, a row's state, …), named in the code.
     #[must_use]
     pub fn kind(mut self, kind: &'static str) -> Self {
@@ -279,6 +289,9 @@ impl<'a> TraceLine<'a> {
         }
         if let Some(call) = self.call {
             line.insert("call".to_owned(), json!(call));
+        }
+        if let Some(frames) = self.frames {
+            line.insert("frames".to_owned(), json!(frames));
         }
         for (key, ids) in [
             ("reacted", &self.reacted),

@@ -1440,7 +1440,7 @@ async fn hold_long(
 }
 
 /// The call screen's camera button.
-const CAMERA: Selector<'static> = Selector::Css("#video-button");
+pub(crate) const CAMERA: Selector<'static> = Selector::Css("#video-button");
 /// How long every page gets to decode the others' video once the cameras are on.
 pub const VIDEO_WAIT: Duration = Duration::from_secs(45);
 /// How long the run records with the cameras on.

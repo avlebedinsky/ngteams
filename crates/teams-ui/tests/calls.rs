@@ -20,11 +20,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use notices::{FakeServer, chat, message};
+use teams_core::VideoOutput;
 use teams_core::{
     CallAction, CallActionError, CallId, CallStatus, End, EngineError, Event, IncomingCall, MessageChange,
     RegistrationReport, RemoteEnd, Source,
 };
 use teams_fence::Mri;
+use teams_media::devices::pattern::TestPattern;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::call_alert::{CallAlert, notice_of};
 use teams_ui::calls::CallKind;
@@ -32,6 +34,8 @@ use teams_ui::notify::NoticeKind;
 use teams_ui::ringtone::{Ringer, Ringtone};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
+use teams_ui::switcher::CallCommand;
+use teams_ui::video::{Tile, VideoFeed};
 use teams_ui::{Calls, ViewTrace};
 
 const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
@@ -271,7 +275,9 @@ fn the_call_shows_as_it_goes(rig: &Rig, shell: &Entity<Shell>, cx: &mut VisualTe
     let shown: Vec<Vec<String>> = lines(written, "in-call", "shown").iter().map(kinds).collect();
     for state in ["placing", "ringing", "connecting", "connected"] {
         assert!(
-            shown.iter().any(|kinds| kinds == &["chat", state, "unmuted"]),
+            shown
+                .iter()
+                .any(|kinds| kinds == &["chat", state, "unmuted", "camera-off"]),
             "{state}: {shown:?}"
         );
     }
@@ -291,7 +297,7 @@ fn hang_up_and_dismiss(rig: &Rig, cx: &mut VisualTestContext, written: &Written)
     assert!(drawn(cx, "call-after"));
     assert!(drawn(cx, "chat-call"));
     let ended = lines(written, "in-call", "shown").last().cloned().unwrap();
-    assert_eq!(kinds(&ended), ["chat", "ended", "hung-up", "unmuted"]);
+    assert_eq!(kinds(&ended), ["chat", "ended", "hung-up", "unmuted", "camera-off"]);
     click(cx, "call-dismiss");
     assert!(!drawn(cx, "call-after"));
     assert_eq!(lines(written, "in-call", "hidden").len(), 1);
@@ -439,7 +445,7 @@ impl Rang<'_> {
             assert_eq!(lines(written, view, change).len(), 1, "{view} {change}");
         }
         let up = lines(written, "in-call", "shown").last().cloned().unwrap();
-        assert_eq!(kinds(&up), ["incoming", "connected", "unmuted"]);
+        assert_eq!(kinds(&up), ["incoming", "connected", "unmuted", "camera-off"]);
         status(rig, 7, CallStatus::Ended(End::Remote(RemoteEnd::default())));
     }
 
@@ -459,7 +465,10 @@ impl Rang<'_> {
         status(rig, 8, CallStatus::Ended(End::Declined));
         assert_eq!((ringer.started(), ringer.stopped()), (2, 2));
         let declined = lines(written, "in-call", "shown").last().cloned().unwrap();
-        assert_eq!(kinds(&declined), ["incoming", "ended", "declined", "unmuted"]);
+        assert_eq!(
+            kinds(&declined),
+            ["incoming", "ended", "declined", "unmuted", "camera-off"]
+        );
     }
 
     /// One whose ring ends before anyone acts: all of it gone, nothing asked.
@@ -532,7 +541,7 @@ fn the_keys_call_answer_decline_mute_and_hang_up() {
     );
     assert!(rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().muted));
     let muted = lines(&written, "in-call", "shown").last().cloned().unwrap();
-    assert_eq!(kinds(&muted), ["chat", "connected", "muted"]);
+    assert_eq!(kinds(&muted), ["chat", "connected", "muted", "camera-off"]);
     cx.simulate_keystrokes("ctrl-shift-m");
     cx.run_until_parked();
     assert_eq!(
@@ -647,7 +656,10 @@ fn the_in_call_view_tells_a_refusal_a_failure_and_voicemail() {
     status(&rig, 1, CallStatus::Connecting);
     rig.send(Event::Voicemail { call: call(1) });
     let voicemail = lines(&written, "in-call", "shown").last().cloned().unwrap();
-    assert_eq!(kinds(&voicemail), ["chat", "connecting", "unmuted", "voicemail"]);
+    assert_eq!(
+        kinds(&voicemail),
+        ["chat", "connecting", "unmuted", "camera-off", "voicemail"]
+    );
     let active = rig.cx.read(|cx| calls_of(&rig).read(cx).call().cloned()).unwrap();
     assert_eq!(
         teams_ui::calls::status_text(&active),
@@ -660,7 +672,10 @@ fn the_in_call_view_tells_a_refusal_a_failure_and_voicemail() {
     status(&rig, 2, CallStatus::Ringing);
     status(&rig, 2, CallStatus::Ended(End::Failed("media")));
     let failed = lines(&written, "in-call", "shown").last().cloned().unwrap();
-    assert_eq!(kinds(&failed), ["chat", "ended", "failed", "media", "unmuted"]);
+    assert_eq!(
+        kinds(&failed),
+        ["chat", "ended", "failed", "media", "unmuted", "camera-off"]
+    );
     let ended = rig.cx.read(|cx| calls_of(&rig).read(cx).ended().cloned()).unwrap();
     assert_eq!(
         teams_ui::calls::end_text(&ended.end, ended.voicemail),
@@ -829,6 +844,148 @@ fn a_refusal_during_a_call_shows_in_its_bar_and_its_end_replaces_it() {
         (calls.refused().cloned(), calls.ended().map(|ended| ended.end.clone()))
     });
     assert_eq!(calls, (None, Some(End::Declined)));
+}
+
+// --- video (M3 Task 18) ---
+
+/// The rig of a build that shows calls with their video, on `feed`.
+fn video_calling(feed: &VideoFeed) -> Rig {
+    let feed = feed.clone();
+    let rig = Rig::start_with(move |cx| teams_ui::Models::with_video_calls(Some(Mri::new(ECHO)), feed, cx));
+    seed(&rig);
+    rig.cx.update(teams_ui::window::init);
+    rig
+}
+
+#[test]
+fn the_camera_is_off_when_a_call_starts_and_goes_on_and_off_by_its_key_its_button_and_the_switcher() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    assert!(drawn(cx, "call-camera"), "the camera's button");
+    assert!(!rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().camera));
+    let up = lines(&written, "in-call", "shown").last().cloned().unwrap();
+    assert_eq!(kinds(&up), ["chat", "connected", "unmuted", "camera-off"]);
+
+    cx.simulate_keystrokes("ctrl-shift-o");
+    cx.run_until_parked();
+    assert_eq!(
+        actions(&rig)[1],
+        CallAction::Camera {
+            call: call(1),
+            on: true
+        }
+    );
+    assert!(rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().camera));
+    let on = lines(&written, "in-call", "shown").last().cloned().unwrap();
+    assert_eq!(kinds(&on), ["chat", "connected", "unmuted", "camera-on"]);
+    click(cx, "call-camera");
+    assert_eq!(
+        actions(&rig)[2],
+        CallAction::Camera {
+            call: call(1),
+            on: false
+        }
+    );
+    assert!(!rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().camera));
+    let offered = rig
+        .cx
+        .read(|cx| CallCommand::fitting(calls_of(&rig).read(cx), Some(AB)));
+    assert_eq!(
+        offered,
+        [CallCommand::HangUp, CallCommand::ToggleMute, CallCommand::ToggleCamera]
+    );
+
+    // a camera that went off by itself (its device gone, its encoder failed) is shown off
+    cx.simulate_keystrokes("ctrl-shift-o");
+    cx.run_until_parked();
+    assert!(rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().camera));
+    rig.send(Event::CameraOff { call: call(1) });
+    cx.run_until_parked();
+    assert!(!rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().camera));
+    let off = lines(&written, "in-call", "shown").last().cloned().unwrap();
+    assert_eq!(kinds(&off), ["chat", "connected", "unmuted", "camera-off"]);
+
+    // the engine's refusal (a call without video) is told, and the camera stays as it was
+    rig.core
+        .call_answers
+        .lock()
+        .unwrap()
+        .push_back(Err(EngineError::Call(CallActionError::NoVideo)));
+    cx.simulate_keystrokes("ctrl-shift-o");
+    cx.run_until_parked();
+    assert!(!rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().camera));
+    assert_eq!(
+        kinds(lines(&written, "call", "refused").last().unwrap()),
+        ["camera", "no-video"]
+    );
+    no_name_in(&written);
+}
+
+#[test]
+fn the_feed_s_frames_draw_as_tiles_while_the_call_is_up_and_go_with_it() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    assert!(!drawn(cx, "video-tiles"), "no frame yet");
+
+    // the call's media shows the far end's frame and the camera's on the feed (I420, the test pattern)
+    let pattern = TestPattern::new(320, 180);
+    let output: &dyn VideoOutput = &feed;
+    output.remote().show(&pattern.frame(1)).unwrap();
+    output.preview().unwrap().show(&pattern.frame(2)).unwrap();
+    assert!(drawn(cx, "video-tile-remote") && drawn(cx, "video-tile-self"));
+    let shown: Vec<Vec<String>> = lines(&written, "video-tile", "shown").iter().map(kinds).collect();
+    assert_eq!(shown, [["remote"], ["self"]]);
+    let remote = feed.picture(Tile::Remote).unwrap();
+    assert_eq!(
+        (remote.width, remote.height, remote.bgra.len()),
+        (320, 180, 320 * 180 * 4)
+    );
+
+    // a frame not in I420 isn't taken
+    let mut wrong = pattern.frame(3);
+    wrong.format = teams_media::devices::PixelFormat::Rgb;
+    assert!(output.remote().show(&wrong).is_err());
+
+    status(&rig, 1, CallStatus::Ended(End::HungUp));
+    assert!(!drawn(cx, "video-tiles"));
+    let hidden: Vec<Vec<String>> = lines(&written, "video-tile", "hidden").iter().map(kinds).collect();
+    assert_eq!(hidden, [["remote"], ["self"]]);
+    assert!(feed.picture(Tile::Remote).is_none(), "the call's frames go with it");
+}
+
+#[test]
+fn a_build_without_the_codec_has_no_camera_and_its_key_asks_nothing() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    assert!(!drawn(cx, "call-camera"));
+    cx.simulate_keystrokes("ctrl-shift-o");
+    cx.run_until_parked();
+    assert_eq!(actions(&rig).len(), 1, "only the call");
+    assert_eq!(
+        kinds(lines(&written, "call", "refused").last().unwrap()),
+        ["camera", "no-video"]
+    );
+    let offered = rig
+        .cx
+        .read(|cx| CallCommand::fitting(calls_of(&rig).read(cx), Some(AB)));
+    assert_eq!(offered, [CallCommand::HangUp, CallCommand::ToggleMute]);
 }
 
 #[test]

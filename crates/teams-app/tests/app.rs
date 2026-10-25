@@ -225,7 +225,7 @@ fn the_app_s_calls_go_through_teams_relay_processed_as_a_call_its_client_the_web
         pacing: teams_media::devices::file::Pacing::RealTime,
     });
     let echo = teams_fence::Mri::new("28:00000000-0000-4000-8000-0000000000ec");
-    let (engine, window) = calling::on_devices(devices, Some(echo.clone()));
+    let (engine, window) = calling::on_devices(devices, Some(echo.clone()), None);
     assert_eq!(engine.media.relay, teams_core::Relay::Teams);
     assert_eq!(
         engine.media.session.processing,
@@ -236,6 +236,50 @@ fn the_app_s_calls_go_through_teams_relay_processed_as_a_call_its_client_the_web
     assert_eq!(engine.language_id.as_deref(), Some(lab::LAB_LANGUAGE));
     assert!(window.ringer.is_some(), "the ringtone on the same devices");
     assert_eq!(window.echo, Some(echo));
+    assert!(
+        engine.media.video.is_none() && window.video.is_none(),
+        "no codec, no video"
+    );
+}
+
+#[test]
+fn with_its_codec_the_app_s_calls_show_their_video_on_the_window_s_feed_off_until_the_camera_is_turned_on() {
+    let devices = Arc::new(teams_media::devices::file::FileDevices {
+        input: teams_media::devices::file::AudioInput::Silence,
+        recording: None,
+        camera: teams_media::devices::file::PatternCamera::default(),
+        pacing: teams_media::devices::file::Pacing::RealTime,
+    });
+    let library = teams_media::video::codec::H264Library::Bundled;
+    let (engine, window) = calling::on_devices(devices, None, Some(library.clone()));
+    let video = engine.media.video.expect("the calls' video");
+    assert_eq!(video.library, library);
+    assert_eq!(video.max_size, teams_media::video::convert::MaxSize::HD);
+    let feed = window.video.expect("the window's feed");
+    assert!(
+        teams_core::VideoOutput::enabled(&*video.output),
+        "the codec on by default"
+    );
+    feed.set_enabled(false);
+    assert!(
+        !teams_core::VideoOutput::enabled(&*video.output),
+        "the settings' switch is the engine's"
+    );
+}
+
+#[test]
+fn the_lab_s_codec_is_cisco_s_library_in_its_data_dir() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
+    let library = lab::openh264(config.paths());
+    let expected = config
+        .paths()
+        .data_dir()
+        .join(lab::OPENH264_DIR)
+        .join(teams_media::video::codec::CISCO_LIBRARY);
+    assert_eq!(library, teams_media::video::codec::H264Library::Cisco(expected));
+    assert!(library.check().is_err(), "not fetched in a test's data dir");
+    Ok(())
 }
 
 #[test]

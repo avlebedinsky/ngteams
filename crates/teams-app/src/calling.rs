@@ -4,21 +4,27 @@
 //! devices, the echo service's MRI for the test call).
 //!
 //! The devices are the PipeWire the build allows ([`PipeWireDevices`]): a lab or test build's is the UI sandbox's
-//! private one only, so a lab app's microphone, speaker and ringtone never reach the desktop's audio. Without it (no
+//! private one only, so a lab app's microphone, speaker, camera and ringtone never reach the desktop's. Without it (no
 //! sandbox PipeWire) the app runs without calls: no call is shown, and the engine has no calling socket.
+//!
+//! **Video** (M3 Task 18): a 1:1 call takes video when the lab's copy of Cisco's OpenH264 is there and is Cisco's
+//! ([`teams_core::lab::openh264`], fetched by `scripts/fetch-openh264.sh`); its frames are shown on the window's
+//! [`VideoFeed`], and the settings' switch ("OpenH264 Video Codec provided by Cisco Systems, Inc.") turns the codec off
+//! and on again. Without the library the calls carry audio only.
 
 use std::sync::Arc;
 
 use teams_core::account::AccountCalls;
 use teams_core::lab::{LAB_LANGUAGE, web_client_info};
-use teams_core::{CallMedia, Relay};
+use teams_core::{CallMedia, CallVideo, Relay};
 use teams_fence::Mri;
 use teams_fence::lab::LabConfig;
 use teams_media::devices::pipewire::PipeWireDevices;
 use teams_media::devices::{DeviceError, Devices};
 use teams_media::relay::RelayOptions;
 use teams_media::session::SessionConfig;
-use teams_ui::{DeviceRinger, Ringer};
+use teams_media::video::codec::H264Library;
+use teams_ui::{DeviceRinger, Ringer, VideoFeed};
 
 /// What the window's calls are made of.
 #[derive(Clone)]
@@ -27,6 +33,8 @@ pub struct AppCalls {
     pub ringer: Option<Arc<dyn Ringer>>,
     /// The echo service's MRI, for the test call; `None` until lab.toml records it.
     pub echo: Option<Mri>,
+    /// Where a 1:1 call's video is shown; `None`: the calls carry no video (no codec).
+    pub video: Option<VideoFeed>,
 }
 
 impl std::fmt::Debug for AppCalls {
@@ -34,19 +42,21 @@ impl std::fmt::Debug for AppCalls {
         f.debug_struct("AppCalls")
             .field("ringer", &self.ringer.is_some())
             .field("echo", &self.echo)
+            .field("video", &self.video.is_some())
             .finish()
     }
 }
 
-/// The account's calling on `devices` (see the module docs).
+/// The account's calling on `devices` (see the module docs), its 1:1 calls' video `video` (none without).
 #[must_use]
-pub fn account_calls(devices: Arc<dyn Devices + Send + Sync>) -> AccountCalls {
+pub fn account_calls(devices: Arc<dyn Devices + Send + Sync>, video: Option<CallVideo>) -> AccountCalls {
     AccountCalls {
         media: CallMedia {
             devices,
             relay: Relay::Teams,
             relay_options: RelayOptions::default(),
             session: SessionConfig::default(),
+            video,
         },
         client: web_client_info(),
         language_id: Some(LAB_LANGUAGE.to_owned()),
@@ -64,15 +74,24 @@ pub fn echo_of(config: &LabConfig) -> Option<Mri> {
         .map(Mri::new)
 }
 
-/// The engine's calling and the window's calls on `devices`.
+/// The engine's calling and the window's calls on `devices`, a 1:1 call's video on `video`'s library (none without).
 #[must_use]
-pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, echo: Option<Mri>) -> (AccountCalls, AppCalls) {
+pub fn on_devices(
+    devices: Arc<dyn Devices + Send + Sync>,
+    echo: Option<Mri>,
+    video: Option<H264Library>,
+) -> (AccountCalls, AppCalls) {
     let ringer: Arc<dyn Ringer> = Arc::new(DeviceRinger::new(Arc::clone(&devices)));
+    let feed = video.as_ref().map(|_| VideoFeed::new());
+    let video = video
+        .zip(feed.clone())
+        .map(|(library, feed)| teams_core::lab::call_video(library, Arc::new(feed)));
     (
-        account_calls(devices),
+        account_calls(devices, video),
         AppCalls {
             ringer: Some(ringer),
             echo,
+            video: feed,
         },
     )
 }
@@ -83,5 +102,13 @@ pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, echo: Option<Mri>) ->
 /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
 pub fn open(config: &LabConfig) -> Result<(AccountCalls, AppCalls), DeviceError> {
     let devices = PipeWireDevices::connect()?;
-    Ok(on_devices(Arc::new(devices), echo_of(config)))
+    let library = teams_core::lab::openh264(config.paths());
+    let video = match library.check() {
+        Ok(()) => Some(library),
+        Err(error) => {
+            log::info!("the calls carry no video: {error}");
+            None
+        }
+    };
+    Ok(on_devices(Arc::new(devices), echo_of(config), video))
 }

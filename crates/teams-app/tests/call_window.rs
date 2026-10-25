@@ -12,7 +12,9 @@
 //!
 //! - a calls b (Ctrl+Shift+C in the a–b chat a's settings open); b's banner, ringtone and notification come, and
 //!   the ringtone is in b's recording; b answers from the notification's Answer; both connect, and each one's tone is
-//!   in the other's recording; a hangs up (Ctrl+Shift+H) and b's call ends with it;
+//!   in the other's recording; a turns its camera on (Ctrl+Shift+O: the sandbox's fake camera, H.264 the bundled
+//!   source's), and b's window presents a's picture through GPUI's external surface and a's its self view (each
+//!   counted by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it;
 //! - a calls b again; b declines from the notification's Decline; a's call is taken by b's voicemail (as captured) and
 //!   a's in-call bar says so; a hangs up;
 //! - both quit; every write in either `fence.log` was permitted.
@@ -47,13 +49,14 @@ use teams_media::relay::{RelayOptions, RelayServer};
 use teams_media::session::SessionConfig;
 use teams_media::tone::{Tone, amplitude_at};
 use teams_media::turn::Transport as RelayTransport;
+use teams_media::video::codec::H264Library;
 use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, Trouter, TrouterCredentials};
 use teams_ui::ringtone::{DeviceRinger, RINGTONE};
 use teams_ui::settings::Settings;
-use teams_ui::{Bridge, Ringer, SettingsFile};
+use teams_ui::{Bridge, Ringer, SettingsFile, VideoFeed};
 use tokio::sync::broadcast;
 use ui_sandbox::input::{Modifier, VirtualInput};
 use ui_sandbox::pipewire::PipeWireOptions;
@@ -92,6 +95,8 @@ const B_TONE: Tone = Tone {
 };
 /// A tone heard at least this loud in a recording, in its loudest 400 ms.
 const HEARD: f32 = 0.1;
+/// The frames a tile must have presented (traced at the first and every 30th).
+const PRESENTED: u64 = 30;
 
 fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
@@ -440,6 +445,28 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
         return Err(format!("the tones didn't cross: a heard b at {a_heard:.3}, b heard a at {b_heard:.3}").into());
     }
 
+    // a turns its camera on (off when the call started): b's window presents a's picture, a's its self view
+    ctrl_shift(&mut a_keys, 'o')?;
+    a.in_call(&["connected", "camera-on"])?;
+    let presented = |tile: &'static str| {
+        move |line: &serde_json::Value| {
+            line["view"] == "video-tile"
+                && line["change"] == "presented"
+                && strings(line, "kinds") == [tile]
+                && line["frames"].as_u64().is_some_and(|frames| frames >= PRESENTED)
+        }
+    };
+    let remote = b
+        .trace
+        .next_where("b: the remote tile presented", presented("remote"))?;
+    let own = a.trace.next_where("a: the self view presented", presented("self"))?;
+    say(&format!(
+        "b presented {} of a's frames, a {} of its own",
+        remote["frames"], own["frames"]
+    ));
+    shot(b_box, "teams-app-call-video.png")?;
+    shot(a_box, "teams-app-call-self-view.png")?;
+
     // a hangs up: b's call ends with it
     ctrl_shift(&mut a_keys, 'h')?;
     a.in_call(&["ended", "hung-up"])?;
@@ -515,7 +542,12 @@ fn env(name: &str) -> SandboxResult<String> {
 /// The account's engine on the mock, as `teams_core::lab::start` builds one but for the mock origins, a test roster
 /// and a `fence.log` of its own, with its calling: its calls' media on `devices`, relayed through the mock's TURN
 /// server, unprocessed.
-fn engine(alias: Alias, devices: Arc<dyn Devices + Send + Sync>, dir: &Path) -> SandboxResult<EngineHandle> {
+fn engine(
+    alias: Alias,
+    devices: Arc<dyn Devices + Send + Sync>,
+    feed: VideoFeed,
+    dir: &Path,
+) -> SandboxResult<EngineHandle> {
     let mri = mri_of(alias);
     let tokens = Arc::new(Tokens {
         ic3: env(IC3_ENV)?,
@@ -562,6 +594,7 @@ fn engine(alias: Alias, devices: Arc<dyn Devices + Send + Sync>, dir: &Path) -> 
     };
     let media = CallMedia {
         devices,
+        video: Some(teams_core::lab::call_video(H264Library::Bundled, Arc::new(feed))),
         relay: Relay::Fixed(vec![RelayServer {
             addr: env(RELAY_ENV)?.parse()?,
             transport: RelayTransport::Udp,
@@ -590,7 +623,8 @@ fn child(alias: Alias) -> SandboxResult {
     let trace = teams_ui::ViewTrace::new(adopt_trace(env(TRACE_FD_ENV)?.parse()?)?);
     let dir = PathBuf::from(env(DIR_ENV)?);
     let devices: Arc<dyn Devices + Send + Sync> = Arc::new(PipeWireDevices::connect()?);
-    let engine = engine(alias, Arc::clone(&devices), &dir)?;
+    let feed = VideoFeed::new();
+    let engine = engine(alias, Arc::clone(&devices), feed.clone(), &dir)?;
     let settings = SettingsFile::new(dir.join("settings.toml"));
     if alias == Alias::A {
         let opened = Settings {
@@ -617,6 +651,7 @@ fn child(alias: Alias) -> SandboxResult {
                 calls: Some(AppCalls {
                     ringer: Some(ringer),
                     echo: Some(Mri::new(ECHO)),
+                    video: Some(feed),
                 }),
             },
         );

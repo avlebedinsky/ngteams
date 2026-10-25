@@ -7,7 +7,9 @@
 //!
 //! A call's engine ([`Lab::start_calling`]) has its calling too: its media on the file backend ([`call_devices`]: no
 //! audio server), relayed through Teams' relay, the microphone unprocessed (a file has no acoustic echo, and a keyed
-//! tone must reach the far end as it is), the account describing its client as the web client does.
+//! tone must reach the far end as it is), the account describing its client as the web client does. With `--video`
+//! a 1:1 call takes video on Cisco's OpenH264 (the lab's copy, [`teams_core::lab::openh264`]): the far end's frames
+//! counted ([`VideoCounts`]), the camera the file backend's test pattern.
 
 use std::fs::DirBuilder;
 use std::io;
@@ -20,11 +22,11 @@ use teams_auth::secrets::{KeyringSecretStore, SecretError};
 use teams_core::account::AccountCalls;
 use teams_core::engine::EngineHandle;
 use teams_core::lab::{self as core_lab, LAB_LANGUAGE, LabEngine, web_client_info};
-use teams_core::{CallMedia, Relay};
+use teams_core::{CallMedia, CallVideo, Relay, VideoOutput};
 use teams_fence::lab::{Alias, ChatsError, ConfigError, LabChats, LabConfig, LabLocations, LabPaths};
 use teams_fence::{Fence, Mri, OpenError};
-use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
-use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
+use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
+use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayOptions;
 use teams_media::session::SessionConfig;
@@ -115,11 +117,15 @@ impl Lab {
         &self,
         devices: impl Devices + Send + Sync + 'static,
         push: bool,
+        video: Option<CallVideo>,
     ) -> Result<EngineHandle, LabError> {
         let fence = Arc::new(Fence::open_lab_account(self.alias)?);
         let secrets = KeyringSecretStore::new(LabPaths::KEYRING_APPLICATION).await?;
         let calls = AccountCalls {
-            media: call_media(devices, Relay::Teams),
+            media: CallMedia {
+                video,
+                ..call_media(devices, Relay::Teams)
+            },
             client: web_client_info(),
             language_id: Some(LAB_LANGUAGE.to_owned()),
         };
@@ -222,6 +228,39 @@ impl Devices for TimedDevices {
     }
 }
 
+/// What a call's video showed: the far end's decoded frames, and our camera's as sent, each counted.
+#[derive(Clone, Debug, Default)]
+pub struct VideoCounts {
+    pub remote: FrameCounter,
+    pub preview: FrameCounter,
+}
+
+impl VideoOutput for VideoCounts {
+    fn remote(&self) -> Box<dyn VideoSink> {
+        Box::new(self.remote.clone())
+    }
+
+    fn preview(&self) -> Option<Box<dyn VideoSink>> {
+        Some(Box::new(self.preview.clone()))
+    }
+}
+
+impl VideoCounts {
+    /// The summary line: `video received=<frames> changed=<n> indexed=<n> gaps=<n> last_index=<n|-> sent=<frames>`,
+    /// the far end's frames as decoded (those of a test pattern carry their index) and our camera's as sent.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let (remote, sent) = (self.remote.counts(), self.preview.counts());
+        let last = remote
+            .last_index
+            .map_or_else(|| "-".to_owned(), |index| index.to_string());
+        format!(
+            "video received={} changed={} indexed={} gaps={} last_index={last} sent={}",
+            remote.frames, remote.changed, remote.indexed, remote.gaps, sent.frames
+        )
+    }
+}
+
 /// A call's media on `devices` through `relay`, the microphone unprocessed (see the module docs).
 #[must_use]
 pub fn call_media(devices: impl Devices + Send + Sync + 'static, relay: Relay) -> CallMedia {
@@ -233,5 +272,6 @@ pub fn call_media(devices: impl Devices + Send + Sync + 'static, relay: Relay) -
             processing: ProcessingConfig::OFF,
             ..SessionConfig::default()
         },
+        video: None,
     }
 }

@@ -7,7 +7,12 @@
 //! b's page loads at the a–b chat, starts its calling stack (the Calls app), and plays Chrome's fake microphone (the
 //! tone in bursts, [`write_burst_tone`]); every native client plays the same tone in bursts (`--tone 440 --bursts`), so
 //! each side can hear the other's: the page by its audio tap ([`wait_for_tone_in_from`]), the native client by the
-//! tone's presence in its recording (`tone hz=440 heard=true`). Three phases, in order:
+//! tone's presence in its recording (`tone hz=440 heard=true`). In the first two phases the call carries video both
+//! ways too (M3 Task 18): the native client takes video on Cisco's OpenH264 (`--video`, the lab's copy) and turns its
+//! camera on (the file backend's test pattern) [`NATIVE_CAMERA_AFTER`] after its call connected; b's page turns its
+//! camera on (Chrome's fake camera) once it heard the native client's tone; the page must decode the native client's
+//! video ([`video_frames`] from the phase's capture on, at least [`PAGE_FRAMES`] within [`VIDEO_WAIT`]) and the native
+//! client must show the page's (its `video received=` line, at least [`NATIVE_FRAMES`]). Three phases, in order:
 //! 1. **a's native client calls b** (`teams-headless a call b`): b's page, held as a callee while it rings
 //!    ([`RING_SENDS`]), must show the incoming call; it clicks answer only on the run's own call (`ab-call`'s ring
 //!    check, [`EarlierRings::OwnLeftOut`]: every invitation the page received is a's call to b in no group chat, an
@@ -40,10 +45,10 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_call::{
-    ACCEPT_AUDIO_CSS, ANSWER_HELD, CALLER_JOIN_HELD, CONNECT_WAIT, CalleeAction, CalleeRole, EarlierRings, HANG_UP_CSS,
-    INCOMING_CALL, Modality, RING_SENDS, RING_WAIT, RunCall, TONE_WAIT, back_to_chat, caller_join_rule, check_ring,
-    hang_up_page, hold_callee, judge_callee, mri, place_call, policy, stand_up_calling, switch_microphone,
-    wait_calling_socket, watch_controls,
+    ACCEPT_AUDIO_CSS, ANSWER_HELD, CALLER_JOIN_HELD, CAMERA, CONNECT_WAIT, CalleeAction, CalleeRole, EarlierRings,
+    HANG_UP_CSS, INCOMING_CALL, Modality, RING_SENDS, RING_WAIT, RunCall, TONE_WAIT, VIDEO_WAIT, back_to_chat,
+    caller_join_rule, check_ring, hang_up_page, hold_callee, judge_callee, mri, place_call, policy, stand_up_calling,
+    switch_microphone, video_frames, wait_calling_socket, watch_controls,
 };
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, setup};
 use super::dsl::{Selector, js_string};
@@ -82,6 +87,13 @@ pub const ELSEWHERE_HOLD: Duration = Duration::from_secs(ELSEWHERE_WAIT.as_secs(
 /// The phrase of the call end a callee's other endpoint gets when the call was answered on another one (seen
 /// 2026-10-25, `ab-call-native`: `code 487`, "Call cancelled as it was accepted by another fork.").
 pub const ANSWERED_ELSEWHERE: &str = "accepted by another fork";
+/// How long after its call connected a native client turns its camera on.
+pub const NATIVE_CAMERA_AFTER: Duration = Duration::from_secs(5);
+/// The native client's video frames b's page must have decoded (about 2 s of its camera).
+pub const PAGE_FRAMES: u64 = 30;
+/// The page's video frames a native client must have shown.
+pub const NATIVE_FRAMES: u64 = 30;
+
 /// What b's page clicks on its incoming call: answer, what it sends from then on held as `ab-call`'s.
 const ANSWER: CalleeAction = CalleeAction {
     label: ANSWER_HELD,
@@ -219,12 +231,14 @@ impl Run {
         hold_callee(session, RING_SENDS)?;
         let since = now_ms();
         self.first_ring = Some(since);
-        self.spawn(Alias::A, CALLER, &call_args(NATIVE_HOLD))?;
+        self.spawn(Alias::A, CALLER, &call_args(NATIVE_HOLD, true))?;
         self.answer_on_page(session, since, report).await?;
         let from = capture_len(session);
         hear_on_page(session, from, report).await?;
+        see_on_page(session, from, report).await?;
         let caller = self.finish(CALLER, NATIVE_HOLD, session, report).await?;
         judge_native(&caller, report);
+        judge_native_video(&caller, report);
         wait_screen_gone(session, report).await;
         Ok(())
     }
@@ -239,7 +253,7 @@ impl Run {
         report
             .notes
             .push("phase 2: b's page calls a's native client".to_owned());
-        self.spawn(Alias::A, CALLEE, &watch_args("--answer-lab-calls"))?;
+        self.spawn(Alias::A, CALLEE, &watch_args("--answer-lab-calls", true))?;
         self.wait_output(CALLEE, session, "calling_registration registered=true", NATIVE_REGISTER)
             .await?;
         session.clear_forced();
@@ -262,6 +276,7 @@ impl Run {
             .notes
             .push(format!("b: in the call a's native client answered, at {}", now_ms()));
         hear_on_page(session, from, report).await?;
+        see_on_page(session, from, report).await?;
         linger(session, PAGE_HOLD).await;
         if !hang_up_page(Alias::B, session, report).await? {
             report
@@ -272,6 +287,7 @@ impl Run {
             .await?;
         let callee = self.stop(CALLEE, session, report).await?;
         judge_native(&callee, report);
+        judge_native_video(&callee, report);
         Ok(())
     }
 
@@ -286,12 +302,12 @@ impl Run {
         report
             .notes
             .push("phase 3: a's native client calls b, answered on b's page while b's native client rings".to_owned());
-        self.spawn(Alias::B, OTHER, &watch_args("--calls"))?;
+        self.spawn(Alias::B, OTHER, &watch_args("--calls", false))?;
         self.wait_output(OTHER, session, "calling_registration registered=true", NATIVE_REGISTER)
             .await?;
         hold_callee(session, RING_SENDS)?;
         let since = now_ms();
-        self.spawn(Alias::A, CALLER, &call_args(ELSEWHERE_HOLD))?;
+        self.spawn(Alias::A, CALLER, &call_args(ELSEWHERE_HOLD, false))?;
         self.wait_output(OTHER, session, "incoming_call", RING_WAIT).await?;
         self.answer_on_page(session, since, report).await?;
         self.wait_output(OTHER, session, "ring_ended", ELSEWHERE_WAIT).await?;
@@ -470,10 +486,13 @@ async fn stop_native(mut native: Native, session: &mut LabSession, report: &mut 
     native.finished(status, report)
 }
 
-/// `call b` with the run's tone, held `hold` once connected.
-fn call_args(hold: Duration) -> Vec<String> {
+/// `call b` with the run's tone, held `hold` once connected; with `video`, its camera on as the run's are.
+fn call_args(hold: Duration, video: bool) -> Vec<String> {
     let mut args = vec!["call".to_owned(), "b".to_owned()];
     args.extend(tone_args());
+    if video {
+        args.extend(video_args());
+    }
     args.extend([
         "--seconds".to_owned(),
         hold.as_secs().to_string(),
@@ -495,11 +514,24 @@ fn tone_args() -> Vec<String> {
     ]
 }
 
-/// `watch <flag>` with the run's tone.
-fn watch_args(flag: &str) -> Vec<String> {
+/// `watch <flag>` with the run's tone; with `video`, the answered call's camera on as the run's are.
+fn watch_args(flag: &str, video: bool) -> Vec<String> {
     let mut args = vec!["watch".to_owned(), flag.to_owned()];
     args.extend(tone_args());
+    if video {
+        args.extend(video_args());
+    }
     args
+}
+
+/// The video arguments of a native client whose call carries video: Cisco's OpenH264, the camera on
+/// [`NATIVE_CAMERA_AFTER`] after the call connected.
+fn video_args() -> Vec<String> {
+    vec![
+        "--video".to_owned(),
+        "--camera-after".to_owned(),
+        NATIVE_CAMERA_AFTER.as_secs().to_string(),
+    ]
 }
 
 /// One native client the run spawned.
@@ -576,6 +608,9 @@ pub fn is_summary(line: &str) -> bool {
         "devices ",
         "call_answer",
         "ring_ended",
+        "camera_",
+        "video_codec",
+        "video received=",
     ]
     .iter()
     .any(|kind| line.contains(kind))
@@ -595,6 +630,34 @@ pub fn ring_ended_elsewhere(output: &str) -> bool {
     output
         .lines()
         .any(|line| line.contains(" ring_ended ") && line.contains(ANSWERED_ELSEWHERE))
+}
+
+/// The frames a native client's output says it received of the far end's video (its `video received=<n>` line);
+/// `None` without the line.
+#[must_use]
+pub fn native_video_frames(output: &str) -> Option<u64> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("video received="))
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|frames| frames.parse().ok())
+}
+
+/// A native client whose call carried video must have turned its camera on and shown at least [`NATIVE_FRAMES`] of
+/// the page's video.
+fn judge_native_video(native: &Finished, report: &mut ScenarioReport) {
+    if !native.output.contains("camera_on call=") {
+        report
+            .failures
+            .push(format!("the native client ({}) didn't turn its camera on", native.what));
+    }
+    match native_video_frames(&native.output) {
+        Some(frames) if frames >= NATIVE_FRAMES => {}
+        frames => report.failures.push(format!(
+            "the native client ({}) showed {frames:?} of the page's video frames, not {NATIVE_FRAMES}",
+            native.what
+        )),
+    }
 }
 
 /// A native client must have exited 0 and heard the page's tone.
@@ -641,6 +704,35 @@ async fn hear_on_page(session: &mut LabSession, from: u64, report: &mut Scenario
             .push("b's call audio didn't go both ways (WebRTC statistics)".to_owned());
     }
     Ok(())
+}
+
+/// b's page turns its camera on (Chrome's fake camera) and must decode at least [`PAGE_FRAMES`] of the native client's
+/// video (its camera on [`NATIVE_CAMERA_AFTER`] after the call connected) within [`VIDEO_WAIT`] (the capture from byte
+/// `from` on).
+async fn see_on_page(session: &mut LabSession, from: u64, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+    session.driver().click("b turns its camera on", CAMERA).await?;
+    report.notes.push(format!("b: camera on at {}", now_ms()));
+    let Some(file) = session.capture_dir().map(|dir| dir.join(EVENTS_FILE)) else {
+        return Err(setup("the run records no capture to read the video in".to_owned()));
+    };
+    let deadline = tokio::time::Instant::now() + VIDEO_WAIT;
+    loop {
+        let frames = video_frames(&read_from(&file, from));
+        if frames >= PAGE_FRAMES {
+            report.notes.push(format!(
+                "b: decoded {frames} video frame(s) of the native client's by {}",
+                now_ms()
+            ));
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            report.failures.push(format!(
+                "b decoded {frames} of the native client's video frames within {VIDEO_WAIT:?}, not {PAGE_FRAMES}"
+            ));
+            return Ok(());
+        }
+        linger(session, Duration::from_secs(1)).await;
+    }
 }
 
 /// Waits up to [`SCREEN_GONE`] for b's call screen to go (the far end hung up), noting when it went or that it

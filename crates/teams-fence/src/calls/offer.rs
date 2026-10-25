@@ -587,7 +587,7 @@ const RECEIPT_OPTIONAL_HEADER: &str = "MS-CV";
 
 /// Judges an invitation's delivery response (see the module docs): the captured envelope, `trouter-request` equal to
 /// the delivery's.
-fn judge_receipt(envelope: &Value, trouter_request: &str) -> Result<(), DeliveryDenyReason> {
+pub(super) fn judge_receipt(envelope: &Value, trouter_request: &str) -> Result<(), DeliveryDenyReason> {
     let shape = DeliveryDenyReason::Shape;
     let object = envelope.as_object().ok_or(shape)?;
     let headers = object.get("headers").and_then(Value::as_object).ok_or(shape)?;

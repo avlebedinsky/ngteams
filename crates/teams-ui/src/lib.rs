@@ -77,6 +77,7 @@ pub mod teams_list;
 pub mod theme;
 pub mod trace;
 pub mod tray;
+pub mod video;
 pub mod view;
 pub mod window;
 
@@ -103,4 +104,5 @@ pub use switcher::Switcher;
 pub use teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
 pub use trace::{TraceId, TraceLine, ViewTrace};
 pub use tray::{Tray, TrayEvent, TrayIcon};
+pub use video::{Tiles, VideoFeed};
 pub use view::Root;

@@ -84,8 +84,10 @@ impl Link {
                 peer.handle_timeout(self.now)?;
             }
         }
-        self.a_events.extend(std::iter::from_fn(|| self.a.poll_event()));
-        self.b_events.extend(std::iter::from_fn(|| self.b.poll_event()));
+        self.a_events
+            .extend(std::iter::from_fn(|| self.a.poll_event()).filter(not_bitrate));
+        self.b_events
+            .extend(std::iter::from_fn(|| self.b.poll_event()).filter(not_bitrate));
         self.now += STEP;
         Ok(())
     }
@@ -241,6 +243,7 @@ fn audio_frames_come_out_as_they_arrive_even_out_of_order() {
         link.b.handle_timeout(link.now).unwrap();
     }
     let times: Vec<u64> = std::iter::from_fn(|| link.b.poll_event())
+        .filter(not_bitrate)
         .filter_map(|event| match event {
             PeerEvent::Audio(frame) => Some(frame.rtp_time),
             _ => None,
@@ -300,7 +303,7 @@ impl Caller {
         if now >= answerer.deadline() {
             answerer.handle_timeout(now).unwrap();
         }
-        answerer_events.extend(std::iter::from_fn(|| answerer.poll_event()));
+        answerer_events.extend(std::iter::from_fn(|| answerer.poll_event()).filter(not_bitrate));
     }
 
     /// Writes one frame of `codec` on the line `mid`.
@@ -313,6 +316,11 @@ impl Caller {
             .unwrap();
         writer.write(pt, now, time, payload.to_vec()).unwrap();
     }
+}
+
+/// Every event but a bandwidth estimate (which comes as often as `str0m` estimates).
+fn not_bitrate(event: &PeerEvent) -> bool {
+    !matches!(event, PeerEvent::Bitrate(_))
 }
 
 #[test]
@@ -333,15 +341,12 @@ fn answering_an_offer_with_video_lines_keeps_the_audio_line() {
     let answer = answerer
         .accept_offer(SdpOffer::from_sdp_string(&offer_text).unwrap())
         .unwrap();
-    // audio alone: both video lines are answered rejected (port 0), the audio line taken
+    // the audio line taken; which video lines a call takes is the dialect's to say (`tests/sdp_video.rs`): the peer
+    // alone takes what offers H.264
     let answer_text = answer.to_sdp_string();
     let lines: Vec<&str> = answer_text.lines().filter(|line| line.starts_with("m=")).collect();
     assert_eq!(lines.len(), 3, "{answer_text}");
     assert!(lines[0].starts_with("m=audio 9 "), "{answer_text}");
-    assert!(
-        lines[1..].iter().all(|line| line.starts_with("m=video 0 ")),
-        "{answer_text}"
-    );
     caller.rtc.sdp_api().accept_answer(pending, answer).unwrap();
     caller.drain(now, &mut answerer);
     let mut events = Vec::new();
@@ -361,14 +366,7 @@ fn answering_an_offer_with_video_lines_keeps_the_audio_line() {
     );
 
     answerer.write_audio(now, now, 0, &FRAME).unwrap();
-    // the rejected video line takes nothing: the caller has nothing to send on it
-    assert!(
-        caller
-            .rtc
-            .writer(video)
-            .is_none_or(|writer| writer.payload_params().next().is_none()),
-        "a rejected line names no payload"
-    );
+    assert_eq!(answerer.video_mid(), Some(video), "the offer's first video line");
     let time = MediaTime::new(0, Frequency::FORTY_EIGHT_KHZ);
     caller.write(now, audio, Codec::Opus, time, &FRAME);
     for _ in 0..10 {

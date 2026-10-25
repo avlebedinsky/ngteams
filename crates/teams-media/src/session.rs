@@ -1,7 +1,9 @@
-//! A call's audio session: the microphone through Opus to the relayed peer, and the peer through the jitter buffer and
-//! Opus to the speaker, on threads of its own.
+//! A call's media session: the microphone through Opus to the relayed peer, and the peer through the jitter buffer and
+//! Opus to the speaker, on threads of its own; and once its video started, the camera through H.264 to the peer and
+//! the peer's H.264 to a sink ([`video`]).
 //!
-//! Three threads, none of them the caller's (and never an async runtime's):
+//! Three threads for the audio, and two more for the video once it started, none of them the caller's (and never an
+//! async runtime's):
 //!
 //! - **the capture thread** (`teams-media-mic`) reads the microphone, runs each 10 ms frame through the audio
 //!   processing (echo cancellation, noise suppression, gain control: [`SessionConfig::processing`]), encodes every two
@@ -10,7 +12,12 @@
 //!   queued packets, puts arriving ones into the jitter buffer, and runs the caller's SDP commands;
 //! - **the playout thread** (`teams-media-spk`) keeps the speaker's pace (one 10 ms frame every 10 ms), taking from
 //!   the jitter buffer what to decode, recover or conceal; each frame it hands the speaker is the one it hands the
-//!   audio processing as the far end, so the echo canceller hears exactly what is played.
+//!   audio processing as the far end, so the echo canceller hears exactly what is played;
+//! - **the decoding thread** (`teams-media-vid`), once the video started ([`MediaSession::start_video`]), decodes the
+//!   far end's H.264 the network thread hands it and shows it on the sink;
+//! - **the camera thread** (`teams-media-cam`), while the camera is on ([`MediaSession::set_camera`]), encodes the
+//!   camera's frames and queues them for the network thread, which sends them while our video line is negotiated to
+//!   send.
 //!
 //! The handoffs are bounded both ways: the capture queue keeps the newest [`SessionConfig::send_queue`] packets (a
 //! network thread that falls behind loses the backlog, not the present), and the jitter buffer holds at most its
@@ -27,7 +34,9 @@
 //! on or off as the far end's Opus line asks once its offer or answer is applied. [`MediaSession::close`] (or dropping
 //! the session) hangs up the peer, releases the allocation, and joins every thread. A thread that fails (the relay,
 //! `str0m`, the codec, the audio processing) reports [`SessionEvent::Failed`] and stops the session: the other threads
-//! end, and the network thread says goodbye and releases the allocation as well as it still can on its way out.
+//! end, and the network thread says goodbye and releases the allocation as well as it still can on its way out. The
+//! camera failing (its device gone: [`SessionEvent::DeviceClosed`]) or its encoder failing
+//! ([`SessionEvent::VideoFailed`]) stops only the camera thread and turns the camera off; the session goes on.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
@@ -40,10 +49,18 @@ use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use crate::Error;
 use crate::codec::{Decoder, Encoder, OpusConfig, Packet, packet_samples};
 use crate::devices::{AudioFrame, AudioSink, AudioSource, Devices, FRAME_DURATION, FRAME_SAMPLES};
+use crate::devices::{VideoSink, VideoSource};
 use crate::jitter::{JitterBuffer, JitterConfig, JitterStats, Playout};
+use crate::peer::ReceivedVideo;
 use crate::peer::{PeerEvent, RelayedPeer};
 use crate::processing::{AudioProcessing, ProcessingConfig};
 use crate::queue::Queue;
+use crate::video::codec::{EncoderSettings, H264Library, VideoDecoder, VideoEncoder};
+use crate::video::convert::MaxSize;
+use video::{CameraLoop, DecodeLoop, OutgoingVideo, VideoShared};
+pub use video::{VideoParts, VideoStats};
+
+mod video;
 
 /// How long the network thread may take to answer an SDP command.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -88,6 +105,7 @@ impl Default for SessionConfig {
 pub enum SessionDevice {
     Microphone,
     Speaker,
+    Camera,
 }
 
 /// What the session reports.
@@ -104,6 +122,8 @@ pub enum SessionEvent {
     Failed(String),
     /// A device went away (or failed); its side of the media stopped, the rest goes on.
     DeviceClosed(SessionDevice),
+    /// The camera's encoder failed: what the camera sends stopped, the rest goes on.
+    VideoFailed(String),
 }
 
 /// The session's counts since it started.
@@ -125,6 +145,8 @@ pub struct SessionStats {
     pub buffered: usize,
     /// The jitter buffer's counts.
     pub jitter: JitterStats,
+    /// The video's counts.
+    pub video: VideoStats,
 }
 
 #[derive(Default)]
@@ -147,6 +169,7 @@ struct Shared {
     /// The encoder's configuration once the far end's SDP changed it, for the capture thread to take.
     negotiated: Mutex<Option<OpusConfig>>,
     events: SyncSender<SessionEvent>,
+    video: VideoShared,
 }
 
 impl Shared {
@@ -189,6 +212,7 @@ impl Shared {
             frames_played: read(&counters.frames_played),
             buffered: jitter.len(),
             jitter: jitter.stats(),
+            video: self.video.stats(),
         }
     }
 
@@ -208,9 +232,10 @@ enum Command {
     Reoffer(Sender<Result<SdpOffer, Error>>),
     AcceptAnswer(SdpAnswer, Sender<Result<(), Error>>),
     AcceptOffer(SdpOffer, Sender<Result<SdpAnswer, Error>>),
+    OfferVideo(bool, Sender<Result<Option<SdpOffer>, Error>>),
 }
 
-/// A running audio session.
+/// A running media session.
 pub struct MediaSession {
     shared: Arc<Shared>,
     commands: SyncSender<Command>,
@@ -221,6 +246,30 @@ pub struct MediaSession {
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// What the capture and playout threads take once the devices open; `None` once they did.
     unopened: Mutex<Option<Unopened>>,
+    /// The video's queues, and what its camera runs with once it started ([`MediaSession::start_video`]).
+    video: Mutex<SessionVideo>,
+}
+
+/// The session's video: its queues, and once it started, what a camera runs with and the camera running now.
+struct SessionVideo {
+    /// Encoded frames, from the camera thread to the network thread.
+    outgoing: Queue<OutgoingVideo>,
+    /// Received access units, from the network thread to the decoding thread.
+    incoming: Queue<ReceivedVideo>,
+    /// What a camera runs with, once the video started.
+    camera_parts: Option<CameraParts>,
+    /// The camera thread running now, with its own stop.
+    camera: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
+    /// The session's video clock's start.
+    epoch: Instant,
+}
+
+/// What each camera the session turns on runs with; the self view is handed from one camera thread to the next.
+struct CameraParts {
+    library: H264Library,
+    encoder: EncoderSettings,
+    max_size: MaxSize,
+    preview: Arc<Mutex<Option<Box<dyn VideoSink>>>>,
 }
 
 /// The capture and playout threads' parts, made when the session starts, waiting for the devices.
@@ -268,8 +317,11 @@ impl MediaSession {
             jitter: Mutex::new(JitterBuffer::new(config.jitter)),
             negotiated: Mutex::new(None),
             events: events_tx,
+            video: VideoShared::default(),
         });
         let outgoing = Queue::new(config.send_queue.max(1));
+        let video_out = Queue::new(video::SEND_QUEUE);
+        let video_in = Queue::new(video::DECODE_QUEUE);
         let session = Self {
             shared: Arc::clone(&shared),
             commands,
@@ -281,6 +333,13 @@ impl MediaSession {
                 processing,
                 outgoing: outgoing.clone(),
             })),
+            video: Mutex::new(SessionVideo {
+                outgoing: video_out.clone(),
+                incoming: video_in.clone(),
+                camera_parts: None,
+                camera: None,
+                epoch: Instant::now(),
+            }),
         };
         let network = Network {
             peer,
@@ -290,6 +349,10 @@ impl MediaSession {
             pending: None,
             opus: config.opus,
             opus_pending: false,
+            video_out,
+            video_in,
+            was_sending: false,
+            desired: 0,
         };
         session.spawn("teams-media-net", move || network.run())?;
         Ok(session)
@@ -355,6 +418,96 @@ impl MediaSession {
         self.request(Command::Reoffer)
     }
 
+    /// Starts the session's video ([`VideoParts`]): the decoding thread, showing what the far end sends on `remote`,
+    /// and what each camera turned on later runs with ([`MediaSession::set_camera`]). Once only (a later call starts
+    /// nothing).
+    ///
+    /// # Errors
+    /// [`Error::Video`] when the codec's library doesn't load, [`Error::Io`] when the thread can't be started.
+    pub fn start_video(&self, parts: VideoParts) -> Result<(), Error> {
+        let mut video = lock(&self.video);
+        if video.camera_parts.is_some() {
+            return Ok(());
+        }
+        let decoding = DecodeLoop {
+            decoder: VideoDecoder::new(&parts.library)?,
+            sink: parts.remote,
+            incoming: video.incoming.clone(),
+            shared: Arc::clone(&self.shared),
+            broken: false,
+            asked: None,
+        };
+        self.spawn("teams-media-vid", move || decoding.run())?;
+        video.camera_parts = Some(CameraParts {
+            library: parts.library,
+            encoder: parts.encoder,
+            max_size: parts.max_size,
+            preview: Arc::new(Mutex::new(parts.preview)),
+        });
+        self.shared.video.started.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Turns the camera on with `camera` (its frames encoded and sent while our video line is negotiated to send), or
+    /// off with `None` (its thread stopped and joined; nothing more is sent). A camera already on is replaced.
+    ///
+    /// # Errors
+    /// [`Error::Video`] before the video started or when the encoder can't be set up, [`Error::Io`] when the thread
+    /// can't be started.
+    pub fn set_camera(&self, camera: Option<Box<dyn VideoSource>>) -> Result<(), Error> {
+        let mut video = lock(&self.video);
+        if let Some((stop, thread)) = video.camera.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+        }
+        let shared = &self.shared.video;
+        shared.camera_on.store(false, Ordering::Relaxed);
+        let Some(camera) = camera else {
+            return Ok(());
+        };
+        let parts = video
+            .camera_parts
+            .as_ref()
+            .ok_or_else(|| Error::Video("the session's video hasn't started".into()))?;
+        let encoder = VideoEncoder::new(&parts.library, parts.encoder)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let camera_loop = CameraLoop {
+            camera,
+            encoder,
+            max_size: parts.max_size,
+            preview: Arc::clone(&parts.preview),
+            outgoing: video.outgoing.clone(),
+            shared: Arc::clone(&self.shared),
+            stop: Arc::clone(&stop),
+            epoch: video.epoch,
+        };
+        shared.desired.store(
+            u64::from(parts.encoder.max_bitrate) + video::AUDIO_HEADROOM,
+            Ordering::Relaxed,
+        );
+        let thread = video::spawn("teams-media-cam", move || camera_loop.run())?;
+        shared.camera_on.store(true, Ordering::Relaxed);
+        video.camera = Some((stop, thread));
+        Ok(())
+    }
+
+    /// Whether the camera is on ([`MediaSession::set_camera`]).
+    #[must_use]
+    pub fn camera_on(&self) -> bool {
+        self.shared.video.camera_on.load(Ordering::Relaxed)
+    }
+
+    /// Offers the session again with our video line sending (`true`, the camera on) or only receiving
+    /// ([`crate::peer::Peer::offer_video`]); the answer goes to [`MediaSession::accept_answer`]. `None` when the line
+    /// already goes that way: nothing to offer.
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if `str0m` fails, [`Error::Timeout`] or [`Error::SessionEnded`] when the network thread doesn't
+    /// answer.
+    pub fn offer_video(&self, sending: bool) -> Result<Option<SdpOffer>, Error> {
+        self.request(|reply| Command::OfferVideo(sending, reply))
+    }
+
     /// Mutes (`true`) or unmutes the microphone: while muted the capture thread encodes and sends silence in place of
     /// what it hears (the line and its timing go on), and the device stays open.
     pub fn set_muted(&self, muted: bool) {
@@ -416,6 +569,11 @@ impl MediaSession {
 
     fn stop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        let camera = lock(&self.video).camera.take();
+        if let Some((stop, thread)) = camera {
+            stop.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+        }
         let threads = std::mem::take(self.threads.get_mut().unwrap_or_else(PoisonError::into_inner));
         for handle in threads {
             // a thread that panicked has nothing left to stop
@@ -441,6 +599,14 @@ struct Network {
     opus: OpusConfig,
     /// The far end's SDP was applied and its Opus line not yet read.
     opus_pending: bool,
+    /// Encoded frames from the camera thread.
+    video_out: Queue<OutgoingVideo>,
+    /// Received access units for the decoding thread.
+    video_in: Queue<ReceivedVideo>,
+    /// Our video line was negotiated to send at the last turn.
+    was_sending: bool,
+    /// The bitrate the bandwidth estimate was last asked to look for.
+    desired: u64,
 }
 
 impl Network {
@@ -463,6 +629,7 @@ impl Network {
             self.on_event(event);
         }
         self.negotiate_opus();
+        self.video_turn()?;
         match self.outgoing.recv(NET_WAIT) {
             Ok(Some(first)) => {
                 self.send(&first)?;
@@ -508,7 +675,57 @@ impl Network {
                 self.opus_pending |= result.is_ok();
                 let _ = reply.send(result);
             }
+            Command::OfferVideo(sending, reply) => {
+                let offer = peer.offer_video(sending).map(|offered| {
+                    offered.map(|(offer, pending)| {
+                        self.pending = Some(pending);
+                        offer
+                    })
+                });
+                let _ = reply.send(offer);
+            }
         }
+    }
+
+    /// The video's part of a turn: the bitrate the estimate looks for, a keyframe the decoding thread wants, and the
+    /// camera's encoded frames sent while our line is negotiated to send (the first one after it began to send asked
+    /// to be an IDR).
+    fn video_turn(&mut self) -> Result<(), Error> {
+        let video = &self.shared.video;
+        let desired = if video.camera_on.load(Ordering::Relaxed) {
+            video.desired.load(Ordering::Relaxed)
+        } else {
+            video::AUDIO_HEADROOM
+        };
+        let peer = self.peer.peer();
+        if desired != self.desired {
+            self.desired = desired;
+            peer.set_desired_bitrate(desired);
+        }
+        if video.keyframe_needed.swap(false, Ordering::Relaxed) && peer.request_keyframe() {
+            VideoShared::count(&video.keyframes_requested, 1);
+        }
+        let sending = peer.is_connected() && peer.video_sending();
+        if sending && !self.was_sending {
+            video.keyframe_wanted.store(true, Ordering::Relaxed);
+        }
+        self.was_sending = sending;
+        let now = Instant::now();
+        while let Ok(Some(frame)) = self.video_out.recv(Duration::ZERO) {
+            let peer = self.peer.peer();
+            // a frame `str0m` won't take (our line's new direction offered and not yet answered: no sending stream
+            // yet) isn't sent; the call's audio goes on
+            if peer
+                .write_video(now, frame.captured, frame.rtp_time, &frame.frame.data)
+                .is_ok()
+            {
+                VideoShared::count(&video.sent, 1);
+            } else {
+                VideoShared::count(&video.unsent, 1);
+            }
+            self.peer.flush(now)?;
+        }
+        Ok(())
     }
 
     /// Once the far end's SDP was applied and the audio line is known (at once for our offer, once the media connects
@@ -528,6 +745,7 @@ impl Network {
     }
 
     fn on_event(&self, event: PeerEvent) {
+        let video = &self.shared.video;
         match event {
             PeerEvent::Connected => self.shared.report(SessionEvent::Connected),
             PeerEvent::Disconnected => self.shared.report(SessionEvent::Disconnected),
@@ -542,6 +760,18 @@ impl Network {
                     None => Shared::count(&self.shared.counters.malformed, 1),
                 }
             }
+            PeerEvent::Video(unit) => {
+                VideoShared::count(&video.received, 1);
+                // nobody decodes before the video started: what comes is dropped
+                if video.started.load(Ordering::Relaxed) && self.video_in.push(unit) > 0 {
+                    video.keyframe_needed.store(true, Ordering::Relaxed);
+                }
+            }
+            PeerEvent::KeyframeRequested => {
+                VideoShared::count(&video.keyframes_asked, 1);
+                video.keyframe_wanted.store(true, Ordering::Relaxed);
+            }
+            PeerEvent::Bitrate(bps) => video.estimate.store(bps, Ordering::Relaxed),
         }
     }
 
@@ -713,6 +943,7 @@ mod tests {
             jitter: Mutex::new(JitterBuffer::new(JitterConfig::default())),
             negotiated: Mutex::new(None),
             events,
+            video: VideoShared::default(),
         };
         shared.fail(&Error::Processing("a refused frame".into()));
         assert_eq!(

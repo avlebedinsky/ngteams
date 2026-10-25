@@ -152,13 +152,15 @@ What the code does and why. A change that undoes one of these needs a new reason
   socket (any host under `trouter.teams.microsoft.com`) only socket.io 0.9 types `0`, `1`, `2` and `5` pass, so a
   delivery response (`3`), a JSON message, an acknowledgement, a binary frame and anything unparsable are denied; on a
   contacting service's socket (`teams_fence::on_contacting_service`) every frame is denied; anywhere else a frame
-  passes. A frame let through is logged `allowed` (method `SEND`). Two delivery responses pass: the acknowledgement
-  of a registered call's acceptance and an offered invitation's receipt. The page's received Trouter frames
-  (`Network.webSocketFrameReceived`, observed in event order, before any send they cause) go to the call registry,
-  and a `3:::` answering a pending acceptance or an offered invitation's delivery on the same connection (the socket's
-  session and `Network` id) is decided by `Fence::check_delivery_response`: the captured envelope, `trouter-request`
-  equal to the delivery's, an acknowledgement whose links are all the start's own callbacks or a receipt with an empty
-  body, once, while the call is live or the invitation rings (a group call's chat read fresh). The browser session
+  passes. A frame let through is logged `allowed` (method `SEND`). Three delivery responses pass: the acknowledgement
+  of a registered call's acceptance, an offered invitation's receipt, and the receipt of a renegotiation, its answer or
+  its acknowledgement delivered at a live registered call's or an answered invitation's own callback. The page's
+  received Trouter frames (`Network.webSocketFrameReceived`, observed in event order, before any send they cause) go to
+  the call registry, and a `3:::` answering a pending acceptance, an offered invitation's delivery or a renegotiation's
+  on the same connection (the socket's session and `Network` id) is decided by `Fence::check_delivery_response`: the
+  captured envelope, `trouter-request` equal to the delivery's, an acknowledgement whose links are all the start's own
+  callbacks or a receipt with an empty body, once, while the call is live (answered) or the invitation rings (a group
+  call's chat read fresh for an invitation). The browser session
   also pauses at the response stage the answers that bind links: a call start's (`CALL_START_URL`) and a join's,
   which register the call (`register_start`, tied to the permitted start or join by `Network` id), and an offered
   invitation's `attach` and `accept` answers (`bind_answer`); each is continued only then.
@@ -254,7 +256,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   `Call` start on the group chat the conversation's invitation bound it to, from that invitation's callee, and its
   answer registers the call; a roster-only conversation join passes on the same binding. A renegotiation or its answer
   delivered at a call's own `mediaRenegotiation` or `mediaAnswer` callback binds the `answer` or `acknowledge` link it
-  names; the caller's `renegotiate` and `updateMediaDescriptions` come from the acceptance.
+  names, and one at its `mediaAcknowledgement` callback binds nothing; each of them may get its receipt, once (without
+  one the call controller holds the call's next negotiation); the caller's `renegotiate` and `updateMediaDescriptions`
+  come from the acceptance.
 - A group or meeting chat is judged like a 1:1 chat, by its fresh member list: a lab-only one is writable, a group
   chat the native client creates included. `chats.toml` is lab data for the scenarios and clients (`abc-chat` records
   the lab's a–b–c chat in it, once); the fence doesn't read it.
@@ -290,11 +294,17 @@ What the code does and why. A change that undoes one of these needs a new reason
   join or an answer goes only once its media is set up, the session started without its devices; the microphone and
   the speaker open only once that start, join or answer passed the fence and was taken (the call ringing, joining or
   connected). An own renegotiation begins in the machine (`Calls::begin_renegotiation`) before the session makes its
-  offer, which replaces the one it waits on. Every media step that blocks runs on tokio's blocking pool, never on the
-  engine's thread, and the calling runs as a task of its own on the engine's thread (a `LocalSet`'s), so a chat's
-  work the engine awaits doesn't hold up a call's write, deliveries or responses. Nothing answers or declines an
-  invitation but its `CallAction`; the engine stopping hangs the call up and lets an invitation that rings go
-  unanswered.
+  offer, which replaces the one it waits on; one turned away while another negotiation is in progress (`491`) goes
+  again with its offer a few seconds later (no other own one begins meanwhile), and the far end's renegotiation goes
+  first: one delivered while ours is made or waits for its answer is held until ours settles, and ours gives way to
+  it when turned away (`RenegotiationGaveWay`: the far end's answered with our camera's line only receiving, that
+  line then offered again). The media's SDP
+  steps (an answer applied, a renegotiation answered, an own offer, the camera turned) run one at a time, in the order
+  the signaling asked for them. Every media step that blocks runs on tokio's blocking pool, never on the engine's
+  thread, and the calling runs as a task of its own on the engine's thread (a `LocalSet`'s), so a chat's work the
+  engine awaits doesn't hold up a call's write, deliveries or responses. Nothing answers or declines an invitation but
+  its `CallAction`, and nothing turns the camera on but `CallAction::Camera` (off at every start, join and answer);
+  the engine stopping hangs the call up and lets an invitation that rings go unanswered.
 - **What the native client sends** (`teams-proto`): a read (`Read`: `GET`, no body), a plain request (`Request`, an
   open trait: any method and body, sent by `Transport::send` only when `teams_fence::contacting` calls it `None`,
   logged `allowed` before it goes: the registration, profile lookups and presence reads whoever they name, the

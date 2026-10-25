@@ -1092,16 +1092,27 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-media/src/*`, `crates/teams-ui/src/*`, `crates/teams-ui/tests/*`, `docs/protocol/calling.md`
 
-- [ ] confirm `openh264` for H.264 as the answers select it (versions looked up live); decide with Codex its licence
+- [x] confirm `openh264` for H.264 as the answers select it (versions looked up live); decide with Codex its licence
       and the patent question (Cisco's cover is for its prebuilt binary) and write the outcome down; hardware encoding
       stays out unless Task 21's numbers call for it
-- [ ] tests first: the sandbox's fake camera; encode, send, receive and decode on loopback through the relay, the
+      → done: `openh264` 0.9.9 (BSD-2-Clause, OpenH264 2.6.0) loading Cisco's prebuilt `libopenh264-2.6.0` by
+      `libloading` (checked by SHA-256, `scripts/fetch-openh264.sh`), the bundled source only under teams-media's
+      `test-support`; written down in `docs/protocol/calling.md` ("The H.264 codec"); the personal build's patent
+      question goes to Task 22 (`docs/backlog/openh264-patents-and-the-personal-build.md`)
+- [x] tests first: the sandbox's fake camera; encode, send, receive and decode on loopback through the relay, the
       bitrate following `str0m`'s bandwidth estimate; frames reach GPUI's external surface (the trace counts them)
-- [ ] the in-call view's video tiles and camera toggle (off when a call starts); the video follow-ups on registered
+      → done: `crates/teams-media/tests/video.rs` and `sdp_video.rs`, `crates/teams-core/tests/calls/video.rs`,
+      `crates/teams-ui/tests/calls.rs` (`video-tile` trace with its frame count), `crates/teams-app/tests/call_window.rs`
+      (the sandbox's `sandbox-camera` node, each window presenting ≥30 frames)
+- [x] the in-call view's video tiles and camera toggle (off when a call starts); the video follow-ups on registered
       calls as Task 6 mapped them
-- [ ] live: `proto-lab run ab-call-native` with video, both directions (frames decoded in the page's `getStats()`;
+      → done: tiles and the camera button (Ctrl+Shift+O, the switcher), only `CallAction::Camera` turns it on; a 1:1
+      call's camera by `renegotiate`/`answer`/`acknowledge`; found live: every negotiation delivery needs its receipt
+      (now a third delivery response the fence decides) and a `491` renegotiation goes again
+- [x] live: `proto-lab run ab-call-native` with video, both directions (frames decoded in the page's `getStats()`;
       the page's test pattern received by `teams-headless`, counted on its output)
-- [ ] the gate passes
+      → done: passed (phase 1: page decoded 34, native received 758; phase 2: page 38, native 427), no breach
+- [x] the gate passes
 
 ### Task 19: Group calls and group video
 **Files:**

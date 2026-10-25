@@ -3,15 +3,17 @@
 use std::error::Error;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
 use teams_core::{Action, EngineHandle};
 use teams_headless::cli::{CallAudio, Cli, Command, WATCH_TONE_SECONDS};
 use teams_headless::commands::{self, Answering, WatchEnd};
-use teams_headless::lab::Lab;
-use teams_headless::print::{now_ms, visible};
+use teams_headless::lab::{Lab, VideoCounts};
+use teams_headless::print::{json_line, now_ms, visible};
 use teams_headless::{availability, call, chat, echo};
+use teams_media::video::codec::CISCO_ATTRIBUTION;
 use teams_proto::chat::MessageText;
 use teams_store::OutboxState;
 use teams_trouter::Stop;
@@ -141,10 +143,10 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             audio,
         } => {
             if answer_lab_calls || calls {
-                let answering = if answer_lab_calls {
-                    Answering::LabCalls
-                } else {
-                    Answering::Nothing
+                let answering = match (answer_lab_calls, audio.camera_after) {
+                    (true, Some(after)) => Answering::LabCallsWithCamera(Duration::from_secs(after)),
+                    (true, None) => Answering::LabCalls,
+                    (false, _) => Answering::Nothing,
                 };
                 let watching = (json, answering);
                 watch_calls(lab, watching, audio, signals, out).await
@@ -163,11 +165,8 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             } else {
                 call::Target::Chat(conversation(lab, &target)?)
             };
-            let asked = CallAsked {
-                target,
-                audio,
-                plan: call_plan(seconds, wait, 0),
-            };
+            let plan = call_plan(seconds, wait, 0, audio.camera_after);
+            let asked = CallAsked { target, audio, plan };
             place_call(lab, asked, signals, out).await
         }
         Command::Join {
@@ -177,10 +176,11 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             wait,
             ring_wait,
         } => {
+            let plan = call_plan(seconds, wait, ring_wait, audio.camera_after);
             let asked = CallAsked {
                 target: call::Target::Join(conversation(lab, &chat)?),
                 audio,
-                plan: call_plan(seconds, wait, ring_wait),
+                plan,
             };
             place_call(lab, asked, signals, out).await
         }
@@ -369,14 +369,15 @@ async fn own_availability(lab: &Lab, plan: availability::Plan, signals: &mut Sig
 }
 
 /// A call's or a join's plan: held `seconds` once connected, connected within `wait` of its placing, a join's
-/// invitation within `ring_wait`.
-fn call_plan(seconds: u64, wait: u64, ring_wait: u64) -> call::Plan {
+/// invitation within `ring_wait`, the camera on `camera_after` seconds after it connected.
+fn call_plan(seconds: u64, wait: u64, ring_wait: u64, camera_after: Option<u64>) -> call::Plan {
     call::Plan {
         register_within: REGISTER_WAIT,
         invited_within: Duration::from_secs(ring_wait),
         connect_within: Duration::from_secs(wait),
         hold: Duration::from_secs(seconds),
         end_within: CALL_END_WAIT,
+        camera_after: camera_after.map(Duration::from_secs),
     }
 }
 
@@ -449,13 +450,17 @@ async fn watch_calls(
 ) -> Outcome {
     let length = Duration::from_secs(audio.tone_seconds.unwrap_or(WATCH_TONE_SECONDS));
     let files = call_files(lab, &audio, "watch", length)?;
-    let mut handle = lab.start_calling(files.devices(), true).await?;
+    let (video, counts) = video_of(lab, &audio, out)?;
+    let mut handle = lab.start_calling(files.devices(), true, video).await?;
     let end = commands::watch(&mut handle, json, answering, &lab.names, out, signals.next()).await;
     // the engine's stop ends a call still up and closes its media, and with it the recording
     handle.shutdown();
     let end = end?;
     if files.opened().speaker.is_some() {
         heard_lines(&files, &audio, out)?;
+    }
+    if let Some(counts) = counts {
+        writeln!(out, "{}", counts.line())?;
     }
     watch_outcome(end)
 }
@@ -475,7 +480,8 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
         .tone_seconds
         .map_or_else(|| call::CallFiles::length_for(&plan), Duration::from_secs);
     let files = call_files(lab, &audio, what, length)?;
-    let mut handle = lab.start_calling(files.devices(), false).await?;
+    let (video, counts) = video_of(lab, &audio, out)?;
+    let mut handle = lab.start_calling(files.devices(), false, video).await?;
     if !matches!(target, call::Target::Echo(_)) {
         let mut stderr = io::stderr();
         let synced = tokio::select! {
@@ -502,11 +508,42 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
         return Ok(ExitCode::from(INTERRUPTED));
     }
     let heard = heard_lines(&files, &audio, out)?;
+    if let Some(counts) = counts {
+        writeln!(out, "{}", counts.line())?;
+    }
     Ok(if report.completed() && (!echo || heard.is_some()) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// The call's video when `audio` asks for it (`--video`): the lab's copy of Cisco's OpenH264, loaded once here to check
+/// it is there and is Cisco's (the attribution printed), and the counts of what it shows. Without the flag, none: the
+/// library isn't loaded.
+///
+/// # Errors
+/// When the library isn't there or isn't the one Cisco published, or the output can't be written.
+fn video_of(
+    lab: &Lab,
+    audio: &CallAudio,
+    out: &mut impl Write,
+) -> Result<(Option<teams_core::CallVideo>, Option<VideoCounts>), Box<dyn Error>> {
+    if !audio.video {
+        return Ok((None, None));
+    }
+    let library = teams_core::lab::openh264(lab.paths());
+    library.check().map_err(|error| {
+        format!("{error} (fetch Cisco's library into the lab's data dir with scripts/fetch-openh264.sh)")
+    })?;
+    writeln!(
+        out,
+        "video_codec {}",
+        json_line(&serde_json::Value::String(CISCO_ATTRIBUTION.to_owned()))
+    )?;
+    let counts = VideoCounts::default();
+    let video = teams_core::lab::call_video(library, Arc::new(counts.clone()));
+    Ok((Some(video), Some(counts)))
 }
 
 /// Stops the engine (after the request it is on) and gives the command's outcome; `None` when a signal cut it short.

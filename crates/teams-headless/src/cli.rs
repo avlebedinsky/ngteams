@@ -230,6 +230,16 @@ pub struct CallAudio {
     /// `watch`'s [`WATCH_TONE_SECONDS`]). A long call's tone kept short keeps its files and their analysis small.
     #[arg(long)]
     pub tone_seconds: Option<u64>,
+    /// A 1:1 call takes video, on Cisco's OpenH264 ("OpenH264 Video Codec provided by Cisco Systems, Inc.", fetched
+    /// into the lab's data dir by `scripts/fetch-openh264.sh`; without the flag the library isn't loaded): the far
+    /// end's frames are decoded and counted, summarised at the end (`video …`). The camera stays off unless
+    /// `--camera-after`.
+    #[arg(long)]
+    pub video: bool,
+    /// Turns the camera (the test pattern, frames carrying their index) on this many seconds after the call's media
+    /// connected (for `watch`, after an answered call's).
+    #[arg(long, requires = "video")]
+    pub camera_after: Option<u64>,
 }
 
 /// How long `watch`'s tone lasts by default, in seconds.

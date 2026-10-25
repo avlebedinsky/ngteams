@@ -741,6 +741,16 @@ async fn the_media_negotiation_binds_its_answer_and_acknowledgement(lab: &Lab, c
         .send(AcknowledgeMediaAnswer::new(&context(), &link(&cc("mediaAnswers", call, "acknowledge"))).unwrap())
         .await;
     assert!(request.body.is_empty(), "a media acknowledgement has no body");
+    // sent as the web client sends it: an empty JSON body, its length said (without, the call controller took 22 s)
+    let header = |name: &str| {
+        request
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(header("content-length").as_deref(), Some("0"));
+    assert_eq!(header("content-type").as_deref(), Some("application/json"));
 }
 
 /// An invitation from a to b, delivered at b's calling endpoint: a 1:1 call's (107), or a group call's (109) in the

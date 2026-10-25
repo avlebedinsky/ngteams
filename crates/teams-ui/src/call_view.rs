@@ -5,15 +5,17 @@
 //!   ringtone and the notification are the desktop's ([`crate::call_alert`]).
 //! - **The in-call bar** while a call is up or being set up: who it is with (a chat's members other than the account,
 //!   by their names; an invitation's caller; the test call's echo), its state (calling, ringing, connecting,
-//!   connected with its duration, reconnecting, taken by voicemail), Mute or Unmute, Hang up, and why an ask went
-//!   nowhere while it is up. Once it ended, how (or why a later ask went nowhere) until the next call or Dismiss.
+//!   connected with its duration, reconnecting, taken by voicemail), Mute or Unmute, Camera on or off (a build that
+//!   shows video), Hang up, and why an ask went nowhere while it is up; under it the video tiles, the far end's
+//!   picture and the self view ([`crate::video::Tiles`]). Once it ended, how (or why a later ask went nowhere) until
+//!   the next call or Dismiss.
 //!
 //! A build that shows no calls draws none of it.
 //!
 //! Every button asks through [`calls::ask`], as the shell's keys and the switcher's commands do. What is shown is
 //! traced (`calling registered`/`unregistered` as the calling endpoint goes, `call-banner shown`/`hidden` with the call's number, its kind, whether the caller is named, a group call's
-//! chat and the caller's MRI; `in-call shown` with the call's number, its kind, state, end, mute and voicemail, its chat
-//! and its participants' MRIs; `in-call hidden`), never a name.
+//! chat and the caller's MRI; `in-call shown` with the call's number, its kind, state, end, mute, camera and voicemail,
+//! its chat and its participants' MRIs; `in-call hidden`; the tiles' `video-tile` lines), never a name.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +34,7 @@ use crate::notify::SOMEONE;
 use crate::people::Shown;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
+use crate::video::{Tiles, VideoFeed};
 
 /// How often the duration of a connected call is drawn again.
 const TICK: Duration = Duration::from_secs(1);
@@ -46,6 +49,7 @@ struct BarShown {
     /// The step a failed call failed at (a name fixed in the code).
     failed: Option<&'static str>,
     muted: bool,
+    camera: bool,
     voicemail: bool,
     chat: Option<String>,
     people: Vec<String>,
@@ -65,6 +69,10 @@ pub struct CallBar {
     participants: Option<(CallId, Vec<(String, SharedString)>)>,
     reading: Option<Task<()>>,
     ticking: Option<Task<()>>,
+    /// The video tiles, in a build that shows video, with the call they last drew.
+    tiles: Option<Tiles>,
+    tiles_call: Option<CallId>,
+    _waking: Option<Task<()>>,
     _observing: [Subscription; 2],
 }
 
@@ -81,6 +89,9 @@ impl CallBar {
             // a chat's name read again: the banner and the bar name it as its row does
             cx.observe(&list, |_, _, cx| cx.notify()),
         ];
+        let feed = calls.read(cx).video().cloned();
+        let waking = feed.as_ref().map(|feed| Self::wake_on_frames(feed, cx));
+        let tiles = feed.map(|feed| Tiles::new(feed, Arc::clone(&trace)));
         let mut bar = Self {
             core,
             calls,
@@ -92,10 +103,25 @@ impl CallBar {
             participants: None,
             reading: None,
             ticking: None,
+            tiles,
+            tiles_call: None,
+            _waking: waking,
             _observing: observing,
         };
         bar.changed(cx);
         bar
+    }
+
+    /// A new frame wakes the bar, which draws the newest one.
+    fn wake_on_frames(feed: &VideoFeed, cx: &mut Context<Self>) -> Task<()> {
+        let woken = feed.woken();
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            while woken.recv().await.is_ok() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
     }
 
     /// The call's participants other than the account, `(MRI, name)`, once read.
@@ -113,6 +139,14 @@ impl CallBar {
         {
             self.read_participants(active, cx);
         }
+        let up = active.as_ref().map(|active| active.id);
+        if let Some(gone) = self.tiles_call.filter(|call| Some(*call) != up)
+            && let Some(tiles) = &mut self.tiles
+        {
+            // the call ended (or another began): its frames go
+            tiles.clear(gone.get());
+        }
+        self.tiles_call = up;
         let connected = active
             .as_ref()
             .is_some_and(|active| active.status == CallStatus::Connected);
@@ -213,6 +247,7 @@ impl CallBar {
                         _ => None,
                     },
                     muted: false,
+                    camera: false,
                     voicemail: ended.voicemail,
                     chat: ended.chat.clone(),
                     people: Vec::new(),
@@ -275,6 +310,7 @@ impl CallBar {
             end: None,
             failed: None,
             muted: active.muted,
+            camera: active.camera,
             voicemail: active.voicemail,
             chat: active.chat.clone(),
             people: self
@@ -295,6 +331,7 @@ impl CallBar {
             line = line.kind(kind);
         }
         line = line.kind(if shown.muted { "muted" } else { "unmuted" });
+        line = line.kind(if shown.camera { "camera-on" } else { "camera-off" });
         if shown.voicemail {
             line = line.kind("voicemail");
         }
@@ -353,7 +390,7 @@ impl CallBar {
             .into_any_element()
     }
 
-    fn in_call(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn in_call(&mut self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let mut status = calls::status_text(active);
         if let (CallStatus::Connected, Some(at), false) = (&active.status, active.connected_at, active.voicemail) {
             status = format!("{status} · {}", calls::duration_text(at.elapsed().as_secs()));
@@ -379,7 +416,30 @@ impl CallBar {
                 .child(SharedString::from(refusal_text(refused)))
         });
         let mute = if active.muted { "Unmute" } else { "Mute" };
-        strip(palette)
+        let camera = self.tiles.is_some().then(|| {
+            let label = if active.camera { "Camera off" } else { "Camera on" };
+            button("call-camera", label, false, cx, |this, cx| {
+                this.ask(Ask::ToggleCamera, cx);
+            })
+        });
+        let tiles = self
+            .tiles
+            .as_mut()
+            .map(|tiles| tiles.elements(active.id.get()))
+            .filter(|tiles| !tiles.is_empty())
+            .map(|tiles| {
+                div()
+                    .debug_selector(|| "video-tiles".to_owned())
+                    .w_full()
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .bg(rgb(palette.surface))
+                    .children(tiles)
+            });
+        let bar = strip(palette)
             .debug_selector(|| "in-call".to_owned())
             .child(
                 div()
@@ -399,9 +459,16 @@ impl CallBar {
             .child(button("call-mute", mute, false, cx, |this, cx| {
                 this.ask(Ask::ToggleMute, cx);
             }))
+            .children(camera)
             .child(button("call-hang-up", "Hang up", true, cx, |this, cx| {
                 this.ask(Ask::HangUp, cx);
-            }))
+            }));
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(bar)
+            .children(tiles)
             .into_any_element()
     }
 
@@ -437,6 +504,7 @@ fn ask_label(ask: &str) -> &'static str {
         "answer" => "answer",
         "decline" => "decline",
         "hang-up" => "hang up",
+        "camera" => "turn the camera on or off",
         _ => "do that",
     }
 }

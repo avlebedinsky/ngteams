@@ -358,6 +358,10 @@ pub enum Event {
     /// The account's call was taken by the callee's voicemail (a 1:1 call the callee declined or didn't answer, as
     /// captured: the call controller forwards it there); told once it is up, and it runs on until it is hung up.
     Voicemail { call: CallId },
+    /// The camera of the account's call went off by itself (its device went away, its encoder failed, or its line
+    /// couldn't be offered again): nothing more is sent on it until the account turns it on again
+    /// ([`CallAction::Camera`]).
+    CameraOff { call: CallId },
 }
 
 /// What the engine's requests can fail with.
@@ -1533,6 +1537,7 @@ where
             CallAction::HangUp { call } => Act::HangUp(call),
             CallAction::Mute { call, muted } => Act::Mute(call, muted),
             CallAction::Renegotiate { call } => Act::Renegotiate(call),
+            CallAction::Camera { call, on } => Act::Camera(call, on),
         };
         match self.calls.as_ref() {
             Some(calls) => calls.act(act, reply),

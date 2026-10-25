@@ -9,7 +9,7 @@ publish.workspace = true
 [features]
 # Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests, the
 # mock's media and the engine's call tests, and the signals the audio processing is judged with (`test_signal`).
-test-support = []
+test-support = ["openh264/source"]
 # The personal build's devices: the desktop's PipeWire instead of the UI sandbox's (`devices::pipewire::THIS_BUILD`).
 # Only `crates/teams` enables it (crates/teams/tests/apart.rs checks every manifest); `test-support` wins over it.
 personal = []
@@ -24,6 +24,11 @@ hmac.workspace = true
 # the PipeWire backend checks its socket belongs to this user (`getuid`)
 libc.workspace = true
 md-5.workspace = true
+# the calls' video codec: H.264 through OpenH264, Cisco's prebuilt library loaded at run time (its bundled source
+# only under `test-support`, above)
+openh264.workspace = true
+# the encoder option the safe API lacks: the bitrate following the bandwidth estimate
+openh264-sys2.workspace = true
 # the calls' audio codec (libopus, built from its bundled source): 20 ms packets, in-band FEC, DTX
 opus.workspace = true
 sha1.workspace = true

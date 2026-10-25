@@ -25,6 +25,9 @@ use teams_auth::secrets::SecretStore;
 use teams_fence::lab::{Alias, LabConfig};
 use teams_fence::{Fence, LiveMembershipSource};
 
+use teams_fence::lab::LabPaths;
+use teams_media::video::codec::{EncoderSettings, H264Library};
+use teams_media::video::convert::MaxSize;
 use teams_proto::ClientInfo;
 
 use crate::account::{self, Account, AccountCalls, AccountEngine, AccountError, Membership};
@@ -105,6 +108,28 @@ pub const WEB_PLATFORM_NAME: &str = "SkypeSpaces/1415/26100212018/os=linux; osVe
                                      browser=chrome; browserVer=155.0.0.0/TsCallingVersion=2026.37.01.11";
 /// The language a lab account's calls name, as the captured starts do.
 pub const LAB_LANGUAGE: &str = "en-us";
+
+/// Where the lab keeps its copy of Cisco's OpenH264 library, under its data dir (`scripts/fetch-openh264.sh` puts it
+/// there, with Cisco's licence for it beside it).
+pub const OPENH264_DIR: &str = "openh264";
+
+/// The lab's H.264 library: Cisco's, in [`OPENH264_DIR`] (loaded only when it is the one Cisco published).
+#[must_use]
+pub fn openh264(paths: &LabPaths) -> H264Library {
+    H264Library::cisco_in(&paths.data_dir().join(OPENH264_DIR))
+}
+
+/// A lab call's video on `library`, shown on `output`: the camera encoded at up to 1.5 Mb/s, 30 frames a second, no
+/// bigger than 1280 by 720.
+#[must_use]
+pub fn call_video(library: H264Library, output: Arc<dyn crate::VideoOutput>) -> crate::CallVideo {
+    crate::CallVideo {
+        library,
+        encoder: EncoderSettings::default(),
+        max_size: MaxSize::HD,
+        output,
+    }
+}
 
 /// The lab accounts' names as lab.toml has them ([`display_name`]), by MRI: the last a person's name comes from.
 #[must_use]

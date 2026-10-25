@@ -206,6 +206,17 @@ pub(crate) fn media_answer(body: &[u8]) -> Option<(MediaContent, Option<CallLink
     ))
 }
 
+/// Whether a rejection of the account's renegotiation (`{"mediaNegotiationFailure": {"code": 491, "phrase":
+/// "Negotiation is in progress.", "resultCategories": ["ExpectedError"]}}`, `ab-call --call video`, when both pages
+/// turned their cameras on together) says another negotiation of the call was in progress: the renegotiation may go
+/// again once it is over.
+pub(crate) fn negotiation_in_progress(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| body.pointer("/mediaNegotiationFailure/code").and_then(Value::as_i64))
+        == Some(491)
+}
+
 /// How the call's services ended a call or a ring: the `callEnd` (or a conversation's end) as delivered. Each part only
 /// where the delivery gives it; nothing is read into a code no capture named.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

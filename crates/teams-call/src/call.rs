@@ -223,6 +223,9 @@ pub(crate) struct Call {
     /// A renegotiation delivered to the account and not answered yet: its offer and the `mediaAnswer` link its answer
     /// goes to.
     pub(crate) negotiation: Option<Negotiation>,
+    /// The far end's renegotiation delivered while the account's was being made or waited for its answer: told once
+    /// the account's settled (answered, turned away or given up), the media's SDP steps one after the other.
+    pub(crate) deferred: Option<Negotiation>,
     /// Every renegotiation delivered to the account that it answered in this call (its answer built and queued): a
     /// delivery of one of them again is a replay, not a new one.
     pub(crate) negotiated: Vec<Negotiation>,
@@ -231,6 +234,13 @@ pub(crate) struct Call {
     pub(crate) reoffer: Option<Reoffer>,
     /// The account's renegotiation began and its offer hasn't gone yet (`Calls::begin_renegotiation`).
     pub(crate) reoffering: bool,
+    /// The offer of the account's last renegotiation, for it to go again once the call controller turned it away
+    /// while another negotiation was in progress (`491`).
+    pub(crate) offered: Option<MediaContent>,
+    /// When the account's renegotiation turned away so goes again.
+    pub(crate) retry: Option<Instant>,
+    /// How many times the account's last renegotiation went again.
+    pub(crate) retried: u8,
     pub(crate) writes: BTreeMap<WriteId, Step>,
     /// Writes that go one after another, each once the write before it (`held_after`) was answered `2xx`.
     pub(crate) held: VecDeque<(Step, CallWrite)>,
@@ -268,9 +278,13 @@ impl Call {
             modalities: Vec::new(),
             renegotiation: None,
             negotiation: None,
+            deferred: None,
             negotiated: Vec::new(),
             reoffer: None,
             reoffering: false,
+            offered: None,
+            retry: None,
+            retried: 0,
             writes: BTreeMap::new(),
             held: VecDeque::new(),
             held_after: None,
