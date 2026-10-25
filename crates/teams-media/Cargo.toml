@@ -1,6 +1,6 @@
 [package]
 name = "teams-media"
-description = "A call's media: the TURN client (RFC 8656) and its relay link, Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's SDP, the relayed str0m peer, Opus with a jitter buffer, the audio session on threads of its own, and the device seam (file and PipeWire backends)"
+description = "A call's media: the TURN client (RFC 8656) and its relay link, Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's SDP, the relayed str0m peer, echo cancellation, noise suppression and gain control, Opus with a jitter buffer, the audio session on threads of its own, and the device seam (file and PipeWire backends)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ publish.workspace = true
 
 [features]
 # Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests and
-# the echo-call spike's.
+# the echo-call spike's, and the signals the audio processing is judged with (`test_signal`).
 test-support = []
 # The personal build's devices: the desktop's PipeWire instead of the UI sandbox's (`devices::pipewire::THIS_BUILD`).
 # Only `crates/teams` enables it (crates/teams/tests/apart.rs checks every manifest); `test-support` wins over it.
@@ -32,6 +32,9 @@ pipewire.workspace = true
 # the SDP the call's peer speaks: offers and answers taken from and handed to it
 str0m.workspace = true
 thiserror.workspace = true
+# the microphone's echo cancellation (AEC3), noise suppression and gain control: WebRTC's audio processing module,
+# built from the source the binding bundles (BSD-3-Clause; it logs nothing)
+webrtc-audio-processing.workspace = true
 
 [dev-dependencies]
 # the SDP fixture's entries

@@ -10,15 +10,17 @@
 //!
 //! - [`peer`]: the call's `str0m` audio peer, sans-IO, and [`peer::RelayedPeer`], the same behind a TURN allocation
 //!   (relayed candidates only).
+//! - [`processing`]: echo cancellation, noise suppression and gain control on the microphone's frames, the
+//!   speaker's frames heard as the far end (WebRTC's audio processing module).
 //! - [`codec`]: Opus as the calls configure it (20 ms packets, in-band FEC, DTX when asked), and [`jitter`]: the
 //!   receiving side's jitter buffer, which plays packets in order and recovers or conceals what is missing.
-//! - [`session`]: a call's audio on threads of its own: the microphone through Opus to the relayed peer, the peer
-//!   through the jitter buffer to the speaker, with bounded handoffs to and from the devices.
+//! - [`session`]: a call's audio on threads of its own: the microphone through the processing and Opus to the
+//!   relayed peer, the peer through the jitter buffer to the speaker, with bounded handoffs to and from the devices.
 //! - [`devices`]: the device seam (a microphone, a speaker, a camera): a file backend that opens no audio server, and
 //!   a PipeWire backend that opens only the server its build allows (the UI sandbox's, or the desktop's for the
 //!   personal build). [`tone`] makes and measures the test tone.
 //!
-//! The rest of the media (echo cancellation, video coding) comes in later, and nothing here sends signaling.
+//! The rest of the media (video coding) comes in later, and nothing here sends signaling.
 
 use std::io;
 
@@ -26,11 +28,14 @@ pub mod codec;
 pub mod devices;
 pub mod jitter;
 pub mod peer;
+pub mod processing;
 mod queue;
 pub mod relay;
 pub mod sdp;
 pub mod session;
 pub mod stun;
+#[cfg(feature = "test-support")]
+pub mod test_signal;
 #[cfg(feature = "test-support")]
 pub mod test_turn;
 pub mod tone;
@@ -62,6 +67,9 @@ pub enum Error {
     NotConnected,
     #[error("device: {0}")]
     Device(#[from] devices::DeviceError),
+    /// The audio processing module refused its setup or a frame.
+    #[error("audio processing: {0}")]
+    Processing(String),
     /// The media session's network thread is gone.
     #[error("the media session ended")]
     SessionEnded,

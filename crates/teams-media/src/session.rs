@@ -3,12 +3,14 @@
 //!
 //! Three threads, none of them the caller's (and never an async runtime's):
 //!
-//! - **the capture thread** (`teams-media-mic`) reads the microphone, encodes every two 10 ms frames into a 20 ms
-//!   packet and queues it for the network thread;
+//! - **the capture thread** (`teams-media-mic`) reads the microphone, runs each 10 ms frame through the audio
+//!   processing (echo cancellation, noise suppression, gain control: [`SessionConfig::processing`]), encodes every two
+//!   frames into a 20 ms packet and queues it for the network thread;
 //! - **the network thread** (`teams-media-net`) owns the [`RelayedPeer`]: it turns the relay and `str0m`, sends the
 //!   queued packets, puts arriving ones into the jitter buffer, and runs the caller's SDP commands;
 //! - **the playout thread** (`teams-media-spk`) keeps the speaker's pace (one 10 ms frame every 10 ms), taking from
-//!   the jitter buffer what to decode, recover or conceal.
+//!   the jitter buffer what to decode, recover or conceal; each frame it hands the speaker is the one it hands the
+//!   audio processing as the far end, so the echo canceller hears exactly what is played.
 //!
 //! The handoffs are bounded both ways: the capture queue keeps the newest [`SessionConfig::send_queue`] packets (a
 //! network thread that falls behind loses the backlog, not the present), and the jitter buffer holds at most its
@@ -18,8 +20,9 @@
 //! SDP crosses as `str0m`'s own (`teams_media::sdp` converts it to and from Teams' dialect); each command is answered
 //! by the network thread within [`COMMAND_TIMEOUT`]. The encoder starts as [`SessionConfig::opus`] says and turns DTX
 //! on or off as the far end's Opus line asks once its offer or answer is applied. [`MediaSession::close`] (or dropping
-//! the session) hangs up the peer, releases the allocation, and joins every thread; a network thread that fails says
-//! goodbye and releases the allocation as well as it still can before it ends.
+//! the session) hangs up the peer, releases the allocation, and joins every thread. A thread that fails (the relay,
+//! `str0m`, the codec, the audio processing) reports [`SessionEvent::Failed`] and stops the session: the other threads
+//! end, and the network thread says goodbye and releases the allocation as well as it still can on its way out.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
@@ -34,6 +37,7 @@ use crate::codec::{Decoder, Encoder, OpusConfig, Packet, packet_samples};
 use crate::devices::{AudioFrame, AudioSink, AudioSource, Devices, FRAME_DURATION, FRAME_SAMPLES};
 use crate::jitter::{JitterBuffer, JitterConfig, JitterStats, Playout};
 use crate::peer::{PeerEvent, RelayedPeer};
+use crate::processing::{AudioProcessing, ProcessingConfig};
 use crate::queue::Queue;
 
 /// How long the network thread may take to answer an SDP command.
@@ -58,6 +62,9 @@ pub struct SessionConfig {
     pub jitter: JitterConfig,
     /// Packets the capture thread may queue for the network thread (20 ms each); more drops the oldest.
     pub send_queue: usize,
+    /// What the microphone's frames go through before they are encoded ([`ProcessingConfig::CALL`] by default;
+    /// [`ProcessingConfig::OFF`] leaves them as they are).
+    pub processing: ProcessingConfig,
 }
 
 impl Default for SessionConfig {
@@ -66,6 +73,7 @@ impl Default for SessionConfig {
             opus: OpusConfig::default(),
             jitter: JitterConfig::default(),
             send_queue: 10,
+            processing: ProcessingConfig::CALL,
         }
     }
 }
@@ -86,7 +94,8 @@ pub enum SessionEvent {
     Disconnected,
     /// The far end closed the media. Final.
     Closed,
-    /// The relay or `str0m` failed and the network thread ended. Final.
+    /// The relay, `str0m`, the codec or the audio processing failed, and the session stopped: every thread ended, the
+    /// peer said goodbye and released the allocation as well as it still could. Final.
     Failed(String),
     /// A device went away (or failed); its side of the media stopped, the rest goes on.
     DeviceClosed(SessionDevice),
@@ -149,6 +158,13 @@ impl Shared {
         }
     }
 
+    /// Reports that a thread failed with `error` and stops the session: the other threads end at their next turn, the
+    /// network thread hanging up on its way out.
+    fn fail(&self, error: &Error) {
+        self.report(SessionEvent::Failed(error.to_string()));
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
     fn count(counter: &AtomicU64, by: u64) {
         counter.fetch_add(by, Ordering::Relaxed);
     }
@@ -199,13 +215,18 @@ impl MediaSession {
     /// until the SDP is exchanged and the media connects.
     ///
     /// # Errors
-    /// [`Error::Device`] when a device can't be opened, [`Error::Opus`] when libopus refuses the setup, [`Error::Io`]
-    /// when a thread can't be started.
+    /// [`Error::Device`] when a device can't be opened, [`Error::Opus`] when libopus refuses the setup,
+    /// [`Error::Processing`] when the audio processing can't be set up, [`Error::Io`] when a thread can't be started.
     pub fn start(peer: RelayedPeer, devices: &dyn Devices, config: SessionConfig) -> Result<Self, Error> {
         let microphone = devices.microphone()?;
         let speaker = devices.speaker()?;
         let encoder = Encoder::new(&config.opus)?;
         let decoder = Decoder::new()?;
+        let processing = if config.processing.any() {
+            Some(Arc::new(AudioProcessing::new(config.processing)?))
+        } else {
+            None
+        };
         let (events_tx, events) = mpsc::sync_channel(EVENT_QUEUE);
         let (commands, commands_rx) = mpsc::sync_channel(COMMAND_QUEUE);
         let shared = Arc::new(Shared {
@@ -235,6 +256,7 @@ impl MediaSession {
         let capture = Capture {
             microphone,
             encoder,
+            processing: processing.clone(),
             outgoing,
             shared: Arc::clone(&shared),
         };
@@ -242,6 +264,7 @@ impl MediaSession {
         let playout = PlayoutLoop {
             speaker,
             decoder,
+            processing,
             shared,
             pcm: Vec::with_capacity(crate::codec::MAX_PACKET_SAMPLES + FRAME_SAMPLES),
         };
@@ -342,7 +365,7 @@ impl Network {
     fn run(mut self) {
         while !self.shared.stopping() {
             if let Err(error) = self.turn() {
-                self.shared.report(SessionEvent::Failed(error.to_string()));
+                self.shared.fail(&error);
                 break;
             }
         }
@@ -468,6 +491,8 @@ impl Network {
 struct Capture {
     microphone: Box<dyn AudioSource>,
     encoder: Encoder,
+    /// The near end's processing, shared with the playout thread, which feeds it the far end.
+    processing: Option<Arc<AudioProcessing>>,
     outgoing: Queue<Outgoing>,
     shared: Arc<Shared>,
 }
@@ -477,8 +502,8 @@ impl Capture {
         while !self.shared.stopping() {
             match self.microphone.next_frame(MIC_WAIT) {
                 Ok(Some(frame)) => {
-                    if let Err(error) = self.encode(&frame) {
-                        self.shared.report(SessionEvent::Failed(error.to_string()));
+                    if let Err(error) = self.encode(frame) {
+                        self.shared.fail(&error);
                         break;
                     }
                 }
@@ -493,13 +518,16 @@ impl Capture {
         self.outgoing.close();
     }
 
-    fn encode(&mut self, frame: &AudioFrame) -> Result<(), Error> {
+    fn encode(&mut self, mut frame: AudioFrame) -> Result<(), Error> {
         let captured = Instant::now();
+        if let Some(processing) = &self.processing {
+            processing.near_end(&mut frame)?;
+        }
         let negotiated = self.shared.negotiated().take();
         if let Some(config) = negotiated {
             self.encoder.configure(&config)?;
         }
-        if let Some(packet) = self.encoder.push(frame)? {
+        if let Some(packet) = self.encoder.push(&frame)? {
             let counters = &self.shared.counters;
             Shared::count(&counters.encoded, 1);
             let dropped = self.outgoing.push(Outgoing { packet, captured });
@@ -513,6 +541,8 @@ impl Capture {
 struct PlayoutLoop {
     speaker: Box<dyn AudioSink>,
     decoder: Decoder,
+    /// The audio processing the capture thread runs, which hears every played frame as the far end.
+    processing: Option<Arc<AudioProcessing>>,
     shared: Arc<Shared>,
     /// Decoded samples not yet played.
     pcm: Vec<f32>,
@@ -534,6 +564,12 @@ impl PlayoutLoop {
                 played = 0;
             }
             let frame = self.next_frame();
+            if let Some(processing) = &self.processing
+                && let Err(error) = processing.far_end(&frame)
+            {
+                self.shared.fail(&error);
+                return;
+            }
             if self.speaker.play(&frame).is_err() {
                 self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
                 return;
@@ -564,5 +600,28 @@ impl PlayoutLoop {
         let frame = AudioFrame::from_samples(&self.pcm[..FRAME_SAMPLES]).unwrap_or_else(AudioFrame::silence);
         self.pcm.drain(..FRAME_SAMPLES);
         frame
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_that_fails_reports_it_and_stops_the_session() {
+        let (events, reported) = mpsc::sync_channel(EVENT_QUEUE);
+        let shared = Shared {
+            stop: AtomicBool::new(false),
+            counters: Counters::default(),
+            jitter: Mutex::new(JitterBuffer::new(JitterConfig::default())),
+            negotiated: Mutex::new(None),
+            events,
+        };
+        shared.fail(&Error::Processing("a refused frame".into()));
+        assert_eq!(
+            reported.try_recv(),
+            Ok(SessionEvent::Failed("audio processing: a refused frame".into()))
+        );
+        assert!(shared.stopping(), "the other threads go on");
     }
 }

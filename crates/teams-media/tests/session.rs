@@ -1,7 +1,9 @@
 //! Two native audio sessions on loopback through the TURN test server, on the file backend: each one's tone reaches
 //! the other's recording (Goertzel), on a clean relay and with loss and reordering injected; neither waits on a stuck
 //! device of its own, and a stuck speaker that plays again does so at the jitter buffer's depth; a device that goes
-//! away and the far end's hang-up are reported; DTX follows the far end's Opus line.
+//! away and the far end's hang-up are reported; DTX follows the far end's Opus line. With A's speaker looped back into
+//! its microphone, the session's audio processing takes B's echo out of what A sends: every frame A plays is the far
+//! end its echo canceller hears.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -13,13 +15,18 @@ use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer};
 use support::{
-    A_TONE, B_TONE, CONNECT_WAIT, Fault, FaultyDevices, Gate, Heard, file_devices, negotiate, recording, start,
-    wait_for,
+    A_TONE, B_TONE, CONNECT_WAIT, Fault, FaultyDevices, Gate, Heard, LoopbackDevices, file_devices, negotiate,
+    recording, start, start_with, wait_for,
 };
 use teams_media::Error;
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
+use teams_media::devices::wav::WavWriter;
+use teams_media::devices::{AudioFrame, Devices, FRAME_DURATION, FRAME_SAMPLES};
+use teams_media::processing::ProcessingConfig;
 use teams_media::session::{SessionDevice, SessionEvent, SessionStats};
+use teams_media::test_signal::{rms, samples, speech_like};
 use teams_media::test_turn::{Impairment, TurnServer};
+use teams_media::tone::decibels;
 
 /// How long the media runs once connected.
 const TALK: Duration = Duration::from_secs(3);
@@ -30,6 +37,13 @@ const SETTLE: Duration = Duration::from_millis(500);
 const TAIL: Duration = Duration::from_millis(200);
 /// How long a stuck speaker plays again before its delay is judged.
 const RESUME: Duration = Duration::from_secs(1);
+/// How long the echo canceller talks: [`CONVERGE`] to converge, then what is judged.
+const ECHO_TALK: Duration = Duration::from_secs(8);
+const CONVERGE: Duration = Duration::from_secs(4);
+/// How far below what A's microphone hears the echo B gets back must be, in dB: less than the processing's own
+/// margin on frames handed over in step (`tests/processing.rs`), as the speaker's and the microphone's threads hand
+/// them over at their own times.
+const SESSION_ECHO_MARGIN_DB: f32 = 20.0;
 
 /// One run: A and B on `turn`, talking for [`TALK`]; returns what each heard of the other and each one's counts.
 struct Run {
@@ -294,4 +308,114 @@ fn dtx_follows_the_far_ends_opus_line() {
     eprintln!("over {TALK:?} of silence A encoded {a_sent} packets, B {b_sent}");
     assert!(b_sent >= 100, "B has no DTX: {b_sent} packets");
     assert!(a_sent * 5 <= b_sent, "A has DTX: {a_sent} packets against B's {b_sent}");
+}
+
+/// How long after A's speaker played a frame A's microphone hears its echo.
+const ECHO_DELAY: Duration = Duration::from_millis(100);
+/// How many runs the echo test may make for one whose echo path stayed as it was set.
+const ECHO_RUNS: usize = 3;
+
+/// What B gets back of its own speech-like signal when A's speaker is looped into A's microphone ([`ECHO_DELAY`]
+/// later, 6 dB down), and the level of the echo A's microphone heard over the same stretch; `None` when the loop dropped frames
+/// once the media connected (A's microphone thread fell a second behind: the echo path changed under the canceller).
+fn echo_back(processing: ProcessingConfig) -> Option<(f32, f32)> {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let speech = dir.path().join("speech.wav");
+    let mut writer = WavWriter::create(&speech).unwrap();
+    writer.write(&samples(&speech_like(3000, 5, 0.5))).unwrap();
+    writer.finish().unwrap();
+    let b_path = recording(dir.path(), "b");
+    let a_devices = LoopbackDevices::new(ECHO_DELAY, 6.0);
+    let b_devices = FileDevices {
+        input: AudioInput::Wav(speech),
+        recording: Some(b_path.clone()),
+        camera: PatternCamera::default(),
+        pacing: Pacing::RealTime,
+    };
+    let started = Instant::now();
+    let a = start_with(&turn, &a_devices, processing);
+    let b = start(&turn, &b_devices);
+    negotiate(&a, &b);
+    wait_for(&a, &SessionEvent::Connected, CONNECT_WAIT);
+    wait_for(&b, &SessionEvent::Connected, CONNECT_WAIT);
+    let connected = started.elapsed();
+    std::thread::sleep(ECHO_TALK);
+    let ended = started.elapsed();
+    let (a_stats, b_stats) = (a.close(), b.close());
+    eprintln!("{processing:?}\nA {a_stats:?}\nB {b_stats:?}");
+    let dropped = a_devices.dropped_since(started + connected);
+    if dropped > 0 {
+        let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+        eprintln!(
+            "the loop dropped {dropped} frames after the media connected (load {}): run again",
+            load.trim()
+        );
+        return None;
+    }
+    let (from, to) = (connected + CONVERGE, ended.saturating_sub(TAIL));
+    let back = Heard::read(&b_path, from, to).rms();
+    // A's speaker started with A's session, a frame every 10 ms
+    let frame_at = |at: Duration| usize::try_from(at.as_micros() / FRAME_DURATION.as_micros()).unwrap();
+    let played = a_devices.played.lock().unwrap();
+    let stretch = &played[frame_at(from).min(played.len())..frame_at(to).min(played.len())];
+    assert!(
+        stretch.len() * FRAME_SAMPLES >= 48_000,
+        "A played {} frames",
+        played.len()
+    );
+    Some((back, rms(stretch) * a_devices.gain()))
+}
+
+/// [`echo_back`] from the first of [`ECHO_RUNS`] runs whose echo path stayed as it was set.
+fn echo_back_undisturbed(processing: ProcessingConfig) -> (f32, f32) {
+    (0..ECHO_RUNS)
+        .find_map(|_| echo_back(processing))
+        .unwrap_or_else(|| panic!("the loop dropped frames in all {ECHO_RUNS} runs"))
+}
+
+#[test]
+fn the_session_takes_the_far_end_s_echo_out_of_what_it_sends() {
+    // without the processing B gets its own echo back, about as loud as A's microphone heard it
+    let (back, echo) = echo_back_undisturbed(ProcessingConfig::OFF);
+    eprintln!("processing off: A's microphone heard the echo at {echo:.4}, B got back {back:.4}");
+    assert!(echo > 0.02, "A's microphone heard B's speech: {echo}");
+    assert!(decibels(back, echo) > -6.0, "B got its echo back at {back}");
+    // with it, the echo is taken out
+    let (back, echo) = echo_back_undisturbed(ProcessingConfig::CALL);
+    let suppressed = -decibels(back, echo);
+    eprintln!(
+        "processing on: A's microphone heard the echo at {echo:.4}, B got back {back:.6} ({suppressed:.1} dB down)"
+    );
+    assert!(echo > 0.02, "A's microphone heard B's speech: {echo}");
+    assert!(
+        suppressed >= SESSION_ECHO_MARGIN_DB,
+        "B's echo is only {suppressed:.1} dB down"
+    );
+}
+
+#[test]
+fn the_loopback_hands_a_played_frame_to_the_microphone_only_once_its_delay_passed() {
+    let delay = Duration::from_millis(100);
+    let devices = LoopbackDevices::new(delay, 6.0);
+    let mut microphone = devices.microphone().unwrap();
+    let mut speaker = devices.speaker().unwrap();
+    let frame = AudioFrame::from_samples(&[0.5; FRAME_SAMPLES]).unwrap();
+    let played = Instant::now();
+    speaker.play(&frame).unwrap();
+    assert!(
+        microphone.next_frame(Duration::ZERO).unwrap().is_none(),
+        "the microphone heard something before the delay"
+    );
+    let heard = microphone
+        .next_frame(Duration::from_secs(2))
+        .unwrap()
+        .expect("the echo");
+    let after = played.elapsed();
+    assert!(after >= delay, "the echo came back after {after:?}");
+    let expected = 0.5 * devices.gain();
+    assert!(
+        heard.samples().iter().all(|sample| (sample - expected).abs() < 1e-6),
+        "the microphone heard something else than the played frame"
+    );
 }

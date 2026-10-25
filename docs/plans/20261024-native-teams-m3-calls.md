@@ -726,12 +726,42 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-media/src/*`
 
-- [ ] confirm `webrtc-audio-processing` (version looked up live; licence, its C++ build needs and logging checked as
+- [x] confirm `webrtc-audio-processing` (version looked up live; licence, its C++ build needs and logging checked as
       the reach audit does)
-- [ ] tests first: the sink looped back into the source with a delay and attenuation, the echo suppressed by a set
+      → done: `webrtc-audio-processing` 2.1.0 (crates.io's newest, 2026-05-13), with its `-config` and `-sys` crates
+      2.1.0; each gives its licence as a file (`license-file = "COPYING"`), Google's BSD-3-Clause text for WebRTC, so
+      the reach audit reads a licence file for exactly those three packages and only when it holds that licence's
+      grant, third clause and disclaimer (`crates/teams-ui/tests/reach.rs`, the media's audio processing binding beside
+      PipeWire and Opus). Its C++ build: the system's `webrtc-audio-processing` is 1.3 and the binding needs 2.x, so
+      `bundled` (meson and ninja build the bundled module, `rust-objcopy` from the toolchain prefixes its symbols,
+      `bindgen` through clang); meson takes the system's Abseil (20260817, through pkg-config) instead of its wrap's
+      download, and links it dynamically. No tool or library was missing. Logging: the crates take `log` only as a
+      dev-dependency, and the module's build defines `NDEBUG`, which leaves `rtc_base/logging.cc` at `LS_NONE`
+- [x] tests first: the sink looped back into the source with a delay and attenuation, the echo suppressed by a set
       margin (dB, written in the test); a near-end tone kept while both talk; noise under a tone reduced; the played
       signal fed as the far end on the same 10 ms frames
-- [ ] the gate passes
+      → done: `teams_media::processing` (`AudioProcessing`: `far_end` analyses a played frame, `near_end` processes a
+      captured one in place, each side locked by the module so one instance is shared by the playout and capture
+      threads; `ProcessingConfig::CALL` = AEC3 with its high-pass filter, moderate noise suppression, AGC2's adaptive
+      digital gain; `OFF` passes frames unchanged). `MediaSession` runs it (`SessionConfig::processing`, `CALL` by
+      default): the capture thread processes each microphone frame before Opus, the playout thread hands the module
+      each frame just before the speaker plays it. `tests/processing.rs` (frames in step, the echo 6 dB down):
+      the echo suppressed by 25 dB or more once converged (30.6 dB at 100 ms, 63.4 dB at the sandbox loopback's
+      250 ms); a near-end voice kept within 6 dB while the far end talks (−0.6 dB), the echo between its segments
+      still 25 dB down (31.2); noise lowered 6 dB or more (8.9) with the voice under it within 3 dB (−0.3); `OFF`
+      changes nothing. `tests/session.rs`: A's speaker looped into A's microphone (100 ms, 6 dB) through two sessions
+      on the TURN test server; B gets its echo back at about A's microphone's level with the processing off and
+      20 dB or more down with it on (61.4 dB; 56–73 dB over 24 runs at load averages up to 47). A run in which the
+      loop dropped frames after the media connected (A's microphone thread a second behind: the echo path changed
+      under the canceller, which then leaked, once −15 dB at 3× the cores in parallel copies) is reported with the
+      load and run again, at most 3 runs. ⚠️ A steady tone is noise to the noise suppression (a 440 Hz tone
+      loses about 13 dB within 2 s), so the processing is judged with `teams_media::test_signal` (`test-support`):
+      a speech-like far end (noise in syllables) and a voice-like near end (a tone that moves between 440, 660, 550
+      and 880 Hz every 250 ms and stops for 50 ms); the session's transport tests keep their steady tones with the
+      processing `OFF`. A later probe that measures a steady tone through a processed microphone (the echo call's
+      round trip, the sandbox's tone source) uses `OFF` where no acoustic echo exists (the file backend) or a
+      voice-like signal
+- [x] the gate passes
 
 ### Task 11: The sealed call writes and the calling service
 **Files:**

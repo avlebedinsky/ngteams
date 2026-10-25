@@ -1,5 +1,6 @@
 //! Two media sessions through the loopback TURN server, on the file backend (or devices of a test's own).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -8,6 +9,7 @@ use str0m::change::{SdpAnswer, SdpOffer};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioFrame, AudioSink, AudioSource, DeviceError, Devices, SAMPLE_RATE, VideoSource, wav};
 use teams_media::peer::RelayedPeer;
+use teams_media::processing::ProcessingConfig;
 use teams_media::relay::{RelayLink, RelayOptions, RelayServer};
 use teams_media::session::{MediaSession, SessionConfig, SessionEvent};
 use teams_media::test_turn::{PASSWORD, TurnServer, USER};
@@ -104,6 +106,15 @@ impl Heard {
     /// The level of `hz` over the whole stretch.
     pub fn level(&self, hz: f32) -> f32 {
         amplitude_at(self.stretch(), hz)
+    }
+
+    /// The RMS level of the whole stretch.
+    pub fn rms(&self) -> f32 {
+        let stretch = self.stretch();
+        let sum: f64 = stretch.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+        #[expect(clippy::cast_possible_truncation, reason = "a level")]
+        let level = (sum / f64::from(u32::try_from(stretch.len().max(1)).unwrap())).sqrt() as f32;
+        level
     }
 
     /// The share of the stretch's 20 ms windows in which `hz` is heard at `level` or more.
@@ -211,12 +222,149 @@ impl Devices for FaultyDevices {
     }
 }
 
+/// The speaker looped back into the microphone: each played frame comes back `delay` after it was played,
+/// `attenuation_db` down, and the microphone hears nothing else (an echo path with no one talking at its end). The
+/// microphone keeps the speaker's pace: it hands over a frame only once its delay has passed, so the echo canceller
+/// hears each frame as the far end `delay` before it hears that frame's echo. A microphone thread that falls
+/// [`LINE_LIMIT`] behind loses the oldest frames, as a device's queue would, and the echo path's delay changes there;
+/// the line notes when.
+pub struct LoopbackDevices {
+    line: Arc<Line>,
+    gain: f32,
+    delay: Duration,
+    /// Every frame the speaker played, for the test to read.
+    pub played: Arc<Mutex<Vec<AudioFrame>>>,
+}
+
+/// The frames on their way from the speaker to the microphone, each with when the microphone may hear it.
+#[derive(Default)]
+struct Line {
+    frames: Mutex<VecDeque<(Instant, AudioFrame)>>,
+    arrived: Condvar,
+    /// When frames were dropped.
+    dropped: Mutex<Vec<Instant>>,
+}
+
+/// The most the line holds (1 s).
+const LINE_LIMIT: usize = 100;
+
+impl LoopbackDevices {
+    pub fn new(delay: Duration, attenuation_db: f32) -> Self {
+        Self {
+            line: Arc::default(),
+            gain: 10.0_f32.powf(-attenuation_db / 20.0),
+            delay,
+            played: Arc::default(),
+        }
+    }
+
+    /// The gain the line applies.
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
+
+    /// Frames the line dropped since `since`: each one shortened the echo path.
+    pub fn dropped_since(&self, since: Instant) -> usize {
+        let dropped = self.line.dropped.lock().unwrap();
+        dropped.iter().filter(|at| **at >= since).count()
+    }
+}
+
+struct LoopSource(Arc<Line>);
+
+impl AudioSource for LoopSource {
+    fn next_frame(&mut self, timeout: Duration) -> Result<Option<AudioFrame>, DeviceError> {
+        let line = &*self.0;
+        let limit = Instant::now() + timeout;
+        let mut frames = line.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            let now = Instant::now();
+            let wake = match frames.front() {
+                Some((due, _)) if *due <= now => return Ok(frames.pop_front().map(|(_, frame)| frame)),
+                Some((due, _)) => (*due).min(limit),
+                None => limit,
+            };
+            if wake <= now {
+                return Ok(None);
+            }
+            frames = line
+                .arrived
+                .wait_timeout(frames, wake - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+struct LoopSink {
+    line: Arc<Line>,
+    gain: f32,
+    delay: Duration,
+    played: Arc<Mutex<Vec<AudioFrame>>>,
+}
+
+impl AudioSink for LoopSink {
+    fn play(&mut self, frame: &AudioFrame) -> Result<(), DeviceError> {
+        self.played
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(frame.clone());
+        let mut echo = frame.clone();
+        for sample in echo.samples_mut() {
+            *sample *= self.gain;
+        }
+        let mut frames = self.line.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        frames.push_back((Instant::now() + self.delay, echo));
+        while frames.len() > LINE_LIMIT {
+            frames.pop_front();
+            self.line
+                .dropped
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(Instant::now());
+        }
+        self.line.arrived.notify_all();
+        Ok(())
+    }
+}
+
+impl Devices for LoopbackDevices {
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        Ok(Box::new(LoopSource(Arc::clone(&self.line))))
+    }
+
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        Ok(Box::new(LoopSink {
+            line: Arc::clone(&self.line),
+            gain: self.gain,
+            delay: self.delay,
+            played: Arc::clone(&self.played),
+        }))
+    }
+
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        Err(DeviceError::Closed)
+    }
+}
+
 /// Where a test's recordings go.
 pub fn recording(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.wav"))
 }
 
-/// Starts a session on `devices` behind its own allocation on `turn`.
+/// Starts a session on `devices` behind its own allocation on `turn`, its microphone unprocessed: these tests judge
+/// what the media carries with a steady tone, which the call's noise suppression takes for noise and lowers
+/// (`tests/processing.rs` judges the processing, `tests/session.rs`'s
+/// `the_session_takes_the_far_end_s_echo_out_of_what_it_sends` the session running it).
 pub fn start(turn: &TurnServer, devices: &dyn Devices) -> MediaSession {
-    MediaSession::start(relayed(turn), devices, SessionConfig::default()).unwrap()
+    start_with(turn, devices, ProcessingConfig::OFF)
+}
+
+/// Starts a session on `devices` behind its own allocation on `turn`, its microphone through `processing`.
+pub fn start_with(turn: &TurnServer, devices: &dyn Devices, processing: ProcessingConfig) -> MediaSession {
+    let config = SessionConfig {
+        processing,
+        ..SessionConfig::default()
+    };
+    MediaSession::start(relayed(turn), devices, config).unwrap()
 }

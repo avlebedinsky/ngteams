@@ -3,8 +3,8 @@
 //! client stays the null one, so nothing in their sources hands GPUI another; nothing in them reads a token's value
 //! out of its `Secret`; and the search is the store's, never the service's (no client crate names Substrate).
 //!
-//! The media's PipeWire and Opus bindings are held to the same audit (no network client, licences, no logger of
-//! their own).
+//! The media's PipeWire, Opus and audio processing bindings are held to the same audit (no network client, licences,
+//! no logger of their own).
 //!
 //! The UI kit's audit (M2 Task 7), what can be checked of it: `gpui-component`'s whole tree for the host holds no
 //! HTTP or WebSocket client, and every package in it is under a licence an Apache-2.0/MIT project can take; the
@@ -185,6 +185,44 @@ const LICENCES: [&str; 14] = [
     "Unicode-DFS-2016",
 ];
 
+/// Packages that give their licence as a file rather than an SPDX id, read as BSD-3-Clause: the audio processing
+/// binding's crates, whose files are Google's BSD-3-Clause text for WebRTC.
+const BSD_3_CLAUSE_FILES: [&str; 3] = [
+    "webrtc-audio-processing",
+    "webrtc-audio-processing-config",
+    "webrtc-audio-processing-sys",
+];
+
+/// What a licence file must say to be read as BSD-3-Clause: its grant, its third clause and its disclaimer.
+const BSD_3_CLAUSE_TEXT: [&str; 3] = [
+    "Redistribution and use in source and binary forms, with or without",
+    "Neither the name of",
+    "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS",
+];
+
+/// A package's licence as an SPDX expression: its `license`, or for a package of [`BSD_3_CLAUSE_FILES`] whose
+/// `license-file` holds that licence's text, BSD-3-Clause. `None` for anything else.
+fn licence_of(found: &Value) -> Option<String> {
+    if let Some(expression) = found["license"].as_str() {
+        return Some(expression.to_owned());
+    }
+    let name = found["name"].as_str()?;
+    if !BSD_3_CLAUSE_FILES.contains(&name) {
+        return None;
+    }
+    let manifest = Path::new(found["manifest_path"].as_str()?);
+    let text = fs::read_to_string(manifest.parent()?.join(found["license_file"].as_str()?)).ok()?;
+    BSD_3_CLAUSE_TEXT
+        .iter()
+        .all(|phrase| text.contains(phrase))
+        .then(|| "BSD-3-Clause".to_owned())
+}
+
+/// Whether `found`'s licence ([`licence_of`]) is one we can take.
+fn licensed_for_us(found: &Value) -> bool {
+    licence_of(found).is_some_and(|expression| licence_allowed(&expression))
+}
+
 /// Whether an SPDX expression (`A OR B`, `A/B`, `(A OR B) AND C`) allows use under one of [`LICENCES`]: some
 /// alternative whose every part is allowed.
 fn licence_allowed(expression: &str) -> bool {
@@ -240,7 +278,7 @@ fn the_kit_brings_no_network_client_and_only_licences_we_can_take() {
     assert!(clients.is_empty(), "the kit's tree holds {clients:?}");
     let refused: Vec<String> = tree
         .iter()
-        .filter(|found| !found["license"].as_str().is_some_and(licence_allowed))
+        .filter(|found| !licensed_for_us(found))
         .map(|found| format!("{} {} ({})", found["name"], found["version"], found["license"]))
         .collect();
     assert!(refused.is_empty(), "under a licence we can't take: {refused:?}");
@@ -259,6 +297,14 @@ const PIPEWIRE_BINDING: [&str; 4] = ["pipewire", "libspa", "pipewire-sys", "libs
 
 /// The Opus binding the media's codec takes (`teams-media`): the crate and the crate that builds and binds libopus.
 const OPUS_BINDING: [&str; 2] = ["opus", "opusic-sys"];
+
+/// The audio processing binding the media's echo cancellation takes (`teams-media`): the crate, its configuration
+/// types and the crate that builds and binds WebRTC's module.
+const AUDIO_PROCESSING_BINDING: [&str; 3] = [
+    "webrtc-audio-processing",
+    "webrtc-audio-processing-config",
+    "webrtc-audio-processing-sys",
+];
 
 /// A native binding `teams-media` takes (its first crate the direct dependency), held to the kit's audit before it
 /// reaches the app: no HTTP or WebSocket client in its tree, only licences we can take, and no logger in the binding
@@ -287,7 +333,7 @@ fn audit_media_binding(binding: &[&str]) {
     assert!(clients.is_empty(), "the binding's tree holds {clients:?}");
     let refused: Vec<String> = tree
         .iter()
-        .filter(|found| !found["license"].as_str().is_some_and(licence_allowed))
+        .filter(|found| !licensed_for_us(found))
         .map(|found| format!("{} {} ({})", found["name"], found["version"], found["license"]))
         .collect();
     assert!(refused.is_empty(), "under a licence we can't take: {refused:?}");
@@ -310,6 +356,29 @@ fn the_media_s_pipewire_binding_brings_no_network_client_no_logger_and_only_lice
 #[test]
 fn the_media_s_opus_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
     audit_media_binding(&OPUS_BINDING);
+}
+
+/// WebRTC's audio processing module is built from the source the binding bundles with `NDEBUG` defined, which
+/// leaves its logger off (`rtc_base/logging.cc`); the binding's crates take `log` only for their examples.
+#[test]
+fn the_media_s_audio_processing_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
+    audit_media_binding(&AUDIO_PROCESSING_BINDING);
+}
+
+#[test]
+fn a_licence_file_counts_only_for_the_packages_read_and_only_with_the_licence_s_text() {
+    let metadata = metadata();
+    for name in BSD_3_CLAUSE_FILES {
+        let found = package(&metadata, &package_id(&metadata, name));
+        assert!(found["license"].is_null(), "{name} now names its licence");
+        assert_eq!(licence_of(found).as_deref(), Some("BSD-3-Clause"), "{name}");
+    }
+    let mut unread = package(&metadata, &package_id(&metadata, "webrtc-audio-processing")).clone();
+    unread["name"] = "not-read".into();
+    assert_eq!(licence_of(&unread), None, "a package not on the list");
+    let mut elsewhere = package(&metadata, &package_id(&metadata, "webrtc-audio-processing")).clone();
+    elsewhere["license_file"] = "Cargo.toml".into();
+    assert_eq!(licence_of(&elsewhere), None, "a file without the licence's text");
 }
 
 #[test]
