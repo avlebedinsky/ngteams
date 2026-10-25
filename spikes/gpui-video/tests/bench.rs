@@ -58,6 +58,7 @@ fn bench_sandbox_options() -> SandboxOptions {
         height: 1080,
         refresh_mhz: Some(60_000),
         niri_extra: NIRI_FULL_WINDOW,
+        ..SandboxOptions::default()
     }
 }
 

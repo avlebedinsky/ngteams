@@ -7,3 +7,5 @@ excessive-nesting-threshold = 5
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+# Names doc comments write as they are, beside clippy's own list ("..").
+doc-valid-idents = ["PipeWire", "WirePlumber", ".."]

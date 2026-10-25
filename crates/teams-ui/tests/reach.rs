@@ -3,6 +3,8 @@
 //! client stays the null one, so nothing in their sources hands GPUI another; nothing in them reads a token's value
 //! out of its `Secret`; and the search is the store's, never the service's (no client crate names Substrate).
 //!
+//! The media's PipeWire binding is held to the same audit (no network client, licences, no logger of its own).
+//!
 //! The UI kit's audit (M2 Task 7), what can be checked of it: `gpui-component`'s whole tree for the host holds no
 //! HTTP or WebSocket client, and every package in it is under a licence an Apache-2.0/MIT project can take; the
 //! default features the kit turns on in `gpui-pre` give GPUI's Linux platform no X11 backend; and the app crates never
@@ -249,6 +251,49 @@ fn the_kit_brings_no_network_client_and_only_licences_we_can_take() {
         "gpui-pre is the vendored path crate: {}",
         gpui[0]["id"]
     );
+}
+
+/// The PipeWire binding the device seam's backend takes (`teams-media`): the crate and the crates it binds through.
+const PIPEWIRE_BINDING: [&str; 4] = ["pipewire", "libspa", "pipewire-sys", "libspa-sys"];
+
+/// The media's PipeWire binding, held to the kit's audit before it reaches the app: no HTTP or WebSocket client in its
+/// tree, only licences we can take, and no logger in the binding itself (libpipewire's own warnings go to stderr, not
+/// through `log`, so nothing of it can bypass `teams-log` or the compile-time cap).
+#[test]
+fn the_media_s_pipewire_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
+    let metadata = metadata();
+    assert!(
+        direct_dependencies(&metadata, "teams-media")
+            .iter()
+            .any(|name| name == "pipewire"),
+        "teams-media takes the binding"
+    );
+    let tree = closure(&metadata, "pipewire");
+    for name in PIPEWIRE_BINDING {
+        assert!(
+            tree.iter().any(|found| found["name"] == name),
+            "{name} is in the binding's tree"
+        );
+    }
+    let clients: Vec<&str> = tree
+        .iter()
+        .filter_map(|found| found["name"].as_str())
+        .filter(|name| NETWORK_CLIENTS.contains(name))
+        .collect();
+    assert!(clients.is_empty(), "the binding's tree holds {clients:?}");
+    let refused: Vec<String> = tree
+        .iter()
+        .filter(|found| !found["license"].as_str().is_some_and(licence_allowed))
+        .map(|found| format!("{} {} ({})", found["name"], found["version"], found["license"]))
+        .collect();
+    assert!(refused.is_empty(), "under a licence we can't take: {refused:?}");
+    for name in PIPEWIRE_BINDING {
+        let loggers: Vec<String> = direct_dependencies(&metadata, name)
+            .into_iter()
+            .filter(|dependency| ["log", "tracing"].contains(&dependency.as_str()))
+            .collect();
+        assert!(loggers.is_empty(), "{name} logs through {loggers:?}");
+    }
 }
 
 #[test]

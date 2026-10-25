@@ -641,18 +641,52 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-media/src/*`, `crates/ui-sandbox/src/*`
 
-- [ ] confirm the PipeWire crate (`pipewire`; `cpal` the fallback) (versions looked up live; licence, threads and
+- [x] confirm the PipeWire crate (`pipewire`; `cpal` the fallback) (versions looked up live; licence, threads and
       logging checked as the reach audit does); decide with Codex if the two are close
-- [ ] tests first: the device seam (`Devices`): a PipeWire backend and a file backend (a tone or WAV in, a recording
+      → done: `pipewire` 0.10.1 (crates.io's newest, with `v0_3_49` for a playback buffer's requested size; the
+      machine has libpipewire 1.6.9), MIT like `libspa` and both `-sys` crates; its whole tree is under licences we
+      take (bindgen, BSD-3-Clause, and clang-sys only at build time); none of the binding's crates depends on `log`
+      or `tracing` (libpipewire's own warnings go to stderr); its objects aren't `Send`, so the backend runs
+      PipeWire's main loop on a thread of its own (libpipewire adds its data thread). The audit is a test
+      (`crates/teams-ui/tests/reach.rs`, the media's PipeWire binding). `cpal` 0.18.2 isn't close: its Linux backend
+      is ALSA, which reaches PipeWire through the ALSA plugin with no way to pin the server's socket, and it has no
+      camera; so no Codex discussion
+- [x] tests first: the device seam (`Devices`): a PipeWire backend and a file backend (a tone or WAV in, a recording
       out, a generated test pattern as the camera, received frames counted; no audio server); which PipeWire a build
       may open fixed at build time (Development Approach: `test-support` wins; `teams-media`'s `personal` feature only
       from `crates/teams`, the manifest test extended); a build with both `personal` and `test-support` on refuses the
       desktop's PipeWire and Pulse sockets; a lab build refuses any PipeWire but the sandbox's
-- [ ] tests first: the sandbox runs a private PipeWire (its own runtime dir, nothing of the desktop's) with a source
+      → done: `teams_media::devices` (10 ms mono f32 frames at 48 kHz, raw video frames; sources read with a
+      timeout, sinks that never wait), `devices::file` (a tone, a WAV file or silence at the device's pace, a WAV
+      recording whose header is brought up to date every second, the test pattern `devices::pattern` whose frames
+      carry their index, `FrameCounter`), `devices::pipewire` (`Reach`, `THIS_BUILD = reach_for(test-support,
+      personal)`; the sandbox's server only at `<UI_SANDBOX_DIR>/pipewire/pipewire-0` with the sandbox's own client
+      config, refused without a sandbox, for a sandbox dir that is or holds `/run/user/<uid>` or `/run/pipewire`, for
+      a link out of the sandbox dir, for the desktop's PipeWire and Pulse sockets; the socket connected by us and
+      handed over as a descriptor, so libpipewire never looks for a server itself), `teams_media::tone`.
+      `tests/devices.rs`, `tests/pipewire_reach.rs` (this build has both features and is refused in the test
+      process's own session); `crates/teams/tests/apart.rs` checks `teams-media`'s `personal` too; the lab build
+      (no feature) is `reach_for(false, false)` (unit-tested) and the sandbox probe built alone turns on no
+      `teams-media` feature (`crates/ui-sandbox/tests/pipewire.rs`, `cargo tree`); under `cargo test --workspace` the
+      probe links the unified `test-support`+`personal` build, so the canary run's refusal is that build's
+- [x] tests first: the sandbox runs a private PipeWire (its own runtime dir, nothing of the desktop's) with a source
       playing a given tone, a sink recorded to a file, a fake camera (a moving test pattern) and a loopback feeding a
       sink back into a source with a set delay and attenuation; a canary on the
       session's own PipeWire and Pulse sockets proves no sandboxed process reaches them
-- [ ] the gate passes
+      → done: `ui_sandbox::pipewire` (`SandboxOptions::pipewire`, or `PrivatePipeWire` alone): `pipewire` on a config
+      of our own (the speaker a null sink; the microphone a filter graph mixing the tone with the speaker's monitor
+      delayed and attenuated, gain 0 without an echo) and `wireplumber` on a profile of our own (the policy only, no
+      hardware monitor, no D-Bus feature), both in an environment built from scratch with plugin and module dirs cut
+      down to links to the few needed (no ALSA, Bluetooth, V4L2, libcamera, D-Bus or portal library); the camera and
+      the speaker's recording on a thread of the sandbox's owner (`pipewire::media`). `tests/pipewire.rs`: through
+      `teams-media`'s backend in a sandboxed probe (`ui-sandbox-media-probe`) the tone is heard at its level, the
+      camera's frames count up with their index and move, a played tone lands in the recording, and a burst comes
+      back at the microphone after the loopback's delay (250 ms set, about 330 ms measured with the streams'
+      latency) at its attenuation (12 dB set, 12.0 measured); a child run with canaries on the session's PipeWire,
+      Pulse and bus sockets (and a client config drop-in nobody may read) stays silent.
+      ⚠️ PipeWire 1.6.9's own `videotestsrc` node aborts the server when it shuts down, so the camera is our own
+      stream; the session manager is a private WirePlumber, since nothing else links streams to the defaults
+- [x] the gate passes
 
 ### Task 9: Opus and the relay on loopback
 **Files:**

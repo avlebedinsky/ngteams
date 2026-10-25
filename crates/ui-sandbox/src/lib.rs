@@ -11,6 +11,9 @@
 //!   `zwp_virtual_keyboard_manager_v1` and `zwlr_virtual_pointer_manager_v1`.
 //! - **A no-op URI opener** ([`opener`]): `xdg-open` (and the other launchers GPUI tries) first on the client's
 //!   `PATH`, recording what it was asked to open and opening nothing.
+//! - **A private PipeWire** ([`pipewire`], when [`SandboxOptions::pipewire`] asks): its own server and session
+//!   manager, a microphone playing a given tone (with the speaker's echo fed back when asked), a speaker recorded to a
+//!   file, the test pattern as the camera; no device plugin, no D-Bus.
 //!
 //! Every child's environment is built from scratch ([`clean_command`]): no `WAYLAND_DISPLAY`, `DISPLAY`, `NIRI_SOCKET`,
 //! D-Bus address or `XDG_RUNTIME_DIR` of the session leaks in, and every descriptor it would inherit is closed but the
@@ -24,6 +27,7 @@
 pub mod bus;
 pub mod input;
 pub mod opener;
+pub mod pipewire;
 pub mod spawn;
 
 use std::{
@@ -41,7 +45,12 @@ use std::{
 
 use tempfile::TempDir;
 
-use crate::{bus::PrivateBus, input::VirtualInput, opener::Opened};
+use crate::{
+    bus::PrivateBus,
+    input::VirtualInput,
+    opener::Opened,
+    pipewire::{PipeWireOptions, PipeWireTools, PrivatePipeWire},
+};
 
 /// Errors of the harness: anything goes, with a readable message.
 pub type SandboxResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -66,8 +75,8 @@ animations {\n    off\n}\nprefer-no-csd\n";
 pub const NIRI_FULL_WINDOW: &str = "layout {\n    gaps 0\n    default-column-width { proportion 1.0; }\n\
     focus-ring {\n        off\n    }\n    border {\n        off\n    }\n}\n";
 
-/// The weston output and the niri config.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The weston output, the niri config, and the private PipeWire if one is wanted.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SandboxOptions {
     pub width: u32,
     pub height: u32,
@@ -75,6 +84,8 @@ pub struct SandboxOptions {
     pub refresh_mhz: Option<u32>,
     /// Appended to the niri config.
     pub niri_extra: &'static str,
+    /// A private PipeWire ([`pipewire`]) with these sounds and camera; `None` runs none.
+    pub pipewire: Option<PipeWireOptions>,
 }
 
 impl Default for SandboxOptions {
@@ -84,6 +95,7 @@ impl Default for SandboxOptions {
             height: 800,
             refresh_mhz: None,
             niri_extra: "",
+            pipewire: None,
         }
     }
 }
@@ -104,7 +116,7 @@ pub fn clean_command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
-fn on_path(path: &OsStr, program: &str) -> Option<PathBuf> {
+pub(crate) fn on_path(path: &OsStr, program: &str) -> Option<PathBuf> {
     std::env::split_paths(path)
         .map(|dir| dir.join(program))
         .find(|path| path.is_file())
@@ -271,16 +283,23 @@ pub fn required() -> bool {
 /// # Errors
 /// The tools are missing and `GPUI_SMOKE_REQUIRE=1`, or they fail to start.
 pub fn sandbox_or_skip(test: &str, options: &SandboxOptions) -> SandboxResult<Option<Sandbox>> {
+    if options.pipewire.is_some()
+        && let Err(reason) = PipeWireTools::find()
+    {
+        return unavailable(test, &reason, required());
+    }
     match Tools::find() {
         Ok(tools) => Ok(Some(Sandbox::start(&tools, options)?)),
         Err(reason) => unavailable(test, &reason, required()),
     }
 }
 
-/// A private headless weston with a niri nested in it, a private bus and the opener; all stopped on drop.
+/// A private headless weston with a niri nested in it, a private bus, the opener, and a private PipeWire when asked;
+/// all stopped on drop.
 pub struct Sandbox {
-    /// Dropped (stopped) before the dir it lives in.
+    /// Dropped (stopped) before the dir they live in.
     bus: PrivateBus,
+    pipewire: Option<PrivatePipeWire>,
     helpers: Vec<Child>,
     dir: TempDir,
     options: SandboxOptions,
@@ -302,10 +321,12 @@ impl Drop for Sandbox {
 }
 
 impl Sandbox {
-    /// Starts weston, then niri nested in it, then the bus and its fakes, and installs the opener.
+    /// Starts weston, then niri nested in it, then the bus and its fakes, and installs the opener; then the private
+    /// PipeWire, its session manager and its camera and recording when [`SandboxOptions::pipewire`] asks.
     ///
     /// # Errors
-    /// A compositor or the bus fails to start or make its sockets in time.
+    /// A compositor or the bus fails to start or make its sockets in time, or (when asked for) the PipeWire tools
+    /// aren't here or the private PipeWire fails to start (see [`PrivatePipeWire::start`]).
     pub fn start(tools: &Tools, options: &SandboxOptions) -> SandboxResult<Self> {
         let dir = TempDir::new()?;
         let niri_run = private_dir(dir.path().join("niri-run"))?;
@@ -314,6 +335,7 @@ impl Sandbox {
         let bus = PrivateBus::start(&tools.dbus_daemon, &niri_run.join("bus"), dir.path())?;
         let mut sandbox = Self {
             bus,
+            pipewire: None,
             helpers: Vec::new(),
             dir,
             options: options.clone(),
@@ -324,7 +346,17 @@ impl Sandbox {
         };
         let parent = sandbox.start_weston(&tools.weston)?;
         sandbox.start_niri(&tools.niri, &parent)?;
+        if let Some(pipewire) = &options.pipewire {
+            let tools = PipeWireTools::find()?;
+            sandbox.pipewire = Some(PrivatePipeWire::start(&tools, sandbox.dir.path(), pipewire)?);
+        }
         Ok(sandbox)
+    }
+
+    /// The private PipeWire, when [`SandboxOptions::pipewire`] asked for one.
+    #[must_use]
+    pub fn pipewire(&self) -> Option<&PrivatePipeWire> {
+        self.pipewire.as_ref()
     }
 
     /// The sandbox's temp dir.
@@ -444,6 +476,9 @@ impl Sandbox {
             let text = fs::read_to_string(self.path(name)).unwrap_or_default();
             let _ = write!(logs, "\n--- {name}\n{text}");
         }
+        if let Some(pipewire) = &self.pipewire {
+            logs.push_str(&pipewire.logs());
+        }
         logs
     }
 
@@ -486,7 +521,8 @@ impl Sandbox {
     }
 
     /// The environment a client of the sandbox gets, on top of [`PASSED_ENV`]: the nested niri's runtime dir and
-    /// socket, the sandbox opt-in, the private bus, and the opener first on `PATH`.
+    /// socket, the sandbox opt-in, the private bus, the opener first on `PATH`, and the private PipeWire's variables
+    /// when there is one ([`PrivatePipeWire::client_env`]).
     #[must_use]
     pub fn client_env(&self) -> Vec<(&'static str, OsString)> {
         let mut path = OsString::from(self.bin.as_os_str());
@@ -494,13 +530,16 @@ impl Sandbox {
             path.push(":");
             path.push(inherited);
         }
-        vec![
+        let mut env = vec![
             ("XDG_RUNTIME_DIR", self.niri_run.clone().into_os_string()),
             ("WAYLAND_DISPLAY", self.wayland.clone().into_os_string()),
             (SANDBOX_ENV, self.dir.path().as_os_str().to_owned()),
             ("DBUS_SESSION_BUS_ADDRESS", self.bus.address().into()),
             ("PATH", path),
-        ]
+        ];
+        let pipewire = self.pipewire.iter().flat_map(PrivatePipeWire::client_env);
+        env.extend(pipewire.filter(|(name, _)| *name != SANDBOX_ENV));
+        env
     }
 
     /// `program` with `args` as a client of the sandbox ([`Sandbox::client_env`]), with `extra_env` on top; stdout

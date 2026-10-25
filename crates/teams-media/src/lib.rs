@@ -8,16 +8,21 @@
 //!   framings; [`relay`] puts it on a UDP socket or a TCP stream and falls back from UDP to TCP (Teams' relay: UDP
 //!   3478, then TCP 443).
 //!
-//! The media itself (Opus, the device seam, echo cancellation, video) comes in later; nothing here opens an audio
-//! server or a camera, and nothing sends signaling.
+//! - [`devices`]: the device seam (a microphone, a speaker, a camera): a file backend that opens no audio server, and
+//!   a PipeWire backend that opens only the server its build allows (the UI sandbox's, or the desktop's for the
+//!   personal build). [`tone`] makes and measures the test tone.
+//!
+//! The rest of the media (Opus, echo cancellation, video coding) comes in later, and nothing here sends signaling.
 
 use std::io;
 
+pub mod devices;
 pub mod relay;
 pub mod sdp;
 pub mod stun;
 #[cfg(feature = "test-support")]
 pub mod test_turn;
+pub mod tone;
 pub mod turn;
 
 /// Everything the relay can fail with.

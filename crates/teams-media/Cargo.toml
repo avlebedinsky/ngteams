@@ -1,6 +1,6 @@
 [package]
 name = "teams-media"
-description = "A call's media: the TURN client (RFC 8656) and its relay link, and Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's SDP"
+description = "A call's media: the TURN client (RFC 8656) and its relay link, Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's SDP, and the device seam (file and PipeWire backends)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,9 @@ publish.workspace = true
 # Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests and
 # the echo-call spike's.
 test-support = []
+# The personal build's devices: the desktop's PipeWire instead of the UI sandbox's (`devices::pipewire::THIS_BUILD`).
+# Only `crates/teams` enables it (crates/teams/tests/apart.rs checks every manifest); `test-support` wins over it.
+personal = []
 
 [dependencies]
 # STUN FINGERPRINT (CRC-32)
@@ -18,8 +21,12 @@ crc32fast.workspace = true
 getrandom.workspace = true
 # STUN MESSAGE-INTEGRITY (HMAC-SHA1 over the long-term key MD5(username:realm:password))
 hmac.workspace = true
+# the PipeWire backend checks its socket belongs to this user (`getuid`)
+libc.workspace = true
 md-5.workspace = true
 sha1.workspace = true
+# the device seam's PipeWire backend: microphone, speaker and camera streams on the PipeWire the build allows
+pipewire.workspace = true
 # the SDP the call's peer speaks: offers and answers taken from and handed to it
 str0m.workspace = true
 thiserror.workspace = true
@@ -27,8 +34,10 @@ thiserror.workspace = true
 [dev-dependencies]
 # the SDP fixture's entries
 serde_json.workspace = true
-# this crate's own tests run against the loopback TURN server
-teams-media = { workspace = true, features = ["test-support"] }
+# this crate's own tests run against the loopback TURN server, and with `personal` on too they show `test-support`
+# wins: such a build still opens only the sandbox's PipeWire
+teams-media = { workspace = true, features = ["test-support", "personal"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

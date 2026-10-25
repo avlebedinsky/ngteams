@@ -1,6 +1,7 @@
 //! How the lab and the personal build are kept apart (`docs/personal-build.md`): only this crate enables the
-//! `personal` features (every workspace manifest read), and building a lab binary alone resolves `teams-fence` and
-//! `teams-signin` without them (`cargo tree`); the workspace's default members leave this crate out; only the install
+//! `personal` features of `teams-fence`, `teams-signin` and `teams-media` (every workspace manifest read; the last
+//! picks the desktop's PipeWire over the UI sandbox's), and building a lab binary alone resolves them without those
+//! features (`cargo tree`); the workspace's default members leave this crate out; only the install
 //! script sets the install marker, and both binaries refuse to run without it and with `test-support`, before anything
 //! else; only this crate names the personal Secret Service application and opens the personal fence, and it never opens
 //! the lab's; each side refuses the other's data dir, and a lab account.
@@ -69,7 +70,7 @@ fn only_this_crate_enables_the_personal_features() {
     for member in list(&workspace, "members") {
         let manifest = manifest(&root().join(&member).join("Cargo.toml"));
         for (kind, table) in dependency_tables(&manifest) {
-            for crate_name in ["teams-fence", "teams-signin"] {
+            for crate_name in ["teams-fence", "teams-signin", "teams-media"] {
                 let personal = table
                     .get(crate_name)
                     .and_then(|entry| entry.get("features"))
@@ -98,6 +99,8 @@ fn only_this_crate_enables_the_personal_features() {
             "crates/teams dependencies teams-signin",
             "crates/teams dev-dependencies teams-fence",
             "crates/teams-fence dev-dependencies teams-fence",
+            // with `test-support` beside it, which wins: the build still opens only the sandbox's PipeWire
+            "crates/teams-media dev-dependencies teams-media",
             "crates/teams-signin dev-dependencies teams-signin",
         ]
     );
@@ -133,6 +136,7 @@ fn a_lab_binary_built_alone_has_neither_personal_feature() {
         for personal in [
             r#"teams-fence feature "personal""#,
             r#"teams-signin feature "personal""#,
+            r#"teams-media feature "personal""#,
         ] {
             assert!(!tree.contains(personal), "{lab} resolves {personal}");
         }

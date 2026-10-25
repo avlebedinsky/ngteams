@@ -1,6 +1,6 @@
 [package]
 name = "ui-sandbox"
-description = "The UI sandbox for tests and lab runs: a nested niri on a headless weston, a private bus, virtual input"
+description = "The UI sandbox for tests and lab runs: a nested niri on a headless weston, a private bus, virtual input, a private PipeWire"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,8 +14,13 @@ gpui-pre-platform.workspace = true
 image = { workspace = true, features = ["png"] }
 libc.workspace = true
 log.workspace = true
+# the private PipeWire's camera and recording thread (`pipewire::media`)
+pipewire.workspace = true
 # the sandbox keeps the compositors' runtime dirs and its bus in a temp dir
 tempfile.workspace = true
+# the private PipeWire's socket and client config at the places teams-media's backend looks; the test pattern, the
+# tone and WAV files; the PipeWire backend the probe (src/bin/ui-sandbox-media-probe.rs) opens
+teams-media.workspace = true
 wayland-client.workspace = true
 wayland-protocols-misc.workspace = true
 wayland-protocols-wlr.workspace = true
