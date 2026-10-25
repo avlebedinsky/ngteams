@@ -32,8 +32,9 @@
 //!     and clicks the header's join of the running call, its join decided by the fence (everything else held back
 //!     under [`JOIN_HELD`]); it must then show the call screen, and its capture the join's answer registering the call.
 //!   - `keep-alive`: as `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past its keep-alive interval, every
-//!     page's requests recorded: the run that captures the call's keep-alive (until it is mapped the fence denies it,
-//!     and that deny fails the run).
+//!     page's requests recorded: the run that captures the call's keep-alive, which the fence permits on the call's
+//!     own `callLeg` link (the registered call's or the answered invitation's). A call that ends before the hold is
+//!     over, or a page whose fence let no keep-alive through ([`KEEP_ALIVE_SENDS`]), fails the run.
 //!
 //!   The run records [`AFTER_RING`] more and notes when each callee's incoming call went.
 //!
@@ -97,7 +98,7 @@ pub enum CallStep {
     /// running call from the chat's header (what else its page sends held back under [`JOIN_HELD`]).
     Join,
     /// As `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past the call's keep-alive interval, to record its
-    /// keep-alive (a request no mapping lets through yet: the fence denies it, and the run fails on that deny).
+    /// keep-alive, which the fence permits on the call's own `callLeg` link: every page must have sent one.
     KeepAlive,
 }
 
@@ -264,6 +265,21 @@ pub const JOIN_SENDS: &str = concat!(
     r"cc/v1/active/[^/?]+/[^/?]+/[^/?]+/[^/?]+|",
     r"cc/v1/mediaAnswers/[^?]+/acknowledge|cc/v1/mcProxy/[^?]+/applyChannelParameters)(\?|$)"
 );
+
+/// The call's keep-alive, as a URL pattern (`POST`): to the call leg's own link (`callLeg`,
+/// `…/cc/v1/active/<call>/<n>/<leg>/<n>`, no operation after it), which the fence maps on the registered call and on
+/// the answered invitation.
+pub const KEEP_ALIVE_SENDS: &str = concat!(
+    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/",
+    r"cc/v1/active/[^/?]+/[^/?]+/[^/?]+/[^/?]+(\?|$)"
+);
+
+/// The keep-alives a capture's `events.jsonl` text shows its fence letting through ([`KEEP_ALIVE_SENDS`], each
+/// `Network` request once).
+#[must_use]
+pub fn keep_alives(text: &str) -> usize {
+    allowed_requests(text, "POST", KEEP_ALIVE_SENDS)
+}
 
 /// What a callee's page `PUT`s once it answered that the fence maps on the answered invitation, as a URL pattern: its
 /// endpoint metadata in the call's conversation.
@@ -618,7 +634,7 @@ impl CallPlan {
             report.notes.push(format!("{alias}: the web client loaded"));
         }
         stand_up_calling(CALLER, &mut caller.driver(), report).await?;
-        back_to_chat(&mut caller.driver(), report).await?;
+        back_to_chat(CALLER, &mut caller.driver(), report).await?;
         for (alias, session) in callees.iter_mut() {
             stand_up_calling(*alias, &mut session.driver(), report).await?;
         }
@@ -660,7 +676,7 @@ impl CallPlan {
     }
 
     /// Each callee clicks `action`'s button, what its page sends from then on held back under its label, but only on
-    /// the run's own call ([`Self::check_ring`]); a hangs up after [`AFTER_ACTION`].
+    /// the run's own call ([`check_ring`]); a hangs up after [`AFTER_ACTION`].
     async fn act(
         &self,
         action: CalleeAction,
@@ -676,7 +692,14 @@ impl CallPlan {
         };
         for (alias, session) in callees.iter_mut().take(answering) {
             hold_callee(session, action.label)?;
-            self.check_ring(*alias, session, action, placed).await?;
+            check_ring(
+                (*alias, &mut *session),
+                action,
+                (&self.call, self.callee_mri(*alias)),
+                placed,
+                EarlierRings::Judged,
+            )
+            .await?;
             session
                 .driver()
                 .click(&format!("{alias} clicks {}", action.what), Selector::Css(action.button))
@@ -697,55 +720,56 @@ impl CallPlan {
         linger(caller, AFTER_ACTION).await;
         hang_up(caller, report).await
     }
+}
 
-    /// Whether `alias` may click `action`'s button: within [`INVITATION_WAIT`], its capture must pass [`ring_check`]
-    /// (every invitation the page received is the run's call, placed at `placed`) and its page must show one incoming
-    /// call with one such button. Anything else fails the step, nothing clicked.
-    async fn check_ring(
-        &self,
-        alias: Alias,
-        session: &mut LabSession,
-        action: CalleeAction,
-        placed: u64,
-    ) -> Result<(), ScenarioError> {
-        let refuse = |reason: String| setup(format!("{alias} doesn't click {}: {reason}", action.what));
-        let file = session
-            .capture_dir()
-            .map(|dir| dir.join(EVENTS_FILE))
-            .ok_or_else(|| refuse("the run records no capture to bind the incoming call to".to_owned()))?;
-        let deadline = tokio::time::Instant::now() + INVITATION_WAIT;
-        loop {
-            let text =
-                std::fs::read_to_string(&file).map_err(|error| refuse(format!("can't read the capture: {error}")))?;
-            match ring_check(&invitations(&text), &self.call, self.callee_mri(alias), placed) {
-                RingCheck::Ready => break,
-                RingCheck::Refused(reason) => return Err(refuse(reason)),
-                RingCheck::Pending if tokio::time::Instant::now() >= deadline => {
-                    return Err(refuse(format!(
-                        "no invitation of the run's call in the capture within {INVITATION_WAIT:?}"
-                    )));
-                }
-                RingCheck::Pending => {
-                    linger(session, Duration::from_millis(500)).await;
-                }
+/// Whether `alias` may click `action`'s button on `call`'s ring at `callee` (its MRI), placed at `placed` (Unix ms):
+/// within [`INVITATION_WAIT`], its capture must pass [`phase_ring_check`] (every invitation the page received is the
+/// run's call, `earlier` saying which earlier ones are left out) and its page must show one incoming call with one such
+/// button. Anything else fails the step, nothing clicked.
+pub(crate) async fn check_ring(
+    (alias, session): (Alias, &mut LabSession),
+    action: CalleeAction,
+    (call, callee): (&RunCall, &str),
+    placed: u64,
+    earlier: EarlierRings,
+) -> Result<(), ScenarioError> {
+    let refuse = |reason: String| setup(format!("{alias} doesn't click {}: {reason}", action.what));
+    let file = session
+        .capture_dir()
+        .map(|dir| dir.join(EVENTS_FILE))
+        .ok_or_else(|| refuse("the run records no capture to bind the incoming call to".to_owned()))?;
+    let deadline = tokio::time::Instant::now() + INVITATION_WAIT;
+    loop {
+        let text =
+            std::fs::read_to_string(&file).map_err(|error| refuse(format!("can't read the capture: {error}")))?;
+        match phase_ring_check(&invitations(&text), call, callee, placed, earlier) {
+            RingCheck::Ready => break,
+            RingCheck::Refused(reason) => return Err(refuse(reason)),
+            RingCheck::Pending if tokio::time::Instant::now() >= deadline => {
+                return Err(refuse(format!(
+                    "no invitation of the run's call in the capture within {INVITATION_WAIT:?}"
+                )));
+            }
+            RingCheck::Pending => {
+                linger(session, Duration::from_millis(500)).await;
             }
         }
-        let shown = session
-            .driver()
-            .evaluate(
-                &format!("{alias}'s incoming calls"),
-                &format!(
-                    "document.querySelectorAll({}).length <= 1 && document.querySelectorAll({}).length === 1",
-                    js_string(INCOMING_SCREEN_CSS),
-                    js_string(action.button)
-                ),
-            )
-            .await?;
-        if shown != Value::Bool(true) {
-            return Err(refuse("the page doesn't show exactly one incoming call".to_owned()));
-        }
-        Ok(())
     }
+    let shown = session
+        .driver()
+        .evaluate(
+            &format!("{alias}'s incoming calls"),
+            &format!(
+                "document.querySelectorAll({}).length <= 1 && document.querySelectorAll({}).length === 1",
+                js_string(INCOMING_SCREEN_CSS),
+                js_string(action.button)
+            ),
+        )
+        .await?;
+    if shown != Value::Bool(true) {
+        return Err(refuse("the page doesn't show exactly one incoming call".to_owned()));
+    }
+    Ok(())
 }
 
 /// Waits up to [`RING_WAIT`] for each callee to show the incoming call; one that doesn't within [`RING_SHOT`] leaves a
@@ -1057,12 +1081,16 @@ pub(crate) async fn wait_calling_socket(
 
 /// Back from the Calls app to the chat the page loaded at, in the same document: the Chat app shows the chat it showed
 /// last, and its header's call buttons.
-pub(crate) async fn back_to_chat(driver: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
-    driver.click("a opens the Chat app", CHAT_APP).await?;
+pub(crate) async fn back_to_chat(
+    alias: Alias,
+    driver: &mut Driver,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
+    driver.click(&format!("{alias} opens the Chat app"), CHAT_APP).await?;
     driver
         .wait_for("the chat's call buttons", CALL_BUTTONS, PAGE_OPEN)
         .await?;
-    report.notes.push(format!("{CALLER}: back at the chat"));
+    report.notes.push(format!("{alias}: back at the chat"));
     Ok(())
 }
 
@@ -1248,7 +1276,7 @@ async fn converse(
     match step {
         CallStep::Video => show_video(caller, callees, report).await?,
         CallStep::Dropped => drop_off(caller, callees, report).await?,
-        CallStep::KeepAlive => hold_long(caller, callees, KEEP_ALIVE_HOLD, report).await,
+        CallStep::KeepAlive => keep_alive(caller, callees, report).await,
         _ => {}
     }
     for (alias, session) in callees.iter_mut() {
@@ -1341,14 +1369,41 @@ pub const KEEP_ALIVE_HOLD: Duration = Duration::from_mins(47);
 /// How often a long hold looks whether the caller's call screen still shows.
 const HOLD_CHECK: Duration = Duration::from_secs(60);
 
+/// `keep-alive`: holds the answered call [`KEEP_ALIVE_HOLD`] ([`hold_long`]); a call that ended before fails the run,
+/// and so does a page whose fence let no keep-alive through ([`keep_alives`]).
+async fn keep_alive(caller: &mut LabSession, callees: &mut [(Alias, LabSession)], report: &mut ScenarioReport) {
+    if !hold_long(caller, callees, KEEP_ALIVE_HOLD, report).await {
+        report.failures.push(format!(
+            "the call ended before it was held {KEEP_ALIVE_HOLD:?}: no keep-alive is due before then"
+        ));
+    }
+    let mut pages: Vec<(Alias, &mut LabSession)> = vec![(CALLER, &mut *caller)];
+    pages.extend(callees.iter_mut().map(|(alias, session)| (*alias, session)));
+    for (alias, session) in pages {
+        let text = session
+            .capture_dir()
+            .and_then(|dir| std::fs::read_to_string(dir.join(EVENTS_FILE)).ok())
+            .unwrap_or_default();
+        match keep_alives(&text) {
+            0 => report
+                .failures
+                .push(format!("{alias}'s fence let no keep-alive of the call through")),
+            sent => report
+                .notes
+                .push(format!("{alias}: the fence let {sent} keep-alive(s) through")),
+        }
+    }
+}
+
 /// Holds the answered call `hold`, every page's events taken in turn, the caller's call screen looked at every
-/// [`HOLD_CHECK`]: a call that ended meanwhile ends the hold (noted with its time).
+/// [`HOLD_CHECK`]: a call that ended meanwhile ends the hold (noted with its time). Whether the call was held the whole
+/// `hold`.
 async fn hold_long(
     caller: &mut LabSession,
     callees: &mut [(Alias, LabSession)],
     hold: Duration,
     report: &mut ScenarioReport,
-) {
+) -> bool {
     let started = tokio::time::Instant::now();
     report
         .notes
@@ -1373,7 +1428,7 @@ async fn hold_long(
                 started.elapsed(),
                 unix_ms()
             ));
-            return;
+            return false;
         }
     }
     report.notes.push(format!(
@@ -1381,6 +1436,7 @@ async fn hold_long(
         started.elapsed(),
         unix_ms()
     ));
+    true
 }
 
 /// The call screen's camera button.
@@ -2041,6 +2097,41 @@ pub fn ring_check(invitations: &[Invitation], call: &RunCall, callee: &str, plac
     } else {
         RingCheck::Pending
     }
+}
+
+/// Which of a page's invitations a ring check judges ([`phase_ring_check`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EarlierRings {
+    /// Every one its page received since it loaded: the page rings for one call in its run (`ab-call`, `abc-call`).
+    Judged,
+    /// Every one but the run's own call's invitations to the callee ([`Invitation::is_of`]) the capture timed before
+    /// the call was placed: an earlier phase of the run rang the page with a call of the same caller
+    /// (`ab-call-native`). Any other invitation from before, an outsider's included, still refuses.
+    OwnLeftOut,
+}
+
+/// [`ring_check`] on the invitations `earlier` says a ring check judges: all of them, or all but the run's own call's
+/// from before it was placed at `placed` (Unix ms).
+#[must_use]
+pub fn phase_ring_check(
+    invitations: &[Invitation],
+    call: &RunCall,
+    callee: &str,
+    placed: u64,
+    earlier: EarlierRings,
+) -> RingCheck {
+    let own_earlier = |invitation: &Invitation| {
+        earlier == EarlierRings::OwnLeftOut
+            && invitation.at_ms != 0
+            && invitation.at_ms < placed
+            && invitation.is_of(call, callee)
+    };
+    let judged: Vec<Invitation> = invitations
+        .iter()
+        .filter(|invitation| !own_earlier(invitation))
+        .cloned()
+        .collect();
+    ring_check(&judged, call, callee, placed)
 }
 
 /// The deliveries of `invitations` that are `call`'s invitation to `callee` ([`Invitation::is_of`]) received after the

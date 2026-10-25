@@ -981,27 +981,63 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 - Create: `crates/proto-lab/src/scenario/ab_call_native.rs`
 - Modify: `crates/teams-headless/src/*`, `crates/teams-headless/tests/*`
 
-- [ ] tests first (`teams-headless`, on the mock): `watch --answer-lab-calls` sends `Action::Answer` for an
+- [x] tests first (`teams-headless`, on the mock): `watch --answer-lab-calls` sends `Action::Answer` for an
       invitation the engine offers and nothing for one it ignores (an outsider's: no request, no frame); without the
       flag nothing is answered; the flag exists in `teams-headless` alone (Technical Details, "Answering and
       declining")
-- [ ] `teams-headless a call b` (release lab build), with `teams-headless b watch --answer-lab-calls` answering only
+      → done: `commands::Answering::LabCalls` answers each `Event::IncomingCall` with `CallAction::Answer` (the engine
+      offers only what the fence offered); `watch --calls` registers the calling stack and answers nothing; `join
+      <chat>` lets the running call's invitation ring out, then joins (`call::Target::Join`); `--bursts`,
+      `--tone-seconds`, repeatable `--hear`, the `tone` (presence) and `devices` (wall-clock opens) lines, offsets read
+      from a lead before the recording (`echo::find_with_lead`). Tests (`crates/teams-headless/tests/call.rs`): a's
+      call answered by b's watch, each tone heard; an outsider's invitation gets no request, no `3:::` frame, no fence
+      line, and the lab call after it is answered; without the flag nothing is answered; a call answered on another
+      endpoint of b ends the ring of b's watch; a join after the ring ran out, and one with no running call; the flag
+      named in no source of `teams-core`, `teams-call`, `teams-ui`, `teams-app`, `teams`; the CLI
+- [x] `teams-headless a call b` (release lab build), with `teams-headless b watch --answer-lab-calls` answering only
       a lab-only invitation the engine offered: the call connects; a tone each way is recorded and checked on the
       other side; setup time and tone latency measured; both leave
-- [ ] the same for the a–b–c group chat (`teams-headless a call abc`, b and c answering), and, once Task 2's wording
+      → done (`scripts/native-call-run.sh`): 5 passing runs (2 more lost a's token renewal to an Entra outage, no call
+      placed): setup 4.3–6.2 s, latency p50 147–211 ms per direction (`docs/protocol/calling.md`, "Native lab
+      calls"); both left, every native write permitted
+- [x] the same for the a–b–c group chat (`teams-headless a call abc`, b and c answering), and, once Task 2's wording
       is in, c joining late (`teams-headless c join abc`)
-- [ ] `proto-lab run ab-call-native`: b's web client in the armed browser and a's native client (the release lab
+      → done: 2 passing group runs (setup 3.2–3.7 s, every one hearing both others, latency p50 281–322 ms through
+      the mixer) and a late join (c's ring ran out after 55 s, `487 Call cancelled on timeout.`; joined, connected
+      1.9 s later, heard and heard by a and b). ⚠️ Fixed on the way (live-only): the native answer to the mixer had 12
+      `sendrecv` H.264 lines (`410 SdpParsingFailure`): the peer now configures audio alone and every video line is
+      answered rejected, written `m=video 0 RTP/SAVP 34` (str0m's form named no format); the mixer's renegotiation names
+      rejected lines on another profile, now read as rejected (`SdpError::Profile` for a line in use). Task 14's
+      SDP-ordering defect wasn't hit
+- [x] `proto-lab run ab-call-native`: b's web client in the armed browser and a's native client (the release lab
       `teams-headless`, spawned by the scenario), both directions: a calls b and b's page answers by the scenario's
       click; b's page calls a and `watch --answer-lab-calls` answers; the tone checked on both sides (in the page,
       and in the native recording); exit 0
-- [ ] answered elsewhere: b's web client and b's native client up together (two endpoints of b); a calls b, b's page
+      → done (`crates/proto-lab/src/scenario/ab_call_native.rs`, `TEAMS_HEADLESS_BIN`): run 4 exit 0, no breach, only
+      expected denies (the page's delivery responses, call-log horizon, file-browser prewarm). Run 1 failed live: the
+      page received none of a's packets: our offer named the `sdes:mid` header extension while `str0m` sends its own
+      mids, so Chrome dropped them; our offers now name no line-naming extension (`teams_media::sdp`). Runs 2–3 lost the
+      network (a registration timeout, a page that didn't load)
+- [x] answered elsewhere: b's web client and b's native client up together (two endpoints of b); a calls b, b's page
       answers, b's native client's ring ends on the delivery
-- [ ] `fence.log` as Task 15's; the gate passes
-- [ ] ➕ (from Task 13) the call's keep-alive: capture a web client's lab call held past its `callKeepAliveInterval`
+      → done (`ab-call-native`'s third phase): the native client's ring ended 1.2–1.6 s after the page's click,
+      `487 Call cancelled as it was accepted by another fork.`, nothing sent for it
+- [x] `fence.log` as Task 15's; the gate passes
+      → done: every native call write `allow` on its call (start, attach, progress, endpoint state, accept, metadata,
+      join, the keep-alive, leave, delivery responses); 2 denies, both `call_ended` on a native callee whose call the
+      mixer had just ended (`410`, before the fix), nothing sent
+- [x] ➕ (from Task 13) the call's keep-alive: capture a web client's lab call held past its `callKeepAliveInterval`
       (2700 s) with the calling requests recorded; establish what the keep-alive request is (method, link, body,
       answer), map it in the fence from that capture, add its sealed write, and have `teams-call` send it on
       `CallEvent::KeepAliveDue` (today it tells the deadline and sends nothing); tests of repeated deadlines and of
       none after the call ended
+      → done: `ab-call --call keep-alive` (47 min) captured it: `POST {"callParticipantUpdate": {}}` to the call leg's
+      own `callLeg` link at 90 % of the interval (2430 s), each page's; the conversation's `notificationLinks`
+      keep-alive (~2200 s) seen and left unmapped; the call outlived both denied. Mapped
+      (`CallOperation::KeepAlive`, bound from the acceptance and the accept's answer), `KeepAliveCall` sealed write,
+      `teams-call` sends it every 90 % of the interval while the call is up (a failure ends nothing). Tests: the row
+      (`contacting.rs`), the registry (`calls.rs`), the machine (repeated, none after the end, none without a link), the
+      mock. Live: a native a → b call held 42 min, both ends' keep-alive `202`, permitted
 
 ### Task 17: Calls in the app
 **Files:**

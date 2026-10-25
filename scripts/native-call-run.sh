@@ -10,7 +10,8 @@
 # Usage: native-call-run.sh OUT CALLER CHAT [CALLEE…] [--join JOINER]
 #   e.g. native-call-run.sh ~/.local/share/teams-lab/headless/ab a b b
 #        native-call-run.sh ~/.local/share/teams-lab/headless/abc a abc b --join c
-# HOLD (default 45) is how long the caller holds the call once connected.
+# HOLD (default 45) is how long the caller holds the call once connected; TONE_SECONDS, when set, how long its tone
+# lasts (a long call's tone kept short keeps its files and their analysis small).
 #
 # Run it under the live lock and an outer timeout, from a normal lab build (`cargo build --release -p teams-headless
 # --target-dir target/lab`), as CLAUDE.md's "Live runs" says:
@@ -65,7 +66,7 @@ done
 echo "caller starts unix_ms $(date +%s%3N)"
 # shellcheck disable=SC2046
 "$BIN" "$CALLER" call "$CHAT" --tone "${TONE[$CALLER]}" $(others "$CALLER") --record "$OUT/$CALLER-call.wav" \
-  --seconds "${HOLD:-45}" --wait 90 >"$OUT/$CALLER-call.txt" 2>&1
+  --seconds "${HOLD:-45}" --wait 90 ${TONE_SECONDS:+--tone-seconds "$TONE_SECONDS"} >"$OUT/$CALLER-call.txt" 2>&1
 echo "$CALLER call exit $?"
 if [ -n "$JOINING" ]; then
   wait "$JOINING"

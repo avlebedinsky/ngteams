@@ -1,9 +1,11 @@
 //! `ab-call-native`'s judgement of what it can judge offline: the forced denies b's page expects, the native clients'
-//! output it reads, the scenario's name.
+//! output it reads (a ring that ended as answered elsewhere among it), the scenario's name.
 
 use proto_lab::scenario::ScenarioName;
 use proto_lab::scenario::ab_call::{ANSWER_HELD, CALLER_JOIN_HELD, RING_SENDS};
-use proto_lab::scenario::ab_call_native::{FORCED, HEADLESS_BIN, TONE_HZ, is_summary, native_heard};
+use proto_lab::scenario::ab_call_native::{
+    ANSWERED_ELSEWHERE, FORCED, HEADLESS_BIN, TONE_HZ, is_summary, native_heard, ring_ended_elsewhere,
+};
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 
 #[test]
@@ -50,4 +52,24 @@ fn the_run_notes_a_native_client_s_summary_lines_only() {
     ] {
         assert!(!is_summary(line), "{line}");
     }
+}
+
+#[test]
+fn b_s_native_ring_ended_as_answered_elsewhere_only_on_that_end_s_phrase() {
+    let elsewhere = "1792 ring_ended call=1 code=487 phrase=\"Call cancelled as it was accepted by another fork.\"";
+    assert!(ring_ended_elsewhere(&format!(
+        "1700 incoming_call call=1 caller=a\n{elsewhere}\n"
+    )));
+    for other in [
+        // a's cancel, the ring's timeout, no phrase
+        "1792 ring_ended call=1 code=487 phrase=\"Call cancelled by the caller.\"",
+        "1792 ring_ended call=1 code=487 phrase=\"Call cancelled on timeout.\"",
+        "1792 ring_ended call=1 code=0 phrase=null",
+        // the phrase in another line
+        "1792 call call=1 status=\"ended\" note=\"accepted by another fork\"",
+        "",
+    ] {
+        assert!(!ring_ended_elsewhere(other), "{other}");
+    }
+    assert!(elsewhere.contains(ANSWERED_ELSEWHERE));
 }

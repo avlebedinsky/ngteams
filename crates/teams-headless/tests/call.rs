@@ -180,12 +180,11 @@ fn watch_answers_lab_calls_only_when_asked_and_takes_the_call_s_audio() {
         CliCommand::Watch {
             answer_lab_calls,
             audio,
-            tone_seconds,
             ..
         } => {
             assert!(answer_lab_calls);
             assert!((audio.tone - 440.0).abs() < f32::EPSILON && audio.bursts);
-            assert_eq!(tone_seconds, 60);
+            assert_eq!(audio.tone_seconds, Some(60));
         }
         other => panic!("{other:?}"),
     }
@@ -202,6 +201,13 @@ fn watch_answers_lab_calls_only_when_asked_and_takes_the_call_s_audio() {
         Cli::try_parse_from(["teams-headless", "b", "watch", "--calls", "--answer-lab-calls"]).is_err(),
         "one or the other"
     );
+    // the recording's summary is text: no JSON stream with the calling stack
+    for flag in ["--calls", "--answer-lab-calls"] {
+        assert!(
+            Cli::try_parse_from(["teams-headless", "b", "watch", "--json", flag]).is_err(),
+            "{flag}"
+        );
+    }
     // no answering by another name
     for flag in ["--answer", "--answer-calls", "--auto-answer"] {
         assert!(
@@ -425,6 +431,28 @@ async fn watch_answering_lab_calls_answers_a_s_call_from_the_chat_and_each_side_
         let opened = files.opened();
         assert!(opened.microphone.is_some() && opened.speaker.is_some(), "{opened:?}");
     }
+}
+
+#[tokio::test]
+async fn watch_as_json_prints_its_answer_as_a_json_object_too() {
+    let lab = Lab::start_echo().await;
+    let mut b = lab.account(LAB_B, 660.0);
+    b.ready().await;
+    let watching = b.watch_as(true, Answering::LabCalls);
+    let ours = lab.mock.ring(LAB_A, LAB_B);
+    watching.until("\"call_answer\"").await;
+    assert!(lab.mock.hang_up_call(&ours));
+    watching.until("\"ended\"").await;
+    let (_, watched) = watching.stop().await;
+    let lines: Vec<Value> = watched
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {line}")))
+        .collect();
+    let answer = lines
+        .iter()
+        .find(|line| line["event"] == "call_answer")
+        .expect("the answer's line");
+    assert!(answer["call"].is_u64() && answer["received_ms"].is_i64(), "{answer}");
 }
 
 #[tokio::test]
@@ -941,13 +969,18 @@ impl Account {
     }
 
     /// Runs `watch` on its engine (as `teams-headless <alias> watch` does, `answering` as asked) until stopped.
-    fn watch(mut self, answering: Answering) -> Watching {
+    fn watch(self, answering: Answering) -> Watching {
+        self.watch_as(false, answering)
+    }
+
+    /// [`Self::watch`], printing JSON with `json`.
+    fn watch_as(mut self, json: bool, answering: Answering) -> Watching {
         let out = SharedLog::default();
         let stop = Arc::new(Notify::new());
         let (mut writer, stopping) = (out.clone(), Arc::clone(&stop));
         let task = tokio::spawn(async move {
             let names = LabNames::new([Some(LAB_A), Some(LAB_B), Some(LAB_C)]);
-            let end = commands::watch(&mut self.handle, false, answering, &names, &mut writer, async move {
+            let end = commands::watch(&mut self.handle, json, answering, &names, &mut writer, async move {
                 stopping.notified().await;
             })
             .await

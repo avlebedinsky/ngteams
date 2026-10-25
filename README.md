@@ -264,7 +264,8 @@ chat other than its forced denies, one for a partial or refused membership, or a
   received is a's call of this run, from a to that callee in the run's chat, and the page shows one incoming call, or
   for a join the run's chat with one join), and the fence decides each answer, decline and join again on the account's
   own offered invitation. `keep-alive` (`ab-call` only) is `answer` held 47 minutes, past the call's keep-alive
-  interval, to record the call's keep-alive.
+  interval, to record the call's keep-alive: every page's fence must let one through, and a call that ends before the
+  hold is over fails the run.
 - `ab-call-native` (`TEAMS_HEADLESS_BIN` naming a lab build of `teams-headless`, release for timing): b's web client
   and a's native client in their 1:1 chat. a's native client calls b and b's page answers (only on the run's own
   call); b's page calls a and `teams-headless a watch --answer-lab-calls` answers; then a's native client calls b while
@@ -315,7 +316,7 @@ teams-headless a profile <mri>... [--wait 30]           # where the engine's nam
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
 teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--record <wav>] [--seconds 45] \
-  [--wait 60]                             # a call through the engine, its media on files; held, hung up, its tone looked for
+  [--wait 60] [--tone-seconds <s>]        # a call through the engine, its media on files; held, hung up, its tone looked for
 teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 60] \
                                           # the group chat's running call joined late, once its invitation rang out here
 ```
@@ -347,7 +348,10 @@ placed). It prints each event, `call_summary` (setup time, held, how it ended) a
 the keyed tone at `--hear` Hz (its own tone by default): its level, the stretches of it that came back with their
 offsets, and the round trips' p50, p95 and max. It exits 0 only when the call connected, was held and hung up, and,
 for `echo`, the tone came back. It answers nothing. `--bursts` plays the tone in bursts (1.6 s on, 0.9 s off, a lab
-browser's page hears those) instead of keyed; after the call it also prints `tone` (how much of the tone at `--hear`
+browser's page hears those) instead of keyed, `--tone-seconds` cuts the tone short (silence after it: a long call's
+files stay small), `--hear` may be given more than once (one report each, a group call's every other tone), and an
+offset or round trip of a far end in another process may be negative (its devices opened after this one's: line it up
+with the far end's `devices` line); after the call it also prints `tone` (how much of the tone at `--hear`
 the recording holds, however it was keyed) and `devices` (when the microphone and the speaker opened, by the wall
 clock: a far end's recording lines up with the tone sent by them, two processes apart). `join` (M3 Task 16) waits
 `--ring-wait` seconds for an invitation to the group chat's running call to ring here, lets it ring out unanswered,
@@ -356,7 +360,8 @@ then joins the running call (a join is judged like a start in that chat) and hol
 a lab account naming only lab accounts, which the lab fence offers (every other one rings unanswered and nothing is
 sent for it), each answer judged by the fence again; the flag exists in `teams-headless` alone. `watch --calls`
 registers the calling stack and answers nothing (an offered call rings until its ring ends). Both play `--tone` (for
-`--tone-seconds`) and record each answered call, and print what the last one's recording holds when they end.
+`--tone-seconds`, 180 s by default) and record each answered call, and print what the last one's recording holds when
+they end, as text: neither takes `--json`.
 `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on
 stderr (Trouter's packets and deliveries by kind and size, never a payload); nothing else is logged.
 

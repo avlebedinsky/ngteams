@@ -9,9 +9,10 @@
 //! each side can hear the other's: the page by its audio tap ([`wait_for_tone_in_from`]), the native client by the
 //! tone's presence in its recording (`tone hz=440 heard=true`). Three phases, in order:
 //! 1. **a's native client calls b** (`teams-headless a call b`): b's page, held as a callee while it rings
-//!    ([`RING_SENDS`]), must show the incoming call; it clicks answer only on the run's own call ([`own_ring`]: every
-//!    invitation since the phase began is a's call to b in no group chat, and the page shows one incoming call), its
-//!    answer held as `ab-call`'s ([`ANSWER_HELD`]); the page must hear a's tone and its audio go both ways, and a's
+//!    ([`RING_SENDS`]), must show the incoming call; it clicks answer only on the run's own call (`ab-call`'s ring
+//!    check, [`EarlierRings::OwnLeftOut`]: every invitation the page received is a's call to b in no group chat, an
+//!    earlier phase's ring of a's call to b aside, and the page shows one incoming call), its answer held as
+//!    `ab-call`'s ([`ANSWER_HELD`]); the page must hear a's tone and its audio go both ways, and a's
 //!    native client must hear the page's tone, hold the call [`NATIVE_HOLD`], hang up and exit 0.
 //! 2. **b's page calls a** (`teams-headless a watch --answer-lab-calls`): once a's calling stack registered, b's page
 //!    calls from the chat's header (its start decided by the fence) and a's native client answers it (the engine
@@ -19,7 +20,8 @@
 //!    ways, and then hang up; a's native client must hear the page's tone and exit 0 on its interrupt.
 //! 3. **Answered elsewhere**: b's native client up too (`teams-headless b watch --calls`, which answers nothing), a's
 //!    native client calls b, both of b's endpoints ring, b's page answers; b's native client's ring must end on the
-//!    delivery (its `ring_ended` and the end's phrase noted), with no answer of its own.
+//!    answered-elsewhere delivery (its `ring_ended` naming [`ANSWERED_ELSEWHERE`], while a's native client still holds
+//!    the call), with no answer of its own.
 //!
 //! The native clients' output goes into b's capture dir (`native-<phase>.txt`, lab data like the capture); their
 //! recordings into the lab's `recordings/`. Judged by b's fence: no deny but the reviewed list's and the run's forced
@@ -31,8 +33,6 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
-
 use crate::browser::Media;
 use crate::capture::{EVENTS_FILE, TAP_TONE_HZ};
 use crate::classify::Classifier;
@@ -40,10 +40,10 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_call::{
-    ACCEPT_AUDIO_CSS, ANSWER_HELD, CALLER_JOIN_HELD, CONNECT_WAIT, CalleeRole, HANG_UP_CSS, INCOMING_CALL,
-    INCOMING_SCREEN_CSS, Modality, RING_SENDS, RING_WAIT, RingCheck, RunCall, TONE_WAIT, back_to_chat,
-    caller_join_rule, hang_up_page, hold_callee, invitations, judge_callee, mri, place_call, policy, ring_check,
-    stand_up_calling, switch_microphone, wait_calling_socket, watch_controls,
+    ACCEPT_AUDIO_CSS, ANSWER_HELD, CALLER_JOIN_HELD, CONNECT_WAIT, CalleeAction, CalleeRole, EarlierRings, HANG_UP_CSS,
+    INCOMING_CALL, Modality, RING_SENDS, RING_WAIT, RunCall, TONE_WAIT, back_to_chat, caller_join_rule, check_ring,
+    hang_up_page, hold_callee, judge_callee, mri, place_call, policy, stand_up_calling, switch_microphone,
+    wait_calling_socket, watch_controls,
 };
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, setup};
 use super::dsl::{Selector, js_string};
@@ -76,8 +76,18 @@ pub const PAGE_HOLD: Duration = Duration::from_secs(15);
 const NATIVE_EXIT: Duration = Duration::from_secs(45);
 /// How long b's native client's ring gets to end once b's page answered.
 pub const ELSEWHERE_WAIT: Duration = Duration::from_secs(30);
-/// How long a's native client holds the call b's page answered while b's native client rang.
-const ELSEWHERE_HOLD: Duration = Duration::from_secs(20);
+/// How long a's native client holds the call b's page answered while b's native client rang: past
+/// [`ELSEWHERE_WAIT`], so the ring can't end on a's hang-up (a cancel) before the answered-elsewhere check is done.
+pub const ELSEWHERE_HOLD: Duration = Duration::from_secs(ELSEWHERE_WAIT.as_secs() + 30);
+/// The phrase of the call end a callee's other endpoint gets when the call was answered on another one (seen
+/// 2026-10-25, `ab-call-native`: `code 487`, "Call cancelled as it was accepted by another fork.").
+pub const ANSWERED_ELSEWHERE: &str = "accepted by another fork";
+/// What b's page clicks on its incoming call: answer, what it sends from then on held as `ab-call`'s.
+const ANSWER: CalleeAction = CalleeAction {
+    label: ANSWER_HELD,
+    button: ACCEPT_AUDIO_CSS,
+    what: "answer",
+};
 /// How long the page's call screen gets to go once the far end hung up.
 const SCREEN_GONE: Duration = Duration::from_secs(30);
 
@@ -188,7 +198,7 @@ impl Run {
         size_page(session).await?;
         report.notes.push("b: the web client loaded at the a-b chat".to_owned());
         stand_up_calling(Alias::B, &mut session.driver(), report).await?;
-        back_to_chat(&mut session.driver(), report).await?;
+        back_to_chat(Alias::B, &mut session.driver(), report).await?;
         wait_calling_socket(Alias::B, session, report).await?;
         watch_controls(Alias::B, session).await?;
         self.native_calls_page(session, report).await?;
@@ -213,7 +223,7 @@ impl Run {
         self.answer_on_page(session, since, report).await?;
         let from = capture_len(session);
         hear_on_page(session, from, report).await?;
-        let caller = self.finish(CALLER, session, report).await?;
+        let caller = self.finish(CALLER, NATIVE_HOLD, session, report).await?;
         judge_native(&caller, report);
         wait_screen_gone(session, report).await;
         Ok(())
@@ -237,7 +247,7 @@ impl Run {
             session.force_deny(rule);
         }
         session.force_deny(caller_join_rule().map_err(|error| setup(error.to_string()))?);
-        back_to_chat(&mut session.driver(), report).await?;
+        back_to_chat(Alias::B, &mut session.driver(), report).await?;
         let from = capture_len(session);
         place_call((Alias::B, session), Modality::Audio, report).await?;
         self.wait_output(CALLEE, session, "call_answer call=", RING_WAIT)
@@ -285,7 +295,22 @@ impl Run {
         self.wait_output(OTHER, session, "incoming_call", RING_WAIT).await?;
         self.answer_on_page(session, since, report).await?;
         self.wait_output(OTHER, session, "ring_ended", ELSEWHERE_WAIT).await?;
-        let caller = self.finish(CALLER, session, report).await?;
+        let rang = self.native(OTHER)?.output();
+        if !ring_ended_elsewhere(&rang) {
+            report.failures.push(format!(
+                "b's native client's ring didn't end as answered elsewhere ({ANSWERED_ELSEWHERE:?}): {}",
+                rang.lines()
+                    .filter(|line| line.contains("ring_ended"))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
+        }
+        if self.native(CALLER)?.output().contains("status=\"ended\"") {
+            report
+                .failures
+                .push("a's native client's call ended before b's native client's ring did".to_owned());
+        }
+        let caller = self.finish(CALLER, ELSEWHERE_HOLD, session, report).await?;
         if caller.status.is_none_or(|status| !status.success()) {
             report.failures.push(format!(
                 "a's native client ({}) didn't exit 0: {:?}",
@@ -305,8 +330,9 @@ impl Run {
         Ok(())
     }
 
-    /// b's page shows the incoming call within [`RING_WAIT`], clicks answer on the run's own call only
-    /// ([`own_ring`]), and is in the call within [`CONNECT_WAIT`].
+    /// b's page shows the incoming call within [`RING_WAIT`], clicks answer on the run's own call only (`ab-call`'s
+    /// ring check: every invitation the page received is the run's call, but an earlier phase's of the same call, and
+    /// the page shows one incoming call), and is in the call within [`CONNECT_WAIT`].
     async fn answer_on_page(
         &self,
         session: &mut LabSession,
@@ -320,8 +346,15 @@ impl Run {
         report
             .notes
             .push(format!("b: the incoming call showed at {}", now_ms()));
-        own_ring(session, &self.call, &self.mri_b, since).await?;
-        hold_callee(session, ANSWER_HELD)?;
+        check_ring(
+            (Alias::B, &mut *session),
+            ANSWER,
+            (&self.call, &self.mri_b),
+            since,
+            EarlierRings::OwnLeftOut,
+        )
+        .await?;
+        hold_callee(session, ANSWER.label)?;
         session
             .driver()
             .click("b clicks answer", Selector::Css(ACCEPT_AUDIO_CSS))
@@ -393,15 +426,17 @@ impl Run {
         }
     }
 
-    /// Waits for native client `what` to exit by itself while the page's events flow (killing it when it doesn't).
+    /// Waits for native client `what`, which holds its call `hold`, to exit by itself while the page's events flow
+    /// (killing it when it doesn't).
     async fn finish(
         &mut self,
         what: &str,
+        hold: Duration,
         session: &mut LabSession,
         report: &mut ScenarioReport,
     ) -> Result<Finished, ScenarioError> {
         let mut native = self.take(what)?;
-        let status = native.wait(session, NATIVE_HOLD + NATIVE_CONNECT + NATIVE_EXIT).await;
+        let status = native.wait(session, hold + NATIVE_CONNECT + NATIVE_EXIT).await;
         Ok(native.finished(status, report))
     }
 
@@ -553,6 +588,15 @@ pub fn native_heard(output: &str) -> bool {
     output.lines().any(|line| line.starts_with(&heard))
 }
 
+/// Whether a native client's output says its ring ended because the call was answered on another endpoint: a
+/// `ring_ended` line naming [`ANSWERED_ELSEWHERE`] (a cancel or a timeout names another phrase).
+#[must_use]
+pub fn ring_ended_elsewhere(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.contains(" ring_ended ") && line.contains(ANSWERED_ELSEWHERE))
+}
+
 /// A native client must have exited 0 and heard the page's tone.
 fn judge_native(native: &Finished, report: &mut ScenarioReport) {
     if native.status.is_none_or(|status| !status.success()) {
@@ -567,51 +611,6 @@ fn judge_native(native: &Finished, report: &mut ScenarioReport) {
             native.what
         ));
     }
-}
-
-/// Whether b may click answer: within its ring, every invitation its page received since `since` (Unix ms) is the
-/// run's call to b ([`ring_check`]) and the page shows one incoming call. Anything else fails the step, nothing clicked.
-async fn own_ring(session: &mut LabSession, call: &RunCall, callee: &str, since: u64) -> Result<(), ScenarioError> {
-    let refuse = |reason: String| setup(format!("b doesn't click answer: {reason}"));
-    let file = session
-        .capture_dir()
-        .map(|dir| dir.join(EVENTS_FILE))
-        .ok_or_else(|| refuse("the run records no capture to bind the incoming call to".to_owned()))?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let text = fs::read_to_string(&file).map_err(|error| refuse(format!("can't read the capture: {error}")))?;
-        let received: Vec<_> = invitations(&text)
-            .into_iter()
-            .filter(|invitation| invitation.at_ms >= since)
-            .collect();
-        match ring_check(&received, call, callee, since) {
-            RingCheck::Ready => break,
-            RingCheck::Refused(reason) => return Err(refuse(reason)),
-            RingCheck::Pending if tokio::time::Instant::now() >= deadline => {
-                return Err(refuse(
-                    "no invitation of the run's call in the capture in time".to_owned(),
-                ));
-            }
-            RingCheck::Pending => {
-                linger(session, Duration::from_millis(500)).await;
-            }
-        }
-    }
-    let shown = session
-        .driver()
-        .evaluate(
-            "b's incoming calls",
-            &format!(
-                "document.querySelectorAll({}).length <= 1 && document.querySelectorAll({}).length === 1",
-                js_string(INCOMING_SCREEN_CSS),
-                js_string(ACCEPT_AUDIO_CSS)
-            ),
-        )
-        .await?;
-    if shown != Value::Bool(true) {
-        return Err(refuse("the page doesn't show exactly one incoming call".to_owned()));
-    }
-    Ok(())
 }
 
 /// b's page in a call opens its microphone (noise suppression off, another microphone), must hear the far end's tone

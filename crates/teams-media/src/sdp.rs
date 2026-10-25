@@ -144,6 +144,10 @@ pub enum SdpError {
     /// The blob isn't an SDP in Teams' dialect (a browser's or `str0m`'s, or not an SDP at all).
     #[error("not an SDP in Teams' dialect: {0}")]
     NotNgc(&'static str),
+    /// A line in use isn't on Teams' profile (`RTP/SAVP`; the mixer's dialect also `RTP/AVP`): a browser's SDP, or a
+    /// form no capture showed. Its kind, port and profile, nothing else of it.
+    #[error("not an SDP in Teams' dialect: a {media} line on port {port} is on {proto}, not RTP/SAVP")]
+    Profile { media: String, port: String, proto: String },
     /// `str0m`'s SDP can't be written in Teams' dialect.
     #[error("str0m's SDP can't be written in Teams' dialect: {0}")]
     Unwritable(&'static str),
@@ -362,9 +366,16 @@ impl Parsed {
     /// Reads an SDP in Teams' `dialect`.
     fn ngc(text: &str, dialect: Dialect) -> Result<Self, SdpError> {
         Self::split(text, |fields| {
-            let proto_ok = fields.proto == "RTP/SAVP" || (dialect == Dialect::Mixer && fields.proto == "RTP/AVP");
+            // a rejected line (port 0) carries nothing: it may name any profile
+            let proto_ok = fields.proto == "RTP/SAVP"
+                || (dialect == Dialect::Mixer && fields.proto == "RTP/AVP")
+                || fields.port == "0";
             if !proto_ok {
-                return Err(SdpError::NotNgc("a media line isn't on RTP/SAVP (a browser's SDP?)"));
+                return Err(SdpError::Profile {
+                    media: fields.media.to_owned(),
+                    port: fields.port.to_owned(),
+                    proto: fields.proto.to_owned(),
+                });
             }
             let kind = match fields.media {
                 "audio" => Kind::Audio,
@@ -911,8 +922,28 @@ fn write_rtp_payload(section: &Section, port: &str, role: Role, out: &mut Vec<St
     out.extend(
         section
             .values("extmap")
+            .filter(|value| role == Role::Answer || !names_a_line(value))
             .map(|value| format!("a=extmap:{}", backslashed(value))),
     );
+}
+
+/// The header extensions that carry a line's mid or a stream's id in every packet. `str0m` names our lines with mids of
+/// its own, and Teams' dialect names them otherwise ([`NgcSession`]): offered, the far end would take our packets for
+/// a line it doesn't know and drop them (seen live, M3 Task 16: a web client answering our offer received nothing),
+/// so our offers name none of them; without them in the answer `str0m` sends none. An answer of ours keeps them: it
+/// answers the offer's own mids.
+const LINE_NAMING_EXTENSIONS: [&str; 3] = [
+    "urn:ietf:params:rtp-hdrext:sdes:mid",
+    "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id",
+    "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id",
+];
+
+/// Whether an `a=extmap` value names one of [`LINE_NAMING_EXTENSIONS`].
+fn names_a_line(value: &str) -> bool {
+    value
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|uri| LINE_NAMING_EXTENSIONS.contains(&uri))
 }
 
 /// The payload lines of a data section, as the web client writes them (an SSRC of its own, drawn at random).

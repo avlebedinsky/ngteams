@@ -564,8 +564,8 @@ fn controller_op(
         ("incoming", "accept") => accept(state, index, leg_index?, body),
         ("incoming", "reject") => reject(state, index, leg_index?, body),
         ("active", "renegotiate") => renegotiated(state, index, account, body),
-        // its answer isn't captured (every keep-alive of the capture was held back): 200 with no body
-        ("active", "keepAlive") if body.get("callParticipantUpdate").is_some() => Some(status(200)),
+        // answered `202` live (a native call's, M3 Task 16; its body not read): 202 with no body
+        ("active", "keepAlive") if body.get("callParticipantUpdate").is_some() => Some(status(202)),
         ("negotiations", "answer") => {
             let answer = body.pointer("/mediaAnswer/mediaContent")?;
             let id = state.calling.calls[index].id.clone();

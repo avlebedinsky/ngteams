@@ -150,8 +150,8 @@ pub enum Command {
     /// as it is received, with its receive time. Answers no delivery and no call, unless `--answer-lab-calls`; registers
     /// the calling stack only with `--calls` or `--answer-lab-calls`.
     Watch {
-        /// One JSON object per line.
-        #[arg(long)]
+        /// One JSON object per line. Not with `--calls` or `--answer-lab-calls`, whose recording's summary is text.
+        #[arg(long, conflicts_with_all = ["answer_lab_calls", "calls"])]
         json: bool,
         /// Also registers the calling stack and answers each call the engine offers: only an invitation from a lab
         /// account naming only lab accounts (the lab fence offers no other; every other one rings unanswered and
@@ -165,9 +165,6 @@ pub enum Command {
         calls: bool,
         #[command(flatten)]
         audio: CallAudio,
-        /// How long the microphone's tone lasts (silence after it), in seconds.
-        #[arg(long, default_value_t = 180)]
-        tone_seconds: u64,
     },
     /// Places a call once the calling socket is registered, holds it `--seconds` once its media connected, then hangs
     /// it up: `echo` (the test call of lab.toml's echo service, which plays back what it hears), or a chat (`a`, `b`,
@@ -229,7 +226,14 @@ pub struct CallAudio {
     /// tone sent, `…-sent.wav`).
     #[arg(long)]
     pub record: Option<PathBuf>,
+    /// How long the microphone's tone lasts (silence after it), in seconds (default: `call`'s and `join`'s whole call;
+    /// `watch`'s [`WATCH_TONE_SECONDS`]). A long call's tone kept short keeps its files and their analysis small.
+    #[arg(long)]
+    pub tone_seconds: Option<u64>,
 }
+
+/// How long `watch`'s tone lasts by default, in seconds.
+pub const WATCH_TONE_SECONDS: u64 = 180;
 
 /// The microphone's tone in a call by default, in Hz.
 pub const DEFAULT_TONE_HZ: f32 = 1_000.0;

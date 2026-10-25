@@ -8,10 +8,10 @@ use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
 use proto_lab::fence_ws::{Frame, Payload};
 use proto_lab::scenario::ab_call::{
     ACCEPT_AUDIO_CSS, ANSWER_HELD, CALLER_JOIN_HELD, CallStep, CalleeAction, CalleeRole, DECLINE_CSS, DECLINE_HELD,
-    DECLINE_SENDS, INVITATION_EVENTS, JOIN_HELD, Modality, RING_SENDS, RingCheck, RingSends, RunCall, START_HELD,
-    allowed_requests, callee_forced, callee_rules, caller_forced, caller_join_rule, calling_socket_up, chat_shown,
-    held_back, invitations, judge_step_sends, own_invitations, registered_joins, ring_check, ring_rules, ring_sends,
-    start_held_rule, video_frames,
+    DECLINE_SENDS, EarlierRings, INVITATION_EVENTS, JOIN_HELD, Modality, RING_SENDS, RingCheck, RingSends, RunCall,
+    START_HELD, allowed_requests, callee_forced, callee_rules, caller_forced, caller_join_rule, calling_socket_up,
+    chat_shown, held_back, invitations, judge_step_sends, keep_alives, own_invitations, phase_ring_check,
+    registered_joins, ring_check, ring_rules, ring_sends, start_held_rule, video_frames,
 };
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 use serde_json::json;
@@ -514,6 +514,64 @@ fn any_invitation_but_the_run_s_own_call_s_refuses_the_click() -> TestResult {
 }
 
 #[test]
+fn a_later_phase_leaves_out_only_its_own_call_s_earlier_ring_and_an_outsider_s_still_refuses_the_click() -> TestResult {
+    let (direct, direct_gp) = fixture_invitation(0)?;
+    let outsider = with(
+        &direct_gp,
+        "/callNotification/from/id",
+        json!("8:orgid:not-a-lab-account"),
+    )?;
+    let earlier_call = with(
+        &direct_gp,
+        "/conversationInvitation/conversationController",
+        json!("https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/Earlier"),
+    )?;
+    let own = |deliveries: &[Delivery<'_>], earlier| {
+        phase_ring_check(&invitations(&capture_of(deliveries)), &one_to_one(), B, PLACED, earlier)
+    };
+    // an earlier phase rang the page with a's call to b: left out, and this phase's call is the one
+    let after_own_earlier = [
+        (direct, &earlier_call, PLACED - 60_000),
+        (direct, &direct_gp, PLACED + 900),
+    ];
+    assert_eq!(own(&after_own_earlier, EarlierRings::OwnLeftOut), RingCheck::Ready);
+    // where the page rings for one call in its run, any earlier invitation refuses
+    assert!(matches!(
+        own(&after_own_earlier, EarlierRings::Judged),
+        RingCheck::Refused(_)
+    ));
+    // an outsider's invitation, whenever it reached the page, refuses: the page may still show it
+    for at in [PLACED - 60_000, PLACED - 1, PLACED + 1] {
+        for earlier in [EarlierRings::OwnLeftOut, EarlierRings::Judged] {
+            let deliveries = [(direct, &outsider, at), (direct, &direct_gp, PLACED + 900)];
+            assert!(
+                matches!(own(&deliveries, earlier), RingCheck::Refused(_)),
+                "{at} {earlier:?}"
+            );
+        }
+    }
+    // an earlier phase's call and the outsider's before this phase: the outsider's still refuses
+    let both = [
+        (direct, &earlier_call, PLACED - 60_000),
+        (direct, &outsider, PLACED - 30_000),
+        (direct, &direct_gp, PLACED + 900),
+    ];
+    assert!(matches!(own(&both, EarlierRings::OwnLeftOut), RingCheck::Refused(_)));
+    // the earlier phase's call delivered again in this phase: invitations of two calls
+    let again = [
+        (direct, &direct_gp, PLACED + 900),
+        (direct, &earlier_call, PLACED + 1_900),
+    ];
+    assert!(matches!(own(&again, EarlierRings::OwnLeftOut), RingCheck::Refused(_)));
+    // only the earlier phase's ring: nothing of this phase's call yet
+    assert_eq!(
+        own(&[(direct, &earlier_call, PLACED - 60_000)], EarlierRings::OwnLeftOut),
+        RingCheck::Pending
+    );
+    Ok(())
+}
+
+#[test]
 fn an_invitation_naming_anything_else_isn_t_the_run_s_call() -> TestResult {
     let (direct, direct_gp) = fixture_invitation(0)?;
     let (mixer, group_gp) = fixture_invitation(1)?;
@@ -756,6 +814,39 @@ fn continued(url: &str, network_id: &str, status: u16, bound: Option<bool>) -> S
         entry["bound"] = json!(bound);
     }
     entry.to_string()
+}
+
+#[test]
+fn a_keep_alive_counts_only_when_its_fence_let_it_through_at_the_call_leg_s_own_link() {
+    let leg = format!("{CC}/active/call-1/27/a4/3?i=10-0-0-1");
+    let none = [
+        verdict("POST", &leg, "2.1", "deny"),
+        verdict("PUT", &leg, "2.2", "allow"),
+        verdict(
+            "POST",
+            &format!("{CC}/active/call-1/27/a4/3/renegotiate?i=1"),
+            "2.3",
+            "allow",
+        ),
+        verdict(
+            "POST",
+            &format!("{CC}/active/call-1/27/a4/3/updateMediaDescriptions?i=1"),
+            "2.4",
+            "allow",
+        ),
+        verdict("POST", &format!("{CC}/active/call-1/27/a4?i=1"), "2.5", "allow"),
+    ]
+    .join("\n");
+    assert_eq!(keep_alives(&none), 0);
+    // one let through, seen on both layers, and the next one 2430 s later
+    let sent = [
+        none,
+        verdict("POST", &leg, "2.6", "allow"),
+        verdict("POST", &leg, "2.6", "allow"),
+        verdict("POST", &format!("{CC}/active/call-1/27/a4/3"), "2.7", "allow"),
+    ]
+    .join("\n");
+    assert_eq!(keep_alives(&sent), 2);
 }
 
 #[test]

@@ -274,7 +274,7 @@ pub enum Answering {
 /// Prints each event as it is received, with its receive time: one JSON object per line with `json`
 /// ([`event_json`], as [`json_line`] writes it), else a line of text ([`event_line`]); each line flushed at once. With
 /// [`Answering::LabCalls`] each offered invitation is answered after its line is printed (`<ms> call_answer call=<id>`,
-/// or `call_answer_refused` with why). Runs until `stop` is ready, the push channel stops for good, or the engine stops.
+/// or `call_answer_refused` with why; with `json` as an object of that `event`). Runs until `stop` is ready, the push channel stops for good, or the engine stops.
 ///
 /// # Errors
 /// When the output can't be written.
@@ -305,7 +305,7 @@ pub async fn watch(
                 match event {
                     Event::PushStopped(why) => return Ok(WatchEnd::PushStopped(why)),
                     Event::IncomingCall(incoming) if answering == Answering::LabCalls => {
-                        answer(handle.requests(), incoming.call, out).await?;
+                        answer(handle.requests(), incoming.call, json, out).await?;
                     }
                     _ => {}
                 }
@@ -314,18 +314,31 @@ pub async fn watch(
     }
 }
 
-/// Answers the offered invitation `call` ([`Answering::LabCalls`]), printing what became of it.
-async fn answer(requests: EngineRequests, call: CallId, out: &mut impl Write) -> Result<(), CommandError> {
-    match requests.call(CallAction::Answer { call }).await {
-        Ok(answered) => writeln!(out, "{} call_answer call={}", now_ms(), answered.get())?,
-        Err(error) => writeln!(
-            out,
-            "{} call_answer_refused call={} why={}",
-            now_ms(),
+/// Answers the offered invitation `call` ([`Answering::LabCalls`]), printing what became of it: a line of text, or
+/// with `json` one JSON object (`call_answer` or `call_answer_refused`, with its time as `received_ms`).
+async fn answer(requests: EngineRequests, call: CallId, json: bool, out: &mut impl Write) -> Result<(), CommandError> {
+    let answered = requests.call(CallAction::Answer { call }).await;
+    let at = now_ms();
+    let line = match (answered, json) {
+        (Ok(answered), false) => format!("{at} call_answer call={}", answered.get()),
+        (Ok(answered), true) => json_line(&serde_json::json!({
+            "event": "call_answer",
+            "call": answered.get(),
+            "received_ms": at,
+        })),
+        (Err(error), false) => format!(
+            "{at} call_answer_refused call={} why={}",
             call.get(),
             json_line(&serde_json::Value::String(error.to_string()))
-        )?,
-    }
+        ),
+        (Err(error), true) => json_line(&serde_json::json!({
+            "event": "call_answer_refused",
+            "call": call.get(),
+            "why": error.to_string(),
+            "received_ms": at,
+        })),
+    };
+    writeln!(out, "{line}")?;
     out.flush()?;
     Ok(())
 }

@@ -235,7 +235,8 @@ Two keep-alives came, from each page:
   isn't captured. Mapped since: `CallOperation::KeepAlive` on exactly a link the acceptance or the accept's answer
   bound, exactly that body ([endpoints.md](endpoints.md#calling-teamsmicrosoftcomtrap-apiflightproxyteamsmicrosoftcomapiv2));
   the native client sends it the same way (`teams-call`, every 90 % of the interval while the call is up, a keep-alive
-  not taken ending nothing).
+  not taken ending nothing). Live, a native a → b call held 42 minutes: both ends sent it 2430 s into the call, each
+  answered `202`, every write of the call permitted.
 - **The conversation's** (`sendConversationKeepAlive`, its period from the client's configuration): about 2200 s into
   the call each page posted its conversation subscription again (`participants.from`, `roster`, the conversation's
   callbacks) to the conversation's `notificationLinks` link, tried twice more 4 s apart. Not mapped: no native
@@ -243,6 +244,26 @@ Two keep-alives came, from each page:
 
 With both denied throughout, the call stayed up on both pages past 2820 s, its media going on, until b hung up: neither
 keep-alive missing ended it within the run.
+
+## Native lab calls
+
+M3 Task 16, release lab builds of `teams-headless` (`scripts/native-call-run.sh`, `proto-lab run ab-call-native`), each
+writing through its own fence. Setup is from the caller's placing to its media connected, the callee's answer by
+`watch --answer-lab-calls` in it; latency is a keyed tone's onset at the sender's microphone to its onset in the far
+end's recording, the two processes' files lined up by when their devices opened (one clock, one machine):
+
+| Call | Runs | Setup | Latency p50 (per direction and run) |
+|---|---|---|---|
+| a → b, native both ends | 5 | 4.3–6.2 s | 147–211 ms (p95 up to 230 ms, one outlier block at 2 s) |
+| a → a–b–c group chat, b and c native | 2 | 3.2–3.7 s | 281–322 ms (through the call's mixer; p95 up to 393 ms) |
+| a → group, b answering, c joining once its ring ran out | 1 | a 3.6 s; c's join 1.9 s | 239–290 ms |
+
+The web client and the native client, both ways (`ab-call-native`): a's native call to b's page connected and the
+page heard a's tone and sent and received audio by its statistics, a heard b's; b's page's call to a's native client,
+answered by `watch --answer-lab-calls`, the same both ways; and with b's native client up beside b's page, a's call
+answered on the page ended the native client's ring (below). Every write of the native clients was permitted on its
+call; a native callee whose call ended while its endpoint metadata was on its way had that write denied
+(`call_ended`) and nothing sent.
 
 ## The ring's ends
 
@@ -264,8 +285,14 @@ keep-alive missing ended it within the run.
 - **The caller's join after it left** (group calls): after its call ended or it hung up, a's page posts a roster-only
   join to the conversation controller itself ([Joining a running call](#joining-a-running-call)), and retries it twice,
   4 s apart. No invitation binds it on a's side; the scenario holds it back by name.
-- **Answered, declined**: [The answer](#the-answer), [The decline](#the-decline). **Answered elsewhere**: not captured
-  (the lab runs one endpoint per account); Task 16 captures it.
+- **Answered, declined**: [The answer](#the-answer), [The decline](#the-decline).
+- **Answered elsewhere** (`ab-call-native`'s third phase: b's web client and b's native client up together, a's call
+  answered on b's page): b's native client's ring ends 1.2–1.6 s after the page's click with a delivery at its
+  attach's `call/end` callback, `code 487`, `phrase: "Call cancelled as it was accepted by another fork."`; it sends
+  nothing for it.
+- **A group callee's ring that runs out** (`teams-headless c join abc`, nobody acting on c's endpoint): about 55 s
+  after the invitation, `code 487`, `phrase: "Call cancelled on timeout."`, at the attach's `call/end` callback; the
+  call runs on, and the invitation's conversation stays joinable.
 
 ## The SDP dialect
 
@@ -330,6 +357,24 @@ Opus as `102`, the media controller's own number for it: the media controller an
 with `102` and took nothing sent as `111`, while `str0m` keeps one number per codec for both directions
 ([calling-echo.md](calling-echo.md#the-native-echo-call)); an answer that still numbers an offered codec otherwise is
 read back with the offer's number.
+
+Three things the native lab calls (M3 Task 16) showed live, each now the native client's way:
+
+- **No video yet: every video line is answered rejected.** Answering a group call's mixer with `str0m`'s default
+  codecs put twelve `sendrecv` H.264 lines in the `accept`; the call controller ended the leg at once with `410
+  SdpParsingFailure`. With audio alone configured, `str0m` answers each video line rejected, and the dialect writes
+  it as the web client writes a rejected line, `m=video 0 RTP/SAVP 34` with its label (`str0m`'s own form names no
+  format at all, which no SDP may do); the mixer takes that answer. A caller's 1:1 offer's video lines are answered
+  the same way, and a web client takes it.
+- **A rejected line may name any profile.** The mixer's renegotiation that follows (within a fraction of a second of
+  the call being up) names the lines we rejected on a profile other than `RTP/SAVP`; a line on port 0 is read as
+  rejected whatever it names, and only a line in use must be on Teams' profile (the error names its kind, port and
+  profile, nothing else).
+- **Our offers name no line-naming header extension** (`sdes:mid`, `sdes:rtp-stream-id`,
+  `sdes:repaired-rtp-stream-id`). `str0m` names its lines with mids of its own, which the dialect renames: a web client
+  that answered an offer naming the mid extension took every packet of ours, carrying `str0m`'s mid, for a line it
+  doesn't know and dropped it (its candidate pair counted them, no inbound stream was made); the page heard nothing.
+  Without them in the answer `str0m` sends none. Our answers keep the offer's: they answer the offer's own mids.
 
 **Opus as the lines ask for it**: every captured Opus line carries `a=ptime:20` and `a=fmtp:111
 minptime=10;useinbandfec=1` (the media controller's answer adds `usedtx=1`). The native client sends 20 ms packets

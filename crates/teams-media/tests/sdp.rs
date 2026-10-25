@@ -178,7 +178,6 @@ fn our_offer_carries_the_relayed_candidate_and_teams_own_lines() -> TestResult {
         "a=x-signaling-fb:* x-message app recv:dsh",
         r"a=extmap:2 http:\\www.webrtc.org\experiments\rtp-hdrext\abs-send-time",
         r"a=extmap:3 http:\\www.ietf.org\id\draft-holmer-rmcat-transport-wide-cc-extensions-01",
-        "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid",
         "a=fmtp:111 minptime=10;useinbandfec=1",
         "a=rtpmap:111 opus/48000/2",
         "a=setup:actpass",
@@ -681,13 +680,114 @@ fn a_rejected_line_without_a_mid_in_a_mixers_renegotiation_is_the_line_at_its_pl
     Ok(())
 }
 
+#[test]
+fn our_offer_names_no_line_naming_header_extension_and_our_answer_keeps_the_offers() -> TestResult {
+    // seen live (M3 Task 16): str0m's packets carry its own mid, which Teams' dialect renames; a web client that
+    // answered an offer naming the mid extension dropped every packet of ours
+    let mut rtc = relayed_peer()?;
+    let (_, offer, _) = audio_offer(&mut rtc)?;
+    let standard = offer.to_sdp_string();
+    assert!(
+        standard.contains("urn:ietf:params:rtp-hdrext:sdes:mid"),
+        "str0m offers it"
+    );
+    let ngc = NgcSession::new().write_offer(&offer)?;
+    for uri in ["sdes:mid", "sdes:rtp-stream-id", "sdes:repaired-rtp-stream-id"] {
+        assert!(!ngc.as_str().contains(uri), "{uri} in our offer:\n{}", ngc.as_str());
+    }
+    assert!(ngc.as_str().contains("abs-send-time"), "the other extensions stay");
+    // answering an offer that names it, it stays: our answer names the offer's own mids
+    let mut answerer = relayed_peer()?;
+    let mut session = NgcSession::new();
+    let invitation = captured("invitation_offer")?;
+    let read = session.read_offer(&invitation)?;
+    let offered_mid = invitation.as_str().contains("sdes:mid");
+    let answer = answerer.sdp_api().accept_offer(read)?;
+    let written = session.write_answer(&answer)?;
+    assert_eq!(
+        written.as_str().contains("sdes:mid"),
+        offered_mid,
+        "{}",
+        written.as_str()
+    );
+    Ok(())
+}
+
+#[test]
+fn a_rejected_line_may_name_any_profile_and_a_line_in_use_only_teams_own() -> TestResult {
+    // seen live (M3 Task 16): the mixer's renegotiation of a call whose video lines we rejected names a profile on
+    // them that isn't RTP/SAVP; a rejected line carries nothing, so whatever it names is read as rejected
+    let mut parts = sections(captured_text("mixer_renegotiation_offer")?);
+    let video = parts
+        .iter()
+        .position(|part| part[0].starts_with("m=video "))
+        .ok_or("a video line")?;
+    parts[video][0] = "m=video 0 RTP/AVP 34";
+    let text = joined(&parts);
+    let read = NgcSdp::new(SDP_NGC, &text)?;
+    assert!(read.as_str().contains("m=video 0 RTP/AVP 34"));
+    // a line in use on another profile is refused, the error naming its kind, port and profile only
+    parts[video][0] = "m=video 50000 RTP/AVPF 34";
+    let refused = NgcSdp::new(SDP_NGC, &joined(&parts)).unwrap_err();
+    assert_eq!(
+        refused,
+        SdpError::Profile {
+            media: "video".to_owned(),
+            port: "50000".to_owned(),
+            proto: "RTP/AVPF".to_owned(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn an_audio_only_answer_to_the_mixer_names_a_format_on_each_rejected_video_line() -> TestResult {
+    // the native peer has no video yet: str0m rejects every video line, naming no format, and the dialect writes the
+    // web client's static `34`, never an m-line without a format (the mixer refuses that: `SdpParsingFailure`)
+    let mut rtc = Rtc::builder()
+        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+        .clear_codecs()
+        .enable_opus(true, false)
+        .build(Instant::now());
+    rtc.add_local_candidate(Candidate::relayed(
+        RELAYED.parse()?,
+        RELAY_BASE.parse()?,
+        Protocol::Udp,
+    )?);
+    let mut session = NgcSession::new();
+    let offer = session.read_offer(&captured("mixer_offer")?)?;
+    let answer = rtc.sdp_api().accept_offer(offer)?;
+    let ngc = session.write_answer(&answer)?;
+    let parts = sections(ngc.as_str());
+    assert_eq!(parts.len(), 14);
+    let videos: Vec<&str> = parts
+        .iter()
+        .map(|part| part[0])
+        .filter(|line| line.starts_with("m=video"))
+        .collect();
+    assert_eq!(
+        videos.len(),
+        11,
+        "every video line of the mixer's, the sharing line among them"
+    );
+    assert!(
+        videos.iter().all(|line| *line == "m=video 0 RTP/SAVP 34"),
+        "{videos:#?}"
+    );
+    assert!(parts[1][0].starts_with("m=audio ") && !parts[1][0].starts_with("m=audio 0 "));
+    Ok(())
+}
+
 // ---- what is refused ----
 
 #[test]
 fn a_browsers_sdp_is_refused_where_teams_dialect_is_required() -> TestResult {
     for browser in [captured_text("browser_offer")?, captured_text("browser_answer")?] {
         assert!(
-            matches!(NgcSdp::new(SDP_NGC, browser), Err(SdpError::NotNgc(_))),
+            matches!(
+                NgcSdp::new(SDP_NGC, browser),
+                Err(SdpError::NotNgc(_) | SdpError::Profile { .. })
+            ),
             "a browser's SDP as it is"
         );
     }

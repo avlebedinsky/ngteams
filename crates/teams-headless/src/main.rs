@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use teams_core::{Action, EngineHandle};
-use teams_headless::cli::{CallAudio, Cli, Command};
+use teams_headless::cli::{CallAudio, Cli, Command, WATCH_TONE_SECONDS};
 use teams_headless::commands::{self, Answering, WatchEnd};
 use teams_headless::lab::Lab;
 use teams_headless::print::{now_ms, visible};
@@ -139,7 +139,6 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             answer_lab_calls,
             calls,
             audio,
-            tone_seconds,
         } => {
             if answer_lab_calls || calls {
                 let answering = if answer_lab_calls {
@@ -148,7 +147,7 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
                     Answering::Nothing
                 };
                 let watching = (json, answering);
-                watch_calls(lab, watching, (audio, tone_seconds), signals, out).await
+                watch_calls(lab, watching, audio, signals, out).await
             } else {
                 watch(lab, json, signals, out).await
             }
@@ -415,6 +414,11 @@ fn heard_lines(
 ) -> Result<Option<echo::Echo>, Box<dyn Error>> {
     writeln!(out, "recording {}", visible(&files.recording.display().to_string()))?;
     writeln!(out, "{}", call::devices_line(files.opened()))?;
+    if files.opened().speaker.is_none() {
+        // the call ended before its media was set up: nothing was recorded
+        writeln!(out, "echo heard=false")?;
+        return Ok(None);
+    }
     let hear = if audio.hear.is_empty() {
         vec![audio.tone]
     } else {
@@ -434,15 +438,17 @@ fn heard_lines(
 
 /// `watch --calls` or `watch --answer-lab-calls`: the push channel's events and the calling stack's until a signal,
 /// each call the engine offers answered with [`Answering::LabCalls`] (and none without), its media on files (`audio`,
-/// the tone `tone_seconds` long); then what the last answered call's recording holds. Exits as `watch` does.
+/// the tone [`WATCH_TONE_SECONDS`] long unless it says otherwise); then what the last answered call's recording holds.
+/// Exits as `watch` does.
 async fn watch_calls(
     lab: &Lab,
     (json, answering): (bool, Answering),
-    (audio, tone_seconds): (CallAudio, u64),
+    audio: CallAudio,
     signals: &mut Signals,
     out: &mut impl Write,
 ) -> Outcome {
-    let files = call_files(lab, &audio, "watch", Duration::from_secs(tone_seconds))?;
+    let length = Duration::from_secs(audio.tone_seconds.unwrap_or(WATCH_TONE_SECONDS));
+    let files = call_files(lab, &audio, "watch", length)?;
     let mut handle = lab.start_calling(files.devices(), true).await?;
     let end = commands::watch(&mut handle, json, answering, &lab.names, out, signals.next()).await;
     // the engine's stop ends a call still up and closes its media, and with it the recording
@@ -465,7 +471,10 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
     } else {
         "call"
     };
-    let files = call_files(lab, &audio, what, call::CallFiles::length_for(&plan))?;
+    let length = audio
+        .tone_seconds
+        .map_or_else(|| call::CallFiles::length_for(&plan), Duration::from_secs);
+    let files = call_files(lab, &audio, what, length)?;
     let mut handle = lab.start_calling(files.devices(), false).await?;
     if !matches!(target, call::Target::Echo(_)) {
         let mut stderr = io::stderr();

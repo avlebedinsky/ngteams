@@ -3,8 +3,8 @@
 //! service and Trouter: the test call through start → acceptance → acknowledgement → connected → leave; a 1:1 call
 //! answered and declined only by an action; an outsider's invitation ignored with nothing sent for it; an offered
 //! invitation that nobody acts on left unanswered; the ring's ends (cancelled, answered elsewhere, timed out); an
-//! invitation during a call not offered; a running group call joined; the keep-alive interval kept with no request
-//! sent for it (no capture shows one).
+//! invitation during a call not offered; a running group call joined; the keep-alive sent to the call leg's own link
+//! every 90 % of its interval, through the fence, until the call ends.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
 
