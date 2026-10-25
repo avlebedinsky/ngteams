@@ -1,4 +1,0 @@
-{
-  "_synthetic": "SYNTHETIC, not a capture: written by hand (Task 19) from the callback names in the web client's bundle. The Task 18 capture had no progress delivery, so the body is unconfirmed; tests deliver it at the call's own progress link.",
-  "body": { "callProgress": { "status": "ringing" } }
-}
