@@ -33,6 +33,9 @@
 //! **The end.** A permitted `leave` moves the call to *ending*, where only that `leave` passes again (the web client
 //! resends it); a delivery at the start's own `conversationEnd` or call `end` callback ends it, and nothing passes on
 //! it any more. A call is never removed or restored: an ended one stays ended for the run, whatever arrives later.
+//! A rejoin (a later start or join of this run answered with the same conversation) takes the conversation's links
+//! from an ending or ended call, so they resolve to the new call alone; a live call keeps its links, and a link two
+//! calls hold resolves to none.
 //!
 //! **The acceptance's delivery response.** The one Trouter delivery response the fence lets through: the acceptance's
 //! acknowledgement, answering a pending acceptance delivery of a live call on the same connection, once
@@ -445,6 +448,8 @@ impl CallRegistry {
             call.state = State::Ended;
             return Err(RegisterError::Unreadable);
         };
+        retire(&mut inner.calls, index, &links);
+        let call = inner.calls.get_mut(index).ok_or(RegisterError::NotPending)?;
         call.links.extend(links);
         call.state = State::Live;
         Ok(())
@@ -739,6 +744,17 @@ impl CallRegistry {
         Some(Response::Acknowledgement(
             judge_response(&envelope, &delivery, call.agent.as_ref()).map(|()| id),
         ))
+    }
+}
+
+/// A rejoin: the call `new` registers with `links` its conversation handed out, which an earlier call of the run (a
+/// session of the same conversation the account left) may hold too. An ending or ended call gives them up, so each
+/// resolves to the new call alone; a live one keeps them, and a link two live calls hold resolves to neither.
+fn retire(calls: &mut [Call], new: usize, links: &[Link]) {
+    for (index, call) in calls.iter_mut().enumerate() {
+        if index != new && matches!(call.state, State::Ending | State::Ended) {
+            call.links.retain(|link| !links.contains(link));
+        }
     }
 }
 

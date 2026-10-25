@@ -305,7 +305,10 @@ or organizer is unreadable. `fence.log` holds the operation and its URL, never t
 
 **The end.** A permitted `leave` moves the call to ending, where only that `leave` passes again (the web client resent
 it); a delivery at the start's own `conversationEnd` or call `end` callback ends it, and nothing passes on it any more.
-An ended call is never restored, whatever arrives after.
+An ended call is never restored, whatever arrives after. A rejoin (a later start or join of the run, permitted on its
+own, answered with the same conversation) takes the conversation's links from an ending or ended call, so the new
+call's follow-ups resolve to it alone; a live call keeps its links, and a link two calls hold resolves to none
+(`Partial(UnregisteredCall)`).
 
 **The acceptance's delivery response** is one of the two Trouter delivery responses the fence lets through (the other
 is an offered invitation's receipt, below; `Fence::check_delivery_response`, logged as a `delivery_response` entry): it

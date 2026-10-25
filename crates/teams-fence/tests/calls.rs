@@ -1093,6 +1093,65 @@ async fn after_its_leave_only_the_leave_passes_and_after_its_end_nothing() -> Te
     Ok(())
 }
 
+#[tokio::test]
+async fn a_rejoin_of_a_conversation_left_takes_its_links_and_its_follow_ups_pass() -> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    let leave = write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?;
+    let metadata = write(
+        CallOperation::UpdateEndpointMetadata,
+        &op_url(CallOperation::UpdateEndpointMetadata, "conv-1"),
+        &[],
+    )?;
+    assert_eq!(verdict(&lab.fence, leave.clone()).await, Ok(()));
+    assert_eq!(verdict(&lab.fence, metadata.clone()).await, Err(ENDED));
+    // the same conversation answers a later permitted start: its links are the new call's alone
+    registered(&lab.fence, "conv-1").await?;
+    assert_eq!(verdict(&lab.fence, metadata.clone()).await, Ok(()));
+    assert_eq!(verdict(&lab.fence, leave).await, Ok(()));
+    assert_eq!(
+        verdict(&lab.fence, metadata).await,
+        Err(ENDED),
+        "the new call is leaving"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rejoin_after_the_call_ended_takes_its_links_too() -> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    assert_eq!(
+        lab.fence.observe_delivery(&delivery(1, END_PATH, b"{}".to_vec())),
+        Observed::Ended
+    );
+    let metadata = write(
+        CallOperation::UpdateEndpointMetadata,
+        &op_url(CallOperation::UpdateEndpointMetadata, "conv-1"),
+        &[],
+    )?;
+    assert_eq!(verdict(&lab.fence, metadata.clone()).await, Err(ENDED));
+    registered(&lab.fence, "conv-1").await?;
+    assert_eq!(verdict(&lab.fence, metadata).await, Ok(()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_conversation_two_live_calls_hold_passes_for_neither() -> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    registered(&lab.fence, "conv-1").await?;
+    let metadata = write(
+        CallOperation::UpdateEndpointMetadata,
+        &op_url(CallOperation::UpdateEndpointMetadata, "conv-1"),
+        &[],
+    )?;
+    assert_eq!(verdict(&lab.fence, metadata).await, Err(UNREGISTERED));
+    let leave = write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?;
+    assert_eq!(verdict(&lab.fence, leave).await, Err(UNREGISTERED));
+    Ok(())
+}
+
 /// The M3 echo call's deliveries (`tests/fixtures/calling/echo/deliveries.json`), their placeholders filled with this
 /// file's lab account and echo service.
 const ECHO_DELIVERIES: &str = include_str!("../../../tests/fixtures/calling/echo/deliveries.json");
