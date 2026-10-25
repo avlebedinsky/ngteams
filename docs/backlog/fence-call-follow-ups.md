@@ -18,9 +18,9 @@ row of the calling family in `teams_fence::contacting`, and is denied: `PUT …/
 `POST …/cc/v1/mcProxy/<call>/…/applyChannelParameters`, `POST …/cc/v1/callAcceptance/<call>/…/acknowledge` (and the
 same answer over Trouter, a delivery response with a body), **`POST …/conv/<id>/add`**, which is how the client brings
 the echo bot in, and `POST …/conv/<id>/leave`. The leg reaches Teams' media controller, the echo never joins, no tone
-comes back (`docs/protocol/calling-echo.md`), and `echo-call` exits 1 on the denied follow-ups. The native client of
-M0 Task 19 has the same writes to make: its `add` is `teams_proto::AddToCall` (an invite on `Scope::Call`), denied as
-partial today, and `echo_call::call::start` sends nothing.
+comes back (`docs/protocol/calling-echo.md`), and `echo-call` exits 1 on the denied follow-ups. The native client has
+the same writes to make: its calls now go through `teams_core::calling` (M3 Task 14), its `add` as
+`teams_proto::AddToCall::invite` to the link the start's answer handed out.
 
 ## The path (the user's decisions of 2026-10-23)
 

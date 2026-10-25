@@ -1959,25 +1959,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echo-call"
-version = "0.1.0"
-dependencies = [
- "clap",
- "fixture-guard",
- "getrandom 0.4.3",
- "media-loop",
- "serde_json",
- "str0m",
- "teams-auth",
- "teams-fence",
- "teams-media",
- "teams-proto",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
 name = "ego-tree"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8270,8 +8251,11 @@ dependencies = [
  "serde",
  "serde_json",
  "teams-auth",
+ "teams-call",
+ "teams-core",
  "teams-fence",
  "teams-log",
+ "teams-media",
  "teams-mock",
  "teams-proto",
  "teams-store",

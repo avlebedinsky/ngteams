@@ -98,6 +98,7 @@ pub fn native(mock: &ChatServiceMock, trouter: &TrouterMock, me: &str, names: [&
         Author::new(Mri::new(me), if me == LAB_A { names[0] } else { names[1] }),
     );
     engine::start(Parts {
+        calls: None,
         store: Store::open(&dir.join("store.sqlite")).unwrap(),
         client,
         outbox,

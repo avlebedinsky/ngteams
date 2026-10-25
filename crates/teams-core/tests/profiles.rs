@@ -170,6 +170,7 @@ fn rig_with(
     let mut store = Store::open(&store_file).unwrap();
     fill(&mut store);
     let handle = engine::start(Parts {
+        calls: None,
         store,
         client,
         outbox,

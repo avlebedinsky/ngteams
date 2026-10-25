@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use teams_fence::{Delivery, Mri, Observed};
-use teams_proto::{CallContext, CallLink, CallParticipant, Links};
+use teams_proto::{CallContext, CallLink, CallParticipant, Links, MediaContent};
 
 use crate::agent::{CallAgent, Callback, Kind};
 use crate::read::{Attached, Conversation, Invitation};
@@ -76,13 +76,19 @@ pub(crate) enum Phase {
 pub(crate) enum Ending {
     HungUp,
     Failed(Step),
+    /// The call's media failed ([`crate::Calls::fail_media`]).
+    Media,
 }
+
+/// The name a call whose media failed ends with ([`End::Failed`]).
+pub(crate) const MEDIA: &str = "media";
 
 impl Ending {
     pub(crate) fn end(self) -> End {
         match self {
             Self::HungUp => End::HungUp,
             Self::Failed(step) => End::Failed(step.name()),
+            Self::Media => End::Failed(MEDIA),
         }
     }
 }
@@ -118,6 +124,12 @@ pub(crate) enum Step {
     EndpointMetadata,
     Add,
     Leave,
+    /// The account's renegotiation of the call's media.
+    Renegotiate,
+    /// The account's answer to a renegotiation delivered to it.
+    MediaAnswer,
+    /// The acknowledgement of the answer to the account's renegotiation.
+    MediaAcknowledge,
 }
 
 impl Step {
@@ -135,6 +147,9 @@ impl Step {
             Self::EndpointMetadata => "update_endpoint_metadata",
             Self::Add => "add",
             Self::Leave => "leave",
+            Self::Renegotiate => "renegotiate",
+            Self::MediaAnswer => "media_answer",
+            Self::MediaAcknowledge => "media_acknowledge",
         }
     }
 }
@@ -156,6 +171,22 @@ pub(crate) struct Acknowledgement {
     pub(crate) by_request: bool,
 }
 
+/// The account's renegotiation that waits for its answer: the paths of the `mediaAnswer` and `rejection` callbacks
+/// its own request handed out. Every renegotiation hands out callbacks of its own, and an earlier one's stay the
+/// call's, so only a delivery at one of these paths is this renegotiation's answer or rejection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Reoffer {
+    pub(crate) answer: String,
+    pub(crate) rejection: String,
+}
+
+/// A renegotiation delivered to the account: its offer and the `mediaAnswer` link its answer goes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Negotiation {
+    pub(crate) offer: MediaContent,
+    pub(crate) link: CallLink,
+}
+
 /// One call.
 #[derive(Debug)]
 pub(crate) struct Call {
@@ -172,6 +203,22 @@ pub(crate) struct Call {
     pub(crate) leg: Option<Attached>,
     pub(crate) acknowledgement: Option<Acknowledgement>,
     pub(crate) keep_alive: Option<KeepAlive>,
+    /// The call's modalities, as its start, its join or its `accept` named them (a renegotiation names them again).
+    pub(crate) modalities: Vec<String>,
+    /// The call controller's `mediaRenegotiation` link, from the acceptance (a placed or joined call's) or the
+    /// `accept`'s answer (an answered one's): where the account's renegotiation goes.
+    pub(crate) renegotiation: Option<CallLink>,
+    /// A renegotiation delivered to the account and not answered yet: its offer and the `mediaAnswer` link its answer
+    /// goes to.
+    pub(crate) negotiation: Option<Negotiation>,
+    /// Every renegotiation delivered to the account that it answered in this call (its answer built and queued): a
+    /// delivery of one of them again is a replay, not a new one.
+    pub(crate) negotiated: Vec<Negotiation>,
+    /// The account's renegotiation that went and waits for its answer: the callbacks it handed out for that answer
+    /// and its rejection. `None` while none waits.
+    pub(crate) reoffer: Option<Reoffer>,
+    /// The account's renegotiation began and its offer hasn't gone yet (`Calls::begin_renegotiation`).
+    pub(crate) reoffering: bool,
     pub(crate) writes: BTreeMap<WriteId, Step>,
     /// Writes that go one after another, each once the write before it (`held_after`) was answered `2xx`.
     pub(crate) held: VecDeque<(Step, CallWrite)>,
@@ -206,6 +253,12 @@ impl Call {
             leg: None,
             acknowledgement: None,
             keep_alive: None,
+            modalities: Vec::new(),
+            renegotiation: None,
+            negotiation: None,
+            negotiated: Vec::new(),
+            reoffer: None,
+            reoffering: false,
             writes: BTreeMap::new(),
             held: VecDeque::new(),
             held_after: None,
@@ -216,10 +269,36 @@ impl Call {
 
     /// A new callback of this call.
     pub(crate) fn callback(&mut self, kind: Kind, name: &'static str) -> Result<String, getrandom::Error> {
+        Ok(self.made(kind, name)?.url)
+    }
+
+    /// A new callback of this call, kept among its callbacks.
+    fn made(&mut self, kind: Kind, name: &'static str) -> Result<Callback, getrandom::Error> {
         let callback = self.agent.callback(kind, name)?;
-        let url = callback.url.clone();
-        self.callbacks.push(callback);
-        Ok(url)
+        self.callbacks.push(callback.clone());
+        Ok(callback)
+    }
+
+    /// New `mediaAnswer` and `rejection` callbacks for the account's renegotiation, as its request's links, and what
+    /// it waits on once it went ([`Self::reoffer`]).
+    pub(crate) fn reoffer_links(&mut self) -> Result<(Links, Reoffer), getrandom::Error> {
+        let answer = self.made(Kind::Call, "mediaAnswer")?;
+        let rejection = self.made(Kind::Call, "rejection")?;
+        let links = Links::new()
+            .with("mediaAnswer", answer.url)
+            .with("rejection", rejection.url);
+        Ok((
+            links,
+            Reoffer {
+                answer: answer.path,
+                rejection: rejection.path,
+            },
+        ))
+    }
+
+    /// Whether the account's renegotiation went and its answer hasn't come.
+    pub(crate) fn waits_for_answer(&self) -> bool {
+        self.reoffer.is_some()
     }
 
     /// New callbacks `kind`/`names` of this call, as a request's links.
@@ -242,6 +321,16 @@ impl Call {
     pub(crate) fn path_of(&self, kind: Kind, name: &str) -> Option<&str> {
         self.callbacks
             .iter()
+            .find(|callback| callback.kind == kind && callback.name == name)
+            .map(|callback| callback.path.as_str())
+    }
+
+    /// The path of this call's callback `kind`/`name` made last: the one the latest request that made it handed out.
+    #[cfg(test)]
+    pub(crate) fn latest_path_of(&self, kind: Kind, name: &str) -> Option<&str> {
+        self.callbacks
+            .iter()
+            .rev()
             .find(|callback| callback.kind == kind && callback.name == name)
             .map(|callback| callback.path.as_str())
     }

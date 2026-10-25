@@ -83,6 +83,8 @@ pub struct Leg {
     /// The endpoint that answered it.
     pub accepted_by: Option<String>,
     pub declined: bool,
+    /// The `mediaRenegotiation` callback its answer handed out, where the call's renegotiation goes.
+    renegotiation: Option<String>,
 }
 
 /// A call as the mock keeps it, for a test to read ([`crate::ChatServiceMock::calls`]).
@@ -135,6 +137,9 @@ pub(crate) struct Calling {
     next: u64,
     /// Deliveries waiting for their endpoint's calling socket.
     pub(crate) outgoing: Vec<Outgoing>,
+    /// The next acceptance the media controller or a mixer delivers names another call in its links
+    /// ([`crate::ChatServiceMock::unbind_next_acceptance`]).
+    pub(crate) unbind_next_acceptance: bool,
 }
 
 /// The skypetoken the mock takes as `mri`'s.
@@ -207,6 +212,32 @@ impl State {
     }
 }
 
+/// The TURN relay's credentials (`GET /trap/tokens`, `answers.json`'s shape) for an account's token: the loopback TURN
+/// server's once a test turned the media on, made-up ones otherwise; `None` for any other path.
+pub(crate) fn relay_tokens(state: &State, request: &Request) -> Option<ResponseTemplate> {
+    if request.url.path() != "/trap/tokens" {
+        return None;
+    }
+    let token = request
+        .headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    if token.and_then(|token| state.account_by_token(token)).is_none() {
+        return Some(status(401));
+    }
+    if request.method.as_str() != "GET" {
+        return Some(status(404));
+    }
+    let answers: Value = serde_json::from_str(ECHO_ANSWERS).unwrap_or_default();
+    let (user, password) = state.relay_credentials();
+    let tokens = fixture(
+        &answers["trap_tokens"].to_string(),
+        &[("<token:1>", user), ("<token:2>", password)],
+    );
+    Some(json_answer(200, &tokens))
+}
+
 /// The calling service's answer to `request`, if its path is under `/api/v2/`.
 pub(crate) fn serve(state: &mut State, request: &Request) -> Option<ResponseTemplate> {
     let path = request.url.path().strip_prefix("/api/v2/")?;
@@ -249,10 +280,15 @@ fn start(state: &mut State, caller: &str, body: &Value) -> Option<ResponseTempla
     ring_callees(state, index);
     if test_call || call.group_chat.is_some() {
         state.calling.calls[index].test_call = test_call;
+        let answer = call
+            .offer
+            .as_ref()
+            .and_then(|offer| state.peer_answer(&call.id, caller, offer));
         accept_by_controller(
             state,
             index,
             call.caller_links.as_ref().and_then(|links| links.acceptance.as_deref()),
+            answer,
         );
     }
     Some(json_answer(200, &conversation_answer(&call.conversation)))
@@ -284,6 +320,7 @@ fn new_call(
                 ringing: Vec::new(),
                 accepted_by: None,
                 declined: false,
+                renegotiation: None,
             })
             .collect(),
         requests: Vec::new(),
@@ -349,16 +386,27 @@ fn invitation_of(state: &State, call: &MockCall, leg: u64, callee: &str) -> Valu
 }
 
 /// The media controller (the test call) or the call's mixer (a group call, a join) accepts the leg whose acceptance
-/// callback is `acceptance` (`answers.json`'s acceptance, the controller's answer).
-fn accept_by_controller(state: &mut State, index: usize, acceptance: Option<&str>) {
+/// callback is `acceptance` (`answers.json`'s acceptance, the controller's answer; `answer` in its place when a peer
+/// answered). Its acknowledgement link names another call than its other links when a test asked for that
+/// ([`Calling::unbind_next_acceptance`]): an acceptance the fence binds nothing of.
+fn accept_by_controller(state: &mut State, index: usize, acceptance: Option<&str>, answer: Option<Value>) {
     let call = &mut state.calling.calls[index];
     call.phase = CallPhase::Connected;
     let id = call.id.clone();
+    let unbound = state.calling.unbind_next_acceptance;
+    state.calling.unbind_next_acceptance = false;
     let answers: Value = serde_json::from_str(ECHO_ANSWERS).unwrap_or_default();
-    let body = fixture(
+    let mut body = fixture(
         &answers["acceptance_callback"]["body"].to_string(),
         &[("<guid:5>", &id)],
     );
+    if unbound && let Some(link) = body.pointer_mut("/callAcceptance/links/acknowledgement") {
+        let other = link.as_str().unwrap_or_default().replace(&id, &format!("{id}Other"));
+        *link = Value::String(other);
+    }
+    if let Some(answer) = answer {
+        body["callAcceptance"]["mediaContent"] = answer;
+    }
     state.call_back(acceptance, body);
 }
 
@@ -375,7 +423,11 @@ fn join(state: &mut State, account: &str, conversation: &str, body: &Value) -> O
         let links = Callbacks::of(body);
         let acceptance = links.acceptance.clone();
         state.calling.calls[index].joined.push((account.to_owned(), links));
-        accept_by_controller(state, index, acceptance.as_deref());
+        let id = state.calling.calls[index].id.clone();
+        let answer = body
+            .pointer("/callInvitation/mediaContent")
+            .and_then(|offer| state.peer_answer(&id, account, offer));
+        accept_by_controller(state, index, acceptance.as_deref(), answer);
     }
     Some(json_answer(200, &conversation_answer(conversation)))
 }
@@ -498,9 +550,65 @@ fn controller_op(
         }
         ("incoming", "accept") => accept(state, index, leg_index?, body),
         ("incoming", "reject") => reject(state, index, leg_index?, body),
-        ("callAcceptance", "acknowledge") | ("mcProxy", "applyChannelParameters") => Some(status(200)),
+        ("active", "renegotiate") => renegotiated(state, index, account, body),
+        ("negotiations", "answer") => {
+            let answer = body.pointer("/mediaAnswer/mediaContent")?;
+            let id = state.calling.calls[index].id.clone();
+            state.peer_accept(&id, account, answer);
+            Some(status(200))
+        }
+        ("callAcceptance" | "mediaAnswers", "acknowledge") | ("mcProxy", "applyChannelParameters") => Some(status(200)),
         _ => None,
     }
+}
+
+/// The account renegotiates call `index`'s media: the call's peer (the media controller, a caller the mock plays)
+/// answers at the renegotiation's `mediaAnswer` callback (`follow_ups.json`'s answer delivery), its acknowledgement
+/// link this call's. Without a peer nothing answers. Its own answer: 200 with no body (not captured).
+fn renegotiated(state: &mut State, index: usize, account: &str, body: &Value) -> Option<ResponseTemplate> {
+    let negotiation = body.get("mediaNegotiation")?;
+    let offer = negotiation.get("mediaContent")?;
+    let to = negotiation.pointer("/links/mediaAnswer")?.as_str()?.to_owned();
+    let call = state.calling.calls[index].clone();
+    if let Some(answer) = state.peer_answer(&call.id, account, offer) {
+        let follow_ups: Value = serde_json::from_str(FOLLOW_UPS).unwrap_or_default();
+        let template = follow_ups["deliveries"][1]["body"].to_string();
+        let mut delivery = fixture(
+            &template,
+            &[
+                ("SyntheticCall1/27/", &format!("{}/1/", call.id)),
+                ("<guid:a>", object_id(&call.caller)),
+            ],
+        );
+        delivery["mediaAnswer"]["mediaContent"] = answer;
+        state.call_back(Some(&to), delivery);
+    }
+    Some(status(200))
+}
+
+/// The peer of call `id` renegotiates with `account`, which answered the call: its new offer at the
+/// `mediaRenegotiation` callback the account's answer handed out (`follow_ups.json`'s renegotiation delivery), the
+/// answer's link this call's. `false` without such a call, answered leg or peer.
+pub(crate) fn renegotiate(state: &mut State, id: &str, account: &str) -> bool {
+    let Some(index) = state.calling.calls.iter().position(|call| call.id == id) else {
+        return false;
+    };
+    let call = state.calling.calls[index].clone();
+    let Some((number, leg)) = (1_u64..).zip(&call.legs).find(|(_, leg)| leg.callee == account) else {
+        return false;
+    };
+    let Some(callback) = leg.renegotiation.clone() else {
+        return false;
+    };
+    let Some(offer) = state.peer_reoffer(id, account) else {
+        return false;
+    };
+    let follow_ups: Value = serde_json::from_str(FOLLOW_UPS).unwrap_or_default();
+    let template = follow_ups["deliveries"][0]["body"].to_string();
+    let mut delivery = fixture(&template, &[("SyntheticCall1/27/", &format!("{id}/{number}/"))]);
+    delivery["mediaNegotiation"]["mediaContent"] = offer;
+    state.call_back(Some(&callback), delivery);
+    true
 }
 
 fn leg_mut(state: &mut State, index: usize, leg: usize) -> Option<&mut Leg> {
@@ -552,10 +660,19 @@ fn accept(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
         .filter(|(attached, _)| Some(attached) != answering.as_ref())
         .map(|(_, end)| end.clone())
         .collect();
+    let renegotiation = body
+        .pointer("/callAcceptance/links/mediaRenegotiation")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let leg_state = leg_mut(state, index, leg)?;
     leg_state.accepted_by = Some(endpoint);
     leg_state.attached.retain(|(_, end)| !others.contains(end));
+    leg_state.renegotiation = renegotiation;
     state.calling.calls[index].phase = CallPhase::Connected;
+    if let Some(answer) = body.pointer("/callAcceptance/mediaContent") {
+        // a caller the mock plays: its peer takes the callee's answer
+        state.peer_accept(&call.id, &callee, answer);
+    }
     for end in &others {
         state.call_back(Some(end), end_body(0, ANSWERED_ELSEWHERE));
     }
@@ -643,9 +760,15 @@ fn forward_to_voicemail(state: &mut State, index: usize, callee: &str) {
 
 /// A caller the mock plays rings `to` (no client places it): the call's id.
 pub(crate) fn ring(state: &mut State, from: &str, to: &[String], group_chat: Option<String>) -> String {
+    let one_to_one = group_chat.is_none();
     let index = new_call(state, from, to, group_chat, None, None);
+    let id = state.calling.calls[index].id.clone();
+    if let (true, [callee]) = (one_to_one, to) {
+        // with the media on, the caller's peer offers (a 1:1 invitation carries the caller's offer)
+        state.calling.calls[index].offer = state.peer_offer(&id, callee);
+    }
     ring_callees(state, index);
-    state.calling.calls[index].id.clone()
+    id
 }
 
 /// Call `id`'s ring ends with `code` and `phrase` (the caller cancelled, it timed out): every endpoint that attached

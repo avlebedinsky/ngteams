@@ -51,6 +51,10 @@
 //! answered in its captured shape; the invitations, acceptances and ends they cause delivered to the calling endpoints
 //! the accounts registered, through the mock's Trouter; calls a caller the mock plays places
 //! ([`ChatServiceMock::ring`]), their ring's end and their hang-up; every call's record ([`ChatServiceMock::calls`]).
+//! The TURN relay's credentials (`GET /trap/tokens`, with the account's token). With the `media` feature and the media
+//! turned on ([`ChatServiceMock::start_media`], M3 Task 14), a loopback media peer stands behind the answers and offers
+//! of the parties the mock plays (the test call's media controller, a group call's mixer, a caller of its own) and
+//! their renegotiations, on a loopback TURN server whose credentials `/trap/tokens` then hands out (`peers.rs`).
 //!
 //! **Trouter** ([`ChatServiceMock::start_trouter`], `trouter.rs`): connect, authenticate, `trouter.connected`, pings,
 //! the deliveries of the queued events and their replay on connect, from the synthetic `tests/fixtures/trouter/`
@@ -77,6 +81,7 @@ mod csa;
 mod fixtures;
 #[cfg(feature = "media")]
 pub mod media;
+mod peers;
 mod reads;
 mod trouter;
 mod ups;
@@ -331,6 +336,18 @@ impl ChatServiceMock {
             .await;
     }
 
+    /// Answers the next request of `http_method` whose path ends with `path_end` with `status` and the JSON `body`,
+    /// before the world sees it: a test's stand-in for an answer the client can't read (the world doesn't change).
+    pub async fn answer_next(&self, http_method: &str, path_end: &str, status: u16, body: &Value) {
+        Mock::given(method(http_method))
+            .and(PathEnds(path_end.to_owned()))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
     /// The skypetoken the mock's calling service takes as `mri`'s (`X-Skypetoken`), if `mri` is one of its accounts.
     #[must_use]
     pub fn skypetoken(&self, mri: &str) -> Option<String> {
@@ -370,6 +387,55 @@ impl ChatServiceMock {
     #[must_use]
     pub fn calls(&self) -> Vec<MockCall> {
         self.lock().calling.calls.clone()
+    }
+
+    /// The next acceptance the media controller or a group call's mixer delivers names another call in its links (an
+    /// acceptance the fence binds nothing of).
+    pub fn unbind_next_acceptance(&self) {
+        self.lock().calling.unbind_next_acceptance = true;
+    }
+
+    /// The peer of call `id` renegotiates its media with `account`, which answered the call (the media on, see
+    /// [`ChatServiceMock::start_media`]). `false` without such a call, answer or peer.
+    #[must_use = "false says nothing was renegotiated"]
+    pub fn renegotiate(&self, id: &str, account: &str) -> bool {
+        calling::renegotiate(&mut self.lock(), id, account)
+    }
+
+    /// Turns the calling service's media on (see the crate docs): a TURN server on loopback, whose UDP address it
+    /// returns (the clients' relay) and whose credentials `/trap/tokens` hands out from now on, and a loopback peer
+    /// behind each party the mock plays, playing `tone` and recording what it hears into `dir`.
+    ///
+    /// # Errors
+    /// When the TURN server can't bind its ports.
+    #[cfg(feature = "media")]
+    pub fn start_media(
+        &self,
+        dir: &std::path::Path,
+        tone: teams_media::tone::Tone,
+    ) -> std::io::Result<std::net::SocketAddr> {
+        self.lock().peers.start(dir, tone)
+    }
+
+    /// Where the peer of call `id` on `account`'s side records (once the media is on).
+    #[cfg(feature = "media")]
+    #[must_use]
+    pub fn peer_recording(&self, id: &str, account: &str) -> Option<std::path::PathBuf> {
+        self.lock().peers.recording(id, account)
+    }
+
+    /// The counts so far of the peer of call `id` on `account`'s side.
+    #[cfg(feature = "media")]
+    #[must_use]
+    pub fn peer_stats(&self, id: &str, account: &str) -> Option<teams_media::session::SessionStats> {
+        self.lock().peers.stats(id, account)
+    }
+
+    /// Hangs up and closes the peer of call `id` on `account`'s side: its final counts.
+    #[cfg(feature = "media")]
+    #[must_use]
+    pub fn close_peer(&self, id: &str, account: &str) -> Option<teams_media::session::SessionStats> {
+        self.lock().peers.close(id, account)
     }
 
     /// The own-availability writes UPS took, in order (see the crate docs).

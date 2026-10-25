@@ -16,12 +16,16 @@
 //! ```
 //!
 //! **In**: the account's actions ([`Calls::place`], [`Calls::join`], [`Calls::answer`], [`Calls::decline`],
-//! [`Calls::hang_up`]), each call delivery as the fence read it ([`Calls::on_delivery`]: the calling socket's
-//! `teams_fence::Delivery` and `Observed`), each write's outcome under its [`WriteId`] ([`Calls::on_outcome`]), a
-//! delivery response that didn't go ([`Calls::on_response_failed`]) and the time ([`Calls::tick`]). **Out**
-//! ([`Calls::poll`]): [`Effect::Send`] (a [`CallWrite`], handed to the engine's [`WriteSink`] as its own sealed type,
-//! checked by the fence and sent in order), [`Effect::Respond`] (a typed delivery response, for the delivery's own
-//! responder) and [`Effect::Event`].
+//! [`Calls::hang_up`], [`Calls::renegotiate`], [`Calls::answer_media`]), each call delivery as the fence read it
+//! ([`Calls::on_delivery`]: the calling socket's `teams_fence::Delivery` and `Observed`), each write's outcome under
+//! its [`WriteId`] ([`Calls::on_outcome`]), a delivery response that didn't go ([`Calls::on_response_failed`]), the
+//! media failing ([`Calls::fail_media`]), the engine stopping ([`Calls::shut_down`]) and the time ([`Calls::tick`]).
+//! **Out** ([`Calls::poll`]): [`Effect::Send`] (a [`CallWrite`], handed to the engine's [`WriteSink`] as its own sealed
+//! type, checked by the fence and sent in order), [`Effect::Respond`] (a typed delivery response, for the delivery's
+//! own responder) and [`Effect::Event`]. An engine keeps one write in flight: beside it it takes only what isn't a
+//! write ([`Calls::poll_beside_write`]), so the writes after it stay in the machine's queue, where a call that ends
+//! drops them; a write refused without being acted on (a 401, a throttled one) goes again only while its call still
+//! wants it ([`Calls::may_send_again`]).
 //!
 //! **The calls, as captured:**
 //! - **Placed**: the start (a chat's call or the test call), its answer the conversation; the acceptance, delivered at
@@ -47,8 +51,20 @@
 //! - **Keep-alives**: the interval the acceptance or the `accept`'s answer asks for (`callKeepAliveInterval`) is kept
 //!   and its deadline told ([`CallEvent::KeepAliveDue`]), but no request goes: no capture shows what the keep-alive
 //!   is yet.
+//! - **Renegotiation**: the account's own ([`Calls::renegotiate`]: its new offer to the call controller's
+//!   `mediaRenegotiation` link, from the acceptance or the `accept`'s answer; the answer delivered at its `mediaAnswer`
+//!   callback is told as [`CallEvent::RemoteMedia`] and acknowledged; a rejection fails the call), and one delivered at
+//!   the account's `mediaRenegotiation` callback (told as [`CallEvent::MediaOffer`], answered only by
+//!   [`Calls::answer_media`]; one the fence bound no link for fails the call: no capture shows a refusal). Deliveries
+//!   aren't answered, so either may come again: an answer or a rejection counts only at the callbacks of the account's
+//!   renegotiation that waits for it (each renegotiation hands out its own), and a renegotiation delivered again as
+//!   it was (its answer link and offer the same as the one waiting or one answered) is taken as a replay and ignored.
+//! - **Media and the engine**: the media failing ends the call as a failed step does ([`Calls::fail_media`],
+//!   [`End::Failed`] `"media"`; a call whose start or join is unanswered leaves once it is, as a hang-up then does);
+//!   the engine stopping hangs a call up and lets an invitation that rings go unanswered
+//!   ([`Calls::shut_down`]).
 //! - **Not sent**: the account's own participant properties (its AI voice consent), which the web client posts once it
-//!   answered: nothing of the call waits for them. Media renegotiation (the camera) comes with the call session.
+//!   answered: nothing of the call waits for them.
 //!
 //! The fence's call registry stays the authority on what may be sent: this crate keeps only what it needs to build
 //! the next request.

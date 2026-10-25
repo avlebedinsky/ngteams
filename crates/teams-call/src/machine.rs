@@ -1,6 +1,6 @@
 //! The machine ([`Calls`]): one call at a time, from the account's action or an invitation to its end.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -10,7 +10,7 @@ use teams_proto::{
 };
 
 use crate::agent::{CallAgent, Kind, guid};
-use crate::call::{Acknowledgement, Call, Ending, KeepAlive, Phase, Side, Step};
+use crate::call::{Acknowledgement, Call, Ending, KeepAlive, Negotiation, Phase, Side, Step};
 use crate::read::{self, Invitation, RemoteEnd};
 use crate::{CallWrite, WriteId, build};
 
@@ -113,8 +113,11 @@ pub enum CallEvent {
     RingEnded { call: CallId, end: RemoteEnd },
     /// The call moved on.
     State { call: CallId, state: CallState },
-    /// The answer to the account's offer (a placed or joined call's acceptance).
+    /// The answer to the account's offer (a placed or joined call's acceptance, or the answer to its renegotiation).
     RemoteMedia { call: CallId, media: MediaContent },
+    /// The call's services renegotiate its media (a group call's mixer does, once the call is up): `offer` is to be
+    /// answered with [`Calls::answer_media`], or the call fails ([`Calls::fail_media`]).
+    MediaOffer { call: CallId, offer: MediaContent },
     /// The call ended. Every call shown ends with this or [`CallEvent::RingEnded`], once.
     Ended { call: CallId, end: End },
     /// The keep-alive interval the call's services asked for has passed again. Nothing is sent for it: no capture
@@ -218,6 +221,9 @@ impl From<getrandom::Error> for CallError {
 struct Out {
     effects: VecDeque<Effect>,
     next_write: u64,
+    /// The `leave`s and declines of calls that ended here before their outcome came: cleanup writes the engine may
+    /// still send again ([`Calls::may_send_again`]), until their outcome comes.
+    detached: BTreeSet<WriteId>,
 }
 
 impl Out {
@@ -330,6 +336,33 @@ impl Calls {
     /// The next thing the engine does, oldest first.
     pub fn poll(&mut self) -> Option<Effect> {
         self.out.effects.pop_front()
+    }
+
+    /// The next thing the engine does that isn't a write, oldest first: for an engine with a write of the machine's in
+    /// flight, which takes the next write only once that one's outcome came. The writes stay in the machine's own
+    /// queue, in order, so a call that ends drops those not taken yet.
+    pub fn poll_beside_write(&mut self) -> Option<Effect> {
+        let at = self
+            .out
+            .effects
+            .iter()
+            .position(|effect| !matches!(effect, Effect::Send { .. }))?;
+        self.out.effects.remove(at)
+    }
+
+    /// Whether the engine may send `write` once more, after an attempt the service refused without acting on it (a
+    /// 401, a throttled one): only while its call still wants it. A call that leaves (or ended) wants no write but its
+    /// `leave` or decline, and a cleanup write of a call that ended here goes on until its outcome came.
+    #[must_use]
+    pub fn may_send_again(&self, write: WriteId) -> bool {
+        let Some(call) = self.call.as_ref() else {
+            return self.out.detached.contains(&write);
+        };
+        match call.writes.get(&write) {
+            Some(Step::Leave | Step::Decline) => true,
+            Some(_) => !matches!(call.phase, Phase::Leaving { .. } | Phase::Declining),
+            None => self.out.detached.contains(&write),
+        }
     }
 
     /// The call that is up, and where it is.
@@ -451,6 +484,96 @@ impl Calls {
         self.out.state(current);
         Ok(())
     }
+
+    /// The account renegotiates the media of `call`, up, with its new `offer`: to the call controller's
+    /// `mediaRenegotiation` link; the answer comes as [`CallEvent::RemoteMedia`] (and is acknowledged), a rejection or
+    /// a failed renegotiation fails the call.
+    ///
+    /// A renegotiation the account began ([`Self::begin_renegotiation`]) goes on here; one it didn't is judged as that
+    /// would judge it.
+    ///
+    /// # Errors
+    /// [`CallError`]: the call isn't up, has no renegotiation link, or a renegotiation (either way) is under way;
+    /// nothing was sent.
+    pub fn renegotiate(&mut self, call: CallId, offer: &MediaContent) -> Result<(), CallError> {
+        let begun = self
+            .call
+            .as_ref()
+            .is_some_and(|current| current.id == call && current.reoffering);
+        let current = if begun {
+            connected(&mut self.call, call)?
+        } else {
+            renegotiable(&mut self.call, call)?
+        };
+        let link = current.renegotiation.clone().ok_or(CallError::NotNow)?;
+        let (write, reoffer) = build::renegotiate(current, &link, offer)?;
+        self.out.send(current, Step::Renegotiate, write);
+        current.reoffering = false;
+        // only now: the callbacks a renegotiation that wasn't built made stay the call's, but nothing waits on them
+        current.reoffer = Some(reoffer);
+        Ok(())
+    }
+
+    /// The account begins a renegotiation of the media of `call`, up, before its offer is made (a media session's new
+    /// offer replaces the one it waits on, so nothing may make one the machine wouldn't take): until the offer goes
+    /// ([`Self::renegotiate`]) or is given up ([`Self::give_up_renegotiation`]) the call takes no other renegotiation.
+    /// The account's second one is refused, and the far end's fails the call, as one does while the account's waits
+    /// for its answer.
+    ///
+    /// # Errors
+    /// [`CallError`]: the call isn't up, has no renegotiation link, or a renegotiation (either way) is under way;
+    /// nothing changed.
+    pub fn begin_renegotiation(&mut self, call: CallId) -> Result<(), CallError> {
+        renegotiable(&mut self.call, call)?.reoffering = true;
+        Ok(())
+    }
+
+    /// The account's renegotiation of `call` it began ([`Self::begin_renegotiation`]) won't go (its offer couldn't be
+    /// made): another may begin.
+    pub fn give_up_renegotiation(&mut self, call: CallId) {
+        if let Some(current) = self.call.as_mut().filter(|current| current.id == call) {
+            current.reoffering = false;
+        }
+    }
+
+    /// The account's `answer` to the renegotiation of `call` told as [`CallEvent::MediaOffer`].
+    ///
+    /// # Errors
+    /// [`CallError`]: no renegotiation of that call waits for an answer; nothing was sent.
+    pub fn answer_media(&mut self, call: CallId, answer: MediaContent) -> Result<(), CallError> {
+        let current = connected(&mut self.call, call)?;
+        let negotiation = current.negotiation.clone().ok_or(CallError::NotNow)?;
+        let write = build::answer_media(current, &negotiation.link, answer)?;
+        current.negotiation = None;
+        self.out.send(current, Step::MediaAnswer, write);
+        // answered once its answer is queued, whatever that answer's outcome: a replay of it is never answered again
+        current.negotiated.push(negotiation);
+        Ok(())
+    }
+}
+
+/// The call `call`, if it is the one up and connected (as signaling goes) and nothing renegotiates it.
+fn connected(current: &mut Option<Call>, call: CallId) -> Result<&mut Call, CallError> {
+    let current = current
+        .as_mut()
+        .filter(|current| current.id == call)
+        .ok_or(CallError::NoSuchCall)?;
+    if current.phase == Phase::Connected && !current.waits_for_answer() {
+        Ok(current)
+    } else {
+        Err(CallError::NotNow)
+    }
+}
+
+/// The call `call`, if it is up and connected (as signaling goes), has a renegotiation link, and no renegotiation of
+/// it is under way either way (the account's begun or waiting for its answer, the far end's waiting for the account's).
+fn renegotiable(current: &mut Option<Call>, call: CallId) -> Result<&mut Call, CallError> {
+    let current = connected(current, call)?;
+    if current.renegotiation.is_some() && current.negotiation.is_none() && !current.reoffering {
+        Ok(current)
+    } else {
+        Err(CallError::NotNow)
+    }
 }
 
 /// The offered invitation `call`, if it is `current`.
@@ -484,12 +607,7 @@ impl Calls {
             Phase::Leaving { .. } => Ok(()),
             Phase::Attaching | Phase::Offered | Phase::Declining => Err(CallError::NotNow),
             Phase::Placing => {
-                // the conversation's `leave` link comes with the start's answer: the leave goes then
-                current.phase = Phase::Leaving {
-                    sent: false,
-                    end: Ending::HungUp,
-                };
-                self.out.state(current);
+                self.leave_once_started(Ending::HungUp);
                 Ok(())
             }
             Phase::Answering => {
@@ -514,6 +632,18 @@ impl Calls {
         }
     }
 
+    /// A call whose start or join is still unanswered leaves for `ending` once it is: the conversation's `leave` link
+    /// comes with that answer, and a start or join the service took is always followed by its `leave`
+    /// ([`Self::started`]). The call stays until then; a start or join that fails ends it with `ending`.
+    fn leave_once_started(&mut self, ending: Ending) {
+        let Some(call) = self.call.as_mut() else { return };
+        call.phase = Phase::Leaving {
+            sent: false,
+            end: ending,
+        };
+        self.out.state(call);
+    }
+
     /// The call leaves for `ending`: its `leave` sent when it may go, else the call ends here at once.
     fn leave(&mut self, ending: Ending, now: Instant) {
         let Some(call) = self.call.as_mut() else { return };
@@ -536,10 +666,17 @@ impl Calls {
         }
     }
 
-    /// The call is over here: none of its writes not handed out yet goes, but a `leave`.
+    /// The call is over here: none of its writes not handed out yet goes, but a `leave`; its cleanup writes still
+    /// waiting for their outcome stay the engine's to finish ([`Self::may_send_again`]).
     fn end_call(&mut self) -> Option<Call> {
         let mut call = self.call.take()?;
         self.out.drop_queued(&mut call);
+        let cleanup = call
+            .writes
+            .iter()
+            .filter(|(_, step)| matches!(step, Step::Leave | Step::Decline))
+            .map(|(id, _)| *id);
+        self.out.detached.extend(cleanup);
         Some(call)
     }
 
@@ -568,24 +705,83 @@ impl Calls {
         if step == Step::Join {
             self.forget_running();
         }
+        // an answer turned into a decline by a hang-up: its endpoint state failing changes nothing, the decline goes
+        // on and its own outcome ends the call
+        let declining = self.call.as_ref().map(|call| call.phase) == Some(Phase::Declining);
+        if declining && step != Step::Decline {
+            return;
+        }
+        self.abandon(Ending::Failed(step), now);
+    }
+
+    /// The call fails for `ending`: it leaves if it may and ends here at once (its `leave` goes out unwatched); an
+    /// invitation not shown yet goes away unseen. A call that was leaving already before its start or join was
+    /// answered ends for what it was leaving for.
+    fn abandon(&mut self, ending: Ending, now: Instant) {
         match self.call.as_ref().map(|call| call.phase) {
             Some(Phase::Attaching) => drop(self.end_call()),
-            // an answer turned into a decline by a hang-up: its endpoint state failing changes nothing, the decline
-            // goes on and its own outcome ends the call
-            Some(Phase::Declining) if step != Step::Decline => {}
-            Some(_) => self.leave(Ending::Failed(step), now),
+            Some(Phase::Leaving { sent: false, end }) => self.leave(end, now),
+            Some(_) => self.leave(ending, now),
             None => {}
         }
-        if let Some(call) = self.call.as_ref()
-            && matches!(call.phase, Phase::Leaving { sent: true, .. })
-        {
-            // the call ends now; its `leave` goes out unwatched
-            self.finish(End::Failed(step.name()));
+        if let Some(Phase::Leaving { sent: true, end }) = self.call.as_ref().map(|call| call.phase) {
+            self.finish(end.end());
+        }
+    }
+
+    /// The call `call`'s media failed (it can't be set up, the far end's SDP doesn't apply, the media never
+    /// connects or is lost): the call fails as a failed step does ([`End::Failed`] `"media"`), with a `leave` when the
+    /// account is in it. A call whose start or join is still unanswered waits for that answer and leaves then, as a
+    /// hang-up does: the service may have taken it. Nothing when `call` isn't the call that is up, or it is ending
+    /// already.
+    pub fn fail_media(&mut self, call: CallId, now: Instant) {
+        let phase = self
+            .call
+            .as_ref()
+            .filter(|current| current.id == call)
+            .map(|current| current.phase);
+        match phase {
+            None | Some(Phase::Leaving { .. } | Phase::Declining) => {}
+            Some(Phase::Placing) => self.leave_once_started(Ending::Media),
+            Some(Phase::Offered) => {
+                // not answered yet: the account isn't in it, and only its own decline would end the ring
+                if let Some(ended) = self.end_call() {
+                    self.out.event(CallEvent::RingEnded {
+                        call: ended.id,
+                        end: RemoteEnd::default(),
+                    });
+                }
+            }
+            Some(_) => self.abandon(Ending::Media, now),
+        }
+    }
+
+    /// The engine stops: the call that is up is hung up as [`Self::hang_up`] does (a `leave`, or the decline of an
+    /// answer whose `accept` hasn't gone), and an invitation that rings here (or isn't shown yet) is let go here
+    /// unanswered: nothing is sent for it, its ring goes on at the account's other endpoints.
+    pub fn shut_down(&mut self, now: Instant) {
+        let Some((id, phase)) = self.call.as_ref().map(|call| (call.id, call.phase)) else {
+            return;
+        };
+        match phase {
+            Phase::Attaching => drop(self.end_call()),
+            Phase::Offered => {
+                drop(self.end_call());
+                self.out.event(CallEvent::RingEnded {
+                    call: id,
+                    end: RemoteEnd::default(),
+                });
+            }
+            Phase::Declining | Phase::Leaving { .. } => {}
+            Phase::Placing | Phase::Ringing | Phase::Joining | Phase::Answering | Phase::Connected => {
+                let _ = self.hang_up(id, now);
+            }
         }
     }
 
     /// How a write went (see [`Effect::Send`]). An outcome of a call that ended is dropped.
     pub fn on_outcome(&mut self, write: WriteId, outcome: &Outcome, now: Instant) {
+        self.out.detached.remove(&write);
         let Some(call) = self.call.as_mut() else { return };
         let Some(step) = call.writes.remove(&write) else {
             return;
@@ -660,9 +856,87 @@ impl Calls {
                 self.forget_running();
                 self.ended(delivery);
             }
+            (Kind::Call, "mediaRenegotiation") => self.renegotiated(delivery, observed, now),
+            (Kind::Call, "mediaAnswer") => self.media_answered(delivery, now),
+            (Kind::Call, "rejection") => self.reoffer_rejected(delivery, now),
             // progress, roster and conversation updates, an add's outcome: read by nothing yet
             _ => {}
         }
+    }
+
+    /// A renegotiation of the call's media delivered to the account: told, to be answered ([`Self::answer_media`]).
+    /// One the fence didn't read (it binds no link for the answer) or that doesn't read, or one while the call isn't
+    /// up, answers another or renegotiates itself (the account's begun or waiting for its answer), fails the call: no
+    /// capture shows how one is refused.
+    ///
+    /// A delivery of the renegotiation that waits for the account's answer, or of one the account answered, again (its
+    /// answer link and its offer both the same) is a replay (deliveries aren't answered, so the service delivers them
+    /// again): nothing. A renegotiation the far end means to send again as it was, on the same answer link, can't be
+    /// told from such a replay and is taken as one; a different offer on a link seen before is a new renegotiation.
+    fn renegotiated(&mut self, delivery: &Delivery, observed: Observed, now: Instant) {
+        let Some(call) = self.call.as_mut() else { return };
+        let read = read::negotiation(&delivery.body)
+            .filter(|_| observed == Observed::Renegotiation)
+            .map(|(offer, link)| Negotiation { offer, link });
+        if let Some(negotiation) = &read {
+            let replay = call.negotiation.as_ref() == Some(negotiation) || call.negotiated.contains(negotiation);
+            if replay {
+                return;
+            }
+        }
+        let up = call.phase == Phase::Connected
+            && call.negotiation.is_none()
+            && !call.waits_for_answer()
+            && !call.reoffering;
+        match read {
+            Some(negotiation) if up => {
+                let offer = negotiation.offer.clone();
+                call.negotiation = Some(negotiation);
+                let id = call.id;
+                self.out.event(CallEvent::MediaOffer { call: id, offer });
+            }
+            _ if matches!(call.phase, Phase::Leaving { .. }) => {}
+            _ => self.fail(Step::MediaAnswer, now),
+        }
+    }
+
+    /// The answer to the account's renegotiation: told as the call's remote media, and acknowledged where it hands out
+    /// a link. Nothing while no renegotiation of the account's waits for one, and nothing for a delivery at an earlier
+    /// renegotiation's callback (a replay of an answer that came): only the waiting one's own callback is its answer.
+    fn media_answered(&mut self, delivery: &Delivery, now: Instant) {
+        let Some(call) = self.call.as_mut() else { return };
+        if call
+            .reoffer
+            .as_ref()
+            .is_none_or(|reoffer| reoffer.answer != delivery.path)
+        {
+            return;
+        }
+        call.reoffer = None;
+        let Some((media, acknowledgement)) = read::media_answer(&delivery.body) else {
+            self.fail(Step::Renegotiate, now);
+            return;
+        };
+        let id = call.id;
+        if let Some(Ok(write)) = acknowledgement.map(|link| build::acknowledge_media(call, &link)) {
+            self.out.send(call, Step::MediaAcknowledge, write);
+        }
+        self.out.event(CallEvent::RemoteMedia { call: id, media });
+    }
+
+    /// The account's renegotiation was rejected: the call fails (its media waits for an answer that won't come).
+    /// Nothing for a delivery at an earlier renegotiation's `rejection` callback, or while none waits.
+    fn reoffer_rejected(&mut self, delivery: &Delivery, now: Instant) {
+        let Some(call) = self.call.as_mut() else { return };
+        if call
+            .reoffer
+            .as_ref()
+            .is_none_or(|reoffer| reoffer.rejection != delivery.path)
+        {
+            return;
+        }
+        call.reoffer = None;
+        self.fail(Step::Renegotiate, now);
     }
 
     /// An invitation the fence offered (see the crate docs).
@@ -746,12 +1020,13 @@ impl Calls {
 
     /// The `accept`'s answer: the call is up.
     fn connected_by_accept(&mut self, body: &[u8], now: Instant) {
-        let keep_alive = read::accept_answer(body);
+        let answer = read::accept_answer(body);
         let Some(call) = self.call.as_mut() else { return };
         if call.phase != Phase::Answering {
             return;
         }
-        self.connect(keep_alive, now);
+        call.renegotiation = answer.renegotiation;
+        self.connect(answer.keep_alive, now);
     }
 
     /// The call is up: told, its keep-alive armed, the account's endpoint metadata sent, then (once that was taken)
@@ -818,6 +1093,7 @@ impl Calls {
                 links,
                 by_request: false,
             });
+            call.renegotiation.clone_from(&acceptance.renegotiation);
         }
         self.acknowledge(delivery);
         if let (Some(call), Some(media)) = (self.call.as_ref(), acceptance.answer) {

@@ -128,19 +128,37 @@ fn keep_alive(at: &Value) -> Option<u64> {
     at.get("callKeepAliveInterval")?.as_u64().filter(|seconds| *seconds > 0)
 }
 
-/// The `keep_alive` interval of an `accept`'s answer.
-pub(crate) fn accept_answer(body: &[u8]) -> Option<u64> {
-    let body: Value = serde_json::from_slice(body).ok()?;
-    keep_alive(body.get("callAcceptanceAcknowledgement")?)
+/// What an `accept`'s answer (`{"callAcceptanceAcknowledgement": {…}}`) hands out: the keep-alive interval and the
+/// call controller's `mediaRenegotiation` link.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AcceptAnswer {
+    pub(crate) keep_alive: Option<u64>,
+    pub(crate) renegotiation: Option<CallLink>,
+}
+
+/// An `accept`'s answer, as far as it reads.
+pub(crate) fn accept_answer(body: &[u8]) -> AcceptAnswer {
+    let Some(acknowledgement) = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| body.get("callAcceptanceAcknowledgement").cloned())
+    else {
+        return AcceptAnswer::default();
+    };
+    AcceptAnswer {
+        keep_alive: keep_alive(&acknowledgement),
+        renegotiation: link(&acknowledgement, "/links/mediaRenegotiation"),
+    }
 }
 
 /// The acceptance of a call the account placed or joined: its `acknowledgement` link (for an acknowledgement by
-/// request), the answer to the account's offer, and the keep-alive interval.
+/// request), the answer to the account's offer, the keep-alive interval and the call controller's
+/// `mediaRenegotiation` link.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Acceptance {
     pub(crate) acknowledgement: Option<CallLink>,
     pub(crate) answer: Option<MediaContent>,
     pub(crate) keep_alive: Option<u64>,
+    pub(crate) renegotiation: Option<CallLink>,
 }
 
 /// The acceptance delivery `body`; `None` unless it is a `callAcceptance`.
@@ -151,7 +169,31 @@ pub(crate) fn acceptance(body: &[u8]) -> Option<Acceptance> {
         acknowledgement: link(acceptance, "/links/acknowledgement"),
         answer: acceptance.get("mediaContent").and_then(media),
         keep_alive: keep_alive(acceptance),
+        renegotiation: link(acceptance, "/links/mediaRenegotiation"),
     })
+}
+
+/// A renegotiation delivered at the account's `mediaRenegotiation` callback (`{"mediaNegotiation": {"mediaContent",
+/// "links": {"mediaAnswer", …}}}`): its offer and the link the answer goes to; `None` unless both read.
+pub(crate) fn negotiation(body: &[u8]) -> Option<(MediaContent, CallLink)> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let negotiation = body.get("mediaNegotiation")?;
+    Some((
+        media(negotiation.get("mediaContent")?)?,
+        link(negotiation, "/links/mediaAnswer")?,
+    ))
+}
+
+/// The answer to the account's renegotiation, delivered at its `mediaAnswer` callback (`{"mediaAnswer":
+/// {"mediaContent", "links": {"mediaAcknowledgement"}}}`): the answer, and the link its acknowledgement goes to where
+/// it reads; `None` without a readable answer.
+pub(crate) fn media_answer(body: &[u8]) -> Option<(MediaContent, Option<CallLink>)> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let answer = body.get("mediaAnswer")?;
+    Some((
+        media(answer.get("mediaContent")?)?,
+        link(answer, "/links/mediaAcknowledgement"),
+    ))
 }
 
 /// How the call's services ended a call or a ring: the `callEnd` (or a conversation's end) as delivered. Each part only
@@ -279,10 +321,39 @@ mod tests {
             conv("/updateEndpointState")
         );
 
-        let accept = json!({"callAcceptanceAcknowledgement": {"links": {}, "callKeepAliveInterval": 2700}});
-        assert_eq!(accept_answer(accept.to_string().as_bytes()), Some(2700));
+        let accept = json!({"callAcceptanceAcknowledgement": {
+            "links": {"mediaRenegotiation": cc("active", "renegotiate")}, "callKeepAliveInterval": 2700}});
+        let read = accept_answer(accept.to_string().as_bytes());
+        assert_eq!(read.keep_alive, Some(2700));
+        assert_eq!(read.renegotiation.unwrap().as_str(), cc("active", "renegotiate"));
         let none = json!({"callAcceptanceAcknowledgement": {"callKeepAliveInterval": null}});
-        assert_eq!(accept_answer(none.to_string().as_bytes()), None);
+        assert_eq!(
+            accept_answer(none.to_string().as_bytes()),
+            super::AcceptAnswer::default()
+        );
+        assert_eq!(accept_answer(b"not json"), super::AcceptAnswer::default());
+    }
+
+    #[test]
+    fn a_renegotiation_and_the_answer_to_one_read_their_media_and_links() {
+        let offer = json!({"mediaNegotiation": {
+            "mediaContent": {"blob": "v=0", "contentType": "application/sdp-ngc-1.0"},
+            "links": {"mediaAnswer": cc("negotiations", "answer"), "rejection": cc("negotiations", "reject")},
+        }});
+        let (media, answer) = super::negotiation(offer.to_string().as_bytes()).unwrap();
+        assert_eq!(media.content_type, "application/sdp-ngc-1.0");
+        assert_eq!(answer.as_str(), cc("negotiations", "answer"));
+        let unlinked = json!({"mediaNegotiation": {"mediaContent": {"blob": "v=0", "contentType": "x"}}});
+        assert!(super::negotiation(unlinked.to_string().as_bytes()).is_none());
+
+        let answered = json!({"mediaAnswer": {
+            "mediaContent": {"blob": "v=0", "contentType": "application/sdp-ngc-1.0"},
+            "links": {"mediaAcknowledgement": cc("mediaAnswers", "acknowledge")},
+        }});
+        let (_, acknowledgement) = super::media_answer(answered.to_string().as_bytes()).unwrap();
+        assert_eq!(acknowledgement.unwrap().as_str(), cc("mediaAnswers", "acknowledge"));
+        let empty = json!({"mediaAnswer": {}});
+        assert!(super::media_answer(empty.to_string().as_bytes()).is_none());
     }
 
     #[test]
@@ -299,6 +370,7 @@ mod tests {
         );
         assert_eq!(read.keep_alive, Some(2700));
         assert!(read.answer.is_some());
+        assert_eq!(read.renegotiation, None);
         assert!(acceptance(b"{}").is_none());
     }
 

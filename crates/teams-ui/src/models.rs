@@ -306,8 +306,15 @@ impl Models {
                 cx.notify();
             }),
             // how the push channel's registration went and a waiting transient's send (told on the feed, for the own
-            // presence's policy), the search backfill over: nothing a view shows
-            Event::Registration(_) | Event::Transient(..) | Event::Indexed { .. } => {}
+            // presence's policy), the search backfill over: nothing a view shows; and calls, which the app's engine
+            // makes none of yet (M3 Task 17 shows them)
+            Event::Registration(_)
+            | Event::Transient(..)
+            | Event::Indexed { .. }
+            | Event::CallingRegistration(_)
+            | Event::IncomingCall(_)
+            | Event::RingEnded { .. }
+            | Event::Call { .. } => {}
         }
     }
 

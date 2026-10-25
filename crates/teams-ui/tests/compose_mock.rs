@@ -200,6 +200,7 @@ fn engine(lab: &Lab, me: &str) -> (EngineHandle, SharedLog, tempfile::TempDir) {
         });
     let dir = tempfile::tempdir().unwrap();
     let handle = engine::start(Parts {
+        calls: None,
         store: Store::open(&dir.path().join("store").join("lab.sqlite")).unwrap(),
         client: Arc::new(Client::new(http())),
         outbox: Outbox::new(

@@ -119,8 +119,13 @@ impl Default for Options {
 #[derive(Debug)]
 pub enum PushEvent {
     /// A socket is up and its endpoint known (`trouter.connected`): pushes may have been missed before it, so catch
-    /// up. `new_endpoint` when the service handed over another endpoint id than the last connection's.
-    Connected { endpoint: String, new_endpoint: bool },
+    /// up. `new_endpoint` when the service handed over another endpoint id than the last connection's; `push_url` the
+    /// endpoint's push URL as the event gave it (`surl`), where the calling stack's callbacks go.
+    Connected {
+        endpoint: String,
+        new_endpoint: bool,
+        push_url: String,
+    },
     /// A registration of the endpoint went through: the endpoint it registered (the client's `epid`), the account's own
     /// registered endpoint of this run, the one id its own availability may name (M2 Task 19). Told just before the
     /// registration's [`PushEvent::Registration`] report.
@@ -656,6 +661,7 @@ where
         self.emit(PushEvent::Connected {
             endpoint: connected.id.clone(),
             new_endpoint,
+            push_url: connected.push_url.clone(),
         });
     }
 }

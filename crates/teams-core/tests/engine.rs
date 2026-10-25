@@ -371,6 +371,7 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
     let ahead = Arc::new(AtomicI64::new(0));
     let outbox = Outbox::new(Arc::new(interposed), fence, membership, author).with_clock(clock_ahead(&ahead));
     let handle = engine::start(Parts {
+        calls: None,
         store,
         client,
         outbox,

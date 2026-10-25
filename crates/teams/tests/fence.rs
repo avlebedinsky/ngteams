@@ -289,6 +289,7 @@ async fn the_engine_sends_a_message_to_the_outsider_s_chat_through_the_personal_
     let client = Arc::new(Client::new(http(&mock, LAB_A, &fence)));
     let outbox = Outbox::new(transport, fence, membership, Author::new(Mri::new(LAB_A), "a"));
     let mut handle = engine::start(Parts {
+        calls: None,
         store: Store::open(&dir.path().join("store.sqlite")).unwrap(),
         client,
         outbox,
@@ -389,6 +390,7 @@ async fn the_personal_build_opens_no_calling_socket_and_sends_no_calling_registr
         Author::new(Mri::new(LAB_A), "a"),
     );
     let mut handle = engine::start(Parts {
+        calls: None,
         store: Store::open(&dir.path().join("store.sqlite")).unwrap(),
         client,
         outbox,

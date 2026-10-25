@@ -192,6 +192,7 @@ fn start<T: Transport<Error = HttpError> + Send + 'static>(
     push: Option<Push>,
 ) -> EngineHandle {
     engine::start(Parts {
+        calls: None,
         store,
         client,
         outbox,

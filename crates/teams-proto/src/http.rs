@@ -857,9 +857,11 @@ impl<C: Credentials> HttpTransport<C> {
     /// checked against the calling base before anything else ([`Refusal::NotAllowed`]), with the account's skypetoken
     /// ([`Refusal::NoSkypetoken`] without one), the call's headers and its body as the fence classified them. A call
     /// start or a join with media is pended in the fence's call registry first ([`Fence::pend_start`], with exactly the
-    /// body sent) and registered from a successful answer ([`Fence::register_start`]); an `attach` or an `accept` pends
-    /// its answer ([`Fence::pend_answer`]) and binds the links a successful answer hands out ([`Fence::bind_answer`]).
-    /// A permit the registry won't take is [`Refusal::NotPended`], nothing sent. The answer comes back whatever its
+    /// body sent) and registered from a successful answer ([`Fence::register_start`]), ended unregistered by any other
+    /// ([`Fence::abandon_start`], so a start sent again is the call its acceptance binds to); an `attach` or an
+    /// `accept` pends its answer ([`Fence::pend_answer`]) and binds the links a successful answer hands out
+    /// ([`Fence::bind_answer`]). A permit the registry won't take is [`Refusal::NotPended`], nothing sent. The answer
+    /// comes back whatever its
     /// status, as any write's; after a 401 the session renews the skypetoken for a later request. A registration that
     /// fails is logged (the call's follow-ups then stay denied), never retried.
     async fn deliver_call(&self, permit: &WritePermit, call: &CallWire) -> Result<Response, HttpError> {
@@ -908,6 +910,9 @@ impl<C: Credentials> HttpTransport<C> {
         }
         if answer.is_success() {
             self.register(pending, answer.body(), url);
+        } else if let Pending::Start(pending) = pending {
+            // the service didn't take it: the start sent again pends a call of its own, and this one binds nothing
+            self.fence.abandon_start(pending);
         }
         Ok(answer)
     }

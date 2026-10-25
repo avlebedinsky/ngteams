@@ -782,6 +782,39 @@ async fn an_acceptance_before_the_answer_waits_on_the_pending_call() -> TestResu
     Ok(())
 }
 
+#[tokio::test]
+async fn a_start_sent_again_after_one_not_taken_is_the_call_its_acceptance_binds_to() -> TestResult {
+    let lab = new_lab()?;
+    // the first attempt was answered without success (a throttle): it ends unregistered
+    let refused = pending(&lab.fence).await?;
+    lab.fence.abandon_start(refused);
+    let again = pending(&lab.fence).await?;
+    lab.fence.register_start(again, &answer("conv-1"))?;
+    assert_eq!(
+        lab.fence
+            .observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("call-1"))),
+        Observed::Acceptance
+    );
+    let acknowledge = write(CallOperation::Acknowledge, &acknowledge_url("call-1"), &[])?;
+    assert_eq!(verdict(&lab.fence, acknowledge).await, Ok(()));
+    let leave = write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?;
+    assert_eq!(verdict(&lab.fence, leave).await, Ok(()));
+
+    // a fence abandons only its own pending start
+    let lab = new_lab()?;
+    let refused = pending(&lab.fence).await?;
+    let other = new_lab()?;
+    other.fence.abandon_start(pending(&lab.fence).await?);
+    lab.fence.abandon_start(refused);
+    assert_eq!(
+        lab.fence
+            .observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("call-1"))),
+        Observed::Acceptance,
+        "another fence's abandon left the second pending"
+    );
+    Ok(())
+}
+
 // --- what a follow-up must fit ---
 
 #[tokio::test]

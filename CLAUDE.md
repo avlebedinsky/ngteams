@@ -279,6 +279,22 @@ What the code does and why. A change that undoes one of these needs a new reason
   and briefly (`MAX_TRANSIENT_WAIT`), the newest of the same takes its place, and a post to its conversation drops it.
   A durable row for `Control/Typing` would never settle (`Control/*` never settles a row) and would go out at a moment
   the user didn't choose.
+- **Call writes** (`teams-core/src/calling.rs`, `outbox/call.rs`) go through the outbox as a kind of their own, no
+  row and no transient (`Outbox::try_call`): each attempt a fresh `Fence::check`, its answer (any status, with its
+  body) back to the `teams-call` machine, which decides what a failed step means (the call ends, with a `leave` when
+  the account is in it); one more attempt only after a 401 or a throttle of at most `MAX_TRANSIENT_WAIT` (once each,
+  never after an unknown outcome: a call controller acting twice is worse than a failed step) and only if the
+  machine still wants the write once the wait is over (`Calls::may_send_again`, asked again then: a hang-up during the
+  wait fails it unsent). One call write is in flight at a time: beside it the engine takes only the machine's events
+  and delivery responses, so its later writes stay in the machine's queue and a call that ends drops them. A start, a
+  join or an answer goes only once its media is set up, the session started without its devices; the microphone and
+  the speaker open only once that start, join or answer passed the fence and was taken (the call ringing, joining or
+  connected). An own renegotiation begins in the machine (`Calls::begin_renegotiation`) before the session makes its
+  offer, which replaces the one it waits on. Every media step that blocks runs on tokio's blocking pool, never on the
+  engine's thread, and the calling runs as a task of its own on the engine's thread (a `LocalSet`'s), so a chat's
+  work the engine awaits doesn't hold up a call's write, deliveries or responses. Nothing answers or declines an
+  invitation but its `CallAction`; the engine stopping hangs the call up and lets an invitation that rings go
+  unanswered.
 - **What the native client sends** (`teams-proto`): a read (`Read`: `GET`, no body), a plain request (`Request`, an
   open trait: any method and body, sent by `Transport::send` only when `teams_fence::contacting` calls it `None`,
   logged `allowed` before it goes: the registration, profile lookups and presence reads whoever they name, the
@@ -311,8 +327,7 @@ What the code does and why. A change that undoes one of these needs a new reason
   `Refusal::NoSkypetoken`), never resent. The transport pends a start or a join with media in the call registry
   before it goes (`Fence::pend_start`, exactly the body sent; `Refusal::NotPended` when the registry won't take the
   permit) and registers the call from a successful answer; an `attach` or an `accept` pends its answer and binds its
-  links. The echo spike's `StartCall::test_call` and `AddToCall::new` have no route. The TURN credentials are a read
-  (`RelayTokens` on `Service::Relay`).
+  links. The TURN credentials are a read (`RelayTokens` on `Service::Relay`).
 - **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The

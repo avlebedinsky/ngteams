@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Tests only, through dev-dependencies: a call's media relayed through given servers (a test's loopback TURN server,
+# `Relay::Fixed`) instead of Teams' relay. It turns on teams-fence's own, so a lab binary built with it refuses to run
+# (`teams_fence::test_support_enabled`).
+test-support = ["teams-fence/test-support"]
+
 [dependencies]
 # a fresh `clientmessageid` for each command, from the system random source
 getrandom.workspace = true
@@ -17,7 +23,11 @@ serde.workspace = true
 serde_json.workspace = true
 # a throttled token (`TokenError::Throttled`) waits like a throttled post; a lab engine's session (`lab`)
 teams-auth.workspace = true
+# a call's signaling machine (M3 Task 14): it builds the call writes, the engine sends them through the outbox
+teams-call.workspace = true
 teams-fence.workspace = true
+# a call's media: the relay, the session on the devices, Teams' SDP dialect
+teams-media.workspace = true
 teams-proto.workspace = true
 teams-store.workspace = true
 # the push channel the engine runs and takes its deliveries from
@@ -27,12 +37,17 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
+# the call session's tests relay through the mock's loopback TURN server
+teams-core = { path = ".", features = ["test-support"] }
+# and run on the file backend
+teams-media = { workspace = true, features = ["test-support"] }
 # the sync tests write as the other lab accounts straight to the mock chat service
 reqwest.workspace = true
 # the tests' fence runs over a test roster, a test log and fake membership sources
 teams-fence = { workspace = true, features = ["test-support"] }
-# the sync tests' chat service, from the synthetic fixtures
-teams-mock.workspace = true
+# the sync tests' chat service, from the synthetic fixtures; with its calling service's media (a loopback peer behind
+# the parties it plays) for the call session's tests
+teams-mock = { workspace = true, features = ["media"] }
 # the diagnostic log at `info` and at `debug` over an offline run (`tests/diagnostic_log.rs`, `tests/diagnostic_log_debug.rs`)
 teams-log.workspace = true
 # the transport reaches wiremock through its mock origin

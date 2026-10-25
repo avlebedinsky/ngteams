@@ -3,8 +3,7 @@
 //!
 //! Set `TEAMS_MEDIA_TURN_SERVER=<ip:port>`, `TEAMS_MEDIA_TURN_USER` and `TEAMS_MEDIA_TURN_PASSWORD` to run the same
 //! relay through an external TURN server on loopback (coturn, started by hand with loopback peers allowed); without
-//! them that test only says it was skipped. Never point it at a public server. (The echo-call spike runs its tone
-//! through such a server too: `spikes/echo-call/tests/relay.rs`.)
+//! them that test only says it was skipped. Never point it at a public server.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::Ordering;

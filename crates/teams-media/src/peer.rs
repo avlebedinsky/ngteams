@@ -131,6 +131,22 @@ impl Peer {
         Ok(offer)
     }
 
+    /// Offers the session again with fresh ICE credentials, its lines as they are and its candidate kept (an ICE
+    /// restart): a renegotiation that changes nothing else, for a call whose media is offered again. Pass the pending
+    /// half to [`Peer::accept_answer`].
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if `str0m` makes no offer of it or fails while draining.
+    pub fn reoffer(&mut self) -> Result<(SdpOffer, SdpPendingOffer), Error> {
+        let mut change = self.rtc.sdp_api();
+        change.ice_restart(true);
+        let offer = change
+            .apply()
+            .ok_or_else(|| Error::Rtc("the ICE restart produced no offer".into()))?;
+        self.drain()?;
+        Ok(offer)
+    }
+
     /// Answers a remote offer.
     ///
     /// # Errors

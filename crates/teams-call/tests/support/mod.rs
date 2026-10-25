@@ -22,7 +22,7 @@ use teams_call::{
 use teams_fence::{
     Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, PartialReason, Roster, Scope, one_to_one_id,
 };
-use teams_mock::{ABC_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, OUTSIDER, REGIONAL_NAME, TENANT};
+use teams_mock::{ABC_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, OUTSIDER, TENANT};
 use teams_proto::{Authorized, ClientInfo, Credentials, HttpTransport, MediaContent, Mutating, Transport};
 use teams_trouter::{CallResponder, CallResponse, CallStack, Options, PushEvent, RegistrationReport, Trouter};
 use tokio::sync::{broadcast, mpsc};
@@ -179,7 +179,7 @@ struct Sink {
 }
 
 impl WriteSink for Sink {
-    fn submit<R: Mutating + Send + 'static>(&mut self, id: WriteId, write: R) {
+    fn submit<R: Mutating + Clone + Send + 'static>(&mut self, id: WriteId, write: R) {
         let (fence, transport) = (Arc::clone(&self.fence), Arc::clone(&self.transport));
         self.queued.push((
             id,
@@ -215,11 +215,6 @@ fn options() -> Options {
         renew_check: Duration::from_millis(50),
         ..Options::default()
     }
-}
-
-/// The calling endpoint's push URL as the mock hands it out.
-fn push_url(endpoint: &str) -> String {
-    format!("https://{REGIONAL_NAME}-f.trouter.teams.microsoft.com:3443/v4/f/{endpoint}/")
 }
 
 impl Client {
@@ -389,7 +384,7 @@ impl Driver {
 
     fn pushed(&mut self, event: PushEvent, ready: &mut Option<tokio::sync::oneshot::Sender<()>>) {
         match event {
-            PushEvent::Connected { endpoint, .. } => self.calls.set_push_url(&push_url(&endpoint)).unwrap(),
+            PushEvent::Connected { push_url, .. } => self.calls.set_push_url(&push_url).unwrap(),
             PushEvent::Registration(RegistrationReport::Registered) => {
                 if let Some(ready) = ready.take() {
                     let _ = ready.send(());

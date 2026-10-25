@@ -44,6 +44,9 @@
 //!   fresh `Fence::check`, but never as a row: nothing of it is stored, checked for, retried after an unknown outcome or
 //!   sent by a later run; a throttled one waits in memory, once and briefly ([`MAX_TRANSIENT_WAIT`]), the newest of
 //!   the same takes its place, and a message post to its conversation drops it ([`Outbox::drop_waiting`]).
+//! - **Call writes** ([`Outbox::try_call`], M3 Task 14): a call's writes go out from here as a kind of their own, no
+//!   row and no transient: each attempt a fresh `Fence::check`, its answer (any status, with its body) back to the call
+//!   machine, another attempt only after a 401 or a short throttle ([`CallRetries`]), never after an unknown outcome.
 //!
 //! The commands are the chat writes of `teams-proto` (M1 Task 12): a message post, an edit, a soft delete, a reaction
 //! and taking it back, a read receipt and a new chat; the engine (M1 Task 18) builds them from what the user asks
@@ -51,8 +54,10 @@
 //! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice. The sync
 //! the check relies on is the [`ConversationSync`] seam, which M1 Task 17's catch-up sync fills.
 
+mod call;
 mod transient;
 
+pub use call::{CallRetries, CallTried};
 pub use transient::{MAX_TRANSIENT_WAIT, Transient, TransientSent};
 
 use std::collections::BTreeMap;

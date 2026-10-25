@@ -609,7 +609,9 @@ async fn a_dropped_socket_reconnects_regionally_and_the_unanswered_deliveries_co
     lab.trouter.drop_sockets(LAB_B);
     assert!(matches!(down(&mut push).await, Down::Closed));
     let again = next(&mut push, |event| match event {
-        PushEvent::Connected { endpoint, new_endpoint } => Some((endpoint, new_endpoint)),
+        PushEvent::Connected {
+            endpoint, new_endpoint, ..
+        } => Some((endpoint, new_endpoint)),
         _ => None,
     })
     .await;
@@ -1156,7 +1158,9 @@ async fn a_regional_host_that_never_says_connected_is_given_up_after_three_conne
         assert!(matches!(down(&mut push).await, Down::Closed));
     }
     let (again, new_endpoint) = next(&mut push, |event| match event {
-        PushEvent::Connected { endpoint, new_endpoint } => Some((endpoint, new_endpoint)),
+        PushEvent::Connected {
+            endpoint, new_endpoint, ..
+        } => Some((endpoint, new_endpoint)),
         _ => None,
     })
     .await;

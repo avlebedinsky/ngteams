@@ -140,6 +140,7 @@ pub fn start<S: SecretStore + 'static>(
     let author = Author::new(Mri::new(&mri), display_name);
     let outbox = Outbox::new(transport, fence, members, author);
     let handle = engine::start(Parts {
+        calls: None,
         store,
         client,
         outbox,

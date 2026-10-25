@@ -3,9 +3,12 @@
 //! mock plays). It is a `teams-media` session on the file backend behind its own allocation on a loopback TURN server
 //! (`teams_media::test_turn`), speaking Teams' dialect as the call controller and media controller do: it answers an
 //! offer in `sdp-ngc-1.0` and offers in it, and takes the answer to its offer (`teams_media::sdp::NgcSession` keeping
-//! the lines' two namings for the call's life). Task 14 puts it behind the calling service's answers.
+//! the lines' two namings for the call's life). With the feature on, the calling service puts one behind its answers
+//! once a test turned its media on ([`crate::ChatServiceMock::start_media`]): the test call's media controller, a
+//! caller the mock plays, and the renegotiations of their calls.
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use teams_media::devices::Devices;
@@ -45,8 +48,16 @@ impl LoopbackPeer {
     /// # Errors
     /// [`PeerError::Media`] when the allocation or the session can't be made.
     pub fn start(turn: &TurnServer, devices: &dyn Devices) -> Result<Self, PeerError> {
+        Self::start_at(turn.udp, devices)
+    }
+
+    /// As [`Self::start`], on the loopback TURN server's UDP port `turn`.
+    ///
+    /// # Errors
+    /// [`PeerError::Media`] when the allocation or the session can't be made.
+    pub fn start_at(turn: SocketAddr, devices: &dyn Devices) -> Result<Self, PeerError> {
         let server = RelayServer {
-            addr: turn.udp,
+            addr: turn,
             transport: Transport::Udp,
         };
         let credentials = Credentials {
@@ -81,6 +92,16 @@ impl LoopbackPeer {
     /// [`PeerError`] when the session can't offer or the offer doesn't convert.
     pub fn offer(&mut self) -> Result<NgcSdp, PeerError> {
         let offer = self.session.offer_audio()?;
+        Ok(self.dialect.write_offer(&offer)?)
+    }
+
+    /// Its offer of the running call's media again (an ICE restart, `MediaSession::reoffer`), in `sdp-ngc-1.0`: a
+    /// renegotiation of its own.
+    ///
+    /// # Errors
+    /// [`PeerError`] when the session can't offer or the offer doesn't convert.
+    pub fn reoffer(&mut self) -> Result<NgcSdp, PeerError> {
+        let offer = self.session.reoffer()?;
         Ok(self.dialect.write_offer(&offer)?)
     }
 

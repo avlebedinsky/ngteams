@@ -419,3 +419,64 @@ fn the_loopback_hands_a_played_frame_to_the_microphone_only_once_its_delay_passe
         "the microphone heard something else than the played frame"
     );
 }
+
+#[test]
+fn a_reoffer_renegotiates_the_running_line_and_the_audio_goes_on() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let b_path = recording(dir.path(), "b");
+    let started = Instant::now();
+    let a = start(&turn, &file_devices(A_TONE, &recording(dir.path(), "a")));
+    let b = start(&turn, &file_devices(B_TONE, &b_path));
+    negotiate(&a, &b);
+    wait_for(&a, &SessionEvent::Connected, CONNECT_WAIT);
+    wait_for(&b, &SessionEvent::Connected, CONNECT_WAIT);
+    std::thread::sleep(SETTLE);
+
+    // A offers the running line again (fresh ICE credentials, the same one audio line), B answers it
+    let offer = a.reoffer().unwrap().to_sdp_string();
+    assert_eq!(offer.matches("m=audio").count(), 1, "{offer}");
+    let answer = b.accept_offer(SdpOffer::from_sdp_string(&offer).unwrap()).unwrap();
+    a.accept_answer(SdpAnswer::from_sdp_string(&answer.to_sdp_string()).unwrap())
+        .unwrap();
+    let renegotiated = started.elapsed();
+    std::thread::sleep(TALK);
+    let ended = started.elapsed();
+    let (a, b) = (a.close(), b.close());
+    let heard = Heard::read(&b_path, renegotiated + SETTLE, ended.saturating_sub(TAIL));
+    let level = heard.level(A_TONE.hz);
+    let share = heard.continuity(A_TONE.hz, 0.1);
+    eprintln!("after the reoffer B hears A at {level:.3} in {share:.3} of the windows\nA {a:?}\nB {b:?}");
+    assert!(level > 0.3, "B hears A's tone at {level} after the renegotiation");
+    assert!(share >= 0.9, "B hears A's tone in {share:.3} of the windows");
+}
+
+#[test]
+fn a_muted_microphone_sends_silence_and_the_line_goes_on() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let b_path = recording(dir.path(), "b");
+    let started = Instant::now();
+    let a = start(&turn, &file_devices(A_TONE, &recording(dir.path(), "a")));
+    let b = start(&turn, &file_devices(B_TONE, &b_path));
+    negotiate(&a, &b);
+    wait_for(&a, &SessionEvent::Connected, CONNECT_WAIT);
+    wait_for(&b, &SessionEvent::Connected, CONNECT_WAIT);
+    std::thread::sleep(SETTLE);
+    assert!(!a.is_muted());
+    a.set_muted(true);
+    assert!(a.is_muted());
+    let muted = started.elapsed();
+    std::thread::sleep(Duration::from_millis(1_500));
+    a.set_muted(false);
+    let unmuted = started.elapsed();
+    std::thread::sleep(Duration::from_millis(1_500));
+    let ended = started.elapsed();
+    let _ = (a.close(), b.close());
+    let silent = Heard::read(&b_path, muted + SETTLE, unmuted.saturating_sub(TAIL));
+    let heard = Heard::read(&b_path, unmuted + SETTLE, ended.saturating_sub(TAIL));
+    let (while_muted, after) = (silent.level(A_TONE.hz), heard.level(A_TONE.hz));
+    eprintln!("B hears A at {while_muted:.4} while muted, {after:.3} after");
+    assert!(while_muted < 0.03, "B heard A's tone while A was muted: {while_muted}");
+    assert!(after > 0.3, "B hears A's tone again once unmuted: {after}");
+}

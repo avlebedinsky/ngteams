@@ -1,6 +1,7 @@
 //! Tests only (`test-support`): a minimal TURN server on loopback (UDP and TCP, long-term credentials, permissions,
-//! channels), for this crate's tests and the echo-call spike's. It can impair the media it relays ([`Impairment`]):
-//! drop RTP packets and send some after the one that followed them, as a lossy network would.
+//! channels), for this crate's tests, the mock's media (`teams-mock`) and the engine's call tests (`teams-core`'s
+//! `tests/calls`). It can impair the media it relays ([`Impairment`]): drop RTP packets and send some after the one
+//! that followed them, as a lossy network would.
 //!
 //! The server is ours, built on the crate's own STUN codec, so it can share a misreading of the RFC with the client;
 //! the codec is checked separately against the RFC 5769 test vectors (`tests/turn.rs`), and `tests/relay.rs` can also

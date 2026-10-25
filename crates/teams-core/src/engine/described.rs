@@ -5,6 +5,7 @@
 use log::{Level, LevelFilter};
 
 use super::{Action, Event, Source};
+use crate::calling::CallAction;
 
 /// An action by its kind and ids.
 pub(super) fn action(action: &Action) -> String {
@@ -34,6 +35,20 @@ pub(super) fn action(action: &Action) -> String {
             message_id,
         } => format!("read receipt up to {message_id} in {conversation}"),
         Action::CreateChat { others } => format!("a chat with {} other(s)", others.len()),
+    }
+}
+
+/// A call action by its kind and ids.
+pub(super) fn call(action: &CallAction) -> String {
+    match action {
+        CallAction::Call { chat } => format!("a call from {chat}"),
+        CallAction::TestCall { echo } => format!("the test call of {echo}"),
+        CallAction::Join { chat } => format!("a join of the call in {chat}"),
+        CallAction::Answer { call } => format!("the answer of call {}", call.get()),
+        CallAction::Decline { call } => format!("the decline of call {}", call.get()),
+        CallAction::HangUp { call } => format!("a hang-up of call {}", call.get()),
+        CallAction::Mute { call, muted } => format!("call {} muted {muted}", call.get()),
+        CallAction::Renegotiate { call } => format!("a renegotiation of call {}", call.get()),
     }
 }
 
@@ -101,6 +116,21 @@ fn plain(event: &Event) -> String {
         Event::Presence { mri, availability } => format!("presence of {mri}: {availability:?}"),
         Event::Teams => "the teams changed".to_owned(),
         Event::Indexed { messages } => format!("search backfill over: {messages} message(s) indexed"),
+        Event::IncomingCall(incoming) => format!(
+            "incoming call {} from {}{}",
+            incoming.call.get(),
+            incoming.caller,
+            incoming
+                .group_chat
+                .as_ref()
+                .map(|chat| format!(" in {chat}"))
+                .unwrap_or_default()
+        ),
+        Event::RingEnded { call, end } => {
+            format!("call {}: its ring ended ({:?}, {:?})", call.get(), end.code, end.phrase)
+        }
+        Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
+        Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }
         | Event::Queued(_)

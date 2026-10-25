@@ -18,10 +18,6 @@
 //! The transport sends exactly what was classified, never resent. A start and a join with media make their call
 //! pending in the fence's registry before they go and register it from their answer; an `attach` and an `accept` bind
 //! the links their answer hands out (`HttpTransport::deliver`).
-//!
-//! Two constructors of the M0 echo spike stay, with no wire (a transport has no route for them):
-//! [`StartCall::test_call`] (its target only) and [`AddToCall::new`] (an `Invite` on `Scope::Call`, which no source
-//! reads, so the fence denies it as partial).
 
 mod parts;
 
@@ -38,7 +34,7 @@ pub use self::parts::{
 };
 
 use super::sealed::Sealed;
-use super::{ConversationUrl, Mutating, Wire};
+use super::{Mutating, Wire};
 use crate::endpoint::Method;
 
 /// Why a call write wasn't made. Nothing was sent.
@@ -326,29 +322,15 @@ fn start_body(parts: &StartParts, scenario: Option<&str>, to: &[Value], group_ch
 /// - [`StartCall::in_chat`]: a call from a 1:1 or group chat: its callees in `participants.to`, the group chat in
 ///   `groupChat` (`null` for a 1:1 call); its target is `WriteKind::Call` on the chat it carries (the group chat, or the
 ///   1:1 chat of the caller and its one callee), the caller and every callee added, so the fence reads that chat fresh.
-///
-/// [`StartCall::test_call`] is the echo spike's: its target only, with no wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartCall {
     caller: Mri,
     echo: Option<Mri>,
     target: Target,
-    built: Option<Built>,
+    built: Built,
 }
 
 impl StartCall {
-    /// The echo spike's test call of `caller` for `echo`: its target only (a transport has no route for it).
-    #[must_use]
-    pub fn test_call(caller: Mri, echo: Mri) -> Self {
-        let target = Target::new(WriteKind::Call, Scope::New).with_added([caller.clone(), echo.clone()]);
-        Self {
-            caller,
-            echo: Some(echo),
-            target,
-            built: None,
-        }
-    }
-
     /// The test call of `parts.from` for `echo` (see the type's docs).
     ///
     /// # Errors
@@ -397,7 +379,7 @@ impl StartCall {
             caller: parts.from.mri.clone(),
             echo: echo.cloned(),
             target: built.target.clone(),
-            built: Some(built),
+            built,
         })
     }
 
@@ -427,7 +409,7 @@ impl Sealed for StartCall {
     }
 
     fn call(&self) -> Option<&CallWire> {
-        self.built.as_ref().map(|built| &built.wire)
+        Some(&self.built.wire)
     }
 }
 
@@ -441,16 +423,12 @@ pub use teams_fence::TEST_CALL_SCENARIO;
 /// with the conversation's query), from the call's caller, naming the 1:1 chat of the caller and the invitee and the
 /// caller as the meeting's organizer, as the web client does; its target is `WriteKind::Invite` on
 /// `Scope::CallOperation` with the invitee added, which the call registry resolves and judges per invitee.
-///
-/// [`AddToCall::new`] is the echo spike's: `Invite` on `Scope::Call` (the conversation URL), which no source reads, so
-/// the fence denies it as partial; it has no wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddToCall {
-    conversation: Option<ConversationUrl>,
     invitee: Mri,
     url: Url,
     target: Target,
-    built: Option<Built>,
+    built: Built,
 }
 
 /// What an `add` sends besides its link: who invites, whom (with a fresh participant id), the 1:1 chat of the two (its
@@ -466,22 +444,6 @@ pub struct AddParts {
 }
 
 impl AddToCall {
-    /// The echo spike's `add` of `invitee` into `conversation` (see the type's docs).
-    #[must_use]
-    pub fn new(conversation: ConversationUrl, invitee: Mri) -> Self {
-        let scope = Scope::Call {
-            id: conversation.as_str().to_owned(),
-        };
-        let target = Target::new(WriteKind::Invite, scope).with_added([invitee.clone()]);
-        Self {
-            url: conversation.operation("add"),
-            conversation: Some(conversation),
-            invitee,
-            target,
-            built: None,
-        }
-    }
-
     /// The `add` at `link` (see the type's docs).
     ///
     /// # Errors
@@ -507,18 +469,11 @@ impl AddToCall {
         });
         let built = operation(context, CallOperation::Add, link, Some(body))?;
         Ok(Self {
-            conversation: None,
             invitee: parts.invitee.mri.clone(),
             url: link.url().clone(),
             target: built.target.clone(),
-            built: Some(built),
+            built,
         })
-    }
-
-    /// The call's conversation, for the echo spike's `add`.
-    #[must_use]
-    pub fn conversation(&self) -> Option<&ConversationUrl> {
-        self.conversation.as_ref()
     }
 
     /// Who is invited.
@@ -527,8 +482,7 @@ impl AddToCall {
         &self.invitee
     }
 
-    /// Where the `add` is posted: the link it was built with, or for the echo spike's the conversation's path plus
-    /// `/add`, its query kept.
+    /// Where the `add` is posted: the link it was built with.
     #[must_use]
     pub fn url(&self) -> Url {
         self.url.clone()
@@ -547,7 +501,7 @@ impl Sealed for AddToCall {
     }
 
     fn call(&self) -> Option<&CallWire> {
-        self.built.as_ref().map(|built| &built.wire)
+        Some(&self.built.wire)
     }
 }
 

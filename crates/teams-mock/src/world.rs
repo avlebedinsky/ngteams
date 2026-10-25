@@ -86,6 +86,9 @@ pub(crate) struct State {
     pub(crate) availability: Vec<crate::ups::OwnAvailability>,
     /// The calling service's calls and the deliveries waiting for calling endpoints (`calling.rs`).
     pub(crate) calling: crate::calling::Calling,
+    /// The calling service's media, once a test turned it on (`peers.rs`).
+    #[cfg(feature = "media")]
+    pub(crate) peers: crate::peers::Peers,
     /// Counts the changes the mock's Trouter acts on (a queued event, a registration), so its sockets wake up.
     pub(crate) changes: watch::Sender<u64>,
     clock: u64,
@@ -118,6 +121,8 @@ impl State {
             registrations: Vec::new(),
             availability: Vec::new(),
             calling: crate::calling::Calling::default(),
+            #[cfg(feature = "media")]
+            peers: crate::peers::Peers::default(),
             changes: watch::Sender::new(0),
             clock: CLOCK_START,
             groups_made: 0,

@@ -21,7 +21,7 @@ use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Client, Credentials, DEFAULT_RETRY_WAIT, Endpoint, HttpError, HttpTransport, MAX_BODY, Method,
     Mutating as _, ProbeOwnState, Read, Refusal, Request as PlainRequest, SendMessage, Service, ShortProfileLookup,
-    StartCall, Transport,
+    Transport,
 };
 use wiremock::matchers::{body_json, body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -398,21 +398,6 @@ async fn a_throttled_write_comes_back_without_a_retry() {
 
     assert_eq!(answer.status(), 429);
     assert_eq!(answer.retry_after(), Some(Duration::from_secs(7)));
-}
-
-#[tokio::test]
-async fn a_write_the_transport_has_no_route_for_sends_nothing() {
-    let setup = setup().await;
-    let call = StartCall::test_call(Mri::new(LAB_A), Mri::new(ECHO));
-    let permit = setup.transport_fence().check(call.target(), &LabOnly).await.unwrap();
-
-    let error = Client::new(setup.transport).write(call, permit).await.unwrap_err();
-
-    assert!(
-        matches!(error, teams_proto::WriteError::Transport(HttpError::NoRoute)),
-        "{error:?}"
-    );
-    assert!(setup.server.received_requests().await.unwrap().is_empty());
 }
 
 /// A plain request of the test's choosing: any type may implement `Request`.

@@ -655,6 +655,7 @@ impl MockLab {
             });
         let author = Author::new(Mri::new(LAB_A), display_name("bot-a@lab.example.test"));
         let engine = engine::start(Parts {
+            calls: None,
             store: Store::open(&config.paths().store_file(Alias::A))?,
             client: Arc::new(Client::new(http()?)),
             outbox: Outbox::new(transport, fence, Arc::new(membership), author),

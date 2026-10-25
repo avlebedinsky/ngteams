@@ -66,6 +66,14 @@
 //!   20, [`crate::own_presence`]), not the engine's.
 //! - **Its handles**: [`EngineRequests`], the request side (writes and queries, each a [`Reply`]), is cloneable, for a
 //!   UI's views to share; [`EngineHandle`] owns the engine: its events, its thread and its shutdown.
+//! - **Calls** (M3 Task 14, [`EngineRequests::call`], [`crate::calling`]): with [`Parts::calls`] the engine opens the
+//!   calling stack's socket too and runs the account's calls: a call from a chat or the test call, a join, the answer
+//!   or the decline of an invitation it offered ([`Event::IncomingCall`]), a hang-up, mute, a renegotiation; each
+//!   write through the outbox's call kind under a fresh `Fence::check`, the call's media on threads of its own. The
+//!   calling runs as a task of its own on the engine's thread (a `LocalSet`'s), so a call's write in flight, its
+//!   deliveries and their responses go on while the engine awaits a chat's work. It tells [`Event::IncomingCall`],
+//!   [`Event::RingEnded`] and [`Event::Call`]. One call at a time; nothing is answered or declined but by its action.
+//!   Stopping, it hangs the call up first.
 //! - **One engine per account** ([`teams_store::Store::engine_lock`]): [`start`] takes the account's engine lock
 //!   without waiting, and is refused ([`EngineError::AlreadyRunning`]) while another engine holds it, in this process
 //!   or another; the lock goes when the engine's thread ends.
@@ -90,6 +98,7 @@ use std::task::{Context, Poll};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
+use teams_call::{CallId, Placement, RemoteEnd};
 use teams_fence::{ChatPeople, Mri};
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
@@ -106,6 +115,7 @@ use teams_trouter::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::calling::{Act, CallAction, CallActionError, CallParts, CallStatus, Calling, CallingTask, IncomingCall};
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
 use crate::presence::{Availability, PRESENCE_POLL, Polled, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
@@ -161,7 +171,7 @@ impl Push {
         Self(Box::new(move || trouter.spawn()))
     }
 
-    fn spawn(self) -> TrouterHandle {
+    pub(crate) fn spawn(self) -> TrouterHandle {
         (self.0)()
     }
 }
@@ -183,6 +193,9 @@ pub struct Parts<C, T> {
     /// Names the binary knows already, by MRI (a lab binary: the lab accounts' from `lab.toml`): the last a person's
     /// name comes from, after their profile and their messages ([`crate::profiles`]).
     pub known_names: Vec<(String, String)>,
+    /// The account's calling ([`crate::calling`]): its calling socket, who it is in its calls and their media; `None`
+    /// for an engine that makes no calls (every call action is refused, `CallActionError::NoCalling`).
+    pub calls: Option<CallParts>,
 }
 
 /// What the user asks the engine to write. Every one goes out through the outbox, under the fence.
@@ -331,6 +344,17 @@ pub enum Event {
     /// unindexed) is indexed; `messages` is how many this run indexed. Told once per run, unless it failed
     /// ([`Event::Failed`]; the next run goes on with it).
     Indexed { messages: usize },
+    /// How a registration of the calling stack's endpoint went ([`crate::calling`]): invitations come only to a
+    /// registered one, and a call is placed only once it is up.
+    CallingRegistration(RegistrationReport),
+    /// An invitation rings here (the fence offered it): answer it or decline it ([`CallAction::Answer`],
+    /// [`CallAction::Decline`]); nothing does otherwise. One call at a time: none rings while a call is up.
+    IncomingCall(IncomingCall),
+    /// An offered invitation's ring ended before the account answered or declined it (as delivered: the caller
+    /// cancelled, it was answered elsewhere, it timed out), or the engine let it go.
+    RingEnded { call: CallId, end: RemoteEnd },
+    /// A call of the account's moved on ([`CallStatus`]); every call ends with [`CallStatus::Ended`], once.
+    Call { call: CallId, status: CallStatus },
 }
 
 /// What the engine's requests can fail with.
@@ -371,6 +395,9 @@ pub enum EngineError {
     AlreadyRunning { lock: PathBuf },
     #[error("the engine has stopped")]
     Stopped,
+    /// A call action was refused: nothing was sent.
+    #[error(transparent)]
+    Call(CallActionError),
 }
 
 impl EngineError {
@@ -392,6 +419,7 @@ impl EngineError {
             Self::Thread(_) => "thread",
             Self::AlreadyRunning { .. } => "already running",
             Self::Stopped => "stopped",
+            Self::Call(_) => "call",
         }
     }
 }
@@ -447,7 +475,7 @@ impl<T> Future for Reply<T> {
     }
 }
 
-type Responder<T> = oneshot::Sender<Result<T, EngineError>>;
+pub(crate) type Responder<T> = oneshot::Sender<Result<T, EngineError>>;
 
 /// Where a [`Reply::later`] is answered; dropped unanswered, the reply is [`EngineError::Stopped`].
 #[derive(Debug)]
@@ -468,6 +496,7 @@ enum Request {
     OwnAvailability(OwnStatus, Responder<TransientSent>),
     Sync(Responder<CatchUpReport>),
     LoadOlder(String, Responder<Option<Synced>>),
+    Call(CallAction, Responder<CallId>),
     SyncConversation(String, Responder<Synced>),
     Person(String, Responder<Person>),
     Presence(String, Responder<Availability>),
@@ -540,6 +569,12 @@ impl EngineRequests {
     #[must_use]
     pub fn me(&self) -> &str {
         &self.me
+    }
+
+    /// A call action ([`crate::calling`]); the reply is the call it acted on, once the action went (a start, a join or an
+    /// answer once its media was set up), or why it was refused (nothing was sent).
+    pub fn call(&self, action: CallAction) -> Reply<CallId> {
+        self.ask(|reply| Request::Call(action, reply))
     }
 
     /// Writes through the outbox (see the module docs); the reply is the row as its first send left it.
@@ -854,8 +889,11 @@ where
     let thread = std::thread::Builder::new()
         .name("teams-core".to_owned())
         .spawn(move || {
-            runtime.block_on(Core::new(parts, events).run(received));
+            // a `LocalSet`, so the calling runs as a task of its own on this thread (`crate::calling`)
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&runtime, Core::new(parts, events).run(received));
             // its tasks (the push channel's) and the store are gone before another engine may start
+            drop(local);
             drop(runtime);
             drop(lock);
             drop(ending);
@@ -895,6 +933,10 @@ struct Core<C, T> {
     /// The people of the account's chats the reads' transport may name in a read by `POST` through the personal
     /// build's fence; `None` through a lab fence, which never reads it.
     people: Option<Arc<ChatPeople>>,
+    /// The account's calling, when the engine makes calls, until the engine runs it as a task of its own.
+    calling: Option<Calling<C, T>>,
+    /// The account's calling, running.
+    calls: Option<CallingTask>,
 }
 
 impl<C, T> Core<C, T>
@@ -917,6 +959,9 @@ where
             .transport()
             .is_personal()
             .then(|| Arc::clone(parts.client.transport().chat_people()));
+        let calling = parts
+            .calls
+            .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
         Self {
             store: parts.store,
@@ -935,6 +980,8 @@ where
             losses: Vec::new(),
             backfill: Some(Backfill::new(parts.options.index_batch)),
             people,
+            calling,
+            calls: None,
         }
     }
 
@@ -953,6 +1000,7 @@ where
 
     async fn run(mut self, mut requests: mpsc::UnboundedReceiver<Request>) {
         let mut push = self.push.take().map(Push::spawn);
+        self.calls = self.calling.take().map(Calling::spawn);
         let mut tick = tokio::time::interval(self.options.tick);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -978,6 +1026,15 @@ where
             }
             // whatever a read settled on its way (a sync after a write, a new conversation's sync, …)
             self.arrived(&[]);
+        }
+        self.stop(push).await;
+    }
+
+    /// The engine stops: the call is hung up first ([`Calling::shut_down`]), then the push channel sends its
+    /// disconnect.
+    async fn stop(&mut self, push: Option<TrouterHandle>) {
+        if let Some(calls) = self.calls.take() {
+            calls.shut_down().await;
         }
         if let Some(push) = push {
             push.stop().await;
@@ -1006,12 +1063,7 @@ where
     }
 
     fn emit(&self, event: Event) {
-        // each event judged at its own level: a failure's warning is logged at `warn` too
-        if let Some((level, line)) = described::logged(&event, log::max_level()) {
-            log::log!(level, "{line}");
-        }
-        // an owner that dropped its handle takes no more events
-        let _ = self.events.send(event);
+        emit_to(&self.events, event);
     }
 
     /// Tells the owner what the reads since the last look stored ([`Core::brought`], as [`Source::CatchUp`]), then
@@ -1102,6 +1154,7 @@ where
             Request::Transient(transient, reply) => {
                 let _ = reply.send(self.transient(transient).await);
             }
+            Request::Call(action, reply) => self.call(action, reply),
             Request::OwnAvailability(status, reply) => {
                 log::info!("action: own availability {status:?}");
                 let _ = reply.send(self.own_availability(status).await);
@@ -1457,6 +1510,61 @@ where
         }
     }
 
+    // --- calls ---
+
+    /// A call action ([`EngineRequests::call`]): a chat's call resolved into whom it calls, then handed to the calling.
+    fn call(&mut self, action: CallAction, reply: Responder<CallId>) {
+        log::info!("action: {}", described::call(&action));
+        let act = match action {
+            CallAction::Call { chat } => match self.placement(&chat) {
+                Ok(placement) => Act::Place(placement),
+                Err(error) => {
+                    let _ = reply.send(Err(error.into()));
+                    return;
+                }
+            },
+            CallAction::TestCall { echo } => Act::Place(Placement::TestCall { echo }),
+            CallAction::Join { chat } => Act::Join(chat),
+            CallAction::Answer { call } => Act::Answer(call),
+            CallAction::Decline { call } => Act::Decline(call),
+            CallAction::HangUp { call } => Act::HangUp(call),
+            CallAction::Mute { call, muted } => Act::Mute(call, muted),
+            CallAction::Renegotiate { call } => Act::Renegotiate(call),
+        };
+        match self.calls.as_ref() {
+            Some(calls) => calls.act(act, reply),
+            None => {
+                let _ = reply.send(Err(CallActionError::NoCalling.into()));
+            }
+        }
+    }
+
+    /// Whom a call from `chat` calls: a 1:1 chat's other member (from its id), or a group chat's other members as
+    /// the store holds them. The fence reads the chat fresh before the start goes.
+    fn placement(&self, chat: &str) -> Result<Placement, CallActionError> {
+        let me = self.me();
+        if let Some(other) = one_to_one_other(chat, me) {
+            return Ok(Placement::Chat {
+                callees: vec![Mri::new(other)],
+                group_chat: None,
+            });
+        }
+        let members = self.store.members(chat).map_err(|_| CallActionError::NotAChat)?;
+        let callees: Vec<Mri> = members
+            .into_iter()
+            .map(|member| member.mri)
+            .filter(|mri| mri != me)
+            .map(Mri::new)
+            .collect();
+        if callees.is_empty() {
+            return Err(CallActionError::NotAChat);
+        }
+        Ok(Placement::Chat {
+            callees,
+            group_chat: Some(chat.to_owned()),
+        })
+    }
+
     // --- the tick ---
 
     async fn on_tick(&mut self) {
@@ -1542,7 +1650,7 @@ where
             }
             PushEvent::Delivery(delivery) => self.on_delivery(delivery).await,
             // an incoming call, or another endpoint's push: never acted on, never answered; a call delivery comes only on
-            // the calling stack's socket, which the engine doesn't open yet
+            // the calling stack's socket, which `crate::calling` runs when the engine has `Parts::calls`
             PushEvent::Ignored(_) | PushEvent::Call(_) => {}
             PushEvent::Disconnected { down, heard } => {
                 self.up = false;
@@ -1676,6 +1784,15 @@ where
     }
 }
 
+/// Tells the engine's owner `event`, logged first at its own level (a failure's warning at `warn` too).
+pub(crate) fn emit_to(events: &mpsc::UnboundedSender<Event>, event: Event) {
+    if let Some((level, line)) = described::logged(&event, log::max_level()) {
+        log::log!(level, "{line}");
+    }
+    // an owner that dropped its handle takes no more events
+    let _ = events.send(event);
+}
+
 /// What an edit sends again of the message it changes: its `clientmessageid` and its compose time must be known.
 fn original(message: &Message) -> Result<Sent, EngineError> {
     let unknown = |missing| EngineError::Unknown {
@@ -1699,6 +1816,22 @@ fn logged<T>(result: Result<T, EngineError>, what: impl FnOnce() -> String) -> R
         log::warn!("action {} failed: {error}", what());
     }
     result
+}
+
+/// The other member of the 1:1 chat `chat` (`19:<object id>_<object id>@unq.gbl.spaces`) of `me`, as an MRI of the
+/// form `me` has; `None` for any other chat, or one `me` isn't in.
+fn one_to_one_other(chat: &str, me: &str) -> Option<String> {
+    let pair = chat.strip_prefix("19:")?.strip_suffix("@unq.gbl.spaces")?;
+    let (one, other) = pair.split_once('_')?;
+    let (prefix, own) = me.rsplit_once(':')?;
+    let them = if one == own {
+        other
+    } else if other == own {
+        one
+    } else {
+        return None;
+    };
+    (!them.is_empty() && them != own).then(|| format!("{prefix}:{them}"))
 }
 
 /// A read in the background that is over.

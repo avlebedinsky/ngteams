@@ -303,7 +303,6 @@ fn every_lab_binary_opening_the_lab_fence_refuses_a_build_with_personal() {
         "crates/proto-lab/src",
         "crates/teams-app/src",
         "crates/teams-headless/src",
-        "spikes/echo-call/src",
     ] {
         assert!(
             checked.iter().any(|dir| dir == expected),

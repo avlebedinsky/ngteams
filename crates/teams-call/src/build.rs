@@ -6,14 +6,15 @@ use std::time::Instant;
 
 use teams_fence::Mri;
 use teams_proto::{
-    AcceptCall, AcceptParts, AcknowledgeAcceptance, AddParts, AddToCall, AttachCall, AttachParts, CallLink,
-    DeclineCall, Invitee, JoinCall, JoinMedia, JoinParts, LeaveCall, LeaveReason, Links, MediaContent, ReportRinging,
-    StartCall, StartParts, UpdateEndpointMetadata, UpdateEndpointState,
+    AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
+    AnswerMediaParts, AttachCall, AttachParts, CallLink, DeclineCall, Invitee, JoinCall, JoinMedia, JoinParts,
+    LeaveCall, LeaveReason, Links, MediaContent, RenegotiateMedia, ReportRinging, StartCall, StartParts,
+    UpdateEndpointMetadata, UpdateEndpointState,
 };
 
 use crate::agent::{Kind, guid};
 use crate::call::{
-    ANSWERED_CALL_LINKS, CONVERSATION_LINKS, Call, MEDIA_CONTROLLER_LINKS, Phase, START_CALL_LINKS, Side, Step,
+    ANSWERED_CALL_LINKS, CONVERSATION_LINKS, Call, MEDIA_CONTROLLER_LINKS, Phase, Reoffer, START_CALL_LINKS, Side, Step,
 };
 use crate::{CallError, CallWrite, Identity, Placement};
 
@@ -56,6 +57,7 @@ pub(crate) fn start(
         Placement::Chat { group_chat: None, .. } => offer.required_features = Some(ONE_TO_ONE_FEATURES.to_owned()),
         Placement::Chat { .. } => {}
     }
+    call.modalities = modalities(group);
     let parts = StartParts {
         from: call.me.clone(),
         roster_update: call.callback(Kind::Conversation, "rosterUpdate")?,
@@ -92,10 +94,11 @@ pub(crate) fn join(
         meeting: None,
         client: identity.client.clone(),
     };
+    call.modalities = modalities(true);
     let media = JoinMedia {
         call_links: call.links(Kind::Call, &START_CALL_LINKS)?,
         media_controller_links: call.links(Kind::Call, &MEDIA_CONTROLLER_LINKS)?,
-        modalities: modalities(true),
+        modalities: call.modalities.clone(),
         media: offer,
     };
     Ok(CallWrite::Join(JoinCall::enter(
@@ -148,10 +151,10 @@ pub(crate) fn answer(
         let state = UpdateEndpointState::new(&call.context, &link, &call.me, false, 1)?;
         writes.push((Step::EndpointState, CallWrite::EndpointState(state)));
     }
-    let group = call.in_group(None);
+    call.modalities = modalities(call.in_group(None));
     let parts = AcceptParts {
         accepted_by: call.me.clone(),
-        modalities: modalities(group),
+        modalities: call.modalities.clone(),
         call_links: call.links(Kind::Call, &ANSWERED_CALL_LINKS)?,
         media_controller_links: call.links(Kind::Call, &MEDIA_CONTROLLER_LINKS)?,
         media: answer,
@@ -217,4 +220,37 @@ pub(crate) fn add(call: &mut Call, identity: &Identity, link: &CallLink, echo: &
         links: call.links(Kind::Conversation, &["addParticipantSuccess", "addParticipantFailure"])?,
     };
     Ok(CallWrite::Add(AddToCall::invite(&call.context, link, &parts)?))
+}
+
+/// The account's renegotiation of the call's media at the call controller's `link`: its new `offer` and its callbacks
+/// for the answer and the rejection, with what the renegotiation waits on once it went (those callbacks' paths).
+pub(crate) fn renegotiate(
+    call: &mut Call,
+    link: &CallLink,
+    offer: &MediaContent,
+) -> Result<(CallWrite, Reoffer), CallError> {
+    let (links, reoffer) = call.reoffer_links()?;
+    let write = RenegotiateMedia::new(&call.context, link, &call.me, &call.modalities, &links, offer)?;
+    Ok((CallWrite::Renegotiate(write), reoffer))
+}
+
+/// The account's `answer` to a renegotiation delivered to it, at the `mediaAnswer` `link` the renegotiation handed out:
+/// its callbacks for the media acknowledgement and the media controller.
+pub(crate) fn answer_media(call: &mut Call, link: &CallLink, answer: MediaContent) -> Result<CallWrite, CallError> {
+    let parts = AnswerMediaParts {
+        sender: call.me.clone(),
+        modalities: call.modalities.clone(),
+        links: call.links(Kind::Call, &["mediaAcknowledgement"])?,
+        media_controller_links: call.links(Kind::Call, &MEDIA_CONTROLLER_LINKS)?,
+        media: answer,
+    };
+    Ok(CallWrite::AnswerMedia(AnswerMedia::new(&call.context, link, &parts)?))
+}
+
+/// The acknowledgement of the answer to the account's renegotiation, at the link that answer handed out.
+pub(crate) fn acknowledge_media(call: &Call, link: &CallLink) -> Result<CallWrite, CallError> {
+    Ok(CallWrite::AcknowledgeMediaAnswer(AcknowledgeMediaAnswer::new(
+        &call.context,
+        link,
+    )?))
 }

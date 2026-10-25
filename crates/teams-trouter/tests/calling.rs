@@ -240,9 +240,16 @@ async fn next<T>(push: &mut TrouterHandle, mut pick: impl FnMut(PushEvent) -> Op
     }
 }
 
+/// The endpoint of the next connect; its push URL (where the calls' callbacks go) is the endpoint's.
 async fn connected(push: &mut TrouterHandle) -> String {
     next(push, |event| match event {
-        PushEvent::Connected { endpoint, .. } => Some(endpoint),
+        PushEvent::Connected { endpoint, push_url, .. } => {
+            assert!(
+                push_url.starts_with("https://") && push_url.ends_with(&format!("/v4/f/{endpoint}/")),
+                "{push_url}"
+            );
+            Some(endpoint)
+        }
         _ => None,
     })
     .await

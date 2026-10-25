@@ -151,6 +151,9 @@ fn handle(state: &mut State, request: &Request) -> ResponseTemplate {
     if let Some(answer) = crate::ups::own_availability(state, request) {
         return answer;
     }
+    if let Some(answer) = crate::calling::relay_tokens(state, request) {
+        return answer;
+    }
     if let Some(answer) = crate::calling::serve(state, request) {
         return answer;
     }

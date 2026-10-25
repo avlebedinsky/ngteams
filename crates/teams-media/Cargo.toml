@@ -7,8 +7,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests and
-# the echo-call spike's, and the signals the audio processing is judged with (`test_signal`).
+# Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests, the
+# mock's media and the engine's call tests, and the signals the audio processing is judged with (`test_signal`).
 test-support = []
 # The personal build's devices: the desktop's PipeWire instead of the UI sandbox's (`devices::pipewire::THIS_BUILD`).
 # Only `crates/teams` enables it (crates/teams/tests/apart.rs checks every manifest); `test-support` wins over it.

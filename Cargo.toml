@@ -22,7 +22,6 @@ members = [
     "crates/teams-trouter",
     "crates/teams-ui",
     "crates/ui-sandbox",
-    "spikes/echo-call",
     "spikes/gpui-video",
     "spikes/media-loop",
 ]
@@ -48,7 +47,6 @@ default-members = [
     "crates/teams-trouter",
     "crates/teams-ui",
     "crates/ui-sandbox",
-    "spikes/echo-call",
     "spikes/gpui-video",
     "spikes/media-loop",
 ]
@@ -88,7 +86,6 @@ teams-trouter = { path = "crates/teams-trouter" }
 teams-ui = { path = "crates/teams-ui" }
 # tests and lab runs only: the private compositor, bus, input and URI opener every GUI process runs in
 ui-sandbox = { path = "crates/ui-sandbox" }
-media-loop = { path = "spikes/media-loop" }
 # The video source hands frames to GPUI's foreground executor: the version GPUI already links.
 async-channel = "2.5.0"
 # base64 bodies and frames in captures, decoded by the sanitizer

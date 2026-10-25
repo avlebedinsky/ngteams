@@ -869,20 +869,70 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-core/src/*`, `crates/teams-core/tests/*`, `spikes/echo-call/*`, README.md
 
-- [ ] decide with Codex: call writes as the outbox's transient kind or a kind of their own; what a failed step does
-- [ ] tests first on the mock and its loopback media peer: the call session joins `teams-call` and `teams-media`
+- [x] decide with Codex: call writes as the outbox's transient kind or a kind of their own; what a failed step does
+      → done (transcript `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-14-call-session/`):
+      **a kind of their own** (`Outbox::try_call`, `crates/teams-core/src/outbox/call.rs`): no row and no transient
+      (no replace, no drop by a message post, no wait from the tick); each attempt a fresh `Fence::check`, its answer
+      (any status, with its body) back to the machine; one more attempt only after a 401 or a throttle of at most
+      `MAX_TRANSIENT_WAIT`, once each (`CallRetries`, at most three attempts), never after an unknown outcome, and only
+      while the machine still wants the write (`Calls::may_send_again`: a call that left wants only its `leave` or
+      decline, a cleanup write of an ended call stays the engine's to finish). One write in flight: beside it the
+      engine takes only events and delivery responses (`Calls::poll_beside_write`), so the machine's queue is the only
+      queue and a call that ends drops its unsent writes. **A failed step**: Task 13's (the call ends, a `leave` when
+      the account is in it) plus the media: a setup that fails before anything is sent refuses the action (an answer's
+      keeps the invitation ringing, never an automatic decline); the far end's SDP not applying, a renegotiation not
+      answerable or rejected, the session failing, the far end closing the media (`CLOSED_GRACE`), no connect within
+      `CONNECT_WITHIN` of the far end's SDP or lost past `RECOVER_WITHIN` fail the call (`Calls::fail_media`,
+      `End::Failed("media")`); the user is told *connecting* until the media connected; every blocking media step on
+      tokio's blocking pool; the engine stopping hangs up (`Calls::shut_down`: an invitation that rings is let go
+      unanswered) within `SHUTDOWN_GRACE`
+- [x] tests first on the mock and its loopback media peer: the call session joins `teams-call` and `teams-media`
       (outgoing: `str0m`'s offer into the start's or the join's media content, the answer applied; incoming: the
       invitation's and acceptance's media as Task 7 reads and writes them; a renegotiation either way; the TURN
       credentials fetched into the peer); a call connects and a tone crosses on the file backend, both directions;
       every write with its `fence.log` line
-- [ ] tests first: the native signaling feeds the fence's `CallRegistry`: a native start's answer registers its call;
+      → done: `crates/teams-core/tests/calls/` (`flows.rs`, `failures.rs`, `support.rs`): an engine per lab account on
+      the mock (its own fence, `fence.log`, messaging and calling sockets; media on the file backend through the mock's
+      loopback TURN server). The test call against the media controller's peer, a → b native on both ends, a caller
+      the mock plays (its offer in the invitation), a running group call joined (the mixer's peer answering the join's
+      offer): each connects and each side's tone is in the other's recording (Goertzel), every write permitted. The
+      mock's media (`teams-mock`'s `media` feature, `ChatServiceMock::start_media`, `crates/teams-mock/src/peers.rs`):
+      a TURN server on loopback whose credentials `/trap/tokens` hands out, a loopback peer behind each party the mock
+      plays and its renegotiations (`renegotiate`, `negotiations/…/answer`, `mediaAnswers/…/acknowledge`,
+      `ChatServiceMock::renegotiate`). A renegotiation either way: b's own (`CallAction::Renegotiate`, the running
+      line offered again as an ICE restart, `MediaSession::reoffer`; its answer applied and acknowledged) and the
+      peer's (answered by `Calls::answer_media`); the audio goes on. ⚠️ Camera and video renegotiation wait for Task 18
+      (the `Camera` action isn't built: there is no video yet); whether the call controller takes an ICE restart
+      isn't captured (live in Task 15/16)
+- [x] tests first: the native signaling feeds the fence's `CallRegistry`: a native start's answer registers its call;
       the acceptance or a `conversationUpdate` delivery binds the call id as the capture binds it; a follow-up on an
       unbound id is refused before it is sent; an answer or delivery that doesn't read binds nothing
-- [ ] tests first: a call survives the calling socket's reconnect (Task 12) and keeps its media
-- [ ] engine: `Action::{Call, Join, Answer, Decline, Hangup, Mute, Camera, …}`, `Event::{IncomingCall, RingEnded,
+      → done (`tests/calls/`): the start's answer registers the call (its metadata, `add` and `leave` permitted), its
+      acceptance binds the call controller's links (the acknowledgement's delivery response permitted); a follow-up on
+      a call no start registered is denied `unregistered_call` and nothing reaches the mock; a start whose answer
+      doesn't read registers nothing (the call fails, no `leave` without a link); an acceptance whose links name two
+      calls binds nothing (no acknowledgement, the call leaves on the conversation its start registered). A
+      `conversationUpdate` binds nothing, as Task 3's registry decided (no captured operation needs it)
+- [x] tests first: a call survives the calling socket's reconnect (Task 12) and keeps its media
+      → done: the account's sockets dropped mid-call; the calling socket registers again, the call's status never
+      moves, the peer keeps receiving, and the `leave` goes on the links the call had before
+- [x] engine: `Action::{Call, Join, Answer, Decline, Hangup, Mute, Camera, …}`, `Event::{IncomingCall, RingEnded,
       Call(state)}`; one call at a time
-- [ ] `spikes/echo-call` reduced to what isn't moved (or removed, its README row and docs updated)
-- [ ] the gate passes
+      → done (`crates/teams-core/src/calling.rs`, `calling/media.rs`): `EngineRequests::call(CallAction)` with
+      `CallAction::{Call { chat }, TestCall { echo }, Join, Answer, Decline, HangUp, Mute, Renegotiate}` (a call
+      action of its own, not `Action`: a chat write answers with its outbox row, a call action with its `CallId`);
+      `Event::{IncomingCall, RingEnded, Call { call, status: CallStatus }, CallingRegistration}`; `Parts::calls`
+      (`CallParts`: the calling socket, the account's `Identity`, `CallMedia`: devices, relay, session config;
+      `Relay::Fixed` only under teams-core's `test-support`, which turns on teams-fence's); one call at a time
+      (`CallActionError::Busy`). Mute is local (silence in place of the microphone, `MediaSession::set_muted`: no
+      capture shows a mute write). ⚠️ `Camera` waits for Task 18. Every binary still builds its engine with
+      `calls: None` (Task 15 wires `teams-headless`, Task 17 the app, Task 22 the personal build)
+- [x] `spikes/echo-call` reduced to what isn't moved (or removed, its README row and docs updated)
+      → removed: its signaling is `teams-call`'s, its relay `teams-media`'s, its call flow and media the engine's, its
+      echo probe superseded by `teams_media::tone` and the call session's tests; with it the routeless legacy
+      constructors `StartCall::test_call`, `AddToCall::new` and `ConversationUrl` (Task 11's ⚠️), their tests rewritten
+      on the fence's targets; README, `docs/spikes/echo-call.md` (a pointer), `docs/protocol/endpoints.md` updated
+- [x] the gate passes
 
 ### Task 15: The native echo call (live)
 **Files:**

@@ -626,6 +626,15 @@ impl Fence {
         self.calls.register(pending, answer)
     }
 
+    /// Ends a pending call unregistered: its start was answered without success (the service didn't take it), so
+    /// nothing it named binds and a start sent again, a pending call of its own with the same callbacks, is the one an
+    /// acceptance binds to ([`crate::calls`]). Nothing for another fence's pending start.
+    pub fn abandon_start(&self, pending: PendingStart) {
+        if pending.fence() == self.id {
+            self.calls.abandon(pending);
+        }
+    }
+
     /// Takes a permit this fence issued for an `attach` or an `accept` on an offered invitation
     /// ([`crate::CallOperation::Attach`], [`crate::CallOperation::Accept`]), once: its answer is then pending
     /// ([`Fence::bind_answer`]). `None` for another fence's permit, one taken already, another write, or an invitation

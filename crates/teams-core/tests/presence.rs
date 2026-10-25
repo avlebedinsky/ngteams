@@ -156,6 +156,7 @@ fn rig_of(server: MockServer, poll: Duration, presence: bool, others: Vec<String
     let outbox = Outbox::new(Arc::new(transport()), Arc::clone(&fence), Arc::new(FailClosed), author);
     let store = Store::open(&dir.path().join("store").join("a.sqlite")).unwrap();
     let handle = engine::start(Parts {
+        calls: None,
         store,
         client: Arc::new(Client::new(reads)),
         outbox,

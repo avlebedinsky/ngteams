@@ -17,6 +17,11 @@
 //! capacity. No thread waits on another's device: a stuck speaker fills only the jitter buffer, and a stuck
 //! microphone only stops what is sent.
 //!
+//! A session may start without its devices ([`MediaSession::start_without_devices`]): the network thread makes and
+//! takes the SDP and connects the media, and the capture and playout threads start only once
+//! [`MediaSession::open_devices`] opened the microphone and the speaker (a call's devices open only once the call
+//! went).
+//!
 //! SDP crosses as `str0m`'s own (`teams_media::sdp` converts it to and from Teams' dialect); each command is answered
 //! by the network thread within [`COMMAND_TIMEOUT`]. The encoder starts as [`SessionConfig::opus`] says and turns DTX
 //! on or off as the far end's Opus line asks once its offer or answer is applied. [`MediaSession::close`] (or dropping
@@ -135,6 +140,8 @@ struct Counters {
 /// What the threads share.
 struct Shared {
     stop: AtomicBool,
+    /// The microphone is muted: the capture thread sends silence in its place.
+    muted: AtomicBool,
     counters: Counters,
     jitter: Mutex<JitterBuffer>,
     /// The encoder's configuration once the far end's SDP changed it, for the capture thread to take.
@@ -198,6 +205,7 @@ struct Outgoing {
 
 enum Command {
     Offer(Sender<Result<SdpOffer, Error>>),
+    Reoffer(Sender<Result<SdpOffer, Error>>),
     AcceptAnswer(SdpAnswer, Sender<Result<(), Error>>),
     AcceptOffer(SdpOffer, Sender<Result<SdpAnswer, Error>>),
 }
@@ -206,20 +214,44 @@ enum Command {
 pub struct MediaSession {
     shared: Arc<Shared>,
     commands: SyncSender<Command>,
-    events: Receiver<SessionEvent>,
-    threads: Vec<JoinHandle<()>>,
+    /// Behind a lock so a session is shared between threads (`Sync`): an engine asks it from one thread and runs its
+    /// SDP commands from another.
+    events: Mutex<Receiver<SessionEvent>>,
+    /// Behind a lock so the devices open on a shared session ([`MediaSession::open_devices`]).
+    threads: Mutex<Vec<JoinHandle<()>>>,
+    /// What the capture and playout threads take once the devices open; `None` once they did.
+    unopened: Mutex<Option<Unopened>>,
+}
+
+/// The capture and playout threads' parts, made when the session starts, waiting for the devices.
+struct Unopened {
+    encoder: Encoder,
+    decoder: Decoder,
+    processing: Option<Arc<AudioProcessing>>,
+    outgoing: Queue<Outgoing>,
 }
 
 impl MediaSession {
-    /// Opens the microphone and the speaker of `devices` and starts the session's threads on `peer`. Nothing is sent
-    /// until the SDP is exchanged and the media connects.
+    /// Opens the microphone and the speaker of `devices` and starts the session's threads on `peer`: as
+    /// [`MediaSession::start_without_devices`], then [`MediaSession::open_devices`]. Nothing is sent until the SDP is
+    /// exchanged and the media connects.
     ///
     /// # Errors
-    /// [`Error::Device`] when a device can't be opened, [`Error::Opus`] when libopus refuses the setup,
-    /// [`Error::Processing`] when the audio processing can't be set up, [`Error::Io`] when a thread can't be started.
+    /// As those two's.
     pub fn start(peer: RelayedPeer, devices: &dyn Devices, config: SessionConfig) -> Result<Self, Error> {
-        let microphone = devices.microphone()?;
-        let speaker = devices.speaker()?;
+        let session = Self::start_without_devices(peer, config)?;
+        session.open_devices(devices)?;
+        Ok(session)
+    }
+
+    /// Starts the session's network thread on `peer`, its devices not opened: the SDP and the media's connection run,
+    /// nothing is captured, sent or played until [`MediaSession::open_devices`] (a call's offer or answer is made
+    /// before the call goes, its devices opened only once it went).
+    ///
+    /// # Errors
+    /// [`Error::Opus`] when libopus refuses the setup, [`Error::Processing`] when the audio processing can't be set
+    /// up, [`Error::Io`] when the thread can't be started.
+    pub fn start_without_devices(peer: RelayedPeer, config: SessionConfig) -> Result<Self, Error> {
         let encoder = Encoder::new(&config.opus)?;
         let decoder = Decoder::new()?;
         let processing = if config.processing.any() {
@@ -231,50 +263,76 @@ impl MediaSession {
         let (commands, commands_rx) = mpsc::sync_channel(COMMAND_QUEUE);
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
+            muted: AtomicBool::new(false),
             counters: Counters::default(),
             jitter: Mutex::new(JitterBuffer::new(config.jitter)),
             negotiated: Mutex::new(None),
             events: events_tx,
         });
         let outgoing = Queue::new(config.send_queue.max(1));
-        let mut session = Self {
+        let session = Self {
             shared: Arc::clone(&shared),
             commands,
-            events,
-            threads: Vec::with_capacity(3),
+            events: Mutex::new(events),
+            threads: Mutex::new(Vec::with_capacity(3)),
+            unopened: Mutex::new(Some(Unopened {
+                encoder,
+                decoder,
+                processing,
+                outgoing: outgoing.clone(),
+            })),
         };
         let network = Network {
             peer,
-            shared: Arc::clone(&shared),
+            shared,
             commands: commands_rx,
-            outgoing: outgoing.clone(),
+            outgoing,
             pending: None,
             opus: config.opus,
             opus_pending: false,
         };
         session.spawn("teams-media-net", move || network.run())?;
-        let capture = Capture {
-            microphone,
-            encoder,
-            processing: processing.clone(),
-            outgoing,
-            shared: Arc::clone(&shared),
-        };
-        session.spawn("teams-media-mic", move || capture.run())?;
-        let playout = PlayoutLoop {
-            speaker,
-            decoder,
-            processing,
-            shared,
-            pcm: Vec::with_capacity(crate::codec::MAX_PACKET_SAMPLES + FRAME_SAMPLES),
-        };
-        session.spawn("teams-media-spk", move || playout.run())?;
         Ok(session)
     }
 
-    fn spawn(&mut self, name: &str, run: impl FnOnce() + Send + 'static) -> Result<(), Error> {
+    /// Opens the microphone and the speaker of `devices` and starts the capture and playout threads; once only (a
+    /// later call opens nothing).
+    ///
+    /// # Errors
+    /// [`Error::Device`] when a device can't be opened (the session goes on without them, and they may be opened
+    /// again), [`Error::Io`] when a thread can't be started.
+    pub fn open_devices(&self, devices: &dyn Devices) -> Result<(), Error> {
+        let mut unopened = lock(&self.unopened);
+        if unopened.is_none() {
+            return Ok(());
+        }
+        let microphone = devices.microphone()?;
+        let speaker = devices.speaker()?;
+        let Some(parts) = unopened.take() else {
+            return Ok(());
+        };
+        let capture = Capture {
+            microphone,
+            encoder: parts.encoder,
+            processing: parts.processing.clone(),
+            outgoing: parts.outgoing,
+            shared: Arc::clone(&self.shared),
+        };
+        self.spawn("teams-media-mic", move || capture.run())?;
+        let playout = PlayoutLoop {
+            speaker,
+            decoder: parts.decoder,
+            processing: parts.processing,
+            shared: Arc::clone(&self.shared),
+            pcm: Vec::with_capacity(crate::codec::MAX_PACKET_SAMPLES + FRAME_SAMPLES),
+        };
+        self.spawn("teams-media-spk", move || playout.run())?;
+        Ok(())
+    }
+
+    fn spawn(&self, name: &str, run: impl FnOnce() + Send + 'static) -> Result<(), Error> {
         let handle = thread::Builder::new().name(name.to_owned()).spawn(run)?;
-        self.threads.push(handle);
+        lock(&self.threads).push(handle);
         Ok(())
     }
 
@@ -285,6 +343,28 @@ impl MediaSession {
     /// answer.
     pub fn offer_audio(&self) -> Result<SdpOffer, Error> {
         self.request(Command::Offer)
+    }
+
+    /// Offers the running line again with fresh ICE credentials (an ICE restart, [`crate::peer::Peer::reoffer`]): a
+    /// renegotiation of the call's media; the answer goes to [`MediaSession::accept_answer`].
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if `str0m` fails, [`Error::Timeout`] or [`Error::SessionEnded`] when the network thread doesn't
+    /// answer.
+    pub fn reoffer(&self) -> Result<SdpOffer, Error> {
+        self.request(Command::Reoffer)
+    }
+
+    /// Mutes (`true`) or unmutes the microphone: while muted the capture thread encodes and sends silence in place of
+    /// what it hears (the line and its timing go on), and the device stays open.
+    pub fn set_muted(&self, muted: bool) {
+        self.shared.muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// Whether the microphone is muted ([`MediaSession::set_muted`]).
+    #[must_use]
+    pub fn is_muted(&self) -> bool {
+        self.shared.muted.load(Ordering::Relaxed)
     }
 
     /// Applies the far end's answer to our last offer.
@@ -318,7 +398,8 @@ impl MediaSession {
     /// The next event, waiting up to `timeout`.
     #[must_use]
     pub fn next_event(&self, timeout: Duration) -> Option<SessionEvent> {
-        self.events.recv_timeout(timeout).ok()
+        let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        events.recv_timeout(timeout).ok()
     }
 
     #[must_use]
@@ -335,7 +416,8 @@ impl MediaSession {
 
     fn stop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        for handle in self.threads.drain(..) {
+        let threads = std::mem::take(self.threads.get_mut().unwrap_or_else(PoisonError::into_inner));
+        for handle in threads {
             // a thread that panicked has nothing left to stop
             let _ = handle.join();
         }
@@ -401,6 +483,13 @@ impl Network {
         match command {
             Command::Offer(reply) => {
                 let offer = peer.offer_audio().map(|(offer, pending)| {
+                    self.pending = Some(pending);
+                    offer
+                });
+                let _ = reply.send(offer);
+            }
+            Command::Reoffer(reply) => {
+                let offer = peer.reoffer().map(|(offer, pending)| {
                     self.pending = Some(pending);
                     offer
                 });
@@ -523,6 +612,9 @@ impl Capture {
         if let Some(processing) = &self.processing {
             processing.near_end(&mut frame)?;
         }
+        if self.shared.muted.load(Ordering::Relaxed) {
+            frame = AudioFrame::silence();
+        }
         let negotiated = self.shared.negotiated().take();
         if let Some(config) = negotiated {
             self.encoder.configure(&config)?;
@@ -603,6 +695,10 @@ impl PlayoutLoop {
     }
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +708,7 @@ mod tests {
         let (events, reported) = mpsc::sync_channel(EVENT_QUEUE);
         let shared = Shared {
             stop: AtomicBool::new(false),
+            muted: AtomicBool::new(false),
             counters: Counters::default(),
             jitter: Mutex::new(JitterBuffer::new(JitterConfig::default())),
             negotiated: Mutex::new(None),

@@ -6,8 +6,10 @@ call ([calling-echo.md](../protocol/calling-echo.md)) the same day. Code: `spike
 
 Since M3 the TURN client, its relay link and their tests live in `crates/teams-media` (`stun`, `turn`, `relay`,
 `tests/turn.rs`, `tests/relay.rs`, the loopback TURN server `test_turn`), and the SDP conversion this write-up calls
-unbuilt is `teams_media::sdp` (`docs/protocol/calling.md`, "The SDP dialect"); the paths below are the spike's as
-it was.
+unbuilt is `teams_media::sdp` (`docs/protocol/calling.md`, "The SDP dialect"). The spike crate itself is gone (M3 Task
+14): its signaling is `crates/teams-call`'s, the call flow through the fence and its media the engine's
+(`teams_core::calling`), and the echo's tone check `teams_media::tone` and the call session's tests; the paths below
+are the spike's as it was.
 
 ## Question
 

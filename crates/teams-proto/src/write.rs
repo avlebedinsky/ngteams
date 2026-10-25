@@ -2,7 +2,6 @@
 
 use serde_json::Value;
 use teams_fence::{Target, WritePermit};
-use url::Url;
 
 use crate::endpoint::{Endpoint, Method, Service};
 
@@ -161,48 +160,5 @@ impl TargetMismatch {
     #[must_use]
     pub fn requested(&self) -> &Target {
         &self.requested
-    }
-}
-
-/// A call's conversation as the echo spike's [`AddToCall::new`] names it: the URL the call start's answer gives as its
-/// `conversationController` (`https://<proxy>/…/conv/<conversation id>?<routing query>`), the id of the
-/// `teams_fence::Scope::Call` it targets (which no source reads, so the fence denies it as partial). The routable call
-/// writes take a [`CallLink`] instead.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConversationUrl(Url);
-
-impl ConversationUrl {
-    /// `None` unless `url` is an `https` URL with a host, no user info, no fragment and a non-empty last path segment
-    /// (the conversation id).
-    #[must_use]
-    pub fn parse(url: &str) -> Option<Self> {
-        let url = Url::parse(url).ok()?;
-        let has_id = url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .is_some_and(|id| !id.is_empty());
-        let plain = url.username().is_empty() && url.password().is_none() && url.fragment().is_none();
-        (url.scheme() == "https" && url.host_str().is_some() && plain && has_id).then_some(Self(url))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-
-    /// The conversation id: the last path segment.
-    #[must_use]
-    pub fn id(&self) -> &str {
-        self.0
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .unwrap_or_default()
-    }
-
-    /// The URL of the operation `name` on this conversation: its path plus `/<name>`, its query kept.
-    pub(crate) fn operation(&self, name: &str) -> Url {
-        let mut url = self.0.clone();
-        url.set_path(&format!("{}/{name}", self.0.path()));
-        url
     }
 }

@@ -14,7 +14,9 @@
 //!    which takes the pending call's [`PendingStart`] once): `conversationController` (on the flight proxy,
 //!    `/api/v2/ep/<host>/conv/<id>`) and, of its `links`, only those of a mapped operation whose URL is the controller's
 //!    path plus the operation's captured segment, with the controller's query (`updateEndpointMetadata`, `leave`, and
-//!    `addParticipantAndModality`, which is the `/add` the client posts to).
+//!    `addParticipantAndModality`, which is the `/add` the client posts to). A start answered without success ends
+//!    unregistered ([`crate::Fence::abandon_start`]): nothing it named binds, so the start sent again (its own
+//!    pending call, with the same callbacks) is the one an acceptance binds to.
 //! 3. **The acceptance.** A delivery that arrives at exactly the path of the start's own `acceptance` callback
 //!    ([`crate::Fence::observe_delivery`]) binds the call controller's links its body names (`callAcceptance.links`:
 //!    `acknowledgement`, `applyChannelParameters`), all on the flight proxy under one call controller host and one call
@@ -446,6 +448,16 @@ impl CallRegistry {
         call.links.extend(links);
         call.state = State::Live;
         Ok(())
+    }
+
+    /// Ends the pending call unregistered: its start was answered without success (see the module docs).
+    pub(crate) fn abandon(&self, pending: PendingStart) {
+        let index = pending.into_call();
+        let mut inner = self.lock();
+        if let Some(call) = inner.calls.get_mut(index).filter(|call| call.state == State::Pending) {
+            call.state = State::Ended;
+            call.deliveries.clear();
+        }
     }
 
     /// A pending answer from an `attach` or an `accept` permit (its `serial`, never taken before) for the invitation

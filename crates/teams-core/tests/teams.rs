@@ -102,6 +102,7 @@ async fn rig(csa: bool, teams_retry: Duration) -> Rig {
         Author::new(Mri::new(LAB_A), "Lab account"),
     );
     let handle = engine::start(Parts {
+        calls: None,
         store: Store::open(&dir.path().join("store").join("a.sqlite")).unwrap(),
         client: Arc::new(Client::new(reads)),
         outbox,

@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use teams_core::{Availability, Cause, Event, MessageChange, NameFrom, Source, TransientSent};
+use teams_core::{Availability, CallStatus, Cause, End, Event, MessageChange, NameFrom, Source, TransientSent};
 use teams_proto::chat;
 use teams_store::{Applied, Conversation, Member, Message, OutboxEntry, OutboxState, Reaction};
 use teams_trouter::RegistrationReport;
@@ -276,6 +276,72 @@ fn event_fields(event: &Event, names: &LabNames) -> Value {
         }),
         Event::Failed { during, error } => json!({"event": "failed", "during": during, "error": error.to_string()}),
         Event::Indexed { messages } => json!({"event": "indexed", "messages": messages}),
+        other => call_fields(other, names),
+    }
+}
+
+/// A call's event: the calling socket's registration, an invitation that rings (its caller by lab name, never the
+/// name the invitation gives), a ring's end, a call's status.
+fn call_fields(event: &Event, names: &LabNames) -> Value {
+    match event {
+        Event::CallingRegistration(RegistrationReport::Registered) => {
+            json!({"event": "calling_registration", "registered": true})
+        }
+        Event::CallingRegistration(RegistrationReport::Failed(error)) => {
+            json!({"event": "calling_registration", "registered": false, "error": error})
+        }
+        Event::IncomingCall(incoming) => json!({
+            "event": "incoming_call",
+            "call": incoming.call.get(),
+            "caller": names.show(incoming.caller.as_str()),
+            "group_chat": incoming.group_chat,
+        }),
+        Event::RingEnded { call, end } => json!({
+            "event": "ring_ended",
+            "call": call.get(),
+            "code": end.code,
+            "phrase": end.phrase,
+        }),
+        Event::Call { call, status } => {
+            let mut fields = json!({"event": "call", "call": call.get(), "status": call_status_word(status)});
+            if let CallStatus::Ended(end) = status {
+                fields["end"] = json!(end_word(end));
+            }
+            fields
+        }
+        _ => json!({"event": "other"}),
+    }
+}
+
+/// A call's status as printed: `placing`, `ringing`, …, `ended`.
+#[must_use]
+pub const fn call_status_word(status: &CallStatus) -> &'static str {
+    match status {
+        CallStatus::Placing => "placing",
+        CallStatus::Ringing => "ringing",
+        CallStatus::Joining => "joining",
+        CallStatus::Answering => "answering",
+        CallStatus::Declining => "declining",
+        CallStatus::Connecting => "connecting",
+        CallStatus::Connected => "connected",
+        CallStatus::Reconnecting => "reconnecting",
+        CallStatus::Leaving => "leaving",
+        CallStatus::Ended(_) => "ended",
+    }
+}
+
+/// How a call ended, as printed: `hung_up`, `declined`, `remote <code> <phrase>`, `failed <step>`.
+#[must_use]
+pub fn end_word(end: &End) -> String {
+    match end {
+        End::HungUp => "hung_up".to_owned(),
+        End::Declined => "declined".to_owned(),
+        End::Remote(remote) => format!(
+            "remote {} {}",
+            remote.code.map_or_else(|| "-".to_owned(), |code| code.to_string()),
+            remote.phrase.as_deref().map_or_else(|| "-".to_owned(), visible)
+        ),
+        End::Failed(step) => format!("failed {step}"),
     }
 }
 

@@ -21,6 +21,8 @@
 //!   messages stored before indexed by a backfill in batches.
 //! - [`teams`]: the account's teams and their channels, read from CSA in the background and kept in the store;
 //!   read-only, as a channel's posts are.
+//! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the
+//!   calling stack's socket, the outbox's call kind and the call's media (`teams-media`).
 //! - [`account`]: one account's engine, assembled the one way every binary builds it (its session over the secret
 //!   store the binary hands in, the fence and the member read it opened); [`lab`] gives it a lab account's parts, the
 //!   personal build (`crates/teams`) its own.
@@ -29,6 +31,7 @@
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod account;
+pub mod calling;
 pub mod engine;
 pub mod lab;
 pub mod outbox;
@@ -39,14 +42,15 @@ pub mod search;
 pub mod sync;
 pub mod teams;
 
+pub use calling::{CallAction, CallActionError, CallMedia, CallParts, CallStatus, IncomingCall, Relay};
 pub use engine::{
     Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, OwnStatus,
     Parts, Push, Reply, Source,
 };
 pub use outbox::{
-    Arrival, CHECK_RETRY_WAIT, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS, MAX_FAILED_CHECKS,
-    MAX_TRANSIENT_WAIT, Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient, TransientSent,
-    UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id,
+    Arrival, CHECK_RETRY_WAIT, CallRetries, CallTried, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS,
+    MAX_FAILED_CHECKS, MAX_TRANSIENT_WAIT, Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient,
+    TransientSent, UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id,
 };
 pub use own_presence::{AVAILABLE_REFRESH, Choice, OwnPresencePolicy, Reporting};
 pub use presence::{Availability, MAX_WATCHED, PRESENCE_MIN_GAP, PRESENCE_POLL};
@@ -57,5 +61,7 @@ pub use sync::{
     Synced,
 };
 pub use teams::{READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
+/// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
+pub use teams_call::{CallId, End, Identity, RemoteEnd};
 /// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.
 pub use teams_trouter::RegistrationReport;
