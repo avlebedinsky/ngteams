@@ -99,6 +99,37 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
   and at once when the session announces another `ic3` token (told by its value, not its expiry). A renewal before
   the service's `1::` sends nothing on that socket.
 
+### The calling stack's socket (M3 Task 12)
+
+`Trouter::for_calls` makes the same client the calling stack's own socket, with an endpoint of its own; nothing opens
+one yet (the call session in the engine does, M3 Task 14). Tested against `TrouterMock` in
+`crates/teams-trouter/tests/calling.rs`:
+
+- **Connect and authentication**: `tc` names `"ua":"SkypeSpaces"` and the query adds `dom=teams.microsoft.com`
+  after `epid`; `user.authenticate` carries only `Authorization` and `X-MS-Migration` (`Authenticate::calling`).
+  Reconnects, the regional move, backoff and renewal are the messaging socket's.
+- **Registration**: `teams_proto::CallingRegistration` (`SkypeSpacesWeb`, `SkypeSpacesWeb_2.6`, the messaging body's
+  shape otherwise) on every `trouter.connected`, a reconnect's included, through `Transport::send_own` (a plain
+  request logged `allowed` in the lab, an `OwnState` entry `calling_endpoint_registration` through a personal fence).
+  It registers no `RegisteredEndpoint`: the account's own availability names its messaging endpoint only.
+- **Deliveries**: one at the endpoint's root or under its `callAgent/` is read by the fence first
+  (`Fence::observe_delivery`, under a key of its connection), its body decoded from base64 and gzip when
+  `X-Microsoft-Skype-Content-Encoding` says `gzip` (one that doesn't decode is ignored). An invitation the fence
+  doesn't offer is ignored: never handed on, nothing sent for it; so is a delivery at the root that may be one but
+  doesn't read (a `callNotification` or an `evt` 107 or 109 the fence can't read, a meeting's or a replacing call's
+  invitation, a body that isn't strictly JSON), while the root's other events (`evt` 115, 116) go on. Every other
+  one goes to its consumer as `PushEvent::Call`, with what the fence made of it. A delivery at any other path (`messaging` included) is ignored.
+- **The only answer**: a typed `AcceptanceAcknowledgement` or `InvitationReceipt` handed back through the delivery's
+  own responder to the connection it came on, sent by `FrameSink::send_permitted` once the fence permitted exactly its
+  JSON for that connection, once. The fence decides it while the socket reads on (`ResponseDecider`: a group call's
+  receipt reads its chat fresh), so a cancellation that comes in the while ends the ring before its last look. A response to a delivery of a connection that went down isn't sent on another. A
+  message-loss report is acknowledged at once (nothing to catch up).
+- **A dropped socket or a renewal** reconnects with the cached `connectparams`, so the endpoint and every call link
+  under its push URL stay the same, and registers again; nothing is sent to the call (as the web client did,
+  `calling.md`, "A call held past a dropped socket").
+- **The personal build** opens none: `for_calls` refuses a personal fence (`BuildError::PersonalCalls`) until M3
+  Task 22 turns its calls on.
+
 ## Connect and the regional move
 
 - The client opens `wss://go.trouter.teams.microsoft.com/v4/c?tc=<json>&timeout=40&epid=<endpoint guid>&ccid=…&

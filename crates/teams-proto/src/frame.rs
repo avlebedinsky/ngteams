@@ -6,8 +6,8 @@
 //!
 //! - [`Authenticate`], the first frame on every socket: `5:::{"name":"user.authenticate","args":[{"headers":{…},
 //!   "connectparams":{…}}]}`, the headers exactly `X-Ms-Test-User: False`, `Authorization: Bearer <ic3>` and
-//!   `X-MS-Migration: True`, and the reconnect parameters an earlier `trouter.connected` handed over, when there are
-//!   some, sent back as they came;
+//!   `X-MS-Migration: True` (the calling stack's socket without `X-Ms-Test-User`: [`Authenticate::calling`]), and the
+//!   reconnect parameters an earlier `trouter.connected` handed over, when there are some, sent back as they came;
 //! - [`Ping`], the keep-alive: `5:<n>+::{"name":"ping"}`;
 //! - [`MessageLossAck`], the acknowledgement of the service's message-loss report:
 //!   `5:<n>+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[{"tag":…,"etag":…},…]}]}`;
@@ -18,7 +18,9 @@
 //! one here (`user.activity`, say) is an ordinary change. The only answer to a delivery (`3:::`) is a typed call
 //! delivery response ([`DeliveryResponse`]: [`AcceptanceAcknowledgement`], [`InvitationReceipt`]), which is no frame by
 //! itself: only [`FrameSink::respond`] sends one, once `Fence::check_delivery_response` permitted exactly its JSON for
-//! the connection the sink was given ([`FrameSink::with_call_responses`]) (`CLAUDE.md`, "Calls go only to the lab").
+//! the connection the sink was given ([`FrameSink::with_call_responses`]) (`CLAUDE.md`, "Calls go only to the lab"), or
+//! the same in two halves, so the socket reads on while the fence decides: [`ResponseDecider::decide`], then that
+//! connection's [`FrameSink::send_permitted`].
 //! Every other delivery stays unanswered.
 //!
 //! The sink numbers the events that ask for an acknowledgement itself (`<n>` above, from 1 per socket). A lab sink
@@ -136,24 +138,42 @@ impl fmt::Debug for ConnectParams {
 pub struct Authenticate {
     token: Secret,
     params: Option<ConnectParams>,
+    /// The calling stack's socket's: without `X-Ms-Test-User`, as its sockets sent it.
+    calling: bool,
 }
 
 impl Authenticate {
-    /// Authenticates with `token` (a bearer token for [`IC3_AUDIENCE`](crate::IC3_AUDIENCE)), sending back `params`
-    /// when an earlier `trouter.connected` handed some over.
+    /// Authenticates the messaging stack's socket with `token` (a bearer token for
+    /// [`IC3_AUDIENCE`](crate::IC3_AUDIENCE)), sending back `params` when an earlier `trouter.connected` handed some
+    /// over.
     #[must_use]
     pub fn new(token: &Secret, params: Option<ConnectParams>) -> Self {
         Self {
             token: token.clone(),
             params,
+            calling: false,
+        }
+    }
+
+    /// As [`Self::new`], for the calling stack's socket: its headers only `Authorization` and `X-MS-Migration`, as the
+    /// calling stack's sockets sent them (`docs/protocol/trouter.md`).
+    #[must_use]
+    pub fn calling(token: &Secret, params: Option<ConnectParams>) -> Self {
+        Self {
+            calling: true,
+            ..Self::new(token, params)
         }
     }
 }
 
 impl sealed::Sealed for Authenticate {
     fn event(&self) -> Event {
-        let headers = Object::new()
-            .string("X-Ms-Test-User", "False")
+        let headers = if self.calling {
+            Object::new()
+        } else {
+            Object::new().string("X-Ms-Test-User", "False")
+        };
+        let headers = headers
             .string("Authorization", &format!("Bearer {}", self.token.expose()))
             .string("X-MS-Migration", "True")
             .finish();
@@ -432,7 +452,9 @@ impl<W: FrameWriter> FrameSink<W> {
 
     /// Answers a call delivery with `response`, once: its JSON made once, decided by the fence for this sink's
     /// connection (`Fence::check_delivery_response`, `source` reading an offered group call's chat fresh), and only
-    /// when permitted sent as `3:::` and exactly that JSON, as a typed frame (logged by its kind on a logging sink).
+    /// when permitted sent as `3:::` and exactly that JSON, as a typed frame (logged by its kind on a logging sink). A
+    /// socket that reads on while the fence decides takes the two apart: [`Self::decider`], then
+    /// [`Self::send_permitted`].
     ///
     /// # Errors
     /// [`RespondError::NoCallResponses`] for a sink that answers none; [`RespondError::NotPending`] when no delivery
@@ -443,17 +465,38 @@ impl<W: FrameWriter> FrameSink<W> {
         response: R,
         source: &dyn MembershipSource,
     ) -> Result<Sent, RespondError<W::Error>> {
+        let decider = self.decider().ok_or(RespondError::NoCallResponses)?;
+        let permitted = decider.decide(response, source).await?;
+        self.send_permitted(permitted).await
+    }
+
+    /// What decides this sink's call delivery responses apart from the sink ([`ResponseDecider`]), so the socket's
+    /// reader goes on while the fence decides one; `None` for a sink that answers none.
+    #[must_use]
+    pub fn decider(&self) -> Option<ResponseDecider> {
+        self.calls.as_ref().map(|(fence, connection)| ResponseDecider {
+            fence: Arc::clone(fence),
+            connection: connection.clone(),
+        })
+    }
+
+    /// Sends a response the fence permitted for this sink's connection ([`ResponseDecider::decide`]) as `3:::` and
+    /// exactly its JSON, as a typed frame (logged by its kind on a logging sink).
+    ///
+    /// # Errors
+    /// [`RespondError::NoCallResponses`] for a sink that answers none; [`RespondError::Denied`]
+    /// ([`DeliveryDenyReason::Uncorrelated`]) for one permitted for another connection or by another fence;
+    /// [`RespondError::Frame`] when it couldn't be logged or sent. Nothing is sent but on success.
+    pub async fn send_permitted<R: DeliveryResponse>(
+        &mut self,
+        permitted: PermittedResponse<R>,
+    ) -> Result<Sent, RespondError<W::Error>> {
         let (fence, connection) = self.calls.as_ref().ok_or(RespondError::NoCallResponses)?;
-        let json = response.envelope();
-        let decision = fence.check_delivery_response(connection, json.as_bytes(), source).await;
-        match decision {
-            DeliveryDecision::Permitted(permit) if permit.delivery() == response.delivery() => {}
-            DeliveryDecision::Permitted(_) => return Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated)),
-            DeliveryDecision::NotPending => return Err(RespondError::NotPending),
-            DeliveryDecision::Denied(reason) => return Err(RespondError::Denied(reason)),
+        if !Arc::ptr_eq(fence, &permitted.fence) || *connection != permitted.connection {
+            return Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated));
         }
         let frame = Checked::<R> {
-            json,
+            json: permitted.json,
             kind: PhantomData,
         };
         self.send(&frame).await.map_err(RespondError::Frame)
@@ -499,6 +542,7 @@ impl<W: FrameWriter> FrameSink<W> {
 /// A typed response to a call delivery: the acceptance's acknowledgement ([`AcceptanceAcknowledgement`]) or an offered
 /// invitation's receipt ([`InvitationReceipt`]), each built from the delivery it answers in the shape the captures show
 /// (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`). Not a frame by itself: only [`FrameSink::respond`]
+/// (or [`FrameSink::send_permitted`])
 /// sends one, after the fence permitted exactly its JSON for the sink's connection. Sealed: no other crate makes
 /// response text.
 pub trait DeliveryResponse: sealed::Response {
@@ -535,7 +579,90 @@ impl<E: Error + 'static> fmt::Debug for RespondError<E> {
     }
 }
 
-/// A delivery response the fence permitted, as the sink sends it: never outside [`FrameSink::respond`].
+/// Decides a calling socket's delivery responses for its connection apart from its sink ([`FrameSink::decider`]), so
+/// the socket reads on while the fence decides one (an offered group call's receipt reads its chat fresh, and a
+/// cancellation read meanwhile ends the ring before the fence's last look). What it permits goes out only through that
+/// sink ([`FrameSink::send_permitted`]).
+#[derive(Clone)]
+pub struct ResponseDecider {
+    fence: Arc<Fence>,
+    connection: String,
+}
+
+impl fmt::Debug for ResponseDecider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResponseDecider").finish_non_exhaustive()
+    }
+}
+
+impl ResponseDecider {
+    /// Decides `response`, once: its JSON made once, decided by the fence for this decider's connection
+    /// (`Fence::check_delivery_response`, `source` reading an offered group call's chat fresh). Sends nothing.
+    ///
+    /// # Errors
+    /// [`ResponseRefused::NotPending`] when no delivery of the connection waits for it; [`ResponseRefused::Denied`]
+    /// when the fence denied it.
+    pub async fn decide<R: DeliveryResponse + Send>(
+        &self,
+        response: R,
+        source: &dyn MembershipSource,
+    ) -> Result<PermittedResponse<R>, ResponseRefused> {
+        let json = response.envelope();
+        let decision = self
+            .fence
+            .check_delivery_response(&self.connection, json.as_bytes(), source)
+            .await;
+        match decision {
+            DeliveryDecision::Permitted(permit) if permit.delivery() == response.delivery() => Ok(PermittedResponse {
+                json,
+                fence: Arc::clone(&self.fence),
+                connection: self.connection.clone(),
+                kind: PhantomData,
+            }),
+            DeliveryDecision::Permitted(_) => Err(ResponseRefused::Denied(DeliveryDenyReason::Uncorrelated)),
+            DeliveryDecision::NotPending => Err(ResponseRefused::NotPending),
+            DeliveryDecision::Denied(reason) => Err(ResponseRefused::Denied(reason)),
+        }
+    }
+}
+
+/// A call delivery response the fence permitted for one connection, waiting for that connection's sink
+/// ([`FrameSink::send_permitted`]). Only [`ResponseDecider::decide`] makes one, and it is sent once (not `Clone`).
+#[must_use = "a permitted response goes out only through its sink"]
+pub struct PermittedResponse<R> {
+    json: String,
+    fence: Arc<Fence>,
+    connection: String,
+    kind: PhantomData<fn() -> R>,
+}
+
+impl<R> fmt::Debug for PermittedResponse<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PermittedResponse").finish_non_exhaustive()
+    }
+}
+
+/// Why [`ResponseDecider::decide`] permitted nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ResponseRefused {
+    /// No delivery of the connection waits for the response: nothing decided.
+    #[error("no delivery of this connection waits for the response")]
+    NotPending,
+    /// The fence denied it (logged).
+    #[error("the fence denied the delivery response: {0}")]
+    Denied(DeliveryDenyReason),
+}
+
+impl<E: Error + 'static> From<ResponseRefused> for RespondError<E> {
+    fn from(refused: ResponseRefused) -> Self {
+        match refused {
+            ResponseRefused::NotPending => Self::NotPending,
+            ResponseRefused::Denied(reason) => Self::Denied(reason),
+        }
+    }
+}
+
+/// A delivery response the fence permitted, as the sink sends it: never outside [`FrameSink::send_permitted`].
 struct Checked<R> {
     json: String,
     kind: PhantomData<fn() -> R>,

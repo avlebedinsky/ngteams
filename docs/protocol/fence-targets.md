@@ -326,7 +326,10 @@ context, and the call's kind in a captured shape: a 1:1 call's (107) naming no g
 group call's (109) naming its group chat by a group chat's id, `isMultiParty` true (its chat is the only field naming
 its other participants, so a group call naming none is no invitation). `Fence::observe_delivery` offers it only when it is addressed
 to the fence's own account (the browser fence is now each account's own, `Fence::open_lab_account`), a lab account,
-and its caller is a lab account or the echo service; any other invitation is ignored and nothing passes for it. A
+and its caller is a lab account or the echo service; any other invitation is ignored and nothing passes for it, as
+is a delivery at the root that may be an invitation but doesn't read (`Observed::Ignored`: an `evt` 107 or 109, or a
+`callNotification` at its top or in a `gp` that decodes, or a body that isn't a strictly read JSON object with a
+numeric `evt`; the root's `evt` 115 and 116 aren't). A
 group call's invitation names only its caller, its callee and its group chat, so **every decision on a group call's
 invitation reads that chat fresh** (complete, lab-only, listing the caller and the callee): a gate beside the MRIs, not
 proof of the call's whole roster (Codex's qualification; in the lab every participant of a lab-only chat is a fenced

@@ -1,37 +1,59 @@
 error[E0451]: fields `answered` and `client_delay` of struct `InvitationReceipt` are private
-  --> tests/ui/proto_delivery_response_literal.rs:13:33
+  --> tests/ui/proto_delivery_response_literal.rs:16:33
    |
-13 |     let _ = InvitationReceipt { answered: any(), client_delay: 0 };
+16 |     let _ = InvitationReceipt { answered: any(), client_delay: 0 };
    |                                 ^^^^^^^^         ^^^^^^^^^^^^ private field
    |                                 |
    |                                 private field
 
 error[E0451]: fields `answered`, `chain_id`, `message_id`, `correlation`, `client_delay` and `links` of struct `AcceptanceAcknowledgement` are private
-  --> tests/ui/proto_delivery_response_literal.rs:15:9
+  --> tests/ui/proto_delivery_response_literal.rs:18:9
    |
-14 |     let _ = AcceptanceAcknowledgement {
+17 |     let _ = AcceptanceAcknowledgement {
    |             ------------------------- in this type
-15 |         answered: any(),
+18 |         answered: any(),
    |         ^^^^^^^^ private field
-16 |         chain_id: String::new(),
+19 |         chain_id: String::new(),
    |         ^^^^^^^^ private field
-17 |         message_id: String::new(),
+20 |         message_id: String::new(),
    |         ^^^^^^^^^^ private field
-18 |         correlation: String::new(),
+21 |         correlation: String::new(),
    |         ^^^^^^^^^^^ private field
-19 |         client_delay: 0,
+22 |         client_delay: 0,
    |         ^^^^^^^^^^^^ private field
-20 |         links: Links::new(),
+23 |         links: Links::new(),
    |         ^^^^^ private field
 
-error: type `teams_proto::frame::Answered` is private
-  --> tests/ui/proto_delivery_response_literal.rs:13:43
+error[E0451]: fields `json`, `fence`, `connection` and `kind` of struct `PermittedResponse` are private
+  --> tests/ui/proto_delivery_response_literal.rs:26:9
    |
-13 |     let _ = InvitationReceipt { answered: any(), client_delay: 0 };
+25 |     let _ = PermittedResponse::<InvitationReceipt> {
+   |             -------------------------------------- in this type
+26 |         json: String::new(),
+   |         ^^^^ private field
+27 |         fence: any(),
+   |         ^^^^^ private field
+28 |         connection: String::new(),
+   |         ^^^^^^^^^^ private field
+29 |         kind: PhantomData,
+   |         ^^^^ private field
+
+error[E0451]: fields `fence` and `connection` of struct `ResponseDecider` are private
+  --> tests/ui/proto_delivery_response_literal.rs:31:31
+   |
+31 |     let _ = ResponseDecider { fence: any(), connection: String::new() };
+   |                               ^^^^^         ^^^^^^^^^^ private field
+   |                               |
+   |                               private field
+
+error: type `teams_proto::frame::Answered` is private
+  --> tests/ui/proto_delivery_response_literal.rs:16:43
+   |
+16 |     let _ = InvitationReceipt { answered: any(), client_delay: 0 };
    |                                           ^^^^^ private type
 
 error: type `teams_proto::frame::Answered` is private
-  --> tests/ui/proto_delivery_response_literal.rs:15:19
+  --> tests/ui/proto_delivery_response_literal.rs:18:19
    |
-15 |         answered: any(),
+18 |         answered: any(),
    |                   ^^^^^ private type

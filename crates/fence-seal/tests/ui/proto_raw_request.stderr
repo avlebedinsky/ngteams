@@ -30,6 +30,9 @@ help: the following other types implement trait `teams_proto::Request`
    |
    | impl Request for EndpointRegistration {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EndpointRegistration`
+...
+   | impl Request for CallingRegistration {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CallingRegistration`
    |
   ::: $WORKSPACE/crates/teams-proto/src/post_read.rs
    |

@@ -297,7 +297,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   `InvitationReceipt`, `DeliveryResponse`, sealed and no `OwnFrame` itself) sent only by `FrameSink::respond`, which
   makes its JSON once, has `Fence::check_delivery_response` decide exactly that JSON for the connection the sink was
   given (`FrameSink::with_call_responses`, the key its deliveries are observed under) and sends it once as a private
-  typed frame, and no retry the transport didn't decide.
+  typed frame, or in those two halves, so the socket reads on while the fence decides (`FrameSink::decider`'s
+  `ResponseDecider::decide`, then a sealed `PermittedResponse` sent only by that connection's
+  `FrameSink::send_permitted`), and no retry the transport didn't decide.
 - **The call writes** (`crates/teams-proto/src/write/call.rs`): each call request a sealed `Mutating` type built whole
   when it is made: its method, its exact URL (`CALL_START_URL`, or a `CallLink`, a link the call's services handed out
   under `https://api.flightproxy.teams.microsoft.com/api/v2/ep/<host>/…`, kept byte for byte, its routing query never
@@ -325,9 +327,13 @@ What the code does and why. A change that undoes one of these needs a new reason
   never settle a row.
 - **Deliveries are never answered** but a call's, by a typed response through `FrameSink::respond` (above); on a
   reconnect the service replays up to ~15 min of unanswered events, which the catch-up and the versioned store
-  absorb. An incoming call is ignored, and the native client sends no
-  `user.activity`; what makes an account show online is UPS's endpoint `PUT`, not `user.activity`
-  (`docs/protocol/trouter.md`, "Own presence"). Its own availability goes out only as the sealed writes
+  absorb. On the messaging socket an incoming call is ignored. The calling stack's socket
+  (`teams_trouter::Trouter::for_calls`, its own endpoint registered as `SkypeSpacesWeb`) hands every delivery to the
+  fence first (`Fence::observe_delivery`): an invitation it doesn't offer or can't read is ignored and nothing is sent
+  for it, the rest go to their consumer, answered only through the delivery's own connection by `FrameSink::respond`
+  (or its two halves, above); the personal fence opens no calling socket (`BuildError::PersonalCalls`) until its calls
+  are turned on. The native client sends no `user.activity`; what makes an account show online is UPS's endpoint
+  `PUT`, not `user.activity` (`docs/protocol/trouter.md`, "Own presence"). Its own availability goes out only as the sealed writes
   `SetEndpointAvailability` and `ForceAvailability`, transient writes of the outbox on `Scope::Account`, which the
   fence permits without a member read only for its own account (`Fence::open_lab_account`), each naming only a
   `RegisteredEndpoint` (only `teams_proto::register` makes one, from a registration of this run the registrar took,
@@ -487,7 +493,8 @@ What the code does and why. A change that undoes one of these needs a new reason
   sends again on its own: an answer, a decline or a join passes only on the account's own offered invitation from a
   lab caller (a group call's chat read fresh), everything else the callee's page sends to the calling services stays
   held back by labelled forced denies. Every other incoming call is ignored, never clicked, and nothing is sent for
-  it. The native Trouter client ignores incoming calls and has no path to answer, decline or join any call.
+  it. The native Trouter client answers no invitation by itself: its calling socket only hands deliveries on, and
+  nothing yet asks it to answer, decline or join a call.
 - Live tests are built only with `--features live` and run only with `PROTO_LAB_LIVE=1`.
 - Tokens: our client is the native `1fec8e78-…` with the `nativeclient` redirect. The chat service takes
   `Authorization: Bearer` with an `https://ic3.teams.office.com` token, not a skypetoken, and a skypetoken expires with

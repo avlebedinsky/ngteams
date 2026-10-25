@@ -19,13 +19,23 @@
 //!   ([`crate::ChatServiceMock::take_events`]): no capture showed what another member is told of them. Every delivered
 //!   event but typing is **stored**: each later connect of the account replays them (`"mstore":true`, the same `id`),
 //!   as the service replays unanswered deliveries; the client never answers, so they never leave the store.
-//! - **Registrar**: `POST /registrar/prod/V2/registrations` with the account's token, `X-MS-Migration: True` and the
-//!   messaging stack's registration (`registration.json`'s shape) is answered `202` with no body and recorded; another
-//!   body is a `400`, a missing credential a `401`.
+//! - **Registrar**: `POST /registrar/prod/V2/registrations` with the account's token, `X-MS-Migration: True` and
+//!   either stack's registration (`registration.json`'s shape: `TeamsCDLWebWorker` or `SkypeSpacesWeb`) is answered
+//!   `202` with no body and recorded; another body is a `400`, a missing credential a `401`. Chat events go only to an
+//!   endpoint the messaging stack registered.
+//! - **The calling stack's socket** (a connect whose `tc` names `SkypeSpaces`): its `user.authenticate` carries only
+//!   `Authorization` and `X-MS-Migration` (the calling stack's two headers), else it is `unauthorized`. Once the
+//!   calling stack registered its endpoint, a test delivers to it an incoming call's invitation
+//!   ([`TrouterMock::deliver_call_invitation`], `tests/fixtures/calling/chat/deliveries.json`'s 1:1 shape at the
+//!   endpoint's root; [`TrouterMock::call_invitation`] and [`TrouterMock::group_call_invitation`] build either shape,
+//!   changed or addressed to someone else, for [`TrouterMock::deliver_call`]) or any call delivery at a path under its push URL ([`TrouterMock::deliver_call`]; one under
+//!   `callAgent/` gzip'd in base64 with `X-Microsoft-Skype-Content-Encoding: gzip`, as the call controller sends it),
+//!   each with the `trouter-request`, chain and message ids its response must echo. The client's responses (`3:::`) are recorded
+//!   with its other frames.
 //!
-//! Test hooks: every socket's record ([`TrouterMock::sockets`]: the account, the endpoint, the query, every frame the
-//! client sent), dropping an account's sockets, a service disconnect with a reason, an incoming call's delivery,
-//! sockets closed before their `trouter.connected`, a late `1::`.
+//! Test hooks: every socket's record ([`TrouterMock::sockets`]: the account, the endpoint, the query, the stack, every
+//! frame the client sent), dropping an account's sockets, a service disconnect with a reason, an incoming call's
+//! delivery, sockets closed before their `trouter.connected`, a late `1::`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -47,15 +57,24 @@ use crate::{ChatEvent, EventKind};
 
 const SESSION: &str = include_str!("../../../tests/fixtures/trouter/session.json");
 const DELIVERIES: &str = include_str!("../../../tests/fixtures/trouter/deliveries.json");
+const CALL_DELIVERIES: &str = include_str!("../../../tests/fixtures/calling/chat/deliveries.json");
 
 /// The made-up regional name of the mock's Trouter hosts.
 pub const REGIONAL_NAME: &str = "mock-zz-01";
+
+/// The messaging stack's app on the registrar.
+pub const MESSAGING_APP: &str = "TeamsCDLWebWorker";
+
+/// The calling stack's app on the registrar.
+pub const CALLING_APP: &str = "SkypeSpacesWeb";
 
 /// An endpoint registered with the registrar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
     /// The account the registration's token is.
     pub account: String,
+    /// The stack that registered it: [`MESSAGING_APP`] or [`CALLING_APP`].
+    pub app_id: String,
     /// The `registrationId` (the client's `epid`).
     pub registration_id: String,
     /// The push URL it names.
@@ -68,6 +87,8 @@ pub struct Registration {
 pub struct SocketRecord {
     /// The connect's query, as it came.
     pub query: String,
+    /// Whether the connect named the calling stack's client (`tc`'s `ua` `SkypeSpaces`).
+    pub calling: bool,
     /// The account its `user.authenticate` named, once it did.
     pub account: Option<String>,
     /// The endpoint id the mock handed over.
@@ -89,6 +110,9 @@ enum Command {
     Disconnect(String),
     /// A delivery of this body at this path under the endpoint's push URL.
     Deliver { path: String, body: String },
+    /// A call delivery to a calling stack's socket whose endpoint the calling stack registered: its id, its path under
+    /// the push URL, its body.
+    DeliverCall { id: i64, path: String, body: String },
 }
 
 /// One delivery the account's endpoints get again on every connect.
@@ -294,6 +318,53 @@ impl TrouterMock {
         );
     }
 
+    /// Delivers to `to`'s calling sockets an incoming 1:1 call from `from`: the fixture's invitation
+    /// (`tests/fixtures/calling/chat/deliveries.json`, its `gp` base64 JSON) at the endpoint's root, its parties
+    /// `from` and `to` (work accounts' MRIs). The delivery's id, which its response must name.
+    #[must_use = "a response names the delivery's id"]
+    pub fn deliver_call_invitation(&self, to: &str, from: &str) -> i64 {
+        self.deliver_call(to, "", &Self::call_invitation(from, to, |_| {}))
+    }
+
+    /// The fixture's 1:1 invitation from `from` to `to` (work accounts' MRIs) as a delivery's body, its decoded `gp`
+    /// changed by `edit` before it is encoded (base64 JSON, as on the wire): for [`TrouterMock::deliver_call`] to any
+    /// account's calling sockets, an invitation addressed to someone else or in a shape the fence doesn't read.
+    #[must_use]
+    pub fn call_invitation(from: &str, to: &str, edit: impl FnOnce(&mut Value)) -> Value {
+        invitation(0, from, to, edit)
+    }
+
+    /// The fixture's group call invitation (`evt` 109) from `from` to `to` in the group chat `chat` (its
+    /// `19:…@thread.v2` id) as a delivery's body, its decoded `gp` changed by `edit` before it is encoded.
+    #[must_use]
+    pub fn group_call_invitation(from: &str, to: &str, chat: &str, edit: impl FnOnce(&mut Value)) -> Value {
+        invitation(1, from, to, |gp| {
+            gp["groupChat"]["threadId"] = Value::from(chat);
+            edit(gp);
+        })
+    }
+
+    /// Delivers `body` to `account`'s calling sockets whose endpoint the calling stack registered, at `path` under the
+    /// push URL (`""` for its root, `callAgent/…` for a callback), with a `trouter-request`, chain and message id of its
+    /// own. The delivery's id.
+    #[must_use = "a response names the delivery's id"]
+    pub fn deliver_call(&self, account: &str, path: &str, body: &Value) -> i64 {
+        let id = {
+            let mut sockets = self.shared.sockets();
+            sockets.next_delivery += 1;
+            i64::try_from(2_000_000 + sockets.next_delivery).unwrap_or(i64::MAX)
+        };
+        self.command(
+            account,
+            &Command::DeliverCall {
+                id,
+                path: path.to_owned(),
+                body: body.to_string(),
+            },
+        );
+        id
+    }
+
     fn command(&self, account: &str, command: &Command) {
         let sockets = self.shared.sockets();
         for (_, owner, commands) in &sockets.commands {
@@ -318,8 +389,10 @@ async fn serve(stream: TcpStream, shared: Arc<Shared>) {
     };
     let (index, hello_delay) = {
         let mut sockets = shared.sockets();
+        let calling = names_calling_stack(&query);
         sockets.records.push(SocketRecord {
             query,
+            calling,
             open: true,
             ..SocketRecord::default()
         });
@@ -341,6 +414,16 @@ async fn serve(stream: TcpStream, shared: Arc<Shared>) {
 }
 
 type Socket = WebSocketStream<TcpStream>;
+
+/// Whether a connect's query names the calling stack's client: its `tc`'s `ua` is `SkypeSpaces`.
+fn names_calling_stack(query: &str) -> bool {
+    query
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("tc="))
+        .filter_map(|tc| percent_encoding::percent_decode_str(tc).decode_utf8().ok())
+        .filter_map(|tc| serde_json::from_str::<Value>(&tc).ok())
+        .any(|tc| tc["ua"] == "SkypeSpaces")
+}
 
 /// Keeps the connect's query, from the handshake.
 struct QueryOf<'a>(&'a mut String);
@@ -379,7 +462,8 @@ async fn authenticate(socket: &mut Socket, shared: &Shared, index: usize) -> Opt
         let _ = socket.send(Message::text(r#"0:::{"reason":"timeout"}"#)).await;
         return None;
     };
-    let Some((account, endpoint, reconnect)) = authenticated(&first, shared) else {
+    let calling = shared.sockets().records.get(index).is_some_and(|record| record.calling);
+    let Some((account, endpoint, reconnect)) = authenticated(&first, shared, calling) else {
         let _ = socket.send(Message::text(r#"0:::{"reason":"unauthorized"}"#)).await;
         return None;
     };
@@ -406,18 +490,22 @@ async fn authenticate(socket: &mut Socket, shared: &Shared, index: usize) -> Opt
     Some(account)
 }
 
-/// The account, the endpoint id and whether the frame carried `connectparams`, if `frame` is the messaging stack's
-/// `user.authenticate` with a token the mock handed out.
-fn authenticated(frame: &str, shared: &Shared) -> Option<(String, String, bool)> {
+/// The account, the endpoint id and whether the frame carried `connectparams`, if `frame` is the socket's stack's
+/// `user.authenticate` (the messaging stack's three headers, or on a `calling` socket the calling stack's two) with a
+/// token the mock handed out.
+fn authenticated(frame: &str, shared: &Shared, calling: bool) -> Option<(String, String, bool)> {
     let event: Value = serde_json::from_str(frame.strip_prefix("5:::")?).ok()?;
     let argument = event["args"].as_array().filter(|args| args.len() == 1)?.first()?;
     let headers = argument["headers"].as_object()?;
     let token = headers.get("Authorization")?.as_str()?.strip_prefix("Bearer ")?;
-    let messaging_shape = event["name"] == "user.authenticate"
-        && headers.len() == 3
-        && headers.get("X-Ms-Test-User") == Some(&json!("False"))
-        && headers.get("X-MS-Migration") == Some(&json!("True"));
-    if !messaging_shape {
+    let stack_headers = if calling {
+        headers.len() == 2
+    } else {
+        headers.len() == 3 && headers.get("X-Ms-Test-User") == Some(&json!("False"))
+    };
+    let shape =
+        event["name"] == "user.authenticate" && stack_headers && headers.get("X-MS-Migration") == Some(&json!("True"));
+    if !shape {
         return None;
     }
     let account = shared.world().account_by_token(token)?.mri.clone();
@@ -479,15 +567,15 @@ async fn connected(mut socket: Socket, shared: &Shared, index: usize, account: &
     let (commands, mut commanded) = mpsc::unbounded_channel();
     shared.sockets().commands.push((index, account.to_owned(), commands));
     let mut changes = shared.world().changes.subscribe();
-    let endpoint = shared
+    let (endpoint, calling) = shared
         .sockets()
         .records
         .get(index)
-        .and_then(|record| record.endpoint.clone())
+        .map(|record| (record.endpoint.clone().unwrap_or_default(), record.calling))
         .unwrap_or_default();
     let mut replayed = false;
     loop {
-        if !replayed && registered(shared, account, &endpoint) {
+        if !replayed && registered(shared, account, &endpoint, MESSAGING_APP) {
             replayed = true;
             if replay(&mut socket, shared, account, &endpoint).await.is_none() {
                 return;
@@ -505,7 +593,8 @@ async fn connected(mut socket: Socket, shared: &Shared, index: usize, account: &
             }
             command = commanded.recv() => {
                 let Some(command) = command else { return };
-                if carry_out(&mut socket, &endpoint, command).await.is_none() {
+                let to_calls = calling && registered(shared, account, &endpoint, CALLING_APP);
+                if carry_out(&mut socket, &endpoint, to_calls, command).await.is_none() {
                     return;
                 }
             }
@@ -539,7 +628,9 @@ async fn answer(socket: &mut Socket, shared: &Shared, text: &str) -> Option<()> 
     socket.send(Message::text(ack)).await.ok()
 }
 
-async fn carry_out(socket: &mut Socket, endpoint: &str, command: Command) -> Option<()> {
+/// Carries out `command` on a socket of `endpoint`; a call delivery only when the socket takes calls (`to_calls`: a
+/// calling stack's socket whose endpoint the calling stack registered).
+async fn carry_out(socket: &mut Socket, endpoint: &str, to_calls: bool, command: Command) -> Option<()> {
     match command {
         Command::Drop => None,
         Command::Disconnect(reason) => {
@@ -558,17 +649,99 @@ async fn carry_out(socket: &mut Socket, endpoint: &str, command: Command) -> Opt
             });
             socket.send(Message::text(format!("3:::{delivery}"))).await.ok()
         }
+        Command::DeliverCall { .. } if !to_calls => Some(()),
+        Command::DeliverCall { id, path, body } => {
+            let guid = |kind: u64| format!("00000000-0000-4000-{kind:04x}-{:012x}", id.unsigned_abs());
+            let request = json!({"id": guid(0x8002), "src": "192.0.2.1", "port": 3443});
+            let mut headers = json!({
+                "Host": format!("{REGIONAL_NAME}-t.trouter.teams.microsoft.com"),
+                "User-Agent": "CallController/0.0.0.0",
+                "Content-Type": "application/json; charset=utf-8",
+                "trouter-request": request.to_string(),
+                "X-Microsoft-Skype-Chain-ID": guid(0x8004),
+                "X-Microsoft-Skype-Message-ID": guid(0x8001),
+            });
+            // the call controller's callbacks come gzip'd in base64, as captured; an invitation at the root as JSON
+            let body = if path.starts_with("callAgent/") {
+                headers["X-Microsoft-Skype-Content-Encoding"] = json!("gzip");
+                gzip_base64(&body)
+            } else {
+                body
+            };
+            headers["Content-Length"] = json!(body.len().to_string());
+            let delivery = json!({
+                "id": id,
+                "method": "POST",
+                "url": format!("/v4/f/{endpoint}/{path}"),
+                "headers": headers,
+                "body": body,
+            });
+            socket.send(Message::text(format!("3:::{delivery}"))).await.ok()
+        }
     }
 }
 
-/// Whether a registration of `account` names `endpoint`'s push URL.
-fn registered(shared: &Shared, account: &str, endpoint: &str) -> bool {
+/// Whether a registration of `account` by the stack `app_id` names `endpoint`'s push URL.
+fn registered(shared: &Shared, account: &str, endpoint: &str, app_id: &str) -> bool {
     let suffix = format!("/v4/f/{endpoint}/");
-    shared
-        .world()
-        .registrations
-        .iter()
-        .any(|registration| registration.account == account && registration.path.ends_with(&suffix))
+    shared.world().registrations.iter().any(|registration| {
+        registration.account == account && registration.app_id == app_id && registration.path.ends_with(&suffix)
+    })
+}
+
+/// The fixture's invitation `index` (0: a 1:1 call's, 1: a group call's) from `from` to `to` (work accounts' MRIs), its
+/// `gp` changed by `edit`, then base64 JSON as on the wire, every other placeholder a made-up GUID.
+fn invitation(index: usize, from: &str, to: &str, edit: impl FnOnce(&mut Value)) -> Value {
+    use base64::Engine as _;
+    let fixture: Value = serde_json::from_str(CALL_DELIVERIES).unwrap_or_default();
+    let body = &fixture["invitations"][index]["body"];
+    let object_id = |mri: &str| mri.rsplit(':').next().unwrap_or_default().to_owned();
+    let gp = body["gp"]
+        .to_string()
+        .replace("<guid:a>", &object_id(from))
+        .replace("<guid:b>", &object_id(to));
+    let mut gp: Value = serde_json::from_str(&fill_guids(&gp)).unwrap_or_default();
+    edit(&mut gp);
+    let gp = gp.to_string();
+    json!({
+        "evt": body["evt"],
+        "gp": base64::engine::general_purpose::STANDARD.encode(gp),
+    })
+}
+
+/// `text` gzip'd, in base64: a call controller's delivery body.
+fn gzip_base64(text: &str) -> String {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let compressed = encoder
+        .write_all(text.as_bytes())
+        .and_then(|()| encoder.finish())
+        .unwrap_or_default();
+    base64::engine::general_purpose::STANDARD.encode(compressed)
+}
+
+/// `text` with every `<guid:…>` placeholder left a made-up GUID, one per name.
+fn fill_guids(text: &str) -> String {
+    use std::fmt::Write as _;
+    let mut names: Vec<String> = Vec::new();
+    let mut filled = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<guid:") {
+        let Some(end) = rest[start..].find('>') else {
+            break;
+        };
+        let name = rest[start..=start + end].to_owned();
+        let number = names.iter().position(|known| *known == name).unwrap_or_else(|| {
+            names.push(name);
+            names.len() - 1
+        });
+        filled.push_str(&rest[..start]);
+        let _ = write!(filled, "00000000-0000-4000-8000-{:012x}", 0x0c00 + number);
+        rest = &rest[start + end + 1..];
+    }
+    filled.push_str(rest);
+    filled
 }
 
 /// Replays `account`'s stored deliveries, as stored ones.
@@ -723,7 +896,7 @@ pub(crate) fn registrar(state: &mut State, request: &Request) -> Option<Response
     let Some(account) = account else {
         return Some(ResponseTemplate::new(401));
     };
-    let Some(registration) = messaging_registration(&request.body, account) else {
+    let Some(registration) = stack_registration(&request.body, account) else {
         return Some(ResponseTemplate::new(400));
     };
     state.registrations.push(registration);
@@ -731,24 +904,27 @@ pub(crate) fn registrar(state: &mut State, request: &Request) -> Option<Response
     Some(ResponseTemplate::new(202))
 }
 
-/// The messaging stack's registration of `registration.json`'s shape, by `account`.
-fn messaging_registration(body: &[u8], account: String) -> Option<Registration> {
+/// Either stack's registration of `registration.json`'s shape, by `account`.
+fn stack_registration(body: &[u8], account: String) -> Option<Registration> {
     let body: Value = serde_json::from_slice(body).ok()?;
     let description = &body["clientDescription"];
+    let app_id = description["appId"].as_str()?;
     let template = description["templateKey"].as_str()?;
     let transport = body["transports"]["TROUTER"]
         .as_array()
         .filter(|list| list.len() == 1)?
         .first()?;
     let path = transport["path"].as_str()?;
-    let messaging = description["appId"] == "TeamsCDLWebWorker"
+    let known = [MESSAGING_APP, CALLING_APP].contains(&app_id)
         && template
-            .strip_prefix("TeamsCDLWebWorker_")
+            .strip_prefix(app_id)
+            .and_then(|rest| rest.strip_prefix('_'))
             .is_some_and(|version| !version.is_empty())
         && path.starts_with("https://")
         && path.contains("/v4/f/");
-    messaging.then(|| Registration {
+    known.then(|| Registration {
         account,
+        app_id: app_id.to_owned(),
         registration_id: body["registrationId"].as_str().unwrap_or_default().to_owned(),
         path: path.to_owned(),
         ttl: transport["ttl"].as_u64().unwrap_or_default(),

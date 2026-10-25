@@ -26,7 +26,9 @@
 //!   join of exactly that conversation from the callee, its chat read fresh, is a start in that chat, even after the
 //!   ring ended.
 //!
-//! An ended invitation is never offered again.
+//! An ended invitation is never offered again. A delivery at the root that may be an invitation but doesn't read
+//! ([`may_be_invitation`]: a `callNotification` the fence can't read, an unread `evt` 107 or 109, a body that isn't
+//! strictly JSON) is ignored like one it doesn't offer: no consumer is handed an invitation the fence can't judge.
 
 use std::collections::BTreeSet;
 
@@ -510,6 +512,30 @@ pub(crate) fn read_invitation(delivery: &Delivery) -> Option<Invitation> {
         controller: controller.as_str().to_owned(),
         attach: attach_link.as_str().to_owned(),
         leg: (host, call),
+    })
+}
+
+/// Whether a delivery that [`read_invitation`] doesn't read may still be an invitation, so that nothing of it is handed
+/// on or answered: a delivery at an endpoint's root whose body isn't a strictly read JSON object with a numeric `evt`
+/// other than an invitation's ([`INVITATION_EVENTS`]), or that carries a `callNotification` (at its top, or in a `gp`
+/// that decodes, one that doesn't counting as one). The root's other captured events (`evt` 115 and 116, a `cp` and no
+/// `gp`) aren't.
+pub(crate) fn may_be_invitation(delivery: &Delivery) -> bool {
+    if endpoint_root(&delivery.path).is_none() {
+        return false;
+    }
+    let Some(Value::Object(body)) = strict_json(&delivery.body) else {
+        return true;
+    };
+    let event = body.get("evt").and_then(Value::as_u64);
+    if event.is_none_or(|event| INVITATION_EVENTS.contains(&event)) || body.contains_key("callNotification") {
+        return true;
+    }
+    body.get("gp").is_some_and(|gp| {
+        gp.as_str()
+            .and_then(|gp| base64::engine::general_purpose::STANDARD.decode(gp).ok())
+            .and_then(|gp| strict_json(&gp))
+            .is_none_or(|gp| !gp.is_object() || gp.get("callNotification").is_some())
     })
 }
 

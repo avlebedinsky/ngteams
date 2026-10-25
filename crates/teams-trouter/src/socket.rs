@@ -49,11 +49,33 @@ pub const MAX_INCOMING: usize = 4 * 1024 * 1024;
 /// The most the write half buffers before a write fails: frames are small (an authentication is the largest).
 const MAX_WRITE_BUFFER: usize = 256 * 1024;
 
-/// The client the connect names in `tc`: the messaging stack (`TeamsCDL`), the web client's versions.
+/// The client version the connect names in `tc` (`cv`), the web client's.
 const CLIENT_VERSION: &str = "2026.36.01.1";
 
 /// The `Origin` the web client's handshake carried.
 const ORIGIN: &str = "https://teams.microsoft.com";
+
+/// The domain the calling stack's connect names (`dom`): the `Origin`'s host, as the web client's carried it.
+const CALLING_DOMAIN: &str = "teams.microsoft.com";
+
+/// Which of the web client's two stacks a socket is: each opens its own socket with its own endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stack {
+    /// The messaging stack's (`TeamsCDL`): chat deliveries.
+    Messaging,
+    /// The calling stack's (`SkypeSpaces`): call deliveries.
+    Calling,
+}
+
+impl Stack {
+    /// The client `tc` names (`ua`).
+    fn client(self) -> &'static str {
+        match self {
+            Self::Messaging => "TeamsCDL",
+            Self::Calling => "SkypeSpaces",
+        }
+    }
+}
 
 /// What the web client percent-encoded in `tc`: quotes and braces (and what a query can't carry); `:`, `,` and `/`
 /// stayed as they were.
@@ -111,11 +133,17 @@ impl ConnectBase {
         (regional && plain).then_some(Self(url))
     }
 
-    /// The connect URL: the base and the web client's query (`tc`, `timeout`, `epid`, `cor_id`, `con_num`).
-    pub(crate) fn connect_url(&self, epid: &str, cor_id: &str, con_num: &str) -> Url {
-        let tc = format!(r#"{{"cv":"{CLIENT_VERSION}","ua":"TeamsCDL","hr":"","v":"{CLIENT_BUILD}"}}"#);
+    /// The connect URL of `stack`'s socket: the base and the web client's query (`tc`, `timeout`, `epid`, the calling
+    /// stack's `dom`, `cor_id`, `con_num`), `tc` naming the stack's client.
+    pub(crate) fn connect_url(&self, stack: Stack, epid: &str, cor_id: &str, con_num: &str) -> Url {
+        let client = stack.client();
+        let tc = format!(r#"{{"cv":"{CLIENT_VERSION}","ua":"{client}","hr":"","v":"{CLIENT_BUILD}"}}"#);
+        let dom = match stack {
+            Stack::Messaging => String::new(),
+            Stack::Calling => format!("&dom={CALLING_DOMAIN}"),
+        };
         let query = format!(
-            "tc={}&timeout={PING_SECONDS}&epid={epid}&cor_id={cor_id}&con_num={con_num}",
+            "tc={}&timeout={PING_SECONDS}&epid={epid}{dom}&cor_id={cor_id}&con_num={con_num}",
             utf8_percent_encode(&tc, TC_ENCODED)
         );
         let mut url = self.0.clone();

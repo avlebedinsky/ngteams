@@ -31,8 +31,8 @@ use teams_proto::{
     ChannelParameters, ClientInfo, Credentials, DeclineCall, FrameSink, FrameText, FrameWriter, HttpError,
     HttpTransport, InvitationReceipt, Invitee, JoinCall, JoinMedia, JoinParts, LeaveCall, LeaveReason, Links,
     MediaContent, MediaDescription, MediaDescriptions, MeetingInfo, Mutating, Refusal, RelayAnswerError, RelayTokens,
-    RenegotiateMedia, ReportRinging, RespondError, Response, StartCall, StartParts, Transport, UpdateEndpointMetadata,
-    UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
+    RenegotiateMedia, ReportRinging, RespondError, Response, ResponseRefused, StartCall, StartParts, Transport,
+    UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -1292,6 +1292,56 @@ async fn the_acceptance_is_acknowledged_once_as_a_typed_frame_the_fence_permitte
             .iter()
             .any(|line| line["response"] == "call_acceptance_acknowledgement" && line["verdict"] == "allow"),
         "{logged:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_response_decided_apart_goes_only_through_its_own_connection_s_sink() {
+    let (lab, other) = (lab(LAB_A).await, lab(LAB_A).await);
+    started_test_call(&lab).await;
+    let socket = Socket::default();
+    let sink = |fence: &Arc<Fence>, connection: &str| {
+        FrameSink::new(socket.clone()).with_call_responses(Arc::clone(fence), connection)
+    };
+    let mut own = sink(&lab.fence, "calling");
+    let decider = own.decider().unwrap();
+    assert!(
+        FrameSink::new(socket.clone()).decider().is_none(),
+        "a sink that answers none"
+    );
+    let decide = |id| {
+        let acceptance = acceptance(&lab, id);
+        let ack = AcceptanceAcknowledgement::new(&acceptance, "cv.1", 5, Links::new()).unwrap();
+        decider.decide(ack, &LabChats)
+    };
+    // permitted for the connection "calling" of this fence: refused on another connection's sink, another fence's,
+    // and a sink that answers none, nothing written
+    let permitted = decide(7).await.unwrap();
+    assert!(matches!(
+        sink(&lab.fence, "another").send_permitted(permitted).await,
+        Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated))
+    ));
+    let permitted = decide(8).await.unwrap();
+    assert!(matches!(
+        sink(&other.fence, "calling").send_permitted(permitted).await,
+        Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated))
+    ));
+    let permitted = decide(9).await.unwrap();
+    assert!(matches!(
+        FrameSink::new(socket.clone()).send_permitted(permitted).await,
+        Err(RespondError::NoCallResponses)
+    ));
+    assert!(socket.texts().is_empty());
+    // and sent by its own
+    let last = acceptance(&lab, 10);
+    let ack = || AcceptanceAcknowledgement::new(&last, "cv.1", 5, Links::new()).unwrap();
+    let permitted = decider.decide(ack(), &LabChats).await.unwrap();
+    own.send_permitted(permitted).await.unwrap();
+    assert_eq!(response_json(&socket.texts()[0])["id"], 10);
+    assert_eq!(
+        decider.decide(ack(), &LabChats).await.err(),
+        Some(ResponseRefused::NotPending),
+        "decided once"
     );
 }
 

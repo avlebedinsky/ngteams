@@ -7,6 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# an incoming call's invitation carries its payload (`gp`) as base64 JSON
+base64.workspace = true
+# a call controller's deliveries are gzip'd (in base64)
+flate2.workspace = true
 # the Trouter mock's socket halves
 futures-util.workspace = true
 # decodes the conversation and message ids the clients percent-encode as one path segment

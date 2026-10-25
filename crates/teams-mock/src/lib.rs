@@ -81,7 +81,7 @@ use wiremock::matchers::{any, method};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 pub use fixtures::FixtureError;
-pub use trouter::{REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
+pub use trouter::{CALLING_APP, MESSAGING_APP, REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
 pub use ups::{AvailabilityChange, OwnAvailability};
 
 /// The region of the mock's chat base.

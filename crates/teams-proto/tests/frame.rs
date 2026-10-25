@@ -151,6 +151,32 @@ async fn each_own_frame_has_the_shape_the_messaging_stack_sent() {
     assert_eq!(sent, expected);
 }
 
+#[tokio::test]
+async fn the_calling_stack_s_authentication_carries_only_its_two_headers() {
+    let mut setup = setup();
+    let token = Secret::new(FIXTURE_TOKEN);
+    setup.sink.send(&Authenticate::calling(&token, None)).await.unwrap();
+    setup
+        .sink
+        .send(&Authenticate::calling(&token, Some(fixture_params())))
+        .await
+        .unwrap();
+    // the calling stack's sockets sent `Authorization` and `X-MS-Migration` only, in that order
+    let texts = setup.socket.texts();
+    assert_eq!(
+        texts[0],
+        r#"5:::{"name":"user.authenticate","args":[{"headers":{"Authorization":"Bearer <token:1>","X-MS-Migration":"True"}}]}"#
+    );
+    let messaging =
+        fixture_frame("authentication with the reconnect parameters an earlier trouter.connected handed over");
+    assert_eq!(
+        texts[1],
+        messaging.replace(r#""X-Ms-Test-User":"False","#, ""),
+        "the same frame as the messaging stack's but for X-Ms-Test-User"
+    );
+    assert_eq!(<Authenticate as OwnFrame>::KIND, "trouter_authenticate");
+}
+
 #[test]
 fn only_the_ack_id_is_taken_out_of_a_frame() {
     assert_eq!(

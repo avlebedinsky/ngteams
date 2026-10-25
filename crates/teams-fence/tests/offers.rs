@@ -258,7 +258,7 @@ async fn an_invitation_the_fence_wouldn_t_answer_is_ignored_and_nothing_passes_f
 }
 
 #[tokio::test]
-async fn an_invitation_that_doesn_t_read_is_no_invitation() -> TestResult {
+async fn an_invitation_that_doesn_t_read_is_ignored_and_nothing_passes_for_it() -> TestResult {
     let lab = lab_b()?;
     let (delivery, gp) = invitation(0, 44)?;
     let edits: [(&str, BodyEdit); 6] = [
@@ -290,8 +290,36 @@ async fn an_invitation_that_doesn_t_read_is_no_invitation() -> TestResult {
         let mut other = gp.clone();
         edit(&mut other);
         let delivery = invitation_delivery(&delivery.path, 44, &other);
-        assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Nothing, "{name}");
+        assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Ignored, "{name}");
     }
+    // a body at the root that may be an invitation, however little of it reads
+    let at_root = |body: &[u8]| Delivery {
+        body: body.to_vec(),
+        ..delivery.clone()
+    };
+    for body in [
+        br#"{"evt":107,"gp":"not base64"}"#.as_slice(),
+        br#"{"evt":109}"#,
+        br#"{"evt":107,"evt":115,"cp":"x"}"#,
+        br#"{"gp":"e30="}"#,
+        br#"{"evt":115,"callNotification":{}}"#,
+        br#"{"evt":115,"gp":"not base64"}"#,
+        br#"{"evt":115,"gp":"eyJjYWxsTm90aWZpY2F0aW9uIjp7fX0="}"#,
+        b"not json",
+        b"[]",
+    ] {
+        assert_eq!(
+            lab.fence.observe_delivery(&at_root(body)),
+            Observed::Ignored,
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    // the root's other captured events aren't invitations
+    assert_eq!(
+        lab.fence.observe_delivery(&at_root(br#"{"evt":115,"cp":"H4sI"}"#)),
+        Observed::Nothing
+    );
     // not at the endpoint's root
     let mut deeper = delivery.clone();
     deeper.path = format!("{}callAgent/x/", delivery.path);
@@ -354,7 +382,8 @@ async fn an_invitation_reads_only_in_its_call_kind_s_captured_shape() -> TestRes
     ];
     for (name, path, evt, gp) in shapes {
         let delivery = invitation_delivery_as(path, 45, evt, &gp);
-        assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Nothing, "{name}");
+        // none reads, and each may be an invitation: ignored, never offered
+        assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Ignored, "{name}");
     }
     assert!(matches!(
         respond(&lab, &receipt(45), &FailClosed).await,

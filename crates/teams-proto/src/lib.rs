@@ -35,7 +35,8 @@
 //! Trouter session's own: authentication, keep-alive, the message-loss acknowledgement, the disconnect), never raw
 //! text, and none of them is written to `fence.log` (a frame isn't a contacting write). The only answer to a delivery
 //! is a typed call delivery response ([`AcceptanceAcknowledgement`], [`InvitationReceipt`]), which only
-//! [`FrameSink::respond`] sends, once the fence permitted exactly its JSON for the sink's connection.
+//! [`FrameSink::respond`] sends (or [`FrameSink::send_permitted`], after a [`ResponseDecider`] the socket reads on
+//! beside), once the fence permitted exactly its JSON for the sink's connection.
 //!
 //! [`HttpTransport`] is the live transport: one base per service, `https` only, no proxy, no redirects, each of the
 //! account's tokens (from its `teams-auth` session) only to its own service's host. Only the `test-support` feature
@@ -59,7 +60,8 @@ pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use endpoint::{Endpoint, Method, Service};
 pub use frame::{
     AcceptanceAcknowledgement, Authenticate, ConnectParams, DeliveryResponse, Disconnect, DroppedIndicator, FrameError,
-    FrameSink, FrameText, FrameWriter, InvitationReceipt, MessageLossAck, OwnFrame, Ping, RespondError, Sent,
+    FrameSink, FrameText, FrameWriter, InvitationReceipt, MessageLossAck, OwnFrame, PermittedResponse, Ping,
+    RespondError, ResponseDecider, ResponseRefused, Sent,
 };
 pub use http::{
     BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, Failure, GRAPH_AUDIENCE, GRAPH_HOST,
@@ -69,8 +71,9 @@ pub use http::{
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
 pub use own::{
-    CLIENT_BUILD, EndpointRegistrar, EndpointRegistration, MESSAGING_APP_ID, MESSAGING_TEMPLATE, OwnState,
-    REGISTRATION_TTL, RegisteredEndpoint, TROUTER_DOMAIN, register,
+    CALLING_APP_ID, CALLING_TEMPLATE, CLIENT_BUILD, CallingRegistration, EndpointRegistrar, EndpointRegistration,
+    MESSAGING_APP_ID, MESSAGING_TEMPLATE, OwnState, REGISTRATION_TTL, RegisteredEndpoint, TROUTER_DOMAIN, register,
+    register_calling,
 };
 #[cfg(feature = "test-support")]
 pub use post_read::ProbePostRead;

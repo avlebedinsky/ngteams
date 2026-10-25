@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::calls::{
     CallRegistry, Delivery, DeliveryDecision, DeliveryPermit, Observed, PendingAnswer, PendingStart, RegisterError,
-    Response, read_invitation,
+    Response, may_be_invitation, read_invitation,
 };
 use crate::contacting::call::{start_evidence, start_target};
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
@@ -660,9 +660,13 @@ impl Fence {
     /// acceptance binds its call controller's links, and the end of a call ends it; an incoming call's invitation is
     /// offered when it is addressed to this fence's [own account](Fence::own_account), a lab account, and its caller
     /// is a lab account or an approved service (a fence of no account offers none), and a delivery at an offered
-    /// invitation's end callback ends its ring. It sends nothing and permits nothing by itself.
+    /// invitation's end callback ends its ring. A delivery at an endpoint's root that may be an invitation but doesn't
+    /// read is [`Observed::Ignored`] too. It sends nothing and permits nothing by itself.
     pub fn observe_delivery(&self, delivery: &Delivery) -> Observed {
         let Some(invitation) = read_invitation(delivery) else {
+            if may_be_invitation(delivery) {
+                return Observed::Ignored;
+            }
             return self.calls.observe(delivery);
         };
         let offered = self.own.as_ref() == Some(&invitation.callee)

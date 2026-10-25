@@ -1,7 +1,8 @@
 // A Trouter socket's sink sends only `teams-proto`'s typed frames: raw text, frames it has no type for (no
 // `user.activity` yet) and an answer to a delivery built by hand don't compile, and neither does a frame's text made
 // outside the sink (a frame built from fields of the caller's choosing is in `proto_frame_literal`). A typed call
-// delivery response is no frame either: it goes only through `FrameSink::respond`, under the fence's decision
+// delivery response is no frame either: it goes only through `FrameSink::respond` (or `FrameSink::send_permitted`),
+// under the fence's decision
 // (`proto_delivery_response`).
 use teams_proto::{AcceptanceAcknowledgement, FrameSink, FrameText, FrameWriter, InvitationReceipt};
 

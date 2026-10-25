@@ -16,16 +16,23 @@
 //!
 //! **What it sends.** The socket sends only `teams_proto`'s typed frames ([`teams_proto::OwnFrame`]:
 //! `user.authenticate`, the keep-alive ping, the message-loss acknowledgement, the disconnect), each through the
-//! connection's [`teams_proto::FrameSink`], never raw text; none is written to `fence.log` (a frame isn't a contacting
-//! write). The socket's write half goes to that sink when the socket opens, and nothing else holds it ([`socket`]):
-//! there is no other way to send on it. No `user.activity` (deliveries come without it), and **no answer to any
-//! delivery**: deliveries stay unanswered, an incoming call's included (it is never answered; the calling stack's
-//! registration isn't made either).
+//! connection's [`teams_proto::FrameSink`], never raw text; a lab sink writes none to `fence.log` (a frame isn't a
+//! contacting write; the personal build's logs each by its kind). The socket's write half goes to that sink when the
+//! socket opens, and nothing else holds it ([`socket`]): there is no other way to send on it. No `user.activity`
+//! (deliveries come without it), and **no answer to any delivery** but a call's typed response on the calling stack's
+//! socket ([`calls`]): the messaging socket's deliveries stay unanswered, an incoming call's included.
 //!
-//! **What it requests over HTTP.** The registrar registration of the endpoint for the messaging stack and its
-//! renewal ([`registration`]), the plain request `teams_proto::EndpointRegistration` (the account's own state: it
-//! reaches nobody), through the account's transport (logged to `fence.log` as `allowed` first, the `ic3` token from
-//! the session).
+//! **Two stacks, two sockets.** A [`Trouter`] is the messaging stack's socket (chat deliveries); built
+//! [`Trouter::for_calls`], it is the calling stack's own (`SkypeSpaces`, its own endpoint): its deliveries read by the
+//! fence and handed on as [`PushEvent::Call`], an invitation the fence doesn't offer ignored, a delivery answered only
+//! by a typed response the fence permits for that call on that connection ([`calls`]). The personal build opens no
+//! calling socket ([`BuildError::PersonalCalls`]).
+//!
+//! **What it requests over HTTP.** The registrar registration of the endpoint for its stack and its renewal
+//! ([`registration`]): `teams_proto::EndpointRegistration` (`TeamsCDLWebWorker`) or
+//! `teams_proto::CallingRegistration` (`SkypeSpacesWeb`), the account's own state (it reaches nobody), sent through
+//! the account's transport by `Transport::send_own` (a plain request logged to `fence.log` as `allowed` first, or the
+//! personal build's own-state entry logged by its kind; the `ic3` token from the session).
 //!
 //! **Where it connects.** `wss://go.trouter.teams.microsoft.com/v4/c`, then the regional `<name>-t` host a
 //! `trouter.connected` names: a fixed allowlist ([`socket::allowed`]), the server certificate checked by the system's
@@ -43,6 +50,7 @@
 //! credential field (the `connectparams` signature of `trouter.connected` among them); no other log line carries a
 //! frame's text.
 
+pub mod calls;
 pub mod credentials;
 pub mod events;
 pub mod frames;
@@ -50,6 +58,7 @@ pub mod registration;
 mod session;
 pub mod socket;
 
+pub use calls::{CallDelivery, CallResponder, CallResponse, CallStack, RespondFailure};
 pub use credentials::TrouterCredentials;
 pub use events::{Change, ChatEvent, Delivery};
 pub use registration::{RegistrationReport, RegistrationTimes};

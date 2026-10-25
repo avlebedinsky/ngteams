@@ -1,20 +1,26 @@
-//! The registrar registration of the endpoint's push URL, for the messaging stack only, and its renewal: the plain
-//! request [`EndpointRegistration`] (`teams_proto`), sent through the account's transport, which asks the fence's
-//! classifier, logs it to `fence.log` as `allowed` first and takes the `ic3` token from the session.
+//! The registrar registration of the endpoint's push URL and its renewal: the messaging stack's
+//! ([`EndpointRegistration`], `TeamsCDLWebWorker`) or the calling stack's ([`CallingRegistration`], `SkypeSpacesWeb`),
+//! each sent through the account's transport ([`teams_proto::Transport::send_own`]: a plain request, which the transport
+//! has the fence's classifier let through and logs to `fence.log` as `allowed` first, or through the personal build's
+//! fence its own-state entry, logged by its kind), the `ic3` token from the session.
 //!
-//! As the web client's messaging stack does it (`docs/protocol/trouter.md`): a registration on every
-//! `trouter.connected`, again [`RegistrationTimes::renew_before`] before its TTL ends, and after a failure again once
-//! [`RegistrationTimes::retry_after`] has passed. The calling stack's registration (`SkypeSpacesWeb`) is never made:
-//! it would make the account reachable for calls.
+//! As the web client's stacks do it (`docs/protocol/trouter.md`): a registration on every `trouter.connected` (the
+//! calling stack's after a dropped socket too, `docs/protocol/calling.md`), again [`RegistrationTimes::renew_before`]
+//! before its TTL ends, and after a failure again once [`RegistrationTimes::retry_after`] has passed. The calling
+//! stack's registration makes the account reachable for calls: what is sent for a call is the fence's to decide.
 //!
-//! Each registration goes out through `teams_proto::register`, which gives the endpoint it registered once the
+//! The messaging registration goes out through `teams_proto::register`, which gives the endpoint it registered once the
 //! registrar took it (a `teams_proto::RegisteredEndpoint`): the one id the account's own availability may name (M2 Task
-//! 19). The loop hands it on with the registration's report.
+//! 19). The loop hands it on with the registration's report. The calling registration registers no such endpoint
+//! (`teams_proto::register_calling`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use teams_proto::{EndpointRegistrar, EndpointRegistration, REGISTRATION_TTL, RegisteredEndpoint, register};
+use teams_proto::{
+    CallingRegistration, EndpointRegistrar, EndpointRegistration, REGISTRATION_TTL, RegisteredEndpoint, register,
+    register_calling,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -48,8 +54,15 @@ pub enum RegistrationReport {
     Failed(String),
 }
 
-/// What one registration came to: its report, and the endpoint it registered when it went through.
+/// What one registration came to: its report, and the endpoint it registered when it went through (the messaging
+/// stack's only).
 pub(crate) type Outcome = (RegistrationReport, Option<RegisteredEndpoint>);
+
+/// Which stack's registration a loop keeps.
+pub(crate) enum Registration {
+    Messaging(EndpointRegistration),
+    Calling(CallingRegistration),
+}
 
 /// The registration loop of one connection; dropping it stops the loop.
 pub(crate) struct Registrar {
@@ -66,7 +79,7 @@ impl Registrar {
     /// Registers `registration` through `transport` now and keeps it registered, reporting each attempt.
     pub(crate) fn start<T>(
         transport: Arc<T>,
-        registration: EndpointRegistration,
+        registration: Registration,
         times: RegistrationTimes,
         reports: mpsc::UnboundedSender<Outcome>,
     ) -> Self
@@ -75,19 +88,11 @@ impl Registrar {
     {
         let task = tokio::spawn(async move {
             loop {
-                let (outcome, wait) = match register(&*transport, &registration).await {
-                    Ok((_, Some(endpoint))) => (
-                        (RegistrationReport::Registered, Some(endpoint)),
-                        times.ttl.saturating_sub(times.renew_before),
-                    ),
-                    Ok((answer, None)) => (
-                        (
-                            RegistrationReport::Failed(format!("the registrar answered HTTP {}", answer.status())),
-                            None,
-                        ),
-                        times.retry_after,
-                    ),
-                    Err(error) => ((RegistrationReport::Failed(error.to_string()), None), times.retry_after),
+                let outcome = once(&*transport, &registration).await;
+                let wait = if outcome.0 == RegistrationReport::Registered {
+                    times.ttl.saturating_sub(times.renew_before)
+                } else {
+                    times.retry_after
                 };
                 if reports.send(outcome).is_err() {
                     return;
@@ -96,5 +101,22 @@ impl Registrar {
             }
         });
         Self { task }
+    }
+}
+
+/// One registration and what it came to.
+async fn once<T: EndpointRegistrar>(transport: &T, registration: &Registration) -> Outcome {
+    let refused = |status: u16| RegistrationReport::Failed(format!("the registrar answered HTTP {status}"));
+    match registration {
+        Registration::Messaging(registration) => match register(transport, registration).await {
+            Ok((_, Some(endpoint))) => (RegistrationReport::Registered, Some(endpoint)),
+            Ok((answer, None)) => (refused(answer.status()), None),
+            Err(error) => (RegistrationReport::Failed(error.to_string()), None),
+        },
+        Registration::Calling(registration) => match register_calling(transport, registration).await {
+            Ok(answer) if answer.is_success() => (RegistrationReport::Registered, None),
+            Ok(answer) => (refused(answer.status()), None),
+            Err(error) => (RegistrationReport::Failed(error.to_string()), None),
+        },
     }
 }

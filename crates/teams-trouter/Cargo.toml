@@ -13,6 +13,9 @@ publish.workspace = true
 test-support = ["teams-proto/test-support"]
 
 [dependencies]
+# the call controller's deliveries on the calling socket: their bodies gzip'd in base64, decoded for the fence
+base64.workspace = true
+flate2.workspace = true
 # the socket's halves: the write half goes only to the frame sink
 futures-util.workspace = true
 # unknown deliveries and service events, logged by kind only. Capped at `debug` at compile time (log's features
@@ -28,6 +31,9 @@ rustls-platform-verifier.workspace = true
 serde_json.workspace = true
 # the `ic3` token with its expiry, the renewal notifications and the clock
 teams-auth.workspace = true
+# the calling socket's deliveries read by the fence (its call registry, offered invitations) and its typed responses
+# decided by it
+teams-fence.workspace = true
 # the frame sink and the typed own frames, the registrar registration (a plain request), the message model
 teams-proto.workspace = true
 # at `debug`, every frame both ways as the diagnostic log's typed record, which redacts `user.authenticate`

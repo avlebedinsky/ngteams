@@ -30,6 +30,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/chatsvc");
 const TROUTER_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/trouter");
 const CSA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/csa");
+const CALL_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/calling/chat");
 
 fn oid(mri: &str) -> &str {
     mri.trim_start_matches("8:orgid:")
@@ -1356,14 +1357,15 @@ fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
                 assert!(
                     include.starts_with("../../../tests/fixtures/chatsvc/")
                         || include.starts_with("../../../tests/fixtures/trouter/")
-                        || include.starts_with("../../../tests/fixtures/csa/"),
+                        || include.starts_with("../../../tests/fixtures/csa/")
+                        || include.starts_with("../../../tests/fixtures/calling/chat/"),
                     "{}: {include:.60}",
                     path.display()
                 );
             }
         }
     }
-    for dir in [FIXTURES, TROUTER_FIXTURES, CSA_FIXTURES] {
+    for dir in [FIXTURES, TROUTER_FIXTURES, CSA_FIXTURES, CALL_FIXTURES] {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             let text = std::fs::read_to_string(&path)?;
@@ -1516,7 +1518,7 @@ async fn a_socket_that_is_late_to_authenticate_or_brings_a_strange_token_is_clos
 }
 
 #[tokio::test]
-async fn the_registrar_takes_only_the_messaging_registration_with_the_accounts_token() -> TestResult {
+async fn the_registrar_takes_either_stacks_registration_with_the_accounts_token() -> TestResult {
     let lab = Lab::start().await?;
     let trouter = lab.mock.start_trouter()?;
     let token = lab.mock.token(LAB_B).ok_or("no b")?;
@@ -1524,18 +1526,35 @@ async fn the_registrar_takes_only_the_messaging_registration_with_the_accounts_t
     let messaging = registration_body("TeamsCDLWebWorker", push);
     assert_eq!(lab.register(None, &messaging).await?, 401);
     assert_eq!(
-        lab.register(Some(&token), &registration_body("SkypeSpacesWeb", push))
+        lab.register(Some(&token), &registration_body("SomeOtherApp", push))
             .await?,
         400
     );
+    let mut mismatched = registration_body("SkypeSpacesWeb", push);
+    mismatched["clientDescription"]["templateKey"] = json!("TeamsCDLWebWorker_2.6");
+    assert_eq!(lab.register(Some(&token), &mismatched).await?, 400);
     assert_eq!(lab.register(Some(&token), &json!({"registrationId": "x"})).await?, 400);
     assert!(trouter.registrations().is_empty());
     assert_eq!(lab.register(Some(&token), &messaging).await?, 202);
-    let registrations = trouter.registrations();
-    assert_eq!(registrations.len(), 1);
+    let calling_push = "https://mock-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/MockEndpoint000010/";
     assert_eq!(
-        (registrations[0].account.as_str(), registrations[0].path.as_str()),
-        (LAB_B, push)
+        lab.register(Some(&token), &registration_body("SkypeSpacesWeb", calling_push))
+            .await?,
+        202
+    );
+    let registrations = trouter.registrations();
+    assert_eq!(registrations.len(), 2);
+    assert_eq!(
+        (
+            registrations[0].account.as_str(),
+            registrations[0].app_id.as_str(),
+            registrations[0].path.as_str()
+        ),
+        (LAB_B, teams_mock::MESSAGING_APP, push)
+    );
+    assert_eq!(
+        (registrations[1].app_id.as_str(), registrations[1].path.as_str()),
+        (teams_mock::CALLING_APP, calling_push)
     );
     assert_eq!(registrations[0].ttl, 3600);
     let url = format!("{}/registrar/prod/V2/registrations", lab.mock.origin());

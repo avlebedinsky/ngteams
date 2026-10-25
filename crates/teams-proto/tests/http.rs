@@ -730,6 +730,51 @@ async fn the_messaging_registration_is_posted_in_its_captured_shape_and_logged_f
     );
 }
 
+#[tokio::test]
+async fn the_calling_registration_is_posted_in_its_captured_shape_and_registers_no_endpoint() {
+    let setup = setup().await;
+    let fixture: Value = serde_json::from_str(REGISTRATIONS).unwrap();
+    let case = &fixture["cases"][2];
+    assert_eq!(case["name"], "the calling stack's endpoint (its own socket)");
+    let mut want = case["body"].clone();
+    want["registrationId"] = json!(EPID);
+    want["clientDescription"]["platformUIVersion"] = json!(teams_proto::CLIENT_BUILD);
+    let push = want["transports"]["TROUTER"][0]["path"].as_str().unwrap().to_owned();
+    Mock::given(method("POST"))
+        .and(path("/registrar/prod/V2/registrations"))
+        .and(header("authorization", bearer(0).as_str()))
+        .and(header("x-ms-migration", "True"))
+        .and(body_json(&want))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&setup.server)
+        .await;
+    let registration = teams_proto::CallingRegistration::new(EPID, &push).unwrap();
+    assert!(teams_proto::CallingRegistration::new("not-a-guid", &push).is_none());
+    assert!(teams_proto::CallingRegistration::new(EPID, "https://evil.example.test/v4/f/x/").is_none());
+
+    // a lab transport sends it as a plain request, logged `allowed` before it goes (the registrar reaches nobody)
+    let answer = teams_proto::register_calling(&setup.transport, &registration)
+        .await
+        .unwrap();
+
+    assert_eq!(answer.status(), 202);
+    let lines = setup.log.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["event"], "allowed");
+    assert_eq!(
+        (
+            case["body"]["clientDescription"]["appId"].as_str(),
+            case["body"]["clientDescription"]["templateKey"].as_str()
+        ),
+        (Some(teams_proto::CALLING_APP_ID), Some(teams_proto::CALLING_TEMPLATE))
+    );
+    assert_eq!(
+        <teams_proto::CallingRegistration as teams_proto::OwnState>::KIND,
+        "calling_endpoint_registration"
+    );
+}
+
 #[test]
 fn a_registration_names_only_a_guid_endpoint_and_a_trouter_push_url() {
     use teams_proto::EndpointRegistration;

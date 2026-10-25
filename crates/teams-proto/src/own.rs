@@ -6,8 +6,10 @@
 //! The entries:
 //! - [`EndpointRegistration`]: the registrar registration of the account's own Trouter endpoint for the **messaging**
 //!   stack, in the shape the web client's messaging stack sent (`docs/protocol/trouter.md`), so the account's chat
-//!   events reach its push socket. Not the calling stack's (`SkypeSpacesWeb`): that one makes the account reachable for
-//!   calls.
+//!   events reach its push socket.
+//! - [`CallingRegistration`]: the same registration of the calling stack's own endpoint (`SkypeSpacesWeb`, its own
+//!   socket), which makes the account reachable for calls (`docs/protocol/calling-echo.md`); [`register_calling`]
+//!   sends it and registers no [`RegisteredEndpoint`].
 //!
 //! [`register`] sends the registration (as a plain request) and, once the registrar took it, gives the endpoint it
 //! registered as a [`RegisteredEndpoint`]: the only way to get one, and the only id the account's own availability may
@@ -31,6 +33,12 @@ pub const MESSAGING_APP_ID: &str = "TeamsCDLWebWorker";
 
 /// The messaging stack's template (`clientDescription.templateKey`): the app and a version, as captured.
 pub const MESSAGING_TEMPLATE: &str = "TeamsCDLWebWorker_2.6";
+
+/// The calling stack's app on the registrar, exactly (`clientDescription.appId`).
+pub const CALLING_APP_ID: &str = "SkypeSpacesWeb";
+
+/// The calling stack's template (`clientDescription.templateKey`), as captured.
+pub const CALLING_TEMPLATE: &str = "SkypeSpacesWeb_2.6";
 
 /// The client build the registration and the Trouter connect name (`platformUIVersion`, and the connect's `tc` `v`):
 /// the web client's in the captures of 2026-10-20.
@@ -61,6 +69,7 @@ mod sealed {
     pub trait Sealed {}
 
     impl Sealed for super::EndpointRegistration {}
+    impl Sealed for super::CallingRegistration {}
 
     #[cfg(feature = "test-support")]
     impl Sealed for super::ProbeOwnState {}
@@ -114,22 +123,121 @@ impl Request for EndpointRegistration {
     }
 
     fn body(&self) -> Option<Value> {
-        Some(json!({
-            "clientDescription": {
-                "appId": MESSAGING_APP_ID,
-                "aesKey": "",
-                "languageId": "en-US",
-                "platform": "chrome",
-                "templateKey": MESSAGING_TEMPLATE,
-                "platformUIVersion": CLIENT_BUILD,
-            },
-            "registrationId": self.registration_id,
-            "nodeId": "",
-            "transports": {
-                "TROUTER": [{"context": "", "path": self.push_url, "ttl": REGISTRATION_TTL}],
-            },
-        }))
+        Some(registration_body(
+            MESSAGING_APP_ID,
+            MESSAGING_TEMPLATE,
+            &self.registration_id,
+            &self.push_url,
+        ))
     }
+}
+
+/// A registration's body: every field the captured value but the app, its template, the endpoint and its push URL.
+fn registration_body(app_id: &str, template: &str, registration_id: &str, push_url: &str) -> Value {
+    json!({
+        "clientDescription": {
+            "appId": app_id,
+            "aesKey": "",
+            "languageId": "en-US",
+            "platform": "chrome",
+            "templateKey": template,
+            "platformUIVersion": CLIENT_BUILD,
+        },
+        "registrationId": registration_id,
+        "nodeId": "",
+        "transports": {
+            "TROUTER": [{"context": "", "path": push_url, "ttl": REGISTRATION_TTL}],
+        },
+    })
+}
+
+/// `POST <AFD host>/registrar/prod/V2/registrations`: the registration of the account's own Trouter endpoint for the
+/// calling stack (`SkypeSpacesWeb`, see the module docs), the calling stack's own socket's endpoint: the messaging
+/// registration's body with the calling stack's app and template, as the calling stack sent it on every
+/// `trouter.connected` (a reconnect included, `docs/protocol/calling.md`). It makes the account reachable for calls,
+/// which is allowed (the registrar is no contacting service); what is sent for a call is the fence's to decide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallingRegistration {
+    registration_id: String,
+    push_url: String,
+}
+
+impl CallingRegistration {
+    /// The calling stack's registration of the endpoint `registration_id` at `push_url`; `None` unless both are as
+    /// [`EndpointRegistration::messaging`] takes them.
+    #[must_use]
+    pub fn new(registration_id: &str, push_url: &str) -> Option<Self> {
+        (is_guid(registration_id) && is_push_url(push_url)).then(|| Self {
+            registration_id: registration_id.to_owned(),
+            push_url: push_url.to_owned(),
+        })
+    }
+
+    #[must_use]
+    pub fn registration_id(&self) -> &str {
+        &self.registration_id
+    }
+
+    #[must_use]
+    pub fn push_url(&self) -> &str {
+        &self.push_url
+    }
+}
+
+impl Request for CallingRegistration {
+    fn service(&self) -> Service {
+        Service::Registrar
+    }
+
+    fn method(&self) -> Method {
+        Method::Post
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::new(["prod", "V2", "registrations"])
+    }
+
+    fn body(&self) -> Option<Value> {
+        Some(registration_body(
+            CALLING_APP_ID,
+            CALLING_TEMPLATE,
+            &self.registration_id,
+            &self.push_url,
+        ))
+    }
+}
+
+impl OwnState for CallingRegistration {
+    const KIND: &'static str = "calling_endpoint_registration";
+
+    fn service(&self) -> Service {
+        Request::service(self)
+    }
+
+    fn method(&self) -> Method {
+        Request::method(self)
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Request::endpoint(self)
+    }
+
+    fn body(&self) -> Option<Value> {
+        Request::body(self)
+    }
+}
+
+/// Sends the calling stack's `registration` through `transport` (a plain request, or through the personal build's
+/// fence its own-state entry, [`Transport::send_own`]: logged to `fence.log` before it goes) and returns the answer. It
+/// registers no [`RegisteredEndpoint`]: the account's own availability names its messaging endpoint only.
+///
+/// # Errors
+/// The transport's.
+pub async fn register_calling<T: Transport>(
+    transport: &T,
+    registration: &CallingRegistration,
+) -> Result<Response, T::Error> {
+    transport.send_own(registration).await
 }
 
 impl OwnState for EndpointRegistration {

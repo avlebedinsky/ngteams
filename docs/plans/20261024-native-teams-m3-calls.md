@@ -801,15 +801,29 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-trouter/src/*`, `crates/teams-trouter/tests/*`, `crates/teams-mock/src/*`
 
-- [ ] tests first: `teams-trouter` opens the calling stack's socket and registers `SkypeSpacesWeb` (a plain request in
+- [x] tests first: `teams-trouter` opens the calling stack's socket and registers `SkypeSpacesWeb` (a plain request in
       the lab; the personal build's `OwnState` entry through `Transport::send_own`, its frames through
       `FrameSink::logging`); the call agent's deliveries reach their consumer; an invitation goes to the fence's
       judgement; no delivery is answered but with a typed response for a registered or offered call
-- [ ] tests first on the mock: a token renewal or a dropped socket reconnects the calling socket; the re-registration
+      → done: `Trouter::for_calls(CallStack)` (`crates/teams-trouter/src/calls.rs`): `tc` naming `SkypeSpaces`, `dom`,
+      `Authenticate::calling` (no `X-Ms-Test-User`), `teams_proto::CallingRegistration` through `register_calling`
+      (`Transport::send_own`) on every `trouter.connected`; every delivery at the endpoint's root or `callAgent/`
+      decoded (gzip in base64, as the call controller sends it) and read by `Fence::observe_delivery` under the
+      connection's key; an invitation it doesn't offer `PushEvent::Ignored`, the rest `PushEvent::Call` with their
+      `CallResponder`, answered only by `FrameSink::respond` on that connection. The personal shape is tested with a
+      personal-shaped transport over a lab fence (the personal fence opens no calling socket until Task 22). Tests:
+      `crates/teams-trouter/tests/calling.rs`, `calls.rs`' decoding units, `teams-proto`'s frame and registration tests
+- [x] tests first on the mock: a token renewal or a dropped socket reconnects the calling socket; the re-registration
       and the call's links as Task 6's capture shows them
-- [ ] tests first (`teams`' lib on the mock): the personal build opens no calling socket and sends no calling
+      → done: both reconnect to the same endpoint with the cached parameters and register again; a response to the
+      dropped connection's delivery fails `Gone`, the call's acceptance at the link handed out before the drop is
+      acknowledged on the new connection, nothing else is sent to the call
+- [x] tests first (`teams`' lib on the mock): the personal build opens no calling socket and sends no calling
       registration until Task 22 turns calling on
-- [ ] the gate passes
+      → done (`crates/teams/tests/fence.rs`): `for_calls` refuses the personal fence (`BuildError::PersonalCalls`),
+      and the engine with its push channel over the personal fence opens only the messaging socket and logs only the
+      messaging registration
+- [x] the gate passes
 
 ### Task 13: `teams-call` on the mock
 **Files:**

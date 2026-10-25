@@ -51,7 +51,7 @@
 mod offer;
 
 pub use offer::INVITATION_EVENTS;
-pub(crate) use offer::{Invitation, read_invitation};
+pub(crate) use offer::{Invitation, may_be_invitation, read_invitation};
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
@@ -161,7 +161,7 @@ pub enum Observed {
     /// go.
     Offered,
     /// An incoming call's invitation the fence doesn't offer (not addressed to the account, a caller outside the lab, a
-    /// ring that ended): nothing may be sent for it.
+    /// ring that ended, or one it can't read): nothing may be sent for it, and it is handed on to nobody.
     Ignored,
     /// The end of an offered invitation's ring (or of its answered call): nothing passes on it any more.
     RingEnded,

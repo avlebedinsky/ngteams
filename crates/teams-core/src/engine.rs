@@ -1541,8 +1541,9 @@ where
                 }
             }
             PushEvent::Delivery(delivery) => self.on_delivery(delivery).await,
-            // an incoming call, or another endpoint's push: never acted on, never answered
-            PushEvent::Ignored(_) => {}
+            // an incoming call, or another endpoint's push: never acted on, never answered; a call delivery comes only on
+            // the calling stack's socket, which the engine doesn't open yet
+            PushEvent::Ignored(_) | PushEvent::Call(_) => {}
             PushEvent::Disconnected { down, heard } => {
                 self.up = false;
                 self.gaps.disconnected();
