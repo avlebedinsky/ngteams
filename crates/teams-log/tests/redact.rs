@@ -456,6 +456,49 @@ fn the_last_pass_catches_tokens_anywhere_in_a_line() {
     assert!(shown.contains("Bearer [redacted]"), "{shown}");
 }
 
+/// An SDP offer as a call request's `mediaContent.blob` carries it: its ICE credentials (`a=ice-ufrag:`,
+/// `a=ice-pwd:`, made up here, shorter than [`redact::OPAQUE_RUN`] and named by no credential's name) beside lines
+/// the log keeps.
+fn sdp(ufrag: &str, pwd: &str) -> String {
+    format!(
+        "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=ice-ufrag:{ufrag}\r\n\
+         a=ice-pwd:{pwd}\r\na=fingerprint:sha-256 AB:CD:EF\r\na=rtpmap:111 opus/48000/2\r\n"
+    )
+}
+
+#[test]
+fn an_sdp_s_ice_credentials_are_redacted_in_a_line_and_a_call_body() {
+    let (ufrag, pwd) = ("Uf9+rAg/", "IcePwd+7rT/9qWx3ZpLmN0bV");
+    let blob = sdp(ufrag, pwd);
+    let body =
+        serde_json::json!({"payload": {"mediaContent": {"blob": blob, "contentType": "application/sdp-ngc-1.0"}}})
+            .to_string();
+    let shown = [
+        // the raw text (a panic message, an error's text), JSON-escaped (a request's body as the log writes it), and
+        // a body through its own pass first
+        redact::line(&blob),
+        redact::line(&body),
+        redact::line(&redact::body(Some("application/json"), body.as_bytes())),
+        redact::line(&format!("{blob:?}")),
+    ];
+    for shown in shown {
+        assert!(!shown.contains(pwd) && !shown.contains(ufrag), "{shown}");
+        assert!(shown.contains(&format!("a=ice-pwd:{REDACTED}")), "{shown}");
+        assert!(shown.contains(&format!("a=ice-ufrag:{REDACTED}")), "{shown}");
+        for kept in [
+            "a=fingerprint:sha-256 AB:CD:EF",
+            "a=rtpmap:111 opus/48000/2",
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+        ] {
+            assert!(shown.contains(kept), "{kept} stays: {shown}");
+        }
+    }
+    // in any case, and not a name that only ends like one
+    let shown = redact::line(&format!("A=ICE-PWD:{pwd} x-ice-pwd-hint:kept noice-pwd:kept2"));
+    assert!(!shown.contains(pwd), "{shown}");
+    assert!(shown.contains("noice-pwd:kept2"), "{shown}");
+}
+
 /// How long the passes over one crafted 200 KB text may take. Linear, they take about 0.15 s unoptimized on an idle
 /// machine (over 30 times less); the quadratic scan this guards against hadn't finished the first text in 20 s.
 const CRAFTED_LIMIT: Duration = Duration::from_secs(5);
@@ -491,6 +534,7 @@ fn a_crafted_text_is_redacted_in_linear_time() {
         ("names chained by =", "a=".repeat(run)),
         ("a long HTML reference", format!("x&#{}", "1".repeat(2 * run))),
         ("a long run of backslashes", format!("x{}u003d1", "\\".repeat(2 * run))),
+        ("ICE attributes chained", "a=ice-pwd:".repeat(run / 5)),
     ];
     for (what, text) in texts {
         let started = std::time::Instant::now();

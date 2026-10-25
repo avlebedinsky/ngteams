@@ -18,7 +18,7 @@ use crate::membership::{ONE_TO_ONE_SUFFIX, is_group_chat_id, is_guid, one_to_one
 use crate::{CallOperation, Mri, Scope, Target, WriteKind};
 
 /// The flight proxy every call request goes through: the call start, and every link the call's services hand out.
-pub(crate) const PROXY_HOST: &str = "api.flightproxy.teams.microsoft.com";
+pub const PROXY_HOST: &str = "api.flightproxy.teams.microsoft.com";
 
 /// The call controller's conversations endpoint, where a call starts (its URL without a query).
 pub const CALL_START_URL: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/epconv";

@@ -39,6 +39,16 @@ pub enum Service {
     /// [`crate::SetEndpointAvailability`]; `v1/me/forceavailability/`, [`crate::ForceAvailability`]), every path sent
     /// with the trailing slash every captured UPS path had.
     Presence,
+    /// The calling service: the flight proxy, `https://api.flightproxy.teams.microsoft.com/api/v2/`, with the account's
+    /// skypetoken (`X-Skypetoken`, not a bearer token). The call writes go here (`crate::StartCall` and the others):
+    /// the call start to `epconv`, every other write to a link the call's services handed out
+    /// (`ep/<service host>/…`, a [`crate::CallLink`]), sent exactly as given and checked against the base. Only
+    /// authorized call writes are sent here: a read or a plain request on it is refused.
+    Calling,
+    /// The TURN relay's credentials, `https://teams.microsoft.com/trap/`, with the account's `ic3` token and
+    /// `x-ms-migration: True` and `api-version: 2`, as the web client's Entra form of the read
+    /// (`docs/protocol/auth.md`): [`crate::RelayTokens`].
+    Relay,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

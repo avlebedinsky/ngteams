@@ -4,23 +4,32 @@
 //! `GET`), a plain [`Request`] (any method, sent only when [`teams_fence::contacting`] says it reaches nobody, logged to
 //! `fence.log` as `allowed` before it goes; one that can't be logged isn't sent; a write or a request the classifier
 //! can't read is refused before anything is sent) and an [`Authorized`] write (its sealed wire form, under the permit
-//! `Fence::check` issued for its target). It has no method that takes a URL or a host of the caller's choosing. Beside
-//! them it keeps the personal build's sealed lists: an [`OwnState`] request ([`HttpTransport::own_state`]) and an
-//! [`AuthorizedPostRead`] ([`HttpTransport::post_read`], read back against its entry's captured shape and the permit's
-//! MRIs, sent once), each also asked of the classifier and logged by its entry's kind before it goes.
+//! `Fence::check` issued for its target). It has no method that takes a URL or a host of the caller's choosing: a call
+//! write's link ([`crate::CallLink`]) is one the call's services handed out, parsed and kept by the sealed write and
+//! checked against the calling base again before it goes. Beside them it keeps the personal build's sealed lists: an
+//! [`OwnState`] request ([`HttpTransport::own_state`]) and an [`AuthorizedPostRead`] ([`HttpTransport::post_read`],
+//! read back against its entry's captured shape and the permit's MRIs, sent once), each also asked of the classifier
+//! and logged by its entry's kind before it goes.
 //!
 //! - **Hosts**: each [`Service`] has one base, and every URL is built from it and checked before anything is sent:
 //!   `https`, the base's host, no user info, port or fragment, the decoded path exactly the base's and the endpoint's
-//!   segments, the query exactly the endpoint's. The chat service at the account's chat base, exactly as
+//!   segments, the query exactly the endpoint's. A call write is the one exception: its URL isn't built from an
+//!   endpoint but is the sealed write's own (the call start's fixed `…/epconv`, or a [`crate::CallLink`] whose routing
+//!   query is kept verbatim), and it is checked before anything is sent instead (`https`, the flight proxy's host, no
+//!   user info, port or fragment, the path `/api/v2/epconv` with no query or `/api/v2/ep/<host>/…` with no segment
+//!   empty, `.` or `..`). The chat service at the account's chat base, exactly as
 //!   [`teams_fence::chat_service_path`] accepts it (the region's `chatServiceAfd`, endpoints under `v1`); the registrar
 //!   on an AFD host (`https://<AFD host>/registrar/…`); Trouter's HTTP side (`https://go.trouter.teams.microsoft.com/`);
 //!   Microsoft Graph (`https://graph.microsoft.com/v1.0/…`); and, once the transport was given them, the middle tier
 //!   ([`HttpTransport::with_middle_tier`], the GTM `middleTier`: `https://<AFD host>/api/mt/part/<partition>`), CSA
 //!   ([`HttpTransport::with_csa`], the GTM `chatSvcAggAfd`: `https://<AFD host>/api/csa/<region>`) and UPS
 //!   ([`HttpTransport::with_presence`], the GTM `presenceUPS`: `https://<AFD host>/ups/<geo>`, every path with the
-//!   trailing slash every captured one had). An endpoint with an empty, `.` or `..` segment is refused. Entra and authz
-//!   aren't a service here (they stay in `teams-auth`'s own clients), and neither is AMS. A new service is a code
-//!   change: a variant, its base and its token's audience.
+//!   trailing slash every captured one had); the calling service ([`Service::Calling`], the flight proxy:
+//!   `https://api.flightproxy.teams.microsoft.com/api/v2/`, authorized call writes only, a read or a plain request on
+//!   it refused); and the TURN relay's credentials ([`Service::Relay`]: `https://teams.microsoft.com/trap`, the
+//!   relay read). An endpoint with an empty, `.` or `..` segment is refused. Entra and authz aren't a service here
+//!   (they stay in `teams-auth`'s own clients), and neither is AMS. A new service is a code change: a variant, its base
+//!   and its token's audience.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
 //!   is an answer, never followed: a region hop is the caller's to report), no retries of its own (reqwest's default
 //!   replays a request after an HTTP/2 GOAWAY or `REFUSED_STREAM`, which would send a write again and a plain request
@@ -38,7 +47,10 @@
 //!   `https://presence.teams.microsoft.com/` token with the values every captured presence read carried
 //!   (`behavioroverride: redirectAs404`, `x-ms-client-type: cdlworker`, `x-ms-client-user-agent: Teams-V2-Web`, an empty
 //!   `x-ms-object-id`) and its body as `application/json` (an own-availability write adds its `x-ms-endpoint-id`, and
-//!   sends `Content-Type` even without a body, as captured).
+//!   sends `Content-Type` even without a body, as captured); the calling service the account's skypetoken in
+//!   `X-Skypetoken` (no bearer token; [`Credentials::skypetoken`], a call write refused without one) and the call's own
+//!   headers as its sealed write carries them; the relay read the `ic3` token with `api-version: 2` and
+//!   `x-ms-migration: True`.
 //! - **Retries** (the transport's part of the retry table), for reads, plain requests and own-state requests: a 401
 //!   makes the session refresh the refused token, a 429 or 503 waits its `Retry-After` (capped at the transport's
 //!   maximum, [`MAX_RETRY_WAIT`] by default; [`DEFAULT_RETRY_WAIT`] without one), and either is sent once more; that is
@@ -54,9 +66,10 @@
 //!
 //! **The log** (`teams-log`): every request at `info` by its method, host and path (never its query), with its status
 //! and latency, or how it failed, and the retry decision; at `debug` the request and its answer in full, as
-//! `teams_log::wire` records whose formatting redacts the credentials (the `Authorization` header among them):
-//! redaction is the logger's, never this module's. Otherwise nothing here shows a token: the `Authorization` header is
-//! marked sensitive, errors carry no token or body, and [`Response`]'s `Debug` shows the body's length only.
+//! `teams_log::wire` records whose formatting redacts the credentials (the `Authorization` and `X-Skypetoken` headers
+//! among them, and a call's SDP ICE credentials): redaction is the logger's, never this module's. Otherwise nothing
+//! here shows a token: the `Authorization` and `X-Skypetoken` headers are marked sensitive, errors carry no token or
+//! body, and [`Response`]'s `Debug` shows the body's length only.
 
 use std::fmt;
 use std::future::Future;
@@ -72,7 +85,8 @@ use teams_auth::session::Session;
 use teams_auth::token::{SPACES_RESOURCE, TokenError, retry_after};
 use teams_fence::{
     AFD_HOSTS, AllowedRecord, Channel, ChatCredential, ChatPeople, Contact, CredentialFuture, CredentialSource, Fence,
-    Mri, Policy, Request as FenceRequest, RequestOutcome, RequestRecord, chat_service_path, contacting,
+    Mri, PendingAnswer, PendingStart, Policy, Request as FenceRequest, RequestOutcome, RequestRecord, WritePermit,
+    chat_service_path, contacting,
 };
 use url::Url;
 
@@ -82,7 +96,7 @@ use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead};
 use crate::read::Read;
 use crate::request::Request;
-use crate::write::{Authorized, Mutating};
+use crate::write::{Authorized, CallWire, Mutating, Registry, on_calling_base};
 
 /// The Entra audience of the token the chat service and the registrar take.
 pub const IC3_AUDIENCE: &str = "https://ic3.teams.office.com";
@@ -134,6 +148,22 @@ pub trait Credentials: Send + Sync {
         audience: &str,
         rejected: &Secret,
     ) -> impl Future<Output = Result<Secret, TokenError>> + Send;
+
+    /// The account's skypetoken, which the calling service takes (`X-Skypetoken`). `Ok(None)` (the default) for a
+    /// source that has none: the transport then refuses a call write ([`Refusal::NoSkypetoken`]) and sends nothing.
+    fn skypetoken(&self) -> impl Future<Output = Result<Option<Secret>, TokenError>> + Send {
+        async { Ok(None) }
+    }
+
+    /// A new skypetoken after the calling service refused `rejected` (a 401), for a later request; `Ok(None)` (the
+    /// default) for a source that has none.
+    fn skypetoken_rejected(
+        &self,
+        rejected: &Secret,
+    ) -> impl Future<Output = Result<Option<Secret>, TokenError>> + Send {
+        let _ = rejected;
+        async { Ok(None) }
+    }
 }
 
 impl<S: SecretStore> Credentials for Session<S> {
@@ -143,6 +173,14 @@ impl<S: SecretStore> Credentials for Session<S> {
 
     async fn bearer_rejected(&self, audience: &str, rejected: &Secret) -> Result<Secret, TokenError> {
         Ok(self.refresh_rejected(audience, rejected).await?.token)
+    }
+
+    async fn skypetoken(&self) -> Result<Option<Secret>, TokenError> {
+        Ok(Some(Session::skypetoken(self).await?.token))
+    }
+
+    async fn skypetoken_rejected(&self, rejected: &Secret) -> Result<Option<Secret>, TokenError> {
+        Ok(Some(Session::skypetoken_rejected(self, rejected).await?.token))
     }
 }
 
@@ -218,6 +256,16 @@ pub enum Refusal {
     /// A read by `POST` the fence denied: it names someone the fence doesn't let it name.
     #[error("the fence denied the read by POST")]
     PostReadDenied,
+    /// A read or a plain request to the calling service: only authorized call writes go there.
+    #[error("only authorized call writes go to the calling service")]
+    Calling,
+    /// A call write while the credentials give no skypetoken.
+    #[error("no skypetoken for the calling service")]
+    NoSkypetoken,
+    /// A call start, a join with media, an `attach` or an `accept` the fence's call registry wouldn't take (its permit
+    /// taken already, or another fence's): sent, it couldn't register its call or bind its answer's links.
+    #[error("the fence's call registry wouldn't take the call write's permit")]
+    NotPended,
 }
 
 /// How a request failed on the way.
@@ -536,6 +584,8 @@ impl<C: Credentials> HttpTransport<C> {
             Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier)),
             Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa)),
             Service::Presence => self.presence.clone().ok_or(refused(Refusal::NoPresence)),
+            Service::Calling => Err(refused(Refusal::Calling)),
+            Service::Relay => fixed(format!("https://{RELAY_HOST}/{RELAY_PATH}")),
         }
     }
 
@@ -670,18 +720,24 @@ impl<C: Credentials> HttpTransport<C> {
         logged.map_err(HttpError::LogUnavailable)?;
         let headers = plain_headers(outgoing.service, outgoing.body.is_some());
         let body = outgoing.body.map(<[u8]>::to_vec);
-        self.send_as(outgoing.method.clone(), outgoing.url, &headers, token, body)
-            .await
+        self.send_as(
+            outgoing.method.clone(),
+            outgoing.url,
+            &headers,
+            Auth::bearer(token),
+            body,
+        )
+        .await
     }
 
-    /// One request with exactly `headers` (lower-cased names, none of them a credential) and the bearer `token`, and
-    /// its answer read.
+    /// One request with exactly `headers` (lower-cased names, none of them a credential) and the credential `auth`
+    /// (none, a bearer token, or the skypetoken), and its answer read.
     async fn send_as(
         &self,
         method: reqwest::Method,
         url: &Url,
         headers: &[(String, String)],
-        token: Option<&Secret>,
+        auth: Auth<'_>,
         body: Option<Vec<u8>>,
     ) -> Result<Response, HttpError> {
         let mut map = HeaderMap::new();
@@ -690,11 +746,15 @@ impl<C: Credentials> HttpTransport<C> {
             let value = HeaderValue::from_str(value).map_err(|_| HttpError::Unknown)?;
             map.append(name, value);
         }
-        if let Some(token) = token {
-            let mut value = HeaderValue::from_str(&format!("Bearer {}", token.expose()))
-                .map_err(|_| HttpError::Refused(Refusal::Token))?;
+        let credential = match auth {
+            Auth::None => None,
+            Auth::Bearer(token) => Some((AUTHORIZATION, format!("Bearer {}", token.expose()))),
+            Auth::Skypetoken(token) => Some((HeaderName::from_static(SKYPETOKEN_HEADER), token.expose().to_owned())),
+        };
+        if let Some((name, value)) = credential {
+            let mut value = HeaderValue::from_str(&value).map_err(|_| HttpError::Refused(Refusal::Token))?;
             value.set_sensitive(true);
-            map.insert(AUTHORIZATION, value);
+            map.insert(name, value);
         }
         let full = log::log_enabled!(log::Level::Debug);
         if full {
@@ -771,7 +831,13 @@ impl<C: Credentials> HttpTransport<C> {
             .record_request(&record)
             .map_err(HttpError::LogUnavailable)?;
         let answer = self
-            .send_as(reqwest::Method::POST, &url, &headers, token.as_ref(), Some(body))
+            .send_as(
+                reqwest::Method::POST,
+                &url,
+                &headers,
+                Auth::bearer(token.as_ref()),
+                Some(body),
+            )
             .await?;
         if let (401, Some(audience), Some(refused)) = (answer.status(), audience(service), &token) {
             // the session refreshes the refused token for a later request, under a new permit; this one isn't resent
@@ -783,6 +849,91 @@ impl<C: Credentials> HttpTransport<C> {
             Err(HttpError::Status(Box::new(answer)))
         }
     }
+}
+
+/// The calling service's writes (see [`Self::deliver_call`]).
+impl<C: Credentials> HttpTransport<C> {
+    /// Sends an authorized call write (`crate::StartCall` and the others) to [`Service::Calling`], once: its exact URL,
+    /// checked against the calling base before anything else ([`Refusal::NotAllowed`]), with the account's skypetoken
+    /// ([`Refusal::NoSkypetoken`] without one), the call's headers and its body as the fence classified them. A call
+    /// start or a join with media is pended in the fence's call registry first ([`Fence::pend_start`], with exactly the
+    /// body sent) and registered from a successful answer ([`Fence::register_start`]); an `attach` or an `accept` pends
+    /// its answer ([`Fence::pend_answer`]) and binds the links a successful answer hands out ([`Fence::bind_answer`]).
+    /// A permit the registry won't take is [`Refusal::NotPended`], nothing sent. The answer comes back whatever its
+    /// status, as any write's; after a 401 the session renews the skypetoken for a later request. A registration that
+    /// fails is logged (the call's follow-ups then stay denied), never retried.
+    async fn deliver_call(&self, permit: &WritePermit, call: &CallWire) -> Result<Response, HttpError> {
+        let url = call.url();
+        if !on_calling_base(url) {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
+        }
+        let token = self
+            .credentials
+            .skypetoken()
+            .await
+            .map_err(HttpError::Credentials)?
+            .ok_or(HttpError::Refused(Refusal::NoSkypetoken))?;
+        let body = call.body_bytes();
+        let pending = match call.registry() {
+            Registry::Nothing => Pending::Nothing,
+            Registry::Start => self
+                .fence
+                .pend_start(permit, body.as_deref().unwrap_or_default())
+                .map(Pending::Start)
+                .ok_or(HttpError::Refused(Refusal::NotPended))?,
+            Registry::Answer => self
+                .fence
+                .pend_answer(permit)
+                .map(Pending::Answer)
+                .ok_or(HttpError::Refused(Refusal::NotPended))?,
+        };
+        let mut headers = plain_headers(Service::Calling, body.is_some());
+        headers.extend(
+            call.headers()
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), value.clone())),
+        );
+        let answer = self
+            .send_as(
+                call.method().to_reqwest(),
+                url,
+                &headers,
+                Auth::Skypetoken(&token),
+                body,
+            )
+            .await?;
+        if answer.status() == 401 {
+            // renewed for a later request; this write isn't resent
+            let _ = self.credentials.skypetoken_rejected(&token).await;
+        }
+        if answer.is_success() {
+            self.register(pending, answer.body(), url);
+        }
+        Ok(answer)
+    }
+
+    /// Registers a pended call write's answer in the fence's call registry (see [`Self::deliver_call`]).
+    fn register(&self, pending: Pending, answer: &[u8], url: &Url) {
+        let registered = match pending {
+            Pending::Nothing => return,
+            Pending::Start(pending) => self.fence.register_start(pending, answer),
+            Pending::Answer(pending) => self.fence.bind_answer(pending, answer),
+        };
+        if let Err(error) = registered {
+            log::info!(
+                "{}{}: the answer registered nothing in the call registry: {error}",
+                url.host_str().unwrap_or_default(),
+                url.path()
+            );
+        }
+    }
+}
+
+/// A call write's registry step, waiting for its answer.
+enum Pending {
+    Nothing,
+    Start(PendingStart),
+    Answer(PendingAnswer),
 }
 
 /// The personal build's sealed lists (see the module docs): a lab binary's requests of their entries go through
@@ -865,6 +1016,9 @@ impl<C: Credentials> Transport for HttpTransport<C> {
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
+        if let Some(call) = write.call() {
+            return self.deliver_call(write.permit(), call).await;
+        }
         let wire = write.wire().ok_or(HttpError::NoRoute)?;
         let service = wire.service();
         match service {
@@ -888,7 +1042,7 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         );
         let body = wire.body().map(|body| body.to_string().into_bytes());
         let answer = self
-            .send_as(wire.method().to_reqwest(), &url, &headers, Some(&token), body)
+            .send_as(wire.method().to_reqwest(), &url, &headers, Auth::Bearer(&token), body)
             .await?;
         if answer.status() == 401 {
             // the session refreshes the refused token for the outbox's next attempt, which also meets any failure of it
@@ -921,15 +1075,37 @@ impl<C: Credentials> CredentialSource for HttpTransport<C> {
     }
 }
 
+/// The credential a request carries: none, a bearer token, or the account's skypetoken (the calling service's).
+#[derive(Clone, Copy)]
+enum Auth<'a> {
+    None,
+    Bearer(&'a Secret),
+    Skypetoken(&'a Secret),
+}
+
+impl<'a> Auth<'a> {
+    /// A bearer token when there is one.
+    fn bearer(token: Option<&'a Secret>) -> Self {
+        token.map_or(Self::None, Self::Bearer)
+    }
+}
+
+/// The header the calling service takes the skypetoken in.
+const SKYPETOKEN_HEADER: &str = "x-skypetoken";
+
+/// The TURN credentials' host and path ([`Service::Relay`]).
+pub const RELAY_HOST: &str = "teams.microsoft.com";
+const RELAY_PATH: &str = "trap";
+
 /// The Entra audience of the bearer token `service` takes, if it takes one.
 fn audience(service: Service) -> Option<&'static str> {
     match service {
-        Service::ChatService | Service::Registrar => Some(IC3_AUDIENCE),
+        Service::ChatService | Service::Registrar | Service::Relay => Some(IC3_AUDIENCE),
         Service::MiddleTier => Some(MIDDLE_TIER_AUDIENCE),
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
-        Service::Trouter => None,
+        Service::Trouter | Service::Calling => None,
     }
 }
 
@@ -943,7 +1119,9 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Trouter
         | Service::Graph
         | Service::Csa
-        | Service::Presence => "application/json",
+        | Service::Presence
+        | Service::Calling
+        | Service::Relay => "application/json",
     };
     let mut headers = vec![(ACCEPT.as_str().to_owned(), "application/json".to_owned())];
     if body {
@@ -976,7 +1154,9 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
             ("x-ms-client-user-agent", "Teams-V2-Web"),
             ("x-ms-object-id", ""),
         ],
-        Service::Trouter | Service::Graph | Service::Csa => &[],
+        // the Entra form of the web client's read (`docs/protocol/auth.md`)
+        Service::Relay => &[("api-version", "2"), ("x-ms-migration", "True")],
+        Service::Trouter | Service::Graph | Service::Csa | Service::Calling => &[],
     }
 }
 
@@ -999,7 +1179,13 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
     let service_rule = match service {
         Service::ChatService => chat_service_path(url).is_some_and(|rest| segments.get(1..) == Some(&rest[..])),
         Service::Registrar => url.host_str().is_some_and(|host| AFD_HOSTS.contains(&host)),
-        Service::Trouter | Service::Graph | Service::MiddleTier | Service::Csa | Service::Presence => true,
+        Service::Trouter
+        | Service::Graph
+        | Service::MiddleTier
+        | Service::Csa
+        | Service::Presence
+        | Service::Relay
+        | Service::Calling => true,
     };
     plain
         && url.host_str() == base.host_str()

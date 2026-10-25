@@ -20,7 +20,11 @@
 //!   availability (UPS's presence endpoint `PUT`, [`SetEndpointAvailability`], and the manual status,
 //!   [`ForceAvailability`]), on the account itself, naming only the endpoint a registration of this run registered for
 //!   that account ([`RegisteredEndpoint`], which only [`register`] gives, over the native transport:
-//!   [`EndpointRegistrar`], recorded for its fence's own account).
+//!   [`EndpointRegistrar`], recorded for its fence's own account). And so are a call's requests (M3): the call start
+//!   ([`StartCall`]), the join, the callee's ring-time sends, answer and decline, and every captured operation on a
+//!   call, each built whole when it is made and classified by [`teams_fence::contacting`], its target the one the
+//!   classifier gives, sent to [`Service::Calling`] with the account's skypetoken, the link exactly as the call's
+//!   services handed it out ([`CallLink`]), the fence's call registry fed around the send.
 //!
 //! The personal build's sealed lists stay beside them: [`OwnState`] and [`PostRead`] (each entry also a plain request),
 //! sent by [`HttpTransport::own_state`] and [`HttpTransport::post_read`] (the latter only inside an
@@ -29,8 +33,9 @@
 //!
 //! On the push channel's socket a [`FrameSink`] sends only an [`OwnFrame`], a typed frame this crate builds (today the
 //! Trouter session's own: authentication, keep-alive, the message-loss acknowledgement, the disconnect), never raw
-//! text, and none of them is written to `fence.log` (a frame isn't a contacting write). There is no answer to a
-//! delivery.
+//! text, and none of them is written to `fence.log` (a frame isn't a contacting write). The only answer to a delivery
+//! is a typed call delivery response ([`AcceptanceAcknowledgement`], [`InvitationReceipt`]), which only
+//! [`FrameSink::respond`] sends, once the fence permitted exactly its JSON for the sink's connection.
 //!
 //! [`HttpTransport`] is the live transport: one base per service, `https` only, no proxy, no redirects, each of the
 //! account's tokens (from its `teams-auth` session) only to its own service's host. Only the `test-support` feature
@@ -46,19 +51,20 @@ mod http;
 mod own;
 mod post_read;
 mod read;
+mod relay;
 mod request;
 mod write;
 
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use endpoint::{Endpoint, Method, Service};
 pub use frame::{
-    Authenticate, ConnectParams, Disconnect, DroppedIndicator, FrameError, FrameSink, FrameText, FrameWriter,
-    MessageLossAck, OwnFrame, Ping, Sent,
+    AcceptanceAcknowledgement, Authenticate, ConnectParams, DeliveryResponse, Disconnect, DroppedIndicator, FrameError,
+    FrameSink, FrameText, FrameWriter, InvitationReceipt, MessageLossAck, OwnFrame, Ping, RespondError, Sent,
 };
 pub use http::{
     BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, Failure, GRAPH_AUDIENCE, GRAPH_HOST,
     HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE,
-    REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
+    RELAY_HOST, REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
 };
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
@@ -76,9 +82,16 @@ pub use read::{
     CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT,
     GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team, TeamsAnswer, object_id,
 };
+pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
 pub use request::Request;
 pub use write::{
-    AddToCall, Author, Authorized, ConversationUrl, CreateChat, DeleteMessage, EditMessage, ForceAvailability,
-    ManualAvailability, Mutating, Original, ReadReceipt, RemoveReaction, SendMessage, SetEndpointAvailability,
-    SetReaction, StartCall, TEST_CALL_SCENARIO, TargetMismatch, Typing, Wire,
+    AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
+    AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, Author, Authorized, CALL_START_URL,
+    CALLING_BASE, CALLING_HOST, CallContext, CallLink, CallParticipant, CallWriteError, ChannelParameters, ClientInfo,
+    ConversationUrl, CreateChat, DeclineCall, DeleteMessage, EditMessage, ForceAvailability, Invitee, JoinCall,
+    JoinMedia, JoinParts, LeaveCall, LeaveReason, Links, ManualAvailability, MediaContent, MediaDescription,
+    MediaDescriptions, MeetingInfo, Mutating, Original, ReadReceipt, RemoveReaction, RenegotiateMedia, ReportRinging,
+    SendMessage, SetEndpointAvailability, SetReaction, StartCall, StartParts, TEST_CALL_SCENARIO, TargetMismatch,
+    Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
+    VoiceConsent, Wire,
 };

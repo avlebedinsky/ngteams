@@ -15,7 +15,8 @@
 //! - **What can't be read is redacted whole**: a body that says it is JSON and isn't, a frame whose data isn't JSON,
 //!   are never written raw ([`UNREADABLE`]). A binary body (a picture) is written as its type and size only.
 //! - **The last pass** ([`line`]): every line, any record's, has its JWT-shaped strings, `skypetoken=…` and
-//!   `Bearer …` values, and long opaque runs (a refresh token, an authorization code) replaced, whatever put them
+//!   `Bearer …` values, an SDP's ICE credentials (`a=ice-pwd:…`, `a=ice-ufrag:…`: [`ice`], a call's offer or answer
+//!   in a request's body), and long opaque runs (a refresh token, an authorization code) replaced, whatever put them
 //!   there (a panic message, an error's text).
 
 use std::borrow::Cow;
@@ -503,12 +504,12 @@ fn jwt_shaped(run: &str) -> bool {
     run.starts_with("eyJ") && run.split('.').filter(|part| !part.is_empty()).count() >= 2 && run.len() >= 20
 }
 
-/// The last pass over a whole line (see the module docs): every credential's `<name>=<value>` ([`params`]), then
-/// JWT-shaped strings, `skypetoken=` and `Bearer ` values, and runs of [`OPAQUE_RUN`] or more token characters become
-/// [`REDACTED`].
+/// The last pass over a whole line (see the module docs): every credential's `<name>=<value>` ([`params`]), an SDP's
+/// ICE credentials ([`ice`]), then JWT-shaped strings, `skypetoken=` and `Bearer ` values, and runs of [`OPAQUE_RUN`]
+/// or more token characters become [`REDACTED`].
 #[must_use]
 pub fn line(text: &str) -> String {
-    let text = params(text);
+    let text = ice(&params(text));
     let text = text.as_str();
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -542,6 +543,49 @@ pub fn line(text: &str) -> String {
         out.push(ch);
         at += ch.len_utf8();
     }
+    out
+}
+
+/// SDP attributes that hold a call's ICE credentials: what a STUN check of the call's media is signed with. Short and
+/// named by no credential's name, so neither [`params`] nor the opaque runs catch them.
+const ICE_ATTRIBUTES: [&[u8]; 2] = [b"ice-pwd:", b"ice-ufrag:"];
+
+/// Text with the value of every SDP ICE credential ([`ICE_ATTRIBUTES`]: `a=ice-pwd:<value>`, `a=ice-ufrag:<value>`,
+/// in any case) redacted, wherever it is (an offer's text, the `mediaContent.blob` of a call request's JSON): the
+/// attribute a whole word (after the start or a byte that can't be in a name), its value the run of ICE characters
+/// (letters, digits, `+`, `/`) after it, so it ends at a line break, raw or escaped. One pass, linear in the text.
+#[must_use]
+pub fn ice(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut at = 0;
+    // every attribute and value is ASCII: `at` and `copied` sit on char boundaries whenever they are cut at
+    while at < bytes.len() {
+        let attribute = (at == 0 || !name_byte(bytes[at - 1]))
+            .then(|| {
+                ICE_ATTRIBUTES
+                    .iter()
+                    .find(|attribute| starts_with_ignore_case(&bytes[at..], attribute))
+            })
+            .flatten();
+        let Some(attribute) = attribute else {
+            at += 1;
+            continue;
+        };
+        let start = at + attribute.len();
+        let value = bytes[start..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+            .count();
+        if value > 0 {
+            out.push_str(&text[copied..start]);
+            out.push_str(REDACTED);
+            copied = start + value;
+        }
+        at = start + value;
+    }
+    out.push_str(&text[copied..]);
     out
 }
 

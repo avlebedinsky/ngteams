@@ -34,3 +34,4 @@ note: required by a bound in `OwnFrame`
             teams_proto::Ping
             teams_proto::MessageLossAck
             teams_proto::Disconnect
+            teams_proto::frame::Checked<R>

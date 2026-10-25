@@ -66,7 +66,7 @@ fn the_call_is_from_account_a_to_the_echo_service_of_lab_toml() {
     let lab = lab(Some(ECHO), Some(LAB_A)).unwrap();
     let call = echo_call(&lab.config, Alias::A).unwrap();
     assert_eq!(call.caller(), &Mri::new(LAB_A));
-    assert_eq!(call.echo(), &Mri::new(ECHO));
+    assert_eq!(call.echo(), Some(&Mri::new(ECHO)));
     assert_eq!(call.target().kind(), WriteKind::Call);
 }
 
@@ -144,10 +144,14 @@ async fn adding_the_echo_to_the_started_call_is_denied_with_every_source_a_lab_b
     let call = authorize(&lab.fence, echo_call(&lab.config, Alias::A).unwrap())
         .await
         .unwrap();
-    let invite = echo_invite(&call, ConversationUrl::parse(CALL).unwrap());
+    let invite = echo_invite(&call, ConversationUrl::parse(CALL).unwrap()).unwrap();
     assert_eq!(invite.target().scope(), &Scope::Call { id: CALL.into() });
     assert_eq!(invite.target().kind(), WriteKind::Invite);
-    assert_eq!(invite.invitee(), call.request().echo(), "the permitted call's echo");
+    assert_eq!(
+        Some(invite.invitee()),
+        call.request().echo(),
+        "the permitted call's echo"
+    );
 
     let error = authorize_invite(&lab.fence, invite.clone(), &FailClosed)
         .await

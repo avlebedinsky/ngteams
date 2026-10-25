@@ -256,7 +256,7 @@ fn the_test_call_targets_a_new_call_of_the_caller_and_the_echo_it_adds() {
     let request = StartCall::test_call(Mri::new(LAB_A), Mri::new(ECHO));
     assert_eq!(request.target(), call_target(LAB_A, ECHO));
     assert_eq!(request.caller(), &Mri::new(LAB_A));
-    assert_eq!(request.echo(), &Mri::new(ECHO));
+    assert_eq!(request.echo(), Some(&Mri::new(ECHO)));
 }
 
 #[tokio::test]
@@ -268,7 +268,7 @@ async fn a_test_call_with_an_approved_echo_gets_a_permit_that_covers_it() {
         .expect("lab account + approved service");
 
     let authorized = Authorized::new(request, permit).expect("the permit covers the call");
-    assert_eq!(authorized.request().echo(), &Mri::new(ECHO));
+    assert_eq!(authorized.request().echo(), Some(&Mri::new(ECHO)));
 }
 
 #[tokio::test]
@@ -322,7 +322,7 @@ fn adding_to_a_call_is_an_invite_on_that_calls_conversation_url() {
         ADD_X,
         "posted to the URL the target names, plus /add"
     );
-    assert_eq!(request.conversation().id(), "CallX");
+    assert_eq!(request.conversation().map(ConversationUrl::id), Some("CallX"));
 }
 
 #[test]

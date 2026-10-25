@@ -9,7 +9,9 @@ below are placeholders. The echo test call is in [calling-echo.md](calling-echo.
 
 The code: the scenarios are `crates/proto-lab/src/scenario/ab_call.rs` and `abc_call.rs`; the start's row is
 `chat_call_start`, the callee's and the call's operations `follow_up`, in `crates/teams-fence/src/contacting/call.rs`;
-offered invitations are `crates/teams-fence/src/calls/offer.rs`.
+offered invitations are `crates/teams-fence/src/calls/offer.rs`. The native client's call requests are
+`crates/teams-proto/src/write/call.rs` (each built in the shape below and classified by the same rows), its typed
+delivery responses `crates/teams-proto/src/frame.rs`.
 
 ## The runs
 

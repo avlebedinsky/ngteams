@@ -16,6 +16,8 @@ test-support = ["teams-fence/test-support"]
 [dependencies]
 # the parsed message HTML's tree, walked iteratively (the version scraper takes)
 ego-tree.workspace = true
+# a call request's message id and a call's chain id (fresh GUIDs)
+getrandom.workspace = true
 # the session's tokens (`Credentials`), `TokenError`, and `Retry-After` read as Entra's and authz's answers are
 teams-auth.workspace = true
 teams-fence.workspace = true

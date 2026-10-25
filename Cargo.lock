@@ -8361,6 +8361,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "ego-tree",
+ "getrandom 0.4.3",
  "log",
  "percent-encoding",
  "reqwest",

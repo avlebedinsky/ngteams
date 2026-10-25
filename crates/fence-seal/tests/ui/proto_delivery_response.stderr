@@ -1,0 +1,28 @@
+error[E0277]: the trait bound `Forged: teams_proto::frame::sealed::Response` is not satisfied
+ --> tests/ui/proto_delivery_response.rs:8:27
+  |
+8 | impl DeliveryResponse for Forged {
+  |                           ^^^^^^ unsatisfied trait bound
+  |
+help: the trait `teams_proto::frame::sealed::Response` is not implemented for `Forged`
+ --> tests/ui/proto_delivery_response.rs:6:1
+  |
+6 | struct Forged;
+  | ^^^^^^^^^^^^^
+help: the following other types implement trait `teams_proto::frame::sealed::Response`
+ --> $WORKSPACE/crates/teams-proto/src/frame.rs
+  |
+  | impl sealed::Response for AcceptanceAcknowledgement {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `AcceptanceAcknowledgement`
+...
+  | impl sealed::Response for InvitationReceipt {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `InvitationReceipt`
+note: required by a bound in `DeliveryResponse`
+ --> $WORKSPACE/crates/teams-proto/src/frame.rs
+  |
+  | pub trait DeliveryResponse: sealed::Response {
+  |                             ^^^^^^^^^^^^^^^^ required by this bound in `DeliveryResponse`
+  = note: `DeliveryResponse` is a "sealed trait", because to implement it you also need to implement `teams_proto::frame::sealed::Response`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            teams_proto::AcceptanceAcknowledgement
+            teams_proto::InvitationReceipt

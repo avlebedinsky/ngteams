@@ -767,12 +767,35 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-proto/src/*`, `crates/teams-proto/tests/*`, `crates/fence-seal/tests/ui/*`
 
-- [ ] tests first: the sealed writes from the captures (`StartCall`, `JoinCall`, `AcceptCall`, `DeclineCall`,
+- [x] tests first: the sealed writes from the captures (`StartCall`, `JoinCall`, `AcceptCall`, `DeclineCall`,
       `AcknowledgeAcceptance`, `ApplyChannelParameters`, `UpdateEndpointMetadata`, `AddToCall`, `LeaveCall`, the video
       follow-ups), each only as `Authorized<_>`; `Service::Calling` and every `ep/<host>` URL checked against its base;
       the trap tokens read; the typed delivery responses (`OwnFrame`) the captures show
-- [ ] `fence-seal` cases for each new type
-- [ ] the gate passes
+      → done (decided with Codex, transcript
+      `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-11-sealed-call-writes/`):
+      `crates/teams-proto/src/write/call.rs`, one sealed type per captured operation (also `AttachCall`,
+      `ReportRinging`, `UpdateEndpointState`, `UpdateParticipantProperties`, `RenegotiateMedia`, `AnswerMedia`,
+      `AcknowledgeMediaAnswer`, `UpdateMediaDescriptions`; `JoinCall::subscribe` and `JoinCall::enter`), each built
+      whole when made (method, exact URL: `epconv` or a `CallLink` kept byte for byte, `CallContext` headers: chain id,
+      a fresh message id, region and partition; body) and classified by `teams_fence::contacting`, its target the one
+      the classifier gives (a request it doesn't map isn't made), so `AddToCall` (`AddToCall::invite`) is now on
+      `Scope::CallOperation`. `Service::Calling` (only call writes, `X-Skypetoken` from `Credentials::skypetoken`, a
+      default `Ok(None)` refused as `Refusal::NoSkypetoken`) and `Service::Relay` (`RelayTokens`, the `ic3` token,
+      `x-ms-migration`, `api-version: 2`). The transport feeds the call registry around the send: a start or a join
+      with media pended before it goes and registered from its answer, an `attach`/`accept` binding its answer's links
+      (`Refusal::NotPended` when the registry won't take the permit). Delivery responses: `AcceptanceAcknowledgement`,
+      `InvitationReceipt` (`DeliveryResponse`, sealed, no frame by themselves), sent only by `FrameSink::respond` on a
+      sink given its connection (`with_call_responses`): its JSON made once, decided by `check_delivery_response`,
+      sent once as a private typed frame. Tests: `crates/teams-proto/tests/call_write.rs` (caller and callee flows on
+      wiremock through the registry, refusals, links, responses, the relay read). ⚠️ Deviations: the echo spike's
+      `StartCall::test_call` and `AddToCall::new` stay as routeless legacy constructors until Task 14 reduces the spike
+      (`StartCall::echo` is now an `Option`); which capability numbers and headers the flight proxy needs is left to
+      Task 15's live run (`ClientInfo` sends only what it is given)
+- [x] `fence-seal` cases for each new type
+      → done: `proto_call_write_literal` (no call write, `CallLink` or wire form outside `teams-proto`),
+      `proto_delivery_response` (no response declared or built outside it), `proto_raw_frame` (a typed response is no
+      frame); the implementor lists in the other snapshots regenerated
+- [x] the gate passes
 
 ### Task 12: The calling stack's Trouter socket
 **Files:**

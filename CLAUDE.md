@@ -240,8 +240,8 @@ What the code does and why. A change that undoes one of these needs a new reason
   call agent; an `add` maps only when its `groupChat` is the 1:1 chat of the sender and its one invitee and its
   `meetingInfo` names the sender as organizer; otherwise `Partial(UnregisteredCall)`, `Partial(CallEnded)` or `CallMismatch`. A permitted `leave` leaves
   only that `leave` passing; a delivery at the start's `conversationEnd` or call `end` callback ends the call for good.
-  `fence.log` never holds the sender. The native `AddToCall` is still an `Invite` on `Scope::Call` (the conversation
-  URL), which no source reads: `Partial`. A `conversationUpdate` binds nothing.
+  `fence.log` never holds the sender. The native transport feeds the registry around a call write's send (below,
+  "The call writes"). A `conversationUpdate` binds nothing.
 - **Offered invitations** (`crates/teams-fence/src/calls/offer.rs`): an invitation delivery (Trouter `evt` 107 or
   109, `callNotification`) to the fence's own account (`Fence::open_lab_account`) from a lab caller is offered by
   `observe_delivery`; a group call's invitation names only its caller, callee and group chat, so every decision on it
@@ -293,8 +293,24 @@ What the code does and why. A change that undoes one of these needs a new reason
   under a `Fence::check_post_read_among` permit against the people of the account's chats (`ChatPeople`, which the
   engine refreshes from its store), and its sink logs each frame (`FrameSink::logging`, `teams_fence::FrameRecord`);
   a lab binary sends their entries as plain requests and its sink logs no frame. There is no raw
-  frame, no answer to a delivery (one may come only as a typed response for a call the fence permitted), and no retry
-  the transport didn't decide.
+  frame, no answer to a delivery but a typed call delivery response (`AcceptanceAcknowledgement`,
+  `InvitationReceipt`, `DeliveryResponse`, sealed and no `OwnFrame` itself) sent only by `FrameSink::respond`, which
+  makes its JSON once, has `Fence::check_delivery_response` decide exactly that JSON for the connection the sink was
+  given (`FrameSink::with_call_responses`, the key its deliveries are observed under) and sends it once as a private
+  typed frame, and no retry the transport didn't decide.
+- **The call writes** (`crates/teams-proto/src/write/call.rs`): each call request a sealed `Mutating` type built whole
+  when it is made: its method, its exact URL (`CALL_START_URL`, or a `CallLink`, a link the call's services handed out
+  under `https://api.flightproxy.teams.microsoft.com/api/v2/ep/<host>/…`, kept byte for byte, its routing query never
+  decoded and built again), its headers (`CallContext`: the call's chain id, a fresh message id, the region and
+  partition) and its body. The constructor classifies that request with `teams_fence::contacting` and keeps the
+  target it gives, so the native target is the browser fence's for the same bytes; a request it doesn't map, or maps
+  as another write, isn't made (`CallWriteError`). Only call writes go to `Service::Calling` (a read or a plain
+  request there is refused), with the account's skypetoken (`Credentials::skypetoken`; none is
+  `Refusal::NoSkypetoken`), never resent. The transport pends a start or a join with media in the call registry
+  before it goes (`Fence::pend_start`, exactly the body sent; `Refusal::NotPended` when the registry won't take the
+  permit) and registers the call from a successful answer; an `attach` or an `accept` pends its answer and binds its
+  links. The echo spike's `StartCall::test_call` and `AddToCall::new` have no route. The TURN credentials are a read
+  (`RelayTokens` on `Service::Relay`).
 - **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The
@@ -307,8 +323,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   row); upserts go by version, so an older one never overwrites a newer one; reactions are per user, the latest
   change wins, and a take-back stays as a tombstone. `Control/*` messages (typing) are signals, never stored, and
   never settle a row.
-- **Deliveries are never answered** (on a reconnect the service replays up to ~15 min of unanswered events, which the
-  catch-up and the versioned store absorb). An incoming call is ignored, and the native client sends no
+- **Deliveries are never answered** but a call's, by a typed response through `FrameSink::respond` (above); on a
+  reconnect the service replays up to ~15 min of unanswered events, which the catch-up and the versioned store
+  absorb. An incoming call is ignored, and the native client sends no
   `user.activity`; what makes an account show online is UPS's endpoint `PUT`, not `user.activity`
   (`docs/protocol/trouter.md`, "Own presence"). Its own availability goes out only as the sealed writes
   `SetEndpointAvailability` and `ForceAvailability`, transient writes of the outbox on `Scope::Account`, which the

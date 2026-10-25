@@ -79,10 +79,11 @@ pub async fn authorize(fence: &Fence, call: StartCall) -> Result<Authorized<Star
 }
 
 /// The `add` that brings the echo of the permitted `call` into the conversation the start opened (`conversation`: the
-/// controller URL from the start's answer). The invitee is always the echo the call start was permitted for.
+/// controller URL from the start's answer). The invitee is always the echo the call start was permitted for; `None`
+/// for a start that is no test call (it has no echo).
 #[must_use]
-pub fn echo_invite(call: &Authorized<StartCall>, conversation: ConversationUrl) -> AddToCall {
-    AddToCall::new(conversation, call.request().echo().clone())
+pub fn echo_invite(call: &Authorized<StartCall>, conversation: ConversationUrl) -> Option<AddToCall> {
+    Some(AddToCall::new(conversation, call.request().echo()?.clone()))
 }
 
 /// Asks the fence for the `add`, which judges the call's members as `source` reads them. With the sources a lab binary

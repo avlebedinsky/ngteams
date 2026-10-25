@@ -15,9 +15,11 @@
 //!
 //! [`OwnFrame`] is sealed only to keep frame text out of other crates' hands: no constructor takes frame text, and no
 //! other crate makes a frame. Which frames exist isn't a reviewed list: the session's own frames reach nobody, so adding
-//! one here (`user.activity`, say) is an ordinary change. No answer to a delivery (`3:::`) exists: deliveries stay
-//! unanswered; the one that may be added is a typed response for a call the fence itself permitted (`CLAUDE.md`,
-//! "Calls go only to the lab").
+//! one here (`user.activity`, say) is an ordinary change. The only answer to a delivery (`3:::`) is a typed call
+//! delivery response ([`DeliveryResponse`]: [`AcceptanceAcknowledgement`], [`InvitationReceipt`]), which is no frame by
+//! itself: only [`FrameSink::respond`] sends one, once `Fence::check_delivery_response` permitted exactly its JSON for
+//! the connection the sink was given ([`FrameSink::with_call_responses`]) (`CLAUDE.md`, "Calls go only to the lab").
+//! Every other delivery stays unanswered.
 //!
 //! The sink numbers the events that ask for an acknowledgement itself (`<n>` above, from 1 per socket). A lab sink
 //! writes nothing to `fence.log`: a frame isn't a contacting write. The personal build's sink ([`FrameSink::logging`],
@@ -33,11 +35,14 @@ use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use serde_json::Value;
 use teams_auth::secrets::Secret;
-use teams_fence::{Fence, FrameRecord};
+use teams_fence::{Delivery, DeliveryDecision, DeliveryDenyReason, Fence, FrameRecord, MembershipSource};
+
+use crate::write::Links;
 
 use self::sealed::Event;
 
@@ -56,6 +61,16 @@ mod sealed {
         fn event(&self) -> Event;
     }
 
+    /// The seal on [`DeliveryResponse`](super::DeliveryResponse): the delivery a response answers and its JSON, which
+    /// only this crate makes and reads.
+    pub trait Response {
+        /// The id of the delivery it answers.
+        fn delivery(&self) -> i64;
+
+        /// The socket.io message's JSON (after `3:::`), keys in the captured order.
+        fn envelope(&self) -> String;
+    }
+
     /// A frame's content, as the sink encodes it (socket.io 0.9): an event is its JSON text, keys in the captured
     /// order.
     pub enum Event {
@@ -65,6 +80,8 @@ mod sealed {
         Acknowledged(String),
         /// `0::`.
         Disconnect,
+        /// `3:::<json>`: a response to a delivery, the JSON already checked by the fence.
+        Response(String),
     }
 }
 
@@ -271,6 +288,13 @@ impl Object {
         object
     }
 
+    /// `key` with a number `value`.
+    fn number(self, key: &str, value: i64) -> Self {
+        let mut object = self.key(key);
+        object.0.push_str(&value.to_string());
+        object
+    }
+
     /// `key` with `json`, a value already written.
     fn raw(self, key: &str, json: &str) -> Self {
         let mut object = self.key(key);
@@ -373,6 +397,9 @@ pub struct FrameSink<W> {
     last_ack: u64,
     /// The personal build's: the fence whose log each frame goes to first, and the socket's URL.
     log: Option<(Arc<Fence>, String)>,
+    /// The calling socket's: the fence that decides its delivery responses, and the connection's key, the one its
+    /// deliveries were observed under (`Fence::observe_delivery`).
+    calls: Option<(Arc<Fence>, String)>,
 }
 
 impl<W> fmt::Debug for FrameSink<W> {
@@ -391,7 +418,45 @@ impl<W: FrameWriter> FrameSink<W> {
             writer,
             last_ack: 0,
             log: None,
+            calls: None,
         }
+    }
+
+    /// The same sink answering call deliveries ([`Self::respond`]): each response decided by `fence` for the
+    /// connection `connection`, the key this socket's deliveries are observed under. A sink without it answers none.
+    #[must_use]
+    pub fn with_call_responses(mut self, fence: Arc<Fence>, connection: impl Into<String>) -> Self {
+        self.calls = Some((fence, connection.into()));
+        self
+    }
+
+    /// Answers a call delivery with `response`, once: its JSON made once, decided by the fence for this sink's
+    /// connection (`Fence::check_delivery_response`, `source` reading an offered group call's chat fresh), and only
+    /// when permitted sent as `3:::` and exactly that JSON, as a typed frame (logged by its kind on a logging sink).
+    ///
+    /// # Errors
+    /// [`RespondError::NoCallResponses`] for a sink that answers none; [`RespondError::NotPending`] when no delivery
+    /// of this connection waits for it; [`RespondError::Denied`] when the fence denied it; [`RespondError::Frame`] when
+    /// it couldn't be logged or sent. Nothing is sent but on success.
+    pub async fn respond<R: DeliveryResponse + Send>(
+        &mut self,
+        response: R,
+        source: &dyn MembershipSource,
+    ) -> Result<Sent, RespondError<W::Error>> {
+        let (fence, connection) = self.calls.as_ref().ok_or(RespondError::NoCallResponses)?;
+        let json = response.envelope();
+        let decision = fence.check_delivery_response(connection, json.as_bytes(), source).await;
+        match decision {
+            DeliveryDecision::Permitted(permit) if permit.delivery() == response.delivery() => {}
+            DeliveryDecision::Permitted(_) => return Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated)),
+            DeliveryDecision::NotPending => return Err(RespondError::NotPending),
+            DeliveryDecision::Denied(reason) => return Err(RespondError::Denied(reason)),
+        }
+        let frame = Checked::<R> {
+            json,
+            kind: PhantomData,
+        };
+        self.send(&frame).await.map_err(RespondError::Frame)
     }
 
     /// The personal build's sink for a socket's write half at `url`: each frame logged to `fence`'s log by its kind
@@ -424,8 +489,216 @@ impl<W: FrameWriter> FrameSink<W> {
                 (format!("5:{}+::{event}", self.last_ack), Some(self.last_ack))
             }
             Event::Disconnect => ("0::".to_owned(), None),
+            Event::Response(json) => (format!("3:::{json}"), None),
         };
         self.writer.write(FrameText(text)).await.map_err(FrameError::Write)?;
         Ok(Sent { ack })
     }
+}
+
+/// A typed response to a call delivery: the acceptance's acknowledgement ([`AcceptanceAcknowledgement`]) or an offered
+/// invitation's receipt ([`InvitationReceipt`]), each built from the delivery it answers in the shape the captures show
+/// (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`). Not a frame by itself: only [`FrameSink::respond`]
+/// sends one, after the fence permitted exactly its JSON for the sink's connection. Sealed: no other crate makes
+/// response text.
+pub trait DeliveryResponse: sealed::Response {
+    /// The frame's kind, as a personal sink logs it.
+    const KIND: &'static str;
+}
+
+/// Why [`FrameSink::respond`] sent nothing.
+#[derive(thiserror::Error)]
+pub enum RespondError<E: Error + 'static> {
+    /// The sink answers no call delivery (no [`FrameSink::with_call_responses`]).
+    #[error("this socket answers no call delivery")]
+    NoCallResponses,
+    /// No delivery of this connection waits for the response (another connection's, one answered already, an id no
+    /// delivery had): nothing decided.
+    #[error("no delivery of this connection waits for the response")]
+    NotPending,
+    /// The fence denied it (logged).
+    #[error("the fence denied the delivery response: {0}")]
+    Denied(DeliveryDenyReason),
+    /// It couldn't be logged or sent.
+    #[error(transparent)]
+    Frame(FrameError<E>),
+}
+
+impl<E: Error + 'static> fmt::Debug for RespondError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoCallResponses => f.write_str("NoCallResponses"),
+            Self::NotPending => f.write_str("NotPending"),
+            Self::Denied(reason) => f.debug_tuple("Denied").field(reason).finish(),
+            Self::Frame(error) => f.debug_tuple("Frame").field(error).finish(),
+        }
+    }
+}
+
+/// A delivery response the fence permitted, as the sink sends it: never outside [`FrameSink::respond`].
+struct Checked<R> {
+    json: String,
+    kind: PhantomData<fn() -> R>,
+}
+
+impl<R> sealed::Sealed for Checked<R> {
+    fn event(&self) -> Event {
+        Event::Response(self.json.clone())
+    }
+}
+
+impl<R: DeliveryResponse> OwnFrame for Checked<R> {
+    const KIND: &'static str = R::KIND;
+}
+
+/// What a call delivery response echoes of its delivery: its id and its `trouter-request`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Answered {
+    id: i64,
+    trouter_request: String,
+}
+
+impl Answered {
+    fn of(delivery: &Delivery) -> Option<Self> {
+        Some(Self {
+            id: delivery.id,
+            trouter_request: delivery.trouter_request.clone()?,
+        })
+    }
+}
+
+/// `trouter-client` as the captures send it: `{"cd":<n>}`.
+fn trouter_client(client_delay: u64) -> String {
+    Object::new()
+        .number("cd", i64::try_from(client_delay).unwrap_or(i64::MAX))
+        .finish()
+}
+
+/// The response to the acceptance of a call the account started: `{"id": <the delivery's>, "status": 200, "headers":
+/// {"MS-CV", "trouter-request", "trouter-client", "X-Microsoft-Skype-Chain-ID", "X-Microsoft-Skype-Message-ID"},
+/// "body": "<the acknowledgement>"}`, the request, chain and message ids the delivery's own, the acknowledgement
+/// `{"callAcceptanceAcknowledgement":{"links":{…}}}` handing the call controller the endpoint's callbacks for the call.
+/// `Debug` shows the delivery's id only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AcceptanceAcknowledgement {
+    answered: Answered,
+    chain_id: String,
+    message_id: String,
+    correlation: String,
+    client_delay: u64,
+    links: Links,
+}
+
+impl AcceptanceAcknowledgement {
+    /// The acknowledgement of the acceptance `delivery`, with the correlation vector `correlation` (`MS-CV`), the
+    /// client's delay `client_delay` (`trouter-client`'s `cd`) and the callbacks `links`; `None` when the delivery
+    /// carries no `trouter-request`, chain id or message id (its response can't echo them).
+    #[must_use]
+    pub fn new(delivery: &Delivery, correlation: impl Into<String>, client_delay: u64, links: Links) -> Option<Self> {
+        Some(Self {
+            answered: Answered::of(delivery)?,
+            chain_id: delivery.chain_id.clone()?,
+            message_id: delivery.message_id.clone()?,
+            correlation: correlation.into(),
+            client_delay,
+            links,
+        })
+    }
+}
+
+impl fmt::Debug for AcceptanceAcknowledgement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AcceptanceAcknowledgement")
+            .field("delivery", &self.answered.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl sealed::Response for AcceptanceAcknowledgement {
+    fn delivery(&self) -> i64 {
+        self.answered.id
+    }
+
+    fn envelope(&self) -> String {
+        let headers = Object::new()
+            .string("MS-CV", &self.correlation)
+            .string("trouter-request", &self.answered.trouter_request)
+            .string("trouter-client", &trouter_client(self.client_delay))
+            .string("X-Microsoft-Skype-Chain-ID", &self.chain_id)
+            .string("X-Microsoft-Skype-Message-ID", &self.message_id)
+            .finish();
+        let links = self
+            .links
+            .iter()
+            .fold(Object::new(), |links, (name, url)| links.string(name, url))
+            .finish();
+        let acknowledgement = Object::new()
+            .raw(
+                "callAcceptanceAcknowledgement",
+                &Object::new().raw("links", &links).finish(),
+            )
+            .finish();
+        Object::new()
+            .number("id", self.answered.id)
+            .number("status", 200)
+            .raw("headers", &headers)
+            .string("body", &acknowledgement)
+            .finish()
+    }
+}
+
+impl DeliveryResponse for AcceptanceAcknowledgement {
+    const KIND: &'static str = "call_acceptance_acknowledgement";
+}
+
+/// The response to an offered invitation's delivery, sent at once while it rings: `{"id": <the delivery's>, "status":
+/// 200, "headers": {"trouter-request", "trouter-client"}, "body": ""}`, the request id the delivery's own (the captures
+/// show it with and without `MS-CV`; this sends none). `Debug` shows the delivery's id only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InvitationReceipt {
+    answered: Answered,
+    client_delay: u64,
+}
+
+impl InvitationReceipt {
+    /// The receipt of the invitation `delivery`, with the client's delay `client_delay`; `None` when the delivery
+    /// carries no `trouter-request`.
+    #[must_use]
+    pub fn new(delivery: &Delivery, client_delay: u64) -> Option<Self> {
+        Some(Self {
+            answered: Answered::of(delivery)?,
+            client_delay,
+        })
+    }
+}
+
+impl fmt::Debug for InvitationReceipt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InvitationReceipt")
+            .field("delivery", &self.answered.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl sealed::Response for InvitationReceipt {
+    fn delivery(&self) -> i64 {
+        self.answered.id
+    }
+
+    fn envelope(&self) -> String {
+        let headers = Object::new()
+            .string("trouter-request", &self.answered.trouter_request)
+            .string("trouter-client", &trouter_client(self.client_delay))
+            .finish();
+        Object::new()
+            .number("id", self.answered.id)
+            .number("status", 200)
+            .raw("headers", &headers)
+            .string("body", "")
+            .finish()
+    }
+}
+
+impl DeliveryResponse for InvitationReceipt {
+    const KIND: &'static str = "call_invitation_receipt";
 }
