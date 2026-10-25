@@ -1,6 +1,6 @@
 # Calling: lab-to-lab calls in the web client
 
-Status: 2026-10-24, M3 Tasks 5 and 6. Written from live runs of `proto-lab run ab-call` (a calls b from their 1:1 chat) and
+Status: 2026-10-24, M3 Tasks 5 and 6; [The SDP dialect](#the-sdp-dialect) 2026-10-25, M3 Task 7. Written from live runs of `proto-lab run ab-call` (a calls b from their 1:1 chat) and
 `proto-lab run abc-call` (a calls the lab's a–b–c group chat), each step of `--call` (below), Chrome for Testing 155
 headless, muted, with fake devices, the fence armed with the lab rule. The captures stay outside the repository; the
 fixtures in `tests/fixtures/calling/chat/` are synthetic, shaped like them. Ids, hosts' numbers, tokens and addresses
@@ -242,6 +242,66 @@ afterwards passed on the same links.
   4 s apart. No invitation binds it on a's side; the scenario holds it back by name.
 - **Answered, declined**: [The answer](#the-answer), [The decline](#the-decline). **Answered elsewhere**: not captured
   (the lab runs one endpoint per account); Task 16 captures it.
+
+## The SDP dialect
+
+Every offer and answer in the signaling is a `mediaContent` object: the SDP as `blob` and `contentType`
+`application/sdp-ngc-1.0`, in every start, acceptance, `accept`, `mediaNegotiation` and `mediaAnswer` of the runs,
+whoever wrote it. The one exception is a group call's invitation: the mixer's offer there is
+`application/sdp-ngc-0.5` (below). The web client turns each into standard SDP before its `RTCPeerConnection` takes it,
+and its own standard SDP into the dialect before it sends it; both forms were captured side by side (the WebRTC hooks
+record what the page hands its peer connection). `teams-media`'s `sdp` module does the same conversion for `str0m`
+(fixture `crates/teams-media/tests/fixtures/sdp/captured.json`, synthetic).
+
+**From standard SDP to the dialect** (what the web client sends):
+
+- the session: `o=- <id> <version> IN IP4 127.0.0.1`, `s=-`, `b=CT:4000`, `t=0 0`, `a=extmap-allow-mixed`,
+  `a=msid-semantic: WMS *`, the bundle group with the lines' mids (`0`, `1`, …, the line's place in the offer);
+- each line on `RTP/SAVP` instead of `UDP/TLS/RTP/SAVPF`, its port and `c=` those of the default candidate (in the
+  web client's offer its relayed one) instead of the placeholder `9` and `0.0.0.0`; the gathered candidates inline
+  in the first line only (the bundled lines carry none); an offer adds `a=rtcp:<port>`, an answer doesn't;
+- Teams' own lines: `a=x-signaling-fb:* x-message app recv:dsh` on audio and `… send:src recv:src,vc` on video,
+  `a=x-ssrc-range:<n>-<n>` naming the line's first SSRC, and `a=label` last (`main-audio`, `main-video`,
+  `applicationsharing-video`, `data`);
+- two extension URIs written with backslashes for slashes (`abs-send-time` and the transport-wide congestion
+  control one); the others go as they are;
+- the data channel's `m=application … UDP/DTLS/SCTP webrtc-datachannel` as `m=x-data <port> RTP/SAVP 127 126` with
+  `a=x-data-protocol:sctp`, an `a=x-ssrc-range` of its own, `a=rtpmap:127 x-data/90000`, `a=rtpmap:126 rtx/90000`,
+  `a=fmtp:126 apt=127`, `a=rtcp-mux`, then `a=sctp-port` and `a=max-message-size`;
+- a rejected line as `m=<kind> 0 RTP/SAVP <payload type>` with only its label, left out of the bundle.
+
+**From the dialect to standard SDP** (what the web client applies): the transports back; Teams' own lines, the
+labels, `a=rtcp`, `b=CT` and every line its peer connection has no use for dropped; `a=rtcp-fb:*` written out per
+payload type; the backslashes back to slashes; `a=sctp-port:5000` added to a data line that names none (the media
+controller's); a stream that a line names only by `a=x-ssrc-range` or `a=ssrc-group` (the media controller's and the
+mixer's lines) given its own `a=ssrc` line with a cname; a line with no direction is `sendrecv`; a rejected line
+gets its offer's mid and `a=inactive`. Teams' candidate forms are rewritten (`UDP` in capitals, `tcp-pass` and
+`tcp-act` for the TCP ones, a trailing `MTURNID <n>`).
+
+**Who answers whom, and in which form.** In a 1:1 call both ends are clients: the callee's `accept` answers the
+caller's offer directly (the callee's host candidates, `a=setup:active`). The media controller (the echo test call)
+answers with its relay candidates on port 3478 over UDP and TCP, IPv4 and IPv6, `a=setup:passive`, no `ice-lite`, and
+an answer line for every offered line, the data line included. Every answerer in the runs took the DTLS client's part
+(`active`) except the media controller, which takes the server's.
+
+**The mixer's dialect, `sdp-ngc-0.5`**: `RTP/AVP` lines with SDES keys (`a=crypto`, `a=cryptoscale`) beside a DTLS
+fingerprint, RTCP on a second component (candidates for components 1 and 2, `a=rtcp:<port+1>`), no `a=setup`, ICE
+credentials on every line but candidates only on the first two lines and on the sharing and data lines (each of those
+two on ports of its own), the bundle's mids out of line order, and codecs no browser offers (Teams' own audio and video codecs beside Opus,
+G.722, H.264 and AV1). The web client reads it as DTLS-SRTP: the SDES keys and the second component dropped,
+`a=setup:actpass`, and only the codecs it knows; it answers in `sdp-ngc-1.0`, as it answers the mixer's later renegotiations (which come in `sdp-ngc-1.0`,
+`a=setup:passive`).
+
+**What the native client does differently**: it writes only its relayed candidate, with `raddr 0.0.0.0 rport 0`
+(no local address leaves it) and a numbered foundation, refusing to write an SDP with any other candidate; it reads
+only the UDP candidates of component 1 (its media goes through its UDP relay allocation, which a TCP candidate is out
+of reach of); and it reads an offer's `actpass` (or the mixer's missing setup) as `passive`, so `str0m`, which would
+take the server's part for `actpass`, takes the client's, as the web client does. `str0m` names its lines with mids of
+its own; the conversion keeps both namings for the call's life, so a renegotiation offered by either side names the
+same lines. A line it adds is numbered one past the highest mid of the call (the mixer's numbering starts at `1` and
+runs out of line order, so neither the count of lines nor a line's place is free), and a rejected line that names no
+mid is the call's line at its place. It labels its lines as the web client does: the last video line of an offer with
+more than one, while the call has no sharing line, is `applicationsharing-video`, the others `main-video`.
 
 ## Seen beside the call
 

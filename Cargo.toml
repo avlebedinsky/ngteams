@@ -12,6 +12,7 @@ members = [
     "crates/teams-fence",
     "crates/teams-headless",
     "crates/teams-log",
+    "crates/teams-media",
     "crates/teams-mock",
     "crates/teams-proto",
     "crates/teams-signin",
@@ -36,6 +37,7 @@ default-members = [
     "crates/teams-fence",
     "crates/teams-headless",
     "crates/teams-log",
+    "crates/teams-media",
     "crates/teams-mock",
     "crates/teams-proto",
     "crates/teams-signin",
@@ -66,6 +68,8 @@ teams-core = { path = "crates/teams-core" }
 teams-fence = { path = "crates/teams-fence" }
 # the app's diagnostic log (M2 Task 24a): installed by the app crates only, through its `install`
 teams-log = { path = "crates/teams-log" }
+# a call's media: the TURN client and its relay link, Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's
+teams-media = { path = "crates/teams-media" }
 # tests only: a crate takes it under [dev-dependencies], never [dependencies] (crates/teams-mock/tests/mock.rs checks)
 teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }

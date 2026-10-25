@@ -603,16 +603,39 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Create: `crates/teams-media/{Cargo.toml,src/sdp.rs,…}` (from `spikes/echo-call`, `spikes/media-loop`)
 
-- [ ] tests first, the caller's side: `str0m`'s offer (audio only, one relayed candidate) written as `sdp-ngc-1.0`
+- [x] tests first, the caller's side: `str0m`'s offer (audio only, one relayed candidate) written as `sdp-ngc-1.0`
       matches the captured offer's shape line for line where it matters; the media controller's answer read back as
       standard SDP that `str0m` accepts
-- [ ] tests first, the callee's side, in the shapes Tasks 5–6 captured: the media an invitation or acceptance carries
+      → done: `teams_media::sdp::NgcSession` (`write_offer`, `read_answer`), `crates/teams-media/tests/sdp.rs` on
+      `tests/fixtures/sdp/captured.json` (synthetic, every captured form: the 1:1 start and its answers, the
+      media controller's 13-line answer, the invitations, the renegotiations, the mixer's). The session keeps
+      `str0m`'s mids paired with Teams' numbered ones (and each line's label) for the call's life. Only relayed
+      candidates are written (`raddr 0.0.0.0 rport 0`, a numbered foundation); any other is refused
+      (`SdpError::LocalCandidate`). An answer line we never offered (the controller's `m=x-data` to an audio-only
+      offer) is dropped
+- [x] tests first, the callee's side, in the shapes Tasks 5–6 captured: the media an invitation or acceptance carries
       read into `str0m` (a remote offer), our answer written back as `sdp-ngc-1.0`; a mid-call renegotiation offered
       by us and offered to us
-- [ ] tests first: a browser SDP refused where `sdp-ngc-1.0` is required; the video lines the captures show, and
+      → done: `read_offer`, `write_answer`; the 1:1 invitation's offer and both sides' renegotiations, and the group
+      invitation's mixer offer, which is `sdp-ngc-0.5` (SDES keys beside DTLS, two components, no `a=setup`): read
+      (`Dialect::Mixer`), never written; we answer in `sdp-ngc-1.0` as the web client does. ⚠️ `str0m` takes the
+      DTLS server's part for an offered `actpass`, the web client the client's: an offer's `actpass` (or none) is read
+      as `passive`, so `str0m` answers `active` as the captures show. Only UDP candidates of component 1 are read
+      (the native media goes through its UDP relay allocation)
+- [x] tests first: a browser SDP refused where `sdp-ngc-1.0` is required; the video lines the captures show, and
       `m=x-data` as Task 6 found it
-- [ ] the spikes' TURN client and relay moved into `teams-media` with their tests (coturn's external test kept)
-- [ ] the gate passes
+      → done: `NgcSdp::new(content_type, blob)` refuses a browser's or `str0m`'s SDP, the placeholder port, an unknown
+      content type and the mixer's `RTP/AVP` outside its dialect; video lines (per-type `rtcp-fb` from `*`, SSRCs from
+      `x-ssrc-range`/`ssrc-group`, rejected lines by their place) and `m=x-data` ↔ `m=application` both ways. The
+      conversion is written up in `docs/protocol/calling.md` ("The SDP dialect"); the echo spike's own `NgcSdp` gave
+      way to `teams-media`'s
+- [x] the spikes' TURN client and relay moved into `teams-media` with their tests (coturn's external test kept)
+      → done: `stun`, `turn`, `relay` (the relay link and the UDP-to-TCP fallback) and `tests/turn.rs`,
+      `tests/relay.rs` (an external TURN server through `TEAMS_MEDIA_TURN_*`); the loopback TURN server behind
+      `teams-media`'s `test-support` (`test_turn`). The `str0m` peer behind the relay (`RelayedPeer`) and the echo
+      through it (with coturn's external echo test, `ECHO_CALL_TURN_*`) stay in `spikes/echo-call` on
+      `media-loop`'s peer, which moves with Opus (Task 9)
+- [x] the gate passes
 
 ### Task 8: The device seam and the sandbox's PipeWire
 **Files:**

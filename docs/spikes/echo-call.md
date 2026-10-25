@@ -4,6 +4,11 @@ Date: 2026-10-20. M0 Task 19 (part 2 of spike 3), brought in line with Task 18's
 call ([calling-echo.md](../protocol/calling-echo.md)) the same day. Code: `spikes/echo-call` (library plus the
 `echo-call` binary), on top of `spikes/media-loop` (Task 17) and `crates/teams-auth` (Tasks 13–14).
 
+Since M3 the TURN client, its relay link and their tests live in `crates/teams-media` (`stun`, `turn`, `relay`,
+`tests/turn.rs`, `tests/relay.rs`, the loopback TURN server `test_turn`), and the SDP conversion this write-up calls
+unbuilt is `teams_media::sdp` (`docs/protocol/calling.md`, "The SDP dialect"); the paths below are the spike's as
+it was.
+
 ## Question
 
 Can our own Rust code place the Teams echo ("test call") call from lab account A, carry its audio over `str0m` and

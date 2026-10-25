@@ -1897,17 +1897,14 @@ name = "echo-call"
 version = "0.1.0"
 dependencies = [
  "clap",
- "crc32fast",
  "fixture-guard",
  "getrandom 0.4.3",
- "hmac 0.13.0",
- "md-5 0.11.0",
  "media-loop",
  "serde_json",
- "sha1 0.11.0",
  "str0m",
  "teams-auth",
  "teams-fence",
+ "teams-media",
  "teams-proto",
  "tempfile",
  "thiserror 2.0.21",
@@ -8184,6 +8181,21 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "teams-media"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "getrandom 0.4.3",
+ "hmac 0.13.0",
+ "md-5 0.11.0",
+ "serde_json",
+ "sha1 0.11.0",
+ "str0m",
+ "teams-media",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

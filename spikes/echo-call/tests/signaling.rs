@@ -198,7 +198,11 @@ fn a_callback_link_is_the_push_url_the_agent_a_segment_of_its_own_and_its_name()
 async fn the_call_start_is_the_web_clients_test_call() {
     let call = permitted_test_call().await.unwrap();
     let (url, captured) = test_call_start().unwrap();
-    let offer = NgcSdp::new(captured["callInvitation"]["mediaContent"]["blob"].as_str().unwrap()).unwrap();
+    let offer = NgcSdp::new(
+        SDP_NGC,
+        captured["callInvitation"]["mediaContent"]["blob"].as_str().unwrap(),
+    )
+    .unwrap();
     let body = call_start_body(&call, &me(), &offer, &fixture_links().unwrap());
 
     assert_eq!(CALL_START_URL, url);
@@ -232,7 +236,11 @@ async fn the_call_start_is_the_web_clients_test_call() {
 async fn the_browser_fence_maps_the_native_start_to_the_permitted_target() {
     let call = permitted_test_call().await.unwrap();
     let (_, captured) = test_call_start().unwrap();
-    let offer = NgcSdp::new(captured["callInvitation"]["mediaContent"]["blob"].as_str().unwrap()).unwrap();
+    let offer = NgcSdp::new(
+        SDP_NGC,
+        captured["callInvitation"]["mediaContent"]["blob"].as_str().unwrap(),
+    )
+    .unwrap();
     let body = serde_json::to_vec(&call_start_body(&call, &me(), &offer, &fixture_links().unwrap())).unwrap();
 
     let request = Request::new("POST", CALL_START_URL).with_body(Some(&body));
@@ -242,16 +250,10 @@ async fn the_browser_fence_maps_the_native_start_to_the_permitted_target() {
 }
 
 #[test]
-fn a_browser_sdp_is_not_the_teams_dialect() {
-    let browser = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n";
-    assert!(NgcSdp::new(browser).is_err(), "str0m's or a browser's offer as is");
-    assert!(
-        NgcSdp::new("m=audio 50000 RTP/SAVP 111\r\n").is_err(),
-        "no session part"
-    );
-    assert!(NgcSdp::new("v=0\r\ns=-\r\n").is_err(), "no media line");
-    let answer = answers().unwrap()["acceptance_callback"]["body"]["callAcceptance"]["mediaContent"]["blob"].clone();
-    assert!(NgcSdp::new(answer.as_str().unwrap()).is_ok());
+fn the_captured_answer_is_in_the_teams_dialect() {
+    // the dialect's own checks (a browser's SDP refused) are teams-media's: crates/teams-media/tests/sdp.rs
+    let media = answers().unwrap()["acceptance_callback"]["body"]["callAcceptance"]["mediaContent"].clone();
+    assert!(NgcSdp::new(media["contentType"].as_str().unwrap(), media["blob"].as_str().unwrap()).is_ok());
 }
 
 #[test]

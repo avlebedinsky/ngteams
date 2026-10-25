@@ -1,6 +1,6 @@
 [package]
 name = "echo-call"
-description = "Spike 3b: a native echo call — TURN client (RFC 8656), str0m through the relay, signaling from the Task 18 capture"
+description = "Spike 3b: a native echo call — str0m through teams-media's TURN relay, signaling from the Task 18 capture"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,16 +8,15 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
-crc32fast.workspace = true
+# the callback links' random segment
 getrandom.workspace = true
-hmac.workspace = true
-md-5.workspace = true
 media-loop.workspace = true
 serde_json.workspace = true
-sha1.workspace = true
 str0m.workspace = true
 teams-auth.workspace = true
 teams-fence.workspace = true
+# the TURN client and relay link (moved there from this spike), Teams' SDP dialect
+teams-media.workspace = true
 teams-proto.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
@@ -27,6 +26,8 @@ fixture-guard.workspace = true
 tempfile.workspace = true
 # the call-flow tests build fences over test rosters
 teams-fence = { workspace = true, features = ["test-support"] }
+# the echo through the relay runs against teams-media's loopback TURN server
+teams-media = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]

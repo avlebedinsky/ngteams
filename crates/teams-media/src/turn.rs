@@ -61,7 +61,7 @@ pub enum Transport {
 }
 
 /// Long-term TURN credentials, as `GET https://teams.microsoft.com/trap/tokens` hands them out
-/// (`crate::signaling::TrapTokens`; 7 days, realm `rtcmedia`). The realm isn't part of them: the client takes the one
+/// (read by the echo-call spike's `TrapTokens`; 7 days, realm `rtcmedia`). The realm isn't part of them: the client takes the one
 /// the server names in its 401. `Debug` shows no password.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials {

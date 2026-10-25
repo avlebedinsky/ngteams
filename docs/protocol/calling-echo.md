@@ -184,7 +184,8 @@ The answer the page applies (from the media controller) keeps BUNDLE and rtcp-mu
 own fingerprint, has no `a=ice-lite`, and selects Opus 111 with `usedtx=1`, RED, G.722, PCMU, PCMA, CN and
 telephone-event for audio (`a=ptime:20`, `transport-cc`, `abs-send-time` and transport-wide CC), H.264 for video. On
 the wire (WebRTC statistics) the audio codec in use was Opus 111 `usedtx=1`; the selected pair was our UDP
-server-reflexive candidate to the controller's relay candidate.
+server-reflexive candidate to the controller's relay candidate. The conversion between the two dialects, line by
+line, is in [calling.md](calling.md#the-sdp-dialect).
 
 ## What the M3 run added
 

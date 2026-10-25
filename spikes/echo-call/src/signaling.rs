@@ -4,7 +4,7 @@
 //!
 //! The test call, step by step:
 //! 1. **TURN credentials**: `GET` [`TRAP_TOKENS_URL`] answers `{"tokens":[{realm, username, password}], "expires"}`
-//!    ([`TrapTokens`]); the relay is one fixed host ([`crate::turn::TEAMS_RELAY_HOST`]), no relay descriptor.
+//!    ([`TrapTokens`]); the relay is one fixed host ([`teams_media::turn::TEAMS_RELAY_HOST`]), no relay descriptor.
 //! 2. **The call start**: `POST` [`CALL_START_URL`] with [`SKYPETOKEN_HEADER`] and [`call_start_body`]. It names no
 //!    callee (`participants.to` is empty) and opens a conversation of the scenario
 //!    [`TEST_CALL_SCENARIO`](teams_proto::TEST_CALL_SCENARIO); the offer goes in `callInvitation.mediaContent` in the
@@ -30,7 +30,7 @@ use serde_json::{Map, Value, json};
 use teams_fence::Mri;
 use teams_proto::{AddToCall, Authorized, ConversationUrl, StartCall, TEST_CALL_SCENARIO};
 
-use crate::turn::Credentials;
+use teams_media::turn::Credentials;
 
 /// Where a call starts (through the flight proxy), with the account's skypetoken in [`SKYPETOKEN_HEADER`].
 pub const CALL_START_URL: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/epconv";
@@ -41,8 +41,8 @@ pub const SKYPETOKEN_HEADER: &str = "X-Skypetoken";
 /// Where the TURN credentials come from (a read, with the account's token).
 pub const TRAP_TOKENS_URL: &str = "https://teams.microsoft.com/trap/tokens";
 
-/// The media content type of the offer and the answer: Teams' SDP dialect.
-pub const SDP_NGC: &str = "application/sdp-ngc-1.0";
+/// The offer and the answer travel in Teams' SDP dialect, checked and converted by `teams-media`.
+pub use teams_media::sdp::{NgcSdp, SDP_NGC};
 
 /// The callbacks a call registers, by name: the key of its link and the last segment of its path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -205,46 +205,6 @@ impl Endpoint {
     }
 }
 
-/// An SDP in Teams' dialect ([`SDP_NGC`]): every media line on `RTP/SAVP` with a real port, not the browser's
-/// `UDP/TLS/RTP/SAVPF` on the placeholder port 9. Writing str0m's offer in this dialect, and reading the media
-/// controller's answer back into one str0m takes, is M3's work (`docs/spikes/echo-call.md`); this only tells the two
-/// apart.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NgcSdp(String);
-
-/// An SDP that isn't in Teams' dialect.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
-#[error("not an SDP in Teams' dialect ({SDP_NGC}): {0}")]
-pub struct NotNgc(&'static str);
-
-impl NgcSdp {
-    /// # Errors
-    /// [`NotNgc`] when `sdp` doesn't start with `v=0`, has no media line, or has one that isn't `RTP/SAVP` on a real
-    /// port.
-    pub fn new(sdp: &str) -> Result<Self, NotNgc> {
-        if !sdp.starts_with("v=0\r\n") {
-            return Err(NotNgc("no session part"));
-        }
-        let mut media = sdp.split("\r\n").filter_map(|line| line.strip_prefix("m=")).peekable();
-        if media.peek().is_none() {
-            return Err(NotNgc("no media line"));
-        }
-        for line in media {
-            let mut fields = line.split(' ').skip(1);
-            let port = fields.next().and_then(|port| port.parse::<u16>().ok());
-            if !matches!(port, Some(port) if port != 0 && port != 9) || fields.next() != Some("RTP/SAVP") {
-                return Err(NotNgc("a media line isn't RTP/SAVP on a real port"));
-            }
-        }
-        Ok(Self(sdp.to_owned()))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 /// The JSON payload that starts the test call, from a call the fence permitted: our endpoint as `from`, nobody in
 /// `to`, the scenario [`TEST_CALL_SCENARIO`], the call's and the conversation's callback links, the offer. Its keys are
 /// a subset of the web client's (the rest of what it sends, capabilities and client details, is left out: whether the
@@ -386,9 +346,6 @@ impl Acceptance {
     fn from_body(body: &Value) -> Option<Self> {
         let acceptance = body.get("callAcceptance")?;
         let media = acceptance.get("mediaContent")?;
-        if media.get("contentType")?.as_str()? != SDP_NGC {
-            return None;
-        }
         let link = |name: &str| {
             acceptance
                 .pointer(&format!("/links/{name}"))
@@ -396,7 +353,7 @@ impl Acceptance {
                 .map(str::to_owned)
         };
         Some(Self {
-            answer: NgcSdp::new(media.get("blob")?.as_str()?).ok()?,
+            answer: NgcSdp::new(media.get("contentType")?.as_str()?, media.get("blob")?.as_str()?).ok()?,
             acknowledgement: link("acknowledgement"),
             call_leg: link("callLeg"),
         })

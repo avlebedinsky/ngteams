@@ -1,0 +1,34 @@
+[package]
+name = "teams-media"
+description = "A call's media: the TURN client (RFC 8656) and its relay link, and Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's SDP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests and
+# the echo-call spike's.
+test-support = []
+
+[dependencies]
+# STUN FINGERPRINT (CRC-32)
+crc32fast.workspace = true
+# STUN transaction ids
+getrandom.workspace = true
+# STUN MESSAGE-INTEGRITY (HMAC-SHA1 over the long-term key MD5(username:realm:password))
+hmac.workspace = true
+md-5.workspace = true
+sha1.workspace = true
+# the SDP the call's peer speaks: offers and answers taken from and handed to it
+str0m.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# the SDP fixture's entries
+serde_json.workspace = true
+# this crate's own tests run against the loopback TURN server
+teams-media = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

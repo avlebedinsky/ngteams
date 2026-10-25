@@ -4,11 +4,11 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use echo_call::stun::{
+use teams_media::stun::{
     Attribute, ChannelData, Class, Framing, IntegrityKey, Message, Method, StreamDecoder, StunError, TransactionId,
     verify_integrity,
 };
-use echo_call::turn::{Credentials, Timing, Transport, TurnClient, TurnError, TurnEvent, TurnFailure};
+use teams_media::turn::{Credentials, Timing, Transport, TurnClient, TurnError, TurnEvent, TurnFailure};
 
 fn hex(text: &str) -> Vec<u8> {
     let nibble = |digit: u8| {
