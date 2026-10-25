@@ -8245,6 +8245,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "teams-call"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "getrandom 0.4.3",
+ "serde_json",
+ "teams-auth",
+ "teams-fence",
+ "teams-mock",
+ "teams-proto",
+ "teams-trouter",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "teams-core"
 version = "0.1.0"
 dependencies = [
@@ -8350,7 +8366,11 @@ dependencies = [
  "serde_json",
  "teams-auth",
  "teams-fence",
+ "teams-media",
+ "teams-mock",
  "teams-proto",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
  "toml 1.1.8+spec-1.1.0",

@@ -830,13 +830,40 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 - Create: `crates/teams-call/*`
 - Modify: `crates/teams-mock/src/*` (the calling service and the loopback media peer)
 
-- [ ] tests first on the mock: an outgoing call through start → acceptance → acknowledgement → connected → leave; a
+- [x] tests first on the mock: an outgoing call through start → acceptance → acknowledgement → connected → leave; a
       join of a running call; an incoming lab-only call answered by an action, declined by an action, one naming an
       outsider ignored and never answered (nothing sent for it, no request or frame); an offered invitation nobody acts
       on stays unanswered (no answer without `Action::Answer`); the ring's ends (cancelled, answered elsewhere, timed
       out) end the ringing; an invitation during a call not offered; keep-alives on `callKeepAliveInterval`
-- [ ] `teams-call` builds sealed writes and hands them on; it sends nothing itself
-- [ ] the gate passes
+      → done (decided with Codex, transcript
+      `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-13-teams-call-shape/`):
+      `crates/teams-call/tests/mock.rs` runs native clients of a and b (each its own fence, `fence.log`, transport and
+      calling socket, driven as the engine will drive them: `tests/support/mod.rs`) against `teams-mock`'s new calling
+      service (`crates/teams-mock/src/calling.rs`: the flight proxy's call requests with the account's skypetoken, the
+      invitations, acceptances and ends delivered to the registered calling endpoints through the mock's Trouter,
+      calls of a caller the mock plays, their ring's end and hang-up, every answer and delivery shaped from
+      `tests/fixtures/calling/`): the test call (start → the media controller's acceptance → its acknowledgement as the
+      delivery response → connected → the echo's `add` → `leave`), a → b answered only by b's action (ringing
+      unanswered until then: `attach` and `progress` only), declined by b's action (a forwarded to b's voicemail, as
+      captured), an outsider's invitation (no request, no frame, no fence decision), the caller's cancel (`487` as
+      delivered), an answer on b's other endpoint and a ring that timed out ending b's ring, an invitation during a call
+      (nothing sent), a running group call joined from its chat once its ring ended; every write the fence permitted.
+      Machine unit tests: `crates/teams-call/src/machine/tests.rs`. ⚠️ Keep-alives, a scope change agreed with Codex:
+      the interval (`callKeepAliveInterval`, from the acceptance or the `accept`'s answer) is kept and its deadline told
+      (`CallEvent::KeepAliveDue`, tested), but **no request goes**: no capture shows what the keep-alive is (every lab
+      call was far shorter than 2700 s) and a call write is mapped only from a capture; the wire keep-alive moved to
+      Task 16 (➕ there). ⚠️ The ring ends "answered elsewhere" and "timed out" (callee side) aren't captured: the ring
+      ends on any delivery at the call's own end callbacks (as the fence's registry ends an offer), its body kept as
+      delivered (`RemoteEnd`), no reason read from a code; the mock's bodies for those two are its own, labelled
+      (`teams_mock::ANSWERED_ELSEWHERE`, `TIMED_OUT`). The loopback media peer is built (`teams-mock`'s `media`
+      feature, `crates/teams-mock/src/media.rs`, smoke-tested both ways in `crates/teams-mock/tests/media.rs`); Task 14
+      puts it behind the calling service's answers
+- [x] `teams-call` builds sealed writes and hands them on; it sends nothing itself
+      → done: `Calls` is sans-IO (no transport, socket or runtime; depends on `teams-proto` and `teams-fence`'s data
+      types only): `Effect::Send` carries a `CallWrite` (each sealed type kept as its own) that the engine's
+      `WriteSink` takes (`CallWrite::submit_to`, one exhaustive match), `Effect::Respond` a typed delivery response for
+      the delivery's own responder, `Effect::Event` what the account is told; outcomes come back by `WriteId`
+- [x] the gate passes
 
 ### Task 14: The call session in the engine
 **Files:**
@@ -892,6 +919,11 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 - [ ] answered elsewhere: b's web client and b's native client up together (two endpoints of b); a calls b, b's page
       answers, b's native client's ring ends on the delivery
 - [ ] `fence.log` as Task 15's; the gate passes
+- [ ] ➕ (from Task 13) the call's keep-alive: capture a web client's lab call held past its `callKeepAliveInterval`
+      (2700 s) with the calling requests recorded; establish what the keep-alive request is (method, link, body,
+      answer), map it in the fence from that capture, add its sealed write, and have `teams-call` send it on
+      `CallEvent::KeepAliveDue` (today it tells the deadline and sends nothing); tests of repeated deadlines and of
+      none after the call ended
 
 ### Task 17: Calls in the app
 **Files:**

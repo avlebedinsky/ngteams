@@ -1,0 +1,35 @@
+[package]
+name = "teams-call"
+description = "A call's signaling state machine (sans-IO): the start, the join, the ring and its ends, the answer and the decline, the acceptance and its acknowledgement, the follow-ups and the leave, each as a sealed teams-proto write handed to the engine; it sends nothing itself"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# an invitation's payload (`gp`) is base64 JSON; a delivery response's correlation vector
+base64.workspace = true
+# fresh GUIDs (participant ids, the call agent) and callback segments
+getrandom.workspace = true
+serde_json.workspace = true
+# a call delivery as the fence read it (`Delivery`, `Observed`), MRIs, the 1:1 chat ids
+teams-fence.workspace = true
+# the sealed call writes and the typed delivery responses it builds
+teams-proto.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# the tests' Trouter credentials
+teams-auth.workspace = true
+# a lab fence over a test roster and log
+teams-fence = { workspace = true, features = ["test-support"] }
+# the chat service mock with its calling service and Trouter
+teams-mock.workspace = true
+# the native transport reaching the mock through its mock origin
+teams-proto = { workspace = true, features = ["test-support"] }
+# each account's calling socket, on the mock's Trouter
+teams-trouter = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

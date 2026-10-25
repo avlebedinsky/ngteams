@@ -45,6 +45,13 @@
 //! naming an endpoint the account registered with the registrar here; answered `201` and `200` with no body, as UPS
 //! answered, and kept ([`ChatServiceMock::own_availability`]).
 //!
+//! **Calls** (`calling.rs`, M3 Task 13): the flight proxy's call requests under `/api/v2/` with the account's
+//! skypetoken ([`ChatServiceMock::skypetoken`]): the start, the callee's `attach`, `progress`, endpoint state, `accept`
+//! and `reject`, the acknowledgement, the endpoint metadata, `add`, `leave` and the join of a running call, each
+//! answered in its captured shape; the invitations, acceptances and ends they cause delivered to the calling endpoints
+//! the accounts registered, through the mock's Trouter; calls a caller the mock plays places
+//! ([`ChatServiceMock::ring`]), their ring's end and their hang-up; every call's record ([`ChatServiceMock::calls`]).
+//!
 //! **Trouter** ([`ChatServiceMock::start_trouter`], `trouter.rs`): connect, authenticate, `trouter.connected`, pings,
 //! the deliveries of the queued events and their replay on connect, from the synthetic `tests/fixtures/trouter/`
 //! fixtures; the registrar's `POST /registrar/prod/V2/registrations` is served on this origin.
@@ -64,9 +71,12 @@
 //! `capabilities` among them) with the `uniquerosterthread` the conversation list gives the chat; its `fixedRoster`
 //! and its own capabilities aren't known, so they aren't made up.
 
+mod calling;
 mod chatsvc;
 mod csa;
 mod fixtures;
+#[cfg(feature = "media")]
+pub mod media;
 mod reads;
 mod trouter;
 mod ups;
@@ -80,6 +90,7 @@ use serde_json::Value;
 use wiremock::matchers::{any, method};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
+pub use calling::{ANSWERED_ELSEWHERE, CallPhase, Leg, MockCall, TIMED_OUT};
 pub use fixtures::FixtureError;
 pub use trouter::{CALLING_APP, MESSAGING_APP, REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
 pub use ups::{AvailabilityChange, OwnAvailability};
@@ -113,6 +124,9 @@ pub const LAB_B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
 pub const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
 /// An account outside the lab, in a 1:1 chat with a ([`AX_CHAT`]): a fence over the lab roster denies writes there.
 pub const OUTSIDER: &str = "8:orgid:00000000-0000-4000-8000-0000000000ff";
+
+/// The echo service (a bot): the test call adds it; a fence approves it as a service participant.
+pub const ECHO: &str = "28:00000000-0000-4000-8000-0000000000ec";
 
 /// The a–b 1:1 chat, holding the messages of `messages.json`.
 pub const AB_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
@@ -315,6 +329,47 @@ impl ChatServiceMock {
             .with_priority(1)
             .mount(&self.server)
             .await;
+    }
+
+    /// The skypetoken the mock's calling service takes as `mri`'s (`X-Skypetoken`), if `mri` is one of its accounts.
+    #[must_use]
+    pub fn skypetoken(&self, mri: &str) -> Option<String> {
+        self.lock()
+            .account(mri)
+            .map(|account| calling::skypetoken_of(&account.mri))
+    }
+
+    /// A caller the mock plays (`from`, no client of its own) rings `to` in their 1:1 call, on every calling endpoint
+    /// `to` registered: the call's id.
+    #[must_use = "the call's id names it"]
+    pub fn ring(&self, from: &str, to: &str) -> String {
+        calling::ring(&mut self.lock(), from, &[to.to_owned()], None)
+    }
+
+    /// A caller the mock plays (`from`) rings `callees` in the group chat `chat`: the call's id.
+    #[must_use = "the call's id names it"]
+    pub fn ring_group(&self, from: &str, chat: &str, callees: &[&str]) -> String {
+        let callees: Vec<String> = callees.iter().map(|callee| (*callee).to_owned()).collect();
+        calling::ring(&mut self.lock(), from, &callees, Some(chat.to_owned()))
+    }
+
+    /// Call `id`'s ring ends with `code` and `phrase` (its caller cancelled, it timed out: see [`TIMED_OUT`]). `false`
+    /// when there is no such call.
+    #[must_use = "false says there was no such call"]
+    pub fn end_ring(&self, id: &str, code: i64, phrase: &str) -> bool {
+        calling::end_ring(&mut self.lock(), id, code, phrase)
+    }
+
+    /// Call `id` is ended by the party the mock plays: everyone in it gets its end. `false` when there is no such call.
+    #[must_use = "false says there was no such call"]
+    pub fn hang_up_call(&self, id: &str) -> bool {
+        calling::hang_up(&mut self.lock(), id)
+    }
+
+    /// The calling service's calls so far, oldest first.
+    #[must_use]
+    pub fn calls(&self) -> Vec<MockCall> {
+        self.lock().calling.calls.clone()
     }
 
     /// The own-availability writes UPS took, in order (see the crate docs).

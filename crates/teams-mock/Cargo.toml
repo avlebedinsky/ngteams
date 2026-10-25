@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# The loopback media peer (`media.rs`): a `teams-media` session behind a loopback TURN server, answering and offering
+# in Teams' dialect, for the crates whose tests carry a call's media; the others don't build or link it.
+media = ["dep:teams-media", "dep:thiserror"]
+
 [dependencies]
 # an incoming call's invitation carries its payload (`gp`) as base64 JSON
 base64.workspace = true
@@ -16,6 +21,9 @@ futures-util.workspace = true
 # decodes the conversation and message ids the clients percent-encode as one path segment
 percent-encoding.workspace = true
 serde_json.workspace = true
+# the loopback media peer (`media`): a session on the file backend through the loopback TURN server
+teams-media = { workspace = true, features = ["test-support"], optional = true }
+thiserror = { workspace = true, optional = true }
 # the Trouter mock: its own loopback server on a thread of its own, and the wake-up when an event is queued
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-tungstenite.workspace = true
@@ -23,6 +31,11 @@ tokio-tungstenite.workspace = true
 wiremock.workspace = true
 
 [dev-dependencies]
+# its own media peer's test (`tests/media.rs`) and the native session it is the far end of
+teams-media = { workspace = true, features = ["test-support"] }
+teams-mock = { path = ".", features = ["media"] }
+# the media peer's test records each side's audio into a directory of its own
+tempfile.workspace = true
 # the mock's own tests send raw requests too: a missing header, a malformed body
 reqwest.workspace = true
 teams-auth.workspace = true

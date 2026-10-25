@@ -584,6 +584,12 @@ async fn connected(mut socket: Socket, shared: &Shared, index: usize, account: &
         if replayed && deliver_queued(&mut socket, shared, account, &endpoint).await.is_none() {
             return;
         }
+        if calling
+            && registered(shared, account, &endpoint, CALLING_APP)
+            && deliver_calls(&mut socket, shared, &endpoint).await.is_none()
+        {
+            return;
+        }
         tokio::select! {
             text = next_text(&mut socket, shared, index) => {
                 let Some(text) = text else { return };
@@ -681,6 +687,32 @@ async fn carry_out(socket: &mut Socket, endpoint: &str, to_calls: bool, command:
     }
 }
 
+/// Takes the calling service's deliveries waiting for `endpoint` (`calling.rs`) and delivers them, in order.
+async fn deliver_calls(socket: &mut Socket, shared: &Shared, endpoint: &str) -> Option<()> {
+    let waiting: Vec<crate::calling::Outgoing> = {
+        let mut world = shared.world();
+        let (mine, others) = std::mem::take(&mut world.calling.outgoing)
+            .into_iter()
+            .partition(|delivery| delivery.endpoint == endpoint);
+        world.calling.outgoing = others;
+        mine
+    };
+    for delivery in waiting {
+        let id = {
+            let mut sockets = shared.sockets();
+            sockets.next_delivery += 1;
+            i64::try_from(2_000_000 + sockets.next_delivery).unwrap_or(i64::MAX)
+        };
+        let command = Command::DeliverCall {
+            id,
+            path: delivery.path,
+            body: delivery.body.to_string(),
+        };
+        carry_out(socket, endpoint, true, command).await?;
+    }
+    Some(())
+}
+
 /// Whether a registration of `account` by the stack `app_id` names `endpoint`'s push URL.
 fn registered(shared: &Shared, account: &str, endpoint: &str, app_id: &str) -> bool {
     let suffix = format!("/v4/f/{endpoint}/");
@@ -691,7 +723,7 @@ fn registered(shared: &Shared, account: &str, endpoint: &str, app_id: &str) -> b
 
 /// The fixture's invitation `index` (0: a 1:1 call's, 1: a group call's) from `from` to `to` (work accounts' MRIs), its
 /// `gp` changed by `edit`, then base64 JSON as on the wire, every other placeholder a made-up GUID.
-fn invitation(index: usize, from: &str, to: &str, edit: impl FnOnce(&mut Value)) -> Value {
+pub(crate) fn invitation(index: usize, from: &str, to: &str, edit: impl FnOnce(&mut Value)) -> Value {
     use base64::Engine as _;
     let fixture: Value = serde_json::from_str(CALL_DELIVERIES).unwrap_or_default();
     let body = &fixture["invitations"][index]["body"];
@@ -722,7 +754,7 @@ fn gzip_base64(text: &str) -> String {
 }
 
 /// `text` with every `<guid:…>` placeholder left a made-up GUID, one per name.
-fn fill_guids(text: &str) -> String {
+pub(crate) fn fill_guids(text: &str) -> String {
     use std::fmt::Write as _;
     let mut names: Vec<String> = Vec::new();
     let mut filled = String::with_capacity(text.len());

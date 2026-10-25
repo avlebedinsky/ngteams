@@ -8,6 +8,7 @@ members = [
     "crates/teams",
     "crates/teams-app",
     "crates/teams-auth",
+    "crates/teams-call",
     "crates/teams-core",
     "crates/teams-fence",
     "crates/teams-headless",
@@ -33,6 +34,7 @@ default-members = [
     "crates/proto-lab",
     "crates/teams-app",
     "crates/teams-auth",
+    "crates/teams-call",
     "crates/teams-core",
     "crates/teams-fence",
     "crates/teams-headless",
@@ -64,6 +66,8 @@ publish = false
 fixture-guard = { path = "crates/fixture-guard" }
 proto-lab = { path = "crates/proto-lab" }
 teams-auth = { path = "crates/teams-auth" }
+# a call's signaling state machine (sans-IO): builds the sealed call writes, sends nothing itself
+teams-call = { path = "crates/teams-call" }
 teams-core = { path = "crates/teams-core" }
 teams-fence = { path = "crates/teams-fence" }
 # the app's diagnostic log (M2 Task 24a): installed by the app crates only, through its `install`

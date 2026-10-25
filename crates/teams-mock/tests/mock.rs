@@ -1,7 +1,8 @@
 //! The mock chat service against its fixtures: reads replay `tests/fixtures/chatsvc/`, writes read back as the
 //! fixtures recorded and queue an event for every other member, the headers M1 Task 3 found are required, and the
 //! native transport and the fence's membership read reach it through their `test-support` mock origins. Its Trouter
-//! (`tests/fixtures/trouter/`): the session's frames, the registrar, and deliveries only to a registered endpoint.
+//! (`tests/fixtures/trouter/`): the session's frames, the registrar, and deliveries only to a registered endpoint. Its
+//! calling service takes the account's skypetoken alone (the calls themselves: `crates/teams-call/tests/mock.rs`).
 //!
 //! Every id and token here is the mock's made-up one, never a real one.
 
@@ -31,6 +32,7 @@ const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixture
 const TROUTER_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/trouter");
 const CSA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/csa");
 const CALL_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/calling/chat");
+const ECHO_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/calling/echo");
 
 fn oid(mri: &str) -> &str {
     mri.trim_start_matches("8:orgid:")
@@ -1358,14 +1360,15 @@ fn the_mock_reads_only_the_synthetic_chat_fixtures() -> TestResult {
                     include.starts_with("../../../tests/fixtures/chatsvc/")
                         || include.starts_with("../../../tests/fixtures/trouter/")
                         || include.starts_with("../../../tests/fixtures/csa/")
-                        || include.starts_with("../../../tests/fixtures/calling/chat/"),
+                        || include.starts_with("../../../tests/fixtures/calling/chat/")
+                        || include.starts_with("../../../tests/fixtures/calling/echo/"),
                     "{}: {include:.60}",
                     path.display()
                 );
             }
         }
     }
-    for dir in [FIXTURES, TROUTER_FIXTURES, CSA_FIXTURES, CALL_FIXTURES] {
+    for dir in [FIXTURES, TROUTER_FIXTURES, CSA_FIXTURES, CALL_FIXTURES, ECHO_FIXTURES] {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             let text = std::fs::read_to_string(&path)?;
@@ -1617,5 +1620,54 @@ async fn deliveries_wait_for_the_registration_and_come_in_the_deliveries_fixture
     write_frame(&mut socket, r#"5:2+::{"name":"ping"}"#).await?;
     assert_eq!(read_frame(&mut socket).await?, r#"6:::2+["pong"]"#);
     assert_eq!(kinds(&lab.mock.take_events(LAB_B)), [EventKind::ReadReceipt]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_calling_service_takes_the_accounts_skypetoken_alone_and_answers_a_start_with_its_conversation()
+-> TestResult {
+    let lab = Lab::start().await?;
+    let start = format!("{}/api/v2/epconv", lab.mock.origin());
+    let body = json!({"participants": {"from": {"id": LAB_A}, "to": [{"id": LAB_B}]}, "groupChat": null});
+    let bearer = format!("Bearer {}", lab.mock.token(LAB_A).ok_or("no a")?);
+    let skypetoken = lab.mock.skypetoken(LAB_A).ok_or("no a")?;
+    for (case, headers) in [
+        ("no credential", vec![]),
+        (
+            "the chat service's bearer token",
+            vec![("Authorization", bearer.as_str())],
+        ),
+        (
+            "a skypetoken the mock didn't hand out",
+            vec![("X-Skypetoken", "mock-skypetoken-unknown")],
+        ),
+    ] {
+        let refused = lab.send_raw(Method::POST, &start, &headers, Some(&body)).await?;
+        assert_eq!((refused.status, refused.text.as_str()), (401, ""), "{case}");
+    }
+    assert!(lab.mock.calls().is_empty(), "nothing started");
+
+    let headers = [("X-Skypetoken", skypetoken.as_str())];
+    let answer = lab.send_raw(Method::POST, &start, &headers, Some(&body)).await?;
+    assert_eq!(answer.status, 200);
+    let conversation = answer.json()?;
+    let controller = conversation["conversationController"]
+        .as_str()
+        .ok_or("no conversation")?;
+    assert!(controller.starts_with("https://api.flightproxy.teams.microsoft.com/api/v2/ep/"));
+    assert!(conversation["links"]["leave"].is_string());
+    let calls = lab.mock.calls();
+    let [call] = calls.as_slice() else {
+        return Err(format!("one call: {calls:#?}").into());
+    };
+    assert_eq!((call.caller.as_str(), call.legs[0].callee.as_str()), (LAB_A, LAB_B));
+    assert_eq!(call.requests, [("start".to_owned(), LAB_A.to_owned())]);
+
+    let unknown = format!(
+        "{}/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/NoSuchCall/1/i1/1/attach",
+        lab.mock.origin()
+    );
+    let missing = lab.send_raw(Method::POST, &unknown, &headers, Some(&json!({}))).await?;
+    assert_eq!(missing.status, 404, "a link of no call");
     Ok(())
 }

@@ -146,7 +146,9 @@ On **Accept with audio** the callee's page posts, in order:
   gets no acceptance delivery): the call leg's `links` (`callLeg` `…/cc/v1/active/<call>/…`, `mediaRenegotiation`
   `…/renegotiate`, `updateMediaDescriptions`, `updateCallState`, `hold`, `monitor`, `transfer`, `replacement`,
   `retargetCompletion`, `startOutgoingNegotiation`, and in a group call `applyChannelParameters` on `mcProxy`) and
-  `callKeepAliveInterval` (2700 s).
+  `callKeepAliveInterval` (2700 s). No run held a call that long, so what a keep-alive is on the wire isn't captured:
+  the native client (`teams-call`) keeps the interval and tells when it falls due, and sends nothing for it until a
+  capture of a web client's call held past it shows the request (M3 Task 16).
 
 Once the call is up it puts its endpoint metadata (`PUT …/updateEndpointMetadata`, as the caller does) and posts its own
 participant properties (`updateParticipantProperties`: `{"from", "to": [<itself, its aiVoiceConsent>], "links":

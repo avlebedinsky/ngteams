@@ -1,0 +1,686 @@
+//! The mock's calling service (M3 Task 13): the flight proxy's call requests (`/api/v2/…`) as the captures show them
+//! (`docs/protocol/calling.md`, `docs/protocol/calling-echo.md`; every answer and delivery shaped from the synthetic
+//! fixtures under `tests/fixtures/calling/`), and the call deliveries it sends the accounts' calling endpoints through
+//! the mock's Trouter.
+//!
+//! - **Credential**: `X-Skypetoken` with the account's skypetoken ([`crate::ChatServiceMock::skypetoken`]); anything
+//!   else is a 401 with no body.
+//! - **The start** (`POST epconv`): its answer the conversation (`answers.json`'s shape). A 1:1 or group call rings
+//!   every callee's registered calling endpoint with an invitation (`deliveries.json`'s 1:1 or group shape, the
+//!   caller's offer in a 1:1 one); the test call and a group call are accepted at once by the media controller or the
+//!   call's mixer (the caller's `acceptance` callback, `answers.json`'s acceptance).
+//! - **The callee** (on an invitation's links): `attach` (answered with `follow_ups.json`'s attach answer for its leg),
+//!   `progress`, the endpoint state, `accept` (answered with its acknowledgement; the caller's acceptance carries the
+//!   callee's answer, and every other endpoint of the callee that attached gets the call's end: answered elsewhere),
+//!   `reject` (in a 1:1 call the caller is forwarded to the callee's voicemail, which accepts, as captured).
+//! - **The call**: the acceptance's acknowledgement, the endpoint metadata, `add` (the echo's success delivered), and
+//!   `leave` (while it rings, a cancel: every attached callee endpoint gets the call's end with the leave's code; once
+//!   up, the call's end to everyone in it). A join (`POST conv/<id>`) with media enters a running call and is accepted
+//!   by its mixer; without media it subscribes only.
+//! - **Calls of no client** ([`crate::ChatServiceMock::ring`], [`crate::ChatServiceMock::ring_group`]): a caller the
+//!   mock plays rings an account; [`crate::ChatServiceMock::end_ring`] ends a call's ring (the caller cancels, it
+//!   times out) and [`crate::ChatServiceMock::hang_up_call`] ends a call that is up.
+//!
+//! **Not captured, so labelled as the mock's own**: the bodies of the ends a callee's endpoint gets for a ring that
+//! was cancelled, answered elsewhere or timed out, and for a call another party left (the echo call's `call/end`
+//! envelope, a code and a phrase of the mock's: [`ANSWERED_ELSEWHERE`], [`TIMED_OUT`]); the answers of `progress`,
+//! the endpoint state and metadata, `add`, the acknowledgement and `leave` (200 with no body).
+
+use serde_json::{Value, json};
+use wiremock::{Request, ResponseTemplate};
+
+use crate::chatsvc::{json as json_answer, status};
+use crate::trouter::{CALLING_APP, fill_guids, invitation};
+use crate::world::State;
+
+const ECHO_ANSWERS: &str = include_str!("../../../tests/fixtures/calling/echo/answers.json");
+const ECHO_DELIVERIES: &str = include_str!("../../../tests/fixtures/calling/echo/deliveries.json");
+const CHAT_DELIVERIES: &str = include_str!("../../../tests/fixtures/calling/chat/deliveries.json");
+const FOLLOW_UPS: &str = include_str!("../../../tests/fixtures/calling/chat/follow_ups.json");
+
+/// The flight proxy's links to the call's services.
+const PROXY: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep";
+/// The conversation service's host behind it.
+const CONV_HOST: &str = "conv-zz-01-prod-aks.conv.skype.com";
+/// The call controller's host behind it.
+const CC_HOST: &str = "cc-zz-01-prod-aks.cc.skype.com";
+/// The routing query of a conversation's links and of a call controller's.
+const CONV_QUERY: &str = "?i=10-0-0-2&e=1";
+const CC_QUERY: &str = "?i=10-0-0-1";
+
+/// The phrase of the end the mock sends an endpoint whose ring another endpoint of its account answered (not captured).
+pub const ANSWERED_ELSEWHERE: &str = "MockAnsweredElsewhere";
+/// The phrase of the end the mock sends a ring that timed out ([`crate::ChatServiceMock::end_ring`]'s default; not
+/// captured for a callee).
+pub const TIMED_OUT: &str = "MockRingTimedOut";
+
+/// A delivery waiting for the calling endpoint `endpoint` (its id in its push URL): at `path` under its push URL.
+#[derive(Clone, Debug)]
+pub(crate) struct Outgoing {
+    pub(crate) endpoint: String,
+    pub(crate) path: String,
+    pub(crate) body: Value,
+}
+
+/// Where a call is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallPhase {
+    /// Its callees ring.
+    Ringing,
+    /// Someone answered (or the media controller, the mixer, a voicemail accepted).
+    Connected,
+    Ended,
+}
+
+/// A callee's leg of a call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Leg {
+    pub callee: String,
+    /// Each endpoint of the callee that attached, with its `call/end` callback.
+    pub attached: Vec<(String, String)>,
+    /// The endpoints that said they ring (`progress`).
+    pub ringing: Vec<String>,
+    /// The endpoint that answered it.
+    pub accepted_by: Option<String>,
+    pub declined: bool,
+}
+
+/// A call as the mock keeps it, for a test to read ([`crate::ChatServiceMock::calls`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MockCall {
+    pub id: String,
+    pub conversation: String,
+    pub caller: String,
+    pub group_chat: Option<String>,
+    pub test_call: bool,
+    pub phase: CallPhase,
+    pub legs: Vec<Leg>,
+    /// Every request on the call, by its operation (`start`, `attach`, `progress`, `accept`, `reject`, `leave`, …), with
+    /// the account that sent it, in order.
+    pub requests: Vec<(String, String)>,
+    /// The caller's callbacks (none when the mock plays the caller).
+    caller_links: Option<Callbacks>,
+    /// Those who joined the running call, with their callbacks.
+    joined: Vec<(String, Callbacks)>,
+    offer: Option<Value>,
+}
+
+/// A party's callbacks the mock calls back: its acceptance, the call's end and progress.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Callbacks {
+    acceptance: Option<String>,
+    end: Option<String>,
+    progress: Option<String>,
+}
+
+impl Callbacks {
+    fn of(body: &Value) -> Self {
+        let at = |name: &str| {
+            body.pointer(&format!("/callInvitation/links/{name}"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        Self {
+            acceptance: at("acceptance"),
+            end: at("end"),
+            progress: at("progress"),
+        }
+    }
+}
+
+/// The calling service's state in the mock's world.
+#[derive(Debug, Default)]
+pub(crate) struct Calling {
+    pub(crate) calls: Vec<MockCall>,
+    next: u64,
+    /// Deliveries waiting for their endpoint's calling socket.
+    pub(crate) outgoing: Vec<Outgoing>,
+}
+
+/// The skypetoken the mock takes as `mri`'s.
+pub(crate) fn skypetoken_of(mri: &str) -> String {
+    format!("mock-skypetoken-{}", mri.rsplit(':').next().unwrap_or_default())
+}
+
+fn conversation_url(conversation: &str, op: Option<&str>) -> String {
+    let op = op.map(|op| format!("/{op}")).unwrap_or_default();
+    format!("{PROXY}/{CONV_HOST}/conv/{conversation}{op}{CONV_QUERY}")
+}
+
+fn cc_url(path: &str) -> String {
+    format!("{PROXY}/{CC_HOST}/cc/v1/{path}{CC_QUERY}")
+}
+
+/// A fixture's JSON with each `(from, to)` replaced, every other `<guid:…>` a made-up GUID.
+fn fixture(text: &str, replace: &[(&str, &str)]) -> Value {
+    let text = replace
+        .iter()
+        .fold(text.to_owned(), |text, (from, to)| text.replace(from, to));
+    serde_json::from_str(&fill_guids(&text)).unwrap_or_default()
+}
+
+fn object_id(mri: &str) -> &str {
+    mri.rsplit(':').next().unwrap_or_default()
+}
+
+/// A callback URL's endpoint and path under its push URL.
+fn target(url: &str) -> Option<(String, String)> {
+    let rest = &url[url.find("/v4/f/")? + "/v4/f/".len()..];
+    let (endpoint, path) = rest.split_once('/')?;
+    Some((endpoint.to_owned(), path.to_owned()))
+}
+
+impl State {
+    /// The account whose skypetoken `request` carries.
+    fn caller_of(&self, request: &Request) -> Option<String> {
+        let token = request.headers.get("x-skypetoken")?.to_str().ok()?;
+        self.accounts
+            .iter()
+            .find(|account| skypetoken_of(&account.mri) == token)
+            .map(|account| account.mri.clone())
+    }
+
+    /// The calling endpoints `mri` registered (their ids in their push URLs).
+    fn calling_endpoints(&self, mri: &str) -> Vec<String> {
+        let mut endpoints: Vec<String> = self
+            .registrations
+            .iter()
+            .filter(|registration| registration.account == mri && registration.app_id == CALLING_APP)
+            .filter_map(|registration| target(&registration.path).map(|(endpoint, _)| endpoint))
+            .collect();
+        endpoints.dedup();
+        endpoints
+    }
+
+    /// Queues `body` for the callback `url`.
+    fn call_back(&mut self, url: Option<&str>, body: Value) {
+        if let Some((endpoint, path)) = url.and_then(target) {
+            self.calling.outgoing.push(Outgoing { endpoint, path, body });
+            self.changed();
+        }
+    }
+
+    fn display_name(&self, mri: &str) -> String {
+        self.account(mri)
+            .map(|account| account.display_name.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// The calling service's answer to `request`, if its path is under `/api/v2/`.
+pub(crate) fn serve(state: &mut State, request: &Request) -> Option<ResponseTemplate> {
+    let path = request.url.path().strip_prefix("/api/v2/")?;
+    let Some(account) = state.caller_of(request) else {
+        return Some(status(401));
+    };
+    let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+    let segments: Vec<&str> = path.split('/').collect();
+    let method = request.method.as_str();
+    let answer = match (method, segments.as_slice()) {
+        ("POST", ["epconv"]) => start(state, &account, &body),
+        ("POST", ["ep", CONV_HOST, "conv", conversation]) => join(state, &account, conversation, &body),
+        (_, ["ep", CONV_HOST, "conv", conversation, op]) => conversation_op(state, &account, conversation, op, &body),
+        (_, ["ep", CC_HOST, "cc", "v1", kind, call, leg, _, _, rest @ ..]) => {
+            controller_op(state, &account, (kind, call, leg), rest.first().copied(), &body)
+        }
+        _ => None,
+    };
+    Some(answer.unwrap_or_else(|| status(404)))
+}
+
+/// A call start: the conversation answered, the callees rung (see the module docs).
+fn start(state: &mut State, caller: &str, body: &Value) -> Option<ResponseTemplate> {
+    let callees: Vec<String> = body
+        .pointer("/participants/to")?
+        .as_array()?
+        .iter()
+        .filter_map(|to| to.get("id")?.as_str().map(str::to_owned))
+        .collect();
+    let test_call =
+        body.pointer("/conversationRequest/scenario").and_then(Value::as_str) == Some("UserInitiatedTestCall");
+    let group_chat = body
+        .pointer("/groupChat/threadId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let offer = body.pointer("/callInvitation/mediaContent").cloned();
+    let index = new_call(state, caller, &callees, group_chat, Some(Callbacks::of(body)), offer);
+    log(state, index, caller, "start");
+    let call = state.calling.calls[index].clone();
+    ring_callees(state, index);
+    if test_call || call.group_chat.is_some() {
+        state.calling.calls[index].test_call = test_call;
+        accept_by_controller(
+            state,
+            index,
+            call.caller_links.as_ref().and_then(|links| links.acceptance.as_deref()),
+        );
+    }
+    Some(json_answer(200, &conversation_answer(&call.conversation)))
+}
+
+/// A new call of `caller` to `callees`; its index.
+fn new_call(
+    state: &mut State,
+    caller: &str,
+    callees: &[String],
+    group_chat: Option<String>,
+    caller_links: Option<Callbacks>,
+    offer: Option<Value>,
+) -> usize {
+    state.calling.next += 1;
+    let n = state.calling.next;
+    state.calling.calls.push(MockCall {
+        id: format!("MockCall{n:04}"),
+        conversation: format!("MockConversation{n:04}"),
+        caller: caller.to_owned(),
+        group_chat,
+        test_call: false,
+        phase: CallPhase::Ringing,
+        legs: callees
+            .iter()
+            .map(|callee| Leg {
+                callee: callee.clone(),
+                attached: Vec::new(),
+                ringing: Vec::new(),
+                accepted_by: None,
+                declined: false,
+            })
+            .collect(),
+        requests: Vec::new(),
+        caller_links,
+        joined: Vec::new(),
+        offer,
+    });
+    state.calling.calls.len() - 1
+}
+
+fn log(state: &mut State, index: usize, account: &str, op: &str) {
+    if let Some(call) = state.calling.calls.get_mut(index) {
+        call.requests.push((op.to_owned(), account.to_owned()));
+    }
+}
+
+/// The conversation a start or a join opens (`answers.json`'s call start answer, on `conversation`).
+fn conversation_answer(conversation: &str) -> Value {
+    let answers: Value = serde_json::from_str(ECHO_ANSWERS).unwrap_or_default();
+    let text = answers["call_start_answer"].to_string();
+    fixture(
+        &text,
+        &[("SyntheticConversation0", conversation), ("?i=0-0-0-0&e=1", CONV_QUERY)],
+    )
+}
+
+/// Rings every callee of call `index` on each calling endpoint it registered.
+fn ring_callees(state: &mut State, index: usize) {
+    let call = state.calling.calls[index].clone();
+    for (leg_number, leg) in (1_u64..).zip(&call.legs) {
+        let body = invitation_of(state, &call, leg_number, &leg.callee);
+        for endpoint in state.calling_endpoints(&leg.callee) {
+            state.calling.outgoing.push(Outgoing {
+                endpoint,
+                path: String::new(),
+                body: body.clone(),
+            });
+        }
+    }
+    state.changed();
+}
+
+/// The invitation of `call`'s leg `leg` to `callee` (`deliveries.json`'s 1:1 or group shape).
+fn invitation_of(state: &State, call: &MockCall, leg: u64, callee: &str) -> Value {
+    let forked = |op: &str| cc_url(&format!("forked/{}/{leg}/i1/{leg}/{op}", call.id));
+    let caller_name = state.display_name(&call.caller);
+    let index = usize::from(call.group_chat.is_some());
+    invitation(index, &call.caller, callee, |gp| {
+        let notification = &mut gp["callNotification"];
+        for op in ["attach", "progress", "reject"] {
+            notification["links"][op] = json!(forked(op));
+        }
+        notification["from"]["displayName"] = json!(caller_name);
+        if let (0, Some(offer)) = (index, &call.offer) {
+            notification["mediaContent"] = offer.clone();
+        }
+        gp["conversationInvitation"]["conversationController"] = json!(conversation_url(&call.conversation, None));
+        if let Some(chat) = &call.group_chat {
+            gp["groupChat"]["threadId"] = json!(chat);
+            gp["conversationInvitation"]["groupCallInitiator"] = json!(call.caller);
+        }
+    })
+}
+
+/// The media controller (the test call) or the call's mixer (a group call, a join) accepts the leg whose acceptance
+/// callback is `acceptance` (`answers.json`'s acceptance, the controller's answer).
+fn accept_by_controller(state: &mut State, index: usize, acceptance: Option<&str>) {
+    let call = &mut state.calling.calls[index];
+    call.phase = CallPhase::Connected;
+    let id = call.id.clone();
+    let answers: Value = serde_json::from_str(ECHO_ANSWERS).unwrap_or_default();
+    let body = fixture(
+        &answers["acceptance_callback"]["body"].to_string(),
+        &[("<guid:5>", &id)],
+    );
+    state.call_back(acceptance, body);
+}
+
+/// A join of the running call on `conversation`: with media it enters the call and the mixer accepts it; without, it
+/// subscribes to the conversation only.
+fn join(state: &mut State, account: &str, conversation: &str, body: &Value) -> Option<ResponseTemplate> {
+    let index = state
+        .calling
+        .calls
+        .iter()
+        .position(|call| call.conversation == conversation && call.phase != CallPhase::Ended)?;
+    log(state, index, account, "join");
+    if body.get("callInvitation").is_some() {
+        let links = Callbacks::of(body);
+        let acceptance = links.acceptance.clone();
+        state.calling.calls[index].joined.push((account.to_owned(), links));
+        accept_by_controller(state, index, acceptance.as_deref());
+    }
+    Some(json_answer(200, &conversation_answer(conversation)))
+}
+
+/// An operation on a conversation (`leave`, `add`, the endpoint's state and metadata, its participant properties).
+fn conversation_op(
+    state: &mut State,
+    account: &str,
+    conversation: &str,
+    op: &str,
+    body: &Value,
+) -> Option<ResponseTemplate> {
+    let index = state
+        .calling
+        .calls
+        .iter()
+        .position(|call| call.conversation == conversation)?;
+    log(state, index, account, op);
+    match op {
+        "leave" => leave(state, index, body),
+        "add" => {
+            let echo = body
+                .pointer("/participants/to/0/id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let deliveries: Value = serde_json::from_str(ECHO_DELIVERIES).unwrap_or_default();
+            let success = deliveries["cases"]
+                .as_array()
+                .and_then(|cases| {
+                    cases.iter().find(|case| {
+                        case["callback"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("addParticipantSuccess")
+                    })
+                })
+                .map(|case| fixture(&case["body"].to_string(), &[("<guid:echo>", object_id(echo))]))
+                .unwrap_or_default();
+            let link = body
+                .pointer("/links/addParticipantSuccess")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            state.call_back(link.as_deref(), success);
+        }
+        "updateEndpointMetadata" | "updateEndpointState" | "updateParticipantProperties" => {}
+        _ => return None,
+    }
+    Some(status(200))
+}
+
+/// Someone leaves call `index`: a cancel while it rings, the call's end to everyone once it is up.
+fn leave(state: &mut State, index: usize, body: &Value) {
+    let code = body
+        .pointer("/callTransactionEnd/code")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let phrase = body
+        .pointer("/callTransactionEnd/phrase")
+        .and_then(Value::as_str)
+        .unwrap_or("CallEndReasonLocalUserInitiated")
+        .to_owned();
+    end_call(state, index, code, &phrase);
+}
+
+/// Ends call `index` for everyone in it, with `code` and `phrase`: every endpoint that attached to a leg not answered
+/// elsewhere, the one that answered, the caller and those who joined get the call's end.
+fn end_call(state: &mut State, index: usize, code: i64, phrase: &str) {
+    let call = state.calling.calls[index].clone();
+    if call.phase == CallPhase::Ended {
+        return;
+    }
+    let body = end_body(code, phrase);
+    let mut ends: Vec<Option<String>> = call
+        .legs
+        .iter()
+        .filter(|leg| !leg.declined)
+        .flat_map(|leg| leg.attached.iter().map(|(_, end)| Some(end.clone())))
+        .collect();
+    ends.push(call.caller_links.as_ref().and_then(|links| links.end.clone()));
+    ends.extend(call.joined.iter().map(|(_, links)| links.end.clone()));
+    for end in ends {
+        state.call_back(end.as_deref(), body.clone());
+    }
+    state.calling.calls[index].phase = CallPhase::Ended;
+}
+
+/// The call's end as delivered (the echo call's `call/end`, with `code` and `phrase`).
+fn end_body(code: i64, phrase: &str) -> Value {
+    let deliveries: Value = serde_json::from_str(ECHO_DELIVERIES).unwrap_or_default();
+    let mut body = deliveries["cases"]
+        .as_array()
+        .and_then(|cases| cases.iter().find(|case| case["observed"] == "ended"))
+        .map_or_else(
+            || json!({"callEnd": {}}),
+            |case| fixture(&case["body"].to_string(), &[]),
+        );
+    body["callEnd"]["code"] = json!(code);
+    body["callEnd"]["phrase"] = json!(phrase);
+    body
+}
+
+/// An operation on a call controller's link: `(kind, call, leg)` and its last segment.
+fn controller_op(
+    state: &mut State,
+    account: &str,
+    (kind, call, leg): (&str, &str, &str),
+    op: Option<&str>,
+    body: &Value,
+) -> Option<ResponseTemplate> {
+    let index = state.calling.calls.iter().position(|known| known.id == call)?;
+    let leg_index = leg.parse::<usize>().ok().and_then(|leg| leg.checked_sub(1));
+    let op = op.unwrap_or_default();
+    log(state, index, account, op);
+    match (kind, op) {
+        ("forked", "attach") => attach(state, index, leg_index?, body),
+        ("incoming", "progress") => {
+            let endpoint = endpoint_of_sender(body, "/callProgress/sender/endpointId");
+            leg_mut(state, index, leg_index?)?.ringing.push(endpoint);
+            Some(status(200))
+        }
+        ("incoming", "accept") => accept(state, index, leg_index?, body),
+        ("incoming", "reject") => reject(state, index, leg_index?, body),
+        ("callAcceptance", "acknowledge") | ("mcProxy", "applyChannelParameters") => Some(status(200)),
+        _ => None,
+    }
+}
+
+fn leg_mut(state: &mut State, index: usize, leg: usize) -> Option<&mut Leg> {
+    state.calling.calls.get_mut(index)?.legs.get_mut(leg)
+}
+
+fn endpoint_of_sender(body: &Value, pointer: &str) -> String {
+    body.pointer(pointer)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A callee's endpoint attaches to its leg: its `call/end` kept, the attach answer (`follow_ups.json`'s) for the leg.
+fn attach(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<ResponseTemplate> {
+    let end = body.pointer("/attach/links/end")?.as_str()?.to_owned();
+    let (endpoint, _) = target(&end)?;
+    let call = state.calling.calls[index].clone();
+    leg_mut(state, index, leg)?.attached.push((endpoint, end));
+    let number = (leg + 1).to_string();
+    let follow_ups: Value = serde_json::from_str(FOLLOW_UPS).unwrap_or_default();
+    let answer = fixture(
+        &follow_ups["attach_answer"].to_string(),
+        &[
+            ("SyntheticCall1/27/t/2", &format!("{}/{number}/t/{number}", call.id)),
+            ("SyntheticConversation1", &call.conversation),
+            ("<guid:a>", object_id(&call.caller)),
+            ("<guid:b>", object_id(&call.legs[leg].callee)),
+        ],
+    );
+    Some(json_answer(200, &answer))
+}
+
+/// A callee's endpoint answers its leg: the call is up; the caller's acceptance carries the callee's answer; the
+/// callee's other endpoints that attached get the call's end (answered elsewhere).
+fn accept(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<ResponseTemplate> {
+    let call = state.calling.calls[index].clone();
+    let callee = call.legs.get(leg)?.callee.clone();
+    let endpoint = endpoint_of_sender(body, "/callAcceptance/acceptedBy/endpointId");
+    // the answering endpoint: the one its callbacks are on
+    let answering = body
+        .pointer("/callAcceptance/links")
+        .and_then(Value::as_object)
+        .and_then(|links| links.values().find_map(|link| target(link.as_str()?)))
+        .map(|(endpoint, _)| endpoint);
+    let others: Vec<String> = call.legs[leg]
+        .attached
+        .iter()
+        .filter(|(attached, _)| Some(attached) != answering.as_ref())
+        .map(|(_, end)| end.clone())
+        .collect();
+    let leg_state = leg_mut(state, index, leg)?;
+    leg_state.accepted_by = Some(endpoint);
+    leg_state.attached.retain(|(_, end)| !others.contains(end));
+    state.calling.calls[index].phase = CallPhase::Connected;
+    for end in &others {
+        state.call_back(Some(end), end_body(0, ANSWERED_ELSEWHERE));
+    }
+    let answer_media = body.pointer("/callAcceptance/mediaContent").cloned();
+    let acceptance = acceptance_body(&call, &callee, None, answer_media);
+    let caller_acceptance = call.caller_links.as_ref().and_then(|links| links.acceptance.clone());
+    state.call_back(caller_acceptance.as_deref(), acceptance);
+    let number = (leg + 1).to_string();
+    let follow_ups: Value = serde_json::from_str(FOLLOW_UPS).unwrap_or_default();
+    let mut answer = fixture(
+        &follow_ups["accept_answer"].to_string(),
+        &[("SyntheticCall1/27/", &format!("{}/{number}/", call.id))],
+    );
+    if let Some(links) = answer
+        .pointer_mut("/callAcceptanceAcknowledgement/links")
+        .and_then(Value::as_object_mut)
+    {
+        links.remove("controlVideoStreaming");
+    }
+    Some(json_answer(200, &answer))
+}
+
+/// The caller's acceptance of `call` by `callee` (`deliveries.json`'s acceptance), its media the callee's answer;
+/// `endpoint_type` `Some("voicemail")` for the callee's voicemail.
+fn acceptance_body(call: &MockCall, callee: &str, endpoint_type: Option<&str>, media: Option<Value>) -> Value {
+    let deliveries: Value = serde_json::from_str(CHAT_DELIVERIES).unwrap_or_default();
+    let case = deliveries["cases"]
+        .as_array()
+        .and_then(|cases| cases.iter().find(|case| case["observed"] == "acceptance"))
+        .map(|case| case["body"].to_string())
+        .unwrap_or_default();
+    let mut body = fixture(&case, &[("SyntheticCall1", &call.id), ("<guid:b>", object_id(callee))]);
+    match endpoint_type {
+        Some(kind) => body["callAcceptance"]["acceptedBy"]["endpointType"] = json!(kind),
+        None => {
+            if let Some(by) = body["callAcceptance"]["acceptedBy"].as_object_mut() {
+                by.remove("endpointType");
+            }
+        }
+    }
+    if let Some(media) = media {
+        body["callAcceptance"]["mediaContent"] = media;
+    }
+    body
+}
+
+/// A callee's endpoint declines its leg: its other endpoints stop ringing; a 1:1 call's caller is forwarded to the
+/// callee's voicemail, which accepts (as captured).
+fn reject(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<ResponseTemplate> {
+    let code = body
+        .pointer("/callEnd/code")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let call = state.calling.calls[index].clone();
+    let callee = call.legs.get(leg)?.callee.clone();
+    let ends: Vec<String> = call.legs[leg].attached.iter().map(|(_, end)| end.clone()).collect();
+    let leg_state = leg_mut(state, index, leg)?;
+    leg_state.declined = true;
+    for end in ends {
+        state.call_back(Some(&end), end_body(code, "CallEndReasonLocalUserInitiated"));
+    }
+    if call.group_chat.is_none() {
+        forward_to_voicemail(state, index, &callee);
+    }
+    Some(status(200))
+}
+
+/// The caller of call `index` is forwarded to `callee`'s voicemail, which accepts the call (as captured).
+fn forward_to_voicemail(state: &mut State, index: usize, callee: &str) {
+    let call = state.calling.calls[index].clone();
+    let Some(links) = call.caller_links.clone() else {
+        return;
+    };
+    let deliveries: Value = serde_json::from_str(CHAT_DELIVERIES).unwrap_or_default();
+    let progress = deliveries["cases"]
+        .as_array()
+        .and_then(|cases| cases.iter().find(|case| case["observed"] == "nothing"))
+        .map(|case| fixture(&case["body"].to_string(), &[("<guid:b>", object_id(callee))]))
+        .unwrap_or_default();
+    state.call_back(links.progress.as_deref(), progress);
+    let acceptance = acceptance_body(&call, callee, Some("voicemail"), None);
+    state.call_back(links.acceptance.as_deref(), acceptance);
+    state.calling.calls[index].phase = CallPhase::Connected;
+}
+
+/// A caller the mock plays rings `to` (no client places it): the call's id.
+pub(crate) fn ring(state: &mut State, from: &str, to: &[String], group_chat: Option<String>) -> String {
+    let index = new_call(state, from, to, group_chat, None, None);
+    ring_callees(state, index);
+    state.calling.calls[index].id.clone()
+}
+
+/// Call `id`'s ring ends with `code` and `phrase` (the caller cancelled, it timed out): every endpoint that attached
+/// to a leg still ringing gets the call's end; a group call runs on (to be joined); a caller of the account's own in a
+/// 1:1 call that timed out is forwarded to the callee's voicemail (as captured).
+pub(crate) fn end_ring(state: &mut State, id: &str, code: i64, phrase: &str) -> bool {
+    let Some(index) = state.calling.calls.iter().position(|call| call.id == id) else {
+        return false;
+    };
+    let call = state.calling.calls[index].clone();
+    let ringing: Vec<&Leg> = call
+        .legs
+        .iter()
+        .filter(|leg| leg.accepted_by.is_none() && !leg.declined)
+        .collect();
+    for leg in &ringing {
+        for (_, end) in &leg.attached {
+            state.call_back(Some(end), end_body(code, phrase));
+        }
+    }
+    let first = ringing.first().map(|leg| leg.callee.clone());
+    match (call.group_chat.is_some(), first) {
+        // a group call runs on with its caller in it, to be joined
+        (true, _) => state.calling.calls[index].phase = CallPhase::Connected,
+        (false, Some(callee)) if call.caller_links.is_some() => forward_to_voicemail(state, index, &callee),
+        (false, _) => state.calling.calls[index].phase = CallPhase::Ended,
+    }
+    true
+}
+
+/// Call `id`, up, is ended by the party the mock plays: everyone in it gets the call's end.
+pub(crate) fn hang_up(state: &mut State, id: &str) -> bool {
+    let Some(index) = state.calling.calls.iter().position(|call| call.id == id) else {
+        return false;
+    };
+    end_call(state, index, 0, "CallEndReasonLocalUserInitiated");
+    true
+}
