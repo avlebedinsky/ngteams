@@ -692,12 +692,35 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-media/src/*`
 
-- [ ] tests first: Opus encode and decode as the capture configures it (in-band FEC) with a jitter buffer and loss
+- [x] tests first: Opus encode and decode as the capture configures it (in-band FEC) with a jitter buffer and loss
       concealment; two native peers on loopback through the TURN test server carry a tone both ways (Goertzel) over
       the file backend, with loss and reordering injected
-- [ ] the media session runs on threads of its own (never the engine's runtime), with a bounded handoff to and from the
+      → done: `teams_media::codec` (`opus` 0.4.0, the newest, bundling libopus through `opusic-sys` 0.7.5,
+      BSD-3-Clause; neither logs; audited in `crates/teams-ui/tests/reach.rs` beside the PipeWire binding):
+      `OpusConfig::from_fmtp` reads the captured lines (`useinbandfec=1`, the controller's `usedtx=1`), the
+      `Encoder` makes a 20 ms packet of two 10 ms device frames (DTX's "nothing to send" kept off the wire, the
+      media time counting on), the `Decoder` decodes, recovers a lost packet from the next one's FEC and conceals;
+      `teams_media::jitter` (packets back in media-time order once 3 are held, a missing one handed out for FEC
+      recovery or concealment, late, duplicate and overflowing ones dropped and counted, playout stopped after 5
+      concealed in a row until it fills again). `media-loop`'s sans-IO peer moved to `teams_media::peer` with its
+      tests, beside the echo spike's `RelayedPeer`; `str0m` holds no audio back for a gap any more (its reordering
+      window 0: the jitter buffer reorders). The loopback TURN server impairs the RTP it relays (`Impairment`:
+      seeded loss and one-place reordering; STUN, DTLS and RTCP untouched). `tests/codec.rs` (the onset lost in
+      a packet comes back from FEC at 0.34 where concealment gives 0.0000003), `tests/jitter.rs`, `tests/peer.rs`,
+      `tests/session.rs`: A's 440 Hz and B's 660 Hz each in the other's recording at about 0.5 and in 100% of the
+      20 ms windows (bound 98% clean, 97% with 5% loss and 10% reordering; FEC recovered packets on both sides);
+      `media-loop` keeps its `UdpPeer` on the moved peer and the echo spike its probe over both
+- [x] the media session runs on threads of its own (never the engine's runtime), with a bounded handoff to and from the
       device seam
-- [ ] the gate passes
+      → done: `teams_media::session::MediaSession` (`teams-media-mic` encodes into a capture queue keeping the
+      newest 10 packets, `teams-media-net` owns the `RelayedPeer` and answers SDP commands within 5 s,
+      `teams-media-spk` plays one 10 ms frame every 10 ms from the jitter buffer; `close` or drop hangs up, releases
+      the allocation and joins them); the drop-oldest queue moved from the PipeWire backend to `teams_media::queue`
+      and counts what it drops. `tests/session_threads.rs` (the three threads named while it runs, none after
+      `close`), `tests/session.rs`: a stuck speaker fills only the jitter buffer (A still sends), a stuck microphone
+      stops only what is sent (A still plays), a device that goes away is reported, the far end's hang-up is
+      reported, an answer with no offer refused
+- [x] the gate passes
 
 ### Task 10: Echo cancellation, noise suppression and gain control
 **Files:**

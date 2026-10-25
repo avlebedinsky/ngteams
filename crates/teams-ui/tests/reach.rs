@@ -3,7 +3,8 @@
 //! client stays the null one, so nothing in their sources hands GPUI another; nothing in them reads a token's value
 //! out of its `Secret`; and the search is the store's, never the service's (no client crate names Substrate).
 //!
-//! The media's PipeWire binding is held to the same audit (no network client, licences, no logger of its own).
+//! The media's PipeWire and Opus bindings are held to the same audit (no network client, licences, no logger of
+//! their own).
 //!
 //! The UI kit's audit (M2 Task 7), what can be checked of it: `gpui-component`'s whole tree for the host holds no
 //! HTTP or WebSocket client, and every package in it is under a licence an Apache-2.0/MIT project can take; the
@@ -256,22 +257,25 @@ fn the_kit_brings_no_network_client_and_only_licences_we_can_take() {
 /// The PipeWire binding the device seam's backend takes (`teams-media`): the crate and the crates it binds through.
 const PIPEWIRE_BINDING: [&str; 4] = ["pipewire", "libspa", "pipewire-sys", "libspa-sys"];
 
-/// The media's PipeWire binding, held to the kit's audit before it reaches the app: no HTTP or WebSocket client in its
-/// tree, only licences we can take, and no logger in the binding itself (libpipewire's own warnings go to stderr, not
-/// through `log`, so nothing of it can bypass `teams-log` or the compile-time cap).
-#[test]
-fn the_media_s_pipewire_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
+/// The Opus binding the media's codec takes (`teams-media`): the crate and the crate that builds and binds libopus.
+const OPUS_BINDING: [&str; 2] = ["opus", "opusic-sys"];
+
+/// A native binding `teams-media` takes (its first crate the direct dependency), held to the kit's audit before it
+/// reaches the app: no HTTP or WebSocket client in its tree, only licences we can take, and no logger in the binding
+/// itself, so nothing of it can bypass `teams-log` or the compile-time cap.
+fn audit_media_binding(binding: &[&str]) {
     let metadata = metadata();
+    let root = binding[0];
     assert!(
         direct_dependencies(&metadata, "teams-media")
             .iter()
-            .any(|name| name == "pipewire"),
-        "teams-media takes the binding"
+            .any(|name| name == root),
+        "teams-media takes {root}"
     );
-    let tree = closure(&metadata, "pipewire");
-    for name in PIPEWIRE_BINDING {
+    let tree = closure(&metadata, root);
+    for name in binding {
         assert!(
-            tree.iter().any(|found| found["name"] == name),
+            tree.iter().any(|found| found["name"] == *name),
             "{name} is in the binding's tree"
         );
     }
@@ -287,13 +291,25 @@ fn the_media_s_pipewire_binding_brings_no_network_client_no_logger_and_only_lice
         .map(|found| format!("{} {} ({})", found["name"], found["version"], found["license"]))
         .collect();
     assert!(refused.is_empty(), "under a licence we can't take: {refused:?}");
-    for name in PIPEWIRE_BINDING {
+    for name in binding {
         let loggers: Vec<String> = direct_dependencies(&metadata, name)
             .into_iter()
             .filter(|dependency| ["log", "tracing"].contains(&dependency.as_str()))
             .collect();
         assert!(loggers.is_empty(), "{name} logs through {loggers:?}");
     }
+}
+
+/// libpipewire's own warnings go to stderr, not through `log`.
+#[test]
+fn the_media_s_pipewire_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
+    audit_media_binding(&PIPEWIRE_BINDING);
+}
+
+/// libopus (BSD-3-Clause, built from the source `opusic-sys` bundles) logs nothing.
+#[test]
+fn the_media_s_opus_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
+    audit_media_binding(&OPUS_BINDING);
 }
 
 #[test]

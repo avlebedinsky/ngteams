@@ -65,9 +65,10 @@ Nothing in this task sent traffic to Microsoft, ran a browser, or answered a cal
 
 ### str0m through the relay
 
-`media_loop::peer::Peer::with_candidate` takes a relayed candidate (`Candidate::relayed(<allocation>, <socket to the
-server>, "udp")`); `relay::RelayedPeer` carries what str0m sends from the allocation through the TURN client and hands
-relayed data back with the allocation as its destination. The echo probe (`src/echo.rs`) connects (ICE, DTLS, SRTP),
+`Peer::with_candidate` (`media_loop::peer` then, `teams_media::peer` since M3) takes a relayed candidate
+(`Candidate::relayed(<allocation>, <socket to the server>, "udp")`); `RelayedPeer` (this spike's `relay` then,
+`teams_media::peer` since M3) carries what str0m sends from the allocation through the TURN client and hands relayed
+data back with the allocation as its destination. The echo probe (`src/echo.rs`) connects (ICE, DTLS, SRTP),
 sends a 440 Hz tone as Opus in real time and decodes what comes back.
 
 In `tests/relay.rs` our peer sits behind the relay with the relayed candidate as its only one, and an echo stand-in (a

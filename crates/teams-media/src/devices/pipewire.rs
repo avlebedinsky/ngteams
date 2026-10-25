@@ -37,10 +37,9 @@ use std::time::{Duration, Instant};
 
 use super::{AudioFrame, AudioSink, AudioSource, DeviceError, Devices, VideoFrame, VideoSource};
 
-mod queue;
 mod streams;
 
-use queue::Queue;
+use crate::queue::Queue;
 
 /// Which PipeWire server a build may open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -495,6 +494,6 @@ impl AudioSink for Speaker {
     /// Queues the frame's samples (the oldest dropped beyond [`SPEAKER_QUEUE`]); [`DeviceError::Closed`] once the
     /// playback stream ended or the server went away.
     fn play(&mut self, frame: &AudioFrame) -> Result<(), DeviceError> {
-        self.queue.extend(frame.samples().iter().copied())
+        self.queue.extend(frame.samples().iter().copied()).map(drop)
     }
 }

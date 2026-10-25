@@ -1,7 +1,7 @@
 //! Spike 3b: a native echo call. What exists and is tested offline:
 //!
-//! - [`relay`]: a `media_loop` peer behind a TURN allocation (the TURN client, its relay link and the UDP-to-TCP
-//!   fallback are `teams-media`'s, moved there in M3);
+//! - [`relay`]: the media paths the probe runs over, `teams-media`'s peer behind a TURN allocation (the peer, the TURN
+//!   client, its relay link and the UDP-to-TCP fallback are `teams-media`'s, moved there in M3) or a plain UDP peer;
 //! - [`echo`]: the tone probe that measures the echo over any media path;
 //! - [`signaling`]: the web client's test call as the Task 18 capture shows it (the call start with no callee, the
 //!   conversation it opens, the acceptance with the remote SDP, the `add` that brings the echo in, the TURN

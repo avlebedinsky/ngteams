@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 opus.workspace = true
 str0m.workspace = true
+# the sans-IO peer, moved there from this spike
+teams-media.workspace = true
 thiserror.workspace = true
 
 [lints]

@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 
 use echo_call::Error;
 use echo_call::echo::{EchoConfig, EchoReport, run_echo};
-use echo_call::relay::{MediaPath, RelayedPeer};
 use str0m::change::{SdpAnswer, SdpOffer};
 use support::EchoBot;
+use teams_media::peer::RelayedPeer;
 use teams_media::relay::{RelayLink, RelayOptions, RelayServer};
 use teams_media::stun::Framing;
 use teams_media::test_turn::{PASSWORD, TurnServer, USER};

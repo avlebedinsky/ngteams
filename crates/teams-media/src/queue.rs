@@ -1,9 +1,10 @@
-//! The bounded queues between the loop thread and the devices.
+//! The bounded queues media crosses threads on: between the PipeWire backend's loop thread and the devices, and
+//! between a media session's capture thread and its network thread.
 //!
 //! A full queue drops its oldest entries, so whoever reads always gets the newest media: a reader that falls behind
-//! (or starts late) loses the backlog, not the present. The loop thread holds its end as [`Closing`], which closes
-//! the queue when the stream ends (it errs, is unlinked, is closed, or the loop stops with the server's fatal
-//! error); the device side then hears [`DeviceError::Closed`].
+//! (or starts late) loses the backlog, not the present. The writing side may hold its end as [`Closing`], which
+//! closes the queue when dropped (the PipeWire loop thread's end, when its stream errs, is unlinked, is closed, or the
+//! loop stops with the server's fatal error); the reading side then hears [`DeviceError::Closed`].
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -12,7 +13,7 @@ use std::time::Duration;
 use crate::devices::DeviceError;
 
 /// One bounded queue, shared by the loop thread and a device.
-pub(super) struct Queue<T> {
+pub(crate) struct Queue<T> {
     shared: Arc<Shared<T>>,
 }
 
@@ -37,7 +38,7 @@ struct State<T> {
 
 impl<T> Queue<T> {
     /// An open queue keeping at most `capacity` entries.
-    pub(super) fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State {
@@ -54,11 +55,11 @@ impl<T> Queue<T> {
         self.shared.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Adds `items` at the back, dropping the oldest beyond the capacity.
+    /// Adds `items` at the back, dropping the oldest beyond the capacity; returns how many were dropped.
     ///
     /// # Errors
     /// [`DeviceError::Closed`] once the queue is closed (nothing is added).
-    pub(super) fn extend(&self, items: impl IntoIterator<Item = T>) -> Result<(), DeviceError> {
+    pub(crate) fn extend(&self, items: impl IntoIterator<Item = T>) -> Result<usize, DeviceError> {
         let mut state = self.lock();
         if state.closed {
             return Err(DeviceError::Closed);
@@ -68,19 +69,20 @@ impl<T> Queue<T> {
         state.items.drain(..excess);
         drop(state);
         self.shared.arrived.notify_one();
-        Ok(())
+        Ok(excess)
     }
 
-    /// Adds one entry at the back, dropping the oldest when full; nothing once closed.
-    pub(super) fn push(&self, item: T) {
-        let _ = self.extend(std::iter::once(item));
+    /// Adds one entry at the back, dropping the oldest when full (returns how many were dropped); nothing once
+    /// closed.
+    pub(crate) fn push(&self, item: T) -> usize {
+        self.extend(std::iter::once(item)).unwrap_or(0)
     }
 
     /// The oldest entry, waiting up to `timeout` for one; `None` when none came.
     ///
     /// # Errors
     /// [`DeviceError::Closed`] once the queue is closed and drained.
-    pub(super) fn recv(&self, timeout: Duration) -> Result<Option<T>, DeviceError> {
+    pub(crate) fn recv(&self, timeout: Duration) -> Result<Option<T>, DeviceError> {
         let (mut state, _) = self
             .shared
             .arrived
@@ -94,26 +96,26 @@ impl<T> Queue<T> {
     }
 
     /// Runs `take` over the entries, oldest first (the speaker's playback takes what it plays from the front).
-    pub(super) fn with_items<R>(&self, take: impl FnOnce(&mut VecDeque<T>) -> R) -> R {
+    pub(crate) fn with_items<R>(&self, take: impl FnOnce(&mut VecDeque<T>) -> R) -> R {
         take(&mut self.lock().items)
     }
 
     /// Closes the queue: no entry is added any more, and a reader hears [`DeviceError::Closed`] once it is drained.
-    pub(super) fn close(&self) {
+    pub(crate) fn close(&self) {
         self.lock().closed = true;
         self.shared.arrived.notify_all();
     }
 }
 
 /// The loop thread's end of a queue: closes it when dropped (its stream gone).
-pub(super) struct Closing<T>(Queue<T>);
+pub(crate) struct Closing<T>(Queue<T>);
 
 impl<T> Closing<T> {
-    pub(super) fn new(queue: Queue<T>) -> Self {
+    pub(crate) fn new(queue: Queue<T>) -> Self {
         Self(queue)
     }
 
-    pub(super) fn queue(&self) -> &Queue<T> {
+    pub(crate) fn queue(&self) -> &Queue<T> {
         &self.0
     }
 }
@@ -150,8 +152,8 @@ mod tests {
     #[test]
     fn audio_beyond_the_capacity_drops_the_oldest_samples() {
         let queue = Queue::new(4);
-        queue.extend([1, 2, 3]).unwrap();
-        queue.extend([4, 5, 6]).unwrap();
+        assert_eq!(queue.extend([1, 2, 3]).unwrap(), 0);
+        assert_eq!(queue.extend([4, 5, 6]).unwrap(), 2, "the dropped are counted");
         let held: Vec<i32> = queue.with_items(|items| items.drain(..).collect());
         assert_eq!(held, [3, 4, 5, 6]);
     }

@@ -24,8 +24,8 @@ use pipewire::spa::pod::{self, Pod, Value};
 use pipewire::spa::utils::{Direction, Fraction, Rectangle, SpaTypes};
 use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 
-use super::queue::{Closing, Queue};
 use crate::devices::{AudioFrame, FRAME_SAMPLES, PixelFormat, SAMPLE_RATE, VideoFrame};
+use crate::queue::{Closing, Queue};
 
 /// The device side's way into the loop thread.
 pub(super) enum Command {

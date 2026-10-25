@@ -1,5 +1,6 @@
 //! Tests only (`test-support`): a minimal TURN server on loopback (UDP and TCP, long-term credentials, permissions,
-//! channels), for this crate's tests and the echo-call spike's.
+//! channels), for this crate's tests and the echo-call spike's. It can impair the media it relays ([`Impairment`]):
+//! drop RTP packets and send some after the one that followed them, as a lossy network would.
 //!
 //! The server is ours, built on the crate's own STUN codec, so it can share a misreading of the RFC with the client;
 //! the codec is checked separately against the RFC 5769 test vectors (`tests/turn.rs`), and `tests/relay.rs` can also
@@ -11,7 +12,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::stun::{
     Attribute, ChannelData, Class, Framing, IntegrityKey, Kind, Message, Method, StreamDecoder, TransactionId,
@@ -23,6 +24,20 @@ pub const PASSWORD: &str = "lab-password";
 pub const REALM: &str = "turn.test";
 const NONCE: &str = "test-nonce-0001";
 const LIFETIME: u32 = 600;
+/// How long a packet held back for reordering waits for the next one before it goes anyway.
+const HOLD_LIMIT: Duration = Duration::from_millis(60);
+
+/// What the server does to the media it relays between allocations: only RTP (a first byte of version 2 and a payload
+/// type outside RTCP's range); STUN, DTLS and RTCP pass untouched, so the connection is made as on a clean network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Impairment {
+    /// RTP packets dropped, in percent.
+    pub loss_percent: u8,
+    /// RTP packets held back and sent after the next one to the same client, in percent.
+    pub reorder_percent: u8,
+    /// Seeds the choices, so a run drops and reorders the same packets.
+    pub seed: u64,
+}
 
 /// What the server saw, for assertions.
 #[derive(Debug, Default)]
@@ -30,6 +45,10 @@ pub struct Counters {
     pub allocations: AtomicUsize,
     pub send_indications: AtomicUsize,
     pub channel_data: AtomicUsize,
+    /// RTP packets relayed between allocations (dropped ones included).
+    pub rtp_relayed: AtomicUsize,
+    pub rtp_dropped: AtomicUsize,
+    pub rtp_reordered: AtomicUsize,
 }
 
 /// The TURN server, running on its own thread until dropped.
@@ -47,6 +66,14 @@ impl TurnServer {
     /// # Errors
     /// When a port can't be bound.
     pub fn start() -> io::Result<Self> {
+        Self::start_impaired(Impairment::default())
+    }
+
+    /// The same, impairing the RTP it relays as `impairment` says.
+    ///
+    /// # Errors
+    /// When a port can't be bound.
+    pub fn start_impaired(impairment: Impairment) -> io::Result<Self> {
         let udp = UdpSocket::bind("127.0.0.1:0")?;
         udp.set_nonblocking(true)?;
         let tcp = TcpListener::bind("127.0.0.1:0")?;
@@ -61,6 +88,9 @@ impl TurnServer {
             allocations: HashMap::new(),
             key: IntegrityKey::long_term(USER, REALM, PASSWORD),
             counters: Arc::clone(&counters),
+            impairment,
+            dice: Dice::new(impairment.seed),
+            held: HashMap::new(),
         };
         let flag = Arc::clone(&stop);
         let thread = thread::spawn(move || {
@@ -116,6 +146,32 @@ struct State {
     allocations: HashMap<Client, Allocation>,
     key: IntegrityKey,
     counters: Arc<Counters>,
+    impairment: Impairment,
+    dice: Dice,
+    /// A packet held back for reordering, per client, and since when.
+    held: HashMap<Client, (Vec<u8>, Instant)>,
+}
+
+/// The impairment's choices: xorshift64*, from the seed.
+struct Dice(u64);
+
+impl Dice {
+    fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+
+    /// Whether a choice of `percent` in a hundred comes up.
+    fn roll(&mut self, percent: u8) -> bool {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        percent > 0 && self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) % 100 < u64::from(percent)
+    }
+}
+
+/// Whether a relayed datagram is RTP (version 2, a payload type outside RTCP's 64..=95 after the marker bit).
+fn is_rtp(data: &[u8]) -> bool {
+    data.len() >= 12 && data[0] >> 6 == 2 && !(64..=95).contains(&(data[1] & 0x7F))
 }
 
 impl State {
@@ -324,14 +380,53 @@ impl State {
                         .with(Attribute::Data(buf[..len].to_vec()))
                         .encode(None, false),
                 };
-                out.push((*client, bytes));
+                out.push((*client, is_rtp(&buf[..len]), bytes));
             }
         }
         let busy = !out.is_empty();
-        for (client, bytes) in out {
-            self.send(client, &bytes);
+        for (client, rtp, bytes) in out {
+            if rtp {
+                self.impair(client, bytes);
+            } else {
+                self.send(client, &bytes);
+            }
         }
+        self.release_held();
         busy
+    }
+
+    /// Relays one RTP packet to `client`: dropped, held back until the next one, or sent (with the one held back
+    /// before it after it).
+    fn impair(&mut self, client: Client, bytes: Vec<u8>) {
+        self.counters.rtp_relayed.fetch_add(1, Ordering::Relaxed);
+        if self.dice.roll(self.impairment.loss_percent) {
+            self.counters.rtp_dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if !self.held.contains_key(&client) && self.dice.roll(self.impairment.reorder_percent) {
+            self.counters.rtp_reordered.fetch_add(1, Ordering::Relaxed);
+            self.held.insert(client, (bytes, Instant::now()));
+            return;
+        }
+        self.send(client, &bytes);
+        if let Some((held, _)) = self.held.remove(&client) {
+            self.send(client, &held);
+        }
+    }
+
+    /// Sends the packets held back longer than [`HOLD_LIMIT`].
+    fn release_held(&mut self) {
+        let due: Vec<Client> = self
+            .held
+            .iter()
+            .filter(|(_, (_, since))| since.elapsed() >= HOLD_LIMIT)
+            .map(|(client, _)| *client)
+            .collect();
+        for client in due {
+            if let Some((held, _)) = self.held.remove(&client) {
+                self.send(client, &held);
+            }
+        }
     }
 
     fn send(&mut self, client: Client, bytes: &[u8]) {

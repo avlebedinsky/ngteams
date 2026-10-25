@@ -4864,6 +4864,7 @@ version = "0.1.0"
 dependencies = [
  "opus",
  "str0m",
+ "teams-media",
  "thiserror 2.0.21",
 ]
 
@@ -8305,6 +8306,7 @@ dependencies = [
  "hmac 0.13.0",
  "libc",
  "md-5 0.11.0",
+ "opus",
  "pipewire",
  "serde_json",
  "sha1 0.11.0",

@@ -3,8 +3,8 @@
 //! back, and the loop records one-way and round-trip latency.
 //!
 //! The pieces are separate so the native echo call (Task 19) can reuse them: [`tone`] and [`goertzel`] make and check
-//! the signal, [`codec`] wraps Opus, [`peer`] is the sans-IO `str0m` peer (bring your own transport, e.g. TURN), and
-//! [`loopback`] is the in-process harness with its latency statistics.
+//! the signal, [`codec`] wraps Opus, [`peer`] puts the sans-IO `str0m` peer (`teams_media::peer::Peer`, moved there
+//! in M3 with its tests) on a UDP socket, and [`loopback`] is the in-process harness with its latency statistics.
 
 use std::time::Duration;
 
@@ -27,15 +27,15 @@ pub enum Error {
     /// A socket failed.
     #[error("socket: {0}")]
     Io(#[from] std::io::Error),
-    /// `str0m` refused an input, an SDP or a candidate.
+    /// `str0m` refused an SDP or a candidate.
     #[error("str0m: {0}")]
     Rtc(String),
+    /// The peer failed (`str0m` refused an input, or media was written before the audio line was connected).
+    #[error(transparent)]
+    Peer(#[from] teams_media::Error),
     /// libopus failed, or a frame had the wrong shape.
     #[error("opus: {0}")]
     Opus(String),
-    /// Media was written before the audio m-line was connected.
-    #[error("the audio m-line is not connected yet")]
-    NotConnected,
     /// The loop's settings can't work.
     #[error("bad loop config: {0}")]
     Config(String),

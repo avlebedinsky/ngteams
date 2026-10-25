@@ -303,6 +303,13 @@ runs out of line order, so neither the count of lines nor a line's place is free
 mid is the call's line at its place. It labels its lines as the web client does: the last video line of an offer with
 more than one, while the call has no sharing line, is `applicationsharing-video`, the others `main-video`.
 
+**Opus as the lines ask for it**: every captured Opus line carries `a=ptime:20` and `a=fmtp:111
+minptime=10;useinbandfec=1` (the media controller's answer adds `usedtx=1`). The native client sends 20 ms packets
+of mono Opus with in-band FEC (each packet also carries a coarse copy of the one before it), turns DTX on only when
+the far end's line asks for it (silence then goes out as a keep-alive now and then, and the media time keeps counting
+through the gap), and on receipt plays packets in media-time order from a jitter buffer kept near its depth, decoding
+a lost packet from the next one's FEC when it has it and concealing it otherwise.
+
 ## Seen beside the call
 
 - The caller's own call log's read horizon: `PUT …/v1/users/ME/conversations/48:calllogs/properties?name=consumptionhorizon`

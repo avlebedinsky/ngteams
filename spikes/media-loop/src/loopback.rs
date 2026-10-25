@@ -11,7 +11,7 @@ use str0m::change::{SdpAnswer, SdpOffer};
 
 use crate::codec::{OpusDecoder, OpusEncoder};
 use crate::goertzel::dominant_frequency;
-use crate::peer::{AudioFrame, PeerEvent, UdpPeer};
+use crate::peer::{PeerEvent, ReceivedAudio, UdpPeer};
 use crate::tone::ToneGenerator;
 use crate::{Error, FRAME_DURATION, FRAME_SAMPLES, SAMPLE_RATE};
 
@@ -253,7 +253,7 @@ fn echo(b: &mut UdpPeer, received: &mut Listener, sent_at: &HashMap<u64, Instant
 
 /// The audio frame of an event. A disconnect fails the run even though ICE may recover from it: on loopback it means
 /// something broke, and the gap would skew the latency figures.
-fn audio(event: PeerEvent) -> Result<Option<AudioFrame>, Error> {
+fn audio(event: PeerEvent) -> Result<Option<ReceivedAudio>, Error> {
     match event {
         PeerEvent::Audio(frame) => Ok(Some(frame)),
         PeerEvent::Disconnected => Err(Error::Rtc("ICE disconnected mid-loop".into())),
@@ -326,7 +326,7 @@ impl Listener {
         })
     }
 
-    fn on_frame(&mut self, frame: &AudioFrame, sent_at: &HashMap<u64, Instant>) -> Result<(), Error> {
+    fn on_frame(&mut self, frame: &ReceivedAudio, sent_at: &HashMap<u64, Instant>) -> Result<(), Error> {
         let pcm = self.decoder.decode(&frame.payload)?;
         let decoded = Instant::now();
         if let Some(sent) = sent_at.get(&frame.rtp_time) {
