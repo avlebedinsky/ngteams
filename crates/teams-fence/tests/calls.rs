@@ -1060,6 +1060,57 @@ async fn a_follow_up_must_be_its_operation_s_kind_from_the_caller_adding_nobody(
 
 // --- the end ---
 
+/// The call leg's own link of the call controller's call `call`, the keep-alive's.
+fn call_leg_url(call: &str) -> String {
+    format!("{PROXY}/{CC_HOST}/cc/v1/active/{call}/1/a1/1?i=10-0-0-2&e=1")
+}
+
+/// The keep-alive to `url`, as the lab rule maps it.
+fn keep_alive(url: &str) -> TestResult<Target> {
+    match classify("POST", url, br#"{"callParticipantUpdate":{}}"#) {
+        Contact::Write(target) => Ok(target),
+        other => Err(format!("the keep-alive to {url} isn't a write: {other:?}").into()),
+    }
+}
+
+#[tokio::test]
+async fn the_keep_alive_passes_only_at_the_call_leg_link_its_acceptance_bound_while_the_call_is_live() -> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    let keep = keep_alive(&call_leg_url("call-1"))?;
+    assert_eq!(
+        verdict(&lab.fence, keep.clone()).await,
+        Err(UNREGISTERED),
+        "not bound yet"
+    );
+    lab.fence
+        .observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("call-1")));
+    assert_eq!(verdict(&lab.fence, keep.clone()).await, Ok(()));
+    assert_eq!(
+        verdict(&lab.fence, keep.clone()).await,
+        Ok(()),
+        "every time it falls due"
+    );
+    // another call's leg, another leg of the call, an operation's link under the leg: none bound
+    for other in [
+        call_leg_url("call-2"),
+        call_leg_url("call-1").replace("/1/a1/1?", "/1/a2/1?"),
+    ] {
+        assert_eq!(
+            verdict(&lab.fence, keep_alive(&other)?).await,
+            Err(UNREGISTERED),
+            "{other}"
+        );
+    }
+    // once the call leaves, it is over
+    let leave = write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?;
+    assert_eq!(verdict(&lab.fence, leave).await, Ok(()));
+    assert_eq!(verdict(&lab.fence, keep.clone()).await, Err(ENDED));
+    lab.fence.observe_delivery(&delivery(2, END_PATH, b"{}".to_vec()));
+    assert_eq!(verdict(&lab.fence, keep).await, Err(ENDED));
+    Ok(())
+}
+
 #[tokio::test]
 async fn after_its_leave_only_the_leave_passes_and_after_its_end_nothing() -> TestResult {
     let lab = new_lab()?;

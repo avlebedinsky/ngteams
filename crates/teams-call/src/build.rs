@@ -8,7 +8,7 @@ use teams_fence::Mri;
 use teams_proto::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, AttachCall, AttachParts, CallLink, DeclineCall, Invitee, JoinCall, JoinMedia, JoinParts,
-    LeaveCall, LeaveReason, Links, MediaContent, RenegotiateMedia, ReportRinging, StartCall, StartParts,
+    KeepAliveCall, LeaveCall, LeaveReason, Links, MediaContent, RenegotiateMedia, ReportRinging, StartCall, StartParts,
     UpdateEndpointMetadata, UpdateEndpointState,
 };
 
@@ -245,6 +245,11 @@ pub(crate) fn answer_media(call: &mut Call, link: &CallLink, answer: MediaConten
         media: answer,
     };
     Ok(CallWrite::AnswerMedia(AnswerMedia::new(&call.context, link, &parts)?))
+}
+
+/// The call's keep-alive, at the call leg's own link (the acceptance's or the `accept`'s answer's `callLeg`).
+pub(crate) fn keep_alive(call: &Call, link: &CallLink) -> Result<CallWrite, CallError> {
+    Ok(CallWrite::KeepAlive(KeepAliveCall::new(&call.context, link)?))
 }
 
 /// The acknowledgement of the answer to the account's renegotiation, at the link that answer handed out.

@@ -30,7 +30,7 @@ use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster, one_to_one
 use teams_headless::availability;
 use teams_headless::chat::{ChatError, LabNames, resolve};
 use teams_headless::cli::{Cli, Command as CliCommand};
-use teams_headless::commands::{self, CommandError, WatchEnd};
+use teams_headless::commands::{self, Answering, CommandError, WatchEnd};
 use teams_headless::lab::display_name;
 use teams_headless::print::name_source_word;
 use teams_mock::{
@@ -450,7 +450,7 @@ fn watching(
     let (stop, stopped) = oneshot::channel::<()>();
     let mut out = printed.clone();
     let task = tokio::spawn(async move {
-        let end = commands::watch(&mut handle, json, &names(), &mut out, async {
+        let end = commands::watch(&mut handle, json, Answering::Nothing, &names(), &mut out, async {
             let _ = stopped.await;
         })
         .await

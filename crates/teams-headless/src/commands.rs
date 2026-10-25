@@ -5,7 +5,9 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::time::Duration;
 
-use teams_core::{Action, CatchUpReport, EngineError, EngineHandle, Event, MAX_WATCHED};
+use teams_core::{
+    Action, CallAction, CallId, CatchUpReport, EngineError, EngineHandle, EngineRequests, Event, MAX_WATCHED,
+};
 use teams_store::{OutboxEntry, OutboxState, Store, StoreError};
 use teams_trouter::Stop;
 
@@ -256,15 +258,30 @@ pub enum WatchEnd {
     EngineStopped,
 }
 
+/// Whether `watch` answers calls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Answering {
+    /// It answers nothing (`watch` without `--answer-lab-calls`).
+    #[default]
+    Nothing,
+    /// `--answer-lab-calls`: it answers each invitation the engine offers ([`Event::IncomingCall`]), which the lab
+    /// fence offers only from a lab caller naming only lab accounts, and nothing else. The answer goes out as the
+    /// engine's [`CallAction::Answer`], under the fence's own judgement again; every other invitation the engine ignored
+    /// already (nothing is sent for it). The only sender of an answer but the user's own action, and it lives here alone.
+    LabCalls,
+}
+
 /// Prints each event as it is received, with its receive time: one JSON object per line with `json`
-/// ([`event_json`], as [`json_line`] writes it), else a line of text ([`event_line`]); each line flushed at once. Runs until `stop` is ready, the
-/// push channel stops for good, or the engine stops.
+/// ([`event_json`], as [`json_line`] writes it), else a line of text ([`event_line`]); each line flushed at once. With
+/// [`Answering::LabCalls`] each offered invitation is answered after its line is printed (`<ms> call_answer call=<id>`,
+/// or `call_answer_refused` with why). Runs until `stop` is ready, the push channel stops for good, or the engine stops.
 ///
 /// # Errors
 /// When the output can't be written.
 pub async fn watch(
     handle: &mut EngineHandle,
     json: bool,
+    answering: Answering,
     names: &LabNames,
     out: &mut impl Write,
     stop: impl Future<Output = ()>,
@@ -285,10 +302,30 @@ pub async fn watch(
                 };
                 writeln!(out, "{line}")?;
                 out.flush()?;
-                if let Event::PushStopped(why) = event {
-                    return Ok(WatchEnd::PushStopped(why));
+                match event {
+                    Event::PushStopped(why) => return Ok(WatchEnd::PushStopped(why)),
+                    Event::IncomingCall(incoming) if answering == Answering::LabCalls => {
+                        answer(handle.requests(), incoming.call, out).await?;
+                    }
+                    _ => {}
                 }
             }
         }
     }
+}
+
+/// Answers the offered invitation `call` ([`Answering::LabCalls`]), printing what became of it.
+async fn answer(requests: EngineRequests, call: CallId, out: &mut impl Write) -> Result<(), CommandError> {
+    match requests.call(CallAction::Answer { call }).await {
+        Ok(answered) => writeln!(out, "{} call_answer call={}", now_ms(), answered.get())?,
+        Err(error) => writeln!(
+            out,
+            "{} call_answer_refused call={} why={}",
+            now_ms(),
+            call.get(),
+            json_line(&serde_json::Value::String(error.to_string()))
+        )?,
+    }
+    out.flush()?;
+    Ok(())
 }

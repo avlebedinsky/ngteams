@@ -14,9 +14,9 @@ pub use call::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CALL_START_URL, CALLING_BASE, CALLING_HOST,
     CallContext, CallLink, CallParticipant, CallWriteError, ChannelParameters, ClientInfo, DeclineCall, Invitee,
-    JoinCall, JoinMedia, JoinParts, LeaveCall, LeaveReason, Links, MediaContent, MediaDescription, MediaDescriptions,
-    MeetingInfo, RenegotiateMedia, ReportRinging, StartCall, StartParts, TEST_CALL_SCENARIO, UpdateEndpointMetadata,
-    UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
+    JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason, Links, MediaContent, MediaDescription,
+    MediaDescriptions, MeetingInfo, RenegotiateMedia, ReportRinging, StartCall, StartParts, TEST_CALL_SCENARIO,
+    UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
 };
 pub(crate) use call::{CallWire, Registry, on_calling_base};
 pub use chat::{

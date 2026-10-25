@@ -146,9 +146,7 @@ On **Accept with audio** the callee's page posts, in order:
   gets no acceptance delivery): the call leg's `links` (`callLeg` `…/cc/v1/active/<call>/…`, `mediaRenegotiation`
   `…/renegotiate`, `updateMediaDescriptions`, `updateCallState`, `hold`, `monitor`, `transfer`, `replacement`,
   `retargetCompletion`, `startOutgoingNegotiation`, and in a group call `applyChannelParameters` on `mcProxy`) and
-  `callKeepAliveInterval` (2700 s). No run held a call that long, so what a keep-alive is on the wire isn't captured:
-  the native client (`teams-call`) keeps the interval and tells when it falls due, and sends nothing for it until a
-  capture of a web client's call held past it shows the request (M3 Task 16).
+  `callKeepAliveInterval` (2700 s): what goes on it, at the `callLeg` link, is in [The keep-alive](#the-keep-alive).
 
 Once the call is up it puts its endpoint metadata (`PUT …/updateEndpointMetadata`, as the caller does) and posts its own
 participant properties (`updateParticipantProperties`: `{"from", "to": [<itself, its aiVoiceConsent>], "links":
@@ -223,6 +221,28 @@ registrations`, a plain request the fence lets through), and its new connection 
 (`POST …/socket.io/1/xhr-polling/<id>`). It sent nothing to the call: no `notificationLinks`, no link of the call
 changed in the 25 s after; the call's media went on, the call stayed up on both pages, and the callee's `leave`
 afterwards passed on the same links.
+
+## The keep-alive
+
+`ab-call --call keep-alive` (2026-10-25) held an answered a → b call 47 minutes with every page's requests recorded.
+Two keep-alives came, from each page:
+
+- **The call's** (`callKeepAliveInterval`, 2700 s in every acceptance and acknowledgement): 2430 s into the call (90 %
+  of the interval, as the bundle's `scheduleKeepAlives` sets its timer), each page posted `{"callParticipantUpdate":
+  {}}` to its call leg's own `callLeg` link: the caller's from its acceptance (`…/cc/v1/active/<call>/<n>/<leg>/<n>
+  ?i&e`), the callee's from its accept's answer (the same form, a leg of its own). Denied (the caller's as unreadable,
+  the callee's held back), each page tried it again twice, 4 s apart, then waited for the next interval. Its answer
+  isn't captured. Mapped since: `CallOperation::KeepAlive` on exactly a link the acceptance or the accept's answer
+  bound, exactly that body ([endpoints.md](endpoints.md#calling-teamsmicrosoftcomtrap-apiflightproxyteamsmicrosoftcomapiv2));
+  the native client sends it the same way (`teams-call`, every 90 % of the interval while the call is up, a keep-alive
+  not taken ending nothing).
+- **The conversation's** (`sendConversationKeepAlive`, its period from the client's configuration): about 2200 s into
+  the call each page posted its conversation subscription again (`participants.from`, `roster`, the conversation's
+  callbacks) to the conversation's `notificationLinks` link, tried twice more 4 s apart. Not mapped: no native
+  request is made for it.
+
+With both denied throughout, the call stayed up on both pages past 2820 s, its media going on, until b hung up: neither
+keep-alive missing ended it within the run.
 
 ## The ring's ends
 

@@ -29,12 +29,17 @@
 //! - [`ab_call`] and [`abc_call`] (accounts a and b, or a, b and c, as `echo-call`): a calls b from their 1:1 chat, or
 //!   the a–b–c group chat; the run's step (`--call`) holds back a's starts, or plays out the ring with every callee's
 //!   sends held back; recorded.
+//! - [`ab_call_native`] (account b's web client, as `ab-call`, and account a's native client, `teams-headless` spawned
+//!   from `TEAMS_HEADLESS_BIN`): a's native client calls b's page and b answers, b's page calls a's native client and
+//!   it answers (`watch --answer-lab-calls`), and a call answered on b's page while b's native client rings; each side
+//!   must hear the other's tone; recorded.
 //!
 //! The steps are in [`dsl`]. A run fails (`proto-lab run` exits non-zero) when its goal isn't reached, when the fence
 //! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`]. The writing scenarios
 //! judge by the reviewed expected-deny list ([`expected`]), which never changes what the fence denies.
 
 pub mod ab_call;
+pub mod ab_call_native;
 pub mod ab_chat;
 pub mod ab_chat_full;
 pub mod ab_file;
@@ -96,6 +101,9 @@ pub enum ScenarioName {
     AbCall,
     /// Account a calls the a–b–c group chat, as the run's step (`--call`) says; recorded.
     AbcCall,
+    /// b's web client and a's native client (`teams-headless`, `TEAMS_HEADLESS_BIN`) call each other both ways, then a call
+    /// answered on b's page while b's native client rings; recorded.
+    AbCallNative,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -125,6 +133,7 @@ impl ScenarioName {
             Self::EchoCall => "echo-call",
             Self::AbCall => "ab-call",
             Self::AbcCall => "abc-call",
+            Self::AbCallNative => "ab-call-native",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -357,13 +366,27 @@ pub async fn run(
         ScenarioName::AbTrouter => ab_trouter::run(paths, options, ab_trouter::Activity::Reported).await,
         ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,
         ScenarioName::ChatShapes => chat_shapes::run(paths, options).await,
-        ScenarioName::EchoCall => echo_call::run(paths, options).await,
-        ScenarioName::AbCall => ab_call::run(paths, options).await,
-        ScenarioName::AbcCall => abc_call::run(paths, options).await,
+        ScenarioName::EchoCall | ScenarioName::AbCall | ScenarioName::AbcCall | ScenarioName::AbCallNative => {
+            run_call(scenario, paths, options).await
+        }
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth
         | ScenarioName::OwnPresenceManualHeld
         | ScenarioName::OwnPresenceManual => own_presence::run_named(paths, options, scenario).await,
+    }
+}
+
+/// Runs one of the call scenarios ([`run`]).
+async fn run_call(
+    scenario: ScenarioName,
+    paths: &LabPaths,
+    options: RunOptions,
+) -> Result<ScenarioReport, ScenarioError> {
+    match scenario {
+        ScenarioName::EchoCall => echo_call::run(paths, options).await,
+        ScenarioName::AbCall => ab_call::run(paths, options).await,
+        ScenarioName::AbcCall => abc_call::run(paths, options).await,
+        _ => ab_call_native::run(paths, options).await,
     }
 }

@@ -130,6 +130,8 @@ pub(crate) enum Step {
     MediaAnswer,
     /// The acknowledgement of the answer to the account's renegotiation.
     MediaAcknowledge,
+    /// The call's keep-alive: its failing ends nothing (the web client sends the next one regardless).
+    KeepAlive,
 }
 
 impl Step {
@@ -150,15 +152,25 @@ impl Step {
             Self::Renegotiate => "renegotiate",
             Self::MediaAnswer => "media_answer",
             Self::MediaAcknowledge => "media_acknowledge",
+            Self::KeepAlive => "keep_alive",
         }
     }
 }
 
-/// The keep-alive interval the call's services asked for, and when it next falls due.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The keep-alive interval the call's services asked for, when the keep-alive next falls due (every 90 % of the
+/// interval, as the web client sends it), and the call leg's own link it goes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KeepAlive {
     pub(crate) interval: Duration,
     pub(crate) next: Instant,
+    pub(crate) link: Option<teams_proto::CallLink>,
+}
+
+impl KeepAlive {
+    /// How often it goes: 90 % of the interval the services asked for (the web client's `scheduleKeepAlives`).
+    pub(crate) fn period(&self) -> Duration {
+        self.interval * 9 / 10
+    }
 }
 
 /// The acknowledgement of a placed or joined call's acceptance: its delivery response went (or couldn't be built),

@@ -10,7 +10,7 @@
 //!   start is held back by a forced deny labelled [`START_HELD`], so nobody is invited and nothing rings. The capture
 //!   keeps the starts' bodies: what a start to a lab callee names (its `participants.to`) and what it names of its
 //!   chat.
-//! - `answer`, `decline`, `cancel`, `timeout`, `video`, `dropped`, `join`: a's browser and each callee's. Each callee
+//! - `answer`, `decline`, `cancel`, `timeout`, `video`, `dropped`, `join`, `keep-alive`: a's browser and each callee's. Each callee
 //!   opens the Calls app (the client starts its calling stack only then), waits for its calling Trouter socket and,
 //!   before a calls, holds back everything its page sends to the calling services but its ring-time sends
 //!   ([`ring_rules`], labelled [`RING_SENDS`]: the fence decides its `attach`, `progress` and the invitation's
@@ -31,6 +31,9 @@
 //!   - `join` (`abc-call` only): every callee but the last answers; once the last one's ring ended it loads the chat
 //!     and clicks the header's join of the running call, its join decided by the fence (everything else held back
 //!     under [`JOIN_HELD`]); it must then show the call screen, and its capture the join's answer registering the call.
+//!   - `keep-alive`: as `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past its keep-alive interval, every
+//!     page's requests recorded: the run that captures the call's keep-alive (until it is mapped the fence denies it,
+//!     and that deny fails the run).
 //!
 //!   The run records [`AFTER_RING`] more and notes when each callee's incoming call went.
 //!
@@ -93,6 +96,9 @@ pub enum CallStep {
     /// `abc-call` only: a calls, every callee but the last answers, and once the last one's ring ended it joins the
     /// running call from the chat's header (what else its page sends held back under [`JOIN_HELD`]).
     Join,
+    /// As `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past the call's keep-alive interval, to record its
+    /// keep-alive (a request no mapping lets through yet: the fence denies it, and the run fails on that deny).
+    KeepAlive,
 }
 
 impl CallStep {
@@ -108,6 +114,7 @@ impl CallStep {
             Self::Video => "video",
             Self::Dropped => "dropped",
             Self::Join => "join",
+            Self::KeepAlive => "keep-alive",
         }
     }
 
@@ -117,7 +124,7 @@ impl CallStep {
     #[must_use]
     pub fn callee_action(self) -> Option<CalleeAction> {
         match self {
-            Self::Answer | Self::Video | Self::Dropped | Self::Join => Some(CalleeAction {
+            Self::Answer | Self::Video | Self::Dropped | Self::Join | Self::KeepAlive => Some(CalleeAction {
                 label: ANSWER_HELD,
                 button: ACCEPT_AUDIO_CSS,
                 what: "answer",
@@ -181,7 +188,7 @@ pub const DECLINE_CSS: &str = concat!(
     r#"[data-testid="notification-wrapper"][aria-labelledby*="cn-calling-main-content"] "#,
     r#"button[aria-label="Decline call"]"#
 );
-const INCOMING_SCREEN_CSS: &str = INCOMING_CALL_CSS;
+pub(crate) const INCOMING_SCREEN_CSS: &str = INCOMING_CALL_CSS;
 /// How long a callee's capture gets to show the run's call's invitation once the page shows the incoming call.
 pub const INVITATION_WAIT: Duration = Duration::from_secs(5);
 
@@ -236,10 +243,12 @@ pub fn start_held_rule() -> Result<ForcedDeny, regex::Error> {
 }
 
 /// What a callee's page sends once it clicked answer that the fence maps on the offered invitation, as a URL pattern
-/// (`POST`): its endpoint state in the call's conversation and its acceptance.
+/// (`POST`): its endpoint state in the call's conversation and its acceptance, and the answered call's operations (the
+/// keep-alive at the call leg's own link among them).
 pub const ANSWER_SENDS: &str = concat!(
     r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/",
     r"(cc/v1/incoming/[^?]+/accept|cc/v1/negotiations/[^?]+/answer|cc/v1/active/[^?]+/renegotiate|",
+    r"cc/v1/active/[^/?]+/[^/?]+/[^/?]+/[^/?]+|",
     r"cc/v1/mediaAnswers/[^?]+/acknowledge|cc/v1/active/[^?]+/updateMediaDescriptions|",
     r"cc/v1/mcProxy/[^?]+/applyChannelParameters|",
     r"conv/[^/?]+/(updateEndpointState|updateParticipantProperties|leave))(\?|$)"
@@ -252,6 +261,7 @@ pub const JOIN_SENDS: &str = concat!(
     r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/",
     r"(conv/[^/?]+|conv/[^/?]+/(updateEndpointState|updateParticipantProperties|leave)|cc/v1/callAcceptance/[^?]+/acknowledge|",
     r"cc/v1/negotiations/[^?]+/answer|cc/v1/active/[^?]+/(renegotiate|updateMediaDescriptions)|",
+    r"cc/v1/active/[^/?]+/[^/?]+/[^/?]+/[^/?]+|",
     r"cc/v1/mediaAnswers/[^?]+/acknowledge|cc/v1/mcProxy/[^?]+/applyChannelParameters)(\?|$)"
 );
 
@@ -359,7 +369,9 @@ pub fn caller_forced(step: CallStep) -> &'static [&'static str] {
 #[must_use]
 pub fn callee_forced(step: CallStep) -> &'static [&'static str] {
     match step {
-        CallStep::Answer | CallStep::Video | CallStep::Dropped => &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD],
+        CallStep::Answer | CallStep::Video | CallStep::Dropped | CallStep::KeepAlive => {
+            &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD]
+        }
         CallStep::Join => &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD, JOIN_HELD],
         CallStep::Decline => &[EARLIER_RUN_PROBE, RING_SENDS, DECLINE_HELD],
         _ => &[EARLIER_RUN_PROBE, RING_SENDS],
@@ -623,7 +635,7 @@ impl CallPlan {
     ) -> Result<(), ScenarioError> {
         let at = now_ms();
         *placed = Some(at);
-        place_call(caller, Modality::Audio, report).await?;
+        place_call((CALLER, caller), Modality::Audio, report).await?;
         match self.step.callee_action() {
             Some(action) => {
                 if let Err(error) = wait_incoming(callees, report).await {
@@ -673,7 +685,10 @@ impl CallPlan {
                 .notes
                 .push(format!("{alias}: clicked {} at {}", action.what, unix_ms()));
         }
-        if matches!(self.step, CallStep::Answer | CallStep::Video | CallStep::Dropped) {
+        if matches!(
+            self.step,
+            CallStep::Answer | CallStep::Video | CallStep::Dropped | CallStep::KeepAlive
+        ) {
             converse(self.step, caller, callees, report).await?;
         }
         if self.step == CallStep::Join {
@@ -735,7 +750,10 @@ impl CallPlan {
 
 /// Waits up to [`RING_WAIT`] for each callee to show the incoming call; one that doesn't within [`RING_SHOT`] leaves a
 /// screenshot of what it shows while it rings (`ringing.png` in its capture).
-async fn wait_incoming(callees: &mut [(Alias, LabSession)], report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+pub(crate) async fn wait_incoming(
+    callees: &mut [(Alias, LabSession)],
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
     for (alias, session) in callees.iter_mut() {
         let what = format!("{alias} shows the incoming call");
         if session
@@ -810,7 +828,7 @@ async fn start_held(
     caller.force_deny(start_held_rule().map_err(|error| setup(error.to_string()))?);
     for &modality in modalities {
         let before = held_back(&caller.denials(), START_HELD);
-        place_call(caller, modality, report).await?;
+        place_call((CALLER, caller), modality, report).await?;
         wait_held(caller, before + 1).await?;
         report
             .notes
@@ -865,10 +883,10 @@ impl Modality {
     }
 }
 
-/// a places a call from the chat's header ([`Modality::control`]): its button when the header shows one, else its item
+/// `alias` (a, but in `ab-call-native` b) places a call from the chat's header ([`Modality::control`]): its button when the header shows one, else its item
 /// in the call options; a group chat's confirmation, when it asks for one within [`CONFIRM_WAIT`], is confirmed.
-async fn place_call(
-    caller: &mut LabSession,
+pub(crate) async fn place_call(
+    (alias, caller): (Alias, &mut LabSession),
     modality: Modality,
     report: &mut ScenarioReport,
 ) -> Result<(), ScenarioError> {
@@ -881,15 +899,19 @@ async fn place_call(
         )
         .await?;
     if shown != Value::Bool(true) {
-        driver.click("a opens the call options", CALL_OPTIONS).await?;
+        driver
+            .click(&format!("{alias} opens the call options"), CALL_OPTIONS)
+            .await?;
         driver
             .wait_for(&format!("the item of {}", modality.what()), control, CONTROL_WAIT)
             .await?;
     }
-    driver.click(&format!("a starts {}", modality.what()), control).await?;
+    driver
+        .click(&format!("{alias} starts {}", modality.what()), control)
+        .await?;
     report
         .notes
-        .push(format!("{CALLER}: {} clicked at {}", modality.what(), unix_ms()));
+        .push(format!("{alias}: {} clicked at {}", modality.what(), unix_ms()));
     let asks = driver
         .wait_until_true(
             "a group call's confirmation",
@@ -900,10 +922,12 @@ async fn place_call(
         .await
         .is_ok();
     if asks {
-        driver.click("a confirms the group call", GROUP_CALL_CONFIRM).await?;
+        driver
+            .click(&format!("{alias} confirms the group call"), GROUP_CALL_CONFIRM)
+            .await?;
         report
             .notes
-            .push(format!("{CALLER}: confirmed the group call at {}", unix_ms()));
+            .push(format!("{alias}: confirmed the group call at {}", unix_ms()));
     }
     Ok(())
 }
@@ -947,7 +971,11 @@ async fn wait_held(caller: &mut LabSession, count: usize) -> Result<(), Scenario
 
 /// Starts the web client's calling stack in `alias`'s page: the Calls app starts it (the client defers it until then;
 /// `echo-call`'s step 2).
-async fn stand_up_calling(alias: Alias, driver: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+pub(crate) async fn stand_up_calling(
+    alias: Alias,
+    driver: &mut Driver,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
     // the client may load once more on its way to the origin it assigns the account: the app bar has to stay
     driver.wait_for("the Calls app", CALLS_APP, PAGE_OPEN).await?;
     tokio::time::sleep(PAGE_STEADY).await;
@@ -1002,7 +1030,7 @@ pub fn calling_socket_up(text: &str) -> bool {
 }
 
 /// Waits up to [`CALLING_SOCKET_WAIT`] until `alias`'s capture shows its calling socket up ([`calling_socket_up`]).
-async fn wait_calling_socket(
+pub(crate) async fn wait_calling_socket(
     alias: Alias,
     session: &mut LabSession,
     report: &mut ScenarioReport,
@@ -1029,7 +1057,7 @@ async fn wait_calling_socket(
 
 /// Back from the Calls app to the chat the page loaded at, in the same document: the Chat app shows the chat it showed
 /// last, and its header's call buttons.
-async fn back_to_chat(driver: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+pub(crate) async fn back_to_chat(driver: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
     driver.click("a opens the Chat app", CHAT_APP).await?;
     driver
         .wait_for("the chat's call buttons", CALL_BUTTONS, PAGE_OPEN)
@@ -1220,6 +1248,7 @@ async fn converse(
     match step {
         CallStep::Video => show_video(caller, callees, report).await?,
         CallStep::Dropped => drop_off(caller, callees, report).await?,
+        CallStep::KeepAlive => hold_long(caller, callees, KEEP_ALIVE_HOLD, report).await,
         _ => {}
     }
     for (alias, session) in callees.iter_mut() {
@@ -1304,6 +1333,54 @@ async fn note_microphone(alias: Alias, session: &LabSession, report: &mut Scenar
     report
         .notes
         .push(format!("{alias}: the microphone button says {label}"));
+}
+
+/// How long `keep-alive` holds the answered call: past the call's keep-alive interval (`callKeepAliveInterval`, 2700 s
+/// in every capture; the web client sends its keep-alive at 90 % of it).
+pub const KEEP_ALIVE_HOLD: Duration = Duration::from_mins(47);
+/// How often a long hold looks whether the caller's call screen still shows.
+const HOLD_CHECK: Duration = Duration::from_secs(60);
+
+/// Holds the answered call `hold`, every page's events taken in turn, the caller's call screen looked at every
+/// [`HOLD_CHECK`]: a call that ended meanwhile ends the hold (noted with its time).
+async fn hold_long(
+    caller: &mut LabSession,
+    callees: &mut [(Alias, LabSession)],
+    hold: Duration,
+    report: &mut ScenarioReport,
+) {
+    let started = tokio::time::Instant::now();
+    report
+        .notes
+        .push(format!("{CALLER}: holding the call from {}", unix_ms()));
+    let share = HOLD_CHECK / u32::try_from(callees.len() + 1).unwrap_or(1);
+    while started.elapsed() < hold {
+        linger(caller, share).await;
+        for (_, session) in callees.iter_mut() {
+            linger(session, share).await;
+        }
+        let mut driver = caller.driver();
+        driver.set_call_timeout(Duration::from_secs(10));
+        let up = driver
+            .evaluate(
+                &format!("{CALLER}'s call screen"),
+                &format!("document.querySelector({}) !== null", js_string(HANG_UP_CSS)),
+            )
+            .await;
+        if !matches!(up, Ok(Value::Bool(true))) {
+            report.notes.push(format!(
+                "{CALLER}: the call screen went {:?} into the hold, at {}",
+                started.elapsed(),
+                unix_ms()
+            ));
+            return;
+        }
+    }
+    report.notes.push(format!(
+        "{CALLER}: held the call {:?}, until {}",
+        started.elapsed(),
+        unix_ms()
+    ));
 }
 
 /// The call screen's camera button.
@@ -1591,7 +1668,11 @@ async fn hang_up_if_up(caller: &mut LabSession, report: &mut ScenarioReport) -> 
 }
 
 /// Clicks `alias`'s hang-up button if its call screen shows it; whether it did.
-async fn hang_up_page(alias: Alias, session: &LabSession, report: &mut ScenarioReport) -> Result<bool, ScenarioError> {
+pub(crate) async fn hang_up_page(
+    alias: Alias,
+    session: &LabSession,
+    report: &mut ScenarioReport,
+) -> Result<bool, ScenarioError> {
     let mut driver = session.driver();
     let up = driver
         .evaluate(
@@ -1607,7 +1688,7 @@ async fn hang_up_page(alias: Alias, session: &LabSession, report: &mut ScenarioR
     Ok(true)
 }
 
-const HANG_UP_CSS: &str = r#"#hangup-button, [data-tid="hangup-main-btn"]"#;
+pub(crate) const HANG_UP_CSS: &str = r#"#hangup-button, [data-tid="hangup-main-btn"]"#;
 
 /// Waits up to `limit` until no callee shows the incoming call any more, noting when each one's went (or that it
 /// didn't).
@@ -1638,7 +1719,7 @@ async fn wait_ring_end(callees: &mut [(Alias, LabSession)], limit: Duration, rep
 const WATCH_CONTROLS: &str = "(() => { const seen = window.__labRingControls = window.__labRingControls || {};      let count = 0; const note = (at) => document.querySelectorAll('[data-tid]').forEach(e => {        const t = e.getAttribute('data-tid'); if (!(t in seen) && count < 300) { seen[t] = at; if (at) count++; } });      note(0); new MutationObserver(() => note(Date.now())).observe(document.documentElement, {subtree: true,        childList: true, attributes: true, attributeFilter: ['data-tid']}); return true; })()";
 
 /// Starts recording what `alias`'s page shows while it rings ([`WATCH_CONTROLS`]).
-async fn watch_controls(alias: Alias, session: &LabSession) -> Result<(), ScenarioError> {
+pub(crate) async fn watch_controls(alias: Alias, session: &LabSession) -> Result<(), ScenarioError> {
     session
         .driver()
         .evaluate(&format!("{alias}'s ring controls"), WATCH_CONTROLS)
@@ -1718,7 +1799,7 @@ fn judge_caller(capture: &Path, step: CallStep, report: &mut ScenarioReport) {
 
 /// A callee's capture: the run's call's invitation must have reached its page ([`own_invitations`]; any other is only
 /// noted), its attach let through, and what its `role` sends ([`judge_step_sends`]).
-fn judge_callee(
+pub(crate) fn judge_callee(
     (alias, callee, role): (Alias, &str, CalleeRole),
     call: &RunCall,
     placed: Option<u64>,

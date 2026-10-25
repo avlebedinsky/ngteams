@@ -134,6 +134,8 @@ fn keep_alive(at: &Value) -> Option<u64> {
 pub(crate) struct AcceptAnswer {
     pub(crate) keep_alive: Option<u64>,
     pub(crate) renegotiation: Option<CallLink>,
+    /// The call leg's own link: where the keep-alive goes.
+    pub(crate) call_leg: Option<CallLink>,
 }
 
 /// An `accept`'s answer, as far as it reads.
@@ -147,6 +149,7 @@ pub(crate) fn accept_answer(body: &[u8]) -> AcceptAnswer {
     AcceptAnswer {
         keep_alive: keep_alive(&acknowledgement),
         renegotiation: link(&acknowledgement, "/links/mediaRenegotiation"),
+        call_leg: link(&acknowledgement, "/links/callLeg"),
     }
 }
 
@@ -159,6 +162,8 @@ pub(crate) struct Acceptance {
     pub(crate) answer: Option<MediaContent>,
     pub(crate) keep_alive: Option<u64>,
     pub(crate) renegotiation: Option<CallLink>,
+    /// The call leg's own link: where the keep-alive goes.
+    pub(crate) call_leg: Option<CallLink>,
 }
 
 /// The acceptance delivery `body`; `None` unless it is a `callAcceptance`.
@@ -170,6 +175,7 @@ pub(crate) fn acceptance(body: &[u8]) -> Option<Acceptance> {
         answer: acceptance.get("mediaContent").and_then(media),
         keep_alive: keep_alive(acceptance),
         renegotiation: link(acceptance, "/links/mediaRenegotiation"),
+        call_leg: link(acceptance, "/links/callLeg"),
     })
 }
 

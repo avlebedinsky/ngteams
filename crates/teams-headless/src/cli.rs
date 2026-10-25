@@ -147,11 +147,27 @@ pub enum Command {
         hold: u64,
     },
     /// Listens on the push channel (Trouter) until SIGINT or SIGTERM, catching up on every connect; prints each event
-    /// as it is received, with its receive time. Answers no delivery and no call.
+    /// as it is received, with its receive time. Answers no delivery and no call, unless `--answer-lab-calls`; registers
+    /// the calling stack only with `--calls` or `--answer-lab-calls`.
     Watch {
         /// One JSON object per line.
         #[arg(long)]
         json: bool,
+        /// Also registers the calling stack and answers each call the engine offers: only an invitation from a lab
+        /// account naming only lab accounts (the lab fence offers no other; every other one rings unanswered and
+        /// nothing is sent for it). The call's media is files, as `call`'s; at the end it prints what the (last)
+        /// call's recording holds of the tone at `--hear`. A write others see, through the fence.
+        #[arg(long)]
+        answer_lab_calls: bool,
+        /// Also registers the calling stack, answering nothing: an offered call rings here (printed) until its ring
+        /// ends (answered on another endpoint, cancelled, timed out). Its media files are as `--answer-lab-calls`'s.
+        #[arg(long, conflicts_with = "answer_lab_calls")]
+        calls: bool,
+        #[command(flatten)]
+        audio: CallAudio,
+        /// How long the microphone's tone lasts (silence after it), in seconds.
+        #[arg(long, default_value_t = 180)]
+        tone_seconds: u64,
     },
     /// Places a call once the calling socket is registered, holds it `--seconds` once its media connected, then hangs
     /// it up: `echo` (the test call of lab.toml's echo service, which plays back what it hears), or a chat (`a`, `b`,
@@ -163,16 +179,8 @@ pub enum Command {
     Call {
         /// `echo`, `a`, `b`, `c`, `abc` or a conversation id.
         target: String,
-        /// The microphone's tone, in Hz.
-        #[arg(long, default_value_t = DEFAULT_TONE_HZ)]
-        tone: f32,
-        /// The keyed tone looked for in the recording, in Hz (default: `--tone`, which the echo plays back).
-        #[arg(long)]
-        hear: Option<f32>,
-        /// Where the far end's audio is recorded (default: `<data_dir>/recordings/<alias>-call-<ms>.wav`, beside the
-        /// tone sent, `…-sent.wav`).
-        #[arg(long)]
-        record: Option<PathBuf>,
+        #[command(flatten)]
+        audio: CallAudio,
         /// Seconds the call is held once its media connected (the echo plays what it heard back until about 41 s
         /// after that).
         #[arg(long, default_value_t = 45)]
@@ -181,6 +189,46 @@ pub enum Command {
         #[arg(long, default_value_t = 60)]
         wait: u64,
     },
+    /// Joins the running call in a group chat late, as `call` places one (the same media, hold, hang-up and output):
+    /// once the calling socket is registered it waits for an invitation to the chat's call to ring here, lets it ring
+    /// unanswered, and once its ring ended joins the running call (the machine joins only a call an invitation named).
+    /// A write others see, through the fence (a join is judged like a start in that chat).
+    Join {
+        /// `abc` or a group chat's conversation id.
+        chat: ChatArg,
+        #[command(flatten)]
+        audio: CallAudio,
+        /// Seconds the call is held once its media connected.
+        #[arg(long, default_value_t = 45)]
+        seconds: u64,
+        /// Seconds the join may take to connect, from its placing.
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
+        /// Seconds the invitation may take to ring here, and then its ring to end.
+        #[arg(long, default_value_t = 180)]
+        ring_wait: u64,
+    },
+}
+
+/// A call's audio on files: the microphone's tone and how it is keyed, the tone looked for in the far end's recording,
+/// and where that goes.
+#[derive(Clone, Debug, PartialEq, clap::Args)]
+pub struct CallAudio {
+    /// The microphone's tone, in Hz.
+    #[arg(long, default_value_t = DEFAULT_TONE_HZ)]
+    pub tone: f32,
+    /// The microphone plays the tone in bursts (1.6 s on, 0.9 s off), as a lab browser's fake microphone does and its
+    /// page hears, instead of keyed in 200 ms slots of the fixed pattern.
+    #[arg(long)]
+    pub bursts: bool,
+    /// A tone looked for in the recording, in Hz; repeatable, one report each (default: `--tone`, which the echo plays
+    /// back).
+    #[arg(long)]
+    pub hear: Vec<f32>,
+    /// Where the far end's audio is recorded (default: `<data_dir>/recordings/<alias>-<command>-<ms>.wav`, beside the
+    /// tone sent, `…-sent.wav`).
+    #[arg(long)]
+    pub record: Option<PathBuf>,
 }
 
 /// The microphone's tone in a call by default, in Hz.

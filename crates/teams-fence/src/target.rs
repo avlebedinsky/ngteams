@@ -246,10 +246,14 @@ pub enum CallOperation {
     /// (media) the sender enters the call; without one it subscribes to the conversation's roster only (the client does
     /// so by itself once its own ring ended, to show the chat's join). Judged like a start in that chat.
     Join,
+    /// `POST …/cc/v1/active/<call>/<n>/<leg>/<n>` with `{"callParticipantUpdate": {}}`: the call's keep-alive, at the
+    /// call leg's own `callLeg` link (the caller's acceptance's, the callee's acceptance's acknowledgement's), sent
+    /// every 90 % of the call's `callKeepAliveInterval` (seen 2026-10-25, `ab-call --call keep-alive`).
+    KeepAlive,
 }
 
 impl CallOperation {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::UpdateEndpointMetadata,
         Self::Add,
         Self::Leave,
@@ -266,6 +270,7 @@ impl CallOperation {
         Self::MediaAcknowledge,
         Self::UpdateMediaDescriptions,
         Self::Join,
+        Self::KeepAlive,
     ];
 
     /// The name used in `fence.log`.
@@ -288,6 +293,7 @@ impl CallOperation {
             Self::MediaAcknowledge => "media_acknowledge",
             Self::UpdateMediaDescriptions => "update_media_descriptions",
             Self::Join => "join",
+            Self::KeepAlive => "keep_alive",
         }
     }
 
@@ -310,7 +316,8 @@ impl CallOperation {
             | Self::Renegotiate
             | Self::MediaAcknowledge
             | Self::UpdateMediaDescriptions
-            | Self::Join => "POST",
+            | Self::Join
+            | Self::KeepAlive => "POST",
         }
     }
 
@@ -332,8 +339,8 @@ impl CallOperation {
             Self::MediaAnswer => "answer",
             Self::Renegotiate => "renegotiate",
             Self::UpdateMediaDescriptions => "updateMediaDescriptions",
-            // the conversation's own URL: no segment after it
-            Self::Join => "",
+            // the conversation's own URL, the call leg's own: no segment after it
+            Self::Join | Self::KeepAlive => "",
         }
     }
 
@@ -363,6 +370,7 @@ impl CallOperation {
                 | Self::Reject
                 | Self::MediaAcknowledge
                 | Self::UpdateMediaDescriptions
+                | Self::KeepAlive
         )
     }
 

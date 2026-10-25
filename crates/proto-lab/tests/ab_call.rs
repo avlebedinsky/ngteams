@@ -205,6 +205,16 @@ fn each_account_expects_only_its_step_s_own_forced_denies() {
         callee_forced(CallStep::Decline),
         [EARLIER_RUN_PROBE, RING_SENDS, DECLINE_HELD]
     );
+    assert_eq!(
+        callee_forced(CallStep::KeepAlive),
+        [EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD]
+    );
+    assert_eq!(
+        caller_forced(CallStep::KeepAlive),
+        [EARLIER_RUN_PROBE, CALLER_JOIN_HELD]
+    );
+    assert_eq!(CallStep::KeepAlive.as_str(), "keep-alive");
+    assert_eq!(CallStep::KeepAlive.callee_action(), CallStep::Answer.callee_action());
     assert_eq!(callee_forced(CallStep::Cancel), [EARLIER_RUN_PROBE, RING_SENDS]);
     assert_eq!(callee_forced(CallStep::Timeout), [EARLIER_RUN_PROBE, RING_SENDS]);
     assert_eq!(CallStep::default(), CallStep::Answer);
@@ -629,10 +639,14 @@ fn once_it_answered_a_callee_s_mapped_sends_go_to_the_fence_and_the_rest_stays_h
             "POST",
             format!("{CC}/mcProxy/call-1/27/k27/3/applyChannelParameters?i=1"),
         ),
+        // the keep-alive, at the call leg's own link
+        ("POST", format!("{CC}/active/call-1/27/a4/3?i=1")),
     ] {
         assert!(!held(method, &url), "{method} {url}");
     }
     for (method, url) in [
+        ("PUT", format!("{CC}/active/call-1/27/a4/3?i=1")),
+        ("POST", format!("{CC}/active/call-1/27/a4?i=1")),
         ("POST", format!("{CC}/incoming/call-1/27/t/2/progress?i=1")),
         ("DELETE", format!("{CC}/incoming/call-1/27/t/2/reject?i=1")),
         ("POST", CONV.to_owned()),

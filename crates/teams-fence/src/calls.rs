@@ -19,7 +19,8 @@
 //!    pending call, with the same callbacks) is the one an acceptance binds to.
 //! 3. **The acceptance.** A delivery that arrives at exactly the path of the start's own `acceptance` callback
 //!    ([`crate::Fence::observe_delivery`]) binds the call controller's links its body names (`callAcceptance.links`:
-//!    `acknowledgement`, `applyChannelParameters`), all on the flight proxy under one call controller host and one call
+//!    `acknowledgement`, `applyChannelParameters`, `mediaRenegotiation`, `updateMediaDescriptions`, and `callLeg`, the
+//!    keep-alive's link), all on the flight proxy under one call controller host and one call
 //!    id; links naming another call, or a call other than one bound before, bind nothing. It may come before the answer
 //!    (then it waits on the pending call, which grants nothing until it is registered).
 //!
@@ -947,8 +948,9 @@ fn bind_acceptance(call: &mut Call, delivery: &Delivery) -> Observed {
 /// The call controller (host, call id) and the links of a mapped operation an acceptance's body names; `None` unless
 /// every link under `callAcceptance.links` that names a call names the same one, and at least one does.
 fn acceptance_links(body: &[u8]) -> Option<(Controller, Vec<Link>)> {
-    const NAMES: [(CallOperation, &str, &str); 4] = [
+    const NAMES: [(CallOperation, &str, &str); 5] = [
         (CallOperation::Acknowledge, "acknowledgement", "callAcceptance"),
+        (CallOperation::KeepAlive, "callLeg", "active"),
         (
             CallOperation::ApplyChannelParameters,
             "applyChannelParameters",
@@ -980,11 +982,20 @@ fn acceptance_links(body: &[u8]) -> Option<(Controller, Vec<Link>)> {
         .filter_map(|(operation, name, kind)| {
             let url = proxy_link(links.get(*name)?)?;
             let (host, call, at, last) = controller_path(&url)?;
-            let fits = (host, call) == controller && at == *kind && last == operation.segment();
+            let fits = (host, call) == controller && at == *kind && link_is(*operation, &url, &last);
             fits.then(|| (*operation, url.as_str().to_owned()))
         })
         .collect();
     Some((controller, bound))
+}
+
+/// Whether a call controller link ending in `last` is `operation`'s (its kind already checked): its captured segment
+/// last, or for a keep-alive the call leg's own link (`…/cc/v1/active/<call>/<n>/<leg>/<n>`, nothing after it).
+pub(crate) fn link_is(operation: CallOperation, url: &Url, last: &str) -> bool {
+    if operation == CallOperation::KeepAlive {
+        return url.path_segments().is_some_and(|segments| segments.count() == 11);
+    }
+    last == operation.segment()
 }
 
 /// A call controller link's host, call id, kind (`callAcceptance`, `mcProxy`, `active`, …) and last segment:

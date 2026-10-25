@@ -5,7 +5,7 @@
 
 use teams_proto::{
     AcceptCall, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddToCall, AnswerMedia, ApplyChannelParameters,
-    AttachCall, DeclineCall, JoinCall, LeaveCall, Mutating, RenegotiateMedia, ReportRinging, StartCall,
+    AttachCall, DeclineCall, JoinCall, KeepAliveCall, LeaveCall, Mutating, RenegotiateMedia, ReportRinging, StartCall,
     UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
 };
 
@@ -50,6 +50,7 @@ pub enum CallWrite {
     AnswerMedia(AnswerMedia),
     AcknowledgeMediaAnswer(AcknowledgeMediaAnswer),
     MediaDescriptions(UpdateMediaDescriptions),
+    KeepAlive(KeepAliveCall),
 }
 
 impl CallWrite {
@@ -73,6 +74,7 @@ impl CallWrite {
             Self::AnswerMedia(write) => sink.submit(id, write),
             Self::AcknowledgeMediaAnswer(write) => sink.submit(id, write),
             Self::MediaDescriptions(write) => sink.submit(id, write),
+            Self::KeepAlive(write) => sink.submit(id, write),
         }
     }
 
@@ -97,6 +99,7 @@ impl CallWrite {
             Self::AnswerMedia(_) => "media_answer",
             Self::AcknowledgeMediaAnswer(_) => "media_acknowledge",
             Self::MediaDescriptions(_) => "update_media_descriptions",
+            Self::KeepAlive(_) => "keep_alive",
         }
     }
 }

@@ -28,10 +28,14 @@ use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, 
 use teams_headless::call::{self, CallFiles, Plan, Report, Target};
 use teams_headless::chat::LabNames;
 use teams_headless::cli::{Cli, Command as CliCommand, DEFAULT_TONE_HZ};
+use teams_headless::commands::{self, Answering, WatchEnd};
 use teams_headless::lab::call_media;
 use teams_media::relay::RelayServer;
 use teams_media::turn::Transport as RelayTransport;
-use teams_mock::{AB_CHAT, AC_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT, TrouterMock};
+use teams_mock::{
+    AB_CHAT, ABC_CHAT, AC_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, OUTSIDER, TENANT,
+    TIMED_OUT, TrouterMock,
+};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, Trouter, TrouterCredentials};
@@ -43,6 +47,7 @@ const ECHO_DELAY: Duration = Duration::from_millis(400);
 /// A short call: quick to register and connect on the mock, held 4 s.
 const PLAN: Plan = Plan {
     register_within: Duration::from_secs(30),
+    invited_within: Duration::from_secs(30),
     connect_within: Duration::from_secs(30),
     hold: Duration::from_secs(4),
     end_within: Duration::from_secs(10),
@@ -56,15 +61,15 @@ fn call_takes_a_target_its_tone_what_to_hear_a_recording_and_its_times() {
     match parsed.command {
         CliCommand::Call {
             target,
-            tone,
-            hear,
-            record,
+            audio,
             seconds,
             wait,
         } => {
             assert_eq!(target, "echo");
-            assert!((tone - DEFAULT_TONE_HZ).abs() < f32::EPSILON);
-            assert_eq!((hear, record, seconds, wait), (None, None, 45, 60));
+            assert!((audio.tone - DEFAULT_TONE_HZ).abs() < f32::EPSILON);
+            assert!(!audio.bursts);
+            assert!(audio.hear.is_empty());
+            assert_eq!((audio.record, seconds, wait), (None, 45, 60));
         }
         other => panic!("{other:?}"),
     }
@@ -75,8 +80,11 @@ fn call_takes_a_target_its_tone_what_to_hear_a_recording_and_its_times() {
         "abc",
         "--tone",
         "660",
+        "--bursts",
         "--hear",
         "440",
+        "--hear",
+        "880",
         "--record",
         "/somewhere/b.wav",
         "--seconds",
@@ -88,16 +96,15 @@ fn call_takes_a_target_its_tone_what_to_hear_a_recording_and_its_times() {
     match parsed.command {
         CliCommand::Call {
             target,
-            tone,
-            hear,
-            record,
+            audio,
             seconds,
             wait,
         } => {
             assert_eq!(target, "abc");
-            assert!((tone - 660.0).abs() < f32::EPSILON);
-            assert_eq!(hear, Some(440.0));
-            assert_eq!(record.as_deref(), Some(Path::new("/somewhere/b.wav")));
+            assert!((audio.tone - 660.0).abs() < f32::EPSILON);
+            assert!(audio.bursts);
+            assert_eq!(audio.hear, [440.0, 880.0]);
+            assert_eq!(audio.record.as_deref(), Some(Path::new("/somewhere/b.wav")));
             assert_eq!((seconds, wait), (30, 90));
         }
         other => panic!("{other:?}"),
@@ -106,6 +113,102 @@ fn call_takes_a_target_its_tone_what_to_hear_a_recording_and_its_times() {
         Cli::try_parse_from(["teams-headless", "a", "call"]).is_err(),
         "a target is needed"
     );
+}
+
+#[test]
+fn join_takes_a_chat_the_call_s_audio_and_how_long_the_ring_may_take() {
+    let parsed = Cli::try_parse_from(["teams-headless", "c", "join", "abc"]).unwrap();
+    match parsed.command {
+        CliCommand::Join {
+            chat,
+            audio,
+            seconds,
+            wait,
+            ring_wait,
+        } => {
+            assert_eq!(chat, "abc");
+            assert!((audio.tone - DEFAULT_TONE_HZ).abs() < f32::EPSILON);
+            assert_eq!((seconds, wait, ring_wait), (45, 60, 180));
+        }
+        other => panic!("{other:?}"),
+    }
+    let parsed = Cli::try_parse_from([
+        "teams-headless",
+        "c",
+        "join",
+        "abc",
+        "--tone",
+        "880",
+        "--ring-wait",
+        "300",
+    ])
+    .unwrap();
+    assert!(
+        matches!(parsed.command, CliCommand::Join { ring_wait: 300, ref audio, .. } if (audio.tone - 880.0).abs() < f32::EPSILON)
+    );
+    assert!(
+        Cli::try_parse_from(["teams-headless", "c", "join"]).is_err(),
+        "a chat is needed"
+    );
+}
+
+#[test]
+fn watch_answers_lab_calls_only_when_asked_and_takes_the_call_s_audio() {
+    let parsed = Cli::try_parse_from(["teams-headless", "b", "watch"]).unwrap();
+    match parsed.command {
+        CliCommand::Watch {
+            json,
+            answer_lab_calls,
+            calls,
+            ..
+        } => assert!(!json && !answer_lab_calls && !calls, "watch answers nothing by default"),
+        other => panic!("{other:?}"),
+    }
+    let parsed = Cli::try_parse_from([
+        "teams-headless",
+        "b",
+        "watch",
+        "--answer-lab-calls",
+        "--tone",
+        "440",
+        "--bursts",
+        "--tone-seconds",
+        "60",
+    ])
+    .unwrap();
+    match parsed.command {
+        CliCommand::Watch {
+            answer_lab_calls,
+            audio,
+            tone_seconds,
+            ..
+        } => {
+            assert!(answer_lab_calls);
+            assert!((audio.tone - 440.0).abs() < f32::EPSILON && audio.bursts);
+            assert_eq!(tone_seconds, 60);
+        }
+        other => panic!("{other:?}"),
+    }
+    let parsed = Cli::try_parse_from(["teams-headless", "b", "watch", "--calls"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        CliCommand::Watch {
+            calls: true,
+            answer_lab_calls: false,
+            ..
+        }
+    ));
+    assert!(
+        Cli::try_parse_from(["teams-headless", "b", "watch", "--calls", "--answer-lab-calls"]).is_err(),
+        "one or the other"
+    );
+    // no answering by another name
+    for flag in ["--answer", "--answer-calls", "--auto-answer"] {
+        assert!(
+            Cli::try_parse_from(["teams-headless", "b", "watch", flag]).is_err(),
+            "{flag}"
+        );
+    }
 }
 
 #[test]
@@ -118,7 +221,7 @@ fn the_keyed_tone_is_written_beside_the_recording_long_enough_for_the_whole_call
     assert_eq!(samples.len(), 48_000 * 54);
     // the files it plays and records
     let devices = files.devices();
-    assert_eq!(devices.recording.as_deref(), Some(files.recording.as_path()));
+    assert_eq!(devices.files.recording.as_deref(), Some(files.recording.as_path()));
 }
 
 // --- the calls on the mock ---
@@ -290,6 +393,293 @@ async fn a_call_whose_media_isn_t_set_up_within_its_time_to_connect_isn_t_placed
     assert!(log.permitted().is_empty(), "{:#?}", log.permitted());
 }
 
+// --- watch --answer-lab-calls, and join ---
+
+#[tokio::test]
+async fn watch_answering_lab_calls_answers_a_s_call_from_the_chat_and_each_side_hears_the_other() {
+    let lab = Lab::start_echo().await;
+    let mut a = lab.account(LAB_A, 1_000.0);
+    let mut b = lab.account(LAB_B, 660.0);
+    b.ready().await;
+    let watching = b.watch(Answering::LabCalls);
+    let (report, printed) = a.call(Target::Chat(AB_CHAT.to_owned()), &PLAN).await;
+    assert!(report.completed(), "{report:?}\n{printed}");
+    watching.until("end=").await;
+    let (b, watched) = watching.stop().await;
+    assert!(
+        watched.contains("incoming_call") && watched.contains("call_answer call="),
+        "{watched}"
+    );
+    assert!(!watched.contains("call_answer_refused"), "{watched}");
+    let b_sent = lab.sent_by(LAB_B);
+    assert!(b_sent.contains(&"accept".to_owned()), "{b_sent:?}");
+    let ((a_log, a_files), (b_log, b_files)) = (a.shut_down().await, b.shut_down().await);
+    assert!(a_log.denials().is_empty() && b_log.denials().is_empty());
+    assert!(b_log.permitted_any("call_answer"), "{:#?}", b_log.lines());
+    // a's keyed tone is in b's recording, b's in a's; each tone's presence too
+    let heard_by_b = call::heard(&b_files.recording, 1_000.0, a_files.length, a_files.length).unwrap();
+    assert!(heard_by_b.is_some() && a_files.heard(660.0).unwrap().is_some());
+    assert!(b_files.presence(1_000.0).unwrap().heard());
+    // both files' devices opened, by the wall clock
+    for files in [&a_files, &b_files] {
+        let opened = files.opened();
+        assert!(opened.microphone.is_some() && opened.speaker.is_some(), "{opened:?}");
+    }
+}
+
+#[tokio::test]
+async fn watch_answering_lab_calls_sends_nothing_for_an_outsider_s_call_and_answers_the_lab_s_after_it() {
+    let lab = Lab::start_echo().await;
+    let mut b = lab.account(LAB_B, 660.0);
+    b.ready().await;
+    let watching = b.watch(Answering::LabCalls);
+    let outsider = lab.mock.ring(OUTSIDER, LAB_B);
+    // the invitation reached b's calling socket, and the fence offered nothing
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !watching.out.text().contains("incoming_call"),
+        "{}",
+        watching.out.text()
+    );
+    assert!(
+        responses(&lab.trouter, LAB_B).is_empty(),
+        "no frame answers an outsider's invitation"
+    );
+    // a lab caller's call after it is answered: the watch was listening the whole time
+    let ours = lab.mock.ring(LAB_A, LAB_B);
+    watching.until("call_answer call=").await;
+    watching.until("status=\"connected\"").await;
+    assert!(lab.mock.hang_up_call(&ours));
+    watching.until("end=").await;
+    let (b, watched) = watching.stop().await;
+    assert_eq!(watched.matches("incoming_call").count(), 1, "{watched}");
+    let calls = lab.mock.calls();
+    let requests_of = |id: &str| {
+        calls
+            .iter()
+            .find(|call| call.id == id)
+            .map(|call| call.requests.clone())
+            .unwrap_or_default()
+    };
+    assert!(
+        requests_of(&outsider).iter().all(|(_, account)| account != LAB_B),
+        "{:?}",
+        requests_of(&outsider)
+    );
+    assert!(requests_of(&ours).contains(&("accept".to_owned(), LAB_B.to_owned())));
+    let (log, _) = b.shut_down().await;
+    assert!(log.denials().is_empty(), "{:#?}", log.denials());
+    let lines = log.lines().iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+    assert!(
+        !lines.contains(OUTSIDER.rsplit(':').next().unwrap()),
+        "nothing decided on the outsider's call: {lines}"
+    );
+}
+
+#[tokio::test]
+async fn watch_without_the_flag_answers_nothing_and_the_call_rings_out() {
+    let lab = Lab::start_echo().await;
+    let mut b = lab.account(LAB_B, 660.0);
+    b.ready().await;
+    let watching = b.watch(Answering::Nothing);
+    let ours = lab.mock.ring(LAB_A, LAB_B);
+    watching.until("incoming_call").await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(lab.mock.end_ring(&ours, 487, TIMED_OUT));
+    watching.until("ring_ended").await;
+    let (b, watched) = watching.stop().await;
+    assert!(!watched.contains("call_answer"), "{watched}");
+    let call = lab.mock.calls().into_iter().find(|call| call.id == ours).unwrap();
+    assert!(
+        !call
+            .requests
+            .iter()
+            .any(|(op, account)| op == "accept" && account == LAB_B),
+        "{:?}",
+        call.requests
+    );
+    let (log, _) = b.shut_down().await;
+    assert!(log.denials().is_empty(), "{:#?}", log.denials());
+}
+
+#[tokio::test]
+async fn a_call_answered_on_another_endpoint_of_b_ends_the_ring_of_b_s_watch_that_answers_nothing() {
+    let lab = Lab::start_echo().await;
+    let mut ringing = lab.account(LAB_B, 660.0);
+    let mut answering = lab.account(LAB_B, 770.0);
+    ringing.ready().await;
+    answering.ready().await;
+    let (ringing, answering) = (ringing.watch(Answering::Nothing), answering.watch(Answering::LabCalls));
+    let ours = lab.mock.ring(LAB_A, LAB_B);
+    answering.until("call_answer call=").await;
+    answering.until("status=\"connected\"").await;
+    ringing.until("ring_ended").await;
+    assert!(lab.mock.hang_up_call(&ours));
+    answering.until("end=").await;
+    let ((ringing, rang), (answering, answered)) = (ringing.stop().await, answering.stop().await);
+    assert!(
+        rang.contains("incoming_call") && !rang.contains("call_answer"),
+        "{rang}"
+    );
+    assert!(
+        rang.lines()
+            .any(|line| line.contains("ring_ended") && line.contains(teams_mock::ANSWERED_ELSEWHERE)),
+        "{rang}"
+    );
+    assert!(answered.contains("status=\"connected\""), "{answered}");
+    let accepts = lab
+        .mock
+        .calls()
+        .into_iter()
+        .find(|call| call.id == ours)
+        .unwrap()
+        .requests
+        .into_iter()
+        .filter(|(op, _)| op == "accept")
+        .count();
+    assert_eq!(accepts, 1, "only one endpoint of b answered");
+    for (log, _) in [ringing.shut_down().await, answering.shut_down().await] {
+        assert!(log.denials().is_empty(), "{:#?}", log.denials());
+    }
+}
+
+#[tokio::test]
+async fn join_lets_the_running_group_call_ring_out_then_joins_it_and_hears_the_mixer() {
+    let lab = Lab::start_echo().await;
+    let mut c = lab.account(LAB_C, 880.0);
+    // a's group call (the mock plays a) rings at c once c's calling endpoint is registered, and rings out 2 s later
+    let ring = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !lab
+            .trouter
+            .registrations()
+            .iter()
+            .any(|registration| registration.account == LAB_C && registration.app_id == CALLING_APP)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "c's calling endpoint registered in time"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let id = lab.mock.ring_group(LAB_A, ABC_CHAT, &[LAB_C]);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(lab.mock.end_ring(&id, 487, TIMED_OUT));
+        id
+    };
+    let ((report, printed), id) = tokio::join!(c.call(Target::Join(ABC_CHAT.to_owned()), &PLAN), ring);
+    assert!(report.completed(), "{report:?}\n{printed}");
+    for line in [
+        "ring_let_go",
+        "ring_ended",
+        "call_placing",
+        "status=\"connected\"",
+        "end=\"hung_up\"",
+    ] {
+        assert!(printed.contains(line), "{line}:\n{printed}");
+    }
+    assert!(!printed.contains("call_answer"), "{printed}");
+    let joined = lab.mock.calls().into_iter().find(|call| call.id == id).unwrap();
+    let ops: Vec<&str> = joined
+        .requests
+        .iter()
+        .filter(|(_, account)| account == LAB_C)
+        .map(|(op, _)| op.as_str())
+        .collect();
+    assert!(ops.contains(&"join") && !ops.contains(&"accept"), "{ops:?}");
+    let (log, files) = c.shut_down().await;
+    assert!(log.denials().is_empty(), "{:#?}", log.denials());
+    // the mixer's stand-in plays c's own keyed tone back
+    assert!(files.heard(880.0).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn join_with_no_running_call_ringing_in_time_places_nothing() {
+    let lab = Lab::start_echo().await;
+    let mut c = lab.account(LAB_C, 880.0);
+    let plan = Plan {
+        invited_within: Duration::from_secs(1),
+        ..PLAN
+    };
+    let (report, printed) = c.call(Target::Join(ABC_CHAT.to_owned()), &plan).await;
+    assert_eq!(report, Report::default(), "{printed}");
+    assert!(printed.contains("no_running_call"), "{printed}");
+    let (log, _) = c.shut_down().await;
+    assert!(lab.mock.calls().is_empty());
+    assert!(log.permitted().is_empty(), "{:#?}", log.permitted());
+}
+
+#[test]
+fn answering_lab_calls_lives_in_teams_headless_alone() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for krate in ["teams-core", "teams-call", "teams-ui", "teams-app", "teams"] {
+        let files = sources(&root.join("crates").join(krate));
+        assert!(!files.is_empty(), "{krate} has sources");
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            for needle in ["answer-lab-calls", "answer_lab_calls", "Answering::LabCalls"] {
+                assert!(!text.contains(needle), "{needle} in {}", path.display());
+            }
+        }
+    }
+}
+
+/// Every `.rs` and `.toml` file under `dir`.
+fn sources(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(sources(&path));
+        } else if path.extension().is_some_and(|ext| ext == "rs" || ext == "toml") {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// The frames `account`'s calling sockets sent that answer a delivery (`3:::…`).
+fn responses(trouter: &TrouterMock, account: &str) -> Vec<String> {
+    trouter
+        .sockets()
+        .into_iter()
+        .filter(|socket| socket.calling && socket.account.as_deref() == Some(account))
+        .flat_map(|socket| socket.frames)
+        .filter(|frame| frame.starts_with("3:::"))
+        .collect()
+}
+
+/// An account's `watch` running on its engine, its output kept.
+struct Watching {
+    out: SharedLog,
+    stop: Arc<Notify>,
+    task: tokio::task::JoinHandle<(Account, WatchEnd)>,
+}
+
+impl Watching {
+    /// Waits until the output holds `what`.
+    async fn until(&self, what: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while !self.out.text().contains(what) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no {what} in time:\n{}",
+                self.out.text()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Stops it: the account back, and what it printed.
+    async fn stop(self) -> (Account, String) {
+        self.stop.notify_one();
+        let (account, end) = self.task.await.unwrap();
+        assert_eq!(end, WatchEnd::Stopped);
+        (account, self.out.text())
+    }
+}
+
 /// What `call` prints, kept; `placing` is told once it printed `call_placing`.
 struct Output {
     text: Vec<u8>,
@@ -396,6 +786,11 @@ impl SharedLog {
 
     fn permitted_any(&self, what: &str) -> bool {
         self.permitted().iter().any(|line| line.contains(what))
+    }
+
+    /// What was written, as text (for `watch`'s output).
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
     }
 }
 
@@ -543,6 +938,23 @@ impl Account {
             .await
             .unwrap();
         (report, String::from_utf8(out).unwrap())
+    }
+
+    /// Runs `watch` on its engine (as `teams-headless <alias> watch` does, `answering` as asked) until stopped.
+    fn watch(mut self, answering: Answering) -> Watching {
+        let out = SharedLog::default();
+        let stop = Arc::new(Notify::new());
+        let (mut writer, stopping) = (out.clone(), Arc::clone(&stop));
+        let task = tokio::spawn(async move {
+            let names = LabNames::new([Some(LAB_A), Some(LAB_B), Some(LAB_C)]);
+            let end = commands::watch(&mut self.handle, false, answering, &names, &mut writer, async move {
+                stopping.notified().await;
+            })
+            .await
+            .unwrap();
+            (self, end)
+        });
+        Watching { out, stop, task }
     }
 
     /// Waits until its calling socket is registered.

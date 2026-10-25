@@ -333,6 +333,15 @@ fn answering_an_offer_with_video_lines_keeps_the_audio_line() {
     let answer = answerer
         .accept_offer(SdpOffer::from_sdp_string(&offer_text).unwrap())
         .unwrap();
+    // audio alone: both video lines are answered rejected (port 0), the audio line taken
+    let answer_text = answer.to_sdp_string();
+    let lines: Vec<&str> = answer_text.lines().filter(|line| line.starts_with("m=")).collect();
+    assert_eq!(lines.len(), 3, "{answer_text}");
+    assert!(lines[0].starts_with("m=audio 9 "), "{answer_text}");
+    assert!(
+        lines[1..].iter().all(|line| line.starts_with("m=video 0 ")),
+        "{answer_text}"
+    );
     caller.rtc.sdp_api().accept_answer(pending, answer).unwrap();
     caller.drain(now, &mut answerer);
     let mut events = Vec::new();
@@ -352,11 +361,14 @@ fn answering_an_offer_with_video_lines_keeps_the_audio_line() {
     );
 
     answerer.write_audio(now, now, 0, &FRAME).unwrap();
-    let keyframe = [0x10, 0x02, 0x00, 0x9D, 0x01, 0x2A, 0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0];
-    for frame in 0..3_u64 {
-        let time = MediaTime::new(frame * 3_000, Frequency::NINETY_KHZ);
-        caller.write(now, video, Codec::Vp8, time, &keyframe);
-    }
+    // the rejected video line takes nothing: the caller has nothing to send on it
+    assert!(
+        caller
+            .rtc
+            .writer(video)
+            .is_none_or(|writer| writer.payload_params().next().is_none()),
+        "a rejected line names no payload"
+    );
     let time = MediaTime::new(0, Frequency::FORTY_EIGHT_KHZ);
     caller.write(now, audio, Codec::Opus, time, &FRAME);
     for _ in 0..10 {

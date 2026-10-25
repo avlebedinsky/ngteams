@@ -1,28 +1,30 @@
-//! `call`: one call through the engine (M3 Task 15). Once the calling socket is registered, the call goes out (the test
-//! call of the echo service, or a call from a chat), its events are printed as they come ([`event_line`]), and once its
-//! media connected it is held for the time asked and hung up; a call that doesn't connect in time is hung up too.
-//! Every write of it goes through the engine's outbox under a fresh `Fence::check`; nothing here answers or declines
-//! anything.
+//! `call` and `join`: one call through the engine (M3 Tasks 15 and 16). Once the calling socket is registered, the call
+//! goes out (the test call of the echo service, a call from a chat, or a join of a group chat's running call once its
+//! invitation rang out here unanswered), its events are printed as they come ([`event_line`]), and once its media
+//! connected it is held for the time asked and hung up; a call that doesn't connect in time is hung up too. Every write
+//! of it goes through the engine's outbox under a fresh `Fence::check`; nothing here answers or declines anything (the
+//! one answering there is, `watch --answer-lab-calls`, is [`crate::commands::Answering`]).
 //!
 //! The call's media runs on the file backend the binary gives the engine (`teams-headless` opens no audio server): the
-//! microphone plays [`crate::echo::keyed`]'s tone, the speaker records what comes back, and [`heard`] looks for that
-//! tone in the recording afterwards.
+//! microphone plays [`crate::echo::keyed`]'s tone (or [`crate::echo::bursts`]), the speaker records what comes back,
+//! and [`heard`] looks for the keyed tone in the recording afterwards ([`CallFiles::presence`] for any tone); the
+//! devices note when they open ([`crate::lab::TimedDevices`]), so two processes' files line up.
 
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use teams_core::{CallAction, CallId, CallStatus, End, EngineHandle, Event, RegistrationReport};
 use teams_fence::Mri;
-use teams_media::devices::file::FileDevices;
 use teams_media::devices::wav;
 use teams_media::tone::Tone;
 
 use crate::chat::LabNames;
 use crate::commands::CommandError;
-use crate::echo::{self, Echo};
+use crate::echo::{self, Echo, Presence};
+use crate::lab::{Opened, TimedDevices};
 use crate::print::{end_word, event_line, json_line, now_ms};
 
 /// Whom a call goes to.
@@ -32,6 +34,9 @@ pub enum Target {
     Echo(Mri),
     /// A call from this chat: its other member, or a group chat's other members as the store holds them.
     Chat(String),
+    /// A join of the running call in this group chat, late: once an invitation to it rang here and its ring ended
+    /// unanswered (the machine joins only a running call an invitation named).
+    Join(String),
 }
 
 /// How long each part of a call may take or lasts.
@@ -39,6 +44,8 @@ pub enum Target {
 pub struct Plan {
     /// How long the calling socket may take to register.
     pub register_within: Duration,
+    /// For a join: how long the running call's invitation may take to ring here, and then its ring to end.
+    pub invited_within: Duration,
     /// How long the call may take, from its placing, to connect its media.
     pub connect_within: Duration,
     /// How long the call is held once its media connected.
@@ -101,6 +108,20 @@ pub async fn run(
     let action = match target {
         Target::Echo(echo) => CallAction::TestCall { echo },
         Target::Chat(chat) => CallAction::Call { chat },
+        Target::Join(chat) => {
+            let rung = tokio::select! {
+                rung = rung_out(handle, &chat, plan.invited_within, names, out) => rung?,
+                () = &mut stop => {
+                    report.interrupted = true;
+                    return Ok(report);
+                }
+            };
+            if !rung {
+                writeln!(out, "{} no_running_call", now_ms())?;
+                return Ok(report);
+            }
+            CallAction::Join { chat }
+        }
     };
     let placed = tokio::time::Instant::now();
     writeln!(out, "{} call_placing", now_ms())?;
@@ -160,6 +181,36 @@ async fn registered(
         print(out, &event, names)?;
         if matches!(event, Event::CallingRegistration(RegistrationReport::Registered)) {
             return Ok(());
+        }
+    }
+}
+
+/// Waits for an invitation to a running call in the group chat `chat` to ring here, and then for its ring to end,
+/// answering nothing, each within `within`, printing the events until then: `true` once the ring ended (the call can
+/// be joined), `false` when either didn't come in time.
+async fn rung_out(
+    handle: &mut EngineHandle,
+    chat: &str,
+    within: Duration,
+    names: &LabNames,
+    out: &mut impl Write,
+) -> Result<bool, CommandError> {
+    let mut ringing = None;
+    let mut deadline = tokio::time::Instant::now() + within;
+    loop {
+        let Ok(event) = tokio::time::timeout_at(deadline, handle.next_event()).await else {
+            return Ok(false);
+        };
+        let event = event.ok_or(CommandError::Stopped)?;
+        print(out, &event, names)?;
+        match event {
+            Event::IncomingCall(incoming) if ringing.is_none() && incoming.group_chat.as_deref() == Some(chat) => {
+                writeln!(out, "{} ring_let_go call={}", now_ms(), incoming.call.get())?;
+                ringing = Some(incoming.call);
+                deadline = tokio::time::Instant::now() + within;
+            }
+            Event::RingEnded { call, .. } if ringing == Some(call) => return Ok(true),
+            _ => {}
         }
     }
 }
@@ -270,14 +321,27 @@ fn print(out: &mut impl Write, event: &Event, names: &LabNames) -> Result<(), Co
 /// The level the microphone's keyed tone peaks at.
 pub const TONE_AMPLITUDE: f32 = 0.5;
 
-/// A call's audio files: the keyed tone the microphone plays (written before the call) and the far end's recording.
-#[derive(Clone, Debug, PartialEq)]
+/// How the microphone's tone is keyed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Keying {
+    /// On and off in 200 ms slots of [`echo::pattern`]: found again and timed by [`echo::find`].
+    #[default]
+    Keyed,
+    /// In bursts of 1.6 s, 0.9 s apart ([`echo::bursts`]): what a lab browser's page hears as the tone.
+    Bursts,
+}
+
+/// A call's audio files: the tone the microphone plays (written before the call) and the far end's recording, and the
+/// devices on them, which note when they open.
+#[derive(Clone, Debug)]
 pub struct CallFiles {
-    /// The keyed tone, `<recording's stem>-sent.wav` beside the recording.
+    /// The tone, `<recording's stem>-sent.wav` beside the recording.
     pub sent: PathBuf,
     pub recording: PathBuf,
-    /// How long the keyed tone lasts (silence after it).
+    /// How long the tone lasts (silence after it).
     pub length: Duration,
+    pub keying: Keying,
+    devices: TimedDevices,
 }
 
 impl CallFiles {
@@ -286,6 +350,21 @@ impl CallFiles {
     /// # Errors
     /// [`CommandError::Recording`] when it can't be written.
     pub fn write(recording: PathBuf, hz: f32, plan: &Plan) -> Result<Self, CommandError> {
+        Self::write_for(recording, hz, Keying::Keyed, Self::length_for(plan))
+    }
+
+    /// How long a call's tone lasts under `plan`: the microphone opens before the media connects, so the whole call,
+    /// and a little more.
+    #[must_use]
+    pub fn length_for(plan: &Plan) -> Duration {
+        plan.connect_within + plan.hold + plan.end_within + Duration::from_secs(10)
+    }
+
+    /// Writes the tone at `hz`, keyed as `keying` says, for `length`, beside `recording`.
+    ///
+    /// # Errors
+    /// [`CommandError::Recording`] when it can't be written.
+    pub fn write_for(recording: PathBuf, hz: f32, keying: Keying, length: Duration) -> Result<Self, CommandError> {
         let failed = |error: &dyn std::fmt::Display| CommandError::Recording(error.to_string());
         let stem = recording
             .file_stem()
@@ -293,28 +372,46 @@ impl CallFiles {
             .to_string_lossy()
             .into_owned();
         let sent = recording.with_file_name(format!("{stem}-sent.wav"));
-        // the microphone opens before the media connects: the tone lasts the whole call, and a little more
-        let length = plan.connect_within + plan.hold + plan.end_within + Duration::from_secs(10);
         let tone = Tone {
             hz,
             amplitude: TONE_AMPLITUDE,
         };
+        let samples = match keying {
+            Keying::Keyed => echo::keyed(tone, length),
+            Keying::Bursts => echo::bursts(tone, length),
+        };
         let mut writer = wav::WavWriter::create(&sent).map_err(|error| failed(&error))?;
-        writer
-            .write(&echo::keyed(tone, length))
-            .map_err(|error| failed(&error))?;
+        writer.write(&samples).map_err(|error| failed(&error))?;
         writer.finish().map_err(|error| failed(&error))?;
+        let devices = TimedDevices::new(crate::lab::call_devices(sent.clone(), recording.clone()));
         Ok(Self {
             sent,
             recording,
             length,
+            keying,
+            devices,
         })
     }
 
-    /// The call's devices on these files ([`crate::lab::call_devices`]).
+    /// The call's devices on these files ([`crate::lab::call_devices`]), noting when they open.
     #[must_use]
-    pub fn devices(&self) -> FileDevices {
-        crate::lab::call_devices(self.sent.clone(), self.recording.clone())
+    pub fn devices(&self) -> TimedDevices {
+        self.devices.clone()
+    }
+
+    /// When the devices last opened.
+    #[must_use]
+    pub fn opened(&self) -> Opened {
+        self.devices.opened()
+    }
+
+    /// How much of the tone at `hz` the recording holds, however it was keyed ([`echo::presence`]).
+    ///
+    /// # Errors
+    /// [`CommandError::Recording`] when the recording can't be read.
+    pub fn presence(&self, hz: f32) -> Result<Presence, CommandError> {
+        let samples = wav::read(&self.recording).map_err(|error| CommandError::Recording(error.to_string()))?;
+        Ok(echo::presence(hz, &samples))
     }
 
     /// The keyed tone at `hz` in the recording ([`echo::find`]), at any offset the call's length allows; `None` when
@@ -327,14 +424,50 @@ impl CallFiles {
     }
 }
 
-/// The keyed tone at `hz` (the first `sent` of it) in the recording at `recording`, found at most `max_offset` later
-/// ([`echo::find`]); `None` when it isn't there.
+/// How much earlier than the recording's own start a block of the far end's keyed tone may be found ([`heard`]): a
+/// far end in another process opened its microphone before this side's speaker opened (a caller's opens at its start,
+/// a callee's speaker at its answer), so what it sent first comes back "before" the recording.
+pub const LEAD: Duration = Duration::from_mins(1);
+
+/// The keyed tone at `hz` (the first `sent` of it) in the recording at `recording`, found from [`LEAD`] before its
+/// start to at most `max_offset` after ([`echo::find_with_lead`]); `None` when it isn't there.
 ///
 /// # Errors
 /// When the recording can't be read.
 pub fn heard(recording: &Path, hz: f32, sent: Duration, max_offset: Duration) -> Result<Option<Echo>, CommandError> {
     let samples = wav::read(recording).map_err(|error| CommandError::Recording(error.to_string()))?;
-    Ok(echo::find(hz, sent, &samples, max_offset))
+    Ok(echo::find_with_lead(hz, sent, &samples, max_offset, LEAD))
+}
+
+/// The tone's presence as printed: `tone hz=<n> heard=<bool> seconds=<n> first_ms=<n|-> peak=<n>`.
+#[must_use]
+pub fn tone_line(hz: f32, presence: &Presence) -> String {
+    format!(
+        "tone hz={hz} heard={} seconds={:.1} first_ms={} peak={:.3}",
+        presence.heard(),
+        presence.length().as_secs_f32(),
+        presence
+            .first
+            .map_or_else(|| "-".to_owned(), |first| first.as_millis().to_string()),
+        presence.peak
+    )
+}
+
+/// When the devices opened as printed, by the wall clock in Unix ms: `devices microphone_opened_ms=<n|->
+/// speaker_opened_ms=<n|->`. The far end's recording lines up with the tone sent by them: a block found `offset` into
+/// it went into the microphone at `microphone_opened + sent_at` and came out of the far speaker at `speaker_opened +
+/// sent_at + offset`.
+#[must_use]
+pub fn devices_line(opened: Opened) -> String {
+    let ms = |at: Option<SystemTime>| {
+        at.and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+            .map_or_else(|| "-".to_owned(), |since| since.as_millis().to_string())
+    };
+    format!(
+        "devices microphone_opened_ms={} speaker_opened_ms={}",
+        ms(opened.microphone),
+        ms(opened.speaker)
+    )
 }
 
 /// What was heard as printed: `echo heard=false`, or `echo heard=true level=<n> blocks=<n> sent_from_ms=<n>
@@ -345,11 +478,13 @@ pub fn echo_line(echo: Option<&Echo>) -> String {
         return "echo heard=false".to_owned();
     };
     let ms = |duration: Option<Duration>| duration.map_or_else(|| "-".to_owned(), |d| d.as_millis().to_string());
+    let signed =
+        |duration: Option<Duration>| duration.map_or_else(|| "-".to_owned(), |d| echo.signed_ms(d).to_string());
     let (from, to) = echo.sent_span().unzip();
     let offsets: Vec<String> = echo
         .blocks
         .iter()
-        .map(|block| block.offset.as_millis().to_string())
+        .map(|block| echo.signed_ms(block.offset).to_string())
         .collect();
     format!(
         "echo heard=true level={:.3} blocks={} sent_from_ms={} sent_to_ms={} offsets_ms={} round_trips={} p50_ms={} \
@@ -360,8 +495,8 @@ pub fn echo_line(echo: Option<&Echo>) -> String {
         ms(to),
         offsets.join(","),
         echo.delays.len(),
-        ms(echo.delay_percentile(50)),
-        ms(echo.delay_percentile(95)),
-        ms(echo.delays.last().copied()),
+        signed(echo.raw_percentile(50)),
+        signed(echo.raw_percentile(95)),
+        signed(echo.delays.last().copied()),
     )
 }

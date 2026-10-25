@@ -674,6 +674,12 @@ fn operation_of(url: &Url) -> Option<CallOperation> {
     let path: Vec<&str> = segments.iter().map(String::as_str).collect();
     match path.as_slice() {
         ["api", "v2", "ep", host, "conv", id] if !host.is_empty() && !id.is_empty() => Some(CallOperation::Join),
+        // the call leg's own link (`callLeg`): its call, a number, the leg and a number, no operation after them
+        ["api", "v2", "ep", host, "cc", "v1", "active", call, number, leg, last]
+            if [*host, *call, *number, *leg, *last].iter().all(|part| !part.is_empty()) =>
+        {
+            Some(CallOperation::KeepAlive)
+        }
         ["api", "v2", "ep", host, "conv", id, op] if !host.is_empty() && !id.is_empty() => match *op {
             "updateEndpointMetadata" => Some(CallOperation::UpdateEndpointMetadata),
             "add" => Some(CallOperation::Add),
@@ -721,8 +727,15 @@ fn shape_of(operation: CallOperation) -> &'static [Field] {
         CallOperation::MediaAcknowledge => &[],
         CallOperation::UpdateMediaDescriptions => UPDATE_MEDIA_DESCRIPTIONS,
         CallOperation::Join => JOIN,
+        CallOperation::KeepAlive => KEEP_ALIVE,
     }
 }
+
+/// `POST …/cc/v1/active/<call>/<n>/<leg>/<n>` (seen 2026-10-25, `ab-call --call keep-alive`, from the caller's page and
+/// the callee's, 2430 s into the call: 90 % of its `callKeepAliveInterval`): the call's keep-alive, an empty
+/// participant update and nothing else (the web client adds a shared line's content only on a shared line, which no
+/// capture shows).
+const KEEP_ALIVE: &[Field] = &[required("callParticipantUpdate", Shape::Object(&[]))];
 
 /// `POST …/cc/v1/active/<call>/…/updateMediaDescriptions` (seen 2026-10-24, `abc-call --call video` when a page turns
 /// its camera on): the sender's media lines, each by its `mid` and direction.
@@ -914,6 +927,8 @@ pub(crate) fn follow_up(method: &str, url: &Url, body: Option<&[u8]>) -> Option<
         CallOperation::Accept => accept_target(url, &request),
         CallOperation::Reject => reject_target(url, &request),
         CallOperation::Renegotiate | CallOperation::MediaAnswer => negotiation_target(operation, url, &request),
+        // names nobody and hands out nothing
+        CallOperation::KeepAlive => Some(invitation_operation(operation, url, None, Vec::new())),
         CallOperation::UpdateEndpointState | CallOperation::UpdateParticipantProperties => {
             conversation_target(operation, url, &request)
         }

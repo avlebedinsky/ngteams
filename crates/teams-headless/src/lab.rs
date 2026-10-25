@@ -13,7 +13,8 @@ use std::fs::DirBuilder;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
 
 use teams_auth::secrets::{KeyringSecretStore, SecretError};
 use teams_core::account::AccountCalls;
@@ -23,6 +24,7 @@ use teams_core::{CallMedia, Relay};
 use teams_fence::lab::{Alias, ChatsError, ConfigError, LabChats, LabConfig, LabLocations, LabPaths};
 use teams_fence::{Fence, Mri, OpenError};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
+use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayOptions;
 use teams_media::session::SessionConfig;
@@ -104,12 +106,16 @@ impl Lab {
         Ok(handle)
     }
 
-    /// The account's engine with its calling (and without its messaging push channel: a call needs only the calling
-    /// socket), its calls' media on `devices` (see the module docs).
+    /// The account's engine with its calling, its calls' media on `devices` (see the module docs): with its messaging
+    /// push channel (`push`) for `watch`, without for `call` and `join` (a call needs only the calling socket).
     ///
     /// # Errors
     /// See [`LabError`].
-    pub async fn start_calling(&self, devices: FileDevices) -> Result<EngineHandle, LabError> {
+    pub async fn start_calling(
+        &self,
+        devices: impl Devices + Send + Sync + 'static,
+        push: bool,
+    ) -> Result<EngineHandle, LabError> {
         let fence = Arc::new(Fence::open_lab_account(self.alias)?);
         let secrets = KeyringSecretStore::new(LabPaths::KEYRING_APPLICATION).await?;
         let calls = AccountCalls {
@@ -117,7 +123,7 @@ impl Lab {
             client: web_client_info(),
             language_id: Some(LAB_LANGUAGE.to_owned()),
         };
-        let LabEngine { handle, .. } = core_lab::start(&self.config, self.alias, fence, secrets, false, Some(calls))?;
+        let LabEngine { handle, .. } = core_lab::start(&self.config, self.alias, fence, secrets, push, Some(calls))?;
         Ok(handle)
     }
 
@@ -162,9 +168,63 @@ pub fn call_devices(sent: PathBuf, recording: PathBuf) -> FileDevices {
     }
 }
 
+/// When a call's devices last opened, by the wall clock: what lines the far end's recording up with the tone sent, two
+/// processes apart ([`TimedDevices`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Opened {
+    pub microphone: Option<SystemTime>,
+    pub speaker: Option<SystemTime>,
+}
+
+/// File devices that note when each one opens ([`Opened`]; a later call's open replaces an earlier one's).
+#[derive(Clone, Debug)]
+pub struct TimedDevices {
+    pub files: FileDevices,
+    opened: Arc<Mutex<Opened>>,
+}
+
+impl TimedDevices {
+    #[must_use]
+    pub fn new(files: FileDevices) -> Self {
+        Self {
+            files,
+            opened: Arc::default(),
+        }
+    }
+
+    /// When the devices last opened.
+    #[must_use]
+    pub fn opened(&self) -> Opened {
+        *self.opened.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn note(&self, what: impl FnOnce(&mut Opened, SystemTime)) {
+        what(
+            &mut self.opened.lock().unwrap_or_else(PoisonError::into_inner),
+            SystemTime::now(),
+        );
+    }
+}
+
+impl Devices for TimedDevices {
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        self.note(|opened, now| opened.microphone = Some(now));
+        self.files.microphone()
+    }
+
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        self.note(|opened, now| opened.speaker = Some(now));
+        self.files.speaker()
+    }
+
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.files.camera()
+    }
+}
+
 /// A call's media on `devices` through `relay`, the microphone unprocessed (see the module docs).
 #[must_use]
-pub fn call_media(devices: FileDevices, relay: Relay) -> CallMedia {
+pub fn call_media(devices: impl Devices + Send + Sync + 'static, relay: Relay) -> CallMedia {
     CallMedia {
         devices: Arc::new(devices),
         relay,

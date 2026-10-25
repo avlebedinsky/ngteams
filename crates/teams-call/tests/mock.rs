@@ -433,32 +433,57 @@ async fn a_running_group_call_is_joined_from_its_chat() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_keep_alive_interval_is_kept_and_told_with_no_request_sent() {
+async fn the_keep_alive_goes_to_the_call_leg_every_90_percent_of_its_interval_through_the_fence_and_stops_with_the_call()
+ {
     let lab = Lab::start().await;
     let mut b = lab.client(LAB_B).await;
     let _ = lab.mock.ring(LAB_A, LAB_B);
     let rings = incoming(&mut b).await;
     b.answer(rings.call);
     state(&mut b, CallState::Connected).await;
-    let before = lab.requests_after(LAB_B, "/updateEndpointMetadata").await;
+    let _ = lab.requests_after(LAB_B, "/updateEndpointMetadata").await;
 
-    // the accept's answer asked for a keep-alive every 2700 s
-    b.tick(Instant::now() + Duration::from_secs(2_690));
+    // the accept's answer asked for a keep-alive every 2700 s: it goes every 2430 s
+    b.tick(Instant::now() + Duration::from_secs(2_420));
     let early = b.events_within(Duration::from_millis(300)).await;
     assert!(early.is_empty(), "{early:#?}");
-    b.tick(Instant::now() + Duration::from_secs(2_701));
-    let due = b
-        .next(|event| match event {
-            CallEvent::KeepAliveDue { call } => Some(call),
-            _ => None,
-        })
-        .await;
-    assert_eq!(due, rings.call);
-    let after = b.events_within(Duration::from_millis(300)).await;
-    assert!(after.is_empty(), "{after:#?}");
-    assert_eq!(
-        lab.calling_requests_of(LAB_B).await,
-        before,
-        "no keep-alive request: none was captured"
+    for round in 1..=2_u32 {
+        b.tick(Instant::now() + Duration::from_secs(2_431) * round);
+        let due = b
+            .next(|event| match event {
+                CallEvent::KeepAliveDue { call, sent } => Some((call, sent)),
+                _ => None,
+            })
+            .await;
+        assert_eq!(due, (rings.call, true));
+        let deadline = tokio::time::Instant::now() + support::WAIT;
+        while keep_alives(&lab, LAB_B) < round as usize {
+            assert!(tokio::time::Instant::now() < deadline, "keep-alive {round} not taken");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    let log = b.log.lines();
+    assert!(
+        log.iter()
+            .filter(|line| line["verdict"] == "allow" && line.to_string().contains("keep_alive"))
+            .count()
+            >= 2,
+        "{log:#?}"
     );
+    every_write_permitted(&log);
+    b.hang_up(rings.call);
+    let _ = ended(&mut b).await;
+    b.tick(Instant::now() + Duration::from_secs(10_000));
+    let after = b.events_within(Duration::from_millis(300)).await;
+    assert!(after.is_empty(), "none after the call ended: {after:#?}");
+    assert_eq!(keep_alives(&lab, LAB_B), 2);
+}
+
+/// The keep-alives `mri` sent on the mock's one call.
+fn keep_alives(lab: &Lab, mri: &str) -> usize {
+    only_call(lab)
+        .requests
+        .iter()
+        .filter(|(op, by)| op == "keepAlive" && by == mri)
+        .count()
 }

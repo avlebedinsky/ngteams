@@ -2,17 +2,16 @@
 
 use std::error::Error;
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
 use teams_core::{Action, EngineHandle};
-use teams_headless::cli::{Cli, Command};
-use teams_headless::commands::{self, WatchEnd};
+use teams_headless::cli::{CallAudio, Cli, Command};
+use teams_headless::commands::{self, Answering, WatchEnd};
 use teams_headless::lab::Lab;
 use teams_headless::print::{now_ms, visible};
-use teams_headless::{availability, call, chat};
+use teams_headless::{availability, call, chat, echo};
 use teams_proto::chat::MessageText;
 use teams_store::OutboxState;
 use teams_trouter::Stop;
@@ -102,7 +101,9 @@ async fn run(cli: Cli) -> Outcome {
             Ok(ExitCode::SUCCESS)
         }
         Command::Sync => sync(&lab, &mut signals, &mut out).await,
-        Command::Watch { json } => watch(&lab, json, &mut signals, &mut out).await,
+        command @ (Command::Watch { .. } | Command::Call { .. } | Command::Join { .. }) => {
+            calling_command(&lab, command, &mut signals, &mut out).await
+        }
         Command::Presence { wait, mris } => {
             presence(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
         }
@@ -123,32 +124,68 @@ async fn run(cli: Cli) -> Outcome {
             };
             own_availability(&lab, plan, &mut signals, &mut out).await
         }
-        Command::Call {
-            target,
-            tone,
-            hear,
-            record,
-            seconds,
-            wait,
-        } => {
-            let asked = CallAsked {
-                target,
-                tone,
-                hear: hear.unwrap_or(tone),
-                record,
-                plan: call::Plan {
-                    register_within: REGISTER_WAIT,
-                    connect_within: Duration::from_secs(wait),
-                    hold: Duration::from_secs(seconds),
-                    end_within: CALL_END_WAIT,
-                },
-            };
-            place_call(&lab, asked, &mut signals, &mut out).await
-        }
         command => {
             let (action, wait) = write_action(&lab, command)?;
             one_write(&lab, action, wait, &mut signals, &mut out).await
         }
+    }
+}
+
+/// `watch` (with or without its calling), `call` and `join`.
+async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    match command {
+        Command::Watch {
+            json,
+            answer_lab_calls,
+            calls,
+            audio,
+            tone_seconds,
+        } => {
+            if answer_lab_calls || calls {
+                let answering = if answer_lab_calls {
+                    Answering::LabCalls
+                } else {
+                    Answering::Nothing
+                };
+                let watching = (json, answering);
+                watch_calls(lab, watching, (audio, tone_seconds), signals, out).await
+            } else {
+                watch(lab, json, signals, out).await
+            }
+        }
+        Command::Call {
+            target,
+            audio,
+            seconds,
+            wait,
+        } => {
+            let target = if target == "echo" {
+                call::Target::Echo(lab.echo()?)
+            } else {
+                call::Target::Chat(conversation(lab, &target)?)
+            };
+            let asked = CallAsked {
+                target,
+                audio,
+                plan: call_plan(seconds, wait, 0),
+            };
+            place_call(lab, asked, signals, out).await
+        }
+        Command::Join {
+            chat,
+            audio,
+            seconds,
+            wait,
+            ring_wait,
+        } => {
+            let asked = CallAsked {
+                target: call::Target::Join(conversation(lab, &chat)?),
+                audio,
+                plan: call_plan(seconds, wait, ring_wait),
+            };
+            place_call(lab, asked, signals, out).await
+        }
+        _ => Err("not a calling command".into()),
     }
 }
 
@@ -280,7 +317,8 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::Presence { .. }
         | Command::Profile { .. }
         | Command::Availability { .. }
-        | Command::Call { .. } => {
+        | Command::Call { .. }
+        | Command::Join { .. } => {
             return Err("not a write".into());
         }
     };
@@ -302,9 +340,14 @@ async fn write(handle: &mut EngineHandle, action: Action, wait: Duration, out: &
 /// The push channel's events until a signal: exits 0 on the signal, non-zero when the channel stopped on its own.
 async fn watch(lab: &Lab, json: bool, signals: &mut Signals, out: &mut impl Write) -> Outcome {
     let mut handle = lab.start_engine(true).await?;
-    let end = commands::watch(&mut handle, json, &lab.names, out, signals.next()).await;
+    let end = commands::watch(&mut handle, json, Answering::Nothing, &lab.names, out, signals.next()).await;
     handle.shutdown();
-    match end? {
+    watch_outcome(end?)
+}
+
+/// How `watch` exits: 0 on a signal, non-zero when the channel or the engine stopped on its own.
+fn watch_outcome(end: WatchEnd) -> Outcome {
+    match end {
         WatchEnd::Stopped | WatchEnd::PushStopped(Stop::Requested) => Ok(ExitCode::SUCCESS),
         WatchEnd::PushStopped(why) => Err(format!("the push channel stopped: {why:?}").into()),
         WatchEnd::EngineStopped => Err("the engine stopped".into()),
@@ -326,34 +369,105 @@ async fn own_availability(lab: &Lab, plan: availability::Plan, signals: &mut Sig
     }
 }
 
+/// A call's or a join's plan: held `seconds` once connected, connected within `wait` of its placing, a join's
+/// invitation within `ring_wait`.
+fn call_plan(seconds: u64, wait: u64, ring_wait: u64) -> call::Plan {
+    call::Plan {
+        register_within: REGISTER_WAIT,
+        invited_within: Duration::from_secs(ring_wait),
+        connect_within: Duration::from_secs(wait),
+        hold: Duration::from_secs(seconds),
+        end_within: CALL_END_WAIT,
+    }
+}
+
 /// A call as the command line asks for it.
 struct CallAsked {
-    target: String,
-    tone: f32,
-    hear: f32,
-    record: Option<PathBuf>,
+    target: call::Target,
+    audio: CallAudio,
     plan: call::Plan,
 }
 
-/// One call ([`call::run`]), its media on files: the keyed tone written first, the engine started with its calling,
-/// a catch-up before a call from a chat (a group chat's members as the store holds them), the call, the engine stopped
-/// (its recording closed), then what the recording holds of the keyed tone at `hear`. Exits 0 only when the call went
-/// as asked and, for the echo, the tone came back.
-async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mut impl Write) -> Outcome {
-    let target = if asked.target == "echo" {
-        call::Target::Echo(lab.echo()?)
-    } else {
-        call::Target::Chat(conversation(lab, &asked.target)?)
-    };
-    let recording = match asked.record {
-        Some(path) => path,
+/// The call's files: the tone written as `audio` asks, for `length`, beside the recording (`audio.record`, or
+/// `<data_dir>/recordings/<alias>-<what>-<ms>.wav`).
+fn call_files(lab: &Lab, audio: &CallAudio, what: &str, length: Duration) -> Result<call::CallFiles, Box<dyn Error>> {
+    let recording = match &audio.record {
+        Some(path) => path.clone(),
         None => lab
             .recordings_dir()?
-            .join(format!("{}-call-{}.wav", lab.alias.as_str(), now_ms())),
+            .join(format!("{}-{what}-{}.wav", lab.alias.as_str(), now_ms())),
     };
-    let files = call::CallFiles::write(recording, asked.tone, &asked.plan)?;
-    let mut handle = lab.start_calling(files.devices()).await?;
-    if matches!(target, call::Target::Chat(_)) {
+    let keying = if audio.bursts {
+        call::Keying::Bursts
+    } else {
+        call::Keying::Keyed
+    };
+    Ok(call::CallFiles::write_for(recording, audio.tone, keying, length)?)
+}
+
+/// What the recording holds of each tone `audio` asks to hear (its own tone when it names none): the keyed tone's
+/// blocks and round trips, and the tone's presence however it was keyed; and when the devices opened. What the first
+/// one's keyed tone came back as.
+fn heard_lines(
+    files: &call::CallFiles,
+    audio: &CallAudio,
+    out: &mut impl Write,
+) -> Result<Option<echo::Echo>, Box<dyn Error>> {
+    writeln!(out, "recording {}", visible(&files.recording.display().to_string()))?;
+    writeln!(out, "{}", call::devices_line(files.opened()))?;
+    let hear = if audio.hear.is_empty() {
+        vec![audio.tone]
+    } else {
+        audio.hear.clone()
+    };
+    let mut first = None;
+    for (index, hz) in hear.into_iter().enumerate() {
+        let heard = files.heard(hz)?;
+        writeln!(out, "{}", call::echo_line(heard.as_ref()))?;
+        writeln!(out, "{}", call::tone_line(hz, &files.presence(hz)?))?;
+        if index == 0 {
+            first = heard;
+        }
+    }
+    Ok(first)
+}
+
+/// `watch --calls` or `watch --answer-lab-calls`: the push channel's events and the calling stack's until a signal,
+/// each call the engine offers answered with [`Answering::LabCalls`] (and none without), its media on files (`audio`,
+/// the tone `tone_seconds` long); then what the last answered call's recording holds. Exits as `watch` does.
+async fn watch_calls(
+    lab: &Lab,
+    (json, answering): (bool, Answering),
+    (audio, tone_seconds): (CallAudio, u64),
+    signals: &mut Signals,
+    out: &mut impl Write,
+) -> Outcome {
+    let files = call_files(lab, &audio, "watch", Duration::from_secs(tone_seconds))?;
+    let mut handle = lab.start_calling(files.devices(), true).await?;
+    let end = commands::watch(&mut handle, json, answering, &lab.names, out, signals.next()).await;
+    // the engine's stop ends a call still up and closes its media, and with it the recording
+    handle.shutdown();
+    let end = end?;
+    if files.opened().speaker.is_some() {
+        heard_lines(&files, &audio, out)?;
+    }
+    watch_outcome(end)
+}
+
+/// One call ([`call::run`]), its media on files: the tone written first, the engine started with its calling, a
+/// catch-up before a call from a chat (a group chat's members as the store holds them), the call, the engine stopped
+/// (its recording closed), then what the recording holds of the tone at `hear`. Exits 0 only when the call went as
+/// asked and, for the echo, the keyed tone came back.
+async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let CallAsked { target, audio, plan } = asked;
+    let what = if matches!(target, call::Target::Join(_)) {
+        "join"
+    } else {
+        "call"
+    };
+    let files = call_files(lab, &audio, what, call::CallFiles::length_for(&plan))?;
+    let mut handle = lab.start_calling(files.devices(), false).await?;
+    if !matches!(target, call::Target::Echo(_)) {
         let mut stderr = io::stderr();
         let synced = tokio::select! {
             synced = commands::sync(&handle, &mut stderr) => Some(synced),
@@ -365,21 +479,20 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
         }
     }
     let echo = matches!(target, call::Target::Echo(_));
-    let report = call::run(&mut handle, target, &asked.plan, &lab.names, out, signals.next()).await;
+    let report = call::run(&mut handle, target, &plan, &lab.names, out, signals.next()).await;
     // the engine's stop closes the call's media, and with it the recording
     handle.shutdown();
     let report = report?;
-    writeln!(out, "recording {}", visible(&files.recording.display().to_string()))?;
     if report.call.is_none() {
-        // a signal before the call was placed, or its media not set up within `--wait`
+        writeln!(out, "recording {}", visible(&files.recording.display().to_string()))?;
+        // a signal before the call was placed, its media not set up within `--wait`, or no running call to join
         if !report.interrupted {
             return Ok(ExitCode::FAILURE);
         }
         eprintln!("teams-headless: interrupted");
         return Ok(ExitCode::from(INTERRUPTED));
     }
-    let heard = files.heard(asked.hear)?;
-    writeln!(out, "{}", call::echo_line(heard.as_ref()))?;
+    let heard = heard_lines(&files, &audio, out)?;
     Ok(if report.completed() && (!echo || heard.is_some()) {
         ExitCode::SUCCESS
     } else {

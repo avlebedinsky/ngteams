@@ -9,6 +9,7 @@ use teams_fence::{Delivery, Mri, Observed};
 use teams_proto::{ClientInfo, MediaContent};
 
 use super::{CallError, CallEvent, CallId, CallState, Calls, DeliveryReply, Effect, End, Identity, Outcome, Placement};
+use crate::CallWrite;
 use crate::WriteId;
 use crate::agent::Kind;
 
@@ -193,24 +194,55 @@ fn an_acceptance_is_acknowledged_by_response_and_by_request_only_when_that_faile
     assert!(effects(&mut calls).is_empty(), "once");
 }
 
-#[test]
-fn the_keep_alive_falls_due_on_its_interval_and_ends_with_the_call() {
-    let now = Instant::now();
+/// The keep-alive's period: 90 % of the acceptance's `callKeepAliveInterval` (2700 s), as the web client sends it.
+const PERIOD: Duration = Duration::from_secs(2_430);
+
+/// A placed call up by an acceptance whose links name the call leg's own (the keep-alive's).
+fn up_with_a_call_leg(now: Instant) -> (Calls, CallId) {
     let (mut calls, call) = ringing_call(now);
     assert_eq!(calls.deadline(), None);
     let path = acceptance_path(&calls);
-    calls.on_delivery(&delivery(&path, &acceptance()), Observed::Acceptance, now);
+    let mut accepting = acceptance();
+    accepting["callAcceptance"]["links"]["callLeg"] = json!(call_leg());
+    calls.on_delivery(&delivery(&path, &accepting), Observed::Acceptance, now);
     let _ = effects(&mut calls);
-    assert_eq!(calls.keep_alive_interval(), Some(Duration::from_mins(45)));
-    assert_eq!(calls.deadline(), Some(now + Duration::from_mins(45)));
-    calls.tick(now + Duration::from_secs(2_699));
-    assert!(effects(&mut calls).is_empty());
-    calls.tick(now + Duration::from_mins(45));
-    let due = effects(&mut calls);
-    assert_eq!(events(&due), [CallEvent::KeepAliveDue { call }]);
-    assert!(sent(&due).is_empty(), "no request: none was captured");
-    assert_eq!(calls.deadline(), Some(now + Duration::from_mins(90)));
+    (calls, call)
+}
 
+#[test]
+fn the_keep_alive_goes_to_the_call_leg_every_90_percent_of_its_interval() {
+    let now = Instant::now();
+    let (mut calls, call) = up_with_a_call_leg(now);
+    assert_eq!(calls.keep_alive_interval(), Some(Duration::from_mins(45)));
+    assert_eq!(calls.deadline(), Some(now + PERIOD));
+    calls.tick(now + Duration::from_secs(2_429));
+    assert!(effects(&mut calls).is_empty());
+    calls.tick(now + PERIOD);
+    let due = effects(&mut calls);
+    assert_eq!(events(&due), [CallEvent::KeepAliveDue { call, sent: true }]);
+    let first = sent(&due);
+    assert_eq!(first.iter().map(|(_, name)| *name).collect::<Vec<_>>(), ["keep_alive"]);
+    let Some(Effect::Send { write, .. }) = due.iter().find(|effect| matches!(effect, Effect::Send { .. })) else {
+        panic!("{due:#?}");
+    };
+    assert!(matches!(**write, CallWrite::KeepAlive(_)), "{write:?}");
+    // its failing ends nothing; the next one falls due a period later, again and again
+    calls.on_outcome(first[0].0, &Outcome::Failed, now + PERIOD);
+    assert!(events(&effects(&mut calls)).is_empty());
+    assert_eq!(calls.current().map(|(id, _)| id), Some(call));
+    assert_eq!(calls.deadline(), Some(now + PERIOD * 2));
+    calls.tick(now + PERIOD * 2);
+    let again = effects(&mut calls);
+    assert_eq!(events(&again), [CallEvent::KeepAliveDue { call, sent: true }]);
+    calls.on_outcome(sent(&again)[0].0, &ok(&json!({})), now + PERIOD * 2);
+    calls.tick(now + PERIOD * 3);
+    assert_eq!(sent(&effects(&mut calls)).len(), 1, "a third one");
+}
+
+#[test]
+fn no_keep_alive_falls_due_once_the_call_ended() {
+    let now = Instant::now();
+    let (mut calls, _) = up_with_a_call_leg(now);
     let end = calls
         .call
         .as_ref()
@@ -236,6 +268,29 @@ fn the_keep_alive_falls_due_on_its_interval_and_ends_with_the_call() {
     assert_eq!((remote.code, remote.phrase.as_deref()), (Some(0), Some("Done")));
     assert_eq!(calls.deadline(), None);
     assert_eq!(calls.current(), None);
+    for period in 1..=3 {
+        calls.tick(now + PERIOD * period);
+        assert!(effects(&mut calls).is_empty(), "none after the call ended");
+    }
+}
+
+#[test]
+fn a_call_without_a_call_leg_link_tells_its_keep_alive_due_and_sends_nothing() {
+    let now = Instant::now();
+    let (mut calls, call) = ringing_call(now);
+    let path = acceptance_path(&calls);
+    calls.on_delivery(&delivery(&path, &acceptance()), Observed::Acceptance, now);
+    let _ = effects(&mut calls);
+    calls.tick(now + PERIOD);
+    let due = effects(&mut calls);
+    assert_eq!(events(&due), [CallEvent::KeepAliveDue { call, sent: false }]);
+    assert!(sent(&due).is_empty());
+    assert_eq!(calls.deadline(), Some(now + PERIOD * 2));
+}
+
+/// A call leg's own link, the keep-alive's.
+fn call_leg() -> String {
+    format!("{PROXY}/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/Call1/1/a1/3?i=10-0-0-1&e=1")
 }
 
 #[test]

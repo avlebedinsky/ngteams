@@ -551,7 +551,8 @@ fn controller_op(
 ) -> Option<ResponseTemplate> {
     let index = state.calling.calls.iter().position(|known| known.id == call)?;
     let leg_index = leg.parse::<usize>().ok().and_then(|leg| leg.checked_sub(1));
-    let op = op.unwrap_or_default();
+    // the call leg's own link takes the call's keep-alive (no operation after it)
+    let op = op.unwrap_or(if kind == "active" { "keepAlive" } else { "" });
     log(state, index, account, op);
     match (kind, op) {
         ("forked", "attach") => attach(state, index, leg_index?, body),
@@ -563,6 +564,8 @@ fn controller_op(
         ("incoming", "accept") => accept(state, index, leg_index?, body),
         ("incoming", "reject") => reject(state, index, leg_index?, body),
         ("active", "renegotiate") => renegotiated(state, index, account, body),
+        // its answer isn't captured (every keep-alive of the capture was held back): 200 with no body
+        ("active", "keepAlive") if body.get("callParticipantUpdate").is_some() => Some(status(200)),
         ("negotiations", "answer") => {
             let answer = body.pointer("/mediaAnswer/mediaContent")?;
             let id = state.calling.calls[index].id.clone();

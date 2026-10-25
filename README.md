@@ -263,7 +263,14 @@ chat other than its forced denies, one for a partial or refused membership, or a
   call screen and its join register the call). A callee clicks only on the run's own call (every invitation its page
   received is a's call of this run, from a to that callee in the run's chat, and the page shows one incoming call, or
   for a join the run's chat with one join), and the fence decides each answer, decline and join again on the account's
-  own offered invitation.
+  own offered invitation. `keep-alive` (`ab-call` only) is `answer` held 47 minutes, past the call's keep-alive
+  interval, to record the call's keep-alive.
+- `ab-call-native` (`TEAMS_HEADLESS_BIN` naming a lab build of `teams-headless`, release for timing): b's web client
+  and a's native client in their 1:1 chat. a's native client calls b and b's page answers (only on the run's own
+  call); b's page calls a and `teams-headless a watch --answer-lab-calls` answers; then a's native client calls b while
+  `teams-headless b watch --calls` rings too, and b's page answers: b's native client's ring must end (answered
+  elsewhere). Every side plays the page's tone in bursts and must hear the other's (the page by its audio tap, a native
+  client in its recording); the native clients' output goes into b's capture dir.
 
 Every lab browser runs with its output muted and Chrome's fake audio manager (`--mute-audio`,
 `--disable-audio-output`): nothing is played aloud and the desktop's audio server is never opened; a call scenario's
@@ -301,18 +308,23 @@ teams-headless a delete b <message>       # one of a's messages, deleted
 teams-headless a react b <message> like [--remove]
 teams-headless b read a <message>         # b's read horizon in the a–b chat moved up to that message (a read receipt)
 teams-headless b watch [--json]           # every event of the push channel with its receive time, until SIGINT/SIGTERM
+teams-headless b watch --answer-lab-calls|--calls [--tone 1000] [--bursts] [--hear <hz>] [--record <wav>] \
+  [--tone-seconds 180]                    # as watch, the calling stack registered: answers each offered lab call, or none
 teams-headless a presence [--wait 30] [--mri <mri>]...  # b's and c's presence, and anyone's by MRI, read from UPS
 teams-headless a profile <mri>... [--wait 30]           # where the engine's name for each comes from (Graph, the middle tier's lookup)
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
-teams-headless a call echo|b|abc|<id> [--tone 1000] [--hear <hz>] [--record <wav>] [--seconds 45] [--wait 60] \
-                                          # a call through the engine, its media on files; held, hung up, its tone looked for
+teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--record <wav>] [--seconds 45] \
+  [--wait 60]                             # a call through the engine, its media on files; held, hung up, its tone looked for
+teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 60] \
+                                          # the group chat's running call joined late, once its invitation rang out here
 ```
 
 A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat
 recorded in `chats.toml`), or a conversation id. Each write first catches up (its summary on stderr), then waits up to
 `--wait` seconds (120) for a write that has to wait out a `Retry-After`; it exits non-zero unless the write went
-through. `watch` answers no delivery and no call; it exits 0 on SIGINT or SIGTERM, non-zero when the push channel
+through. `watch` answers no delivery and no call (but with `--answer-lab-calls`, below); it exits 0 on SIGINT or SIGTERM,
+non-zero when the push channel
 stopped on its own. `presence` reads only (a read sent as a `POST`, which reaches nobody whoever it names); it waits up to
 `--wait` seconds (30) for each person's presence to be told, then prints one `presence <alias or MRI> <availability>`
 line per person, `Unknown` for one not told in time or whose read failed; it refuses more people (the other lab accounts
@@ -334,7 +346,18 @@ hung up (and hung up when it hasn't connected within `--wait` seconds; one whose
 placed). It prints each event, `call_summary` (setup time, held, how it ended) and `echo`: what the recording holds of
 the keyed tone at `--hear` Hz (its own tone by default): its level, the stretches of it that came back with their
 offsets, and the round trips' p50, p95 and max. It exits 0 only when the call connected, was held and hung up, and,
-for `echo`, the tone came back. It answers nothing. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on
+for `echo`, the tone came back. It answers nothing. `--bursts` plays the tone in bursts (1.6 s on, 0.9 s off, a lab
+browser's page hears those) instead of keyed; after the call it also prints `tone` (how much of the tone at `--hear`
+the recording holds, however it was keyed) and `devices` (when the microphone and the speaker opened, by the wall
+clock: a far end's recording lines up with the tone sent by them, two processes apart). `join` (M3 Task 16) waits
+`--ring-wait` seconds for an invitation to the group chat's running call to ring here, lets it ring out unanswered,
+then joins the running call (a join is judged like a start in that chat) and holds it as `call` does. `watch
+--answer-lab-calls` registers the calling stack too and answers each call the engine offers: only an invitation from
+a lab account naming only lab accounts, which the lab fence offers (every other one rings unanswered and nothing is
+sent for it), each answer judged by the fence again; the flag exists in `teams-headless` alone. `watch --calls`
+registers the calling stack and answers nothing (an offered call rings until its ring ends). Both play `--tone` (for
+`--tone-seconds`) and record each answered call, and print what the last one's recording holds when they end.
+`TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on
 stderr (Trouter's packets and deliveries by kind and size, never a payload); nothing else is logged.
 
 The live acceptance test (M1 Task 21, `tests/chat_live.rs`) only spawns a normally built binary and reads its output

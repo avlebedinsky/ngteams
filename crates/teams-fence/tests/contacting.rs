@@ -1020,3 +1020,60 @@ fn only_typing_read_receipts_and_own_availability_are_not_contacting() {
         assert_eq!(kind.is_contacting(), !quiet.contains(&kind), "{kind}");
     }
 }
+
+#[test]
+fn a_keep_alive_is_an_empty_participant_update_to_a_call_leg_s_own_link_naming_nobody() -> TestResult {
+    let fixture: Value = serde_json::from_str(&fill(CHAT_FOLLOW_UPS))?;
+    let cases = fixture["cases"].as_array().ok_or("cases")?;
+    let keep_alives: Vec<&Value> = cases
+        .iter()
+        .filter(|case| case["name"].as_str().is_some_and(|name| name.contains("keep-alive")))
+        .collect();
+    assert_eq!(keep_alives.len(), 2, "the caller's and the callee's");
+    let verdict = |method: &str, at: &str, body: &str| {
+        contacting(&Request::new(method, at).with_body(Some(body.as_bytes())), &policy())
+    };
+    for case in keep_alives {
+        let url = case["url"].as_str().ok_or("url")?;
+        let body = case["body"].to_string();
+        let Contact::Write(target) = verdict("POST", url, &body) else {
+            return Err(format!("{}: not a write", case["name"]).into());
+        };
+        assert_eq!(target.kind(), WriteKind::CallFollowUp);
+        assert!(target.added().is_empty());
+        let Scope::CallOperation {
+            operation,
+            url: at,
+            from,
+            callbacks,
+            joins,
+        } = target.scope()
+        else {
+            return Err("not a call operation".into());
+        };
+        assert_eq!(*operation, CallOperation::KeepAlive);
+        assert_eq!(at.as_str(), Url::parse(url)?.as_str());
+        assert!(from.is_none() && callbacks.is_empty() && joins.is_none());
+        // only that body, that method, that link
+        for other in [
+            r#"{"callParticipantUpdate":{"sharedLineCallContent":{}}}"#,
+            r#"{"callParticipantUpdate":{},"x":1}"#,
+            r#"{"callParticipantUpdate":null}"#,
+            "{}",
+            "",
+        ] {
+            assert_eq!(verdict("POST", url, other), Contact::Unreadable, "{other}");
+        }
+        assert_eq!(verdict("PUT", url, &body), Contact::Unreadable);
+        assert_eq!(verdict("DELETE", url, &body), Contact::Unreadable);
+        let deeper = url.replacen('?', "/more?", 1);
+        assert_eq!(verdict("POST", &deeper, &body), Contact::Unreadable);
+        let mut shorter = Url::parse(url)?;
+        let segments: Vec<String> = shorter.path_segments().ok_or("segments")?.map(str::to_owned).collect();
+        shorter.set_path(&segments[..segments.len() - 1].join("/"));
+        assert_eq!(verdict("POST", shorter.as_str(), &body), Contact::Unreadable);
+        let elsewhere = url.replace("/active/", "/incoming/");
+        assert_eq!(verdict("POST", &elsewhere, &body), Contact::Unreadable);
+    }
+    Ok(())
+}

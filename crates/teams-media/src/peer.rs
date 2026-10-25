@@ -104,10 +104,11 @@ impl Peer {
     /// # Errors
     /// [`Error::Rtc`] if `str0m` fails while draining.
     pub fn with_candidate(now: Instant, candidate: Candidate) -> Result<Self, Error> {
+        // audio alone (no video yet): every video line offered is answered rejected, as an audio-only client does
         let mut config = Rtc::builder()
             .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
             .set_reordering_size_audio(0)
-            .enable_opus(false, false);
+            .clear_codecs();
         // Opus as `str0m` offers it by default (`minptime=10;useinbandfec=1`), on the payload type the media
         // controller numbers it with
         config.codec_config().add_config(

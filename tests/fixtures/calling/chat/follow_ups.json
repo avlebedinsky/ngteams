@@ -1,5 +1,5 @@
 {
- "_synthetic": "Made up, shaped like the ab-call and abc-call captures of 2026-10-24 (read locally from the captures; docs/protocol/calling.md): the requests on a call from a chat that the echo call's capture didn't show: the caller's cancel, the callee's attach while it rings, the attach's answer (`attach_answer`: the call leg's links and the conversation subscription's output, trimmed), the callee's progress while it rings at the progress link that answer handed out, on the callee's click its endpoint state, its acceptance (the SDP a stub on documentation addresses) and its decline, the acceptance's answer (`accept_answer`), the answered call's operations (endpoint metadata, own participant properties, leave), the media negotiation (a renegotiation, its delivery at the peer's callback in `deliveries`, the answer to one, an answer's delivery and its acknowledgement, the media lines' update) and the join of a running group call (the roster-only one and the one with media). <guid:a> and <guid:b> are lab accounts a and b, <group> the group chat's id, other <guid:\u2026> made-up ids; tests fill in made-up GUIDs. Hosts, ids, routes and callbacks are made up.",
+ "_synthetic": "Made up, shaped like the ab-call and abc-call captures of 2026-10-24 (read locally from the captures; docs/protocol/calling.md): the requests on a call from a chat that the echo call's capture didn't show: the caller's cancel, the callee's attach while it rings, the attach's answer (`attach_answer`: the call leg's links and the conversation subscription's output, trimmed), the callee's progress while it rings at the progress link that answer handed out, on the callee's click its endpoint state, its acceptance (the SDP a stub on documentation addresses) and its decline, the acceptance's answer (`accept_answer`), the answered call's operations (endpoint metadata, own participant properties, leave), the media negotiation (a renegotiation, its delivery at the peer's callback in `deliveries`, the answer to one, an answer's delivery and its acknowledgement, the media lines' update), the join of a running group call (the roster-only one and the one with media) and the keep-alive of either side (shaped like ab-call --call keep-alive of 2026-10-25). <guid:a> and <guid:b> are lab accounts a and b, <group> the group chat's id, other <guid:\u2026> made-up ids; tests fill in made-up GUIDs. Hosts, ids, routes and callbacks are made up.",
  "cases": [
   {
    "name": "the caller hangs up while the callee rings: the leave carries how long it rang",
@@ -559,6 +559,22 @@
       }
      }
     }
+   }
+  },
+  {
+   "name": "the caller's keep-alive (its acceptance's callLeg link), 90 % of callKeepAliveInterval into the call",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/k1/1?i=10-0-0-1&e=1",
+   "body": {
+    "callParticipantUpdate": {}
+   }
+  },
+  {
+   "name": "the callee's keep-alive (the acceptance answer's callLeg link)",
+   "method": "POST",
+   "url": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/SyntheticCall1/27/a4/3?i=10-0-0-1",
+   "body": {
+    "callParticipantUpdate": {}
    }
   }
  ],

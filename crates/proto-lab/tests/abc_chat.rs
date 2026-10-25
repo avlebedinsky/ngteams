@@ -263,6 +263,13 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
             assert!(callee_forced(step).contains(&EARLIER_RUN_PROBE));
             (probe_rules(None)?, policy(caller_forced(step)))
         }
+        // b's page, under the earlier run's probe rules
+        ScenarioName::AbCallNative => {
+            use proto_lab::scenario::ab_call::policy;
+            use proto_lab::scenario::ab_call_native::FORCED;
+            assert!(FORCED.contains(&EARLIER_RUN_PROBE));
+            (probe_rules(None)?, policy(FORCED))
+        }
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth

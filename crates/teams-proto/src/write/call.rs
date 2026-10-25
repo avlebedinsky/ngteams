@@ -542,6 +542,7 @@ call_write!(
     AnswerMedia,
     AcknowledgeMediaAnswer,
     UpdateMediaDescriptions,
+    KeepAliveCall,
 );
 
 /// The meeting a group chat's call is, as a join names it (`meetingInfo`): its organizer's object id and tenant.
@@ -1110,5 +1111,22 @@ impl UpdateMediaDescriptions {
             link,
             Some(body),
         )?))
+    }
+}
+
+/// The call's keep-alive: `POST` of an empty participant update (`{"callParticipantUpdate": {}}`) to the call leg's
+/// own `callLeg` link (the caller's acceptance's, the callee's acceptance's acknowledgement's), sent every 90 % of the
+/// call's `callKeepAliveInterval` as the web client does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeepAliveCall(Built);
+
+impl KeepAliveCall {
+    /// The keep-alive at `link`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the link isn't a call leg's own.
+    pub fn new(context: &CallContext, link: &CallLink) -> Result<Self, CallWriteError> {
+        let body = json!({"callParticipantUpdate": {}});
+        Ok(Self(operation(context, CallOperation::KeepAlive, link, Some(body))?))
     }
 }

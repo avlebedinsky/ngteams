@@ -75,6 +75,93 @@ pub fn keyed(tone: Tone, length: Duration) -> Vec<f32> {
     samples
 }
 
+/// How long a burst of [`bursts`] lasts, and the silence after it: the web client's fake microphone's (the lab
+/// browser's), whose bursts the page's audio tap reads as the tone.
+pub const BURST_ON: Duration = Duration::from_millis(1_600);
+pub const BURST_OFF: Duration = Duration::from_millis(900);
+
+/// `tone` in bursts for `length`: [`BURST_ON`] of it, then [`BURST_OFF`] of silence, each burst's edges faded over
+/// 5 ms. What a lab browser's page hears as the tone (a keyed 200 ms slot is too short for its audio tap).
+#[must_use]
+pub fn bursts(tone: Tone, length: Duration) -> Vec<f32> {
+    let total = samples_in(length);
+    let (on, period) = (samples_in(BURST_ON), samples_in(BURST_ON + BURST_OFF));
+    let mut samples = vec![0.0; total];
+    ToneGenerator::new(tone).fill(&mut samples);
+    for (at, sample) in samples.iter_mut().enumerate() {
+        let into = at % period;
+        *sample *= if into >= on {
+            0.0
+        } else {
+            ramp(into.min(on - 1 - into).min(RAMP))
+        };
+    }
+    samples
+}
+
+/// Samples in `length` at the devices' rate.
+fn samples_in(length: Duration) -> usize {
+    usize::try_from(length.as_millis()).unwrap_or(usize::MAX) * (SLOT_SAMPLES / 200)
+}
+
+/// A stretch of a recording [`presence`] counts the tone in (100 ms).
+const STRETCH_WINDOWS: usize = 10;
+/// How much of a recording must hold the tone for it to be heard: 1 s of stretches, all told.
+const MIN_HEARD_STRETCHES: usize = 10;
+
+/// How much of a tone a recording holds, whatever its keying ([`presence`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Presence {
+    /// The 100 ms stretches whose level at the tone's frequency reaches [`MIN_LEVEL`].
+    pub stretches: usize,
+    /// The first of them, from the recording's start.
+    pub first: Option<Duration>,
+    /// The loudest stretch's level.
+    pub peak: f32,
+}
+
+impl Presence {
+    /// Whether the tone is there: at least 1 s of it, all told.
+    #[must_use]
+    pub fn heard(&self) -> bool {
+        self.stretches >= MIN_HEARD_STRETCHES
+    }
+
+    /// How long the tone sounds in the recording, all told.
+    #[must_use]
+    pub fn length(&self) -> Duration {
+        window_time(self.stretches * STRETCH_WINDOWS)
+    }
+}
+
+/// How much of the tone at `hz` `received` holds, in 100 ms stretches (each the mean level of its 10 ms windows,
+/// [`Meter`]), however it was keyed: the check for a far end that doesn't play [`keyed`]'s pattern (a lab browser's
+/// page plays bursts).
+#[must_use]
+pub fn presence(hz: f32, received: &[f32]) -> Presence {
+    let meter = Meter::new(hz);
+    let levels: Vec<f32> = received
+        .as_chunks::<WINDOW>()
+        .0
+        .iter()
+        .map(|window| meter.level(window))
+        .collect();
+    let mut found = Presence {
+        stretches: 0,
+        first: None,
+        peak: 0.0,
+    };
+    for (index, stretch) in levels.as_chunks::<STRETCH_WINDOWS>().0.iter().enumerate() {
+        let level = stretch.iter().sum::<f32>() / small_f32(STRETCH_WINDOWS);
+        found.peak = found.peak.max(level);
+        if level >= MIN_LEVEL {
+            found.stretches += 1;
+            found.first.get_or_insert_with(|| window_time(index * STRETCH_WINDOWS));
+        }
+    }
+    found
+}
+
 /// The fade-in gain of a slot's `at`th sample (a raised cosine over [`RAMP`] samples).
 fn ramp(at: usize) -> f32 {
     let x = std::f32::consts::PI * small_f32(at) / small_f32(RAMP);
@@ -100,9 +187,20 @@ pub struct Echo {
     pub blocks: Vec<EchoedBlock>,
     /// Each onset's round trip within those blocks, sorted.
     pub delays: Vec<Duration>,
+    /// The silence [`find_with_lead`] put before the recording: every offset and round trip above counts it in, and
+    /// one shorter than it came back before the recording started ([`Echo::signed_ms`]).
+    pub lead: Duration,
 }
 
 impl Echo {
+    /// `measured` (an offset or a round trip above) less [`Echo::lead`], in ms: negative for a far end whose recording
+    /// started after what it heard went out (another process's devices opened later).
+    #[must_use]
+    pub fn signed_ms(&self, measured: Duration) -> i64 {
+        let ms = |duration: Duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+        ms(measured) - ms(self.lead)
+    }
+
     /// The on-slots' level, the median over the echoed blocks.
     #[must_use]
     pub fn level(&self) -> f32 {
@@ -111,9 +209,17 @@ impl Echo {
         levels.get(levels.len() / 2).copied().unwrap_or(0.0)
     }
 
-    /// The nearest-rank `percent` percentile of the round trips; `None` without any.
+    /// The nearest-rank `percent` percentile of the round trips, the lead taken off (none below zero); `None` without
+    /// any.
     #[must_use]
     pub fn delay_percentile(&self, percent: usize) -> Option<Duration> {
+        self.raw_percentile(percent)
+            .map(|delay| delay.saturating_sub(self.lead))
+    }
+
+    /// The nearest-rank `percent` percentile of the round trips as measured, the lead counted in.
+    #[must_use]
+    pub fn raw_percentile(&self, percent: usize) -> Option<Duration> {
         let rank = (self.delays.len() * percent).div_ceil(100).max(1);
         self.delays.get(rank - 1).copied()
     }
@@ -125,6 +231,19 @@ impl Echo {
         let last = self.blocks.last()?.sent_at + SLOT * slots_u32(BLOCK_SLOTS);
         Some((first, last))
     }
+}
+
+/// [`find`] in `received` with `lead` of silence put before it: a block that came back up to `lead` *before* the
+/// recording's own start is found too (a far end in another process, whose devices opened after the sender's), at an
+/// offset [`Echo::signed_ms`] reads below zero. Whole 10 ms windows of lead.
+#[must_use]
+pub fn find_with_lead(hz: f32, sent: Duration, received: &[f32], max_offset: Duration, lead: Duration) -> Option<Echo> {
+    let lead_samples = usize::try_from(lead.as_millis() / 10).unwrap_or(0) * WINDOW;
+    let mut padded = vec![0.0; lead_samples];
+    padded.extend_from_slice(received);
+    let mut echo = find(hz, sent, &padded, max_offset + lead)?;
+    echo.lead = window_time(lead_samples / WINDOW);
+    Some(echo)
 }
 
 /// Looks for the keyed tone at `hz` (what [`keyed`] made of the first `sent` of it) in `received`, at most
@@ -143,6 +262,7 @@ pub fn find(hz: f32, sent: Duration, received: &[f32], max_offset: Duration) -> 
     let mut echo = Echo {
         blocks: Vec::new(),
         delays: Vec::new(),
+        lead: Duration::ZERO,
     };
     for (index, block) in slots.as_chunks::<BLOCK_SLOTS>().0.iter().enumerate() {
         let first = index * BLOCK_SLOTS;
@@ -447,6 +567,53 @@ mod tests {
         assert!(find(TONE.hz, sent, &received, Duration::from_secs(2)).is_some());
         assert_eq!(find(660.0, sent, &received, Duration::from_secs(2)), None);
         assert_eq!(find(1_340.0, sent, &received, Duration::from_secs(2)), None);
+    }
+
+    #[test]
+    fn with_a_lead_a_far_end_that_started_recording_later_is_found_at_a_negative_offset() {
+        let sent = Duration::from_secs(12);
+        let signal = keyed(TONE, sent);
+        // the far end's speaker opened 3 s after the microphone did; the way there takes 200 ms
+        let at_far_end = delayed(&signal, Duration::from_millis(200), 0.5, signal.len() + 48_000);
+        let received = &at_far_end[3 * 48_000..];
+        assert_eq!(find(TONE.hz, sent, received, sent), None, "not without a lead");
+        let echo = find_with_lead(TONE.hz, sent, received, sent, Duration::from_secs(5)).unwrap();
+        assert_eq!(echo.lead, Duration::from_secs(5));
+        for block in &echo.blocks {
+            assert!((echo.signed_ms(block.offset) + 2_800).abs() <= 30, "{block:?}");
+        }
+        let p50 = echo.raw_percentile(50).unwrap();
+        assert!((echo.signed_ms(p50) + 2_800).abs() <= 10, "{p50:?}");
+        assert_eq!(echo.delay_percentile(50), Some(Duration::ZERO), "none below zero");
+    }
+
+    #[test]
+    fn bursts_are_the_tone_for_1_6_s_then_0_9_s_of_silence() {
+        let samples = bursts(TONE, Duration::from_secs(5));
+        assert_eq!(samples.len(), 5 * 48_000);
+        let level =
+            |from_ms: usize, to_ms: usize| teams_media::tone::amplitude_at(&samples[from_ms * 48..to_ms * 48], TONE.hz);
+        assert!((level(100, 1_500) - 0.5).abs() < 0.02);
+        assert!(level(1_650, 2_450) < 1e-6);
+        assert!((level(2_600, 4_000) - 0.5).abs() < 0.02);
+        assert!(level(4_150, 4_950) < 1e-6);
+    }
+
+    #[test]
+    fn presence_counts_the_tone_however_it_is_keyed_and_finds_none_in_silence_or_at_another_frequency() {
+        let mut received = vec![0.0; 48_000 * 2];
+        received.extend(bursts(TONE, Duration::from_secs(5)).iter().map(|sample| sample * 0.3));
+        let found = presence(TONE.hz, &received);
+        assert!(found.heard(), "{found:?}");
+        // two bursts of 1.6 s, their faded edges a stretch or so short of it
+        assert!((28..=32).contains(&found.stretches), "{found:?}");
+        assert_eq!(found.first, Some(Duration::from_secs(2)));
+        assert!((found.peak - 0.15).abs() < 0.01, "{found:?}");
+        assert!(!presence(660.0, &received).heard());
+        let silent = presence(TONE.hz, &vec![0.0; 48_000 * 3]);
+        assert_eq!((silent.heard(), silent.stretches, silent.first), (false, 0, None));
+        // the keyed tone, heard too
+        assert!(presence(TONE.hz, &keyed(TONE, Duration::from_secs(6))).heard());
     }
 
     #[test]

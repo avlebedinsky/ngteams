@@ -120,9 +120,9 @@ pub enum CallEvent {
     MediaOffer { call: CallId, offer: MediaContent },
     /// The call ended. Every call shown ends with this or [`CallEvent::RingEnded`], once.
     Ended { call: CallId, end: End },
-    /// The keep-alive interval the call's services asked for has passed again. Nothing is sent for it: no capture
-    /// shows the keep-alive request yet (the plan's ➕ in Task 16).
-    KeepAliveDue { call: CallId },
+    /// The call's keep-alive fell due (every 90 % of the interval the call's services asked for): it went to the call
+    /// leg's own link when the call has one (`sent`), else nothing went.
+    KeepAliveDue { call: CallId, sent: bool },
 }
 
 /// The Trouter delivery a response answers: its connection (the fence's key for it) and its id.
@@ -390,7 +390,7 @@ impl Calls {
     pub fn keep_alive_interval(&self) -> Option<Duration> {
         self.call
             .as_ref()
-            .and_then(|call| call.keep_alive)
+            .and_then(|call| call.keep_alive.as_ref())
             .map(|keep| keep.interval)
     }
 
@@ -399,7 +399,7 @@ impl Calls {
     pub fn deadline(&self) -> Option<Instant> {
         self.call
             .as_ref()
-            .and_then(|call| call.keep_alive)
+            .and_then(|call| call.keep_alive.as_ref())
             .map(|keep| keep.next)
     }
 
@@ -810,7 +810,8 @@ impl Calls {
             (Step::Accept, Some(body)) => self.connected_by_accept(body, now),
             (Step::Decline, Some(_)) => self.finish(End::Declined),
             (Step::Leave, Some(_)) => self.left(),
-            (_, Some(_)) => {}
+            // a keep-alive not taken ends nothing: the next one goes when it falls due, as the web client's does
+            (_, Some(_)) | (Step::KeepAlive, None) => {}
             (step, None) => self.fail(step, now),
         }
     }
@@ -1040,20 +1041,22 @@ impl Calls {
             return;
         }
         call.renegotiation = answer.renegotiation;
-        self.connect(answer.keep_alive, now);
+        self.connect((answer.keep_alive, answer.call_leg), now);
     }
 
     /// The call is up: told, its keep-alive armed, the account's endpoint metadata sent, then (once that was taken)
     /// the test call's echo added.
-    fn connect(&mut self, keep_alive: Option<u64>, now: Instant) {
+    fn connect(&mut self, (keep_alive, link): (Option<u64>, Option<CallLink>), now: Instant) {
         let Some(call) = self.call.as_mut() else { return };
         call.phase = Phase::Connected;
         call.keep_alive = keep_alive.map(|seconds| {
-            let interval = Duration::from_secs(seconds);
-            KeepAlive {
-                interval,
-                next: now + interval,
-            }
+            let mut keep = KeepAlive {
+                interval: Duration::from_secs(seconds),
+                next: now,
+                link,
+            };
+            keep.next = now + keep.period();
+            keep
         });
         self.out.state(call);
         let mut writes = Vec::new();
@@ -1113,7 +1116,7 @@ impl Calls {
         if let (Some(call), Some(media)) = (self.call.as_ref(), acceptance.answer) {
             self.out.event(CallEvent::RemoteMedia { call: call.id, media });
         }
-        self.connect(acceptance.keep_alive, now);
+        self.connect((acceptance.keep_alive, acceptance.call_leg), now);
     }
 
     /// The acceptance's acknowledgement as its delivery response; by request when the response can't be built.
@@ -1184,15 +1187,29 @@ impl Calls {
         }
     }
 
-    /// Time passed: a keep-alive that fell due is told ([`CallEvent::KeepAliveDue`]).
+    /// Time passed: a keep-alive that fell due goes to the call leg's own link (only while the call is up), and is
+    /// told ([`CallEvent::KeepAliveDue`]).
     pub fn tick(&mut self, now: Instant) {
         let Some(call) = self.call.as_mut() else { return };
-        let Some(keep) = call.keep_alive.as_mut() else { return };
-        if now >= keep.next {
-            keep.next = now + keep.interval;
-            let id = call.id;
-            self.out.event(CallEvent::KeepAliveDue { call: id });
+        if call.phase != Phase::Connected {
+            return;
         }
+        let Some(keep) = call.keep_alive.as_mut() else { return };
+        if now < keep.next {
+            return;
+        }
+        keep.next = now + keep.period();
+        let write = keep.link.clone().map(|link| build::keep_alive(call, &link));
+        let sent = match write {
+            Some(Ok(write)) => {
+                self.out.send(call, Step::KeepAlive, write);
+                true
+            }
+            // a link that builds no keep-alive in its captured shape, or none: nothing goes (told as not sent)
+            Some(Err(_)) | None => false,
+        };
+        let id = call.id;
+        self.out.event(CallEvent::KeepAliveDue { call: id, sent });
     }
 }
 

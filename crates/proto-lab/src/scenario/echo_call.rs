@@ -830,14 +830,21 @@ pub(crate) async fn wait_for_tone(session: &mut LabSession, limit: Duration) -> 
 /// `file`, looking at it as it grows after each `keep_up(`[`TONE_POLL`]`)`, for up to `limit`. `keep_up` keeps the
 /// session's events flowing for that long and gives `false` once the connection is gone, which ends the wait
 /// ([`ToneWait::Lost`]) instead of reading a capture nothing adds to any more.
-pub async fn wait_for_tone_in(
+pub async fn wait_for_tone_in(file: &Path, limit: Duration, keep_up: impl AsyncFnMut(Duration) -> bool) -> ToneWait {
+    wait_for_tone_in_from(file, 0, limit, keep_up).await
+}
+
+/// [`wait_for_tone_in`], reading the capture's events `file` from byte `from` on: a tone a page heard in an earlier
+/// call of the run (before `from`) doesn't count.
+pub async fn wait_for_tone_in_from(
     file: &Path,
+    from: u64,
     limit: Duration,
     mut keep_up: impl AsyncFnMut(Duration) -> bool,
 ) -> ToneWait {
     let started = tokio::time::Instant::now();
     let mut tally = AudioTally::default();
-    let mut offset = 0;
+    let mut offset = from;
     while started.elapsed() < limit {
         let alive = keep_up(TONE_POLL).await;
         offset = read_new_lines(file, offset, &mut tally);

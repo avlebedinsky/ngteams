@@ -321,7 +321,7 @@ fn media_line(line: &str) -> Option<MediaLine<'_>> {
         media,
         port,
         proto,
-        formats: fields.map(str::to_owned).collect(),
+        formats: fields.filter(|format| !format.is_empty()).map(str::to_owned).collect(),
     })
 }
 
@@ -727,11 +727,14 @@ fn write(parsed: &Parsed, names: &[Line], role: Role) -> Result<NgcSdp, SdpError
     write_session(parsed, names, &mut out)?;
     for ((section, name), ours) in parsed.media.iter().zip(names).zip(candidates) {
         if section.rejected() {
-            out.push(format!(
-                "m={} 0 RTP/SAVP {}",
-                section.kind.ngc(),
-                section.formats.join(" ")
-            ));
+            // a line names at least one format: one `str0m` rejected names none, so it gets the static one the web
+            // client's rejected lines name (`34` for video; `0`, PCMU, for audio)
+            let formats = match (section.formats.is_empty(), section.kind) {
+                (false, _) => section.formats.join(" "),
+                (true, Kind::Video) => "34".to_owned(),
+                (true, _) => "0".to_owned(),
+            };
+            out.push(format!("m={} 0 RTP/SAVP {formats}", section.kind.ngc()));
             out.push(format!("a=label:{}", name.label));
         } else {
             let at = ours.first.unwrap_or_else(|| bundle_default.clone());

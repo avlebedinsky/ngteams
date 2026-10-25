@@ -208,7 +208,8 @@ impl Offer {
             CallOperation::Reject
             | CallOperation::MediaAcknowledge
             | CallOperation::UpdateMediaDescriptions
-            | CallOperation::ApplyChannelParameters => from.is_none() && plain,
+            | CallOperation::ApplyChannelParameters
+            | CallOperation::KeepAlive => from.is_none() && plain,
             _ => false,
         }
     }
@@ -239,6 +240,7 @@ impl Offer {
                     | CallOperation::Renegotiate
                     | CallOperation::UpdateMediaDescriptions
                     | CallOperation::ApplyChannelParameters
+                    | CallOperation::KeepAlive
             ),
             OfferState::Leaving => operation == CallOperation::Leave,
             OfferState::Declined => operation == CallOperation::Reject,
@@ -376,11 +378,13 @@ impl Offer {
 
     /// Binds the answered call's links a permitted `accept`'s answer hands out (`callAcceptanceAcknowledgement.links`), on
     /// the flight proxy, of the invitation's own call: its `mediaRenegotiation` (`…/cc/v1/active/<call>/…/renegotiate`),
-    /// its `updateMediaDescriptions` (`…/cc/v1/active/<call>/…/updateMediaDescriptions`) and its `applyChannelParameters`
+    /// its `updateMediaDescriptions` (`…/cc/v1/active/<call>/…/updateMediaDescriptions`), its `callLeg` (the keep-alive's,
+    /// `…/cc/v1/active/<call>/<n>/<leg>/<n>`) and its `applyChannelParameters`
     /// (`…/cc/v1/mcProxy/<call>/…/applyChannelParameters`, a group call's). Whether anything bound.
     pub(crate) fn bind_acceptance(&mut self, answer: &[u8]) -> bool {
-        const NAMES: [(CallOperation, &str, &str); 3] = [
+        const NAMES: [(CallOperation, &str, &str); 4] = [
             (CallOperation::Renegotiate, "mediaRenegotiation", "active"),
+            (CallOperation::KeepAlive, "callLeg", "active"),
             (
                 CallOperation::UpdateMediaDescriptions,
                 "updateMediaDescriptions",
@@ -405,7 +409,7 @@ impl Offer {
                 continue;
             };
             let fits = controller_path(&url).is_some_and(|(_, call, at, last)| {
-                call == self.invitation.leg.1 && at == kind && last == operation.segment()
+                call == self.invitation.leg.1 && at == kind && super::link_is(operation, &url, &last)
             });
             if fits && !self.holds(operation, url.as_str()) {
                 self.links.push((operation, url.as_str().to_owned()));
