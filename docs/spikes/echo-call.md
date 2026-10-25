@@ -175,6 +175,9 @@ denied (`Outsiders`, logged to `fence.log`).
 
 ## Open questions for M3
 
+Answered by the native client's own test call (M3 Task 15):
+[calling-echo.md, "The native echo call"](../protocol/calling-echo.md#the-native-echo-call).
+
 1. **Which parts of the call start the service needs.** The native body is a subset of the client's keys; the
    capabilities, endpoint state and client details may be required.
 2. **Trouter and registration.** The capture shows the client's Trouter session and its registration with the

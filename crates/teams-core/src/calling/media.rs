@@ -82,11 +82,37 @@ pub(crate) struct Prepared {
     pub(super) session: MediaSession,
     pub(super) dialect: NgcSession,
     pub(super) sdp: NgcSdp,
+    /// The account's tenant, read from its token for a test call whose engine didn't know it.
+    pub(super) tenant: Option<String>,
 }
 
-/// Sets up a call's media (see the module docs): our offer, or with `offer` our answer to it.
+/// Sets up a call's media (see the module docs): our offer, or with `offer` our answer to it; with `tenant`, the
+/// account's tenant read from its token first (a test call's `add` names it), the setup refused without one.
 pub(super) async fn prepare<C: Credentials + 'static>(
     client: Arc<Client<HttpTransport<C>>>,
+    media: CallMedia,
+    offer: Option<MediaContent>,
+    tenant: bool,
+) -> Result<Prepared, String> {
+    let tenant = if tenant {
+        Some(
+            client
+                .transport()
+                .account_tenant()
+                .await
+                .ok_or("the account's tenant can't be read from its token")?,
+        )
+    } else {
+        None
+    };
+    let mut prepared = set_up_with(&client, media, offer).await?;
+    prepared.tenant = tenant;
+    Ok(prepared)
+}
+
+/// [`prepare`]'s media part.
+async fn set_up_with<C: Credentials + 'static>(
+    client: &Client<HttpTransport<C>>,
     media: CallMedia,
     offer: Option<MediaContent>,
 ) -> Result<Prepared, String> {
@@ -117,7 +143,18 @@ fn set_up(
 ) -> Result<Prepared, String> {
     let text = |error: &dyn std::fmt::Display| error.to_string();
     let servers = media.relay.servers()?;
-    let (link, _) = allocate_any(&servers, credentials, &media.relay_options).map_err(|error| text(&error))?;
+    let (link, failed) = allocate_any(&servers, credentials, &media.relay_options).map_err(|error| text(&error))?;
+    for (server, why) in &failed {
+        log::info!("a relay allocation over {:?} failed: {why}", server.transport);
+    }
+    // which way the media goes: the transport, the family, how many allocations failed first
+    let server = link.server();
+    let family = if server.addr.is_ipv4() { "IPv4" } else { "IPv6" };
+    log::info!(
+        "the call's media is relayed over {:?} ({family}), after {} failed",
+        server.transport,
+        failed.len()
+    );
     let peer = RelayedPeer::new(Instant::now(), link).map_err(|error| text(&error))?;
     // no device opens before the call's start, join or answer passed the fence (`open_devices`)
     let session = MediaSession::start_without_devices(peer, media.session).map_err(|error| text(&error))?;
@@ -134,7 +171,12 @@ fn set_up(
             dialect.write_answer(&answer).map_err(|error| text(&error))?
         }
     };
-    Ok(Prepared { session, dialect, sdp })
+    Ok(Prepared {
+        session,
+        dialect,
+        sdp,
+        tenant: None,
+    })
 }
 
 /// A `mediaContent` of Teams' dialect, read.

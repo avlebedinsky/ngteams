@@ -1,5 +1,7 @@
 //! The command line: `teams-headless <alias> <command>`.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use teams_fence::lab::Alias;
 use teams_proto::ManualAvailability;
@@ -151,7 +153,38 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Places a call once the calling socket is registered, holds it `--seconds` once its media connected, then hangs
+    /// it up: `echo` (the test call of lab.toml's echo service, which plays back what it hears), or a chat (`a`, `b`,
+    /// `c`, `abc` or a conversation id; a catch-up first). Its media is files, never an audio server: the microphone
+    /// plays a tone keyed on and off in 200 ms slots of a fixed pattern, the speaker records to `--record`. Prints each
+    /// event, a summary (setup time, how it ended) and what the recording holds of the keyed tone at `--hear` (its
+    /// level and round trips). A write others see, through the fence. Exits 0 only when the call connected, was held
+    /// and hung up, and, for `echo`, the tone came back.
+    Call {
+        /// `echo`, `a`, `b`, `c`, `abc` or a conversation id.
+        target: String,
+        /// The microphone's tone, in Hz.
+        #[arg(long, default_value_t = DEFAULT_TONE_HZ)]
+        tone: f32,
+        /// The keyed tone looked for in the recording, in Hz (default: `--tone`, which the echo plays back).
+        #[arg(long)]
+        hear: Option<f32>,
+        /// Where the far end's audio is recorded (default: `<data_dir>/recordings/<alias>-call-<ms>.wav`, beside the
+        /// tone sent, `…-sent.wav`).
+        #[arg(long)]
+        record: Option<PathBuf>,
+        /// Seconds the call is held once its media connected (the echo plays what it heard back until about 41 s
+        /// after that).
+        #[arg(long, default_value_t = 45)]
+        seconds: u64,
+        /// Seconds the call may take to connect, from its placing.
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
+    },
 }
+
+/// The microphone's tone in a call by default, in Hz.
+pub const DEFAULT_TONE_HZ: f32 = 1_000.0;
 
 /// A manual status as the command line names it: the account menu's, as captured (M2 Task 18).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

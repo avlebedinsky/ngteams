@@ -322,6 +322,20 @@ impl Calls {
         }
     }
 
+    /// Whether the account's tenant is known (the test call's `add` names it).
+    #[must_use]
+    pub fn knows_tenant(&self) -> bool {
+        !self.identity.tenant_id.is_empty()
+    }
+
+    /// The account's tenant, once it is read (an engine that couldn't name it when it was built reads it from the
+    /// account's token before its first test call). An empty `tenant` changes nothing.
+    pub fn set_tenant(&mut self, tenant: String) {
+        if !tenant.is_empty() {
+            self.identity.tenant_id = tenant;
+        }
+    }
+
     /// The calling endpoint's push URL (its `trouter.connected`'s `surl`): calls from now on hand out callbacks under
     /// a call agent of their own there. A call that is up keeps its own.
     ///
@@ -1135,7 +1149,9 @@ impl Calls {
         }
     }
 
-    /// The call's end, or an offered invitation's ring's.
+    /// The call's end, or an offered invitation's ring's. The end of a call the account is leaving (its `leave` on its
+    /// way) ends it for what it left for: the call controller ends a call for the `leave`, and may deliver that end
+    /// before the `leave`'s answer comes (a live test call's did).
     fn ended(&mut self, delivery: &Delivery) {
         let end = read::remote_end(&delivery.body);
         match self.call.as_ref().map(|call| (call.id, call.phase)) {
@@ -1144,6 +1160,13 @@ impl Calls {
                 drop(self.end_call());
                 self.out.event(CallEvent::RingEnded { call: id, end });
             }
+            Some((
+                _,
+                Phase::Leaving {
+                    sent: true,
+                    end: leaving,
+                },
+            )) => self.finish(leaving.end()),
             Some(_) => self.finish(End::Remote(end)),
             None => {}
         }

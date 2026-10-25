@@ -274,6 +274,69 @@ fn an_answer_with_a_data_line_we_never_offered_drops_it() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn an_answer_that_numbers_opus_otherwise_is_read_back_with_our_number() -> TestResult {
+    // the media controller's answer to an audio-only offer, Opus numbered 102 where the offer said 111, as a live
+    // test call answered (and it sent Opus as 111 all the same)
+    let full = sections(captured_text("controller_answer")?);
+    let session_part: Vec<&str> = full[0]
+        .iter()
+        .map(|line| {
+            if line.starts_with("a=group:") {
+                "a=group:BUNDLE 0"
+            } else {
+                line
+            }
+        })
+        .collect();
+    let audio: Vec<String> = full[1]
+        .iter()
+        .map(|line| {
+            if line.starts_with("m=audio") {
+                line.replace(" 111 ", " 102 ")
+            } else {
+                line.replace("a=rtpmap:111 ", "a=rtpmap:102 ")
+                    .replace("a=fmtp:111 ", "a=fmtp:102 ")
+                    .replace("a=rtcp-fb:111 ", "a=rtcp-fb:102 ")
+                    .replace("111/111", "102/102")
+            }
+        })
+        .collect();
+    assert!(audio.iter().any(|line| line.starts_with("a=rtpmap:102 ")), "{audio:#?}");
+    let audio: Vec<&str> = audio.iter().map(String::as_str).collect();
+    let blob = [session_part, audio].concat().join("\r\n") + "\r\n";
+    let answer = NgcSdp::new(SDP_NGC, &blob).unwrap();
+    let mut rtc = relayed_peer()?;
+    let (mid, offer, pending) = audio_offer(&mut rtc)?;
+    let offered = offer.to_sdp_string();
+    let opus = offered
+        .lines()
+        .find_map(|line| line.strip_prefix("a=rtpmap:").filter(|rest| rest.contains("opus")))
+        .and_then(|rest| rest.split(' ').next())
+        .ok_or("str0m offers Opus")?
+        .to_owned();
+    let mut session = NgcSession::new();
+    session.write_offer(&offer).unwrap();
+
+    let read = session.read_answer(&answer).unwrap();
+
+    let text = read.to_sdp_string();
+    assert!(
+        text.to_ascii_lowercase()
+            .contains(&format!("a=rtpmap:{opus} opus/48000/2")),
+        "{text}"
+    );
+    assert!(!text.contains("a=rtpmap:102 "), "{text}");
+    rtc.sdp_api().accept_answer(pending, read).unwrap();
+    let writer = rtc.writer(mid).ok_or("the audio line")?;
+    let sent_as = writer
+        .payload_params()
+        .find(|params| params.spec().codec == str0m::format::Codec::Opus)
+        .map(|params| params.pt().to_string());
+    assert_eq!(sent_as, Some(opus), "str0m keeps our number for Opus, both ways");
+    Ok(())
+}
+
 /// Our offer in the web client's 1:1 shape: audio, the main video line receiving, the sharing line inactive, data.
 fn one_to_one_offer(rtc: &mut Rtc) -> TestResult<(Vec<Mid>, SdpOffer, SdpPendingOffer)> {
     let mut change = rtc.sdp_api();

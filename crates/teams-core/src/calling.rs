@@ -676,8 +676,8 @@ where
     /// Closes the running media off the engine's thread (its close joins the session's threads).
     fn close_media(&mut self) {
         if let Some(live) = self.live.take() {
-            let session = live.session;
-            tokio::task::spawn_blocking(move || drop(session));
+            let (call, session) = (live.call, live.session);
+            tokio::task::spawn_blocking(move || close(call, session));
         }
     }
 
@@ -830,7 +830,14 @@ where
                 CallActionError::Media("the invitation carries no offer".to_owned()),
             );
         }
-        let setup = Box::pin(media::prepare(Arc::clone(&self.client), self.media.clone(), offer));
+        // a test call's `add` names the account's tenant: read from its token when the engine couldn't name it
+        let tenant = matches!(act, Act::Place(Placement::TestCall { .. })) && !self.calls.knows_tenant();
+        let setup = Box::pin(media::prepare(
+            Arc::clone(&self.client),
+            self.media.clone(),
+            offer,
+            tenant,
+        ));
         self.preparing = Some(Preparing {
             answering,
             act,
@@ -844,10 +851,13 @@ where
         let Some(preparing) = self.preparing.take() else {
             return;
         };
-        let prepared = match prepared {
+        let mut prepared = match prepared {
             Ok(prepared) => prepared,
             Err(why) => return refuse(preparing.reply, CallActionError::Media(why)),
         };
+        if let Some(tenant) = prepared.tenant.take() {
+            self.calls.set_tenant(tenant);
+        }
         let sdp = media::content(&prepared.sdp);
         let acted = match &preparing.act {
             Act::Place(placement) => self.calls.place(placement, sdp, now),
@@ -901,12 +911,32 @@ where
             log::warn!("the call's last writes didn't finish within {SHUTDOWN_GRACE:?}");
         }
         if let Some(live) = self.live.take() {
-            let _ = tokio::task::spawn_blocking(move || drop(live.session)).await;
+            let (call, session) = (live.call, live.session);
+            let _ = tokio::task::spawn_blocking(move || close(call, session)).await;
         }
         if let Some(push) = self.push.take() {
             push.stop().await;
         }
     }
+}
+
+/// Closes a call's media (the close joins the session's threads), its counts logged first: what went out and what came
+/// in, never what it carried.
+fn close(call: CallId, session: Arc<teams_media::session::MediaSession>) {
+    let stats = session.stats();
+    log::info!(
+        "call {}: its media closes: {} packets encoded, {} sent, {} unsent; {} received, {} malformed; {} frames \
+         played; jitter {:?}",
+        call.get(),
+        stats.encoded,
+        stats.sent,
+        stats.unsent,
+        stats.received,
+        stats.malformed,
+        stats.frames_played,
+        stats.jitter
+    );
+    drop(session);
 }
 
 fn refuse(reply: Waiting, error: CallActionError) {

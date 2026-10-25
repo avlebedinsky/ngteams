@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::format::Codec;
+use str0m::format::{Codec, FormatParams};
 use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
@@ -31,6 +31,14 @@ use crate::Error;
 use crate::codec::OpusConfig;
 use crate::relay::RelayLink;
 use crate::turn::TurnEvent;
+
+/// The payload type our offers give Opus: the media controller's own number for it. Answering an Opus-only offer
+/// that numbered it `111` (the web client's number), the media controller answered `102`, sent Opus to us as `111`
+/// and took none of ours as `111`; `str0m` keeps one number per codec for both ways, so the offer names Opus as the
+/// media controller does and both ways agree (`docs/protocol/calling-echo.md`, "The native echo call"). A far end that
+/// answers another number is read back with ours ([`crate::sdp::NgcSession::read_answer`]); an offer we answer keeps
+/// its own numbers.
+pub const OPUS_PT: u8 = 102;
 
 /// What a [`Peer`] reports to the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,10 +104,25 @@ impl Peer {
     /// # Errors
     /// [`Error::Rtc`] if `str0m` fails while draining.
     pub fn with_candidate(now: Instant, candidate: Candidate) -> Result<Self, Error> {
-        let mut rtc = Rtc::builder()
+        let mut config = Rtc::builder()
             .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
             .set_reordering_size_audio(0)
-            .build(now);
+            .enable_opus(false, false);
+        // Opus as `str0m` offers it by default (`minptime=10;useinbandfec=1`), on the payload type the media
+        // controller numbers it with
+        config.codec_config().add_config(
+            OPUS_PT.into(),
+            None,
+            Codec::Opus,
+            Frequency::FORTY_EIGHT_KHZ,
+            Some(2),
+            FormatParams {
+                min_p_time: Some(10),
+                use_inband_fec: Some(true),
+                ..FormatParams::default()
+            },
+        );
+        let mut rtc = config.build(now);
         rtc.add_local_candidate(candidate);
         let mut peer = Self {
             rtc,

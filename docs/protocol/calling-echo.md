@@ -1,7 +1,8 @@
 # Calling: the web client's test call to the echo service
 
-Status: 2026-10-20, M0 Task 18 (spike 3b, part 1), and 2026-10-24, M3 Task 4 (the call completed under the call
-registry: [What the M3 run added](#what-the-m3-run-added)). Written from live runs of `proto-lab run echo-call --headless`
+Status: 2026-10-20, M0 Task 18 (spike 3b, part 1), 2026-10-24, M3 Task 4 (the call completed under the call
+registry: [What the M3 run added](#what-the-m3-run-added)), and 2026-10-25, M3 Task 15 (the native client's own test
+call: [The native echo call](#the-native-echo-call)). Written from live runs of `proto-lab run echo-call --headless`
 (account a, Chrome for Testing 155 headless, a fake microphone playing a 440 Hz WAV tone, the fence armed with what
 were then its calling classifiers), from the web client's own diagnostic log of one of those runs (Ctrl+Alt+Shift+1, read locally),
 and from the web bundle `26260.1717.5229.7049`. The captures stay outside the repository; the fixtures in
@@ -225,6 +226,60 @@ muted with its fake audio manager, the call registry of
   delivered again about 13 s later (`Trouter-Timeout`); the redeliveries carry the same bodies.
 - **Timing.** The tone came back about 32 s after the call screen showed (the echo greets, beeps, records, beeps and
   plays the recording back), on one run.
+
+## The native echo call
+
+From live runs of 2026-10-25 (M3 Task 15: `teams-headless a call echo --seconds 45`, the release lab build, account
+a, the lab fence). Its media is files: the microphone plays a 1 kHz tone keyed on and off in 200 ms slots of a fixed
+pseudo-random pattern, the speaker is recorded, and the recording is searched for the pattern afterwards
+(`teams_headless::echo`). The recordings stay under the lab's data dir. It answers the open questions of the M0 spike
+([echo-call.md](../spikes/echo-call.md#open-questions-for-m3)).
+
+- **What the start needs.** The start as `teams-proto` builds it from the capture was taken (`201`): the captured
+  shape with the web client's capability numbers (`endpointCapabilities`, `clientEndpointCapabilities`) and a
+  platform name in the web client's form, sent with `X-Skypetoken`, the call's chain id, a fresh message id, and the
+  region and partition authz named. The `MS-Teams-Ring` header and the client-version header the web client adds
+  weren't needed. Then, as in the web client's run: the conversation answer, the acceptance delivered at the calling
+  endpoint and acknowledged by its delivery response, `updateEndpointMetadata` (`200`), the echo's `add` (`202`) and,
+  on hanging up, `leave` (`204`). Every write was permitted by the fence on the call it registered; nothing was
+  denied, and no delivery was answered but the acceptance.
+- **The relay.** Over UDP 3478 the relay answers the Allocate with `300 Try Alternate`, naming another relay address
+  on the same port. The native client follows it once, on the same transport, and allocates there, as a browser's
+  TURN client does. Before it followed the redirect it fell back to TCP 443, which also carried the call: the relay
+  speaks TURN's own framing over TCP (`ChannelData` padded to 4 bytes), not RFC 4571's length prefix. TURN over TLS
+  wasn't needed, and the credentials worked as given (ASCII).
+- **Opus's payload type.** Answering an Opus-only offer that numbered Opus `111` (the web client's number), the media
+  controller answered `m=audio … 102` with `a=rtpmap:102 OPUS/48000/2`, its own number, then sent its audio numbered
+  `111`, the number the offer gave it (a sender uses the receiver's numbers), and played back nothing of what we sent
+  as `111`. `str0m` keeps one number per codec for both directions: it took `102` from the answer and dropped every
+  packet that came in as `111`. (Its answer to the web client's offer of nine audio codecs kept Opus at `111` and gave
+  comfort noise and telephone events numbers of its own.) So the native client offers Opus as `102`: the media
+  controller answers `102`, and both directions agree. An answer that still numbers an offered codec otherwise is read
+  back with the offer's number (`NgcSession::read_answer`), so at least what comes in plays.
+- **The media path.** Our side offers its relayed candidate only; the media controller answers with relay candidates
+  of its own on port 3478, and ICE and DTLS connect through the relay. From the action to the media connected took
+  2.3–2.9 s.
+- **What comes back, and when**, counted from the call's devices opening (when the start is answered, about 1 s
+  before the media connects): silence for about 3 s, the echo's greeting (about 7 s of speech), about 15 s of silence
+  while it records, about 2 s of speech, the recording played back (about 14 s), then speech again; the call stays up
+  until the caller leaves. The media controller sends nothing while its side is silent (`usedtx=1`). The echo records
+  what we send from about 10 s to 24 s and **plays the recording back as a whole**: every 2 s stretch of the keyed
+  tone comes back at one offset, 16.7–16.9 s later depending on the run (within a run the onsets agree to 50 ms), at
+  the level it was sent at (0.495 for 0.5). It doesn't re-time packet by packet, so a frame's "round trip" through
+  it is the recording's delay, not the network's.
+- **Holding the call.** The playback ends about 41 s after the media connected: `--seconds 45` hears it, a 20 s call
+  ends before the echo plays anything back.
+- **The end.** In one run the call controller delivered `call/end` (`CallEndReasonLocalUserInitiated`) for our `leave`
+  before the `leave`'s own `204`; the native client ends a call it is leaving as hung up whichever comes first.
+
+The three runs that heard the tone back (load average 2–4), each onset of the keyed tone in the stretch the echo
+recorded, from going into the microphone to coming out of the speaker, on one clock:
+
+| run | setup (action → media connected) | stretch recorded (of what was sent) | onsets timed | p50 | p95 | max |
+|---|---|---|---|---|---|---|
+| 1 | 2343 ms | 10 s – 24 s | 17 | 16 681 ms | 16 681 ms | 16 681 ms |
+| 2 | 2897 ms | 12 s – 26 s | 17 | 16 711 ms | 16 731 ms | 16 731 ms |
+| 3 | 2390 ms | 10 s – 24 s | 16 | 16 871 ms | 16 871 ms | 16 871 ms |
 
 ## Open
 

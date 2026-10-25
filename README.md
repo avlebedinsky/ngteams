@@ -112,6 +112,7 @@ outside the repo:
 | `…/chats.toml` | the lab's group chat: the id of the a–b–c chat `abc-chat` created, recorded once as `abc` (`0600`): lab data for the scenarios and clients, which the fence doesn't read |
 | `…/store/<alias>.sqlite` | the account's native store (`teams-headless`): conversations, messages, reactions, the outbox (`0600`, its dir `0700`); `<alias>.sqlite-runs/` holds a lock per open run |
 | `…/headless/<time>…/` | the native live runs' outputs (`teams-headless` and `chat_live`'s `summary.json`) |
+| `…/recordings/` | a native call's audio (`teams-headless … call`): the keyed tone sent and what the far end played (`0700`) |
 | `…/live.lock` | the live lock: every live run (a lab browser or a native client against the tenant) holds it with `flock` |
 | `…/auth/<alias>.json` | the account's region, partition, region GTMs and skypetoken expiry from `auth` (`0600`) |
 | `…/status-<alias>.json` | `login`'s steps, and why it stopped |
@@ -304,6 +305,8 @@ teams-headless a presence [--wait 30] [--mri <mri>]...  # b's and c's presence, 
 teams-headless a profile <mri>... [--wait 30]           # where the engine's name for each comes from (Graph, the middle tier's lookup)
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
+teams-headless a call echo|b|abc|<id> [--tone 1000] [--hear <hz>] [--record <wav>] [--seconds 45] [--wait 60] \
+                                          # a call through the engine, its media on files; held, hung up, its tone looked for
 ```
 
 A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat
@@ -321,8 +324,18 @@ for the lookups it started (none when it started none), and prints
 account's own availability (others see it, and it reaches nobody, so the lab rule allows it): once its push channel's registration went through it
 sends the endpoint's presence `PUT` (available), then the manual status at `--manual-after` and its reset at
 `--reset-after` seconds after the `PUT`, each under the fence's permit for the account's own availability; it prints
-each step with its time and ends `--hold` seconds after the `PUT`, which takes the endpoint down. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on stderr (Trouter's packets and
-deliveries by kind and size, never a payload); nothing else is logged.
+each step with its time and ends `--hold` seconds after the `PUT`, which takes the endpoint down. `call` places one
+call (M3 Task 15) once its calling socket registered: `echo` is the test call of `lab.toml`'s echo service, anything
+else a chat (a catch-up first); each write of it goes through the fence. Its media is files, never an audio server:
+the microphone plays a tone at `--tone` Hz keyed on and off in 200 ms slots of a fixed pattern (written first as
+`…-sent.wav`), the speaker records to `--record` (`<data_dir>/recordings/<alias>-call-<ms>.wav` by default); the call is
+held `--seconds` once its media connected (45: the echo plays its recording back until about 41 s after that), then
+hung up (and hung up when it hasn't connected within `--wait` seconds; one whose media isn't set up by then isn't
+placed). It prints each event, `call_summary` (setup time, held, how it ended) and `echo`: what the recording holds of
+the keyed tone at `--hear` Hz (its own tone by default): its level, the stretches of it that came back with their
+offsets, and the round trips' p50, p95 and max. It exits 0 only when the call connected, was held and hung up, and,
+for `echo`, the tone came back. It answers nothing. `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on
+stderr (Trouter's packets and deliveries by kind and size, never a payload); nothing else is logged.
 
 The live acceptance test (M1 Task 21, `tests/chat_live.rs`) only spawns a normally built binary and reads its output
 and `fence.log`; run it under the live lock:

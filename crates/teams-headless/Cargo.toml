@@ -20,6 +20,8 @@ teams-core.workspace = true
 teams-fence.workspace = true
 # which records are the app's full requests and frames (`teams_log::wire::is_wire`), which this log leaves out
 teams-log.workspace = true
+# `call`'s media on the file backend (no audio server), its keyed tone and the recording read back
+teams-media.workspace = true
 teams-proto.workspace = true
 teams-store.workspace = true
 teams-trouter.workspace = true
@@ -32,7 +34,10 @@ tempfile.workspace = true
 # the CLI tests run the commands against the mock chat service and its Trouter, through the test-support mock
 # origins; never a normal dependency, and the binary refuses to run when a test build unified it in
 teams-fence = { workspace = true, features = ["test-support"] }
-teams-mock.workspace = true
+# the call tests relay through the mock's loopback TURN server (`Relay::Fixed`)
+teams-core = { workspace = true, features = ["test-support"] }
+# with its calling service's media: the echo's stand-in and the peers behind the parties it plays
+teams-mock = { workspace = true, features = ["media"] }
 teams-proto = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

@@ -444,6 +444,9 @@ struct Line {
 #[derive(Clone, Debug, Default)]
 pub struct NgcSession {
     lines: Vec<Line>,
+    /// The payload types our latest offer gave each codec, by `str0m`'s mid: `(codec, payload type)`, the codec as
+    /// its `rtpmap` names it, in lower case.
+    offered: Vec<(String, Vec<(String, String)>)>,
 }
 
 /// Which half of an exchange an SDP is.
@@ -527,19 +530,33 @@ impl NgcSession {
                     .cloned()
                     .ok_or(SdpError::Unwritable("an m-line without a mid"))?,
             );
+            self.offered.retain(|(mid, _)| mid != local);
+            self.offered.push((local.to_owned(), payloads(section)));
         }
         write(&parsed, &names, Role::Offer)
     }
 
+    /// `section` of an answer to our offer's line `local`, with each codec numbered as our offer numbered it.
+    fn our_numbers(&self, section: &Section, local: &str) -> Section {
+        match self.offered.iter().find(|(mid, _)| mid == local) {
+            Some((_, offered)) => renumbered(section, offered),
+            None => section.clone(),
+        }
+    }
+
     /// The answer to our offer (the media controller's, or a callee's in a 1:1 call), for `str0m`. A line of an offer
     /// we never made (the media controller's `m=x-data` to an offer without one) is left out.
+    ///
+    /// A codec the answer numbers otherwise than our offer did is read back with our number (the media controller
+    /// answered Opus offered as `111` with `102`, and sends it as `111`): `str0m` keeps one payload type per codec for
+    /// both ways, and the far end sends us a codec with the number our offer gave it.
     ///
     /// # Errors
     /// [`SdpError::Mismatch`] when no line of the answer is one of ours, [`SdpError::Refused`] when `str0m` refuses
     /// what the conversion made.
     pub fn read_answer(&self, answer: &NgcSdp) -> Result<SdpAnswer, SdpError> {
         let parsed = Parsed::ngc(answer.as_str(), answer.dialect())?;
-        let mut kept = Vec::new();
+        let mut ours = Vec::new();
         for (index, section) in parsed.media.iter().enumerate() {
             let line = match section.mid() {
                 Some(mid) => self.by_remote(mid),
@@ -548,9 +565,10 @@ impl NgcSession {
                 None => None,
             };
             if let Some(line) = line {
-                kept.push((section, line.local.clone()));
+                ours.push((self.our_numbers(section, &line.local), line.local.clone()));
             }
         }
+        let kept: Vec<(&Section, String)> = ours.iter().map(|(section, local)| (section, local.clone())).collect();
         if kept.is_empty() {
             return Err(SdpError::Mismatch("the answer has none of the offer's m-lines"));
         }
@@ -620,6 +638,74 @@ impl NgcSession {
             .collect::<Result<Vec<_>, _>>()?;
         write(&parsed, &names, Role::Answer)
     }
+}
+
+/// A section's codecs as its `rtpmap` lines number them: `(codec in lower case, payload type)`.
+fn payloads(section: &Section) -> Vec<(String, String)> {
+    section
+        .values("rtpmap")
+        .filter_map(|value| {
+            let (pt, codec) = value.split_once(' ')?;
+            Some((codec.to_ascii_lowercase(), pt.to_owned()))
+        })
+        .collect()
+}
+
+/// `section` with each codec `offered` numbers otherwise renumbered to the offer's number, wherever the section names
+/// it: its m-line, `rtpmap`, `fmtp` (RED's list of payload types too) and `rtcp-fb`. A number the section already
+/// gives another codec is left as it is.
+fn renumbered(section: &Section, offered: &[(String, String)]) -> Section {
+    let answered = payloads(section);
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for (codec, pt) in &answered {
+        let Some((_, ours)) = offered.iter().find(|(key, _)| key == codec) else {
+            continue;
+        };
+        let taken = answered.iter().any(|(_, other)| other == ours) || renames.iter().any(|(_, to)| to == ours);
+        if ours != pt && !taken {
+            renames.push((pt.clone(), ours.clone()));
+        }
+    }
+    if renames.is_empty() {
+        return section.clone();
+    }
+    let rename = |pt: &str| {
+        renames
+            .iter()
+            .find(|(from, _)| from == pt)
+            .map_or(pt, |(_, to)| to.as_str())
+            .to_owned()
+    };
+    let mut out = section.clone();
+    out.formats = section.formats.iter().map(|pt| rename(pt)).collect();
+    out.lines = section
+        .lines
+        .iter()
+        .map(|line| renumbered_line(line, &rename))
+        .collect();
+    out
+}
+
+/// An `rtpmap`, `fmtp` or `rtcp-fb` line with its payload type (and a RED `fmtp`'s list of them) renamed.
+fn renumbered_line(line: &str, rename: &impl Fn(&str) -> String) -> String {
+    for name in ["rtpmap", "fmtp", "rtcp-fb"] {
+        let Some(value) = attribute(line, name) else {
+            continue;
+        };
+        let (pt, rest) = value.split_once(' ').unwrap_or((value, ""));
+        let red = name == "fmtp" && !rest.is_empty() && rest.split('/').all(|part| part.parse::<u8>().is_ok());
+        let rest = if red {
+            rest.split('/').map(rename).collect::<Vec<_>>().join("/")
+        } else {
+            rest.to_owned()
+        };
+        return if rest.is_empty() {
+            format!("a={name}:{}", rename(pt))
+        } else {
+            format!("a={name}:{} {rest}", rename(pt))
+        };
+    }
+    line.to_owned()
 }
 
 // ---- standard → Teams' dialect ----

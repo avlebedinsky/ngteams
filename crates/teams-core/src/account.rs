@@ -7,7 +7,8 @@
 //! transport (the middle tier's base from the GTM `middleTier`, the profile lookup's; CSA's from `chatSvcAggAfd`, the
 //! teams read's; UPS's from `presenceUPS`, the presence read's), sharing the people of the account's chats the engine
 //! keeps from its store (`teams_fence::ChatPeople`, read only through a personal fence), the push channel
-//! ([`Trouter`]) when asked for, and starts the engine.
+//! ([`Trouter`]) when asked for, the calling ([`AccountCalls`]: the calling stack's socket over the writes' transport, the
+//! account in its calls, their media) when asked for, and starts the engine.
 //!
 //! Nothing here reads or prints a token, and nothing is sent while the engine is built: the session asks its store for
 //! a token only when a request needs one.
@@ -19,12 +20,14 @@ use teams_auth::authz::{AuthzClient, AuthzError, CHAT_BASE_GTM, Region};
 use teams_auth::secrets::SecretStore;
 use teams_auth::session::Session;
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
+use teams_call::Identity;
 use teams_fence::{ChatPeople, CredentialSource, Fence, LiveSourceError, MembershipSource, Mri};
-use teams_proto::{Author, BuildError, Client, Credentials, HttpTransport};
+use teams_proto::{Author, BuildError, Client, ClientInfo, Credentials, HttpTransport};
 use teams_store::{Store, StoreError};
-use teams_trouter::Trouter;
+use teams_trouter::{CallStack, Trouter};
 
 use crate::Outbox;
+use crate::calling::{CallMedia, CallParts};
 use crate::engine::{self, EngineError, EngineHandle, EngineOptions, Parts, Push};
 
 /// Why an account's engine couldn't be built or started.
@@ -67,6 +70,19 @@ pub struct Account<S> {
     pub push: bool,
     /// Names the binary knows already, by MRI ([`Parts::known_names`]).
     pub known_names: Vec<(String, String)>,
+    /// Whether, and how, the account calls; `None` runs the engine without calling.
+    pub calls: Option<AccountCalls>,
+}
+
+/// An account's calling as the binary gives it: what its calls' media is made of, and how the account describes its
+/// client in them. The rest of the account in its calls comes from the account (its MRI, its name, its region and
+/// partition), the calling endpoint the socket registers, and its token (its tenant, read before its first test call).
+#[derive(Clone, Debug)]
+pub struct AccountCalls {
+    pub media: CallMedia,
+    pub client: ClientInfo,
+    /// The language its calls name (`languageId`), as the web client's do.
+    pub language_id: Option<String>,
 }
 
 /// How the fence reads a target's members, built from the fence and the credential the writes' transport gives (the
@@ -103,6 +119,7 @@ pub fn start<S: SecretStore + 'static>(
         secrets,
         push,
         known_names,
+        calls,
     } = account;
     let store = Store::open(&store_file)?;
     let session = Arc::new(Session::new(
@@ -137,10 +154,28 @@ pub fn start<S: SecretStore + 'static>(
     } else {
         None
     };
+    let calls = match calls {
+        Some(calls) => {
+            let identity = Identity {
+                mri: Mri::new(&mri),
+                display_name: Some(display_name.clone()),
+                endpoint_id: String::new(),
+                language_id: calls.language_id,
+                tenant_id: String::new(),
+                client: calls.client,
+                region: session.region().name,
+                partition: session.region().partition,
+            };
+            let socket = Trouter::new(Arc::clone(&transport), Arc::clone(&session))?
+                .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)))?;
+            Some(CallParts::new(socket, identity, calls.media))
+        }
+        None => None,
+    };
     let author = Author::new(Mri::new(&mri), display_name);
     let outbox = Outbox::new(transport, fence, members, author);
     let handle = engine::start(Parts {
-        calls: None,
+        calls,
         store,
         client,
         outbox,

@@ -8,7 +8,9 @@
 //! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's), CSA's from the
 //! GTM `chatSvcAggAfd` (the teams read's) and UPS's from the GTM `presenceUPS` (the presence read's; the writes'
 //! transport gets UPS's base too, for the account's own availability, M2 Task 19), the lab
-//! accounts' names as lab.toml has them ([`known_names`]), and the push channel when asked for.
+//! accounts' names as lab.toml has them ([`known_names`]), the push channel when asked for, and the calling when the
+//! binary gives its media ([`AccountCalls`]; the account describes its client in its calls as the web client does,
+//! [`web_client_info`]).
 //!
 //! Nothing here reads or prints a token, and nothing is sent while the engine is built: the session asks its store for
 //! a token only when a request needs one.
@@ -23,7 +25,9 @@ use teams_auth::secrets::SecretStore;
 use teams_fence::lab::{Alias, LabConfig};
 use teams_fence::{Fence, LiveMembershipSource};
 
-use crate::account::{self, Account, AccountEngine, AccountError, Membership};
+use teams_proto::ClientInfo;
+
+use crate::account::{self, Account, AccountCalls, AccountEngine, AccountError, Membership};
 pub use crate::account::{CSA_GTM, MIDDLE_TIER_GTM, PRESENCE_GTM};
 
 /// Why a lab account's engine couldn't be built or started.
@@ -41,8 +45,9 @@ pub enum LabError {
 /// sign-out, [`Session::watch_signed_out`](teams_auth::session::Session::watch_signed_out)).
 pub type LabEngine<S> = AccountEngine<S>;
 
-/// Builds `alias`'s engine as the module docs say, over `fence` and `secrets`, with its push channel when `push`, and
-/// starts it ([`account::start`]: refused while another engine runs on the account).
+/// Builds `alias`'s engine as the module docs say, over `fence` and `secrets`, with its push channel when `push` and
+/// its calling when `calls` is given, and starts it ([`account::start`]: refused while another engine runs on the
+/// account).
 ///
 /// # Errors
 /// See [`LabError`]; [`LabError::Account`] with [`AccountError::Engine`] and
@@ -54,6 +59,7 @@ pub fn start<S: SecretStore + 'static>(
     fence: Arc<Fence>,
     secrets: S,
     push: bool,
+    calls: Option<AccountCalls>,
 ) -> Result<LabEngine<S>, LabError> {
     let account = config.account(alias);
     let mri = account.mri.clone().ok_or(LabError::NoMri(alias))?;
@@ -68,6 +74,7 @@ pub fn start<S: SecretStore + 'static>(
         secrets,
         push,
         known_names: known_names(config),
+        calls,
     };
     let membership: Membership<'_> = Box::new(|fence, credential| {
         let membership = LiveMembershipSource::for_fence(fence)?;
@@ -76,6 +83,28 @@ pub fn start<S: SecretStore + 'static>(
     });
     Ok(account::start(lab_account, fence, membership)?)
 }
+
+/// How a lab account describes its client in its calls: as the web client's calling stack does in the captures
+/// (`docs/protocol/calling-echo.md`): its endpoint's and its client's capability numbers and its platform's name, in
+/// the form the web client sends it. The native client takes the web client's place in a call.
+#[must_use]
+pub fn web_client_info() -> ClientInfo {
+    ClientInfo {
+        endpoint_capabilities: Some(WEB_ENDPOINT_CAPABILITIES),
+        client_endpoint_capabilities: Some(WEB_CLIENT_ENDPOINT_CAPABILITIES),
+        platform_name: Some(WEB_PLATFORM_NAME.to_owned()),
+    }
+}
+
+/// The web client's `endpointCapabilities` in the captured starts.
+pub const WEB_ENDPOINT_CAPABILITIES: u64 = 73_463;
+/// The web client's `clientEndpointCapabilities` in the captured starts.
+pub const WEB_CLIENT_ENDPOINT_CAPABILITIES: u64 = 114_259_690;
+/// The web client's platform name (`pstnContent.platformName`), in the captured form.
+pub const WEB_PLATFORM_NAME: &str = "SkypeSpaces/1415/26100212018/os=linux; osVer=undefined; deviceType=computer; \
+                                     browser=chrome; browserVer=155.0.0.0/TsCallingVersion=2026.37.01.11";
+/// The language a lab account's calls name, as the captured starts do.
+pub const LAB_LANGUAGE: &str = "en-us";
 
 /// The lab accounts' names as lab.toml has them ([`display_name`]), by MRI: the last a person's name comes from.
 #[must_use]

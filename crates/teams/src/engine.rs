@@ -51,6 +51,8 @@ pub fn start<S: SecretStore + 'static>(
         secrets,
         push,
         known_names: Vec::new(),
+        // the personal build keeps calling off until its call rule is built (M3 Task 22)
+        calls: None,
     };
     let membership: Membership<'_> = Box::new(|fence, credential| {
         let membership = PersonalMembershipSource::for_fence(fence)?;

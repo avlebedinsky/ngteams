@@ -5,13 +5,20 @@
 //! offer in `sdp-ngc-1.0` and offers in it, and takes the answer to its offer (`teams_media::sdp::NgcSession` keeping
 //! the lines' two namings for the call's life). With the feature on, the calling service puts one behind its answers
 //! once a test turned its media on ([`crate::ChatServiceMock::start_media`]): the test call's media controller, a
-//! caller the mock plays, and the renegotiations of their calls.
+//! caller the mock plays, and the renegotiations of their calls. [`EchoDevices`] make a peer the echo service's
+//! stand-in: it plays back what it hears ([`crate::ChatServiceMock::start_echo_media`]).
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use teams_media::devices::Devices;
+use teams_media::devices::file::FileDevices;
+use teams_media::devices::{
+    AudioFrame, AudioSink, AudioSource, DeviceError, Devices, FRAME_DURATION, FRAME_SAMPLES, VideoSource,
+};
 use teams_media::peer::RelayedPeer;
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::{RelayLink, RelayOptions, RelayServer};
@@ -141,5 +148,96 @@ impl LoopbackPeer {
     #[must_use]
     pub fn close(self) -> SessionStats {
         self.session.close()
+    }
+}
+
+/// The echo service's stand-in: a microphone that plays back what the speaker played `delay` earlier, paced as a
+/// device is (one 10 ms frame per 10 ms); the speaker also records as `recording`'s does, and the camera is its.
+pub struct EchoDevices {
+    queue: Arc<Mutex<VecDeque<f32>>>,
+    recording: FileDevices,
+}
+
+impl fmt::Debug for EchoDevices {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EchoDevices").finish_non_exhaustive()
+    }
+}
+
+impl EchoDevices {
+    /// Devices that play back what they hear `delay` later (in whole samples at 48 kHz).
+    #[must_use]
+    pub fn new(delay: Duration, recording: FileDevices) -> Self {
+        let samples = usize::try_from(delay.as_micros() * 48 / 1_000).unwrap_or(usize::MAX);
+        Self {
+            queue: Arc::new(Mutex::new(VecDeque::from(vec![0.0; samples]))),
+            recording,
+        }
+    }
+}
+
+impl Devices for EchoDevices {
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        Ok(Box::new(EchoSource {
+            queue: Arc::clone(&self.queue),
+            start: None,
+            handed: 0,
+        }))
+    }
+
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        Ok(Box::new(EchoSink {
+            queue: Arc::clone(&self.queue),
+            recorder: self.recording.speaker()?,
+        }))
+    }
+
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.recording.camera()
+    }
+}
+
+/// What the echo plays: the speaker's samples, `delay` later.
+struct EchoSource {
+    queue: Arc<Mutex<VecDeque<f32>>>,
+    start: Option<Instant>,
+    handed: u32,
+}
+
+impl AudioSource for EchoSource {
+    fn next_frame(&mut self, timeout: Duration) -> Result<Option<AudioFrame>, DeviceError> {
+        let now = Instant::now();
+        let due = *self.start.get_or_insert(now) + FRAME_DURATION * self.handed;
+        let wait = due.saturating_duration_since(now);
+        if wait > timeout {
+            thread::sleep(timeout);
+            return Ok(None);
+        }
+        thread::sleep(wait);
+        self.handed = self.handed.saturating_add(1);
+        let mut frame = AudioFrame::silence();
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        if queue.len() >= FRAME_SAMPLES {
+            for (sample, heard) in frame.samples_mut().iter_mut().zip(queue.drain(..FRAME_SAMPLES)) {
+                *sample = heard;
+            }
+        }
+        Ok(Some(frame))
+    }
+}
+
+/// The echo's speaker: into the queue its microphone plays back, and recorded.
+struct EchoSink {
+    queue: Arc<Mutex<VecDeque<f32>>>,
+    recorder: Box<dyn AudioSink>,
+}
+
+impl AudioSink for EchoSink {
+    fn play(&mut self, frame: &AudioFrame) -> Result<(), DeviceError> {
+        self.queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(frame.samples());
+        self.recorder.play(frame)
     }
 }

@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use crate::Error;
 use crate::stun::{Framing, StreamDecoder};
-use crate::turn::{Credentials, TEAMS_RELAY_TCP_PORT, TEAMS_RELAY_UDP_PORT, Timing, Transport, TurnClient, TurnEvent};
+use crate::turn::{
+    Credentials, TEAMS_RELAY_TCP_PORT, TEAMS_RELAY_UDP_PORT, Timing, Transport, TurnClient, TurnEvent, TurnFailure,
+};
 
 /// What the client calls itself in its requests' `SOFTWARE` attribute.
 const SOFTWARE: &str = "ms-teams teams-media";
@@ -305,7 +307,9 @@ fn unspecified(server: SocketAddr) -> SocketAddr {
     }
 }
 
-/// Allocates on the first server of `servers` that works, in order. Returns the link and every failure before it.
+/// Allocates on the first server of `servers` that works, in order. A server that redirects (`300 Try Alternate`, as
+/// Teams' relay answers over UDP) is followed once: its alternate, on the same transport, is tried before the next
+/// server. Returns the link and every failure before it (a redirect counted as one).
 ///
 /// # Errors
 /// [`Error::NoRelay`] with each server's failure when none allocates.
@@ -318,6 +322,17 @@ pub fn allocate_any(
     for server in servers {
         match RelayLink::allocate(*server, credentials.clone(), options) {
             Ok(link) => return Ok((link, failures)),
+            Err(Error::Turn(TurnFailure::TryAlternate(addr))) => {
+                failures.push((*server, TurnFailure::TryAlternate(addr).to_string()));
+                let alternate = RelayServer {
+                    addr,
+                    transport: server.transport,
+                };
+                match RelayLink::allocate(alternate, credentials.clone(), options) {
+                    Ok(link) => return Ok((link, failures)),
+                    Err(error) => failures.push((alternate, error.to_string())),
+                }
+            }
             Err(error) => failures.push((*server, error.to_string())),
         }
     }

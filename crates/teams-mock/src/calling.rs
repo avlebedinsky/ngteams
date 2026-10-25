@@ -100,6 +100,9 @@ pub struct MockCall {
     /// Every request on the call, by its operation (`start`, `attach`, `progress`, `accept`, `reject`, `leave`, …), with
     /// the account that sent it, in order.
     pub requests: Vec<(String, String)>,
+    /// The tenant each `add` named for its invitation (`participantInvitationData.invitationData.meetingInfo.tenantId`,
+    /// empty when it named none), in order.
+    pub add_tenants: Vec<String>,
     /// The caller's callbacks (none when the mock plays the caller).
     caller_links: Option<Callbacks>,
     /// Those who joined the running call, with their callbacks.
@@ -324,6 +327,7 @@ fn new_call(
             })
             .collect(),
         requests: Vec::new(),
+        add_tenants: Vec::new(),
         caller_links,
         joined: Vec::new(),
         offer,
@@ -449,6 +453,14 @@ fn conversation_op(
     match op {
         "leave" => leave(state, index, body),
         "add" => {
+            let tenant = body
+                .pointer("/participantInvitationData/invitationData/meetingInfo/tenantId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if let Some(call) = state.calling.calls.get_mut(index) {
+                call.add_tenants.push(tenant);
+            }
             let echo = body
                 .pointer("/participants/to/0/id")
                 .and_then(Value::as_str)

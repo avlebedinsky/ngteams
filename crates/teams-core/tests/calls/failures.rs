@@ -4,7 +4,8 @@
 //! to), and what a failure does as Task 14 decided with Codex (a media setup that fails refuses the action and sends
 //! nothing, an answer's keeps the invitation ringing; the media closing under the call fails it with a `leave`; a
 //! throttled write hung up during its wait isn't sent again); the microphone opens only once a start passed the fence;
-//! the engine stopping hangs the call up.
+//! the engine stopping hangs the call up; a test call of an engine that doesn't know the account's tenant reads it
+//! from the account's token first, and is refused, nothing sent, when the token names none.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +15,7 @@ use serde_json::json;
 use teams_core::engine::EngineError;
 use teams_core::{CallAction, CallActionError, CallStatus, CallTried, End, Outbox};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
-use teams_mock::{AX_CHAT, CHAT_BASE, ECHO, LAB_A, LAB_B, LAB_C};
+use teams_mock::{AX_CHAT, CHAT_BASE, ECHO, LAB_A, LAB_B, LAB_C, TENANT};
 use teams_proto::{AcknowledgeMediaAnswer, Author, CallContext, CallLink, HttpTransport};
 
 /// A media answer's acknowledgement on a call no start of this run registered.
@@ -272,4 +273,48 @@ async fn the_engine_stopping_while_the_start_is_in_flight_waits_for_it_and_leave
     wait_until(|| lab.sent_by(LAB_A).last().map(String::as_str) == Some("leave")).await;
     assert_eq!(lab.sent_by(LAB_A).first().map(String::as_str), Some("start"));
     assert!(log.denials().is_empty(), "{:#?}", log.denials());
+}
+
+/// a's token in a JWT's shape (made-up claims, no signature checked): its audience and the mock's tenant.
+const A_TOKEN_WITH_TENANT: &str = "eyJhbGciOiJub25lIn0.\
+    eyJhdWQiOiJodHRwczovL2ljMy50ZWFtcy5vZmZpY2UuY29tIiwidGlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAxIn0.\
+    c2lnbmF0dXJl";
+
+#[tokio::test]
+async fn a_test_call_of_an_engine_without_the_tenant_reads_it_from_the_account_s_token_first() {
+    let lab = Lab::start().await;
+    assert!(lab.mock.set_token(LAB_A, A_TOKEN_WITH_TENANT));
+    let mut a = lab.account_without_tenant(LAB_A, A_TONE).await;
+    let requests = a.handle.requests();
+    let call = requests
+        .call(CallAction::TestCall { echo: Mri::new(ECHO) })
+        .await
+        .unwrap();
+    a.status(call, &CallStatus::Connected).await;
+    wait_until(|| lab.sent_by(LAB_A).contains(&"add".to_owned())).await;
+    // the `add` names the tenant read from the token (its `tid`, the mock's tenant)
+    let added = lab.mock.calls().last().expect("a call").add_tenants.clone();
+    assert_eq!(added, [TENANT]);
+    requests.call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
+}
+
+#[tokio::test]
+async fn a_test_call_whose_tenant_can_t_be_read_is_refused_and_sends_nothing() {
+    let lab = Lab::start().await;
+    // the mock's own tokens are opaque: no tenant in them
+    let a = lab.account_without_tenant(LAB_A, A_TONE).await;
+    let refused = a
+        .handle
+        .requests()
+        .call(CallAction::TestCall { echo: Mri::new(ECHO) })
+        .await;
+    assert!(
+        matches!(refused, Err(EngineError::Call(CallActionError::Media(ref why))) if why.contains("tenant")),
+        "{refused:?}"
+    );
+    assert!(lab.mock.calls().is_empty(), "no start went");
+    assert!(a.log.permitted().is_empty(), "{:#?}", a.log.permitted());
+    assert_eq!(a.microphones(), 0);
 }

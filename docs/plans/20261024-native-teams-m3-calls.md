@@ -938,15 +938,43 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-headless/src/*`, `crates/teams-headless/tests/*`, `docs/protocol/calling-echo.md`
 
-- [ ] tests first (on the mock): `teams-headless <alias> call <target>` (`echo`, a lab alias or a recorded chat) places
+- [x] tests first (on the mock): `teams-headless <alias> call <target>` (`echo`, a lab alias or a recorded chat) places
       the call through the engine on the file backend (`--tone`, `--record`, `--seconds`), and ends it
-- [ ] `teams-headless a call echo --seconds 20` (release lab build): the tone goes out, comes back, and is checked
+      → done: `crates/teams-headless/src/call.rs` (`call::run`: waits for the calling registration, places the test
+      call or a chat's call, prints each event, holds it `--seconds` once connected, hangs up, waits for its end;
+      hangs up a call not connected within `--wait`; `CallFiles`: the keyed tone written before the call, the far
+      end's recording), `src/echo.rs` (a tone keyed on and off in 200 ms slots of a degree-10 shift register's
+      pattern, and `find`: each 2 s block's offset in a recording, a Hann-windowed Goertzel, every onset timed),
+      `--hear` beside `--tone`, `--record`, `--seconds`, `--wait`; the lab engine with its calling
+      (`teams_core::account::AccountCalls`, `lab::start(…, calls)`, `Lab::start_calling`: file devices, Teams'
+      relay, the web client's capability numbers, the tenant read from the `ic3` token before a test call). Tests:
+      `crates/teams-headless/tests/call.rs` on the mock (the test call against the mock's new echo stand-in,
+      `ChatServiceMock::start_echo_media`/`EchoDevices`, its tone found back at the stand-in's delay; a → b answered
+      by b's own action, each tone in the other's recording; a call nobody answers hung up after `--wait`; a signal
+      before the registration places nothing; the arguments), `echo.rs`' unit tests
+- [x] `teams-headless a call echo --seconds 20` (release lab build): the tone goes out, comes back, and is checked
       (Goertzel); the round trip measured (p50/p95/max; how the echo re-times playback written up)
-- [ ] `fence.log`: the start, the `add`, the follow-ups, all on the registered call; nothing denied; no answer to any
+      → done with `--seconds 45`, three runs with the tone back (exit 0): setup 2.3–2.9 s; the echo records about 14 s
+      of what was sent (from about 10 s after the devices opened) and plays the recording back as a whole, 16.7–16.9 s
+      later (p50/p95/max per run 16681/16681/16681, 16711/16731/16731, 16871/16871/16871 ms), at the level sent.
+      ⚠️ 20 s ends the call before the echo plays anything back (its playback ends about 41 s after the media
+      connected). ⚠️ Fixed on the way (live-only): Teams' relay answers UDP with `300 Try Alternate` (followed once,
+      `teams_media::relay::allocate_any`; TCP 443 carried the first runs); the media controller answered Opus offered
+      as `111` with `102` and took nothing of ours as `111`, while `str0m` dropped its audio sent as `111` (the
+      native offer now numbers Opus `102`, `teams_media::peer::OPUS_PT`; an answer numbering an offered codec
+      otherwise is read back with ours, `NgcSession::read_answer`); `call/end` for our `leave` came before the
+      `leave`'s answer (the machine now ends a call it is leaving as hung up). Task 14's open SDP-ordering defect
+      wasn't hit (no renegotiation in a test call)
+- [x] `fence.log`: the start, the `add`, the follow-ups, all on the registered call; nothing denied; no answer to any
       delivery but the acknowledgement's typed response
-- [ ] the open questions of `docs/spikes/echo-call.md` answered in `docs/protocol/calling-echo.md` (what the start
+      → done: each run logged the calling registration (`allowed`), the start (`call`, `new`, 2 added),
+      `updateEndpointMetadata`, the acceptance's `delivery_response` (`call_acceptance_acknowledgement`), the `add`
+      (`invite`, 1 added) and `leave`, each `allow` on the registered call; no deny in any run
+- [x] the open questions of `docs/spikes/echo-call.md` answered in `docs/protocol/calling-echo.md` (what the start
       needs, TCP framing, the relay transport used, re-timing)
-- [ ] the gate passes
+      → done: "The native echo call" (and a pointer in the spike's open questions; the Opus number in
+      `calling.md`'s SDP dialect; `endpoints.md`'s relay row and native evidence)
+- [x] the gate passes
 
 ### Task 16: Native lab-to-lab audio, against itself and the web client (live)
 **Files:**

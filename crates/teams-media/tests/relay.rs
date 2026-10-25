@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use teams_media::Error;
 use teams_media::relay::{RelayLink, RelayOptions, RelayServer, allocate_any, teams_relay};
+use teams_media::stun::{Attribute, Class, Message, Method};
 use teams_media::test_turn::{PASSWORD, TurnServer, USER};
 use teams_media::turn::{Credentials, Transport, TurnEvent, TurnFailure};
 
@@ -158,6 +159,52 @@ fn a_silent_udp_relay_falls_back_to_tcp() {
     assert_eq!(link.server(), servers[1], "TCP took over");
     assert_eq!(failures.len(), 1);
     assert!(failures[0].1.contains("timed out"), "{failures:?}");
+}
+
+/// A UDP relay that answers every Allocate with `300 Try Alternate` naming `alternate`, as Teams' relay answered.
+fn redirecting(alternate: SocketAddr) -> TestResult<SocketAddr> {
+    let socket = UdpSocket::bind("127.0.0.1:0")?;
+    let addr = socket.local_addr()?;
+    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+    std::thread::spawn(move || {
+        let mut buf = [0; 1500];
+        while let Ok((len, from)) = socket.recv_from(&mut buf) {
+            let Ok(request) = Message::decode(&buf[..len]) else {
+                continue;
+            };
+            let refusal = Message::new(Class::Error, Method::Allocate, request.transaction_id)
+                .with(Attribute::ErrorCode {
+                    code: 300,
+                    reason: "Try Alternate".into(),
+                })
+                .with(Attribute::AlternateServer(alternate));
+            let _ = socket.send_to(&refusal.encode(None, true), from);
+        }
+    });
+    Ok(addr)
+}
+
+#[test]
+fn a_relay_that_redirects_is_followed_to_its_alternate_once() {
+    let turn = TurnServer::start().unwrap();
+    let options = RelayOptions {
+        allocate_timeout: Duration::from_millis(500),
+        ..RelayOptions::default()
+    };
+    let servers = [udp(redirecting(turn.udp).unwrap()), tcp(turn.tcp)];
+
+    let (link, failures) = allocate_any(&servers, &credentials(), &options).unwrap();
+
+    assert_eq!(link.server(), udp(turn.udp), "the alternate, over UDP still");
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].1.contains("Try Alternate"), "{failures:?}");
+
+    // an alternate that redirects too isn't followed again: the next server is
+    let second = redirecting(turn.udp).unwrap();
+    let servers = [udp(redirecting(second).unwrap()), tcp(turn.tcp)];
+    let (link, failures) = allocate_any(&servers, &credentials(), &options).unwrap();
+    assert_eq!(link.server(), servers[1]);
+    assert_eq!(failures.len(), 2, "{failures:?}");
 }
 
 #[test]

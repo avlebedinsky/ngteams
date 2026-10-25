@@ -80,6 +80,7 @@ use std::time::{Duration, Instant};
 use percent_encoding::percent_decode_str;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LOCATION};
 use serde_json::Value;
+use teams_auth::claims::TokenSummary;
 use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
 use teams_auth::token::{SPACES_RESOURCE, TokenError, retry_after};
@@ -530,6 +531,13 @@ impl<C: Credentials> HttpTransport<C> {
     #[must_use]
     pub fn chat_base(&self) -> &str {
         self.chat_base.as_str()
+    }
+
+    /// The account's tenant id, as its `ic3` token's `tid` claim names it (the test call's `add` names it as the
+    /// organizer's); `None` without a token, or one that isn't a JWT with that claim. Nothing of the token leaves here.
+    pub async fn account_tenant(&self) -> Option<String> {
+        let token = self.credentials.bearer(IC3_AUDIENCE).await.ok()?;
+        TokenSummary::read(&token)?.tenant
     }
 
     /// Whether the transport was given the account's middle-tier base ([`Self::with_middle_tier`]): without one, every

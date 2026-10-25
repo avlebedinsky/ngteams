@@ -417,6 +417,20 @@ impl ChatServiceMock {
         self.lock().peers.start(dir, tone)
     }
 
+    /// Turns the calling service's media on as [`Self::start_media`] does, each peer the echo service's stand-in: it
+    /// plays back what it hears `delay` later ([`media::EchoDevices`]) and records it into `dir`.
+    ///
+    /// # Errors
+    /// When the TURN server can't bind its ports.
+    #[cfg(feature = "media")]
+    pub fn start_echo_media(
+        &self,
+        dir: &std::path::Path,
+        delay: std::time::Duration,
+    ) -> std::io::Result<std::net::SocketAddr> {
+        self.lock().peers.start_echo(dir, delay)
+    }
+
     /// Where the peer of call `id` on `account`'s side records (once the media is on).
     #[cfg(feature = "media")]
     #[must_use]

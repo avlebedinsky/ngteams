@@ -305,7 +305,11 @@ its own; the conversion keeps both namings for the call's life, so a renegotiati
 same lines. A line it adds is numbered one past the highest mid of the call (the mixer's numbering starts at `1` and
 runs out of line order, so neither the count of lines nor a line's place is free), and a rejected line that names no
 mid is the call's line at its place. It labels its lines as the web client does: the last video line of an offer with
-more than one, while the call has no sharing line, is `applicationsharing-video`, the others `main-video`.
+more than one, while the call has no sharing line, is `applicationsharing-video`, the others `main-video`. It offers
+Opus as `102`, the media controller's own number for it: the media controller answered an Opus-only offer's `111`
+with `102` and took nothing sent as `111`, while `str0m` keeps one number per codec for both directions
+([calling-echo.md](calling-echo.md#the-native-echo-call)); an answer that still numbers an offered codec otherwise is
+read back with the offer's number.
 
 **Opus as the lines ask for it**: every captured Opus line carries `a=ptime:20` and `a=fmtp:111
 minptime=10;useinbandfec=1` (the media controller's answer adds `usedtx=1`). The native client sends 20 ms packets

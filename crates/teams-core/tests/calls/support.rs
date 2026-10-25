@@ -175,7 +175,15 @@ impl Lab {
 
     /// `mri`'s engine, its calls' media playing `tone`, ready: both its sockets registered.
     pub async fn account(&self, mri: &'static str, tone: Tone) -> Account {
-        let mut account = Account::start(self, mri, tone);
+        let mut account = Account::start(self, mri, tone, TENANT);
+        account.ready().await;
+        account
+    }
+
+    /// As [`Self::account`], its engine not knowing the account's tenant (as a lab binary's doesn't): a test call
+    /// reads it from the account's token first.
+    pub async fn account_without_tenant(&self, mri: &'static str, tone: Tone) -> Account {
+        let mut account = Account::start(self, mri, tone, "");
         account.ready().await;
         account
     }
@@ -232,7 +240,7 @@ pub struct Account {
 }
 
 impl Account {
-    fn start(lab: &Lab, mri: &'static str, tone: Tone) -> Self {
+    fn start(lab: &Lab, mri: &'static str, tone: Tone, tenant: &str) -> Self {
         let log = SharedLog::default();
         let fence = Arc::new(
             Fence::new(
@@ -261,7 +269,7 @@ impl Account {
         let recording = lab.dir.path().join(format!("{}.wav", mri.rsplit(':').next().unwrap()));
         let microphones = Arc::new(AtomicUsize::new(0));
         let media = media(lab.relay, tone, &recording, Arc::clone(&microphones));
-        let calls = CallParts::new(calling, identity(mri), media);
+        let calls = CallParts::new(calling, identity(mri, tenant), media);
         let push = Push::new(trouter());
         let client = Arc::new(Client::new(http()));
         let outbox = Outbox::new(transport, fence, members, Author::new(Mri::new(mri), "Lab"));
@@ -379,13 +387,13 @@ impl Account {
 }
 
 /// The account in its calls.
-fn identity(mri: &str) -> Identity {
+fn identity(mri: &str, tenant: &str) -> Identity {
     Identity {
         mri: Mri::new(mri),
         display_name: Some("Lab".into()),
         endpoint_id: String::new(),
         language_id: Some("en-us".into()),
-        tenant_id: TENANT.into(),
+        tenant_id: tenant.into(),
         client: ClientInfo {
             endpoint_capabilities: Some(73_463),
             client_endpoint_capabilities: Some(114_259_690),

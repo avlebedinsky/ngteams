@@ -267,7 +267,7 @@ fn broker(runtime: &tokio::runtime::Runtime) -> TestResult<(BrokerSecretStore, A
 
 fn start(lab: &TempLab, secrets: BrokerSecretStore) -> Result<LabEngine<BrokerSecretStore>, LabError> {
     let fence = Arc::new(Fence::open(&lab.config).expect("the lab's fence"));
-    lab::start(&lab.config, Alias::A, fence, secrets, false)
+    lab::start(&lab.config, Alias::A, fence, secrets, false, None)
 }
 
 #[test]

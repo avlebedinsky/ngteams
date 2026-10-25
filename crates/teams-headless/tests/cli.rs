@@ -73,6 +73,7 @@ fn help_names_every_command() {
         "presence",
         "profile",
         "availability",
+        "call",
     ] {
         assert!(
             help.lines().any(|line| line.trim_start().starts_with(command)),
@@ -93,6 +94,7 @@ fn a_build_with_test_support_refuses_to_run_before_it_touches_the_lab() {
         &["a", "list"][..],
         &["b", "watch", "--json"],
         &["a", "send", "b", "hello"],
+        &["a", "call", "echo"],
     ] {
         let output = Command::new(BINARY)
             .args(args)

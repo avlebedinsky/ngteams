@@ -55,7 +55,9 @@ mod on {
     use teams_media::test_turn::{PASSWORD, TurnServer, USER};
     use teams_media::tone::Tone;
 
-    use crate::media::LoopbackPeer;
+    use std::time::Duration;
+
+    use crate::media::{EchoDevices, LoopbackPeer};
     use crate::world::State;
 
     /// The media a test turned on: its TURN server, where the peers record, the tone they play, and the peers.
@@ -68,6 +70,8 @@ mod on {
         turn: TurnServer,
         dir: PathBuf,
         tone: Tone,
+        /// The peers play back what they hear this much later instead of the tone (the echo service's stand-in).
+        echo: Option<Duration>,
         peers: Vec<((String, String), LoopbackPeer)>,
     }
 
@@ -75,12 +79,26 @@ mod on {
         /// Turns the media on: a TURN server on loopback, the peers recording into `dir` and playing `tone`. The
         /// relay's UDP address.
         pub(crate) fn start(&mut self, dir: &Path, tone: Tone) -> std::io::Result<SocketAddr> {
+            self.start_with(dir, tone, None)
+        }
+
+        /// Turns the media on as [`Self::start`] does, the peers playing back what they hear `delay` later.
+        pub(crate) fn start_echo(&mut self, dir: &Path, delay: Duration) -> std::io::Result<SocketAddr> {
+            let silent = Tone {
+                hz: 0.0,
+                amplitude: 0.0,
+            };
+            self.start_with(dir, silent, Some(delay))
+        }
+
+        fn start_with(&mut self, dir: &Path, tone: Tone, echo: Option<Duration>) -> std::io::Result<SocketAddr> {
             let turn = TurnServer::start()?;
             let udp = turn.udp;
             self.on = Some(On {
                 turn,
                 dir: dir.to_path_buf(),
                 tone,
+                echo,
                 peers: Vec::new(),
             });
             Ok(udp)
@@ -121,7 +139,11 @@ mod on {
                     camera: PatternCamera::default(),
                     pacing: Pacing::RealTime,
                 };
-                let peer = LoopbackPeer::start_at(on.turn.udp, &devices).ok()?;
+                let peer = match on.echo {
+                    Some(delay) => LoopbackPeer::start_at(on.turn.udp, &EchoDevices::new(delay, devices)),
+                    None => LoopbackPeer::start_at(on.turn.udp, &devices),
+                }
+                .ok()?;
                 on.peers.push(((call.to_owned(), account.to_owned()), peer));
                 on.peers.len() - 1
             };

@@ -110,7 +110,7 @@ fn prepare(alias: Alias, secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<L
         Arc::new(Fence::open_lab_account(alias).map_err(|error| format!("the fence can't be opened: {error}"))?);
     let secrets = BrokerSecretStore::new(socket, LabPaths::KEYRING_APPLICATION)
         .map_err(|error| format!("the broker's socket: {error}"))?;
-    let lab = teams_core::lab::start(&config, alias, fence, secrets, true)
+    let lab = teams_core::lab::start(&config, alias, fence, secrets, true, None)
         .map_err(|error| app::start_failure(alias, &error))?;
     Ok(Launch {
         alias,

@@ -28,6 +28,10 @@ pub enum CommandError {
     Stopped,
     #[error("{asked} people asked about, more than the engine watches at once ({most})")]
     TooMany { asked: usize, most: usize },
+    #[error("the calling socket didn't register in time")]
+    NotRegistered,
+    #[error("the call's recording can't be read or written: {0}")]
+    Recording(String),
 }
 
 /// How often `profile` asks the engine again whether a lookup is still under way: a lookup that ends without a change

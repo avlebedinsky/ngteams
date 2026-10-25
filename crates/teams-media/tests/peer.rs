@@ -15,7 +15,7 @@ use str0m::media::{Direction, Frequency, MediaData, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use teams_media::Error;
-use teams_media::peer::{Peer, PeerEvent};
+use teams_media::peer::{OPUS_PT, Peer, PeerEvent};
 
 /// One virtual run-loop step.
 const STEP: Duration = Duration::from_millis(10);
@@ -161,6 +161,33 @@ fn a_remote_close_ends_the_session() {
         !link.a_events.contains(&PeerEvent::Closed),
         "only the remote side reports Closed"
     );
+}
+
+#[test]
+fn our_offer_names_opus_with_the_media_controllers_number_and_sends_it_so() {
+    let now = Instant::now();
+    let mut peer = host_peer(now, 41_002).unwrap();
+    let (offer, _) = peer.offer_audio().unwrap();
+    let text = offer.to_sdp_string();
+    let audio = text.lines().find(|line| line.starts_with("m=audio")).unwrap();
+    assert!(
+        audio.ends_with(&format!(" {OPUS_PT}")),
+        "Opus alone, as {OPUS_PT}: {audio}"
+    );
+    assert!(text.contains(&format!("a=rtpmap:{OPUS_PT} opus/48000/2")), "{text}");
+    assert!(
+        text.contains(&format!("a=fmtp:{OPUS_PT} minptime=10;useinbandfec=1")),
+        "{text}"
+    );
+
+    // what goes out of a connected pair is numbered so
+    let mut link = Link::connected().unwrap();
+    while link.a.poll_datagram().is_some() {}
+    link.a.write_audio(link.now, link.now, 0, &FRAME).unwrap();
+    let sent = std::iter::from_fn(|| link.a.poll_datagram())
+        .find(|d| d.contents.first().is_some_and(|b| (128..=191).contains(b)))
+        .unwrap();
+    assert_eq!(sent.contents[1] & 0x7f, OPUS_PT);
 }
 
 #[test]

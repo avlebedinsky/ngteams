@@ -652,6 +652,32 @@ fn a_hang_up_once_the_accept_went_leaves() {
 }
 
 #[test]
+fn the_call_s_end_delivered_before_its_leave_s_answer_ends_it_as_hung_up() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let _ = effects(&mut calls);
+    calls.hang_up(call, now).unwrap();
+    let leaving = effects(&mut calls);
+    assert_eq!(names(&leaving), ["leave"]);
+    let end = callback(&calls, "end");
+    let body = json!({"callEnd": {"code": 0, "phrase": "CallEndReasonLocalUserInitiated", "reason": "noError"}});
+    calls.on_delivery(&delivery(&end, &body), Observed::Ended, now);
+    assert_eq!(
+        events(&effects(&mut calls)),
+        [CallEvent::Ended { call, end: End::HungUp }]
+    );
+
+    // a call nobody is leaving that ends that way ended at the far end
+    let (mut calls, call) = connected_call(now);
+    let end = callback(&calls, "end");
+    calls.on_delivery(&delivery(&end, &body), Observed::Ended, now);
+    assert!(matches!(
+        &events(&effects(&mut calls))[..],
+        [.., CallEvent::Ended { call: of, end: End::Remote(_) }] if *of == call
+    ));
+}
+
+#[test]
 fn writes_still_queued_when_the_call_ends_never_go() {
     let now = Instant::now();
     let (mut calls, call) = ringing_call(now);
