@@ -115,7 +115,9 @@ use teams_trouter::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::calling::{Act, CallAction, CallActionError, CallParts, CallStatus, Calling, CallingTask, IncomingCall};
+use crate::calling::{
+    Act, CallAction, CallActionError, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall,
+};
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
 use crate::presence::{Availability, PRESENCE_POLL, Polled, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
@@ -362,6 +364,9 @@ pub enum Event {
     /// couldn't be offered again): nothing more is sent on it until the account turns it on again
     /// ([`CallAction::Camera`]).
     CameraOff { call: CallId },
+    /// Who is in the account's call besides it, whose video each line shows, and who is speaking ([`CallView`]):
+    /// told whenever that changed.
+    CallParticipants { call: CallId, view: CallView },
 }
 
 /// What the engine's requests can fail with.

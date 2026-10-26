@@ -338,6 +338,14 @@ What the code does and why. A change that undoes one of these needs a new reason
   before it goes (`Fence::pend_start`, exactly the body sent; `Refusal::NotPended` when the registry won't take the
   permit) and registers the call from a successful answer; an `attach` or an `accept` pends its answer and binds its
   links. The TURN credentials are a read (`RelayTokens` on `Service::Relay`).
+- **A group call's video** (`teams-media/src/mcp.rs`, `session/control.rs`, `teams-core/src/calling/gallery.rs`;
+  `docs/protocol/calling.md`, "Group video") goes through the call's mixer: every video line answered and offered
+  `sendrecv` as the web client does, which way each really goes told by the media descriptions; the start, join,
+  `accept` and every answer to the mixer's renegotiations carry the descriptions and the bandwidth seed (without
+  them the mixer sends no video on the receiving lines); our offers number H.264 as the mixer does (`107`, its
+  retransmissions `99`: it takes only its own numbers); whose video each receiving line shows is a source request
+  on the data channel's control plane, which is media (never classified, never a write). Who is in the call comes
+  from the `rosterUpdate` deliveries, read only to show it: nothing is sent for them and the fence reads no roster.
 - **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The

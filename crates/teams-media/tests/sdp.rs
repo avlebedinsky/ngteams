@@ -870,7 +870,7 @@ fn an_offer_without_a_relayed_candidate_is_unwritable() -> TestResult {
 
 #[test]
 fn an_answer_to_an_offer_we_never_made_is_refused() -> TestResult {
-    let session = NgcSession::new();
+    let mut session = NgcSession::new();
     let error = session.read_answer(&captured("controller_answer")?).unwrap_err();
     assert!(matches!(error, SdpError::Mismatch(_)), "{error}");
     Ok(())

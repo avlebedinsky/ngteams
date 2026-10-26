@@ -243,6 +243,97 @@
     ]);
   };
 
+  // The data channels: every channel a connection makes or is given (`datachannel`), the messages it sends and
+  // receives, each as `dc:send` / `dc:message` with the channel's label and id and its data: text as it is, binary as
+  // hex (at most DC_MAX_BYTES of it, with its whole length). A message received as a Blob is reported by its size.
+  const Channel = scope.RTCDataChannel;
+  const channelProto = Channel ? Channel.prototype : undefined;
+  const channelGetter = (name) => {
+    const descriptor = channelProto ? getOwnPropertyDescriptor(channelProto, name) : undefined;
+    return descriptor ? descriptor.get : undefined;
+  };
+  const channelLabel = channelGetter('label');
+  const channelId = channelGetter('id');
+  const eventData = getterIn(scope.MessageEvent, 'data');
+  const channelOf = getterIn(scope.RTCDataChannelEvent, 'channel');
+  const Bytes = scope.Uint8Array;
+  const ArrayBufferOf = scope.ArrayBuffer;
+  const isView = ArrayBufferOf ? ArrayBufferOf.isView : undefined;
+  const DC_MAX_BYTES = 4096;
+  const hexDigits = '0123456789abcdef';
+  const channelPc = new WeakMap();
+  const watched = new WeakSet();
+  const isWatched = WeakSet.prototype.has;
+  const markWatched = WeakSet.prototype.add;
+  const payload = (data) => {
+    if (typeof data === 'string') {
+      return { __proto__: null, text: data };
+    }
+    let bytes;
+    if (ArrayBufferOf && data instanceof ArrayBufferOf) {
+      bytes = new Bytes(data);
+    } else if (isView && isView(data)) {
+      bytes = new Bytes(data.buffer, data.byteOffset, data.byteLength);
+    } else {
+      return { __proto__: null, other: toText(data && data.size !== undefined ? 'blob ' + data.size : typeof data) };
+    }
+    const length = bytes.length;
+    const shown = length < DC_MAX_BYTES ? length : DC_MAX_BYTES;
+    let hex = '';
+    for (let index = 0; index < shown; index += 1) {
+      const byte = bytes[index];
+      hex += hexDigits[byte >> 4] + hexDigits[byte & 15];
+    }
+    return { __proto__: null, length, hex };
+  };
+  const channelInfo = (channel) => ({
+    __proto__: null,
+    label: channelLabel ? apply(channelLabel, channel, []) : null,
+    id: channelId ? apply(channelId, channel, []) : null,
+  });
+  const watchChannel = (id, channel) => {
+    if (!channel || typeof channel !== 'object' || apply(isWatched, watched, [channel])) {
+      return;
+    }
+    apply(markWatched, watched, [channel]);
+    apply(setId, channelPc, [channel, id]);
+    apply(addListener, channel, [
+      'open',
+      () => send(id, 'dc:open', channelInfo(channel)),
+    ]);
+    apply(addListener, channel, [
+      'message',
+      (event) => {
+        try {
+          const info = channelInfo(channel);
+          info.data = payload(eventData ? apply(eventData, event, []) : undefined);
+          send(id, 'dc:message', info);
+        } catch (_) {
+          // the page gets its message whatever the hooks run into
+        }
+      },
+    ]);
+  };
+  if (channelProto && typeof channelProto.send === 'function') {
+    const originalSend = channelProto.send;
+    const hookedSend = {
+      send(...args) {
+        try {
+          const id = apply(idOf, channelPc, [this]);
+          if (id !== undefined) {
+            const info = channelInfo(this);
+            info.data = payload(args[0]);
+            send(id, 'dc:send', info);
+          }
+        } catch (_) {
+          // the page's send goes through whatever the hooks run into
+        }
+        return apply(originalSend, this, args);
+      },
+    }.send;
+    defineProperty(channelProto, 'send', { value: hookedSend, writable: true, enumerable: true, configurable: true });
+  }
+
   // the connection's number, noting it (and starting its listeners and stats) the first time it is seen
   const track = (connection, configuration) => {
     const known = apply(idOf, ids, [connection]);
@@ -251,6 +342,18 @@
     }
     // only a real connection takes the listeners; anything else (the prototype) throws here, before it is noted
     apply(addListener, connection, ['icecandidate', (event) => send(id, 'icecandidate', candidate(event.candidate))]);
+    apply(addListener, connection, [
+      'datachannel',
+      (event) => {
+        try {
+          const channel = channelOf ? apply(channelOf, event, []) : null;
+          send(id, 'datachannel', channel ? channelInfo(channel) : null);
+          watchChannel(id, channel);
+        } catch (_) {
+          // the page gets its channel whatever the hooks run into
+        }
+      },
+    ]);
     apply(addListener, connection, [
       'track',
       (event) => {
@@ -319,6 +422,32 @@
   );
   hook('addIceCandidate', (id, args) => send(id, 'addIceCandidate', candidate(args[0])), null);
   hook('close', (id) => send(id, 'close', null), null);
+  {
+    const originalCreate = proto.createDataChannel;
+    if (typeof originalCreate === 'function') {
+      const hookedCreate = {
+        createDataChannel(...args) {
+          const channel = apply(originalCreate, this, args);
+          try {
+            const id = this !== null && typeof this === 'object' ? track(this, undefined) : undefined;
+            if (id !== undefined) {
+              send(id, 'createDataChannel', channelInfo(channel));
+              watchChannel(id, channel);
+            }
+          } catch (_) {
+            // the page gets its channel whatever the hooks run into
+          }
+          return channel;
+        },
+      }.createDataChannel;
+      defineProperty(proto, 'createDataChannel', {
+        value: hookedCreate,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+  }
 
   const handler = { __proto__: null };
   handler.construct = (target, args, newTarget) => {

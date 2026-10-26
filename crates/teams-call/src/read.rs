@@ -136,6 +136,26 @@ pub(crate) struct AcceptAnswer {
     pub(crate) renegotiation: Option<CallLink>,
     /// The call leg's own link: where the keep-alive goes.
     pub(crate) call_leg: Option<CallLink>,
+    /// Where a group call's media lines are described again (`updateMediaDescriptions`) and its send capabilities
+    /// given (`applyChannelParameters`): the camera turned on or off.
+    pub(crate) group_media: GroupMediaLinks,
+}
+
+/// Where a group call's media lines are described (`updateMediaDescriptions`) and its send capabilities given
+/// (`applyChannelParameters`), as an acceptance or an `accept`'s answer hands them out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GroupMediaLinks {
+    pub(crate) descriptions: Option<CallLink>,
+    pub(crate) channel_parameters: Option<CallLink>,
+}
+
+impl GroupMediaLinks {
+    fn of(at: &Value) -> Self {
+        Self {
+            descriptions: link(at, "/links/updateMediaDescriptions"),
+            channel_parameters: link(at, "/links/applyChannelParameters"),
+        }
+    }
 }
 
 /// An `accept`'s answer, as far as it reads.
@@ -150,6 +170,7 @@ pub(crate) fn accept_answer(body: &[u8]) -> AcceptAnswer {
         keep_alive: keep_alive(&acknowledgement),
         renegotiation: link(&acknowledgement, "/links/mediaRenegotiation"),
         call_leg: link(&acknowledgement, "/links/callLeg"),
+        group_media: GroupMediaLinks::of(&acknowledgement),
     }
 }
 
@@ -167,6 +188,8 @@ pub(crate) struct Acceptance {
     /// The callee's voicemail took the call (`acceptedBy.endpointType` `voicemail`, as captured for a 1:1 call the
     /// callee declined or didn't answer).
     pub(crate) voicemail: bool,
+    /// A group call's media links.
+    pub(crate) group_media: GroupMediaLinks,
 }
 
 /// The acceptance delivery `body`; `None` unless it is a `callAcceptance`.
@@ -180,6 +203,66 @@ pub(crate) fn acceptance(body: &[u8]) -> Option<Acceptance> {
         renegotiation: link(acceptance, "/links/mediaRenegotiation"),
         call_leg: link(acceptance, "/links/callLeg"),
         voicemail: acceptance.pointer("/acceptedBy/endpointType").and_then(Value::as_str) == Some("voicemail"),
+        group_media: GroupMediaLinks::of(acceptance),
+    })
+}
+
+/// One participant of a call as its roster lists them (a `rosterUpdate` delivered at the conversation's callback:
+/// `{"participants": {<MRI>: {"version", "state", "details": {"displayName"}, "endpoints": {<id>: {"call":
+/// {"mediaStreams": [{"type", "label", "sourceId", "direction"}]}}}}}, "type": "Delta", "sequenceNumber"}`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RosterEntry {
+    pub(crate) mri: Mri,
+    /// Counts up per participant: an entry delivered again, or older, changes nothing.
+    pub(crate) version: u64,
+    /// `active` while in the call; `inactive` once gone (its endpoints empty).
+    pub(crate) active: bool,
+    pub(crate) name: Option<String>,
+    /// The main audio's and the main video's source ids, and whether the main video goes out (`sendrecv` or
+    /// `sendonly`): of the first endpoint in the call that lists its media.
+    pub(crate) audio_source: Option<i64>,
+    pub(crate) video_source: Option<i64>,
+    pub(crate) video_on: bool,
+}
+
+/// The roster update `body`'s participants, each where it reads (an MRI and a version); `None` unless it is one.
+pub(crate) fn roster(body: &[u8]) -> Option<Vec<RosterEntry>> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let participants = body.get("participants")?.as_object()?;
+    Some(
+        participants
+            .iter()
+            .filter_map(|(mri, entry)| roster_entry(mri, entry))
+            .collect(),
+    )
+}
+
+fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
+    let version = entry.get("version")?.as_u64()?;
+    let streams = entry.get("endpoints").and_then(Value::as_object).and_then(|endpoints| {
+        endpoints
+            .values()
+            .find_map(|endpoint| endpoint.pointer("/call/mediaStreams")?.as_array())
+    });
+    let stream = |label: &str| {
+        streams?
+            .iter()
+            .find(|stream| stream.get("label").and_then(Value::as_str) == Some(label))
+    };
+    let video = stream("main-video");
+    Some(RosterEntry {
+        mri: Mri::new(mri),
+        version,
+        active: entry.get("state").and_then(Value::as_str) == Some("active") && streams.is_some(),
+        name: entry
+            .pointer("/details/displayName")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        audio_source: stream("main-audio").and_then(|audio| audio.get("sourceId")?.as_i64()),
+        video_source: video.and_then(|video| video.get("sourceId")?.as_i64()),
+        video_on: video
+            .and_then(|video| video.get("direction")?.as_str())
+            .is_some_and(|direction| matches!(direction, "sendrecv" | "sendonly")),
     })
 }
 
@@ -231,9 +314,12 @@ pub(crate) fn remote_end(body: &[u8]) -> RemoteEnd {
     let Ok(body) = serde_json::from_slice::<Value>(body) else {
         return RemoteEnd::default();
     };
-    let Some(end) = body.get("callEnd").or_else(|| body.get("conversationEnd")) else {
-        return RemoteEnd::default();
-    };
+    // a conversation's end may also come bare (`{"code": 409, "subCode", "phrase", "conversationUrl", …}`, a start in a
+    // chat whose call still runs: `docs/protocol/calling.md`, "Joining a running call")
+    let end = body
+        .get("callEnd")
+        .or_else(|| body.get("conversationEnd"))
+        .unwrap_or(&body);
     RemoteEnd {
         code: end.get("code").and_then(Value::as_i64),
         sub_code: end.get("subCode").and_then(Value::as_i64),
@@ -407,5 +493,7 @@ mod tests {
         );
         assert_eq!(remote_end(b"not json"), super::RemoteEnd::default());
         assert_eq!(remote_end(b"{\"callEnd\":{\"code\":\"x\"}}").code, None);
+        let bare = remote_end(br#"{"code":409,"subCode":5704,"phrase":"Conversation cannot be created"}"#);
+        assert_eq!((bare.code, bare.sub_code), (Some(409), Some(5704)));
     }
 }

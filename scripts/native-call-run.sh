@@ -58,7 +58,7 @@ JOINING=""
 if [ -n "$JOINER" ]; then
   # shellcheck disable=SC2046
   "$BIN" "$JOINER" join "$CHAT" --tone "${TONE[$JOINER]}" $(others "$JOINER") --record "$OUT/$JOINER-join.wav" \
-    --seconds 30 --wait 90 --ring-wait 240 >"$OUT/$JOINER-join.txt" 2>&1 &
+    --seconds 30 --wait 90 --ring-wait 240 $(extra "$JOINER") >"$OUT/$JOINER-join.txt" 2>&1 &
   JOINING=$!
 fi
 for WHO in "${CALLEES[@]}" ${JOINER:+"$JOINER"}; do

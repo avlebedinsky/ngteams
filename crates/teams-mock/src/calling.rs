@@ -18,6 +18,10 @@
 //!   `leave` (while it rings, a cancel: every attached callee endpoint gets the call's end with the leave's code; once
 //!   up, the call's end to everyone in it). A join (`POST conv/<id>`) with media enters a running call and is accepted
 //!   by its mixer; without media it subscribes only.
+//! - **A group call's roster** ([`crate::roster`]): delivered to everyone in the call as parties come, leave, and turn
+//!   their cameras on (`updateMediaDescriptions`); in a group call a `leave` takes only its party out, and the call
+//!   ends once nobody is left. With group video on, each party's media is a mixer of its own ([`crate::mixer`]): a
+//!   callee's invitation carries its mixer's offer.
 //! - **Calls of no client** ([`crate::ChatServiceMock::ring`], [`crate::ChatServiceMock::ring_group`]): a caller the
 //!   mock plays rings an account; [`crate::ChatServiceMock::end_ring`] ends a call's ring (the caller cancels, it
 //!   times out) and [`crate::ChatServiceMock::hang_up_call`] ends a call that is up.
@@ -31,6 +35,7 @@ use serde_json::{Value, json};
 use wiremock::{Request, ResponseTemplate};
 
 use crate::chatsvc::{json as json_answer, status};
+use crate::roster::{self, Party};
 use crate::trouter::{CALLING_APP, fill_guids, invitation};
 use crate::world::State;
 
@@ -86,6 +91,8 @@ pub struct Leg {
     pub declined: bool,
     /// The `mediaRenegotiation` callback its answer handed out, where the call's renegotiation goes.
     renegotiation: Option<String>,
+    /// The `rosterUpdate` callback its `attach` handed out.
+    roster: Option<String>,
 }
 
 /// A call as the mock keeps it, for a test to read ([`crate::ChatServiceMock::calls`]).
@@ -112,6 +119,12 @@ pub struct MockCall {
     /// Those who joined the running call, with their callbacks.
     joined: Vec<(String, Callbacks)>,
     offer: Option<Value>,
+    /// A group call's roster: everyone who was in it.
+    pub(crate) roster: Vec<Party>,
+    pub(crate) roster_version: u64,
+    /// The `rosterUpdate` callbacks of the callees' `attach`es: each told the roster when it attached, then every
+    /// change while the call runs (whether its callee answered, or let the ring end and joined later).
+    pub(crate) roster_watchers: Vec<String>,
 }
 
 /// A party's callbacks the mock calls back: its acceptance, the call's end and progress.
@@ -149,6 +162,9 @@ pub(crate) struct Calling {
     /// The next acceptance the media controller or a mixer delivers names another call in its links
     /// ([`crate::ChatServiceMock::unbind_next_acceptance`]).
     pub(crate) unbind_next_acceptance: bool,
+    /// The next call operation whose path ends with this segment is answered this much later, the world changed at
+    /// once ([`crate::ChatServiceMock::delay_next_call_op`]).
+    pub(crate) delay_next: Option<(String, std::time::Duration)>,
 }
 
 /// The skypetoken the mock takes as `mri`'s.
@@ -207,14 +223,14 @@ impl State {
     }
 
     /// Queues `body` for the callback `url`.
-    fn call_back(&mut self, url: Option<&str>, body: Value) {
+    pub(crate) fn call_back(&mut self, url: Option<&str>, body: Value) {
         if let Some((endpoint, path)) = url.and_then(target) {
             self.calling.outgoing.push(Outgoing { endpoint, path, body });
             self.changed();
         }
     }
 
-    fn display_name(&self, mri: &str) -> String {
+    pub(crate) fn display_name(&self, mri: &str) -> String {
         self.account(mri)
             .map(|account| account.display_name.clone())
             .unwrap_or_default()
@@ -265,7 +281,15 @@ pub(crate) fn serve(state: &mut State, request: &Request) -> Option<ResponseTemp
         }
         _ => None,
     };
-    Some(answer.unwrap_or_else(|| status(404)))
+    let answer = answer.unwrap_or_else(|| status(404));
+    let delay = state
+        .calling
+        .delay_next
+        .take_if(|(segment, _)| segments.last() == Some(&segment.as_str()));
+    Some(match delay {
+        Some((_, delay)) => answer.set_delay(delay),
+        None => answer,
+    })
 }
 
 /// A call start: the conversation answered, the callees rung (see the module docs).
@@ -300,6 +324,7 @@ fn start(state: &mut State, caller: &str, body: &Value) -> Option<ResponseTempla
             answer,
         );
     }
+    roster::enter(state, index, caller, roster::link_of(body));
     Some(json_answer(200, &conversation_answer(&call.conversation)))
 }
 
@@ -330,6 +355,7 @@ fn new_call(
                 accepted_by: None,
                 declined: false,
                 renegotiation: None,
+                roster: None,
             })
             .collect(),
         requests: Vec::new(),
@@ -338,6 +364,9 @@ fn new_call(
         negotiation: None,
         joined: Vec::new(),
         offer,
+        roster: Vec::new(),
+        roster_version: 0,
+        roster_watchers: Vec::new(),
     });
     state.calling.calls.len() - 1
 }
@@ -358,11 +387,17 @@ fn conversation_answer(conversation: &str) -> Value {
     )
 }
 
-/// Rings every callee of call `index` on each calling endpoint it registered.
+/// Rings every callee of call `index` on each calling endpoint it registered (a group call's with its callee's mixer's
+/// offer, when its parties have mixers).
 fn ring_callees(state: &mut State, index: usize) {
     let call = state.calling.calls[index].clone();
     for (leg_number, leg) in (1_u64..).zip(&call.legs) {
-        let body = invitation_of(state, &call, leg_number, &leg.callee);
+        let mut body = invitation_of(state, &call, leg_number, &leg.callee);
+        if call.group_chat.is_some()
+            && let Some(offer) = state.peer_offer(&call.id, &leg.callee)
+        {
+            body = with_offer(&body, offer);
+        }
         for endpoint in state.calling_endpoints(&leg.callee) {
             state.calling.outgoing.push(Outgoing {
                 endpoint,
@@ -372,6 +407,24 @@ fn ring_callees(state: &mut State, index: usize) {
         }
     }
     state.changed();
+}
+
+/// `invitation` (`{"evt", "gp": <base64 JSON>}`) with `offer` as its `callNotification.mediaContent`.
+fn with_offer(invitation: &Value, offer: Value) -> Value {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let Some(mut gp) = invitation
+        .get("gp")
+        .and_then(Value::as_str)
+        .and_then(|gp| engine.decode(gp).ok())
+        .and_then(|gp| serde_json::from_slice::<Value>(&gp).ok())
+    else {
+        return invitation.clone();
+    };
+    gp["callNotification"]["mediaContent"] = offer;
+    let mut invitation = invitation.clone();
+    invitation["gp"] = json!(engine.encode(gp.to_string()));
+    invitation
 }
 
 /// The invitation of `call`'s leg `leg` to `callee` (`deliveries.json`'s 1:1 or group shape).
@@ -418,7 +471,21 @@ fn accept_by_controller(state: &mut State, index: usize, acceptance: Option<&str
     if let Some(answer) = answer {
         body["callAcceptance"]["mediaContent"] = answer;
     }
+    if call_is_group(state, index) {
+        // a group call's acceptance hands out where its lines are described again (as captured; the echo call's
+        // fixture names none)
+        body["callAcceptance"]["links"]["updateMediaDescriptions"] =
+            json!(cc_url(&format!("active/{id}/1/a1/1/updateMediaDescriptions")));
+    }
     state.call_back(acceptance, body);
+}
+
+fn call_is_group(state: &State, index: usize) -> bool {
+    state
+        .calling
+        .calls
+        .get(index)
+        .is_some_and(|call| call.group_chat.is_some())
 }
 
 /// A join of the running call on `conversation`: with media it enters the call and the mixer accepts it; without, it
@@ -439,6 +506,7 @@ fn join(state: &mut State, account: &str, conversation: &str, body: &Value) -> O
             .pointer("/callInvitation/mediaContent")
             .and_then(|offer| state.peer_answer(&id, account, offer));
         accept_by_controller(state, index, acceptance.as_deref(), answer);
+        roster::enter(state, index, account, roster::link_of(body));
     }
     Some(json_answer(200, &conversation_answer(conversation)))
 }
@@ -458,6 +526,12 @@ fn conversation_op(
         .position(|call| call.conversation == conversation)?;
     log(state, index, account, op);
     match op {
+        // a group call's party leaves alone: the call ends once nobody is left
+        "leave" if call_is_group(state, index) && state.calling.calls[index].phase == CallPhase::Connected => {
+            if !roster::leave(state, index, account) {
+                leave(state, index, body);
+            }
+        }
         "leave" => leave(state, index, body),
         "add" => {
             let tenant = body
@@ -582,6 +656,15 @@ fn controller_op(
             Some(status(200))
         }
         ("callAcceptance" | "mediaAnswers", "acknowledge") | ("mcProxy", "applyChannelParameters") => Some(status(200)),
+        // the main video line first, as captured: `sendrecv` while the camera is on
+        ("active", "updateMediaDescriptions") => {
+            let on = body
+                .pointer("/UpdateMediaDescriptions/mediaDescriptions/descriptions/0/direction")
+                .and_then(Value::as_str)
+                == Some("sendrecv");
+            roster::video(state, index, account, on);
+            Some(status(200))
+        }
         _ => None,
     }
 }
@@ -745,7 +828,12 @@ fn attach(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
     let end = body.pointer("/attach/links/end")?.as_str()?.to_owned();
     let (endpoint, _) = target(&end)?;
     let call = state.calling.calls[index].clone();
-    leg_mut(state, index, leg)?.attached.push((endpoint, end));
+    let leg_state = leg_mut(state, index, leg)?;
+    leg_state.attached.push((endpoint, end));
+    leg_state.roster = roster::link_of(body);
+    if let Some(link) = roster::link_of(body) {
+        roster::watch(state, index, &link);
+    }
     let number = (leg + 1).to_string();
     let follow_ups: Value = serde_json::from_str(FOLLOW_UPS).unwrap_or_default();
     let answer = fixture(
@@ -786,7 +874,9 @@ fn accept(state: &mut State, index: usize, leg: usize, body: &Value) -> Option<R
     leg_state.accepted_by = Some(endpoint);
     leg_state.attached.retain(|(_, end)| !others.contains(end));
     leg_state.renegotiation = renegotiation;
+    let roster_link = leg_state.roster.clone();
     state.calling.calls[index].phase = CallPhase::Connected;
+    roster::enter(state, index, &callee, roster_link);
     if let Some(answer) = body.pointer("/callAcceptance/mediaContent") {
         // a caller the mock plays: its peer takes the callee's answer
         state.peer_accept(&call.id, &callee, answer);

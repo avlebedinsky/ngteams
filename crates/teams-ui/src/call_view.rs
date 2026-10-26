@@ -6,16 +6,20 @@
 //! - **The in-call bar** while a call is up or being set up: who it is with (a chat's members other than the account,
 //!   by their names; an invitation's caller; the test call's echo), its state (calling, ringing, connecting,
 //!   connected with its duration, reconnecting, taken by voicemail), Mute or Unmute, Camera on or off (a build that
-//!   shows video), Hang up, and why an ask went nowhere while it is up; under it the video tiles, the far end's
-//!   picture and the self view ([`crate::video::Tiles`]). Once it ended, how (or why a later ask went nowhere) until
-//!   the next call or Dismiss.
+//!   shows video), Hang up, and why an ask went nowhere while it is up; under it, once the call's roster told who is in
+//!   it, **the participant grid**: a cell per participant (its name as the roster gives it, its video when a line shows
+//!   it, a mark while it speaks) and the account's own (its self view, a mark while it speaks); before that, the video
+//!   tiles, the far end's picture and the self view ([`crate::video::Tiles`]). Once it ended, how (or why a later ask
+//!   went nowhere) until the next call or Dismiss.
 //!
 //! A build that shows no calls draws none of it.
 //!
 //! Every button asks through [`calls::ask`], as the shell's keys and the switcher's commands do. What is shown is
 //! traced (`calling registered`/`unregistered` as the calling endpoint goes, `call-banner shown`/`hidden` with the call's number, its kind, whether the caller is named, a group call's
 //! chat and the caller's MRI; `in-call shown` with the call's number, its kind, state, end, mute, camera and voicemail,
-//! its chat and its participants' MRIs; `in-call hidden`; the tiles' `video-tile` lines), never a name.
+//! its chat and its participants' MRIs; `in-call hidden`; `call-participant shown` per grid cell when the grid changed,
+//! with the call's number, the participant's MRI and kinds for its camera, its line and whether it speaks, and
+//! `call-participant self` for the account's own; the tiles' `video-tile` lines), never a name.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +29,7 @@ use gpui::{
     SharedString, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use teams_core::{CallId, CallStatus, IncomingCall};
+use teams_core::{CallId, CallStatus, CallView, IncomingCall};
 
 use crate::bridge::Core;
 use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, Refused};
@@ -34,7 +38,7 @@ use crate::notify::SOMEONE;
 use crate::people::Shown;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
-use crate::video::{Tiles, VideoFeed};
+use crate::video::{Tile, Tiles, VideoFeed};
 
 /// How often the duration of a connected call is drawn again.
 const TICK: Duration = Duration::from_secs(1);
@@ -72,6 +76,8 @@ pub struct CallBar {
     /// The video tiles, in a build that shows video, with the call they last drew.
     tiles: Option<Tiles>,
     tiles_call: Option<CallId>,
+    /// The participant grid as last traced, with its call.
+    grid_traced: Option<(CallId, CallView)>,
     _waking: Option<Task<()>>,
     _observing: [Subscription; 2],
 }
@@ -105,6 +111,7 @@ impl CallBar {
             ticking: None,
             tiles,
             tiles_call: None,
+            grid_traced: None,
             _waking: waking,
             _observing: observing,
         };
@@ -422,23 +429,12 @@ impl CallBar {
                 this.ask(Ask::ToggleCamera, cx);
             })
         });
-        let tiles = self
-            .tiles
-            .as_mut()
-            .map(|tiles| tiles.elements(active.id.get()))
-            .filter(|tiles| !tiles.is_empty())
-            .map(|tiles| {
-                div()
-                    .debug_selector(|| "video-tiles".to_owned())
-                    .w_full()
-                    .flex()
-                    .items_end()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .bg(rgb(palette.surface))
-                    .children(tiles)
-            });
+        let grid = self.grid(active, palette);
+        let tiles = if grid.is_none() {
+            self.video_tiles(active, palette)
+        } else {
+            None
+        };
         let bar = strip(palette)
             .debug_selector(|| "in-call".to_owned())
             .child(
@@ -468,8 +464,120 @@ impl CallBar {
             .flex()
             .flex_col()
             .child(bar)
+            .children(grid)
             .children(tiles)
             .into_any_element()
+    }
+
+    /// A 1:1 call's video tiles (the far end's and the account's own), when there are any.
+    fn video_tiles(&mut self, active: &ActiveCall, palette: Palette) -> Option<gpui::Div> {
+        let tiles = self.tiles.as_mut()?.elements(active.id.get());
+        (!tiles.is_empty()).then(|| {
+            div()
+                .debug_selector(|| "video-tiles".to_owned())
+                .w_full()
+                .flex()
+                .items_end()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .bg(rgb(palette.surface))
+                .children(tiles)
+        })
+    }
+
+    /// The participant grid of `active`, once its roster told who is in it: a cell per participant and the account's
+    /// own (see the module docs); traced when it changed.
+    fn grid(&mut self, active: &ActiveCall, palette: Palette) -> Option<AnyElement> {
+        let view = &active.view;
+        if view.participants.is_empty() {
+            return None;
+        }
+        self.trace_grid(active.id, view);
+        let call = active.id.get();
+        let names = self
+            .participants
+            .as_ref()
+            .filter(|(read, _)| *read == active.id)
+            .map(|(_, people)| people.clone())
+            .unwrap_or_default();
+        let mut cells = Vec::with_capacity(view.participants.len() + 1);
+        for (index, participant) in view.participants.iter().enumerate() {
+            let tile = participant
+                .line
+                .and_then(|line| self.tiles.as_mut()?.element(Tile::Line(line), call));
+            let name = participant
+                .name
+                .clone()
+                .map(SharedString::from)
+                .or_else(|| {
+                    names
+                        .iter()
+                        .find(|(mri, _)| *mri == participant.mri)
+                        .map(|(_, name)| name.clone())
+                })
+                .unwrap_or_else(|| SharedString::from(SOMEONE));
+            cells.push(cell(
+                format!("call-participant-{index}"),
+                name,
+                participant.speaking,
+                tile,
+                palette,
+            ));
+        }
+        let own = self.tiles.as_mut().and_then(|tiles| tiles.element(Tile::Own, call));
+        cells.push(cell(
+            "call-participant-self".to_owned(),
+            SharedString::from("You"),
+            view.speaking,
+            own,
+            palette,
+        ));
+        Some(
+            div()
+                .debug_selector(|| "call-grid".to_owned())
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_end()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .bg(rgb(palette.surface))
+                .children(cells)
+                .into_any_element(),
+        )
+    }
+
+    /// Traces the grid's cells when the grid of `call` changed: each participant's MRI, camera, line and speaking, and
+    /// the account's own speaking.
+    fn trace_grid(&mut self, call: CallId, view: &CallView) {
+        if self
+            .grid_traced
+            .as_ref()
+            .is_some_and(|(traced, shown)| *traced == call && shown == view)
+        {
+            return;
+        }
+        for participant in &view.participants {
+            let line = TraceLine::new("call-participant", "shown")
+                .call(call.get())
+                .people([participant.mri.as_str()])
+                .kind(if participant.video_on {
+                    "camera-on"
+                } else {
+                    "camera-off"
+                })
+                .kind(participant.line.map_or("no-line", |line| Tile::Line(line).name()))
+                .kind(if participant.speaking { "speaking" } else { "quiet" });
+            self.trace.record(&line);
+        }
+        self.trace.record(
+            &TraceLine::new("call-participant", "self")
+                .call(call.get())
+                .kind(if view.speaking { "speaking" } else { "quiet" }),
+        );
+        self.grid_traced = Some((call, view.clone()));
     }
 
     /// How the last call ended, or why the last ask went nowhere, with Dismiss.
@@ -507,6 +615,35 @@ fn ask_label(ask: &str) -> &'static str {
         "camera" => "turn the camera on or off",
         _ => "do that",
     }
+}
+
+/// One cell of the participant grid: its tile (when its video shows), its name, and a border in the brand colour while
+/// it speaks.
+fn cell(
+    selector: String,
+    name: SharedString,
+    speaking: bool,
+    tile: Option<AnyElement>,
+    palette: Palette,
+) -> AnyElement {
+    let border = if speaking { palette.brand } else { palette.border };
+    let marked = if speaking {
+        SharedString::from(format!("{name} · speaking"))
+    } else {
+        name
+    };
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_1()
+        .rounded_md()
+        .border_2()
+        .border_color(rgb(border))
+        .children(tile)
+        .child(div().text_xs().child(marked))
+        .into_any_element()
 }
 
 /// A strip across the top of the right side.

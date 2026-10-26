@@ -27,7 +27,8 @@ use std::time::Instant;
 
 use gpui::{App, AsyncApp, Context, Entity};
 use teams_core::{
-    CallAction, CallActionError, CallId, CallStatus, End, EngineError, Event, IncomingCall, RegistrationReport,
+    CallAction, CallActionError, CallId, CallStatus, CallView, End, EngineError, Event, IncomingCall,
+    RegistrationReport,
 };
 use teams_fence::Mri;
 
@@ -81,6 +82,9 @@ pub struct ActiveCall {
     pub camera: bool,
     /// The callee's voicemail took it (declined, or not answered).
     pub voicemail: bool,
+    /// Who is in it besides the account, as its roster tells it, whose video each line shows and who speaks
+    /// ([`teams_core::Event::CallParticipants`]); empty until told.
+    pub view: CallView,
 }
 
 /// How the last call ended, shown until the next one.
@@ -297,6 +301,7 @@ impl Calls {
                     | Event::Call { .. }
                     | Event::Voicemail { .. }
                     | Event::CameraOff { .. }
+                    | Event::CallParticipants { .. }
             );
         }
         match event {
@@ -323,6 +328,11 @@ impl Calls {
             Event::CameraOff { call } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
                     active.camera = false;
+                }
+            }
+            Event::CallParticipants { call, view } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.view = view.clone();
                 }
             }
             _ => return false,
@@ -382,6 +392,7 @@ impl Calls {
             muted: false,
             camera: false,
             voicemail: false,
+            view: CallView::default(),
         }
     }
 

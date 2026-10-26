@@ -304,6 +304,18 @@ fn call_fields(event: &Event, names: &LabNames) -> Value {
         }),
         Event::Voicemail { call } => json!({"event": "voicemail", "call": call.get()}),
         Event::CameraOff { call } => json!({"event": "camera_off", "call": call.get()}),
+        // each by lab name, never the name the roster gives
+        Event::CallParticipants { call, view } => json!({
+            "event": "call_participants",
+            "call": call.get(),
+            "speaking": view.speaking,
+            "participants": view.participants.iter().map(|participant| json!({
+                "who": names.show(&participant.mri),
+                "video_on": participant.video_on,
+                "line": participant.line,
+                "speaking": participant.speaking,
+            })).collect::<Vec<_>>(),
+        }),
         Event::Call { call, status } => {
             let mut fields = json!({"event": "call", "call": call.get(), "status": call_status_word(status)});
             if let CallStatus::Ended(end) = status {

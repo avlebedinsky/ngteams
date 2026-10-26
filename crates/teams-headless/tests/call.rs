@@ -25,7 +25,7 @@ use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::lab::{LAB_LANGUAGE, web_client_info};
 use teams_core::{CallAction, CallParts, CallVideo, End, Identity, Outbox, Relay};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
-use teams_headless::call::{self, CallFiles, Plan, Report, Target};
+use teams_headless::call::{self, CallFiles, Plan, Report, Showing, Target};
 use teams_headless::chat::LabNames;
 use teams_headless::cli::{Cli, Command as CliCommand, DEFAULT_TONE_HZ};
 use teams_headless::commands::{self, Answering, WatchEnd};
@@ -327,7 +327,7 @@ async fn a_signal_before_the_calling_socket_registered_places_nothing() {
         &mut a.handle,
         Target::Echo(Mri::new(ECHO)),
         &PLAN,
-        &names,
+        Showing::names(&names),
         &mut out,
         future::ready(()),
     )
@@ -361,7 +361,7 @@ async fn a_signal_while_the_call_s_media_is_set_up_places_nothing() {
             &mut a.handle,
             Target::Echo(Mri::new(ECHO)),
             &PLAN,
-            &names,
+            Showing::names(&names),
             &mut out,
             stop,
         ),
@@ -432,6 +432,36 @@ async fn watch_answering_lab_calls_answers_a_s_call_from_the_chat_and_each_side_
         let opened = files.opened();
         assert!(opened.microphone.is_some() && opened.speaker.is_some(), "{opened:?}");
     }
+}
+
+#[tokio::test]
+async fn a_call_with_video_prints_the_frames_each_line_brought_while_it_runs() {
+    let lab = Lab::start_echo().await;
+    let (mut a, counts) = lab.account_with_video(LAB_A, 1_000.0);
+    let (mut b, _) = lab.account_with_video(LAB_B, 660.0);
+    b.ready().await;
+    let watching = b.watch(Answering::LabCallsWithCamera(Duration::from_millis(300)));
+    let plan = Plan {
+        hold: Duration::from_secs(6),
+        ..PLAN
+    };
+    let names = LabNames::new([Some(LAB_A), Some(LAB_B), Some(LAB_C)]);
+    let showing = Showing {
+        names: &names,
+        video: Some(&counts),
+    };
+    let (report, printed) = a.call_showing(Target::Chat(AB_CHAT.to_owned()), &plan, showing).await;
+    assert!(report.completed(), "{report:?}\n{printed}");
+    watching.until("end=").await;
+    let _ = watching.stop().await;
+    // b's camera on line 0, counted as it came: the last count printed during the call is one the call reached
+    let received: Vec<u64> = printed
+        .lines()
+        .filter_map(|line| line.split_once(" video_lines received=0:")?.1.parse().ok())
+        .collect();
+    assert!(received.last().is_some_and(|frames| *frames > 0), "{printed}");
+    assert!(received.is_sorted(), "{received:?}");
+    assert!(counts.progress().is_some_and(|line| line.starts_with("received=0:")));
 }
 
 #[tokio::test]
@@ -516,7 +546,9 @@ async fn watch_answering_with_the_camera_turns_it_on_once_connected_and_counts_t
     watching.until("call_answer call=").await;
     watching.until("camera_on call=").await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while counts.remote.counts().indexed < 15 || lab.mock.peer_stats(&ours, LAB_B).unwrap().video.shown < 15 {
+    while counts.lines().iter().map(|(_, line)| line.indexed).sum::<u64>() < 15
+        || lab.mock.peer_stats(&ours, LAB_B).unwrap().video.shown < 15
+    {
         assert!(
             tokio::time::Instant::now() < deadline,
             "{} {:?}",
@@ -1032,9 +1064,14 @@ struct Account {
 impl Account {
     /// `call` to `target` under `plan`, with what it printed.
     async fn call(&mut self, target: Target, plan: &Plan) -> (Report, String) {
-        let mut out = Vec::new();
         let names = LabNames::new([Some(LAB_A), Some(LAB_B), Some(LAB_C)]);
-        let report = call::run(&mut self.handle, target, plan, &names, &mut out, future::pending())
+        self.call_showing(target, plan, Showing::names(&names)).await
+    }
+
+    /// [`Self::call`], printing what `showing` says.
+    async fn call_showing(&mut self, target: Target, plan: &Plan, showing: Showing<'_>) -> (Report, String) {
+        let mut out = Vec::new();
+        let report = call::run(&mut self.handle, target, plan, showing, &mut out, future::pending())
             .await
             .unwrap();
         (report, String::from_utf8(out).unwrap())

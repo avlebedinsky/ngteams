@@ -206,7 +206,10 @@ fn side(turn: &TurnServer, name: &str, dir: &std::path::Path) -> Side {
             library: H264Library::Bundled,
             encoder: settings(),
             max_size: MaxSize::HD,
-            remote: Box::new(remote.clone()) as Box<dyn VideoSink>,
+            remote: Box::new({
+                let remote = remote.clone();
+                move |_| Box::new(remote.clone()) as Box<dyn VideoSink>
+            }),
             preview: Some(Box::new(preview.clone())),
         })
         .unwrap();

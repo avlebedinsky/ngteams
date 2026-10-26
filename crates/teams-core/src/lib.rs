@@ -43,7 +43,8 @@ pub mod sync;
 pub mod teams;
 
 pub use calling::{
-    CallAction, CallActionError, CallMedia, CallParts, CallStatus, CallVideo, IncomingCall, Relay, VideoOutput,
+    CallAction, CallActionError, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView, GROUP_SLOTS,
+    IncomingCall, Relay, VideoOutput,
 };
 pub use engine::{
     Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, OwnStatus,

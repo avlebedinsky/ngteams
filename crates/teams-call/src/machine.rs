@@ -6,13 +6,15 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use teams_fence::{Delivery, Mri, Observed};
 use teams_proto::{
-    AcceptanceAcknowledgement, CallContext, CallLink, CallParticipant, ClientInfo, InvitationReceipt, MediaContent,
+    AcceptanceAcknowledgement, CallContext, CallLink, CallParticipant, ChannelParameters, ClientInfo,
+    InvitationReceipt, MediaContent, MediaDescriptions,
 };
 
 use crate::agent::{CallAgent, Kind, guid};
 use crate::call::{Acknowledgement, Call, Ending, KeepAlive, Negotiation, Phase, Side, Step};
 use crate::read::{self, Invitation, RemoteEnd};
-use crate::{CallWrite, WriteId, build};
+use crate::roster::Roster;
+use crate::{CallWrite, Participant, WriteId, build};
 
 /// The modality a call's renegotiation and answer name beside the call's others once its media carries video (the
 /// web client's camera-on renegotiation and the answer to it: `["Audio", "Video"]`).
@@ -146,6 +148,12 @@ pub enum CallEvent {
     /// The account's call was taken by the callee's voicemail (as captured for a 1:1 call the callee declined or
     /// didn't answer: the call controller forwards it there): told once it is up. It runs on as any call up.
     Voicemail { call: CallId },
+    /// Who is in the call now besides the account, as its roster updates tell it ([`Participant`]): told whenever
+    /// that changed (someone came or left, turned their camera on or off).
+    Participants {
+        call: CallId,
+        participants: Vec<Participant>,
+    },
 }
 
 /// The Trouter delivery a response answers: its connection (the fence's key for it) and its id.
@@ -328,8 +336,23 @@ pub struct Calls {
     /// its conversation's end is delivered, when a join to it fails, or when a newer invitation in the chat names
     /// another.
     running: BTreeMap<String, CallLink>,
+    /// The rosters of running calls an invitation's `attach` subscribed to, by their group chat: who is in the call,
+    /// kept from the ring on (see [`Followed`]).
+    followed: BTreeMap<String, Followed>,
     next_call: u64,
     out: Out,
+}
+
+/// A running group call's roster as the `attach` of its invitation subscribed to it: the service goes on delivering
+/// its updates at that subscription's callbacks after the ring ended, and a join later gets only the changes from
+/// then on (at both the `attach`'s callbacks and its own, as the web client's captures show), so the join starts
+/// from this roster and takes the updates at those callbacks too. Read only to show who is in the call.
+#[derive(Clone, Debug)]
+struct Followed {
+    conversation: CallLink,
+    roster: Roster,
+    /// The `attach`'s `rosterUpdate` callback paths.
+    paths: Vec<String>,
 }
 
 impl Calls {
@@ -340,6 +363,7 @@ impl Calls {
             agent: None,
             call: None,
             running: BTreeMap::new(),
+            followed: BTreeMap::new(),
             next_call: 0,
             out: Out::default(),
         }
@@ -459,6 +483,13 @@ impl Calls {
             conversation: conversation.clone(),
         };
         let mut call = self.new_call(side, now)?;
+        if let Some(followed) = self
+            .followed
+            .get(chat)
+            .filter(|followed| followed.conversation == conversation)
+        {
+            call.roster = followed.roster.seeded();
+        }
         let write = build::join(&mut call, &self.identity, &conversation, chat, offer)?;
         Ok(self.begin(call, Step::Join, write))
     }
@@ -578,6 +609,45 @@ impl Calls {
         }
     }
 
+    /// The account describes the media lines of `call`, up, a group call's, again (its camera turned on or off: its
+    /// main video line `sendrecv` or `recvonly`, each receiving line `recvonly`; numbered on from the descriptions its
+    /// start's, join's, `accept`'s and answers' media carried, as the media numbers them): to the call controller's
+    /// `updateMediaDescriptions` link, and then, when given, its send capabilities to its `applyChannelParameters` link.
+    /// Neither failing ends the call.
+    ///
+    /// # Errors
+    /// [`CallError`]: the call can't be described now ([`Self::describable`]), or either write can't be built; nothing
+    /// was sent.
+    pub fn describe_media(
+        &mut self,
+        call: CallId,
+        described: &MediaDescriptions,
+        parameters: Option<ChannelParameters>,
+    ) -> Result<(), CallError> {
+        let current = describable(&mut self.call, call)?;
+        let link = current.group_media.descriptions.clone().ok_or(CallError::NotNow)?;
+        let write = build::describe(current, &link, described)?;
+        // both built before either goes: a send capability that can't be built leaves the descriptions unsent too
+        let parameters = match (parameters, current.group_media.channel_parameters.clone()) {
+            (Some(parameters), Some(link)) => Some(build::channel_parameters(current, &link, &parameters)?),
+            _ => None,
+        };
+        self.out.send(current, Step::Describe, write);
+        if let Some(write) = parameters {
+            self.out.send(current, Step::ChannelParameters, write);
+        }
+        Ok(())
+    }
+
+    /// Whether the media lines of `call` can be described now ([`Self::describe_media`]): it is up and connected (as
+    /// signaling goes), nothing renegotiates it, and its services handed out an `updateMediaDescriptions` link.
+    ///
+    /// # Errors
+    /// [`CallError`]: it isn't the call up, or can't be described now.
+    pub fn describable(&mut self, call: CallId) -> Result<(), CallError> {
+        describable(&mut self.call, call).map(|_| ())
+    }
+
     /// Whether the media of `call` carries video now (a video line in use, either way): its next renegotiation and
     /// answer name the `Video` modality beside the call's others, as the web client's do once a camera is on.
     pub fn set_video(&mut self, call: CallId, video: bool) {
@@ -615,6 +685,17 @@ fn connected(current: &mut Option<Call>, call: CallId) -> Result<&mut Call, Call
         .filter(|current| current.id == call)
         .ok_or(CallError::NoSuchCall)?;
     if current.phase == Phase::Connected && !current.waits_for_answer() {
+        Ok(current)
+    } else {
+        Err(CallError::NotNow)
+    }
+}
+
+/// The call `call`, if it is up and connected (as signaling goes), nothing renegotiates it, and it has an
+/// `updateMediaDescriptions` link.
+fn describable(current: &mut Option<Call>, call: CallId) -> Result<&mut Call, CallError> {
+    let current = connected(current, call)?;
+    if current.group_media.descriptions.is_some() {
         Ok(current)
     } else {
         Err(CallError::NotNow)
@@ -732,6 +813,7 @@ impl Calls {
     /// waiting for their outcome stay the engine's to finish ([`Self::may_send_again`]).
     fn end_call(&mut self) -> Option<Call> {
         let mut call = self.call.take()?;
+        self.follow(&call);
         self.out.drop_queued(&mut call);
         let cleanup = call
             .writes
@@ -758,6 +840,52 @@ impl Calls {
         if self.running.get(chat) == Some(conversation) {
             let chat = chat.to_owned();
             self.running.remove(&chat);
+            self.followed.remove(&chat);
+        }
+    }
+
+    /// An invitation to a running group call that ends here (its ring ended, or it was declined or answered and left)
+    /// leaves its `attach`'s roster followed while the call runs and is joinable.
+    fn follow(&mut self, call: &Call) {
+        let Some(invitation) = call.invitation() else { return };
+        let Some(chat) = invitation.group_chat.as_ref() else {
+            return;
+        };
+        if self.running.get(chat) != Some(&invitation.conversation) {
+            return;
+        }
+        let paths = call.callback_paths(Kind::Conversation, "rosterUpdate");
+        if paths.is_empty() {
+            return;
+        }
+        let followed = Followed {
+            conversation: invitation.conversation.clone(),
+            roster: call.roster.clone(),
+            paths,
+        };
+        self.followed.insert(chat.clone(), followed);
+    }
+
+    /// A roster update at a followed `attach`'s callback: the joined call's when the account is in it, otherwise
+    /// kept for a join to come; anything else at no callback of the call's is dropped.
+    fn followed_roster(&mut self, delivery: &Delivery) {
+        let Some((chat, followed)) = self
+            .followed
+            .iter_mut()
+            .find(|(_, followed)| followed.paths.contains(&delivery.path))
+        else {
+            return;
+        };
+        let joined = self
+            .call
+            .as_ref()
+            .and_then(Call::running)
+            .is_some_and(|(running, conversation)| running == chat && *conversation == followed.conversation);
+        if let Some(update) = read::roster(&delivery.body) {
+            let _ = followed.roster.apply(update, &self.identity.mri);
+        }
+        if joined {
+            self.roster_updated(delivery);
         }
     }
 
@@ -858,8 +986,9 @@ impl Calls {
             (Step::Accept, Some(body)) => self.connected_by_accept(body, now),
             (Step::Decline, Some(_)) => self.finish(End::Declined),
             (Step::Leave, Some(_)) => self.left(),
-            // a keep-alive not taken ends nothing: the next one goes when it falls due, as the web client's does
-            (_, Some(_)) | (Step::KeepAlive, None) => {}
+            // a keep-alive not taken ends nothing: the next one goes when it falls due, as the web client's does; a
+            // group call's media described again and not taken leaves the call as it was (the camera goes unseen)
+            (_, Some(_)) | (Step::KeepAlive | Step::Describe | Step::ChannelParameters, None) => {}
             (step, None) => self.fail(step, now),
         }
     }
@@ -910,6 +1039,7 @@ impl Calls {
             return;
         }
         let Some(callback) = self.call.as_ref().and_then(|call| call.callback_at(&delivery.path)) else {
+            self.followed_roster(delivery);
             return;
         };
         if observed == Observed::Renegotiation {
@@ -928,7 +1058,8 @@ impl Calls {
             (Kind::Call, "mediaRenegotiation") => self.renegotiated(delivery, observed, now),
             (Kind::Call, "mediaAnswer") => self.media_answered(delivery, now),
             (Kind::Call, "rejection") => self.reoffer_rejected(delivery, now),
-            // progress, roster and conversation updates, an add's outcome: read by nothing yet
+            (Kind::Conversation, "rosterUpdate") => self.roster_updated(delivery),
+            // progress and conversation updates, an add's outcome: read by nothing yet
             _ => {}
         }
     }
@@ -1151,6 +1282,18 @@ impl Calls {
         }));
     }
 
+    /// A roster update at the call's own callback: the participants told when they changed.
+    fn roster_updated(&mut self, delivery: &Delivery) {
+        let Some(update) = read::roster(&delivery.body) else {
+            return;
+        };
+        let Some(call) = self.call.as_mut() else { return };
+        if let Some(participants) = call.roster.apply(update, &self.identity.mri) {
+            let id = call.id;
+            self.out.event(CallEvent::Participants { call: id, participants });
+        }
+    }
+
     /// The `accept`'s answer: the call is up.
     fn connected_by_accept(&mut self, body: &[u8], now: Instant) {
         let answer = read::accept_answer(body);
@@ -1159,6 +1302,7 @@ impl Calls {
             return;
         }
         call.renegotiation = answer.renegotiation;
+        call.group_media = answer.group_media;
         self.connect((answer.keep_alive, answer.call_leg), now);
     }
 
@@ -1186,6 +1330,16 @@ impl Calls {
             writes.push((Step::Add, write));
         }
         self.out.send_in_turn(call, writes);
+        // who is in it, as the roster told it so far (a callee's from its ring on, a joiner's from its invitation's),
+        // told again now that the call is up and shows them
+        let participants = call
+            .roster
+            .apply(Vec::new(), &self.identity.mri)
+            .unwrap_or_else(|| call.roster.participants().to_vec());
+        if !participants.is_empty() {
+            let id = call.id;
+            self.out.event(CallEvent::Participants { call: id, participants });
+        }
     }
 
     /// A placed or joined call's acceptance.
@@ -1229,6 +1383,7 @@ impl Calls {
                 by_request: false,
             });
             call.renegotiation.clone_from(&acceptance.renegotiation);
+            call.group_media.clone_from(&acceptance.group_media);
         }
         self.acknowledge(delivery);
         if let (Some(call), Some(media)) = (self.call.as_ref(), acceptance.answer) {

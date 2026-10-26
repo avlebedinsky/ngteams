@@ -81,8 +81,11 @@ mod csa;
 mod fixtures;
 #[cfg(feature = "media")]
 pub mod media;
+#[cfg(feature = "media")]
+pub mod mixer;
 mod peers;
 mod reads;
+mod roster;
 mod trouter;
 mod ups;
 mod world;
@@ -395,6 +398,12 @@ impl ChatServiceMock {
         self.lock().calling.unbind_next_acceptance = true;
     }
 
+    /// The next call operation whose path ends with `segment` (`accept`, `join`'s conversation, …) is answered `delay`
+    /// later; the world changes at once, as the service's would (the caller is told, the callee waits for its answer).
+    pub fn delay_next_call_op(&self, segment: &str, delay: std::time::Duration) {
+        self.lock().calling.delay_next = Some((segment.to_owned(), delay));
+    }
+
     /// The peer of call `id` renegotiates its media with `account`, which answered the call (the media on, see
     /// [`ChatServiceMock::start_media`]). `false` without such a call, answer or peer.
     #[must_use = "false says nothing was renegotiated"]
@@ -422,6 +431,45 @@ impl ChatServiceMock {
         tone: teams_media::tone::Tone,
     ) -> std::io::Result<std::net::SocketAddr> {
         self.lock().peers.start(dir, tone)
+    }
+
+    /// Turns the calling service's media on as [`Self::start_media`] does, a group call's parties each with a mixer of
+    /// its own ([`mixer::MixerPeer`]): its lines' video chosen by source requests over the data channel, its roster's
+    /// sources the mixer's.
+    ///
+    /// # Errors
+    /// When the TURN server can't bind its ports.
+    #[cfg(feature = "media")]
+    pub fn start_group_video(
+        &self,
+        dir: &std::path::Path,
+        tone: teams_media::tone::Tone,
+    ) -> std::io::Result<std::net::SocketAddr> {
+        self.lock().peers.start_group_video(dir, tone)
+    }
+
+    /// What the mixer of call `id` on `account`'s side saw and did so far (group video on).
+    #[cfg(feature = "media")]
+    #[must_use]
+    pub fn mixer_stats(&self, id: &str, account: &str) -> Option<mixer::MixerStats> {
+        self.lock().peers.mixer_stats(id, account)
+    }
+
+    /// The mixer of call `id` on `account`'s side tells the dominant speakers, newest first: the audio sources of
+    /// `speakers`' mixers. `false` without such a mixer.
+    #[cfg(feature = "media")]
+    #[must_use = "false says nobody was told"]
+    pub fn speak(&self, id: &str, account: &str, speakers: &[&str]) -> bool {
+        let state = self.lock();
+        let sources: Vec<i64> = speakers
+            .iter()
+            .filter_map(|speaker| state.mixer_sources(id, speaker).map(|(audio, _)| audio))
+            .collect();
+        state
+            .peers
+            .known_mixer(id, account)
+            .map(|mixer| mixer.speak(sources))
+            .is_some()
     }
 
     /// Turns the calling service's media on as [`Self::start_media`] does, each peer the echo service's stand-in: it

@@ -494,7 +494,11 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
         }
     }
     let echo = matches!(target, call::Target::Echo(_));
-    let report = call::run(&mut handle, target, &plan, &lab.names, out, signals.next()).await;
+    let showing = call::Showing {
+        names: &lab.names,
+        video: counts.as_ref(),
+    };
+    let report = call::run(&mut handle, target, &plan, showing, out, signals.next()).await;
     // the engine's stop closes the call's media, and with it the recording
     handle.shutdown();
     let report = report?;

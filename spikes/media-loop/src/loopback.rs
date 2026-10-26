@@ -259,7 +259,12 @@ fn audio(event: PeerEvent) -> Result<Option<ReceivedAudio>, Error> {
         PeerEvent::Disconnected => Err(Error::Rtc("ICE disconnected mid-loop".into())),
         PeerEvent::Closed => Err(Error::Rtc("the session closed mid-loop".into())),
         // the loop carries audio alone: its bandwidth estimates (and no video) change nothing of it
-        PeerEvent::Connected | PeerEvent::Video(_) | PeerEvent::KeyframeRequested | PeerEvent::Bitrate(_) => Ok(None),
+        PeerEvent::Connected
+        | PeerEvent::Video(_)
+        | PeerEvent::KeyframeRequested
+        | PeerEvent::Bitrate(_)
+        | PeerEvent::ChannelOpen
+        | PeerEvent::ChannelData(_) => Ok(None),
     }
 }
 

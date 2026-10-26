@@ -8,7 +8,8 @@ use teams_fence::{Delivery, Mri, Observed};
 use teams_proto::{CallContext, CallLink, CallParticipant, Links, MediaContent};
 
 use crate::agent::{CallAgent, Callback, Kind};
-use crate::read::{Attached, Conversation, Invitation};
+use crate::read::{Attached, Conversation, GroupMediaLinks, Invitation};
+use crate::roster::Roster;
 use crate::{CallId, CallState, CallWrite, End, WriteId};
 
 /// The conversation's callbacks a start, a join or an `attach` hands out (`conversationRequest.links`, as captured).
@@ -132,6 +133,10 @@ pub(crate) enum Step {
     MediaAcknowledge,
     /// The call's keep-alive: its failing ends nothing (the web client sends the next one regardless).
     KeepAlive,
+    /// A group call's media lines described again (the camera on or off): its failing ends nothing.
+    Describe,
+    /// A group call's send capabilities: its failing ends nothing.
+    ChannelParameters,
 }
 
 impl Step {
@@ -153,6 +158,8 @@ impl Step {
             Self::MediaAnswer => "media_answer",
             Self::MediaAcknowledge => "media_acknowledge",
             Self::KeepAlive => "keep_alive",
+            Self::Describe => "update_media_descriptions",
+            Self::ChannelParameters => "apply_channel_parameters",
         }
     }
 }
@@ -220,6 +227,10 @@ pub(crate) struct Call {
     /// The call controller's `mediaRenegotiation` link, from the acceptance (a placed or joined call's) or the
     /// `accept`'s answer (an answered one's): where the account's renegotiation goes.
     pub(crate) renegotiation: Option<CallLink>,
+    /// A group call's media links, from the same: where its lines are described again and its send capabilities go.
+    pub(crate) group_media: GroupMediaLinks,
+    /// Who is in the call, as its roster updates tell it.
+    pub(crate) roster: Roster,
     /// A renegotiation delivered to the account and not answered yet: its offer and the `mediaAnswer` link its answer
     /// goes to.
     pub(crate) negotiation: Option<Negotiation>,
@@ -277,6 +288,8 @@ impl Call {
             keep_alive: None,
             modalities: Vec::new(),
             renegotiation: None,
+            group_media: GroupMediaLinks::default(),
+            roster: Roster::default(),
             negotiation: None,
             deferred: None,
             negotiated: Vec::new(),
@@ -340,6 +353,15 @@ impl Call {
             .iter()
             .find(|callback| callback.path == path)
             .map(|callback| (callback.kind, callback.name))
+    }
+
+    /// The paths of this call's callbacks `kind`/`name`.
+    pub(crate) fn callback_paths(&self, kind: Kind, name: &str) -> Vec<String> {
+        self.callbacks
+            .iter()
+            .filter(|callback| callback.kind == kind && callback.name == name)
+            .map(|callback| callback.path.clone())
+            .collect()
     }
 
     /// The path of this call's callback `kind`/`name` (the first made).

@@ -192,7 +192,7 @@ decoded video. In a group call the camera goes on with `POST …/cc/v1/active/<c
 video. **Which participant's video a page receives** is named in no request or delivery of the signaling: the
 updates name only the lines' directions, and the group call's remote description carries a data channel
 (`m=application … webrtc-datachannel`, `a=sctp-port:5000`; the `m=x-data` line in `sdp-ngc`); the source selection
-travels over that channel, which the hooks don't read (Task 19 reads it).
+travels over that channel ("Group video" below).
 
 ### The H.264 codec
 
@@ -232,10 +232,12 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
 - **What the far end offers is answered by the call's video lines rule**: a 1:1 call takes the main video line (the
   first video line that isn't the sharing line, then that line for the call's life) and answers it `recvonly` while
   the camera is off, `sendrecv` while it is on; the sharing line and every other video line are answered rejected
-  (`m=video 0 RTP/SAVP 34`). A group call's media (and a join's, and the test call's) takes no video line, as in Task
-  16: Task 19 builds group video.
-- **H.264** is offered as the web client offers constrained baseline, payload type `108` (`profile-level-id=42e01f`,
-  `packetization-mode=1`) with its retransmissions on `109`; an offer we answer keeps its own numbers. The encoder
+  (`m=video 0 RTP/SAVP 34`). A group call's video lines (a start's in a group chat, a join's, a group call
+  answered) follow "Group video" below; the test call's media takes no video line.
+- **H.264** is offered as constrained baseline (`profile-level-id=42e01f`, `packetization-mode=1`) on the payload
+  type a group call's mixer gives it, `107`, with its retransmissions on `99` (the web client offers `108` and `109`;
+  the mixer answers any offer with its own numbers and takes only those, "Group video" below); an offer we answer
+  keeps its own numbers. The encoder
   makes 20-30 fps camera pictures up to 1280 by 720 at a target bitrate that follows `str0m`'s bandwidth estimate
   (transport-wide congestion control) less what the audio takes, between 100 kb/s and 1.5 Mb/s; an IDR comes first,
   every 4 s, and whenever the far end asks (PLI or FIR); a receiver that loses a frame asks for one (PLI) and shows
@@ -260,6 +262,72 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   does to one delivered while ours waits to go again: the far end's is answered with our camera's line only
   receiving, then our camera's line is offered again as the camera goes. Any other rejection fails the call. The
   media's SDP steps (an offer, an answer, an accepted answer) run one at a time, in the order they were asked.
+
+### Group video
+
+A group call's video goes through the call's mixer (M3 Task 19). What follows comes from the web client's code (read
+for its shapes, written here in our own words), `abc-call --call video`'s signaling captures, the native lab runs
+that made it work, and `abc-call-mixed`'s captures, where the lab browser's data channel hooks (`rtc_hooks.js`:
+`dc:open`, `dc:send`, `dc:message`) read the web callees' channel.
+
+- **The lines.** The mixer's offer to a callee (and its answer to a caller's or a joiner's group offer) has audio,
+  the main video line, a set of receiving video lines (nine seen), the sharing line and the data line (`m=x-data`).
+  The native client takes the main line and up to nine receiving lines and rejects the sharing line; a caller's or a
+  joiner's own offer has the same lines in that order. Every video line is answered (and offered) `sendrecv`, as the
+  web client does (an answer `recvonly` on a receiving line is refused with `410` `SdpParsingFailure` or
+  `InvalidFinalAnswerMediaDescriptions`), and each carries `a=rtcp-rsize`, `a=rtcp-fb:* …` for every payload type,
+  a stream of its own (`a=x-ssrc-range`; a line we send nothing on names stream `1`, no media stream) and the
+  largest picture it takes in its H.264 `fmtp` (`max-fs=3600;max-mbps=108000;max-fps=3000`). Which way a line
+  really goes is told apart from the SDP, by the media descriptions. The mixer numbers H.264 `107` and its
+  retransmissions `99` whatever the offer said, sends with the offer's numbers and takes only its own: a caller's
+  video offered as `108` reached nobody, so the native client offers the mixer's numbers.
+- **The media descriptions.** A start's, a join's and an `accept`'s `mediaContent` carries `mediaDescriptions`
+  (`{"descriptions": [{"mid", "direction", "label"?}], "negotiationTag", "requestId"}`: the main line `recvonly`
+  with the camera off, `sendrecv` with it on, labelled `main-video`; every receiving line `recvonly`) and
+  `applyChannelParameters` seeding the mixer's send rate (`{"mids": ["*"], "mediaParameter": "{\"sendSideBWSeed\":
+  {\"seedValueBitsPerSec\": …}}"}`; the native client seeds 4 Mb/s). **Without the seed the mixer sends no video
+  on the receiving lines** (native runs: source requests answered `ok`, audio flowing, no video RTP; with it, video
+  came within seconds). The mixer renegotiates the media now and then (`fromMixer`); the answer to each carries the
+  descriptions again (`requestId` counting on) and the seed, as the web client's do: native callees whose answers
+  lacked them stopped receiving video after the first renegotiation. The camera turns on and off with
+  `updateMediaDescriptions` (the main line `sendrecv` or `recvonly`, the request numbered on) and, turning on,
+  `applyChannelParameters` with the main line's send capabilities (`maxVideoSendCapabilities`, one stream); no SDP
+  changes. A group call's own video is sent at most 640 by 360 at 600 kb/s.
+- **The data channel and the control plane.** The client opens a channel labelled `main-channel` on the data line.
+  Every message on it is a packet: an 11-byte header (the format version in the high nibble and the header's length,
+  a start flag with the data id, a 16-bit sequence number, how many packets follow, the sender's 32-bit source id,
+  how many recipients), the recipients (4 bytes each) and the payload. The control plane is data id `18` addressed
+  to the mixer (`0xFFFFFFFC`), the sender the data line's own stream id; its payload is a version byte `1` and a
+  JSON array of messages. The client opens it with `syn` naming what it takes (the web client `["dsh", "bwe",
+  "sr", "ssbwe", "leave", "vdclc", "heartbeat"]`, the native client only `["dsh", "sr"]`), the mixer answers `ack`
+  (it sends `bwe`, `dsh`, `sr_res`, `heartbeat`, `vdclc`; it takes `sr`, `ssbwe`, `leave`, `heartbeat`); then the
+  client sends source requests (`sr`, `{"controlVideoStreaming": {"sequenceNumber", "controlInfo": {"sourceId",
+  "streamMsid", "fmtParams": [{"max-fs", "max-mbps", "max-fps", "profile-level-id"}]}}}`): per receiving line its
+  stream id (`streamMsid`, the line's `a=x-source-streamid`), the participant's video `sourceId` (from the roster;
+  `-1` to stop a line) and the largest picture it takes (`max-fs` in macroblocks, `max-fps` in hundredths of a
+  frame per second; the web client asks up to 1920 by 1080, `max-fs` 8160, the native client 1280 by 720); the
+  mixer answers each `sr_res` `ok`. The mixer tells who spoke last as `dsh` (the dominant speakers' audio source
+  ids); the web client also trades `heartbeat`s with it every second, gets its estimate of the bandwidth (`bwe`)
+  and the sending constraints for its own video (`vdclc`, its `fmtParamsList`, e.g. `max-fs=2040`, `max-br=482`),
+  and tells the bandwidth it takes per line (`ssbwe`); the native client does none of these and runs calls of
+  minutes without them. A request goes only when what a line should show changes, and names a participant's source only while its
+  camera is on (the roster says so), `-1` once it goes off. In one native run a caller that asked for both callees
+  as they connected, before their cameras were on, got `ok` and no video at all, while a callee that asked for the
+  other before its camera came on did get it; why is not settled, and asking again when the camera comes on gave
+  every participant the others' video in the runs after.
+- **The roster.** Who is in the call, and their sources, come only in `rosterUpdate` deliveries at the
+  conversation's callback (`{"participants": {<MRI>: {"version", "state", "details": {"displayName"}, "endpoints":
+  {<id>: {"call": {"mediaStreams": [{"type", "label", "sourceId", "direction"}]}}}}}, "type": "Delta",
+  "sequenceNumber"}`): a participant is in the call while its `state` is `active` with an endpoint in the call, the
+  `main-video` stream's `sourceId` is what a source request names and its direction says whether its camera is on,
+  the `main-audio` stream's `sourceId` is what `dsh` names; a newer `version` replaces an older one. An update
+  lists only who changed, so a client knows the others only from what it was told before: a callee's `attach`
+  subscribes to the roster while it rings, and the service goes on delivering updates at that subscription's
+  callback after the ring ended; a later join gets only the changes from then on, at both its own callback and the
+  `attach`'s (the web joiner's captures), so the native joiner starts from the roster its invitation's `attach` was
+  told and takes the updates at both. The native
+  client reads it only to show the call (who is in it, whose video is on which line, who speaks); it sends nothing
+  for it, and the fence reads no roster.
 
 ## Joining a running call
 

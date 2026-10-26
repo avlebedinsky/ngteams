@@ -90,7 +90,7 @@ impl LoopbackPeer {
             library: H264Library::Bundled,
             encoder: EncoderSettings::default(),
             max_size: MaxSize::HD,
-            remote: Box::new(FrameCounter::new()),
+            remote: Box::new(|_| Box::new(FrameCounter::new()) as Box<dyn teams_media::devices::VideoSink>),
             preview: None,
         })?;
         let mut dialect = NgcSession::new();

@@ -1,4 +1,5 @@
-//! The call's WebRTC peer on `str0m`: its audio, and the one video line a 1:1 call carries.
+//! The call's WebRTC peer on `str0m`: its audio, the main video line, a group call's receiving video lines and its
+//! data channel.
 //!
 //! - [`Peer`] is sans-IO: it owns no socket and no clock, takes datagrams and `now` in and hands datagrams, events and
 //!   its next deadline out. Every mutation of the `Rtc` (input, write, SDP change) is followed by a full drain of
@@ -10,9 +11,13 @@
 //! A Teams offer carries video, sharing and data lines beside the audio: the peer answers them as `str0m` does (which
 //! lines it takes is the dialect's to say: [`crate::sdp::NgcSession::set_video`]), but its audio is the line its own
 //! offer added or the offer's first audio line, and only that line's frames come out as [`PeerEvent::Audio`]; its
-//! video is the line its own offer added or the first video line it took, whose frames come out as
-//! [`PeerEvent::Video`]. H.264 is offered as the web client offers constrained baseline ([`H264_PT`]); the bandwidth
-//! estimate (`str0m`'s, on the transport-wide congestion control feedback) is told as [`PeerEvent::Bitrate`].
+//! video is the line its own offer added or the first video line it took (line 0), and a group call's receiving
+//! video lines (lines 1, 2, …) the other video lines its group offer added or the far end's offer had it take, whose
+//! frames come out as [`PeerEvent::Video`] by line. H.264 is offered as the web client offers constrained baseline
+//! ([`H264_PT`]); the bandwidth estimate (`str0m`'s, on the transport-wide congestion control feedback) is told as
+//! [`PeerEvent::Bitrate`]. A group call's data channel ([`crate::mcp::CHANNEL_LABEL`]) is the peer's own: added by
+//! its group offer, or opened on the far end's data line ([`Peer::open_channel`]); what arrives on it comes out as
+//! [`PeerEvent::ChannelData`].
 //!
 //! `str0m` hands every audio frame over the moment it arrives, in arrival order: the receiving side's jitter buffer
 //! ([`crate::jitter`]) puts frames back in order and decides what a gap means, so `str0m` holds nothing back waiting
@@ -26,6 +31,7 @@ use std::time::Instant;
 
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+use str0m::channel::{ChannelConfig, ChannelId};
 use str0m::format::{Codec, FormatParams};
 use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
@@ -33,6 +39,9 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use crate::Error;
 use crate::codec::OpusConfig;
+use crate::mcp::CHANNEL_LABEL;
+#[cfg(feature = "test-support")]
+use crate::mcp::MIXER_CHANNEL_LABEL;
 use crate::relay::RelayLink;
 use crate::turn::TurnEvent;
 
@@ -44,10 +53,12 @@ use crate::turn::TurnEvent;
 /// its own numbers.
 pub const OPUS_PT: u8 = 102;
 /// The payload type our offers give H.264 (constrained baseline, `profile-level-id=42e01f`, `packetization-mode=1`),
-/// and [`H264_RTX_PT`] its retransmissions: the web client's own numbers for it (its offers give `102` to another
-/// H.264 profile, which ours already gives Opus).
-pub const H264_PT: u8 = 108;
-pub const H264_RTX_PT: u8 = 109;
+/// and [`H264_RTX_PT`] its retransmissions: a group call's mixer's own numbers for them. As with Opus, the mixer
+/// answers our offer with its own numbers and takes only those: offered as `108` (the web client's number), the
+/// caller's video reached nobody in the native group runs (M3 Task 19), so the offer names them as the mixer does. A
+/// 1:1 call's far end (a web client) answers with ours.
+pub const H264_PT: u8 = 107;
+pub const H264_RTX_PT: u8 = 99;
 /// The bandwidth estimate a call starts from, in bits per second.
 pub const START_BITRATE: u64 = 300_000;
 
@@ -70,11 +81,17 @@ pub enum PeerEvent {
     KeyframeRequested,
     /// The bandwidth estimate of what we send, in bits per second.
     Bitrate(u64),
+    /// The data channel opened.
+    ChannelOpen,
+    /// A message arrived on the data channel.
+    ChannelData(Vec<u8>),
 }
 
 /// An incoming video frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedVideo {
+    /// The line it came on: 0 the main video line, 1, 2, … a group call's receiving lines in order.
+    pub line: usize,
     /// RTP media time in 90 kHz units.
     pub rtp_time: u64,
     /// The access unit, Annex B (start codes before each NAL unit).
@@ -109,7 +126,28 @@ pub struct Datagram {
     pub contents: Vec<u8>,
 }
 
-/// A sans-IO peer: one `str0m::Rtc` with one Opus audio m-line and at most one H.264 video m-line.
+/// A group call's part of a peer: its receiving video lines and its data channel.
+#[derive(Default)]
+struct Group {
+    /// A group call's receiving video lines (lines 1, 2, …).
+    slots: Vec<Mid>,
+    /// The receiving lines our group offer adds, until its answer commits them.
+    offered_slots: Vec<Mid>,
+    /// Whether the far end's offers make receiving lines of the video lines after the main one (a group call's).
+    takes_slots: bool,
+    /// The data channel, once made.
+    channel: Option<ChannelId>,
+    channel_open: bool,
+    /// The data channel is the one the far end opens ([`CHANNEL_LABEL`]), not one of the peer's own (a mixer's side,
+    /// in tests).
+    takes_remote_channel: bool,
+    /// A mixer's offer waiting for its answer (in tests).
+    #[cfg(feature = "test-support")]
+    mixer_pending: Option<SdpPendingOffer>,
+}
+
+/// A sans-IO peer: one `str0m::Rtc` with one Opus audio m-line, its main video line, and a group call's receiving video
+/// lines and data channel.
 pub struct Peer {
     rtc: Rtc,
     /// The audio line: the one our offer added, or the first audio line of the far end's offer.
@@ -120,6 +158,8 @@ pub struct Peer {
     /// The video line our latest offer adds, until the answer to that offer commits it (`str0m` has no media for it
     /// before, and an offer made meanwhile, or the far end's taken, replaces that offer).
     offered_video: Option<Mid>,
+    /// A group call's receiving video lines and its data channel.
+    group: Group,
     /// The last offer or answer the far end sent, as text.
     remote_sdp: Option<String>,
     /// The state last reported through [`PeerEvent::Connected`] / [`PeerEvent::Disconnected`].
@@ -171,6 +211,7 @@ impl Peer {
             mid: None,
             video: None,
             offered_video: None,
+            group: Group::default(),
             remote_sdp: None,
             reported_connected: false,
             closed: false,
@@ -197,6 +238,201 @@ impl Peer {
         self.offered_video = None;
         self.drain()?;
         Ok(offer)
+    }
+
+    /// Creates a group call's offer, as the web client's group offer is made: one send-and-receive audio line, the main
+    /// video line (sending once the camera is on), `slots` receiving video lines (each one participant's video, as the
+    /// source requests choose; offered both ways as the web client offers its first ones, and described receive-only:
+    /// nothing is sent on them), a sharing line (received on, never shown) and the data channel. Pass the pending half
+    /// to [`Peer::accept_answer`], which commits the lines.
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if `str0m` fails while draining.
+    pub fn offer_group(&mut self, slots: usize) -> Result<(SdpOffer, SdpPendingOffer), Error> {
+        let mut change = self.rtc.sdp_api();
+        let audio = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        let main = change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
+        let receiving: Vec<Mid> = (0..slots)
+            .map(|_| change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None))
+            .collect();
+        // the sharing line: the dialect labels the last video line of an offer so
+        change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+        let channel = change.add_channel(CHANNEL_LABEL.to_owned());
+        let offer = change
+            .apply()
+            .ok_or_else(|| Error::Rtc("the SDP change produced no offer".into()))?;
+        self.mid = Some(audio);
+        self.offered_video = Some(main);
+        self.group.offered_slots = receiving;
+        self.group.takes_slots = true;
+        self.group.channel = Some(channel);
+        self.drain()?;
+        Ok(offer)
+    }
+
+    /// A group call's mixer's offer, as the tests' mixer makes it: audio, the main video line both ways, `slots` video
+    /// lines it sends on and the sharing line (lines 1, 2, …, in order; offered both ways, as the mixer's are), and a
+    /// data line (its own channel,
+    /// [`MIXER_CHANNEL_LABEL`]); the far end's channel ([`CHANNEL_LABEL`]) is the one it takes. The pending half is
+    /// kept: the answer goes to [`Peer::accept_mixer_answer`].
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if `str0m` fails while draining.
+    #[cfg(feature = "test-support")]
+    pub fn offer_mixer(&mut self, slots: usize) -> Result<SdpOffer, Error> {
+        let mut change = self.rtc.sdp_api();
+        let audio = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        let main = change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
+        let sending: Vec<Mid> = (0..=slots)
+            .map(|_| change.add_media(MediaKind::Video, Direction::SendRecv, None, None, None))
+            .collect();
+        change.add_channel(MIXER_CHANNEL_LABEL.to_owned());
+        let offer = change
+            .apply()
+            .ok_or_else(|| Error::Rtc("the SDP change produced no offer".into()))?;
+        self.mid = Some(audio);
+        self.offered_video = Some(main);
+        self.group.offered_slots = sending;
+        self.group.takes_slots = true;
+        self.group.takes_remote_channel = true;
+        self.drain()?;
+        let (offer, pending) = offer;
+        self.group.mixer_pending = Some(pending);
+        Ok(offer)
+    }
+
+    /// Applies the answer to [`Peer::offer_mixer`]'s offer.
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] when no such offer waits, or `str0m` refuses the answer.
+    #[cfg(feature = "test-support")]
+    pub fn accept_mixer_answer(&mut self, answer: SdpAnswer) -> Result<(), Error> {
+        let pending = self
+            .group
+            .mixer_pending
+            .take()
+            .ok_or_else(|| Error::Rtc("no offer of the mixer's waits for an answer".into()))?;
+        self.accept_answer(pending, answer)
+    }
+
+    /// A mixer's renegotiation of the media it offered ([`Peer::offer_mixer`]): an ICE restart ([`Peer::reoffer`]), its
+    /// pending half kept for [`Peer::accept_mixer_answer`].
+    ///
+    /// # Errors
+    /// As [`Peer::reoffer`]'s.
+    #[cfg(feature = "test-support")]
+    pub fn reoffer_mixer(&mut self) -> Result<SdpOffer, Error> {
+        let (offer, pending) = self.reoffer()?;
+        self.group.mixer_pending = Some(pending);
+        Ok(offer)
+    }
+
+    /// The data channel is the one the far end opens ([`CHANNEL_LABEL`]): a mixer's side, in tests.
+    #[cfg(feature = "test-support")]
+    pub fn take_remote_channel(&mut self) {
+        self.group.takes_remote_channel = true;
+    }
+
+    /// Sends one H.264 access unit on video line `line` ([`Peer::write_video`]'s, on any line the peer sends on): a
+    /// mixer's side, in tests, which sends each participant's video on its own line.
+    ///
+    /// # Errors
+    /// [`Error::NotConnected`] while the peer isn't connected or the line doesn't send, [`Error::Rtc`] if `str0m`
+    /// fails.
+    #[cfg(feature = "test-support")]
+    pub fn write_video_on(
+        &mut self,
+        line: usize,
+        now: Instant,
+        (wallclock, rtp_time): (Instant, u64),
+        data: &[u8],
+    ) -> Result<(), Error> {
+        let mid = self.mid_of_line(line).ok_or(Error::NotConnected)?;
+        let sends = self.rtc.media(mid).is_some_and(|media| media.direction().is_sending());
+        if !self.is_connected() || !sends {
+            return Err(Error::NotConnected);
+        }
+        let writer = self.rtc.writer(mid).ok_or(Error::NotConnected)?;
+        let pt = writer
+            .payload_params()
+            .find(|params| params.spec().codec == Codec::H264)
+            .map(str0m::format::PayloadParams::pt)
+            .ok_or_else(|| Error::Rtc("H.264 was not negotiated".into()))?;
+        let time = MediaTime::new(rtp_time, Frequency::NINETY_KHZ);
+        writer.write(pt, wallclock, time, data.to_vec()).map_err(rtc_error)?;
+        self.rtc.handle_input(Input::Timeout(now)).map_err(rtc_error)?;
+        self.drain()
+    }
+
+    /// From the far end's next offer on, its video lines after the main one are receiving lines (a group call's:
+    /// which of them the call takes is the dialect's to say, [`crate::sdp::VideoLines::Group`]).
+    pub fn take_slots(&mut self) {
+        self.group.takes_slots = true;
+    }
+
+    /// Opens the data channel ([`CHANNEL_LABEL`]) on the far end's data line, once: it opens when the media connects
+    /// ([`PeerEvent::ChannelOpen`]). Nothing when the peer made it already (its group offer did).
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if `str0m` fails while draining.
+    pub fn open_channel(&mut self) -> Result<(), Error> {
+        if self.group.channel.is_some() {
+            return Ok(());
+        }
+        let id = self.rtc.direct_api().create_data_channel(ChannelConfig {
+            label: CHANNEL_LABEL.to_owned(),
+            ..ChannelConfig::default()
+        });
+        self.group.channel = Some(id);
+        self.drain()
+    }
+
+    /// Whether the data channel is open.
+    #[must_use]
+    pub fn channel_open(&self) -> bool {
+        self.group.channel_open
+    }
+
+    /// Sends `data` on the data channel (binary); whether it was taken (`false`: not open yet, or its buffer full).
+    ///
+    /// # Errors
+    /// [`Error::Rtc`] if `str0m` fails.
+    pub fn write_channel(&mut self, data: &[u8]) -> Result<bool, Error> {
+        let Some(id) = self.group.channel.filter(|_| self.group.channel_open) else {
+            return Ok(false);
+        };
+        let Some(mut channel) = self.rtc.channel(id) else {
+            return Ok(false);
+        };
+        let taken = channel.write(true, data).map_err(rtc_error)?;
+        self.drain()?;
+        Ok(taken)
+    }
+
+    /// A group call's receiving video lines, in order (lines 1, 2, …).
+    #[must_use]
+    pub fn video_slots(&self) -> &[Mid] {
+        &self.group.slots
+    }
+
+    /// The line `mid` is: 0 the main video line, 1, 2, … a receiving line.
+    fn line_of(&self, mid: Mid) -> Option<usize> {
+        if Some(mid) == self.video {
+            return Some(0);
+        }
+        self.group
+            .slots
+            .iter()
+            .position(|slot| *slot == mid)
+            .map(|index| index + 1)
+    }
+
+    /// The mid of video line `line` ([`Peer::line_of`]'s numbering).
+    fn mid_of_line(&self, line: usize) -> Option<Mid> {
+        match line {
+            0 => self.video,
+            _ => self.group.slots.get(line - 1).copied(),
+        }
     }
 
     /// Offers the session again with our video line sending (`true`) or only receiving: the line added to the session
@@ -276,6 +512,7 @@ impl Peer {
         let answer = self.rtc.sdp_api().accept_offer(offer).map_err(rtc_error)?;
         // an offer of ours still waiting for its answer can't take one now
         self.offered_video = None;
+        self.group.offered_slots.clear();
         self.remote_sdp = Some(text);
         self.drain()?;
         Ok(answer)
@@ -293,6 +530,11 @@ impl Peer {
             && self.rtc.media(mid).is_some()
         {
             self.video = Some(mid);
+        }
+        for mid in std::mem::take(&mut self.group.offered_slots) {
+            if self.rtc.media(mid).is_some() && !self.group.slots.contains(&mid) {
+                self.group.slots.push(mid);
+            }
         }
         self.remote_sdp = Some(text);
         self.drain()
@@ -444,9 +686,10 @@ impl Peer {
         self.drain()
     }
 
-    /// Asks the far end for a keyframe of the video it sends (a PLI), when the line negotiated one; whether it went.
-    pub fn request_keyframe(&mut self) -> bool {
-        let Some(mut writer) = self.video.and_then(|mid| self.rtc.writer(mid)) else {
+    /// Asks the far end for a keyframe of the video it sends on video line `line` (a PLI), when the line negotiated
+    /// one; whether it went.
+    pub fn request_keyframe(&mut self, line: usize) -> bool {
+        let Some(mut writer) = self.mid_of_line(line).and_then(|mid| self.rtc.writer(mid)) else {
             return false;
         };
         let asked = writer.is_request_keyframe_possible(KeyframeRequestKind::Pli)
@@ -510,6 +753,9 @@ impl Peer {
             Event::MediaAdded(added) => match added.kind {
                 MediaKind::Audio if self.mid.is_none() => self.mid = Some(added.mid),
                 MediaKind::Video if self.video.is_none() => self.video = Some(added.mid),
+                MediaKind::Video if self.group.takes_slots && !self.group.slots.contains(&added.mid) => {
+                    self.group.slots.push(added.mid);
+                }
                 _ => {}
             },
             Event::MediaData(data) if Some(data.mid) == self.mid => {
@@ -519,9 +765,10 @@ impl Peer {
                     payload: data.data,
                 }));
             }
-            Event::MediaData(data) if Some(data.mid) == self.video => {
+            Event::MediaData(data) if self.line_of(data.mid).is_some() => {
                 let keyframe = data.is_keyframe();
                 self.events.push_back(PeerEvent::Video(ReceivedVideo {
+                    line: self.line_of(data.mid).unwrap_or_default(),
                     rtp_time: data.time.rebase(Frequency::NINETY_KHZ).numer(),
                     data: data.data,
                     keyframe,
@@ -534,6 +781,19 @@ impl Peer {
             Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. } | BweKind::Remb { estimate, .. }) => {
                 self.events.push_back(PeerEvent::Bitrate(estimate.as_u64()));
             }
+            Event::ChannelOpen(id, _) if Some(id) == self.group.channel => {
+                self.group.channel_open = true;
+                self.events.push_back(PeerEvent::ChannelOpen);
+            }
+            Event::ChannelOpen(id, label) if self.group.takes_remote_channel && label == CHANNEL_LABEL => {
+                self.group.channel = Some(id);
+                self.group.channel_open = true;
+                self.events.push_back(PeerEvent::ChannelOpen);
+            }
+            Event::ChannelData(data) if Some(data.id) == self.group.channel => {
+                self.events.push_back(PeerEvent::ChannelData(data.data));
+            }
+            Event::ChannelClose(id) if Some(id) == self.group.channel => self.group.channel_open = false,
             _ => {}
         }
     }

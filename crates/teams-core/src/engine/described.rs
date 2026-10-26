@@ -133,6 +133,16 @@ fn plain(event: &Event) -> String {
         Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
         Event::Voicemail { call } => format!("call {}: taken by the callee's voicemail", call.get()),
         Event::CameraOff { call } => format!("call {}: its camera went off", call.get()),
+        // no names: how many, which lines, who of them speaks
+        Event::CallParticipants { call, view } => format!(
+            "call {}: {} participant(s), cameras on {}, lines {:?}, speaking {}{}",
+            call.get(),
+            view.participants.len(),
+            view.participants.iter().filter(|p| p.video_on).count(),
+            view.participants.iter().map(|p| p.line).collect::<Vec<_>>(),
+            view.participants.iter().filter(|p| p.speaking).count(),
+            if view.speaking { " and the account" } else { "" }
+        ),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }

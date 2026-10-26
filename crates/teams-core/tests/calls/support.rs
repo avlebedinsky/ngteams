@@ -19,7 +19,8 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{
-    CallId, CallMedia, CallParts, CallStatus, CallVideo, End, Identity, IncomingCall, Outbox, Relay, VideoOutput,
+    CallId, CallMedia, CallParts, CallStatus, CallVideo, CallView, End, Identity, IncomingCall, Outbox, Relay,
+    VideoOutput,
 };
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
@@ -177,9 +178,23 @@ impl Lab {
         }
     }
 
+    /// The mock with its calls' media on, a group call's parties each with a mixer of its own (group video).
+    pub async fn start_group_video() -> Self {
+        let mock = ChatServiceMock::start().await.unwrap();
+        let trouter = mock.start_trouter().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let relay = mock.start_group_video(dir.path(), PEER_TONE).unwrap();
+        Self {
+            mock,
+            trouter,
+            relay,
+            dir,
+        }
+    }
+
     /// `mri`'s engine, its calls' media playing `tone`, ready: both its sockets registered.
     pub async fn account(&self, mri: &'static str, tone: Tone) -> Account {
-        let mut account = Account::start(self, mri, tone, TENANT);
+        let mut account = Account::start(self, mri, tone, (TENANT, true));
         account.ready().await;
         account
     }
@@ -187,7 +202,14 @@ impl Lab {
     /// As [`Self::account`], its engine not knowing the account's tenant (as a lab binary's doesn't): a test call
     /// reads it from the account's token first.
     pub async fn account_without_tenant(&self, mri: &'static str, tone: Tone) -> Account {
-        let mut account = Account::start(self, mri, tone, "");
+        let mut account = Account::start(self, mri, tone, ("", true));
+        account.ready().await;
+        account
+    }
+
+    /// As [`Self::account`], its calls' media without video (no codec given to its engine).
+    pub async fn account_without_video(&self, mri: &'static str, tone: Tone) -> Account {
+        let mut account = Account::start(self, mri, tone, (TENANT, false));
         account.ready().await;
         account
     }
@@ -242,19 +264,37 @@ pub struct Account {
     microphones: Arc<AtomicUsize>,
     /// What its calls showed of the far end's video, and of its own camera.
     pub video: Shown,
+    /// The newest view of each call told so far (whichever wait it came during).
+    views: std::collections::HashMap<CallId, CallView>,
     _store: tempfile::TempDir,
 }
 
-/// The frames an account's calls showed: the far end's, decoded, and its own camera's as sent.
+/// The frames an account's calls showed: the far end's, decoded (a 1:1 call's on line 0, a group call's participants'
+/// on the lines after it), and its own camera's as sent.
 #[derive(Clone, Default)]
 pub struct Shown {
     pub remote: FrameCounter,
+    pub lines: Arc<std::sync::Mutex<std::collections::BTreeMap<usize, FrameCounter>>>,
     pub preview: FrameCounter,
 }
 
+impl Shown {
+    /// The frames shown on group line `line` so far.
+    pub fn line(&self, line: usize) -> u64 {
+        self.lines
+            .lock()
+            .unwrap()
+            .get(&line)
+            .map_or(0, |counter| counter.counts().frames)
+    }
+}
+
 impl VideoOutput for Shown {
-    fn remote(&self) -> Box<dyn VideoSink> {
-        Box::new(self.remote.clone())
+    fn remote(&self, line: usize) -> Box<dyn VideoSink> {
+        if line == 0 {
+            return Box::new(self.remote.clone());
+        }
+        Box::new(self.lines.lock().unwrap().entry(line).or_default().clone())
     }
 
     fn preview(&self) -> Option<Box<dyn VideoSink>> {
@@ -263,7 +303,8 @@ impl VideoOutput for Shown {
 }
 
 impl Account {
-    fn start(lab: &Lab, mri: &'static str, tone: Tone, tenant: &str) -> Self {
+    /// `mri`'s engine on `lab`, knowing `tenant` (none: empty), its calls' media with video when `video`.
+    fn start(lab: &Lab, mri: &'static str, tone: Tone, (tenant, video_on): (&str, bool)) -> Self {
         let log = SharedLog::default();
         let fence = Arc::new(
             Fence::new(
@@ -293,7 +334,7 @@ impl Account {
         let microphones = Arc::new(AtomicUsize::new(0));
         let video = Shown::default();
         let mut media = media(lab.relay, tone, &recording, Arc::clone(&microphones));
-        media.video = Some(CallVideo {
+        media.video = video_on.then(|| CallVideo {
             library: H264Library::Bundled,
             encoder: EncoderSettings::default(),
             max_size: MaxSize::HD,
@@ -323,6 +364,7 @@ impl Account {
             recording,
             microphones,
             video,
+            views: std::collections::HashMap::new(),
             _store: store,
         }
     }
@@ -366,6 +408,9 @@ impl Account {
                 .await
                 .unwrap_or_else(|_| panic!("{}: the event didn't come in time", self.mri))
                 .expect("the engine runs");
+            if let Event::CallParticipants { call, view } = &event {
+                self.views.insert(*call, view.clone());
+            }
             if let Some(picked) = pick(&event) {
                 return picked;
             }
@@ -392,6 +437,18 @@ impl Account {
                 call: of,
                 status: CallStatus::Ended(end),
             } if *of == call => Some(end.clone()),
+            _ => None,
+        })
+        .await
+    }
+
+    /// Waits until the view of `call` (who is in it, their lines, who speaks) is one `wanted` takes: that view.
+    pub async fn view(&mut self, call: CallId, wanted: impl Fn(&CallView) -> bool) -> CallView {
+        if let Some(view) = self.views.get(&call).filter(|view| wanted(view)) {
+            return view.clone();
+        }
+        self.next(|event| match event {
+            Event::CallParticipants { call: of, view } if *of == call && wanted(view) => Some(view.clone()),
             _ => None,
         })
         .await

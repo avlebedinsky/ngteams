@@ -79,6 +79,7 @@ mod build;
 mod call;
 mod machine;
 mod read;
+mod roster;
 mod write;
 
 pub use machine::{
@@ -86,4 +87,5 @@ pub use machine::{
     Outcome, Placement,
 };
 pub use read::RemoteEnd;
+pub use roster::Participant;
 pub use write::{CallWrite, WriteId, WriteSink};

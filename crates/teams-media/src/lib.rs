@@ -20,6 +20,8 @@
 //!   a PipeWire backend that opens only the server its build allows (the UI sandbox's, or the desktop's for the
 //!   personal build). [`tone`] makes and measures the test tone.
 //!
+//! - [`mcp`]: a group call's media control plane, the messages the client and the call's mixer exchange over the
+//!   group call's data channel: whose video the mixer sends on each receiving video line, who speaks.
 //! - [`video`]: H.264 through OpenH264 (Cisco's prebuilt library, or the bundled source in a `test-support` build) and
 //!   the frames' conversions; the session runs a call's camera and received video on threads of their own.
 //!
@@ -30,6 +32,7 @@ use std::io;
 pub mod codec;
 pub mod devices;
 pub mod jitter;
+pub mod mcp;
 pub mod peer;
 pub mod processing;
 mod queue;

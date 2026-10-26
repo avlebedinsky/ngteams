@@ -28,7 +28,10 @@
 //! - `rtc`: what the WebRTC hooks reported, `payload` as the page sent it: `pc` (the connection's number in its
 //!   context), `event` (`create` with the configuration, `createOffer`, `createAnswer`, `setLocalDescription`,
 //!   `setRemoteDescription` with the description, `addIceCandidate` and `icecandidate` with the candidate, the state
-//!   changes, `stats` with every `getStats()` entry, `close`, and `<method>:error`; and from the audio tap on every
+//!   changes, `stats` with every `getStats()` entry, `close`, and `<method>:error`; every data channel the connection
+//!   makes (`createDataChannel`) or is given (`datachannel`) with its `label` and `id`, its `dc:open`, and each message
+//!   it sends (`dc:send`) or receives (`dc:message`) with its `data`: `text`, or binary as `hex` (its first 4096 bytes)
+//!   with its whole `length`; and from the audio tap on every
 //!   received audio track, `audio` every [`TAP_INTERVAL`] with the `track` id, the tap's context `state`, its sample
 //!   `rate`, the `rms` level of the newest [`TAP_WINDOW`] samples and `tone`, the share of their power at
 //!   [`TAP_TONE_HZ`], then `audio:ended`, or `audio:error`), `ts` and `data`; `context` is the execution context.

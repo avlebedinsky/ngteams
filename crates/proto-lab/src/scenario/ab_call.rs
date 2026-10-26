@@ -1095,8 +1095,8 @@ pub(crate) async fn back_to_chat(
 }
 
 /// The chat header's join of a running call (any control there whose `data-tid` names a join).
-const CHAT_JOIN: Selector<'static> = Selector::Css(CHAT_JOIN_CSS);
-const CHAT_JOIN_CSS: &str = r#"[data-tid="chat-calling-meeting-buttons"] [data-tid*="join" i]"#;
+pub(crate) const CHAT_JOIN: Selector<'static> = Selector::Css(CHAT_JOIN_CSS);
+pub(crate) const CHAT_JOIN_CSS: &str = r#"[data-tid="chat-calling-meeting-buttons"] [data-tid*="join" i]"#;
 /// How long a running call gets to show its join in the chat's header.
 pub const JOIN_WAIT: Duration = Duration::from_secs(30);
 
@@ -1108,7 +1108,7 @@ const CHAT_SEND_CSS: &str = r#"[data-tid="sendMessageCommands-send"]"#;
 /// ([`CHAT_JOIN_CSS`]), as JSON for [`chat_shown`]: how many send buttons ([`CHAT_SEND_CSS`]) the page shows
 /// (`sends`), how many of them name `chat` exactly (`ours`), how many joins the header shows (`joins`), and where the
 /// page names the chat (each element's tag, `data-tid` and attribute name; at most 12, ids only, no page text).
-fn chat_shown_script(chat: &str, joins: &str) -> String {
+pub(crate) fn chat_shown_script(chat: &str, joins: &str) -> String {
     format!(
         "(() => {{ const chat = {chat}; \
          const sends = [...document.querySelectorAll({sends})]; \
@@ -1230,7 +1230,11 @@ impl CallPlan {
 
 /// `alias`'s page opens the Chat app (the chat it showed last) and waits up to [`JOIN_WAIT`] for its header's join of
 /// the running call; the call controls it shows go into the notes.
-async fn open_join(alias: Alias, joiner: &LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+pub(crate) async fn open_join(
+    alias: Alias,
+    joiner: &LabSession,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
     let mut driver = joiner.driver();
     driver.click(&format!("{alias} opens the Chat app"), CHAT_APP).await?;
     driver

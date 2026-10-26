@@ -1119,14 +1119,32 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 - Create: `crates/proto-lab/src/scenario/abc_call_mixed.rs`
 - Modify: `crates/teams-media/src/*`, `crates/teams-core/src/*`, `crates/teams-ui/src/*`, `crates/teams-ui/tests/*`
 
-- [ ] tests first: group video sources as Task 6 captured them (the data channel and its messages if that is how,
+- [x] tests first: group video sources as Task 6 captured them (the data channel and its messages if that is how,
       otherwise the signaling); up to 9 tiles as the M0 spike measured
-- [ ] tests first on the mock: a call in the a–b–c group chat; b and c answer; a participant who leaves; c joining
+      → done: the source selection is the data channel's media control plane (`teams-media/src/mcp.rs`: the packet
+      framing, `syn`/`ack`, `sr`/`sr_res`, `dsh`; `tests/mcp.rs`), read from the web client's code and checked live,
+      then against `abc-call-mixed`'s captures (the hooks' new `dc:*` events); the group lines in Teams' dialect
+      (`tests/sdp_group.rs`: 9 receiving lines both ways, `rtcp-rsize`, `x-ssrc-range`, the largest picture, our group
+      offer); 9 receiving lines (`GROUP_SLOTS`), the app's grid up to 9 participants (`teams-ui/tests/calls.rs`).
+- [x] tests first on the mock: a call in the a–b–c group chat; b and c answer; a participant who leaves; c joining
       late; the in-call view's participant grid and who is speaking (from the media's audio levels)
-- [ ] live: `teams-headless` a, b and c in the group chat with video, each receiving the others' frames (counted on
+      → done: `teams-core/tests/calls/group.rs` on the mock's mixers (`teams-mock/src/mixer.rs`, the roster as
+      deltas with the `attach`'s subscription, `roster.rs`): each on a line of its own, no video asked while cameras
+      are off, b's camera by media descriptions, every line decoding, the mixer's dominant speaker, c leaving and its
+      line given back, c joining late from its invitation's roster; who speaks from the mixer's `dsh` and the audio
+      levels (`calling/gallery.rs`); the grid in `teams-ui/tests/calls.rs`.
+- [x] live: `teams-headless` a, b and c in the group chat with video, each receiving the others' frames (counted on
       its output); `proto-lab run abc-call-mixed` (a native, b and c web) with audio and video among all three; once
       Task 2's wording is in, c leaving and joining late
-- [ ] the gate passes
+      → done: native a–b–c 20261026-task19-abc-33 (every account decoding both others' lines, 164–427 frames per line,
+      every tone heard), late join and leave abc-36 (c joins after its ring ran out, sees a and b on two lines, they
+      see it come and go); `abc-call-mixed` 20261026T032038Z ok (both pages hear and decode the native client, a
+      decodes both pages on two lines, c leaves and joins late); regressions: `ab-call-native` 20261026T032658Z ok,
+      native 1:1 with video, the echo call. What it took: the bandwidth seed and media descriptions in every start,
+      join, `accept` and mixer renegotiation answer, H.264 offered on the mixer's numbers (`107`/`99`), receiving
+      lines answered `sendrecv`. No fence deny in the native runs. Earlier attempts and the one breached web run
+      (abc-call 20261026T001629Z, c's iframe) are in the progress log.
+- [x] the gate passes
 
 ### Task 20: Real devices
 **Files:**

@@ -6,13 +6,18 @@
 //! once a renegotiation of ours gave way to the far end's, [`offer_camera`]), and what the session reports turned into
 //! what the call does ([`LiveMedia::poll`]: a camera whose device went away or whose encoder failed is off).
 //!
-//! **Video** (M3 Task 18): a 1:1 call's media takes video when the engine has its codec ([`CallVideo`]): the session's
-//! video starts with it (received frames to the account's sink, [`VideoOutput`]), and the dialect takes the main video
-//! line of what the far end offers, receiving until the camera is on. The camera is off when a call starts; only the
-//! account's action turns it on. A group call's, a join's and the test call's media carry no video (every video line
-//! offered read rejected, as before), and neither does a call whose codec doesn't load (Cisco's library missing). Every
-//! step that blocks (the allocation, opening a device, an SDP command, the session's close) runs on tokio's blocking
-//! pool, never on the engine's thread; the session's own threads carry the media.
+//! **Video** (M3 Tasks 18, 19): a call's media takes video when the engine has its codec ([`CallVideo`]): the
+//! session's video starts with it (received frames to the account's sinks by video line, [`VideoOutput`]). A 1:1 call's
+//! dialect takes the main video line of what the far end offers, receiving until the camera is on (its camera turned on
+//! by a renegotiation). A group call's (placed, joined or answered) takes the main video line, sent on once the camera
+//! is on, and up to [`GROUP_SLOTS`] receiving lines, each carrying the participant a source request chose: its offer
+//! is the web client's group offer's kind (audio, the main line, the receiving lines, the sharing line, the data
+//! channel), its start, join or answer describes those lines (`mediaDescriptions`), and its control plane (the data
+//! channel's) is started once the far end's SDP was applied (`teams_media::mcp`). The camera is off when a call starts;
+//! only the account's action turns it on. The test call's media carries no video (every video line offered read
+//! rejected), and neither does a call whose codec doesn't load (Cisco's library missing). Every step that blocks (the
+//! allocation, opening a device, an SDP command, the session's close) runs on tokio's blocking pool, never on the
+//! engine's thread; the session's own threads carry the media.
 
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -23,11 +28,16 @@ use teams_media::devices::{Devices, VideoSink};
 use teams_media::peer::RelayedPeer;
 use teams_media::relay::{RelayOptions, RelayServer, allocate_any, teams_relay};
 use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
-use teams_media::session::{MediaSession, SessionConfig, SessionDevice, SessionEvent, VideoParts};
+use teams_media::session::{MediaSession, RemoteSinks, SessionConfig, SessionDevice, SessionEvent, VideoParts};
 use teams_media::turn::{self, TEAMS_RELAY_HOST, TEAMS_RELAY_UDP_PORT};
 use teams_media::video::codec::{EncoderSettings, H264Library};
 use teams_media::video::convert::MaxSize;
-use teams_proto::{Client, Credentials, HttpTransport, MediaContent, RelayTokens};
+use teams_proto::{
+    ChannelParameters, Client, Credentials, HttpTransport, MediaContent, MediaDescription, MediaDescriptions,
+    RelayTokens,
+};
+
+use super::gallery::Gallery;
 
 /// How long the media may take to connect once the far end's SDP was applied before the call fails.
 pub const CONNECT_WITHIN: Duration = Duration::from_secs(30);
@@ -36,6 +46,9 @@ pub const RECOVER_WITHIN: Duration = Duration::from_secs(15);
 /// How long after the far end closed the media the call's own end may still come (a hang-up closes both) before the
 /// call fails.
 pub const CLOSED_GRACE: Duration = Duration::from_secs(2);
+/// How many participants' video a group call receives at once (the mixer offers as many receiving lines; the M0
+/// spike drew nine 720p tiles at 30 fps).
+pub const GROUP_SLOTS: usize = 9;
 
 /// Where a call's media is relayed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,8 +113,10 @@ impl std::fmt::Debug for CallVideo {
 
 /// Where a call's video is shown (one call at a time): the far end's decoded frames, and our camera's as sent.
 pub trait VideoOutput: Send + Sync {
-    /// The sink of the far end's frames, for a call whose video starts.
-    fn remote(&self) -> Box<dyn VideoSink>;
+    /// The sink of the frames that come on video line `line` (0 the main line, a 1:1 call's far end; 1, 2, … a group
+    /// call's receiving lines, each one participant's video as [`crate::Event::CallParticipants`] tells), made the
+    /// first time the line brings a frame.
+    fn remote(&self, line: usize) -> Box<dyn VideoSink>;
     /// The sink of our camera's frames (a self view), or `None`.
     fn preview(&self) -> Option<Box<dyn VideoSink>>;
 
@@ -132,15 +147,30 @@ pub(crate) struct Prepared {
     pub(super) tenant: Option<String>,
     /// The call's media takes video (its session's video started).
     pub(super) video: bool,
+    /// A group call's that takes video: its lines as its start, join or answer describes them.
+    pub(super) group: Option<MediaDescriptions>,
+    /// It is a group call's (placed, joined or answered), whether or not its video started.
+    pub(super) group_call: bool,
+}
+
+/// Which video a call's media takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum VideoKind {
+    /// None (the test call's).
+    None,
+    /// A 1:1 call's: the main video line.
+    OneToOne,
+    /// A group call's: the main video line and the receiving lines, with the control plane.
+    Group,
 }
 
 /// What a call's media is set up for: the far end's offer to answer (none for a start or a join), whether to read
-/// the account's tenant first (a test call's `add` names it; the setup is refused without one), and whether the call
-/// takes video (a 1:1 call's).
+/// the account's tenant first (a test call's `add` names it; the setup is refused without one), and which video the
+/// call takes.
 pub(super) struct Setup {
     pub(super) offer: Option<MediaContent>,
     pub(super) tenant: bool,
-    pub(super) video: bool,
+    pub(super) video: VideoKind,
 }
 
 /// Sets up a call's media (see the module docs): our offer, or our answer to the far end's.
@@ -171,7 +201,7 @@ async fn set_up_with<C: Credentials + 'static>(
     client: &Client<HttpTransport<C>>,
     media: CallMedia,
     offer: Option<MediaContent>,
-    video: bool,
+    video: VideoKind,
 ) -> Result<Prepared, String> {
     let answer = client
         .read(&RelayTokens)
@@ -197,7 +227,7 @@ fn set_up(
     media: &CallMedia,
     credentials: &turn::Credentials,
     offer: Option<&MediaContent>,
-    video: bool,
+    kind: VideoKind,
 ) -> Result<Prepared, String> {
     let text = |error: &dyn std::fmt::Display| error.to_string();
     let servers = media.relay.servers()?;
@@ -217,12 +247,21 @@ fn set_up(
     // no device opens before the call's start, join or answer passed the fence (`open_devices`)
     let session = MediaSession::start_without_devices(peer, media.session).map_err(|error| text(&error))?;
     let mut dialect = NgcSession::new();
-    let video = video && start_video(&session, media.video.as_ref());
-    if video {
+    let video = kind != VideoKind::None && start_video(&session, media.video.as_ref(), kind);
+    let group = video && kind == VideoKind::Group;
+    if group {
+        // the main line, and the receiving lines each a participant's video
+        dialect.set_video(VideoLines::Group { slots: GROUP_SLOTS });
+        session.take_slots().map_err(|error| text(&error))?;
+    } else if video {
         // the far end's main video line is taken, receiving until the camera is on
         dialect.set_video(VideoLines::Main { sending: false });
     }
     let sdp = match offer {
+        None if group => {
+            let ours = session.offer_group(GROUP_SLOTS).map_err(|error| text(&error))?;
+            dialect.write_offer(&ours).map_err(|error| text(&error))?
+        }
         None => {
             let ours = session.offer_audio().map_err(|error| text(&error))?;
             dialect.write_offer(&ours).map_err(|error| text(&error))?
@@ -231,29 +270,96 @@ fn set_up(
             let theirs = ngc(offer)?;
             let theirs = dialect.read_offer(&theirs).map_err(|error| text(&error))?;
             let answer = session.accept_offer(theirs).map_err(|error| text(&error))?;
+            if group {
+                session
+                    .start_control(dialect.data_stream_id())
+                    .map_err(|error| text(&error))?;
+            }
             dialect.write_answer(&answer).map_err(|error| text(&error))?
         }
     };
+    let group = group.then(|| descriptions(&dialect, false));
     Ok(Prepared {
         session,
         dialect,
         sdp,
         tenant: None,
         video,
+        group,
+        group_call: kind == VideoKind::Group,
     })
+}
+
+impl LiveMedia {
+    /// It is a group call's that takes video (its receiving lines assigned, its camera turned by describing its
+    /// lines).
+    pub(super) fn is_group(&self) -> bool {
+        self.gallery.has_lines()
+    }
+
+    /// A group call's video lines described anew, numbered on: the main line as its camera goes, each receiving line
+    /// receiving.
+    pub(super) fn describe(&mut self) -> MediaDescriptions {
+        self.described += 1;
+        let mut described = descriptions(&lock(&self.dialect), self.camera == Some(true));
+        described.request_id = Some(self.described);
+        described
+    }
+
+    /// Our answer to a renegotiation as its `mediaContent`: a group call's with its lines described anew and the
+    /// bandwidth seeded, as the web client answers the mixer's renegotiations (without them the mixer stops sending
+    /// the receiving lines' video, seen live, M3 Task 19).
+    pub(super) fn answer_content(&mut self, sdp: &NgcSdp) -> MediaContent {
+        let mut answer = content(sdp);
+        if self.is_group() {
+            answer.descriptions = Some(self.describe());
+            answer.channel_parameters = Some(bandwidth_seed());
+        }
+        answer
+    }
+}
+
+/// A group call's video lines as its requests describe them: the main line as the camera goes (`sending`), each
+/// receiving line receiving.
+pub(super) fn descriptions(dialect: &NgcSession, sending: bool) -> MediaDescriptions {
+    MediaDescriptions {
+        descriptions: dialect
+            .group_descriptions(sending)
+            .into_iter()
+            .map(|(mid, direction)| MediaDescription {
+                mid,
+                direction: direction.to_owned(),
+                label: None,
+            })
+            .collect(),
+        request_id: Some(1),
+    }
 }
 
 /// Starts the session's video when the engine has a codec for it; whether it started (a library that doesn't load
 /// leaves the call without video, its audio as it is).
-fn start_video(session: &MediaSession, video: Option<&CallVideo>) -> bool {
+fn start_video(session: &MediaSession, video: Option<&CallVideo>, kind: VideoKind) -> bool {
     let Some(video) = video.filter(|video| video.output.enabled()) else {
         return false;
     };
+    let output = Arc::clone(&video.output);
+    let remote: RemoteSinks = Box::new(move |line| output.remote(line));
+    let (mut encoder, mut max_size) = (video.encoder, video.max_size);
+    if kind == VideoKind::Group {
+        // one stream for every receiver of the mixer (no simulcast): the size and rate of the web client's middle
+        // layer, which the mixer forwards to a receiver whose downlink takes it
+        encoder.max_bitrate = encoder.max_bitrate.min(GROUP_MAX_BITRATE);
+        encoder.start_bitrate = encoder.start_bitrate.min(encoder.max_bitrate);
+        max_size = MaxSize {
+            width: max_size.width.min(GROUP_MAX_SIZE.width),
+            height: max_size.height.min(GROUP_MAX_SIZE.height),
+        };
+    }
     let parts = VideoParts {
         library: video.library.clone(),
-        encoder: video.encoder,
-        max_size: video.max_size,
-        remote: video.output.remote(),
+        encoder,
+        max_size,
+        remote,
         preview: video.output.preview(),
     };
     match session.start_video(parts) {
@@ -275,6 +381,36 @@ pub(super) fn content(sdp: &NgcSdp) -> MediaContent {
     MediaContent::new(sdp.as_str(), sdp.content_type())
 }
 
+/// Our SDP as a start's, a join's or an `accept`'s `mediaContent`: a group call's with its lines described, as the
+/// web client's.
+pub(super) fn first_content(prepared: &Prepared) -> MediaContent {
+    let mut content = content(&prepared.sdp);
+    content.descriptions.clone_from(&prepared.group);
+    if prepared.group.is_some() {
+        content.channel_parameters = Some(bandwidth_seed());
+    }
+    content
+}
+
+/// The bandwidth the mixer may start sending at, as the web client seeds it (`sendSideBWSeed` on every line).
+fn bandwidth_seed() -> ChannelParameters {
+    ChannelParameters {
+        mids: vec!["*".to_owned()],
+        media_parameter: serde_json::json!({"sendSideBWSeed": {"seedValueBitsPerSec": BANDWIDTH_SEED}}).to_string(),
+    }
+}
+
+/// The bandwidth a group call's mixer is told it may start sending at, in bits a second (the web client seeds its
+/// measured downlink, a few hundred kb/s in the captures; the session's `b=CT` is 4000 kb/s). Without it the mixer
+/// forwards no video at all (seen live, M3 Task 19).
+const BANDWIDTH_SEED: u64 = 4_000_000;
+/// The largest picture and the highest bitrate a group call sends.
+const GROUP_MAX_SIZE: MaxSize = MaxSize {
+    width: 640,
+    height: 360,
+};
+const GROUP_MAX_BITRATE: u32 = 600_000;
+
 /// What a media step of a running call came to.
 pub(crate) enum MediaDone {
     /// The far end's answer applied (or not).
@@ -290,6 +426,13 @@ pub(crate) enum MediaDone {
         call: CallId,
         on: bool,
         result: Result<Option<NgcSdp>, String>,
+        reply: super::Waiting,
+    },
+    /// A group call's camera turned on or off (or why not): its lines are described again next.
+    GroupCamera {
+        call: CallId,
+        on: bool,
+        result: Result<(), String>,
         reply: super::Waiting,
     },
     /// Our renegotiation's offer (or why there is none).
@@ -323,6 +466,14 @@ pub(super) struct LiveMedia {
     /// A renegotiation of ours gave way to the far end's: the far end's is answered with our camera's line only
     /// receiving, and our camera's line offered again once it was ([`offer_camera`]).
     pub(super) reoffer_owed: bool,
+    /// Who is in the call, whose video each receiving line shows, who speaks; a group call's that takes video
+    /// ([`LiveMedia::is_group`]) has its camera go by describing its lines again, its receiving lines carrying the
+    /// participants the source requests chose.
+    pub(super) gallery: Gallery,
+    /// How many times a group call's send capabilities went (each one's number).
+    pub(super) capabilities: u64,
+    /// The number of a group call's latest media descriptions (its start's, join's or `accept`'s is `1`).
+    pub(super) described: u64,
 }
 
 /// What the session's reports since the last look mean for the call.
@@ -335,6 +486,8 @@ pub(super) enum MediaChange {
     /// The camera went off by itself (its device went away, or its encoder failed): nothing more is sent on our video
     /// line until the account turns it on again.
     CameraOff,
+    /// Who spoke last in a group call: the dominant speakers' audio source ids, as its mixer told them.
+    Speakers(Vec<i64>),
 }
 
 impl LiveMedia {
@@ -342,6 +495,9 @@ impl LiveMedia {
         Self {
             camera: prepared.video.then_some(false),
             reoffer_owed: false,
+            gallery: Gallery::new(prepared.group_call, prepared.group.is_some()),
+            capabilities: 0,
+            described: 1,
             call,
             session: Arc::new(prepared.session),
             dialect: Arc::new(Mutex::new(prepared.dialect)),
@@ -389,6 +545,29 @@ impl LiveMedia {
                     log::warn!("call {}: its camera's video stopped: {why}", self.call.get());
                     changes.extend(self.camera_stopped());
                 }
+                SessionEvent::ControlActive { send, receive } => {
+                    log::info!(
+                        "call {}: its control plane is up (the mixer sends {send:?}, takes {receive:?})",
+                        self.call.get()
+                    );
+                }
+                SessionEvent::SourceRequested {
+                    sequence,
+                    stream,
+                    source,
+                } => {
+                    log::info!(
+                        "call {}: source request {sequence}: line {stream} to source {source}",
+                        self.call.get()
+                    );
+                }
+                SessionEvent::SourceResult { sequence, result } => {
+                    log::info!("call {}: source request {sequence}: {result}", self.call.get());
+                }
+                SessionEvent::ControlTimedOut => {
+                    log::warn!("call {}: its mixer didn't answer the control plane", self.call.get());
+                }
+                SessionEvent::DominantSpeakers(speakers) => changes.push(MediaChange::Speakers(speakers)),
             }
         }
         if let Some(why) = self.overdue(now) {
@@ -435,12 +614,48 @@ pub(super) fn open_devices(
 /// Applies the far end's `answer` to our offer, off the engine's thread.
 pub(super) fn apply(live: &LiveMedia, answer: MediaContent) -> impl FnOnce() -> MediaDone + Send + use<> {
     let (call, session, dialect) = (live.call, Arc::clone(&live.session), Arc::clone(&live.dialect));
+    let group = live.is_group();
     move || {
         let result = ngc(&answer).and_then(|answer| {
-            let answer = lock(&dialect).read_answer(&answer).map_err(|error| error.to_string())?;
-            session.accept_answer(answer).map_err(|error| error.to_string())
+            let mut dialect = lock(&dialect);
+            let answer = dialect.read_answer(&answer).map_err(|error| error.to_string())?;
+            session.accept_answer(answer).map_err(|error| error.to_string())?;
+            // a group call's control plane, on the data channel our offer made
+            if group {
+                session
+                    .start_control(dialect.data_stream_id())
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
         });
         MediaDone::Applied { call, result }
+    }
+}
+
+/// Turns a group call's camera on (opened from `devices`) or off, off the engine's thread: no SDP changes (its main
+/// line goes both ways throughout), its lines are described again once it turned.
+pub(super) fn group_camera(
+    live: &LiveMedia,
+    devices: Arc<dyn Devices + Send + Sync>,
+    on: bool,
+    reply: super::Waiting,
+) -> impl FnOnce() -> MediaDone + Send + use<> {
+    let (call, session) = (live.call, Arc::clone(&live.session));
+    move || {
+        let result = if on {
+            devices
+                .camera()
+                .map_err(|error| error.to_string())
+                .and_then(|camera| session.set_camera(Some(camera)).map_err(|error| error.to_string()))
+        } else {
+            session.set_camera(None).map_err(|error| error.to_string())
+        };
+        MediaDone::GroupCamera {
+            call,
+            on,
+            result,
+            reply,
+        }
     }
 }
 
@@ -546,6 +761,15 @@ fn offer_line(session: &MediaSession, dialect: &Mutex<NgcSession>, on: bool) -> 
     offered
 }
 
-fn lock(dialect: &Mutex<NgcSession>) -> std::sync::MutexGuard<'_, NgcSession> {
+pub(super) fn lock(dialect: &Mutex<NgcSession>) -> std::sync::MutexGuard<'_, NgcSession> {
     dialect.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A group call's receiving lines' stream ids, in line order, as its dialect names them now.
+pub(super) fn slots(live: &LiveMedia) -> Vec<Option<u32>> {
+    lock(&live.dialect)
+        .video_slots()
+        .into_iter()
+        .map(|(_, stream)| stream)
+        .collect()
 }

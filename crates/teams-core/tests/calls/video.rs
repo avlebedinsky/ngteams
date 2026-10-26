@@ -1,14 +1,13 @@
 //! A 1:1 call's video (M3 Task 18), on the mock and its loopback peer (H.264 the bundled source's): the camera off
 //! when the call starts and turned on only by the account's action, as a renegotiation of the call's media the peer
-//! answers; the peer's video shown once its renegotiation offers it; the camera turned off stops what is sent; a group
-//! call carries no video.
+//! answers; the peer's video shown once its renegotiation offers it; the camera turned off stops what is sent. A group
+//! call's video is `group`'s.
 
 use std::time::Duration;
 
 use crate::support::{A_TONE, B_TONE, Lab, wait_until};
-use teams_core::engine::EngineError;
-use teams_core::{CallAction, CallActionError, CallStatus, End, Event};
-use teams_mock::{AB_CHAT, ABC_CHAT, LAB_A, LAB_B, LAB_C, TIMED_OUT};
+use teams_core::{CallAction, CallStatus, End};
+use teams_mock::{AB_CHAT, LAB_A, LAB_B, LAB_C};
 
 /// Frames a side must have decoded of the other's test pattern.
 const FRAMES: u64 = 20;
@@ -149,27 +148,4 @@ async fn native_ends_turn_their_cameras_on_and_each_shows_the_other_s() {
     }
     assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
     assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
-}
-
-#[tokio::test]
-async fn a_group_call_carries_no_video() {
-    let lab = Lab::start().await;
-    let mut b = lab.account(LAB_B, B_TONE).await;
-    let id = lab.mock.ring_group(LAB_A, ABC_CHAT, &[LAB_B]);
-    let _ = b.incoming().await;
-    assert!(lab.mock.end_ring(&id, 487, TIMED_OUT));
-    b.next(|event| matches!(event, Event::RingEnded { .. }).then_some(()))
-        .await;
-    let requests = b.handle.requests();
-    let call = requests.call(CallAction::Join { chat: ABC_CHAT.into() }).await.unwrap();
-    b.status(call, &CallStatus::Connected).await;
-    let refused = requests.call(CallAction::Camera { call, on: true }).await;
-    assert!(
-        matches!(refused, Err(EngineError::Call(CallActionError::NoVideo))),
-        "{refused:?}"
-    );
-    assert!(!lab.sent_by(LAB_B).contains(&"renegotiate".to_owned()));
-    requests.call(CallAction::HangUp { call }).await.unwrap();
-    assert_eq!(b.ended(call).await, End::HungUp);
-    assert_eq!(b.video.preview.counts().frames, 0);
 }

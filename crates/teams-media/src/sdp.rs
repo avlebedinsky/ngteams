@@ -474,6 +474,25 @@ pub enum VideoLines {
     None,
     /// The main video line, receiving; sending too when `sending` (our camera is on).
     Main { sending: bool },
+    /// A group call's: the main video line as offered (the mixer offers it sending and receiving, and the web client
+    /// answers it so; what we send on it the camera decides, and the call's services are told by signaling), and up
+    /// to `slots` more video lines, taken as offered (both ways, as the web client answers them; described receive-only
+    /// and nothing sent on them): each carries one participant's video,
+    /// the one a source request chose ([`crate::mcp`]). The sharing line and any other video line are read rejected.
+    Group { slots: usize },
+    /// Every video line as the far end offered it: a mixer's side (the tests' mixer answering a client's group
+    /// offer), which sends on every line the client receives on.
+    Offered,
+}
+
+/// What a call takes an offered video line as ([`NgcSession::with_video_lines`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Taken {
+    No,
+    Main,
+    Slot,
+    /// As offered ([`VideoLines::Offered`]).
+    Offered,
 }
 
 /// One call's media session as Teams' dialect sees it: the pairs of `str0m`'s and Teams' mids for every m-line and
@@ -486,6 +505,10 @@ pub struct NgcSession {
     video: VideoLines,
     /// The Teams mid of the video line the call took (or our offer added), kept for the call's life.
     video_line: Option<String>,
+    /// A group call's receiving video lines, by Teams mid, in the order the call took them (or our offer added them).
+    slots: Vec<String>,
+    /// Each line's stream id (`a=x-source-streamid`) as the far end's last offer or answer named it, by Teams mid.
+    stream_ids: Vec<(String, u32)>,
     /// The payload types our latest offer gave each codec, by `str0m`'s mid: `(codec, payload type)`, the codec as
     /// its `rtpmap` names it, in lower case.
     offered: Vec<(String, Vec<(String, String)>)>,
@@ -518,7 +541,8 @@ impl NgcSession {
     }
 
     /// `parsed` (an offer to us) with the video lines the call doesn't take read as rejected (and left out of the
-    /// bundle), and the one it takes read as one the far end only sends on while our camera is off.
+    /// bundle), and the main one it takes read as one the far end only sends on while a 1:1 call's camera is off; a
+    /// group call's main line and receiving lines are taken as offered.
     fn with_video_lines(&mut self, mut parsed: Parsed) -> Parsed {
         let mut refused = Vec::new();
         for section in &mut parsed.media {
@@ -526,21 +550,31 @@ impl NgcSession {
                 continue;
             }
             let mid = section.mid().map(str::to_owned);
-            let take = match (self.video, &self.video_line) {
-                (VideoLines::None, _) => false,
-                (VideoLines::Main { .. }, Some(line)) => mid.as_ref() == Some(line),
-                (VideoLines::Main { .. }, None) => mid.is_some() && section.value("label") != Some(SHARING_LABEL),
-            };
-            if !take {
-                section.port = 0;
-                refused.extend(mid);
-                continue;
-            }
-            if self.video_line.is_none() {
-                self.video_line = mid;
-            }
-            if self.video == (VideoLines::Main { sending: false }) {
-                only_theirs(section);
+            match self.take_video(section, mid.as_deref()) {
+                Taken::No => {
+                    section.port = 0;
+                    refused.extend(mid);
+                }
+                Taken::Main => {
+                    if self.video_line.is_none() {
+                        self.video_line = mid;
+                    }
+                    if self.video == (VideoLines::Main { sending: false }) {
+                        only_theirs(section);
+                    }
+                }
+                Taken::Slot => {
+                    if let Some(mid) = mid
+                        && !self.slots.contains(&mid)
+                    {
+                        self.slots.push(mid);
+                    }
+                    // taken as offered (both ways): the web client answers the receiving lines it shows both ways
+                    // and describes them receive-only; the mixer refuses a line described receive-only that the
+                    // answer made receive-only already (`410 InvalidFinalAnswerMediaDescriptions`, M3 Task 19). Nothing
+                    // is sent on them.
+                }
+                Taken::Offered => {}
             }
         }
         if !refused.is_empty() {
@@ -555,6 +589,82 @@ impl NgcSession {
             }
         }
         parsed
+    }
+
+    /// Whether the call takes the offered video line `section` (Teams mid `mid`), and as what.
+    fn take_video(&self, section: &Section, mid: Option<&str>) -> Taken {
+        let Some(mid) = mid else { return Taken::No };
+        let sharing = section.value("label") == Some(SHARING_LABEL);
+        match (self.video, &self.video_line) {
+            (VideoLines::None, _) => Taken::No,
+            (VideoLines::Offered, _) => Taken::Offered,
+            (_, Some(line)) if line == mid => Taken::Main,
+            (VideoLines::Main { .. } | VideoLines::Group { .. }, None) if !sharing => Taken::Main,
+            (VideoLines::Group { .. }, _) if self.slots.iter().any(|slot| slot == mid) => Taken::Slot,
+            (VideoLines::Group { slots }, Some(_)) if !sharing && self.slots.len() < slots => Taken::Slot,
+            _ => Taken::No,
+        }
+    }
+
+    /// A group call's receiving video lines, in the order the call took them: each line's `str0m` mid and its stream
+    /// id (what a source request names it by), when the far end named one.
+    #[must_use]
+    pub fn video_slots(&self) -> Vec<(String, Option<u32>)> {
+        self.slots
+            .iter()
+            .filter_map(|remote| {
+                let line = self.by_remote(remote)?;
+                Some((line.local.clone(), self.stream_id(remote)))
+            })
+            .collect()
+    }
+
+    /// A group call's video lines as its requests describe them (`mediaDescriptions`, by Teams mid, as the web client
+    /// describes them): the main line `sendrecv` while the camera is on (`sending`), `recvonly` while it is off, and
+    /// each receiving line `recvonly`.
+    #[must_use]
+    pub fn group_descriptions(&self, sending: bool) -> Vec<(String, &'static str)> {
+        let main = self
+            .video_line
+            .iter()
+            .map(|mid| (mid.clone(), if sending { "sendrecv" } else { "recvonly" }));
+        main.chain(self.slots.iter().map(|mid| (mid.clone(), "recvonly")))
+            .collect()
+    }
+
+    /// The Teams mid of the call's main video line, once it has one.
+    #[must_use]
+    pub fn main_video_mid(&self) -> Option<&str> {
+        self.video_line.as_deref()
+    }
+
+    /// The stream id of the call's data line (the source id the client sends its control plane messages as), when
+    /// the far end named one.
+    #[must_use]
+    pub fn data_stream_id(&self) -> Option<u32> {
+        self.lines
+            .iter()
+            .find(|line| line.label == Kind::Data.label())
+            .and_then(|line| self.stream_id(&line.remote))
+    }
+
+    /// The stream id the far end named the line with Teams mid `remote` by.
+    fn stream_id(&self, remote: &str) -> Option<u32> {
+        self.stream_ids.iter().find(|(mid, _)| mid == remote).map(|(_, id)| *id)
+    }
+
+    /// Keeps the stream id each line of the far end's offer or answer names.
+    fn keep_stream_ids(&mut self, parsed: &Parsed) {
+        for section in &parsed.media {
+            let (Some(mid), Some(id)) = (
+                section.mid(),
+                section.value("x-source-streamid").and_then(|id| id.parse::<u32>().ok()),
+            ) else {
+                continue;
+            };
+            self.stream_ids.retain(|(known, _)| known != mid);
+            self.stream_ids.push((mid.to_owned(), id));
+        }
     }
 
     fn by_local(&self, mid: &str) -> Option<&Line> {
@@ -626,7 +736,14 @@ impl NgcSession {
                 .cloned()
                 .ok_or(SdpError::Unwritable("an m-line without a mid"))?;
             if section.kind == Kind::Video && !section.rejected() && name.label != SHARING_LABEL {
-                self.video_line.get_or_insert_with(|| name.remote.clone());
+                let main = self.video_line.get_or_insert_with(|| name.remote.clone()).clone();
+                // a group call's offer: every other video line but the sharing one is one we receive on
+                if matches!(self.video, VideoLines::Group { .. })
+                    && main != name.remote
+                    && !self.slots.contains(&name.remote)
+                {
+                    self.slots.push(name.remote.clone());
+                }
             }
             names.push(name);
             self.offered.retain(|(mid, _)| mid != local);
@@ -676,8 +793,9 @@ impl NgcSession {
     /// # Errors
     /// [`SdpError::Mismatch`] when no line of the answer is one of ours, [`SdpError::Refused`] when `str0m` refuses
     /// what the conversion made.
-    pub fn read_answer(&self, answer: &NgcSdp) -> Result<SdpAnswer, SdpError> {
+    pub fn read_answer(&mut self, answer: &NgcSdp) -> Result<SdpAnswer, SdpError> {
         let parsed = Parsed::ngc(answer.as_str(), answer.dialect())?;
+        self.keep_stream_ids(&parsed);
         let mut ours = Vec::new();
         for (index, section) in parsed.media.iter().enumerate() {
             let line = match section.mid() {
@@ -709,6 +827,7 @@ impl NgcSession {
     /// [`SdpError::Refused`] when `str0m` refuses what the conversion made.
     pub fn read_offer(&mut self, offer: &NgcSdp) -> Result<SdpOffer, SdpError> {
         let parsed = Parsed::ngc(offer.as_str(), offer.dialect())?;
+        self.keep_stream_ids(&parsed);
         let parsed = self.with_video_lines(parsed);
         let mut kept = Vec::new();
         for (index, section) in parsed.media.iter().enumerate() {
@@ -1020,6 +1139,17 @@ fn write_section(
                 .filter(|line| attribute_name(line).is_some_and(|name| kept.contains(&name)))
                 .cloned(),
         );
+        if kept.contains(&"ssrc") && section.kind != Kind::Data && !section.has("ssrc") {
+            // a line we send nothing on names the stream `1`, as the web client writes its receive-only lines (with
+            // its `a=x-ssrc-range:1-1`)
+            out.push(format!("a=ssrc:1 cname:{SYNTHESIZED_CNAME}"));
+        }
+    }
+    if section.kind == Kind::Video && !section.has("rtcp-rsize") {
+        // reduced-size RTCP on every video line, as the web client's (Chrome's) are: the mixer refuses a group call's
+        // answer whose receiving lines don't name it (`410 SdpParsingFailure`, M3 Task 19); `str0m` reads RTCP packet
+        // by packet, so a reduced-size one reads as well as a compound one
+        out.push("a=rtcp-rsize".to_owned());
     }
     out.push(format!("a=label:{}", name.label));
     if section.kind == Kind::Data {
@@ -1040,22 +1170,70 @@ fn write_rtp_payload(section: &Section, port: &str, role: Role, out: &mut Vec<St
         Kind::Audio => "a=x-signaling-fb:* x-message app recv:dsh".to_owned(),
         Kind::Video | Kind::Data => "a=x-signaling-fb:* x-message app send:src recv:src,vc".to_owned(),
     });
-    if let Some(ssrc) = section.values("ssrc").next().and_then(|ssrc| ssrc.split(' ').next()) {
-        out.push(format!("a=x-ssrc-range:{ssrc}-{ssrc}"));
+    // a line we send nothing on names the range `1-1`, as the web client writes its receive-only lines (the mixer
+    // refuses an answer whose line names no range: `410 SdpParsingFailure`, M3 Task 19)
+    match section.values("ssrc").next().and_then(|ssrc| ssrc.split(' ').next()) {
+        Some(ssrc) => out.push(format!("a=x-ssrc-range:{ssrc}-{ssrc}")),
+        None => out.push("a=x-ssrc-range:1-1".to_owned()),
     }
-    for name in ["rtpmap", "fmtp"] {
-        out.extend(section.values(name).map(|value| format!("a={name}:{value}")));
-    }
+    out.extend(section.values("rtpmap").map(|value| format!("a=rtpmap:{value}")));
+    out.extend(
+        section
+            .values("fmtp")
+            .map(|value| format!("a=fmtp:{}", with_receive_limits(section, value))),
+    );
     if role == Role::Offer {
         out.push(format!("a=rtcp:{port}"));
     }
-    out.extend(section.values("rtcp-fb").map(|value| format!("a=rtcp-fb:{value}")));
+    out.extend(rtcp_feedback(section));
     out.extend(
         section
             .values("extmap")
             .filter(|value| role == Role::Answer || !names_a_line(value))
             .map(|value| format!("a=extmap:{}", backslashed(value))),
     );
+}
+
+/// The largest picture we take on a video line, as the web client names its own on H.264's format (`max-fs` in 16 by 16
+/// macroblocks, `max-mbps` macroblocks a second, `max-fps` frames a second times 100): 1280 by 720 at 30 frames a
+/// second, what the native client decodes. The mixer refuses a group call's answer whose receiving lines name none:
+/// `410 SdpParsingFailure`, M3 Task 19.
+const H264_RECEIVE_LIMITS: &str = "max-fs=3600;max-mbps=108000;max-fps=3000";
+
+/// An `a=fmtp` value of `section` with [`H264_RECEIVE_LIMITS`] added when it is H.264's on a video line that names none.
+fn with_receive_limits(section: &Section, value: &str) -> String {
+    let Some((pt, params)) = value.split_once(' ') else {
+        return value.to_owned();
+    };
+    let h264 = section.values("rtpmap").any(|map| {
+        map.split_once(' ')
+            .is_some_and(|(mapped, codec)| mapped == pt && codec.to_ascii_lowercase().starts_with("h264/"))
+    });
+    if section.kind != Kind::Video || !h264 || params.contains("max-fs=") {
+        return value.to_owned();
+    }
+    format!("{pt} {params};{H264_RECEIVE_LIMITS}")
+}
+
+/// A section's `a=rtcp-fb` lines as Teams writes them: a video line's once each for every payload type (`a=rtcp-fb:*
+/// nack`), as the web client, the mixer and the media controller write theirs (the mixer refuses a group call's answer
+/// whose video lines name their feedback per payload type: `410 SdpParsingFailure`, M3 Task 19); an audio line's as
+/// they are (the web client writes Opus's per payload type).
+fn rtcp_feedback(section: &Section) -> Vec<String> {
+    if section.kind != Kind::Video {
+        return section
+            .values("rtcp-fb")
+            .map(|value| format!("a=rtcp-fb:{value}"))
+            .collect();
+    }
+    let mut feedback: Vec<&str> = Vec::new();
+    for value in section.values("rtcp-fb") {
+        let kind = value.split_once(' ').map_or(value, |(_, kind)| kind);
+        if !feedback.contains(&kind) {
+            feedback.push(kind);
+        }
+    }
+    feedback.into_iter().map(|kind| format!("a=rtcp-fb:* {kind}")).collect()
 }
 
 /// The header extensions that carry a line's mid or a stream's id in every packet. `str0m` names our lines with mids of
@@ -1098,7 +1276,9 @@ fn write_transport(section: &Section, name: &Line, candidates: Vec<String>, out:
         out.push(format!("a=setup:{setup}"));
     }
     out.push(format!("a=mid:{}", name.remote));
-    if let Some(msid) = section.value("msid") {
+    // a line naming no stream of ours names no media stream either, as the web client writes its receive-only lines
+    // (the mixer refuses a group call's answer whose receive-only lines name one: `410 SdpParsingFailure`, M3 Task 19)
+    if let Some(msid) = section.value("msid").filter(|_| section.has("ssrc")) {
         out.push(format!("a=msid:{msid}"));
     }
     out.push(format!("a={}", section.direction().unwrap_or("sendrecv")));

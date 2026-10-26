@@ -15,5 +15,6 @@
 
 mod failures;
 mod flows;
+mod group;
 mod support;
 mod video;

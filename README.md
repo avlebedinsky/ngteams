@@ -275,6 +275,13 @@ chat other than its forced denies, one for a partial or refused membership, or a
   both ways (`--video`, Cisco's OpenH264 from `scripts/fetch-openh264.sh` in the lab's `openh264/`): the page turns
   its camera on and must decode the native client's frames, and the native client turns its camera on 5 s in
   (`--camera-after`) and must decode the page's.
+- `abc-call-mixed` (`TEAMS_HEADLESS_BIN` as `ab-call-native`'s): a's native client calls the a–b–c group chat with
+  video and b's and c's web clients answer (only on the run's own call); each page must hear the tone and decode
+  video, and a's native client must show both on receiving lines of their own; c's page hangs up (a must show b
+  alone), then joins the running call from the chat's header (a must show both again, c's line bringing frames after
+  the join, as the native client's `video_lines` counts say); a's native client must have
+  heard the tone and decoded video on two lines. `scripts/native-call-run.sh` runs the same group call natively (a
+  calls, b and c answer, or `--join c` for a late join; `EXTRA="--video --camera-after 5"`).
 
 Every lab browser runs with its output muted and Chrome's fake audio manager (`--mute-audio`,
 `--disable-audio-output`): nothing is played aloud and the desktop's audio server is never opened; a call scenario's

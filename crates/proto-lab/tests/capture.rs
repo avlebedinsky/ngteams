@@ -635,6 +635,30 @@ fn check_rtc_reports(entries: &[Value], page: &SessionId) {
     let reports = rtc_reports(entries);
     check_descriptions(&reports);
     check_candidates(&reports);
+    check_data_channel(&reports);
+}
+
+fn check_data_channel(reports: &[(u64, String, Value)]) {
+    // the offerer's channel, made by it and given to the answerer; each message reported as sent by one side and as
+    // received by the other: text as it is, binary as hex with its length
+    assert_eq!(
+        reported(reports, 1, "createDataChannel"),
+        [&json!({"label": "lab", "id": null})]
+    );
+    assert_eq!(reported(reports, 2, "datachannel").len(), 1);
+    assert_eq!(reported(reports, 2, "datachannel")[0]["label"], "lab");
+    let text = json!({"text": "lab text"});
+    let binary = json!({"length": 4, "hex": "0102feff"});
+    let sent: Vec<&Value> = reported(reports, 1, "dc:send")
+        .iter()
+        .map(|data| &data["data"])
+        .collect();
+    assert_eq!(sent, [&text, &binary]);
+    let received: Vec<&Value> = reported(reports, 2, "dc:message")
+        .iter()
+        .map(|data| &data["data"])
+        .collect();
+    assert_eq!(received, [&text, &binary]);
 }
 
 fn check_descriptions(reports: &[(u64, String, Value)]) {

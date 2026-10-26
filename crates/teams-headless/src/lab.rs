@@ -11,6 +11,8 @@
 //! a 1:1 call takes video on Cisco's OpenH264 (the lab's copy, [`teams_core::lab::openh264`]): the far end's frames
 //! counted ([`VideoCounts`]), the camera the file backend's test pattern.
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::DirBuilder;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
@@ -25,7 +27,7 @@ use teams_core::lab::{self as core_lab, LAB_LANGUAGE, LabEngine, web_client_info
 use teams_core::{CallMedia, CallVideo, Relay, VideoOutput};
 use teams_fence::lab::{Alias, ChatsError, ConfigError, LabChats, LabConfig, LabLocations, LabPaths};
 use teams_fence::{Fence, Mri, OpenError};
-use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
+use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, FrameCounts, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayOptions;
@@ -228,16 +230,18 @@ impl Devices for TimedDevices {
     }
 }
 
-/// What a call's video showed: the far end's decoded frames, and our camera's as sent, each counted.
+/// What a call's video showed: the far end's decoded frames by video line (a 1:1 call's on line 0, a group call's
+/// participants' on lines 1, 2, …), and our camera's as sent, each counted.
 #[derive(Clone, Debug, Default)]
 pub struct VideoCounts {
-    pub remote: FrameCounter,
+    pub remote: Arc<Mutex<BTreeMap<usize, FrameCounter>>>,
     pub preview: FrameCounter,
 }
 
 impl VideoOutput for VideoCounts {
-    fn remote(&self) -> Box<dyn VideoSink> {
-        Box::new(self.remote.clone())
+    fn remote(&self, line: usize) -> Box<dyn VideoSink> {
+        let mut lines = self.remote.lock().unwrap_or_else(PoisonError::into_inner);
+        Box::new(lines.entry(line).or_default().clone())
     }
 
     fn preview(&self) -> Option<Box<dyn VideoSink>> {
@@ -246,18 +250,59 @@ impl VideoOutput for VideoCounts {
 }
 
 impl VideoCounts {
-    /// The summary line: `video received=<frames> changed=<n> indexed=<n> gaps=<n> last_index=<n|-> sent=<frames>`,
-    /// the far end's frames as decoded (those of a test pattern carry their index) and our camera's as sent.
+    /// Each line's counts so far, by line.
+    #[must_use]
+    pub fn lines(&self) -> Vec<(usize, FrameCounts)> {
+        let lines = self.remote.lock().unwrap_or_else(PoisonError::into_inner);
+        lines.iter().map(|(line, counter)| (*line, counter.counts())).collect()
+    }
+
+    /// The frames each line brought so far, as `video_lines` prints them while a call runs: `received=<line>:<frames>,…`
+    /// in line order; `None` before any line brought one.
+    #[must_use]
+    pub fn progress(&self) -> Option<String> {
+        let lines = self.lines();
+        if lines.is_empty() {
+            return None;
+        }
+        let each: Vec<String> = lines
+            .iter()
+            .map(|(line, counts)| format!("{line}:{}", counts.frames))
+            .collect();
+        Some(format!("received={}", each.join(",")))
+    }
+
+    /// The summary line: `video received=<frames> changed=<n> indexed=<n> gaps=<n> last_index=<n|-> sent=<frames>
+    /// lines=<n>`, the far end's frames as decoded over every line (those of a test pattern carry their index; the
+    /// last index the highest of any line) and our camera's as sent, then one `video line=<n> received=<frames>
+    /// indexed=<n> gaps=<n> last_index=<n|->` per line that brought frames.
     #[must_use]
     pub fn line(&self) -> String {
-        let (remote, sent) = (self.remote.counts(), self.preview.counts());
-        let last = remote
-            .last_index
-            .map_or_else(|| "-".to_owned(), |index| index.to_string());
-        format!(
-            "video received={} changed={} indexed={} gaps={} last_index={last} sent={}",
-            remote.frames, remote.changed, remote.indexed, remote.gaps, sent.frames
-        )
+        let lines = self.lines();
+        let sum = |count: fn(&FrameCounts) -> u64| lines.iter().map(|(_, counts)| count(counts)).sum::<u64>();
+        let last = |index: Option<u32>| index.map_or_else(|| "-".to_owned(), |index| index.to_string());
+        let highest = lines.iter().filter_map(|(_, counts)| counts.last_index).max();
+        let mut text = format!(
+            "video received={} changed={} indexed={} gaps={} last_index={} sent={} lines={}",
+            sum(|counts| counts.frames),
+            sum(|counts| counts.changed),
+            sum(|counts| counts.indexed),
+            sum(|counts| counts.gaps),
+            last(highest),
+            self.preview.counts().frames,
+            lines.len()
+        );
+        for (line, counts) in &lines {
+            let _ = write!(
+                text,
+                "\nvideo line={line} received={} indexed={} gaps={} last_index={}",
+                counts.frames,
+                counts.indexed,
+                counts.gaps,
+                last(counts.last_index)
+            );
+        }
+        text
     }
 }
 

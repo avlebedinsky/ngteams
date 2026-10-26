@@ -22,8 +22,8 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 use notices::{FakeServer, chat, message};
 use teams_core::VideoOutput;
 use teams_core::{
-    CallAction, CallActionError, CallId, CallStatus, End, EngineError, Event, IncomingCall, MessageChange,
-    RegistrationReport, RemoteEnd, Source,
+    CallAction, CallActionError, CallId, CallParticipant, CallStatus, CallView, End, EngineError, Event, IncomingCall,
+    MessageChange, RegistrationReport, RemoteEnd, Source,
 };
 use teams_fence::Mri;
 use teams_media::devices::pattern::TestPattern;
@@ -942,12 +942,12 @@ fn the_feed_s_frames_draw_as_tiles_while_the_call_is_up_and_go_with_it() {
     // the call's media shows the far end's frame and the camera's on the feed (I420, the test pattern)
     let pattern = TestPattern::new(320, 180);
     let output: &dyn VideoOutput = &feed;
-    output.remote().show(&pattern.frame(1)).unwrap();
+    output.remote(0).show(&pattern.frame(1)).unwrap();
     output.preview().unwrap().show(&pattern.frame(2)).unwrap();
     assert!(drawn(cx, "video-tile-remote") && drawn(cx, "video-tile-self"));
     let shown: Vec<Vec<String>> = lines(&written, "video-tile", "shown").iter().map(kinds).collect();
     assert_eq!(shown, [["remote"], ["self"]]);
-    let remote = feed.picture(Tile::Remote).unwrap();
+    let remote = feed.picture(Tile::REMOTE).unwrap();
     assert_eq!(
         (remote.width, remote.height, remote.bgra.len()),
         (320, 180, 320 * 180 * 4)
@@ -956,13 +956,130 @@ fn the_feed_s_frames_draw_as_tiles_while_the_call_is_up_and_go_with_it() {
     // a frame not in I420 isn't taken
     let mut wrong = pattern.frame(3);
     wrong.format = teams_media::devices::PixelFormat::Rgb;
-    assert!(output.remote().show(&wrong).is_err());
+    assert!(output.remote(0).show(&wrong).is_err());
 
     status(&rig, 1, CallStatus::Ended(End::HungUp));
     assert!(!drawn(cx, "video-tiles"));
     let hidden: Vec<Vec<String>> = lines(&written, "video-tile", "hidden").iter().map(kinds).collect();
     assert_eq!(hidden, [["remote"], ["self"]]);
-    assert!(feed.picture(Tile::Remote).is_none(), "the call's frames go with it");
+    assert!(feed.picture(Tile::REMOTE).is_none(), "the call's frames go with it");
+}
+
+/// The view of a group call: `who`, each `(MRI, roster name, camera on, line, speaking)`, and whether the account
+/// speaks.
+fn view(who: &[(&str, &str, bool, Option<usize>, bool)], speaking: bool) -> CallView {
+    CallView {
+        participants: who
+            .iter()
+            .map(|(mri, name, video_on, line, speaking)| CallParticipant {
+                mri: (*mri).to_owned(),
+                name: Some((*name).to_owned()),
+                video_on: *video_on,
+                line: *line,
+                speaking: *speaking,
+            })
+            .collect(),
+        speaking,
+    }
+}
+
+#[test]
+fn a_group_call_s_grid_shows_each_participant_its_video_and_who_speaks() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(TRIO), trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    assert!(!drawn(cx, "call-grid"), "no roster told yet");
+
+    // the roster tells b (camera on, line 1) and c (camera off, line 2, speaking): a cell each and the account's own
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: view(
+            &[
+                (LAB_B, "Lab Bee", true, Some(1), false),
+                (LAB_C, "Lab Sea", false, Some(2), true),
+            ],
+            false,
+        ),
+    });
+    let pattern = TestPattern::new(320, 180);
+    let output: &dyn VideoOutput = &feed;
+    output.remote(1).show(&pattern.frame(1)).unwrap();
+    cx.run_until_parked();
+    for cell in [
+        "call-grid",
+        "call-participant-0",
+        "call-participant-1",
+        "call-participant-self",
+    ] {
+        assert!(drawn(cx, cell), "{cell}");
+    }
+    assert!(drawn(cx, "video-tile-line-1"), "b's video on its line");
+    assert!(!drawn(cx, "video-tile-line-2"), "no frame of c's yet");
+    let cells = lines(&written, "call-participant", "shown");
+    assert_eq!(
+        cells.iter().map(kinds).collect::<Vec<_>>(),
+        [["camera-on", "line-1", "quiet"], ["camera-off", "line-2", "speaking"]]
+    );
+    assert_eq!(cells[0]["people"], serde_json::json!([LAB_B]));
+    assert_eq!(
+        kinds(lines(&written, "call-participant", "self").last().unwrap()),
+        ["quiet"]
+    );
+
+    // c leaves and the account speaks: the grid follows
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: view(&[(LAB_B, "Lab Bee", true, Some(1), false)], true),
+    });
+    cx.run_until_parked();
+    draw(cx);
+    assert!(!drawn(cx, "call-participant-1"));
+    assert_eq!(
+        kinds(lines(&written, "call-participant", "self").last().unwrap()),
+        ["speaking"]
+    );
+    no_name_in(&written);
+}
+
+#[test]
+fn nine_participants_each_draw_on_a_line_of_their_own() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, _written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(TRIO), trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let mris: Vec<String> = (1..=9)
+        .map(|n| format!("8:orgid:00000000-0000-4000-8000-0000000001{n:02}"))
+        .collect();
+    let who: Vec<(&str, &str, bool, Option<usize>, bool)> = mris
+        .iter()
+        .zip(1..)
+        .map(|(mri, line)| (mri.as_str(), "Someone", true, Some(line), false))
+        .collect();
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: view(&who, false),
+    });
+    let pattern = TestPattern::new(320, 180);
+    let output: &dyn VideoOutput = &feed;
+    for line in 1..=9 {
+        output.remote(line).show(&pattern.frame(1)).unwrap();
+    }
+    // a line past the ninth has no tile: its frames are dropped
+    output.remote(10).show(&pattern.frame(1)).unwrap();
+    cx.run_until_parked();
+    for line in 1..=9 {
+        assert!(drawn(cx, &format!("video-tile-line-{line}")), "line {line}");
+    }
+    assert!(feed.picture(Tile::Line(10)).is_none());
 }
 
 #[test]

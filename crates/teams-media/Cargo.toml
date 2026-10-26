@@ -34,6 +34,8 @@ opus.workspace = true
 sha1.workspace = true
 # the device seam's PipeWire backend: microphone, speaker and camera streams on the PipeWire the build allows
 pipewire.workspace = true
+# a group call's control plane: its messages are JSON (`mcp`)
+serde_json.workspace = true
 # the SDP the call's peer speaks: offers and answers taken from and handed to it
 str0m.workspace = true
 thiserror.workspace = true
@@ -42,8 +44,6 @@ thiserror.workspace = true
 webrtc-audio-processing.workspace = true
 
 [dev-dependencies]
-# the SDP fixture's entries
-serde_json.workspace = true
 # this crate's own tests run against the loopback TURN server, and with `personal` on too they show `test-support`
 # wins: such a build still opens only the sandbox's PipeWire
 teams-media = { workspace = true, features = ["test-support", "personal"] }

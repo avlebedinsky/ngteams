@@ -31,6 +31,12 @@
 //! - **The media's SDP steps run one at a time, in the order the signaling asked for them** (the far end's answer
 //!   applied, its renegotiation answered, our own offered): each waits for the one before, so an acceptance followed
 //!   at once by a renegotiation reaches the session in that order.
+//! - **A group call's video** (M3 Task 19): its camera goes on or off without an SDP change (its main video line goes
+//!   both ways throughout, as the web client's): the camera turned, then its lines described again to the call's
+//!   services (`Calls::describe_media`, with its send capabilities when it went on). Who is in the call comes from its
+//!   roster (`CallEvent::Participants`); whose video each receiving line shows is the gallery's to say
+//!   ([`gallery`]), sent to the mixer as source requests once its control plane is up; told as
+//!   [`Event::CallParticipants`] with who speaks.
 //! - **The calling socket's deliveries** go to the machine as the fence read them; a delivery response goes only
 //!   through the delivery's own responder, decided by the fence; an invitation the fence doesn't offer never gets here.
 //! - **What the account is told**: [`Event::IncomingCall`], [`Event::RingEnded`] and [`Event::Call`] with the call's
@@ -52,9 +58,11 @@
 //! A call survives the calling socket's reconnect: its links stay as they were (the capture shows a dropped socket
 //! changes none), the socket registers again on the same endpoint, and the media runs on its own threads throughout.
 
+mod gallery;
 mod media;
 
-pub use media::{CLOSED_GRACE, CONNECT_WITHIN, CallMedia, CallVideo, RECOVER_WITHIN, Relay, VideoOutput};
+pub use gallery::{CallParticipant, CallView, SPEAKING_HOLD, SPEAKING_LEVEL};
+pub use media::{CLOSED_GRACE, CONNECT_WITHIN, CallMedia, CallVideo, GROUP_SLOTS, RECOVER_WITHIN, Relay, VideoOutput};
 
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending};
@@ -64,11 +72,12 @@ use std::time::{Duration, Instant};
 
 use teams_call::{
     CallError, CallEvent, CallId, CallState, CallWrite, Calls, DeliveryKey, DeliveryReply, Effect, End, Identity,
-    Outcome, Placement, WriteId, WriteSink,
+    Outcome, Participant, Placement, WriteId, WriteSink,
 };
 use teams_fence::Mri;
 use teams_proto::{
-    Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, MediaContent, Mutating, Transport,
+    ChannelParameters, Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, MediaContent, Mutating,
+    Transport,
 };
 use teams_trouter::{CallResponder, CallResponse, Ignored, PushEvent, Trouter, TrouterCredentials, TrouterHandle};
 use tokio::sync::{mpsc, oneshot};
@@ -76,7 +85,7 @@ use tokio::task::JoinSet;
 
 use crate::engine::{EngineError, Event, Push, emit_to};
 use crate::outbox::{CallRetries, CallTried, Outbox};
-use media::{LiveMedia, MediaChange, MediaDone, Prepared, Setup};
+use media::{LiveMedia, MediaChange, MediaDone, Prepared, Setup, VideoKind};
 
 /// How long the engine, stopping, waits for a call's last writes (its `leave`, its decline).
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -141,8 +150,9 @@ pub enum CallAction {
     Mute { call: CallId, muted: bool },
     /// The call's media offered again (an ICE restart) as a renegotiation.
     Renegotiate { call: CallId },
-    /// The camera of a call that takes video turned on (`true`) or off: our video line offered again going that way
-    /// (a renegotiation), the camera's frames sent while it is on.
+    /// The camera of a call that takes video turned on (`true`) or off, the camera's frames sent while it is on: a 1:1
+    /// call's video line offered again going that way (a renegotiation); a group call's lines described again
+    /// (`updateMediaDescriptions`) with no SDP change, only once the call is up.
     Camera { call: CallId, on: bool },
 }
 
@@ -198,7 +208,7 @@ pub enum CallActionError {
     /// No media runs for that call.
     #[error("no media runs for that call")]
     NoMedia,
-    /// That call's media carries no video (a group call's, or one whose codec didn't load).
+    /// That call's media carries no video (the test call's, or one whose codec didn't load).
     #[error("that call carries no video")]
     NoVideo,
     /// The call's media couldn't be set up, or its SDP made.
@@ -626,6 +636,7 @@ where
             }
             CallEvent::Ended { call, end } => self.ended(call, end),
             CallEvent::Voicemail { call } => self.emit(Event::Voicemail { call }),
+            CallEvent::Participants { call, participants } => self.participants(call, participants, now),
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }
@@ -742,11 +753,97 @@ where
     // --- the media ---
 
     fn media_done(&mut self, done: MediaDone, now: Instant) {
-        if !matches!(done, MediaDone::Opened { .. }) {
+        if !matches!(done, MediaDone::Opened { .. } | MediaDone::GroupCamera { .. }) {
             self.sdp_running = false;
         }
         self.media_step_done(done, now);
         self.next_sdp_step();
+        // an SDP step may have changed the receiving lines: what they show follows
+        self.show_participants(now);
+    }
+
+    /// Who is in `call` now, as its roster told it: the gallery follows, its source requests go.
+    fn participants(&mut self, call: CallId, participants: Vec<Participant>, now: Instant) {
+        if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
+            live.gallery.set_participants(participants);
+            self.show_participants(now);
+        }
+    }
+
+    /// The running call's receiving lines as its dialect names them now, what they are to show sent to the mixer,
+    /// and its view told when it changed.
+    fn show_participants(&mut self, now: Instant) {
+        let Some(live) = self.live.as_mut() else { return };
+        if live.is_group() {
+            let slots = media::slots(live);
+            live.gallery.set_slots(slots);
+            let wanted = live.gallery.assign();
+            if !wanted.is_empty()
+                && let Err(error) = live.session.request_sources(wanted)
+            {
+                log::warn!("call {}: its source requests didn't go: {error}", live.call.get());
+            }
+        }
+        if let Some(view) = live.gallery.changed(now) {
+            let call = live.call;
+            self.emit(Event::CallParticipants { call, view });
+        }
+    }
+
+    /// A group call's camera turned (or not): its lines described again, its send capabilities given when it went on.
+    /// A camera turned on whose lines can't be described (the call stopped being describable while it opened) is shut
+    /// again and refused (told off when it was on); one turned off stays off, descriptions that can't go only logged.
+    fn group_camera_turned(
+        &mut self,
+        call: CallId,
+        on: bool,
+        result: Result<(), String>,
+    ) -> Result<(), CallActionError> {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
+            return Err(CallActionError::NoMedia);
+        };
+        if let Err(why) = result {
+            if on && live.camera == Some(true) {
+                live.camera = Some(false);
+                self.emit(Event::CameraOff { call });
+            }
+            return Err(CallActionError::Media(why));
+        }
+        let was = live.camera;
+        live.camera = Some(on);
+        let described = live.describe();
+        let main = media::lock(&live.dialect).main_video_mid().map(str::to_owned);
+        let parameters = main
+            .filter(|_| on)
+            .map(|mid| send_capabilities(mid, live.capabilities + 1));
+        match self.calls.describe_media(call, &described, parameters) {
+            Ok(()) => {
+                live.capabilities += u64::from(on);
+                log::info!("call {}: camera {}", call.get(), if on { "on" } else { "off" });
+                Ok(())
+            }
+            Err(error) if on => {
+                log::warn!(
+                    "call {}: its camera's lines can't be described ({error}): shut again",
+                    call.get()
+                );
+                live.camera = Some(false);
+                let session = Arc::clone(&live.session);
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = session.set_camera(None) {
+                        log::warn!("the camera didn't shut: {error}");
+                    }
+                });
+                if was == Some(true) {
+                    self.emit(Event::CameraOff { call });
+                }
+                Err(error.into())
+            }
+            Err(error) => {
+                log::warn!("call {}: camera off, its lines not described: {error}", call.get());
+                Ok(())
+            }
+        }
     }
 
     fn media_step_done(&mut self, done: MediaDone, now: Instant) {
@@ -760,10 +857,19 @@ where
                 Err(why) => self.media_failed(call, &why, now),
             },
             MediaDone::Answered { call, result } => {
+                let live = self.live.as_mut().filter(|live| live.call == call);
                 let answered = result.and_then(|answer| {
-                    self.calls.set_video(call, answer.carries_video());
+                    let content = match live {
+                        Some(live) if live.is_group() => live.answer_content(&answer),
+                        // a 1:1 call's answer names the `Video` modality while a video line is in use; a group
+                        // call's names the call's own, as the web client's
+                        _ => {
+                            self.calls.set_video(call, answer.carries_video());
+                            media::content(&answer)
+                        }
+                    };
                     self.calls
-                        .answer_media(call, media::content(&answer))
+                        .answer_media(call, content)
                         .map_err(|error| error.to_string())
                 });
                 match answered {
@@ -800,6 +906,15 @@ where
                 reply,
             } => {
                 let turned = self.camera_turned(call, on, result, now);
+                let _ = reply.send(turned.map(|()| call).map_err(EngineError::from));
+            }
+            MediaDone::GroupCamera {
+                call,
+                on,
+                result,
+                reply,
+            } => {
+                let turned = self.group_camera_turned(call, on, result);
                 let _ = reply.send(turned.map(|()| call).map_err(EngineError::from));
             }
         }
@@ -880,6 +995,8 @@ where
     fn look_at_media(&mut self, now: Instant) {
         let Some(live) = self.live.as_mut() else { return };
         let call = live.call;
+        let levels = live.session.levels();
+        live.gallery.levels(levels, now);
         for change in live.poll(now) {
             match change {
                 MediaChange::Connected if self.up == Some(call) => self.emit(Event::Call {
@@ -895,11 +1012,23 @@ where
                     log::warn!("call {}: its camera went off", call.get());
                     self.emit(Event::CameraOff { call });
                 }
+                MediaChange::Speakers(speakers) => {
+                    if let Some(live) = self.live.as_mut() {
+                        live.gallery.speakers(&speakers);
+                    }
+                }
                 MediaChange::Failed(why) => {
                     self.media_failed(call, &why, now);
                     return;
                 }
             }
+        }
+        // who speaks, as the levels and the mixer told it
+        if let Some(live) = self.live.as_mut()
+            && let Some(view) = live.gallery.changed(now)
+        {
+            let call = live.call;
+            self.emit(Event::CallParticipants { call, view });
         }
     }
 }
@@ -931,6 +1060,16 @@ where
                 None => Err(CallActionError::NoMedia),
             },
             Act::Camera(call, on) => match self.live.as_ref().filter(|live| live.call == call) {
+                // a group call's camera changes no SDP: its lines are described again once it turned; it opens only
+                // while they can be (the call up, nothing renegotiating it), else it stays shut
+                Some(live) if live.is_group() && live.camera.is_some() => match self.calls.describable(call) {
+                    Err(error) if on => Err(error.into()),
+                    _ => {
+                        let step = media::group_camera(live, Arc::clone(&self.media.devices), on, reply);
+                        self.media_steps.spawn_blocking(step);
+                        return;
+                    }
+                },
                 Some(live) if live.camera.is_some() => match self.calls.begin_renegotiation(call) {
                     Ok(()) => {
                         let step = media::camera(live, Arc::clone(&self.media.devices), on, reply);
@@ -973,19 +1112,24 @@ where
     /// Sets up the media of a start, a join or an answer; the action goes once it is.
     fn set_up(&mut self, act: Act, reply: Waiting) {
         let busy = self.preparing.is_some() || self.live.is_some();
-        // a 1:1 call takes video; a group call's, a join's and the test call's media don't
+        // a 1:1 call takes its main video line; a group call's (placed, joined, answered) its main line and receiving
+        // lines; the test call's media takes none
         let (answering, offer, video) = match &act {
             Act::Answer(call) => {
                 let ringing = self.calls.current() == Some((*call, Some(CallState::Offered)));
                 match self.offers.get(call) {
-                    Some((offer, group)) if ringing && !busy => (Some(*call), offer.clone(), !group),
+                    Some((offer, group)) if ringing && !busy => {
+                        let kind = if *group { VideoKind::Group } else { VideoKind::OneToOne };
+                        (Some(*call), offer.clone(), kind)
+                    }
                     _ => return refuse(reply, CallError::NotNow.into()),
                 }
             }
             _ if busy || self.calls.current().is_some() => return refuse(reply, CallActionError::Busy),
             Act::Join(chat) if !self.calls.joinable(chat) => return refuse(reply, CallError::NotJoinable.into()),
-            Act::Place(Placement::Chat { group_chat: None, .. }) => (None, None, true),
-            _ => (None, None, false),
+            Act::Place(Placement::Chat { group_chat: None, .. }) => (None, None, VideoKind::OneToOne),
+            Act::Place(Placement::Chat { .. }) | Act::Join(_) => (None, None, VideoKind::Group),
+            _ => (None, None, VideoKind::None),
         };
         if answering.is_some() && offer.is_none() {
             return refuse(
@@ -1020,7 +1164,7 @@ where
         if let Some(tenant) = prepared.tenant.take() {
             self.calls.set_tenant(tenant);
         }
-        let sdp = media::content(&prepared.sdp);
+        let sdp = media::first_content(&prepared);
         let acted = match &preparing.act {
             Act::Place(placement) => self.calls.place(placement, sdp, now),
             Act::Join(chat) => self.calls.join(chat, sdp, now),
@@ -1117,6 +1261,19 @@ fn close(call: CallId, session: Arc<teams_media::session::MediaSession>) {
         stats.jitter
     );
     drop(session);
+}
+
+/// A group call's send capabilities once its camera is on (`applyChannelParameters` on its main video line `mid`, as
+/// the web client gives them, numbered `sequence`): the largest picture it sends, one stream (no simulcast).
+fn send_capabilities(mid: String, sequence: u64) -> ChannelParameters {
+    let caps = serde_json::json!({"maxVideoSendCapabilities": {"caps": {
+        "max-width": 1280, "max-height": 1280, "max-fps": 30, "max-streams": 1, "max-layers": 1,
+        "sequence-number": sequence,
+    }}});
+    ChannelParameters {
+        mids: vec![mid],
+        media_parameter: caps.to_string(),
+    }
 }
 
 fn refuse(reply: Waiting, error: CallActionError) {

@@ -33,6 +33,9 @@
 //!   from `TEAMS_HEADLESS_BIN`): a's native client calls b's page and b answers, b's page calls a's native client and
 //!   it answers (`watch --answer-lab-calls`), and a call answered on b's page while b's native client rings; each side
 //!   must hear the other's tone; recorded.
+//! - [`abc_call_mixed`] (b's and c's web clients, and a's native client as `ab-call-native`'s): a's native client calls
+//!   the a–b–c group chat with video and both pages answer, c's page leaves and joins late; audio and video among all
+//!   three; recorded.
 //!
 //! The steps are in [`dsl`]. A run fails (`proto-lab run` exits non-zero) when its goal isn't reached, when the fence
 //! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`]. The writing scenarios
@@ -46,6 +49,7 @@ pub mod ab_file;
 pub mod ab_image;
 pub mod ab_trouter;
 pub mod abc_call;
+pub mod abc_call_mixed;
 pub mod abc_chat;
 pub mod chat_shapes;
 pub mod dsl;
@@ -104,6 +108,9 @@ pub enum ScenarioName {
     /// b's web client and a's native client (`teams-headless`, `TEAMS_HEADLESS_BIN`) call each other both ways, then a call
     /// answered on b's page while b's native client rings; recorded.
     AbCallNative,
+    /// a's native client (`teams-headless`, `TEAMS_HEADLESS_BIN`) calls the a–b–c group chat with video, b's and c's web
+    /// clients answer; c leaves and joins late; recorded.
+    AbcCallMixed,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -134,6 +141,7 @@ impl ScenarioName {
             Self::AbCall => "ab-call",
             Self::AbcCall => "abc-call",
             Self::AbCallNative => "ab-call-native",
+            Self::AbcCallMixed => "abc-call-mixed",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -366,9 +374,11 @@ pub async fn run(
         ScenarioName::AbTrouter => ab_trouter::run(paths, options, ab_trouter::Activity::Reported).await,
         ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,
         ScenarioName::ChatShapes => chat_shapes::run(paths, options).await,
-        ScenarioName::EchoCall | ScenarioName::AbCall | ScenarioName::AbcCall | ScenarioName::AbCallNative => {
-            run_call(scenario, paths, options).await
-        }
+        ScenarioName::EchoCall
+        | ScenarioName::AbCall
+        | ScenarioName::AbcCall
+        | ScenarioName::AbCallNative
+        | ScenarioName::AbcCallMixed => run_call(scenario, paths, options).await,
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth
@@ -387,6 +397,7 @@ async fn run_call(
         ScenarioName::EchoCall => echo_call::run(paths, options).await,
         ScenarioName::AbCall => ab_call::run(paths, options).await,
         ScenarioName::AbcCall => abc_call::run(paths, options).await,
+        ScenarioName::AbcCallMixed => abc_call_mixed::run(paths, options).await,
         _ => ab_call_native::run(paths, options).await,
     }
 }

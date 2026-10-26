@@ -1,5 +1,6 @@
-//! A 1:1 call's video in the window (M3 Task 18): the far end's picture and the camera's own (the self view) as
-//! tiles of the in-call bar ([`crate::call_view::CallBar`]).
+//! A call's video in the window (M3 Tasks 18, 19): a 1:1 call's far end's picture, a group call's participants' (one
+//! per receiving video line), and the camera's own (the self view), as tiles of the in-call bar
+//! ([`crate::call_view::CallBar`]).
 //!
 //! - **The feed** ([`VideoFeed`]) is what the engine's call media shows its frames on ([`teams_core::VideoOutput`]):
 //!   the media's own threads hand each decoded frame (the far end's) and each frame the camera sends (the self view)
@@ -8,9 +9,9 @@
 //!   media starts no video and the codec isn't used.
 //! - **The tiles** ([`Tiles`]) draw the newest frame of each through GPUI's external surface (a texture kept per
 //!   tile, written from the frame's pixels), and count each frame the renderer presented: the trace's `video-tile
-//!   presented` line names the tile (`remote`, `self`) and how many it presented so far, at the first frame and every
-//!   [`TRACE_EVERY`] after it; `video-tile shown`/`hidden` as a tile comes and goes. A tile whose last frame is older
-//!   than [`STALE`] is hidden (the far end's camera went off).
+//!   presented` line names the tile (`remote`, `line-1` … `line-9`, `self`) and how many it presented so far, at the
+//!   first frame and every [`TRACE_EVERY`] after it; `video-tile shown`/`hidden` as a tile comes and goes. A tile whose
+//!   last frame is older than [`STALE`] is hidden (the far end's camera went off).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -29,35 +30,53 @@ use crate::trace::{TraceLine, ViewTrace};
 pub const STALE: Duration = Duration::from_secs(2);
 /// A tile's presented frames are traced at the first and every this many after it.
 pub const TRACE_EVERY: u64 = 30;
-/// The far end's tile's height, and the self view's, in pixels (their widths follow the picture).
+/// The far end's tile's height, a group call's participant's, and the self view's, in pixels (their widths follow the
+/// picture).
 const REMOTE_HEIGHT: f32 = 240.0;
+const GROUP_HEIGHT: f32 = 150.0;
 const SELF_HEIGHT: f32 = 120.0;
+
+/// The video lines a call shows: line 0 (a 1:1 call's far end) and a group call's receiving lines.
+pub const LINES: usize = 1 + teams_core::GROUP_SLOTS;
+/// Every tile: each line's, and the self view.
+const TILES: usize = LINES + 1;
+/// The trace's names of the lines' tiles.
+const LINE_NAMES: [&str; LINES] = [
+    "remote", "line-1", "line-2", "line-3", "line-4", "line-5", "line-6", "line-7", "line-8", "line-9",
+];
 
 /// Which tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tile {
-    /// The far end's picture.
-    Remote,
+    /// What a video line brings: 0 a 1:1 call's far end, 1, 2, … a group call's participants.
+    Line(usize),
     /// The camera's own, as sent.
     Own,
 }
 
 impl Tile {
-    pub const ALL: [Self; 2] = [Self::Remote, Self::Own];
+    /// A 1:1 call's far end.
+    pub const REMOTE: Self = Self::Line(0);
+
+    /// Every tile.
+    pub fn all() -> impl Iterator<Item = Self> {
+        (0..LINES).map(Self::Line).chain([Self::Own])
+    }
 
     /// The trace's name for it.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            Self::Remote => "remote",
+            Self::Line(line) => LINE_NAMES.get(line).copied().unwrap_or("line"),
             Self::Own => "self",
         }
     }
 
-    fn index(self) -> usize {
+    /// Its place among the tiles; `None` for a line past the last.
+    fn index(self) -> Option<usize> {
         match self {
-            Self::Remote => 0,
-            Self::Own => 1,
+            Self::Line(line) => (line < LINES).then_some(line),
+            Self::Own => Some(LINES),
         }
     }
 }
@@ -77,8 +96,8 @@ pub struct Picture {
 /// What the media's threads and the window share.
 struct Shared {
     enabled: AtomicBool,
-    pictures: [Mutex<Option<Arc<Picture>>>; 2],
-    serials: [AtomicU64; 2],
+    pictures: Vec<Mutex<Option<Arc<Picture>>>>,
+    serials: Vec<AtomicU64>,
     wake: async_channel::Sender<()>,
     woken: async_channel::Receiver<()>,
 }
@@ -112,8 +131,8 @@ impl VideoFeed {
         Self {
             shared: Arc::new(Shared {
                 enabled: AtomicBool::new(true),
-                pictures: [Mutex::new(None), Mutex::new(None)],
-                serials: [AtomicU64::new(0), AtomicU64::new(0)],
+                pictures: (0..TILES).map(|_| Mutex::new(None)).collect(),
+                serials: (0..TILES).map(|_| AtomicU64::new(0)).collect(),
                 wake,
                 woken,
             }),
@@ -134,7 +153,7 @@ impl VideoFeed {
     /// The newest frame of `tile`, unless it is older than [`STALE`].
     #[must_use]
     pub fn picture(&self, tile: Tile) -> Option<Arc<Picture>> {
-        let picture = lock(&self.shared.pictures[tile.index()]).clone()?;
+        let picture = lock(&self.shared.pictures[tile.index()?]).clone()?;
         (picture.at.elapsed() < STALE).then_some(picture)
     }
 
@@ -153,9 +172,11 @@ impl VideoFeed {
 
     /// Takes `frame` (I420) as `tile`'s newest.
     fn take(&self, tile: Tile, frame: &VideoFrame) -> Result<(), DeviceError> {
+        // a line past the last has no tile: its frames are dropped
+        let Some(index) = tile.index() else { return Ok(()) };
         let bgra = i420_to_bgra(frame).ok_or_else(|| DeviceError::Refused("a frame not in I420".into()))?;
-        let serial = self.shared.serials[tile.index()].fetch_add(1, Ordering::Relaxed) + 1;
-        *lock(&self.shared.pictures[tile.index()]) = Some(Arc::new(Picture {
+        let serial = self.shared.serials[index].fetch_add(1, Ordering::Relaxed) + 1;
+        *lock(&self.shared.pictures[index]) = Some(Arc::new(Picture {
             width: frame.width,
             height: frame.height,
             bgra: Arc::new(bgra),
@@ -169,10 +190,10 @@ impl VideoFeed {
 }
 
 impl teams_core::VideoOutput for VideoFeed {
-    fn remote(&self) -> Box<dyn VideoSink> {
+    fn remote(&self, line: usize) -> Box<dyn VideoSink> {
         Box::new(Sink {
             feed: self.clone(),
-            tile: Tile::Remote,
+            tile: Tile::Line(line),
         })
     }
 
@@ -223,7 +244,7 @@ impl TileState {
 pub struct Tiles {
     feed: VideoFeed,
     trace: Arc<ViewTrace>,
-    states: [TileState; 2],
+    states: Vec<TileState>,
 }
 
 impl Tiles {
@@ -232,7 +253,7 @@ impl Tiles {
         Self {
             feed,
             trace,
-            states: [TileState::new(), TileState::new()],
+            states: (0..TILES).map(|_| TileState::new()).collect(),
         }
     }
 
@@ -242,34 +263,39 @@ impl Tiles {
         &self.feed
     }
 
-    /// The tiles of call `call` with a fresh frame, as elements (none while no tile has one); traces a tile that comes
-    /// or goes.
+    /// The 1:1 call `call`'s tiles with a fresh frame (the far end's, the self view), as elements (none while no tile
+    /// has one); traces a tile that comes or goes.
     pub fn elements(&mut self, call: u64) -> Vec<AnyElement> {
-        let mut elements = Vec::new();
-        for tile in Tile::ALL {
-            let picture = self.feed.picture(tile);
-            let state = &mut self.states[tile.index()];
-            if picture.is_some() != state.shown {
-                state.shown = picture.is_some();
-                let change = if state.shown { "shown" } else { "hidden" };
-                self.trace
-                    .record(&TraceLine::new("video-tile", change).kind(tile.name()).call(call));
-            }
-            let Some(picture) = picture else {
-                state.drawn = None;
-                continue;
-            };
-            let frame = frame_of(state, &picture, tile, call, &self.trace);
-            elements.push(tile_element(tile, &picture, frame));
+        [Tile::REMOTE, Tile::Own]
+            .into_iter()
+            .filter_map(|tile| self.element(tile, call))
+            .collect()
+    }
+
+    /// `tile` of call `call`, when it has a fresh frame; traces it when it comes or goes.
+    pub fn element(&mut self, tile: Tile, call: u64) -> Option<AnyElement> {
+        let picture = self.feed.picture(tile);
+        let state = &mut self.states[tile.index()?];
+        if picture.is_some() != state.shown {
+            state.shown = picture.is_some();
+            let change = if state.shown { "shown" } else { "hidden" };
+            self.trace
+                .record(&TraceLine::new("video-tile", change).kind(tile.name()).call(call));
         }
-        elements
+        let Some(picture) = picture else {
+            state.drawn = None;
+            return None;
+        };
+        let frame = frame_of(state, &picture, tile, call, &self.trace);
+        Some(tile_element(tile, &picture, frame))
     }
 
     /// Forgets what was drawn and the frames (the call ended); traces the tiles that go.
     pub fn clear(&mut self, call: u64) {
         self.feed.clear();
-        for tile in Tile::ALL {
-            let state = &mut self.states[tile.index()];
+        for tile in Tile::all() {
+            let Some(index) = tile.index() else { continue };
+            let state = &mut self.states[index];
             state.drawn = None;
             if state.shown {
                 state.shown = false;
@@ -330,7 +356,8 @@ fn frame_of(
 /// A tile: `frame` filling a box of the picture's shape.
 fn tile_element(tile: Tile, picture: &Picture, frame: Arc<PixelFrame>) -> AnyElement {
     let height = match tile {
-        Tile::Remote => REMOTE_HEIGHT,
+        Tile::Line(0) => REMOTE_HEIGHT,
+        Tile::Line(_) => GROUP_HEIGHT,
         Tile::Own => SELF_HEIGHT,
     };
     let side = |pixels: u32| f32::from(u16::try_from(pixels).unwrap_or(u16::MAX));

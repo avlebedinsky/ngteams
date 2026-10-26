@@ -7,9 +7,10 @@ use std::time::Instant;
 use teams_fence::Mri;
 use teams_proto::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
-    AnswerMediaParts, AttachCall, AttachParts, CallLink, DeclineCall, Invitee, JoinCall, JoinMedia, JoinParts,
-    KeepAliveCall, LeaveCall, LeaveReason, Links, MediaContent, RenegotiateMedia, ReportRinging, StartCall, StartParts,
-    UpdateEndpointMetadata, UpdateEndpointState,
+    AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CallLink, ChannelParameters, DeclineCall,
+    Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason, Links, MediaContent,
+    MediaDescriptions, RenegotiateMedia, ReportRinging, StartCall, StartParts, UpdateEndpointMetadata,
+    UpdateEndpointState, UpdateMediaDescriptions,
 };
 
 use crate::agent::{Kind, guid};
@@ -250,6 +251,29 @@ pub(crate) fn answer_media(call: &mut Call, link: &CallLink, answer: MediaConten
 /// The call's keep-alive, at the call leg's own link (the acceptance's or the `accept`'s answer's `callLeg`).
 pub(crate) fn keep_alive(call: &Call, link: &CallLink) -> Result<CallWrite, CallError> {
     Ok(CallWrite::KeepAlive(KeepAliveCall::new(&call.context, link)?))
+}
+
+/// A group call's media lines described again at the call controller's `updateMediaDescriptions` link.
+pub(crate) fn describe(call: &Call, link: &CallLink, descriptions: &MediaDescriptions) -> Result<CallWrite, CallError> {
+    Ok(CallWrite::MediaDescriptions(UpdateMediaDescriptions::new(
+        &call.context,
+        link,
+        descriptions,
+        None,
+    )?))
+}
+
+/// A group call's send capabilities at the call controller's `applyChannelParameters` link.
+pub(crate) fn channel_parameters(
+    call: &Call,
+    link: &CallLink,
+    parameters: &ChannelParameters,
+) -> Result<CallWrite, CallError> {
+    Ok(CallWrite::ChannelParameters(ApplyChannelParameters::new(
+        &call.context,
+        link,
+        parameters,
+    )?))
 }
 
 /// The acknowledgement of the answer to the account's renegotiation, at the link that answer handed out.

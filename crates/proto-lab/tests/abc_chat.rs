@@ -270,6 +270,13 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
             assert!(FORCED.contains(&EARLIER_RUN_PROBE));
             (probe_rules(None)?, policy(FORCED))
         }
+        // b's and c's pages, under the earlier run's probe rules
+        ScenarioName::AbcCallMixed => {
+            use proto_lab::scenario::ab_call::policy;
+            use proto_lab::scenario::abc_call_mixed::{FORCED_B, FORCED_C};
+            assert!(FORCED_B.contains(&EARLIER_RUN_PROBE) && FORCED_C.contains(&EARLIER_RUN_PROBE));
+            (probe_rules(None)?, policy(FORCED_C))
+        }
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth

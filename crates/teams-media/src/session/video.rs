@@ -8,11 +8,14 @@
 //!   A camera that fails (`DeviceClosed(Camera)`) or whose encoder fails (`VideoFailed`) ends the thread and turns
 //!   the camera off; the rest of the session goes on.
 //! - **The decoding thread** runs once the session's video started ([`super::MediaSession::start_video`]): each
-//!   access unit the network thread hands over decoded and shown on the sink; a gap or a frame that doesn't decode
-//!   asks the far end for a keyframe (at most every [`KEYFRAME_ASK_EVERY`]) and nothing is shown until one comes.
+//!   access unit the network thread hands over decoded by its video line's own decoder and shown on that line's sink
+//!   (made the first time the line brings a frame, [`RemoteSinks`]); a gap or a frame that doesn't decode asks the far
+//!   end for a keyframe of that line (at most every [`KEYFRAME_ASK_EVERY`]) and nothing is shown on it until one
+//!   comes.
 //! - **The bitrate** follows the bandwidth estimate: the network thread keeps the newest estimate, the camera thread
 //!   sets the encoder to it less what the audio takes ([`AUDIO_HEADROOM`]), between the encoder's minimum and maximum.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -39,6 +42,13 @@ pub(super) const KEYFRAME_ASK_EVERY: Duration = Duration::from_millis(500);
 /// What the estimate leaves to the audio, in bits per second.
 pub(super) const AUDIO_HEADROOM: u64 = 64_000;
 
+/// Where the far end's decoded frames (I420) go: the sink of each video line, made the first time the line brings a
+/// frame (0 the main video line, 1, 2, … a group call's receiving lines).
+pub type RemoteSinks = Box<dyn FnMut(usize) -> Box<dyn VideoSink> + Send>;
+
+/// The receiving lines a session's video decodes, at most: line numbers past it are dropped.
+const MAX_LINES: usize = 64;
+
 /// A call's video, as [`super::MediaSession::start_video`] takes it.
 pub struct VideoParts {
     /// The OpenH264 library the encoder and decoder run on.
@@ -47,8 +57,8 @@ pub struct VideoParts {
     pub encoder: EncoderSettings,
     /// The largest picture sent: a bigger camera frame is scaled down to fit.
     pub max_size: MaxSize,
-    /// Where the far end's decoded frames go (I420).
-    pub remote: Box<dyn VideoSink>,
+    /// Where the far end's decoded frames go (I420), by video line.
+    pub remote: RemoteSinks,
     /// Where our camera's frames go as they are sent (I420): the self view; `None` for none.
     pub preview: Option<Box<dyn VideoSink>>,
 }
@@ -103,8 +113,8 @@ pub(super) struct VideoShared {
     pub(super) camera_on: AtomicBool,
     /// The next frame encoded is to be an IDR.
     pub(super) keyframe_wanted: AtomicBool,
-    /// The decoding thread wants a keyframe of the far end (the network thread asks).
-    pub(super) keyframe_needed: AtomicBool,
+    /// The video lines the decoding thread wants a keyframe of (bit `n` line `n`; the network thread asks).
+    pub(super) keyframe_needed: AtomicU64,
     pub(super) captured: AtomicU64,
     pub(super) encoded: AtomicU64,
     pub(super) keyframes: AtomicU64,
@@ -140,6 +150,13 @@ impl VideoShared {
 
     pub(super) fn count(counter: &AtomicU64, by: u64) {
         counter.fetch_add(by, Ordering::Relaxed);
+    }
+
+    /// Asks the network thread for a keyframe of video line `line`.
+    pub(super) fn want_keyframe(&self, line: usize) {
+        if line < MAX_LINES {
+            self.keyframe_needed.fetch_or(1 << line, Ordering::Relaxed);
+        }
     }
 }
 
@@ -233,13 +250,21 @@ fn rtp_time(epoch: Instant, at: Instant) -> u64 {
 
 /// The decoding thread.
 pub(super) struct DecodeLoop {
-    pub(super) decoder: VideoDecoder,
-    pub(super) sink: Box<dyn VideoSink>,
+    pub(super) library: H264Library,
+    pub(super) sinks: RemoteSinks,
     pub(super) incoming: Queue<ReceivedVideo>,
     pub(super) shared: Arc<Shared>,
+    /// Each video line's decoder and sink, made the first time the line brings a frame.
+    pub(super) lines: HashMap<usize, LineDecoder>,
+}
+
+/// One video line's decoding.
+pub(super) struct LineDecoder {
+    decoder: VideoDecoder,
+    sink: Box<dyn VideoSink>,
     /// Waiting for a keyframe: what comes before it isn't decoded.
-    pub(super) broken: bool,
-    pub(super) asked: Option<Instant>,
+    broken: bool,
+    asked: Option<Instant>,
 }
 
 impl DecodeLoop {
@@ -255,6 +280,39 @@ impl DecodeLoop {
 
     fn decode(&mut self, unit: &ReceivedVideo) {
         let video = &self.shared.video;
+        if unit.line >= MAX_LINES {
+            VideoShared::count(&video.undecoded, 1);
+            return;
+        }
+        if !self.lines.contains_key(&unit.line) {
+            let Ok(decoder) = VideoDecoder::new(&self.library) else {
+                VideoShared::count(&video.undecoded, 1);
+                return;
+            };
+            let sink = (self.sinks)(unit.line);
+            self.lines.insert(
+                unit.line,
+                LineDecoder {
+                    decoder,
+                    sink,
+                    broken: false,
+                    asked: None,
+                },
+            );
+        }
+        let Some(line) = self.lines.get_mut(&unit.line) else {
+            return;
+        };
+        if line.decode(unit, video) {
+            video.want_keyframe(unit.line);
+        }
+    }
+}
+
+impl LineDecoder {
+    /// Decodes and shows `unit`; whether a keyframe is to be asked for now (a gap, a frame that didn't decode, at most
+    /// every [`KEYFRAME_ASK_EVERY`]).
+    fn decode(&mut self, unit: &ReceivedVideo, video: &VideoShared) -> bool {
         if !unit.contiguous && !unit.keyframe {
             self.broken = true;
         }
@@ -263,32 +321,32 @@ impl DecodeLoop {
         }
         if self.broken {
             VideoShared::count(&video.undecoded, 1);
-            self.ask_keyframe();
-            return;
+            return self.ask_keyframe();
         }
         match self.decoder.decode(&unit.data) {
             Ok(Some(frame)) => {
                 if self.sink.show(&frame).is_ok() {
                     VideoShared::count(&video.shown, 1);
                 }
+                false
             }
-            Ok(None) => {}
+            Ok(None) => false,
             Err(_) => {
                 VideoShared::count(&video.undecoded, 1);
                 self.broken = true;
-                self.ask_keyframe();
+                self.ask_keyframe()
             }
         }
     }
 
-    /// Asks the network thread to request a keyframe of the far end, at most every [`KEYFRAME_ASK_EVERY`].
-    fn ask_keyframe(&mut self) {
+    /// Whether to ask for a keyframe now: at most every [`KEYFRAME_ASK_EVERY`].
+    fn ask_keyframe(&mut self) -> bool {
         let now = Instant::now();
         if self.asked.is_some_and(|asked| now < asked + KEYFRAME_ASK_EVERY) {
-            return;
+            return false;
         }
         self.asked = Some(now);
-        self.shared.video.keyframe_needed.store(true, Ordering::Relaxed);
+        true
     }
 }
 

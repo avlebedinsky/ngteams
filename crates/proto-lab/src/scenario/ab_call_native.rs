@@ -72,13 +72,13 @@ pub const TONE_HZ: u32 = TAP_TONE_HZ;
 /// How long a's native client holds its call once the media connected.
 pub const NATIVE_HOLD: Duration = Duration::from_secs(40);
 /// How long a native client may take to connect its call, from its placing.
-const NATIVE_CONNECT: Duration = Duration::from_secs(90);
+pub(crate) const NATIVE_CONNECT: Duration = Duration::from_secs(90);
 /// How long a native client gets to register its calling stack.
 pub const NATIVE_REGISTER: Duration = Duration::from_secs(90);
 /// How long b's page holds the call it placed once it heard a's tone (or the wait for it ended).
 pub const PAGE_HOLD: Duration = Duration::from_secs(15);
 /// How long a native client gets to exit once its call is over or it was interrupted.
-const NATIVE_EXIT: Duration = Duration::from_secs(45);
+pub(crate) const NATIVE_EXIT: Duration = Duration::from_secs(45);
 /// How long b's native client's ring gets to end once b's page answered.
 pub const ELSEWHERE_WAIT: Duration = Duration::from_secs(30);
 /// How long a's native client holds the call b's page answered while b's native client rang: past
@@ -95,7 +95,7 @@ pub const PAGE_FRAMES: u64 = 30;
 pub const NATIVE_FRAMES: u64 = 30;
 
 /// What b's page clicks on its incoming call: answer, what it sends from then on held as `ab-call`'s.
-const ANSWER: CalleeAction = CalleeAction {
+pub(crate) const ANSWER: CalleeAction = CalleeAction {
     label: ANSWER_HELD,
     button: ACCEPT_AUDIO_CSS,
     what: "answer",
@@ -157,7 +157,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 }
 
 /// The `teams-headless` binary from [`HEADLESS_BIN`].
-fn headless_binary() -> Result<PathBuf, ScenarioError> {
+pub(crate) fn headless_binary() -> Result<PathBuf, ScenarioError> {
     let binary = std::env::var_os(HEADLESS_BIN).map(PathBuf::from).ok_or_else(|| {
         setup(format!(
             "{HEADLESS_BIN} is unset: build `cargo build --release -p teams-headless --target-dir target/lab` and \
@@ -386,22 +386,8 @@ impl Run {
 
     /// `teams-headless <alias> <args>` started as `what`, its output into `native-<what>.txt` in the run's dir.
     fn spawn(&mut self, alias: Alias, what: &'static str, args: &[String]) -> Result<(), ScenarioError> {
-        let out = self.dir.join(format!("native-{what}.txt"));
-        let file = fs::File::create(&out).map_err(|error| setup(format!("can't create {}: {error}", out.display())))?;
-        let errors = file
-            .try_clone()
-            .map_err(|error| setup(format!("can't share {}: {error}", out.display())))?;
-        let child = tokio::process::Command::new(&self.binary)
-            .arg(alias.as_str())
-            .args(args)
-            .env_remove("TEAMS_HEADLESS_LOG")
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(file))
-            .stderr(Stdio::from(errors))
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| setup(format!("can't start teams-headless for {what}: {error}")))?;
-        self.natives.push(Native { what, child, out });
+        let native = spawn_native((&self.binary, &self.dir), alias, what, args)?;
+        self.natives.push(native);
         Ok(())
     }
 
@@ -479,8 +465,33 @@ impl Run {
     }
 }
 
+/// `teams-headless <alias> <args>` (`binary`) started as `what`, its output into `native-<what>.txt` in `dir`.
+pub(crate) fn spawn_native(
+    (binary, dir): (&Path, &Path),
+    alias: Alias,
+    what: &'static str,
+    args: &[String],
+) -> Result<Native, ScenarioError> {
+    let out = dir.join(format!("native-{what}.txt"));
+    let file = fs::File::create(&out).map_err(|error| setup(format!("can't create {}: {error}", out.display())))?;
+    let errors = file
+        .try_clone()
+        .map_err(|error| setup(format!("can't share {}: {error}", out.display())))?;
+    let child = tokio::process::Command::new(binary)
+        .arg(alias.as_str())
+        .args(args)
+        .env_remove("TEAMS_HEADLESS_LOG")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(errors))
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| setup(format!("can't start teams-headless for {what}: {error}")))?;
+    Ok(Native { what, child, out })
+}
+
 /// Interrupts `native` and waits up to [`NATIVE_EXIT`] for it to exit (killing it when it doesn't).
-async fn stop_native(mut native: Native, session: &mut LabSession, report: &mut ScenarioReport) -> Finished {
+pub(crate) async fn stop_native(mut native: Native, session: &mut LabSession, report: &mut ScenarioReport) -> Finished {
     native.interrupt();
     let status = native.wait(session, NATIVE_EXIT).await;
     native.finished(status, report)
@@ -503,7 +514,7 @@ fn call_args(hold: Duration, video: bool) -> Vec<String> {
 }
 
 /// The tone arguments every native client takes: the page's tone, in bursts, and the same tone looked for.
-fn tone_args() -> Vec<String> {
+pub(crate) fn tone_args() -> Vec<String> {
     let hz = TONE_HZ.to_string();
     vec![
         "--tone".to_owned(),
@@ -526,7 +537,7 @@ fn watch_args(flag: &str, video: bool) -> Vec<String> {
 
 /// The video arguments of a native client whose call carries video: Cisco's OpenH264, the camera on
 /// [`NATIVE_CAMERA_AFTER`] after the call connected.
-fn video_args() -> Vec<String> {
+pub(crate) fn video_args() -> Vec<String> {
     vec![
         "--video".to_owned(),
         "--camera-after".to_owned(),
@@ -535,25 +546,25 @@ fn video_args() -> Vec<String> {
 }
 
 /// One native client the run spawned.
-struct Native {
+pub(crate) struct Native {
     what: &'static str,
     child: tokio::process::Child,
     out: PathBuf,
 }
 
 /// A native client that exited (or was killed), with its output.
-struct Finished {
-    what: &'static str,
-    status: Option<ExitStatus>,
-    output: String,
+pub(crate) struct Finished {
+    pub(crate) what: &'static str,
+    pub(crate) status: Option<ExitStatus>,
+    pub(crate) output: String,
 }
 
 impl Native {
-    fn output(&self) -> String {
+    pub(crate) fn output(&self) -> String {
         fs::read_to_string(&self.out).unwrap_or_default()
     }
 
-    fn interrupt(&self) {
+    pub(crate) fn interrupt(&self) {
         let pid = self
             .child
             .id()
@@ -566,7 +577,7 @@ impl Native {
 
     /// Waits up to `limit` for it to exit, the page's events flowing; kills it when it doesn't. `None` when it had to
     /// be killed.
-    async fn wait(&mut self, session: &mut LabSession, limit: Duration) -> Option<ExitStatus> {
+    pub(crate) async fn wait(&mut self, session: &mut LabSession, limit: Duration) -> Option<ExitStatus> {
         let deadline = tokio::time::Instant::now() + limit;
         while tokio::time::Instant::now() < deadline {
             if let Ok(Some(status)) = self.child.try_wait() {
@@ -578,7 +589,7 @@ impl Native {
         None
     }
 
-    fn finished(self, status: Option<ExitStatus>, report: &mut ScenarioReport) -> Finished {
+    pub(crate) fn finished(self, status: Option<ExitStatus>, report: &mut ScenarioReport) -> Finished {
         let output = self.output();
         for line in output.lines().filter(|line| is_summary(line)) {
             report.notes.push(format!("{}: {line}", self.what));
@@ -661,7 +672,7 @@ fn judge_native_video(native: &Finished, report: &mut ScenarioReport) {
 }
 
 /// A native client must have exited 0 and heard the page's tone.
-fn judge_native(native: &Finished, report: &mut ScenarioReport) {
+pub(crate) fn judge_native(native: &Finished, report: &mut ScenarioReport) {
     if native.status.is_none_or(|status| !status.success()) {
         report.failures.push(format!(
             "the native client ({}) didn't exit 0: {:?}",
@@ -678,7 +689,11 @@ fn judge_native(native: &Finished, report: &mut ScenarioReport) {
 
 /// b's page in a call opens its microphone (noise suppression off, another microphone), must hear the far end's tone
 /// within [`TONE_WAIT`], and its call audio must go both ways (the capture from byte `from` on).
-async fn hear_on_page(session: &mut LabSession, from: u64, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+pub(crate) async fn hear_on_page(
+    session: &mut LabSession,
+    from: u64,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
     turn_off_noise_suppression(Alias::B, &mut session.driver(), report).await?;
     switch_microphone(Alias::B, &mut session.driver(), report).await?;
     let Some(file) = session.capture_dir().map(|dir| dir.join(EVENTS_FILE)) else {
@@ -757,7 +772,7 @@ async fn wait_screen_gone(session: &mut LabSession, report: &mut ScenarioReport)
 }
 
 /// The capture's length so far, in bytes: where a phase's own events begin.
-fn capture_len(session: &LabSession) -> u64 {
+pub(crate) fn capture_len(session: &LabSession) -> u64 {
     session
         .capture_dir()
         .and_then(|dir| fs::metadata(dir.join(EVENTS_FILE)).ok())
@@ -765,14 +780,14 @@ fn capture_len(session: &LabSession) -> u64 {
 }
 
 /// `file` from byte `from` on, as text.
-fn read_from(file: &Path, from: u64) -> String {
+pub(crate) fn read_from(file: &Path, from: u64) -> String {
     let bytes = fs::read(file).unwrap_or_default();
     let from = usize::try_from(from).unwrap_or(usize::MAX).min(bytes.len());
     String::from_utf8_lossy(&bytes[from..]).into_owned()
 }
 
 /// The time now in Unix milliseconds, as a capture stamps its entries (`ts_ms`).
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

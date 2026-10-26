@@ -77,9 +77,13 @@ fn a_one_to_one_call_takes_the_main_video_line_receiving_while_the_camera_is_off
         video[0].starts_with("m=video ") && !video[0].starts_with("m=video 0 "),
         "{video:?}"
     );
+    // H.264 as constrained baseline, on the offer's own number for it (the web client's `108`, not ours)
+    assert!(has(video, "a=rtpmap:108 H264/90000"), "{video:?}");
     assert!(
-        has(video, &format!("a=rtpmap:{H264_PT} H264/90000")),
-        "H.264 as constrained baseline: {video:?}"
+        video
+            .iter()
+            .any(|line| line.starts_with("a=fmtp:108 ") && line.contains("profile-level-id=42e01f")),
+        "{video:?}"
     );
     assert!(has(video, "a=recvonly"), "{video:?}");
     assert!(has(video, "a=label:main-video"));

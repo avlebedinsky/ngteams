@@ -24,7 +24,7 @@ use teams_media::tone::Tone;
 use crate::chat::LabNames;
 use crate::commands::CommandError;
 use crate::echo::{self, Echo, Presence};
-use crate::lab::{Opened, TimedDevices};
+use crate::lab::{Opened, TimedDevices, VideoCounts};
 use crate::print::{end_word, event_line, json_line, now_ms};
 
 /// Whom a call goes to.
@@ -56,6 +56,26 @@ pub struct Plan {
     pub camera_after: Option<Duration>,
 }
 
+/// How often a call's video counts are printed while it runs (`video_lines`).
+pub const VIDEO_EVERY: Duration = Duration::from_secs(2);
+
+/// What a call's output shows beside its events: the lab's names for the MRIs in them, and the call's video counts
+/// (printed every [`VIDEO_EVERY`] while the call runs: `<ms> video_lines received=<line>:<frames>,…`, each line that
+/// brought frames, counted since the call's media started) when it takes video.
+#[derive(Clone, Copy)]
+pub struct Showing<'a> {
+    pub names: &'a LabNames,
+    pub video: Option<&'a VideoCounts>,
+}
+
+impl<'a> Showing<'a> {
+    /// The names alone: no video counts printed.
+    #[must_use]
+    pub const fn names(names: &'a LabNames) -> Self {
+        Self { names, video: None }
+    }
+}
+
 /// How a call went.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
@@ -80,8 +100,9 @@ impl Report {
 }
 
 /// Places the call to `target` once the calling socket is registered, holds it `plan.hold` once its media connected,
-/// hangs it up and waits for its end, printing each event as it comes and a summary line at the end: `<ms>
-/// call_summary call=<id> setup_ms=<n> held=<bool> end="<how>"`. `stop` (a signal) hangs the call up early.
+/// hangs it up and waits for its end, printing each event as it comes (each MRI by `showing`'s names, the video counts
+/// [`Showing`] says) and a summary line at the end: `<ms> call_summary call=<id> setup_ms=<n> held=<bool>
+/// end="<how>"`. `stop` (a signal) hangs the call up early.
 ///
 /// A signal, or `plan.connect_within` running out, while the engine still sets the call's media up ends the wait with
 /// no call in the report (`interrupted`, or `call_not_connected_in_time` printed); the engine's stop then answers the
@@ -94,10 +115,11 @@ pub async fn run(
     handle: &mut EngineHandle,
     target: Target,
     plan: &Plan,
-    names: &LabNames,
+    showing: Showing<'_>,
     out: &mut impl Write,
     stop: impl Future<Output = ()>,
 ) -> Result<Report, CommandError> {
+    let names = showing.names;
     let mut report = Report::default();
     tokio::pin!(stop);
     tokio::select! {
@@ -151,6 +173,8 @@ pub async fn run(
         out: &mut *out,
         phase: Phase::Connecting(placed + plan.connect_within),
         camera_at: None,
+        video: showing.video,
+        video_at: showing.video.map(|_| placed + VIDEO_EVERY),
     };
     following.run(stop, &mut report).await?;
     let setup = report
@@ -248,6 +272,10 @@ struct Following<'a, W> {
     phase: Phase,
     /// When the camera goes on, once the media connected.
     camera_at: Option<tokio::time::Instant>,
+    /// The call's video counts, printed every [`VIDEO_EVERY`].
+    video: Option<&'a VideoCounts>,
+    /// When they are printed next.
+    video_at: Option<tokio::time::Instant>,
 }
 
 impl<W: Write> Following<'_, W> {
@@ -268,6 +296,10 @@ impl<W: Write> Following<'_, W> {
                     camera_on(self.handle.requests(), self.call, self.out).await?;
                     continue;
                 }
+                () = sleep_until(self.video_at) => {
+                    self.video_lines()?;
+                    continue;
+                }
                 () = &mut stop, if !report.interrupted => {
                     report.interrupted = true;
                     if !matches!(self.phase, Phase::Ending(_)) {
@@ -279,22 +311,39 @@ impl<W: Write> Following<'_, W> {
             print(self.out, &event, self.names)?;
             if let Event::Call { call, status } = event
                 && call == self.call
+                && self.status(status, report)
             {
-                match status {
-                    CallStatus::Connected if matches!(self.phase, Phase::Connecting(_)) => {
-                        let now = tokio::time::Instant::now();
-                        report.setup = Some(now - self.placed);
-                        self.phase = Phase::Held(now + self.plan.hold);
-                        self.camera_at = self.plan.camera_after.map(|after| now + after);
-                    }
-                    CallStatus::Ended(end) => {
-                        report.end = Some(end);
-                        return Ok(());
-                    }
-                    _ => {}
-                }
+                return Ok(());
             }
         }
+    }
+
+    /// The call is `status` now: held once its media connected, its end reported; `true` once it ended.
+    fn status(&mut self, status: CallStatus, report: &mut Report) -> bool {
+        match status {
+            CallStatus::Connected if matches!(self.phase, Phase::Connecting(_)) => {
+                let now = tokio::time::Instant::now();
+                report.setup = Some(now - self.placed);
+                self.phase = Phase::Held(now + self.plan.hold);
+                self.camera_at = self.plan.camera_after.map(|after| now + after);
+                false
+            }
+            CallStatus::Ended(end) => {
+                report.end = Some(end);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Prints the video counts so far (when a line brought frames) and when they are printed next.
+    fn video_lines(&mut self) -> Result<(), CommandError> {
+        self.video_at = Some(tokio::time::Instant::now() + VIDEO_EVERY);
+        if let Some(progress) = self.video.and_then(VideoCounts::progress) {
+            writeln!(self.out, "{} video_lines {progress}", now_ms())?;
+            self.out.flush()?;
+        }
+        Ok(())
     }
 
     /// The phase's time is up: the call is hung up (held long enough, or not connected in time); `false` once its end
