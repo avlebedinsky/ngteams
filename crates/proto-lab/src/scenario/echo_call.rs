@@ -8,9 +8,9 @@
 //! (`[[service_participants]] name = "echo"`). The run uses the lab rule, under which what sets up the account's own
 //! endpoint reaches nobody and passes, with the echo service's MRI ([`Classifier::with_test_call_callee`]): the call
 //! start is a write the fence judges as a new call of a and the echo service. With no echo MRI in `lab.toml` the call
-//! start is unknown and denied. A permitted start registers the call in the fence's call registry, and the call's
-//! follow-ups (the echo's `add`, the endpoint metadata, the channel parameters, the acceptance's acknowledgement over
-//! Trouter, `leave`) pass only on it.
+//! start is unknown and denied. The echo's `add` is judged by its invitee (the echo service); the call's other
+//! follow-ups (the endpoint metadata, the channel parameters, the acceptance's acknowledgement over Trouter, `leave`)
+//! pass once the start was let in.
 //!
 //! The browser plays nothing aloud: it is muted with no audio device ([`crate::browser::BASE_ARGS`]), and the received
 //! audio is read in the page by the hooks' audio tap (`assets/rtc_hooks.js`).
@@ -123,8 +123,8 @@ pub const MIN_TONE_RMS: f64 = 0.005;
 /// tap's interval).
 pub const TONE_READINGS: usize = 4;
 
-/// The call's follow-ups a run must see permitted on its registered call (the last segment of the link each goes
-/// to): the echo service's `add` and the `leave` on hanging up. The acceptance is acknowledged too, by one of two
+/// The call's follow-ups a run must see permitted (the last segment of the link each goes to): the echo service's
+/// `add` and the `leave` on hanging up. The acceptance is acknowledged too, by one of two
 /// ways ([`CallFollowUps::acknowledged`]).
 pub const REQUIRED_FOLLOW_UPS: [&str; 2] = ["add", "leave"];
 
@@ -150,7 +150,7 @@ pub fn forced_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
 
 /// The denies a run of this scenario expects: the reviewed list ([`super::expected`]) and the forced denies of
 /// [`EXPECTED_FORCED`]. A deny on the call (its follow-ups, the echo service's `add`, `leave`) is unexpected: the call
-/// needs them, and they pass on its registered call.
+/// needs them, and they pass once its start was let in.
 #[must_use]
 pub fn policy() -> DenyPolicy {
     DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))

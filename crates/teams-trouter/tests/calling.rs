@@ -168,18 +168,27 @@ struct Lab {
 }
 
 impl Lab {
-    /// b's lab: b's fence (b its own account, a and b lab accounts, the echo service approved) logging to the lab's log.
+    /// b's lab: b's fence (b its own account, a and b lab accounts, the echo service approved) logging to the lab's log,
+    /// deciding calls by the call registry (the personal build's rule, which these tests hold the socket's responses to).
     async fn start() -> Self {
+        Self::start_with(true).await
+    }
+
+    /// b's lab whose fence decides calls by the lab's own rule: a call's entry only.
+    async fn start_lab_rule() -> Self {
+        Self::start_with(false).await
+    }
+
+    async fn start_with(tracking: bool) -> Self {
         let mock = ChatServiceMock::start().await.unwrap();
         let trouter = mock.start_trouter().unwrap();
         let log = SharedLog::default();
-        let fence = Arc::new(
-            Fence::new(
-                Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], [Mri::new(ECHO)]),
-                FenceLog::from_writer(log.clone()),
-            )
-            .with_own_account(Mri::new(LAB_B)),
-        );
+        let fence = Fence::new(
+            Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], [Mri::new(ECHO)]),
+            FenceLog::from_writer(log.clone()),
+        )
+        .with_own_account(Mri::new(LAB_B));
+        let fence = Arc::new(if tracking { fence.tracking_calls() } else { fence });
         let tokens = Tokens::new(&mock.token(LAB_B).unwrap());
         Self {
             mock,
@@ -873,4 +882,42 @@ async fn in_the_personal_shape_the_registration_goes_as_its_own_state_entry_and_
     }
     let sent = lab.trouter.sockets()[0].frames.len();
     assert_eq!(frames.len(), sent, "every frame the socket sent was logged first");
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_call_s_deliveries_are_answered_with_no_registered_call() {
+    let lab = Lab::start_lab_rule().await;
+    let mut push = lab.calling().spawn();
+    let endpoint = connected(&mut push).await;
+    registered(&mut push).await;
+    // no call was started or registered: a delivery at the call agent is handed on, and its response goes, logged
+    let (_, roster) = callback(&endpoint, "06060606", "conversation", "conversationUpdate");
+    let id = lab
+        .trouter
+        .deliver_call(LAB_B, &roster, &json!({"conversationUpdate": {}}));
+    let update = call_delivery(&mut push).await;
+    assert_eq!((update.delivery.id, update.observed), (id, Observed::Nothing));
+    update
+        .respond(InvitationReceipt::new(&update.delivery, 1).unwrap())
+        .await
+        .unwrap();
+    let sent = responses_after(&lab.trouter, 1).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["id"], id);
+    assert!(
+        lab.log
+            .lines()
+            .iter()
+            .any(|line| line["event"] == "delivery_response" && line["verdict"] == "allow"),
+        "logged before it went"
+    );
+    // an outsider's invitation is still never handed on, so nothing answers it
+    let _ = lab.trouter.deliver_call_invitation(LAB_B, OUTSIDER);
+    let ignored = next(&mut push, |event| match event {
+        PushEvent::Ignored(ignored) => Some(ignored),
+        _ => None,
+    })
+    .await;
+    assert_eq!(ignored, Ignored::IncomingCall);
+    push.stop().await;
 }

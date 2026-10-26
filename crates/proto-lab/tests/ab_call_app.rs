@@ -2,14 +2,14 @@
 //! says its own microphone sounds. Its progress lines are read (and their parser tested) by the app's live test.
 
 use proto_lab::scenario::ScenarioName;
-use proto_lab::scenario::ab_call::{ANSWER_HELD, CALLER_JOIN_HELD, CallStep, RING_SENDS};
+use proto_lab::scenario::ab_call::CallStep;
 use proto_lab::scenario::ab_call_app::{FORCED_ANSWER, FORCED_PLACE, forced, microphone_sounds};
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 
 #[test]
-fn b_s_page_expects_its_probe_and_the_step_s_holds_and_nothing_else() {
-    assert_eq!(FORCED_ANSWER, [EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD]);
-    assert_eq!(FORCED_PLACE, [EARLIER_RUN_PROBE, CALLER_JOIN_HELD]);
+fn b_s_page_expects_only_an_earlier_run_s_probe() {
+    assert_eq!(FORCED_ANSWER, [EARLIER_RUN_PROBE]);
+    assert_eq!(FORCED_PLACE, [EARLIER_RUN_PROBE]);
     assert_eq!(forced(CallStep::Answer), Ok(FORCED_ANSWER));
     assert_eq!(forced(CallStep::Place), Ok(FORCED_PLACE));
     assert_eq!(ScenarioName::AbCallApp.as_str(), "ab-call-app");

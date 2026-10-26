@@ -8,15 +8,13 @@
 //!
 //! b's page loads at the a–b chat, starts its calling stack and plays Chrome's fake microphone (the tone in bursts) and
 //! camera, as `ab-call-native`'s does. By `--call`:
-//! - **`answer`** (the default): once the page's calling socket is up it says `ready` and waits for a's call (held as a
-//!   callee while it rings, [`RING_SENDS`]); it clicks answer only on the run's own call (`ab-call`'s ring check, every
-//!   invitation the page received a's call to b in no group chat), says `in-call`, must hear a's tone (`heard`) and
-//!   decode a's video once its own camera is on (`saw`), and then stays in the call until a hangs up (`ended`), at most
-//!   [`APP_HOLD`].
+//! - **`answer`** (the default): once the page's calling socket is up it says `ready` and waits for a's call; it clicks
+//!   answer only on the run's own call (`ab-call`'s ring check, every invitation the page received a's call to b in no
+//!   group chat), says `in-call`, must hear a's tone (`heard`) and decode a's video once its own camera is on (`saw`),
+//!   and then stays in the call until a hangs up (`ended`), at most [`APP_HOLD`].
 //! - **`place`**: once the page's calling socket is up it says `ready` and calls a from the chat's header (its start
-//!   decided by the fence, its join of a running call held back as `ab-call`'s caller's); once a's app answered it
-//!   says `in-call`, must hear a's tone and decode a's video as above, holds the call [`PAGE_HOLD`] and hangs up
-//!   (`ended`).
+//!   decided by the fence); once a's app answered it says `in-call`, must hear a's tone and decode a's video as above,
+//!   holds the call [`PAGE_HOLD`] and hangs up (`ended`).
 //!
 //! Judged by b's fence: no deny but the reviewed list's and the run's forced ones; in `answer`, the run's invitation
 //! reaching the page and its attach let through; in `place`, its own start let through.
@@ -32,9 +30,9 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_call::{
-    ANSWER_HELD, CALLER_JOIN_HELD, CONNECT_WAIT, CallStep, CalleeRole, EarlierRings, HANG_UP_CSS, INCOMING_CALL,
-    Modality, RING_SENDS, RunCall, back_to_chat, caller_join_rule, check_ring, hang_up_page, hold_callee, judge_callee,
-    mri, note_microphone, place_call, policy, stand_up_calling, switch_microphone, wait_calling_socket, watch_controls,
+    CONNECT_WAIT, CallStep, CalleeRole, EarlierRings, HANG_UP_CSS, INCOMING_CALL, Modality, RunCall, back_to_chat,
+    check_ring, hang_up_page, judge_callee, mri, note_microphone, place_call, policy, stand_up_calling,
+    switch_microphone, wait_calling_socket, watch_controls,
 };
 use super::ab_call_native::{ANSWER, hear_on_page, now_ms, see_on_page};
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, setup};
@@ -42,10 +40,10 @@ use super::dsl::{Selector, js_string};
 use super::echo_call::{HANG_UP, USER_AGENT, call_starts, linger, size_page, write_burst_tone};
 use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// The forced denies of `answer`: an earlier run's probe, the page's sends while it rings and once it answered.
-pub const FORCED_ANSWER: &[&str] = &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD];
-/// The forced denies of `place`: an earlier run's probe and the page's own join of the running call.
-pub const FORCED_PLACE: &[&str] = &[EARLIER_RUN_PROBE, CALLER_JOIN_HELD];
+/// The forced denies of `answer`: an earlier run's probe.
+pub const FORCED_ANSWER: &[&str] = &[EARLIER_RUN_PROBE];
+/// The forced denies of `place`: an earlier run's probe.
+pub const FORCED_PLACE: &[&str] = &[EARLIER_RUN_PROBE];
 
 /// How long the page waits for a's call once it said `ready`: the live test calls once it read the line.
 pub const APP_RING_WAIT: Duration = Duration::from_secs(90);
@@ -185,7 +183,6 @@ async fn answer(
     report: &mut ScenarioReport,
 ) -> Result<Option<u64>, ScenarioError> {
     stand_up(session, &call.caller, options, report).await?;
-    hold_callee(session, RING_SENDS)?;
     let since = now_ms();
     progress("ready");
     session
@@ -203,7 +200,6 @@ async fn answer(
         EarlierRings::OwnLeftOut,
     )
     .await?;
-    hold_callee(session, ANSWER.label)?;
     session
         .driver()
         .click("b clicks answer", Selector::Css(ANSWER.button))
@@ -230,7 +226,6 @@ async fn place(
     report: &mut ScenarioReport,
 ) -> Result<(), ScenarioError> {
     stand_up(session, mri_a, options, report).await?;
-    session.force_deny(caller_join_rule().map_err(|error| setup(error.to_string()))?);
     back_to_chat(Alias::B, &mut session.driver(), report).await?;
     progress("ready");
     place_call((Alias::B, session), Modality::Audio, report).await?;

@@ -141,3 +141,35 @@ fn a_profile_event_names_whose_profile_changed_and_never_their_name() {
     assert_eq!(value["who"], mri);
     assert_eq!(value.as_object().map(serde_json::Map::len), Some(3), "{value}");
 }
+
+#[test]
+fn a_start_refused_by_a_running_call_says_so_and_names_that_call() {
+    use teams_core::{End, RemoteEnd};
+    use teams_headless::print::end_word;
+    let conversation =
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/Synthetic9";
+    let refused = RemoteEnd {
+        code: Some(409),
+        sub_code: Some(5704),
+        phrase: Some("Conversation cannot be created due to a failure to resolve ownership.".to_owned()),
+        conversation: Some(conversation.to_owned()),
+    };
+    assert_eq!(
+        end_word(&End::Remote(refused.clone())),
+        format!("remote 409 chat has a running call {conversation}")
+    );
+    let unnamed = RemoteEnd {
+        conversation: None,
+        ..refused.clone()
+    };
+    assert_eq!(end_word(&End::Remote(unnamed)), "remote 409 chat has a running call ?");
+    // any other end keeps its code and phrase
+    let other = RemoteEnd {
+        sub_code: Some(0),
+        ..refused
+    };
+    assert_eq!(
+        end_word(&End::Remote(other)),
+        "remote 409 Conversation cannot be created due to a failure to resolve ownership."
+    );
+}

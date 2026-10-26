@@ -1094,12 +1094,11 @@ fn dispatch(cdp: &Cdp, shared: &Arc<Shared>, event: Event) {
             tokio::spawn(async move {
                 let shared = &deciding.0;
                 let handled = shared.http.handle(&cdp, &event).await;
-                // only a decided request is a verdict; a continued response is recorded as such (a read call answer
-                // with what it bound), a caught redirect isn't recorded
+                // only a decided request is a verdict; a continued response is recorded as such, a caught redirect
+                // isn't recorded
                 match (&shared.capture, handled) {
                     (Some(capture), Ok(Handled::Decided(verdict))) => capture.http_verdict(&event, verdict),
-                    (Some(capture), Ok(Handled::ResponseContinued)) => capture.continued(&event, None),
-                    (Some(capture), Ok(Handled::CallAnswerRead { bound })) => capture.continued(&event, Some(bound)),
+                    (Some(capture), Ok(Handled::ResponseContinued)) => capture.continued(&event),
                     (Some(capture), Err(error)) => capture.unanswered(&event, &error.to_string()),
                     _ => {}
                 }

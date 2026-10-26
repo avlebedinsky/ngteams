@@ -129,19 +129,19 @@ fn the_edit_adds_no_space_and_the_reported_run_outlasts_a_delivery_s_lifetime() 
 }
 
 #[test]
-fn denied_delivery_responses_are_expected_trouter_frames() -> TestResult {
+fn delivery_responses_pass_and_no_denied_trouter_frame_is_expected() -> TestResult {
     for activity in [Activity::Reported, Activity::HeldBack] {
         let policy = ab_trouter::trouter_policy(activity, Some(AB_CHAT))?;
         let denied = FrameDenial::new(
             "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c",
             DenyCause::Unclassified,
         );
-        assert!(policy.expects_frame(&denied));
+        assert!(!policy.expects_frame(&denied));
         let answer = Frame {
             url: REGIONAL.to_owned(),
             payload: Payload::Text(r#"3:::{"id":"-1","status":200}"#.to_owned()),
         };
-        assert_eq!(classify_frame(&answer), Classification::Unknown);
+        assert_eq!(classify_frame(&answer), Classification::Allow);
     }
     Ok(())
 }

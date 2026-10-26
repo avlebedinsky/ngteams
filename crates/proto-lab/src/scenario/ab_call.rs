@@ -4,23 +4,23 @@
 //! fence's verdicts and the WebRTC hooks' reports are the material of `docs/protocol/calling.md`.
 //!
 //! Every account runs under the lab rule with members read live, Chrome's fake camera and a microphone playing a tone,
-//! muted ([`crate::browser::BASE_ARGS`]). What a run does is its step ([`CallStep`], `proto-lab run ab-call --call
-//! <step>`):
+//! muted ([`crate::browser::BASE_ARGS`]). The fence judges a call by its entry: a's start, a callee's answer, decline
+//! or join; what a call sends once it was let in (its follow-ups, the callee's ring-time sends, the delivery
+//! responses) passes. What a run does is its step ([`CallStep`], `proto-lab run ab-call --call <step>`):
 //! - `start-held`: only a's browser runs. a clicks the chat's audio call button, then its video call button; each call
 //!   start is held back by a forced deny labelled [`START_HELD`], so nobody is invited and nothing rings. The capture
 //!   keeps the starts' bodies: what a start to a lab callee names (its `participants.to`) and what it names of its
 //!   chat.
-//! - `answer`, `decline`, `cancel`, `timeout`, `video`, `dropped`, `join`, `keep-alive`: a's browser and each callee's. Each callee
-//!   opens the Calls app (the client starts its calling stack only then), waits for its calling Trouter socket and,
-//!   before a calls, holds back everything its page sends to the calling services but its ring-time sends
-//!   ([`ring_rules`], labelled [`RING_SENDS`]: the fence decides its `attach`, `progress` and the invitation's
-//!   delivery response on the offered invitation). a's audio call start goes to the fence, which permits it only as a
-//!   start to lab callees in a lab-only chat; each callee must show the incoming call within [`RING_WAIT`]. Then:
-//!   - `answer`: each callee clicks answer ([`ACCEPT_AUDIO`]); its answer and the answered call's sends go to the fence
-//!     (everything else held back under [`ANSWER_HELD`]); the call must connect with audio both ways on every page
-//!     (getStats; whether each page heard the other side's tone is only noted), and then every participant hangs up;
-//!   - `decline`: each callee clicks decline ([`DECLINE`]); its rejection goes to the fence (everything else held back
-//!     under [`DECLINE_HELD`]) and must have been let through; a hangs up after [`AFTER_ACTION`];
+//! - `answer`, `decline`, `cancel`, `timeout`, `video`, `dropped`, `join`, `keep-alive`: a's browser and each callee's.
+//!   Each callee opens the Calls app (the client starts its calling stack only then) and waits for its calling Trouter
+//!   socket. a's audio call start goes to the fence, which permits it only as a start to lab callees in a lab-only chat;
+//!   each callee must show the incoming call within [`RING_WAIT`] (a's call ended by the service as one in a chat whose
+//!   call still runs fails the step at once: [`running_call_conflict`]). Then:
+//!   - `answer`: each callee clicks answer ([`ACCEPT_AUDIO`]), which the fence permits only on its own offered
+//!     invitation; the call must connect with audio both ways on every page (getStats; whether each page heard the
+//!     other side's tone is only noted), and then every participant hangs up;
+//!   - `decline`: each callee clicks decline ([`DECLINE`]); its rejection must have been let through; a hangs up after
+//!     [`AFTER_ACTION`];
 //!   - `cancel`: a hangs up after [`RING_BEFORE_CANCEL`] while the callees ring: the caller's cancel as they receive it;
 //!   - `timeout`: nobody acts for [`UNANSWERED`] (an unanswered call goes to the callee's voicemail, a service of
 //!     the callee's own account, which accepts it for a); then a hangs up;
@@ -29,12 +29,11 @@
 //!     run closes its calling Trouter socket itself, which must close; once the page is back every page must still
 //!     show the call;
 //!   - `join` (`abc-call` only): every callee but the last answers; once the last one's ring ended it loads the chat
-//!     and clicks the header's join of the running call, its join decided by the fence (everything else held back
-//!     under [`JOIN_HELD`]); it must then show the call screen, and its capture the join's answer registering the call.
+//!     and clicks the header's join of the running call, which the fence judges by the chat it names; it must then show
+//!     the call screen, and its capture the join let through.
 //!   - `keep-alive`: as `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past its keep-alive interval, every
-//!     page's requests recorded: the run that captures the call's keep-alive, which the fence permits on the call's
-//!     own `callLeg` link (the registered call's or the answered invitation's). A call that ends before the hold is
-//!     over, or a page whose fence let no keep-alive through ([`KEEP_ALIVE_SENDS`]), fails the run.
+//!     page's requests recorded: the run that captures the call's keep-alive. A call that ends before the hold is over,
+//!     or a page whose fence let no keep-alive through ([`KEEP_ALIVE_SENDS`]), fails the run.
 //!
 //!   The run records [`AFTER_RING`] more and notes when each callee's incoming call went.
 //!
@@ -43,13 +42,15 @@
 //! ([`ring_check`]): every invitation its page received is a's call placed in this run (from a, to this callee, in the
 //! run's chat, nobody else named), all of one call; for an answer or a decline the page shows one incoming call, for a
 //! join the page shows the run's chat ([`chat_shown`]) with one join. Anything else and the step fails without a
-//! click. Whatever a click sends, the fence decides it again on its own: an answer, a decline or a join passes only on
-//! the account's own offered invitation from a lab caller.
+//! click. Whatever a click sends, the fence decides it again on its own: an answer or a decline passes only on the
+//! account's own offered invitation from a lab caller, a join only in a lab-only chat.
 //!
 //! Judged by [`policy`] per account: no deny but the reviewed expected-deny list's and the run's own forced ones; a's
 //! start allowed, each callee's page receiving the run's own call's invitation ([`own_invitations`]) and its attach let
-//! through, and what its step sends ([`judge_step_sends`]: a decline's rejection let through, a join registering its
-//! call). A failed run leaves each page's screenshot as `failure.png` in its capture.
+//! through, and what its step sends ([`judge_step_sends`]: a decline's rejection let through, a join let through). A
+//! failed run hangs up every page that shows its call, a's first, and waits up to [`HANG_UP_WAIT`] for each one's
+//! `leave` ([`hang_up_all`]), so no call is left running in the chat; it leaves each page's screenshot as
+//! `failure.png` in its capture.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -62,8 +63,8 @@ use crate::browser::Media;
 use crate::capture::EVENTS_FILE;
 use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::{Denial, DenyCause, ForcedDeny};
-use crate::fence_ws::ForcedFrameDeny;
+use crate::fence_http::{Denial, DenyCause, ForcedDeny, without_query};
+use crate::fence_ws::delivery_of;
 use crate::session::{LabSession, SessionOptions, TEAMS_URL};
 
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, save_screenshot_as, setup};
@@ -95,7 +96,7 @@ pub enum CallStep {
     /// requests fail and the run closes its calling Trouter socket; the call's media isn't affected) and comes back.
     Dropped,
     /// `abc-call` only: a calls, every callee but the last answers, and once the last one's ring ended it joins the
-    /// running call from the chat's header (what else its page sends held back under [`JOIN_HELD`]).
+    /// running call from the chat's header.
     Join,
     /// As `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past the call's keep-alive interval, to record its
     /// keep-alive, which the fence permits on the call's own `callLeg` link: every page must have sent one.
@@ -122,19 +123,16 @@ impl CallStep {
         }
     }
 
-    /// What each callee does in this step: answer ([`ACCEPT_AUDIO`], what its page sends from then on but the
-    /// answered call's mapped sends held back under [`ANSWER_HELD`]) or decline ([`DECLINE`], under [`DECLINE_HELD`]);
-    /// `None` for a step where no callee acts.
+    /// What each callee does in this step: answer ([`ACCEPT_AUDIO`]) or decline ([`DECLINE`]); `None` for a step where
+    /// no callee acts.
     #[must_use]
     pub fn callee_action(self) -> Option<CalleeAction> {
         match self {
             Self::Answer | Self::Video | Self::Dropped | Self::Join | Self::KeepAlive => Some(CalleeAction {
-                label: ANSWER_HELD,
                 button: ACCEPT_AUDIO_CSS,
                 what: "answer",
             }),
             Self::Decline => Some(CalleeAction {
-                label: DECLINE_HELD,
                 button: DECLINE_CSS,
                 what: "decline",
             }),
@@ -146,8 +144,6 @@ impl CallStep {
 /// What a callee does on the incoming call ([`CallStep::callee_action`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CalleeAction {
-    /// The label of what its page sends once it clicked.
-    pub label: &'static str,
     /// The CSS selector of the button it clicks.
     pub button: &'static str,
     /// The action, for the notes.
@@ -198,21 +194,6 @@ pub const INVITATION_WAIT: Duration = Duration::from_secs(5);
 
 /// The label of the forced deny of a's call starts in `start-held`.
 pub const START_HELD: &str = "the call start, held back";
-/// The label of what a callee's page sends to the calling services, or as a Trouter delivery response, while it rings.
-pub const RING_SENDS: &str = "a callee's sends while ringing, held back";
-/// The label of what a callee's page sends once it clicked answer.
-pub const ANSWER_HELD: &str = "a callee's answer, held back";
-/// The label of what a callee's page sends once it clicked decline.
-pub const DECLINE_HELD: &str = "a callee's decline, held back";
-/// The label of what the last callee's page sends once it clicked the chat's join (`join`).
-pub const JOIN_HELD: &str = "a callee's join of the running call, held back";
-/// The label of a's own join of the running call ([`caller_join_rule`]).
-pub const CALLER_JOIN_HELD: &str = "the caller's join of the running call, held back";
-
-/// The calling services' hosts as a URL pattern: the flight proxy, its `api.fl` name and the Skype-era call hosts
-/// (`teams_fence::service_of`'s calling service).
-pub const CALLING_HOSTS: &str =
-    r"^https://([a-z0-9-]+\.)*(flightproxy\.teams\.microsoft\.com|api\.fl\.teams\.microsoft\.com|skype\.com)(:\d+)?/";
 
 /// A Trouter socket's URL as a pattern.
 pub const TROUTER_SOCKETS: &str = r"^wss://([a-z0-9-]+\.)*trouter\.teams\.microsoft\.com(:\d+)?/";
@@ -224,6 +205,8 @@ pub const DELIVERY_RESPONSE: &str = "3:::";
 pub const RING_WAIT: Duration = Duration::from_secs(45);
 /// How long a callee gets to show the incoming call before the run takes a screenshot of what it shows instead.
 pub const RING_SHOT: Duration = Duration::from_secs(12);
+/// How often the wait for the incoming call looks at a's capture for a call the service ended at once.
+pub const RING_LOOK: Duration = Duration::from_secs(2);
 /// How long the callees ring before a hangs up in `cancel`.
 pub const RING_BEFORE_CANCEL: Duration = Duration::from_secs(8);
 /// How long the run records after the callees acted, before a hangs up.
@@ -237,6 +220,8 @@ pub const UNANSWERED: Duration = Duration::from_secs(50);
 pub const AFTER_RING: Duration = Duration::from_secs(8);
 /// How long a held-back start's call screen gets to go before the run hangs it up.
 pub const HELD_SETTLE: Duration = Duration::from_secs(6);
+/// How long a failed run waits for each page it hung up to send its `leave` ([`hang_up_all`]).
+pub const HANG_UP_WAIT: Duration = Duration::from_secs(10);
 
 /// The forced deny of every call start ([`CALL_START_URL`]), labelled [`START_HELD`].
 ///
@@ -246,32 +231,8 @@ pub fn start_held_rule() -> Result<ForcedDeny, regex::Error> {
     Ok(ForcedDeny::new("POST", &format!("^{}(\\?|$)", regex::escape(CALL_START_URL)))?.labelled(START_HELD))
 }
 
-/// What a callee's page sends once it clicked answer that the fence maps on the offered invitation, as a URL pattern
-/// (`POST`): its endpoint state in the call's conversation and its acceptance, and the answered call's operations (the
-/// keep-alive at the call leg's own link among them).
-pub const ANSWER_SENDS: &str = concat!(
-    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/",
-    r"(cc/v1/incoming/[^?]+/accept|cc/v1/negotiations/[^?]+/answer|cc/v1/active/[^?]+/renegotiate|",
-    r"cc/v1/active/[^/?]+/[^/?]+/[^/?]+/[^/?]+|",
-    r"cc/v1/mediaAnswers/[^?]+/acknowledge|cc/v1/active/[^?]+/updateMediaDescriptions|",
-    r"cc/v1/mcProxy/[^?]+/applyChannelParameters|",
-    r"conv/[^/?]+/(updateEndpointState|updateParticipantProperties|leave))(\?|$)"
-);
-
-/// What the page that joins a running call sends that the fence maps, as a URL pattern (`POST`): the join itself (the
-/// roster-only one and the one that enters the call, both to the conversation), and then its call's operations as an
-/// answered call's ([`ANSWER_SENDS`]) and the acceptance's acknowledgement.
-pub const JOIN_SENDS: &str = concat!(
-    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/",
-    r"(conv/[^/?]+|conv/[^/?]+/(updateEndpointState|updateParticipantProperties|leave)|cc/v1/callAcceptance/[^?]+/acknowledge|",
-    r"cc/v1/negotiations/[^?]+/answer|cc/v1/active/[^?]+/(renegotiate|updateMediaDescriptions)|",
-    r"cc/v1/active/[^/?]+/[^/?]+/[^/?]+/[^/?]+|",
-    r"cc/v1/mediaAnswers/[^?]+/acknowledge|cc/v1/mcProxy/[^?]+/applyChannelParameters)(\?|$)"
-);
-
 /// The call's keep-alive, as a URL pattern (`POST`): to the call leg's own link (`callLeg`,
-/// `…/cc/v1/active/<call>/<n>/<leg>/<n>`, no operation after it), which the fence maps on the registered call and on
-/// the answered invitation.
+/// `…/cc/v1/active/<call>/<n>/<leg>/<n>`, no operation after it).
 pub const KEEP_ALIVE_SENDS: &str = concat!(
     r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/",
     r"cc/v1/active/[^/?]+/[^/?]+/[^/?]+/[^/?]+(\?|$)"
@@ -284,118 +245,30 @@ pub fn keep_alives(text: &str) -> usize {
     allowed_requests(text, "POST", KEEP_ALIVE_SENDS)
 }
 
-/// What a callee's page `PUT`s once it answered that the fence maps on the answered invitation, as a URL pattern: its
-/// endpoint metadata in the call's conversation.
-pub const ANSWER_PUTS: &str =
-    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/conv/[^/?]+/updateEndpointMetadata(\?|$)";
-
-/// What a callee's page sends once it clicked decline that the fence maps on the offered invitation, as a URL pattern
-/// (`DELETE`): the rejection of its call leg.
+/// A callee's decline, as a URL pattern (`DELETE`): the rejection of its call leg.
 pub const DECLINE_SENDS: &str =
     r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/cc/v1/incoming/[^?]+/reject(\?|$)";
-
-/// The forced denies of everything a callee's page sends to the calling services ([`CALLING_HOSTS`]: every method
-/// that can write) and of every Trouter delivery response it sends, all labelled `label`; once it clicked answer
-/// ([`ANSWER_HELD`]) but its answer's `POST`s ([`ANSWER_SENDS`]), once it clicked decline ([`DECLINE_HELD`]) but its
-/// decline's `DELETE` ([`DECLINE_SENDS`]), which the fence decides.
-///
-/// # Errors
-/// Never: the patterns are fixed.
-pub fn callee_rules(label: &str) -> Result<(Vec<ForcedDeny>, ForcedFrameDeny), regex::Error> {
-    let requests: Vec<ForcedDeny> = ["POST", "PUT", "PATCH", "DELETE"]
-        .into_iter()
-        .map(|method| {
-            let rule = ForcedDeny::new(method, CALLING_HOSTS)?;
-            let rule = match (label, method) {
-                (ANSWER_HELD, "POST") => rule.except(ANSWER_SENDS)?,
-                (ANSWER_HELD | JOIN_HELD, "PUT") => rule.except(ANSWER_PUTS)?,
-                (DECLINE_HELD, "DELETE") => rule.except(DECLINE_SENDS)?,
-                (JOIN_HELD, "POST") => rule.except(JOIN_SENDS)?,
-                _ => rule,
-            };
-            Ok(rule.labelled(label))
-        })
-        .collect::<Result<_, regex::Error>>()?;
-
-    let frames = ForcedFrameDeny::new(TROUTER_SOCKETS)?
-        .with_text_starting_with(DELIVERY_RESPONSE)
-        .labelled(label);
-    Ok((requests, frames))
-}
 
 /// An invitation's `attach` link (`…/cc/v1/forked/<call>/…/attach`), as a URL pattern.
 pub const ATTACH: &str =
     r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/cc/v1/forked/[^?]+/attach(\?|$)";
 
-/// What a callee's page sends while it rings that the fence maps on the offered invitation, as a URL pattern: its
-/// `attach` ([`ATTACH`]) and its `progress` (`…/cc/v1/incoming/<call>/…/progress`, the link the attach's answer
-/// handed out).
-pub const RING_TIME: &str = concat!(
-    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/cc/v1/",
-    r"(forked/[^?]+/attach|incoming/[^?]+/progress)(\?|$)"
-);
-
-/// The forced denies of a callee's page while it rings, labelled [`RING_SENDS`]: everything it sends to the calling
-/// services ([`callee_rules`]) but its `POST`s to [`RING_TIME`], which the fence decides; and no frame rule, so its
-/// delivery responses go to the fence too (the offered invitation's receipt passes; any other one on a Trouter socket
-/// is denied by the frame rule).
-///
-/// # Errors
-/// Never: the patterns are fixed.
-pub fn ring_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
-    ["POST", "PUT", "PATCH", "DELETE"]
-        .into_iter()
-        .map(|method| {
-            let rule = ForcedDeny::new(method, CALLING_HOSTS)?;
-            let rule = if method == "POST" {
-                rule.except(RING_TIME)?
-            } else {
-                rule
-            };
-            Ok(rule.labelled(RING_SENDS))
-        })
-        .collect()
-}
-
-/// The forced deny of a's join of a running call (a `POST` to a conversation controller itself,
-/// `…/api/v2/ep/<conv host>/conv/<id>`), labelled [`CALLER_JOIN_HELD`]: after a hangs up a group call its callees
-/// still ring in, the client joins the call's conversation again by itself (seen 2026-10-24, `abc-call --call
-/// cancel`). No invitation of a's binds that conversation to a chat (a join maps only on an offered invitation's
-/// binding), so it stays denied; the rule only names it.
-///
-/// # Errors
-/// Never: the pattern is fixed.
-pub fn caller_join_rule() -> Result<ForcedDeny, regex::Error> {
-    Ok(ForcedDeny::new("POST", CONVERSATION_JOIN)?.labelled(CALLER_JOIN_HELD))
-}
-
 /// A conversation controller's own URL on the flight proxy: where a join goes.
 pub const CONVERSATION_JOIN: &str =
     r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/conv/[^/?]+(\?|$)";
 
-/// The forced denies of `step` the caller's run expects: an earlier run's probe, in `start-held` its starts, and in
-/// the ring's steps its own join of the running call ([`caller_join_rule`]).
+/// The forced denies of `step` the caller's run expects: an earlier run's probe, and in `start-held` its starts.
 #[must_use]
 pub fn caller_forced(step: CallStep) -> &'static [&'static str] {
     match step {
         CallStep::StartHeld => &[EARLIER_RUN_PROBE, START_HELD],
-        _ => &[EARLIER_RUN_PROBE, CALLER_JOIN_HELD],
+        _ => &[EARLIER_RUN_PROBE],
     }
 }
 
-/// The forced denies of `step` a callee's run expects: an earlier run's probe, its sends while ringing, and its
-/// answer's or decline's.
-#[must_use]
-pub fn callee_forced(step: CallStep) -> &'static [&'static str] {
-    match step {
-        CallStep::Answer | CallStep::Video | CallStep::Dropped | CallStep::KeepAlive => {
-            &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD]
-        }
-        CallStep::Join => &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD, JOIN_HELD],
-        CallStep::Decline => &[EARLIER_RUN_PROBE, RING_SENDS, DECLINE_HELD],
-        _ => &[EARLIER_RUN_PROBE, RING_SENDS],
-    }
-}
+/// The forced denies a callee's run expects: an earlier run's probe. Nothing the callee's page sends for the call is
+/// held back: the fence judges its answer, decline or join, and lets the rest of the call through.
+pub const CALLEE_FORCED: &[&str] = &[EARLIER_RUN_PROBE];
 
 /// The denies a run expects of an account with these forced `labels`: the reviewed list ([`super::expected`]) and them.
 #[must_use]
@@ -513,10 +386,103 @@ pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<Scenar
     if let Err(error) = plan.drive(&mut sessions, &mut placed, &mut report).await {
         report.failures.push(error.to_string());
         diagnose(&sessions, &mut report).await;
+        hang_up_all(&mut sessions, &mut report).await;
     }
     close_all(sessions, plan, placed, &mut report).await;
     judge_held(plan.step, &mut report);
     Ok(report)
+}
+
+/// A conversation's `leave`, as a URL pattern (`POST`): what a page that hangs up sends to leave the call.
+pub const LEAVE_SENDS: &str =
+    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/conv/[^/?]+/leave(\?|$)";
+
+/// The `leave`s a capture's `events.jsonl` text shows its fence letting through ([`LEAVE_SENDS`], each `Network`
+/// request once).
+#[must_use]
+pub fn leaves(text: &str) -> usize {
+    allowed_requests(text, "POST", LEAVE_SENDS)
+}
+
+/// The text of `session`'s capture so far (its `events.jsonl`); `None` without one.
+fn capture_text(session: &LabSession) -> Option<String> {
+    std::fs::read_to_string(session.capture_dir()?.join(EVENTS_FILE)).ok()
+}
+
+/// A failed run's last step before its browsers close: every page that shows its call's hang-up control hangs up, in
+/// order (a's first), and the run waits up to [`HANG_UP_WAIT`] for that page's fence to let a `leave` through
+/// ([`leaves`]), so no call of the run is left running in its chat (the service would refuse the chat's next call:
+/// [`running_call_conflict`]). What each page did goes into the notes; nothing here fails the run further.
+pub(crate) async fn hang_up_all(sessions: &mut [(Alias, LabSession)], report: &mut ScenarioReport) {
+    for (alias, session) in sessions.iter_mut() {
+        let before = capture_text(session).map_or(0, |text| leaves(&text));
+        match hang_up_page(*alias, session, report).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                report
+                    .notes
+                    .push(format!("{alias}: couldn't hang up after the failure: {error}"));
+                continue;
+            }
+        }
+        let deadline = tokio::time::Instant::now() + HANG_UP_WAIT;
+        loop {
+            if capture_text(session).is_some_and(|text| leaves(&text) > before) {
+                report.notes.push(format!("{alias}: its leave went by {}", unix_ms()));
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                report
+                    .notes
+                    .push(format!("{alias}: no leave went within {HANG_UP_WAIT:?} of its hang-up"));
+                break;
+            }
+            linger(session, Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// What a native client's call says when the service ended it at once because the chat already has a running call
+/// (`teams-headless`'s end word for a `conversationEnd` of 409, 5704), the running call's conversation after it.
+pub const NATIVE_CONFLICT: &str = "remote 409 chat has a running call ";
+
+/// Whether a native client's output shows its call ended at once because the chat already has a running call
+/// ([`NATIVE_CONFLICT`]): the running call's conversation, as the end names it; `None` when no such end came.
+#[must_use]
+pub fn native_call_conflict(output: &str) -> Option<String> {
+    let (_, rest) = output.split_once(NATIVE_CONFLICT)?;
+    let conversation: String = rest.chars().take_while(|c| !c.is_whitespace() && *c != '"').collect();
+    Some(if conversation.is_empty() {
+        "?".to_owned()
+    } else {
+        conversation
+    })
+}
+
+/// Whether a capture's `events.jsonl` text shows its page's call ended by the service at once because the chat already
+/// has a running call: a Trouter delivery at a `conversationEnd` callback whose body names code 409, sub-code 5704
+/// ("failure to resolve ownership", seen 2026-10-26: a start in a chat whose earlier call still runs). The running
+/// call's conversation, as the end names it (`conversationUrl.Location`, its query left out), or `"?"` when it names
+/// none; `None` when no such end came.
+#[must_use]
+pub fn running_call_conflict(text: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["type"] == "cdp" && entry["method"] == "Network.webSocketFrameReceived")
+        .find_map(|entry| {
+            let delivery = delivery_of("", entry["params"]["response"]["payloadData"].as_str()?)?;
+            if !delivery.path.ends_with("/conversationEnd/") {
+                return None;
+            }
+            let end: Value = serde_json::from_slice(&delivery.body).ok()?;
+            let conflict = end["code"].as_i64() == Some(409) && end["subCode"].as_i64() == Some(5704);
+            conflict.then(|| {
+                end.pointer("/conversationUrl/Location")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| "?".to_owned(), |url| without_query(url).to_owned())
+            })
+        })
 }
 
 /// A failed run's diagnosis: each page's screenshot and the call controls it shows.
@@ -546,7 +512,7 @@ async fn close_all(
         let labels = if alias == CALLER {
             caller_forced(step)
         } else {
-            callee_forced(step)
+            CALLEE_FORCED
         };
         report.close_account(alias, session, &policy(labels)).await;
         if let Some(dir) = capture {
@@ -610,9 +576,7 @@ impl CallPlan {
         for (alias, session) in callees.iter_mut() {
             wait_calling_socket(*alias, session, report).await?;
         }
-        caller.force_deny(caller_join_rule().map_err(|error| setup(error.to_string()))?);
         for (alias, session) in callees.iter() {
-            hold_callee(session, RING_SENDS)?;
             watch_controls(*alias, session).await?;
         }
         self.ring(caller, callees, placed, report).await
@@ -664,7 +628,7 @@ impl CallPlan {
         place_call((CALLER, caller), Modality::Audio, report).await?;
         match self.step.callee_action() {
             Some(action) => {
-                if let Err(error) = wait_incoming(callees, report).await {
+                if let Err(error) = wait_incoming(callees, caller.capture_dir(), report).await {
                     note_ring_controls(callees, report).await;
                     return Err(error);
                 }
@@ -685,8 +649,8 @@ impl CallPlan {
         Ok(())
     }
 
-    /// Each callee clicks `action`'s button, what its page sends from then on held back under its label, but only on
-    /// the run's own call ([`check_ring`]); a hangs up after [`AFTER_ACTION`].
+    /// Each callee clicks `action`'s button, but only on the run's own call ([`check_ring`]); a hangs up after
+    /// [`AFTER_ACTION`].
     async fn act(
         &self,
         action: CalleeAction,
@@ -701,7 +665,6 @@ impl CallPlan {
             callees.len()
         };
         for (alias, session) in callees.iter_mut().take(answering) {
-            hold_callee(session, action.label)?;
             check_ring(
                 (*alias, &mut *session),
                 action,
@@ -783,40 +746,42 @@ pub(crate) async fn check_ring(
 }
 
 /// Waits up to [`RING_WAIT`] for each callee to show the incoming call; one that doesn't within [`RING_SHOT`] leaves a
-/// screenshot of what it shows while it rings (`ringing.png` in its capture).
+/// screenshot of what it shows while it rings (`ringing.png` in its capture). Every [`RING_LOOK`] meanwhile it reads the
+/// caller's capture, `caller` (its directory), when there is one: a call the service ended at once because the chat
+/// already has a running call ([`running_call_conflict`]) fails the step then, naming that call, rather than when the
+/// ring wait runs out.
 pub(crate) async fn wait_incoming(
     callees: &mut [(Alias, LabSession)],
+    caller: Option<&Path>,
     report: &mut ScenarioReport,
 ) -> Result<(), ScenarioError> {
+    let conflict = || {
+        let text = std::fs::read_to_string(caller?.join(EVENTS_FILE)).ok()?;
+        running_call_conflict(&text)
+    };
     for (alias, session) in callees.iter_mut() {
         let what = format!("{alias} shows the incoming call");
-        if session
-            .driver()
-            .wait_for(&what, INCOMING_CALL, RING_SHOT)
-            .await
-            .is_err()
-        {
-            if let Some(note) = save_screenshot_as(*alias, session, "ringing.png").await {
-                report.notes.push(note);
+        let started = tokio::time::Instant::now();
+        let mut shot = false;
+        loop {
+            let left = RING_WAIT.saturating_sub(started.elapsed());
+            let shown = session
+                .driver()
+                .wait_for(&what, INCOMING_CALL, left.min(RING_LOOK))
+                .await;
+            let Err(error) = shown else { break };
+            if let Some(conversation) = conflict() {
+                return Err(setup(format!(
+                    "chat has a running call {conversation}: the service ended {CALLER}'s call at once (409, 5704)"
+                )));
             }
-            let toast = session
-                .driver()
-                .evaluate(
-                    "the in-app notifications' controls",
-                    "JSON.stringify([...document.querySelectorAll('[data-tid=\"app-layout-area--in-app-notifications\"] \
-                     button, [data-tid=\"app-layout-area--in-app-notifications\"] [role]')].slice(0, 40)\
-                     .map(e => Object.fromEntries([...e.attributes].filter(a => a.name !== 'style' && a.name !== 'class')\
-                     .map(a => [a.name, a.value.slice(0, 80)]))))",
-                )
-                .await
-                .unwrap_or_default();
-            report
-                .notes
-                .push(format!("{alias}: the in-app notifications' controls: {toast}"));
-            session
-                .driver()
-                .wait_for(&what, INCOMING_CALL, RING_WAIT.saturating_sub(RING_SHOT))
-                .await?;
+            if started.elapsed() >= RING_WAIT {
+                return Err(error.into());
+            }
+            if !shot && started.elapsed() >= RING_SHOT {
+                shot = true;
+                note_ringing(*alias, session, report).await;
+            }
         }
         report
             .notes
@@ -825,31 +790,26 @@ pub(crate) async fn wait_incoming(
     Ok(())
 }
 
-/// From now on, `session`'s page is held under `label`: while it rings ([`RING_SENDS`]) everything it sends to the
-/// calling services but what the fence maps on an offered invitation ([`ring_rules`]), once it acted everything it
-/// sends to the calling services but what the fence maps for that action, and every Trouter delivery response it sends
-/// ([`callee_rules`]); the probe rules stay,
-/// and the earlier label's rules go.
-///
-/// # Errors
-/// Never: the patterns are fixed.
-pub(crate) fn hold_callee(session: &LabSession, label: &str) -> Result<(), ScenarioError> {
-    let (requests, frames) = if label == RING_SENDS {
-        (ring_rules().map_err(|error| setup(error.to_string()))?, None)
-    } else {
-        let (requests, frames) = callee_rules(label).map_err(|error| setup(error.to_string()))?;
-        (requests, Some(frames))
-    };
-    let probes = probe_rules(None).map_err(|error| setup(error.to_string()))?;
-    session.clear_forced();
-    probes
-        .into_iter()
-        .chain(requests)
-        .for_each(|rule| session.force_deny(rule));
-    if let Some(frames) = frames {
-        session.force_deny_frames(frames);
+/// What a callee's page shows while it doesn't show the incoming call: its screenshot (`ringing.png` in its capture)
+/// and the in-app notifications' controls, into the notes.
+async fn note_ringing(alias: Alias, session: &LabSession, report: &mut ScenarioReport) {
+    if let Some(note) = save_screenshot_as(alias, session, "ringing.png").await {
+        report.notes.push(note);
     }
-    Ok(())
+    let toast = session
+        .driver()
+        .evaluate(
+            "the in-app notifications' controls",
+            "JSON.stringify([...document.querySelectorAll('[data-tid=\"app-layout-area--in-app-notifications\"] \
+             button, [data-tid=\"app-layout-area--in-app-notifications\"] [role]')].slice(0, 40)\
+             .map(e => Object.fromEntries([...e.attributes].filter(a => a.name !== 'style' && a.name !== 'class')\
+             .map(a => [a.name, a.value.slice(0, 80)]))))",
+        )
+        .await
+        .unwrap_or_default();
+    report
+        .notes
+        .push(format!("{alias}: the in-app notifications' controls: {toast}"));
 }
 
 /// `start-held`: a places each call of `modalities` (an audio call, a video call); each start must be held back (the
@@ -1156,9 +1116,9 @@ pub fn chat_shown(reading: &str) -> Result<(), String> {
 
 impl CallPlan {
     /// `join`: every callee but the last answered; the last one's ring ends unanswered ([`RING_END`]), its page goes
-    /// back to the chat (the Chat app shows the chat it loaded at), holds everything it sends to the calling services
-    /// under [`JOIN_HELD`], and, only on the run's own call ([`Self::check_join`]), clicks the header's join of the
-    /// running call ([`CHAT_JOIN`]); its call screen must then show within [`CONNECT_WAIT`]. Then the others hang up.
+    /// back to the chat (the Chat app shows the chat it loaded at), and, only on the run's own call
+    /// ([`Self::check_join`]), clicks the header's join of the running call ([`CHAT_JOIN`]); its call screen must then
+    /// show within [`CONNECT_WAIT`]. Then the others hang up.
     async fn join_late(
         &self,
         placed: u64,
@@ -1178,7 +1138,6 @@ impl CallPlan {
         wait_ring_end(&mut callees[last..], RING_END, report).await;
         let (alias, joiner) = &mut callees[last];
         let alias = *alias;
-        hold_callee(joiner, JOIN_HELD)?;
         open_join(alias, joiner, report).await?;
         self.check_join(alias, joiner, placed, report).await?;
         let mut driver = joiner.driver();
@@ -1933,8 +1892,8 @@ impl CalleeRole {
 }
 
 /// What a callee's capture (`text`, its `events.jsonl`) must show it sent in its `role`: one that declines, its
-/// rejection let through by the fence ([`DECLINE_SENDS`], [`allowed_requests`]); one that joins, its join with media
-/// registering its call ([`registered_joins`]). A note of what it shows, or the failure.
+/// rejection let through by the fence ([`DECLINE_SENDS`], [`allowed_requests`]); one that joins, its join of the running
+/// call let through ([`CONVERSATION_JOIN`]). A note of what it shows, or the failure.
 ///
 /// # Errors
 /// The failure, when the capture doesn't show it.
@@ -1944,9 +1903,11 @@ pub fn judge_step_sends(role: CalleeRole, text: &str) -> Result<Option<String>, 
             0 => Err("the fence let no rejection of the call through".to_owned()),
             rejects => Ok(Some(format!("the fence let {rejects} rejection(s) through"))),
         },
-        CalleeRole::Joins => match registered_joins(text) {
-            0 => Err("no join of the running call registered its call".to_owned()),
-            joins => Ok(Some(format!("{joins} join(s) of the running call registered its call"))),
+        CalleeRole::Joins => match allowed_requests(text, "POST", CONVERSATION_JOIN) {
+            0 => Err("the fence let no join of the running call through".to_owned()),
+            joins => Ok(Some(format!(
+                "the fence let {joins} join(s) of the running call through"
+            ))),
         },
         CalleeRole::Other => Ok(None),
     }
@@ -1963,24 +1924,6 @@ pub fn allowed_requests(text: &str, method: &str, pattern: &str) -> usize {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|entry| entry["type"] == "verdict" && entry["verdict"] == "allow" && entry["channel"] == "http")
         .filter(|entry| entry["method"] == method && pattern.is_match(entry["url"].as_str().unwrap_or_default()))
-        .map(|entry| entry["network_id"].to_string())
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-}
-
-/// The joins with media a capture's `events.jsonl` text shows registering their call: each answer to a `POST` to a
-/// conversation ([`CONVERSATION_JOIN`]) that the fence permitted and waited for, read with a success status and
-/// registering the call (a `response_continued` entry with `"bound": true`), once per `Network` request.
-#[must_use]
-pub fn registered_joins(text: &str) -> usize {
-    let Ok(join) = regex::Regex::new(CONVERSATION_JOIN) else {
-        return 0;
-    };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|entry| entry["type"] == "response_continued" && entry["method"] == "POST")
-        .filter(|entry| entry["bound"] == true && entry["status"].as_u64().is_some_and(|s| (200..300).contains(&s)))
-        .filter(|entry| join.is_match(entry["url"].as_str().unwrap_or_default()))
         .map(|entry| entry["network_id"].to_string())
         .collect::<std::collections::BTreeSet<_>>()
         .len()
@@ -2190,31 +2133,13 @@ pub fn invitations(text: &str) -> Vec<Invitation> {
 /// call's mixer dialling the callee out).
 pub const INVITATION_EVENTS: [u64; 2] = [107, 109];
 
-/// The held-back counts by label, per account, into the notes; `start-held` must have held back both starts.
+/// The held-back starts, per account, into the notes; `start-held` must have held back both starts.
 fn judge_held(step: CallStep, report: &mut ScenarioReport) {
-    let labels = [
-        START_HELD,
-        RING_SENDS,
-        ANSWER_HELD,
-        DECLINE_HELD,
-        CALLER_JOIN_HELD,
-        JOIN_HELD,
-    ];
     let mut notes = Vec::new();
     for run in &report.accounts {
-        for label in labels {
-            let requests = held_back(&run.denials, label);
-            let frames = run
-                .frame_denials
-                .iter()
-                .filter(|denial| denial.label.as_deref() == Some(label))
-                .count();
-            if requests + frames > 0 {
-                notes.push(format!(
-                    "{}: {label}: {requests} request(s), {frames} frame(s)",
-                    run.alias
-                ));
-            }
+        let requests = held_back(&run.denials, START_HELD);
+        if requests > 0 {
+            notes.push(format!("{}: {START_HELD}: {requests} request(s)", run.alias));
         }
         if step == CallStep::StartHeld && run.alias == CALLER && held_back(&run.denials, START_HELD) == 0 {
             report.failures.push("a's fence held back no call start".to_owned());

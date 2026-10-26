@@ -22,26 +22,12 @@
 //! that sends the browser there by script) is caught and failed the same way. Every other paused response is continued:
 //! its request was already let through at the request stage, and continuing a response sends nothing. So the catch
 //! only ever fails what would otherwise go on; it lets nothing through that the fence would deny, and a fence without
-//! one pauses no response of its own (any other paused response but the call start's answer, below, is failed, and fails
-//! the run).
+//! one pauses no response at all (a paused response without a catch is failed, and fails the run).
 //!
-//! **The call start's answer** feeds the fence's call registry (`teams_fence`'s `calls`: a call's follow-ups pass only
-//! on a call this fence permitted, to the links its services handed out). A call start the fence permits is kept,
-//! with its body, as a pending call ([`teams_fence::Fence::pend_start`]) under the request's `Network` id, which both
-//! fetch layers see; the browser session also pauses the responses to [`CALL_START_URL`] at the response stage (of any
-//! method: the start's CORS preflight `OPTIONS` pauses too, and is continued), and when the answer to a start's `POST`
-//! kept so is a success, its body (`Fetch.getResponseBody`) registers the call ([`teams_fence::Fence::register_start`])
-//! before the response is continued, so the page can't name the call before the fence knows it. A join of a running
-//! call with media pends and registers the same way: the browser session also pauses the answers to a conversation's
-//! requests ([`CONVERSATIONS`]). Any other answer registers nothing. Continuing a response sends nothing.
-//!
-//! **An `attach`'s and an `accept`'s answers** do the same on the callee's side: an `attach` or an `accept` the fence
-//! permits on an offered invitation pends under its `Network` id ([`teams_fence::Fence::pend_answer`]), the browser
-//! session pauses the responses to an invitation's `attach` and `accept` links ([`CALL_ANSWERS`]) at the response
-//! stage, and a success's body binds the links it hands out (an `attach`'s: the call leg's and the conversation's; an
-//! `accept`'s: the answered call's `mediaRenegotiation`, `updateMediaDescriptions` and `applyChannelParameters`) to
-//! the invitation ([`teams_fence::Fence::bind_answer`]) before it is continued. The capture records whether such a
-//! read answer registered or bound anything ([`Handled::CallAnswerRead`]).
+//! **Calls** are judged at the request stage alone, by their entry (the lab's call rule, `teams_fence::Fence::check`):
+//! a call start, a join, an answer, a decline and an `add` by who takes part in them; what a call sends once it was let
+//! in passes with no lookup. So no call answer is read at the response stage and nothing is registered or bound for
+//! the call's later requests.
 //!
 //! A run can also force a deny ([`HttpFence::force_deny`], [`ForcedDeny`]): a request it matches is denied before it is
 //! classified, whatever it is. That is how a scenario checks, live, that a denied write never leaves the browser.
@@ -53,18 +39,15 @@
 //! event, headers included, has been handed to the run's event watchers and offered to the capture recorder before
 //! that.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use base64::Engine as _;
 use regex::Regex;
 use serde_json::{Value, json};
 use teams_auth::redirect::{RedirectError, RedirectUri};
 use teams_auth::secrets::Secret;
 use teams_fence::{
-    AllowedRecord, CALL_START_URL, CallOperation, Channel, ChatCredential, Fence, LiveMembershipSource,
-    MembershipSource, OVERRIDE_HEADERS, PendingAnswer, PendingStart, RequestOutcome, RequestRecord, Scope, WriteKind,
-    WritePermit,
+    AllowedRecord, Channel, ChatCredential, Fence, LiveMembershipSource, MembershipSource, OVERRIDE_HEADERS,
+    RequestOutcome, RequestRecord,
 };
 use tokio::sync::mpsc;
 use url::Url;
@@ -159,9 +142,6 @@ pub enum DenyCause {
     ForeignSocket,
     /// The run forced a deny on it ([`ForcedDeny`]).
     Forced,
-    /// A Trouter delivery response answering a pending call delivery, which the fence refused (its reason is in
-    /// `fence.log`).
-    DeliveryResponse(teams_fence::DeliveryDenyReason),
 }
 
 /// What happens to one request (or, in the WebSocket layer, one frame).
@@ -279,15 +259,8 @@ pub enum Handled {
     Decided(Verdict),
     /// The authorization redirect: caught, handed to the catch's receiver, and failed.
     RedirectCaught,
-    /// A paused response continued: the login origin's that isn't the redirect, or a call answer (a call start's or a
-    /// join's, an `attach`'s or an `accept`'s) no permitted request of the fence's waited for.
+    /// A paused response continued: the login origin's that isn't the redirect.
     ResponseContinued,
-    /// A paused call answer to a `POST` the fence permitted and waited for (a call start or a join with media, an
-    /// `attach`, an `accept`), read and then continued.
-    CallAnswerRead {
-        /// Whether the answer registered its call or bound the links it hands out to its invitation.
-        bound: bool,
-    },
 }
 
 /// Why a [`RedirectCatch`] can't be made.
@@ -384,61 +357,6 @@ pub struct HttpFence {
     forced: Mutex<Vec<ForcedDeny>>,
     denials: Mutex<Vec<Denial>>,
     catch: Option<RedirectCatch>,
-    /// The call starts this fence permitted, by the request's `Network` id, waiting for their answers (see the module
-    /// docs).
-    starts: Mutex<HashMap<String, PendingStart>>,
-    /// The `attach`es and `accept`s this fence permitted, by the request's `Network` id, waiting for their answers.
-    answers: Mutex<HashMap<String, PendingAnswer>>,
-}
-
-/// The `Fetch` pattern that pauses the call start's answer, on the browser session.
-fn call_start_answer_pattern() -> Value {
-    json!({"urlPattern": CALL_START_URL, "requestStage": "Response"})
-}
-
-/// An invitation's `attach` link and its leg's `accept` link, as a regular expression: where the answers
-/// [`call_answer_patterns`] pause go to.
-pub const CALL_ANSWERS: &str = concat!(
-    r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/cc/v1/",
-    r"(forked/[^?]+/attach|incoming/[^?]+/accept)(\?|$)"
-);
-
-/// The `Fetch` patterns that pause the answers to `attach` and `accept` links (every one on the flight proxy's call
-/// controllers; only a permitted one's binds anything), on the browser session.
-fn call_answer_patterns() -> [Value; 2] {
-    ["forked/*/attach*", "incoming/*/accept*"].map(|link| {
-        json!({
-            "urlPattern": format!("https://api.flightproxy.teams.microsoft.com/api/v2/ep/*/cc/v1/{link}"),
-            "requestStage": "Response",
-        })
-    })
-}
-
-/// Whether a paused response answers a request to an `attach` or an `accept` link ([`CALL_ANSWERS`]).
-fn is_call_answer(params: &Value) -> bool {
-    params["request"]["url"]
-        .as_str()
-        .is_some_and(|url| Regex::new(CALL_ANSWERS).is_ok_and(|answers| answers.is_match(url)))
-}
-
-/// Whether a paused response is one [`call_start_answer_pattern`] or [`conversation_answer_pattern`] pauses: a request
-/// to [`CALL_START_URL`] exactly, or to a conversation on the flight proxy ([`CONVERSATIONS`]: a join goes to the
-/// conversation itself), of any method (the patterns match every method, a CORS preflight `OPTIONS` too). Only a
-/// `POST`'s answer to a start or join the fence pended can register a call ([`HttpFence::read_call_start_answer`]);
-/// every one is continued.
-fn is_call_start_answer(params: &Value) -> bool {
-    params["request"]["url"].as_str().is_some_and(|url| {
-        url == CALL_START_URL || Regex::new(CONVERSATIONS).is_ok_and(|conversations| conversations.is_match(url))
-    })
-}
-
-/// Any URL of a conversation on the flight proxy (its own, or an operation on it), as a regular expression.
-pub const CONVERSATIONS: &str = r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/conv/";
-
-/// The `Fetch` pattern that pauses the answers to a conversation's requests (a join's among them), on the browser
-/// session.
-fn conversation_answer_pattern() -> Value {
-    json!({"urlPattern": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/*/conv/*", "requestStage": "Response"})
 }
 
 impl HttpFence {
@@ -453,8 +371,6 @@ impl HttpFence {
             forced: Mutex::new(Vec::new()),
             denials: Mutex::new(Vec::new()),
             catch: None,
-            starts: Mutex::new(HashMap::new()),
-            answers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -470,17 +386,11 @@ impl HttpFence {
         self.fence.log()
     }
 
-    /// The `Fetch.enable` params for the browser session: every request at the request stage, the call start's answer,
-    /// a conversation's answers (a join's) and the `attach` and `accept` answers at the response stage, plus, with a
-    /// redirect catch, the responses of the login origin.
+    /// The `Fetch.enable` params for the browser session: every request at the request stage, plus, with a redirect
+    /// catch, the responses of the login origin.
     #[must_use]
     pub fn fetch_patterns(&self) -> Value {
-        let mut patterns = vec![
-            json!({"urlPattern": "*"}),
-            call_start_answer_pattern(),
-            conversation_answer_pattern(),
-        ];
-        patterns.extend(call_answer_patterns());
+        let mut patterns = vec![json!({"urlPattern": "*"})];
         patterns.extend(self.catch.as_ref().map(RedirectCatch::response_pattern));
         json!({ "patterns": patterns })
     }
@@ -559,77 +469,22 @@ impl HttpFence {
             &request.headers,
             request.classified_body(),
         );
-        let (verdict, permit) = self.judge_keeping(classification, &request.method, &request.url).await;
-        if let (Some(permit), Some(network_id)) = (&permit, &request.network_id) {
-            self.pend_answer(permit, network_id);
-        }
-        if let (Some(permit), Some(network_id), Some(body)) = (permit, &request.network_id, &request.body) {
-            self.pend_start(&permit, network_id, body);
-        }
-        verdict
-    }
-
-    /// Keeps an `attach`'s or an `accept`'s permit as a pending answer to the request with this `Network` id; the
-    /// first layer to permit the request pends it. A permit for anything else pends nothing.
-    fn pend_answer(&self, permit: &WritePermit, network_id: &str) {
-        let answered = matches!(
-            permit.target().scope(),
-            Scope::CallOperation {
-                operation: CallOperation::Attach | CallOperation::Accept,
-                ..
-            }
-        );
-        if !answered {
-            return;
-        }
-        let mut answers = self.answers.lock().unwrap_or_else(PoisonError::into_inner);
-        if answers.contains_key(network_id) {
-            return;
-        }
-        if let Some(pending) = self.fence.pend_answer(permit) {
-            answers.insert(network_id.to_owned(), pending);
-        }
-    }
-
-    /// Keeps a call start's permit, with its body, as a pending call waiting for the answer to the request with this
-    /// `Network` id; the browser's and the target's layers both permit the same request, and the first one pends it.
-    /// A permit for anything but a call start pends nothing.
-    fn pend_start(&self, permit: &WritePermit, network_id: &str, body: &[u8]) {
-        if permit.target().kind() != WriteKind::Call {
-            return;
-        }
-        let mut starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
-        if starts.contains_key(network_id) {
-            return;
-        }
-        if let Some(pending) = self.fence.pend_start(permit, body) {
-            starts.insert(network_id.to_owned(), pending);
-        }
+        self.judge(classification, &request.method, &request.url).await
     }
 
     /// Decides a request already classified. Every deny is logged and kept.
     pub async fn judge(&self, classification: Classification, method: &str, url: &str) -> Verdict {
-        self.judge_keeping(classification, method, url).await.0
-    }
-
-    /// [`Self::judge`], giving the permit of a write it allowed too.
-    async fn judge_keeping(
-        &self,
-        classification: Classification,
-        method: &str,
-        url: &str,
-    ) -> (Verdict, Option<WritePermit>) {
         let request = RequestRecord {
             channel: Channel::Http,
             method,
             url,
             outcome: RequestOutcome::Unclassified,
         };
-        let (verdict, permit) = judge_keeping(&self.fence, self.members.as_ref(), classification, request).await;
+        let verdict = judge(&self.fence, self.members.as_ref(), classification, request).await;
         if let Verdict::Deny(cause) = verdict {
             self.keep(Denial::new(method, url, cause));
         }
-        (verdict, permit)
+        verdict
     }
 
     fn deny_malformed(&self) {
@@ -689,56 +544,8 @@ impl HttpFence {
         Ok(Handled::Decided(verdict))
     }
 
-    /// Reads a paused call start answer and registers its call, when it answers a start this fence permitted (by the
-    /// request's `Network` id) with a success: the body as `Fetch.getResponseBody` gives it. Anything else (another
-    /// method than `POST`, such as the start's preflight, which leaves a pending start as it is; no pending start, a
-    /// failure status, a body that can't be had or read) registers nothing, and the call's follow-ups stay denied.
-    /// Continuing the response afterwards sends nothing. Whether it registered the call; `None` when no start was
-    /// pending for it (or it isn't a `POST`).
-    async fn read_call_start_answer(&self, cdp: &Cdp, session: Option<&SessionId>, params: &Value) -> Option<bool> {
-        if params["request"]["method"] != "POST" {
-            return None;
-        }
-        let pending = params["networkId"].as_str().and_then(|network_id| {
-            self.starts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(network_id)
-        })?;
-        let Some(body) = success_body(cdp, session, params).await else {
-            return Some(false);
-        };
-        // an answer that doesn't read registers nothing; its call's follow-ups stay denied
-        Some(self.fence.register_start(pending, &body).is_ok())
-    }
-
-    /// Reads a paused `attach` or `accept` answer and binds the links it hands out to its invitation, when it answers
-    /// one this fence permitted (by the request's `Network` id) with a success. Anything else (the preflight, nothing
-    /// pending, a failure, a body that can't be had or read) binds nothing, and what would go to those links stays denied.
-    /// Whether it bound them; `None` when no answer was pending for it (or it isn't a `POST`).
-    async fn read_call_answer(&self, cdp: &Cdp, session: Option<&SessionId>, params: &Value) -> Option<bool> {
-        if params["request"]["method"] != "POST" {
-            return None;
-        }
-        let pending = params["networkId"].as_str().and_then(|network_id| {
-            self.answers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(network_id)
-        })?;
-        let Some(body) = success_body(cdp, session, params).await else {
-            return Some(false);
-        };
-        // an answer that binds nothing leaves the leg's links unbound; its ring-time sends stay denied
-        Some(self.fence.bind_answer(pending, &body).is_ok())
-    }
-
-    /// A response paused at the response stage. Every fence pauses the call answers: the responses to
-    /// [`CALL_START_URL`], to a conversation's requests (a join's among them, [`CONVERSATIONS`]) and to `attach` and
-    /// `accept` links ([`CALL_ANSWERS`]): each is continued, and the answer to a `POST` the fence permitted and waits for
-    /// is read first ([`Handled::CallAnswerRead`], see the module docs). Only a fence with a catch also pauses the login
-    /// origin's responses: the redirect is caught and failed, anything else continued. Any other response paused
-    /// without a catch is failed and fails the run.
+    /// A response paused at the response stage: only a fence with a catch pauses any (the login origin's): the redirect
+    /// is caught and failed, anything else continued. A response paused without a catch is failed and fails the run.
     async fn handle_response(
         &self,
         cdp: &Cdp,
@@ -746,15 +553,6 @@ impl HttpFence {
         params: &Value,
     ) -> Result<Handled, CdpError> {
         let id = params["requestId"].as_str().unwrap_or_default();
-        if is_call_start_answer(params) || is_call_answer(params) {
-            let read = if is_call_start_answer(params) {
-                self.read_call_start_answer(cdp, session, params).await
-            } else {
-                self.read_call_answer(cdp, session, params).await
-            };
-            continue_response(cdp, session, params).await?;
-            return Ok(read.map_or(Handled::ResponseContinued, |bound| Handled::CallAnswerRead { bound }));
-        }
         let Some(catch) = &self.catch else {
             self.deny_malformed();
             fail(cdp, session, id).await?;
@@ -780,37 +578,27 @@ pub(crate) async fn judge(
     classification: Classification,
     request: RequestRecord<'_>,
 ) -> Verdict {
-    judge_keeping(fence, members, classification, request).await.0
-}
-
-/// [`judge`], giving the permit of a write it allowed too (the call start's, which the call registry takes).
-async fn judge_keeping(
-    fence: &Fence,
-    members: &(dyn MembershipSource + Send),
-    classification: Classification,
-    request: RequestRecord<'_>,
-) -> (Verdict, Option<WritePermit>) {
     let record = |outcome| RequestRecord { outcome, ..request };
     match classification {
-        Classification::Read => (Verdict::Allow, None),
+        Classification::Read => Verdict::Allow,
         Classification::Allow => {
             let allowed = AllowedRecord {
                 method: request.method,
                 url: request.url,
             };
             match fence.log().record_allowed(&allowed) {
-                Ok(()) => (Verdict::Allow, None),
-                Err(_) => (Verdict::Deny(DenyCause::LogUnavailable), None),
+                Ok(()) => Verdict::Allow,
+                Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
             }
         }
         Classification::Write(target) => match fence.check(target, members).await {
-            Ok(permit) => (Verdict::Allow, Some(permit)),
-            Err(denied) => (Verdict::Deny(DenyCause::Fenced(*denied.reason())), None),
+            Ok(_) => Verdict::Allow,
+            Err(denied) => Verdict::Deny(DenyCause::Fenced(*denied.reason())),
         },
         // denied either way; a deny the log won't take is `LogUnavailable`, so no scenario's review expects it
         Classification::Unknown => match fence.log().record_request(&record(RequestOutcome::Unclassified)) {
-            Ok(()) => (Verdict::Deny(DenyCause::Unclassified), None),
-            Err(_) => (Verdict::Deny(DenyCause::LogUnavailable), None),
+            Ok(()) => Verdict::Deny(DenyCause::Unclassified),
+            Err(_) => Verdict::Deny(DenyCause::LogUnavailable),
         },
     }
 }
@@ -827,34 +615,6 @@ async fn continue_response(cdp: &Cdp, session: Option<&SessionId>, params: &Valu
     cdp.call(session, method, json!({"requestId": params["requestId"]}))
         .await
         .map(drop)
-}
-
-/// The body of a response paused at the response stage, when its status is a success (`Fetch.getResponseBody`).
-async fn success_body(cdp: &Cdp, session: Option<&SessionId>, params: &Value) -> Option<Vec<u8>> {
-    let success = params["responseStatusCode"]
-        .as_u64()
-        .is_some_and(|status| (200..300).contains(&status));
-    if !success {
-        return None;
-    }
-    let answer = cdp
-        .call(
-            session,
-            "Fetch.getResponseBody",
-            json!({"requestId": params["requestId"]}),
-        )
-        .await;
-    answer.ok().as_ref().and_then(response_body)
-}
-
-/// The bytes of a `Fetch.getResponseBody` answer (`body`, base64 when `base64Encoded`).
-fn response_body(answer: &Value) -> Option<Vec<u8>> {
-    let body = answer["body"].as_str()?;
-    if answer["base64Encoded"].as_bool() == Some(true) {
-        base64::engine::general_purpose::STANDARD.decode(body).ok()
-    } else {
-        Some(body.as_bytes().to_vec())
-    }
 }
 
 /// A URL without its query and fragment, where tokens travel.

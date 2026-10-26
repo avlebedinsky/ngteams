@@ -35,13 +35,12 @@ A run that chats over the push channel runs under the lab rule, like every run:
   `TeamsCDLWebWorker`, `templateKey` `TeamsCDLWebWorker_<digits and dots>`, `2.6` and `2.7` seen) is what the
   scenario waits for, each one's body read to tell it apart; the calling stack's (`SkypeSpacesWeb`) makes the account
   reachable for calls, which is allowed: an incoming call is never answered;
-- every frame of socket.io type `0` (disconnect), `1` (connect), `2` (heartbeat) and `5` (event) on a Trouter socket
-  (any host under `trouter.teams.microsoft.com`): `user.authenticate`, `ping`, the client's own `user.activity`,
-  `trouter.processed_message_loss`, `0::`; each logged to `fence.log` as `allowed` (`SEND`, the socket's host and path
-  shape), never with its content;
-- and **no answer to any delivery**: a `3:::` frame, like a `4`, a `6`, a binary frame and anything that doesn't parse,
-  is denied on a Trouter socket (the writing scenarios' expected-deny list names the class, "Trouter delivery
-  responses", so a run isn't failed by it).
+- every frame of socket.io type `0` (disconnect), `1` (connect), `2` (heartbeat), `3` (message: the answer to a
+  delivery, which goes back to the service that delivered it, a call's receipts and acknowledgements among them) and
+  `5` (event) on a Trouter socket (any host under `trouter.teams.microsoft.com`): `user.authenticate`, `ping`, the
+  client's own `user.activity`, `trouter.processed_message_loss`, `0::`, a delivery's answer; each logged to
+  `fence.log` as `allowed` (`SEND`, the socket's host and path shape), never with its content;
+- and nothing else on a Trouter socket: a `4`, a `6`, a binary frame and anything that doesn't parse are denied.
 
 Until 2026-10-23 a run that chatted over the push channel used a reviewed **messaging set** instead: the messaging
 stack's registration in its captured shape and the session's frames above, everything else denied.
@@ -61,8 +60,9 @@ adding one is an ordinary change. The sink writes nothing to `fence.log`: a fram
 | `trouter_disconnect` | `0::` |
 
 The sink numbers the acknowledged events itself (`<n>`, from 1 per socket). No `user.activity` (nothing needs it) and
-no answer to a delivery: neither has a type, so neither can be sent. The one answer that may be added is a typed
-response for a call the fence itself permitted (M3, `docs/backlog/fence-call-follow-ups.md`).
+no answer to a chat delivery: neither has a type, so neither can be sent. A call's deliveries are answered only on the
+calling socket, as typed responses (`AcceptanceAcknowledgement`, `InvitationReceipt`) through `FrameSink::respond`,
+each decided by `Fence::check_delivery_response` ([the calling socket](#the-calling-stacks-socket-m3-task-12)).
 
 ## The native client (M1 Task 16)
 
@@ -278,8 +278,8 @@ doesn't deliver those (`teams_mock::TrouterMock`).
 
 The web client answers each chat delivery `3:::{"id":<the delivery's id>,"status":200,"headers":{"MS-CV":"<its
 MS-CV>.0","trouter-request":"<echoed>","trouter-client":"{\"cd\":<ms spent>}"},"body":""}` and pings right after.
-The messaging set denied every answer, as the frame rule still does (socket.io type `3`), so every run showed what an
-endpoint that never answers gets:
+The messaging set denied every answer, as the frame rule did until the lab's call rule let them through (socket.io
+type `3`), so every run then showed what an endpoint that never answers gets:
 
 - **On a stable socket, nothing more.** Each live delivery came once; in 16 minutes of observation after the last one
   (two runs) none came again. The socket stayed up, every ping was answered within about 100 ms, and later deliveries

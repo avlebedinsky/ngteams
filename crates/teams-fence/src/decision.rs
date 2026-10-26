@@ -16,13 +16,14 @@ use serde::Serialize;
 
 use crate::calls::{
     CallRegistry, Delivery, DeliveryDecision, DeliveryPermit, Observed, PendingAnswer, PendingStart, RegisterError,
-    Response, may_be_invitation, read_invitation,
+    Resolved, Response, may_be_invitation, read_invitation,
 };
 use crate::contacting::call::{start_evidence, start_target};
+use crate::contacting::json::strict_json;
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
 use crate::membership::is_chat_id;
-use crate::target::{Mri, Scope, Target, WriteKind};
+use crate::target::{CallOperation, Mri, Scope, Target, WriteKind};
 
 /// Who may take part in a write: the lab accounts and the approved service participants, by exact MRI. A lab account
 /// or service whose MRI isn't known yet is simply left out, so it matches nobody.
@@ -109,8 +110,9 @@ pub enum PartialReason {
     /// tenant's user, a consumer account), or a thread of another type. Never guessed: the write is denied
     /// (`docs/personal-build.md`, Choice B).
     UnknownForm,
-    /// A call operation whose link no call of this run's registry holds (live): a call this fence didn't permit,
-    /// whose answer or acceptance wasn't read, or of another run.
+    /// A call operation whose link no call or offered invitation of this run's fence holds: a call this fence didn't
+    /// permit, whose answer or acceptance wasn't read, or of another run; or, under the lab's call rule, an answer or a
+    /// decline of a call leg no offered invitation names.
     UnregisteredCall,
     /// A call operation on a call that ended (or is ending, for anything but its `leave`).
     CallEnded,
@@ -127,7 +129,7 @@ impl fmt::Display for PartialReason {
             Self::NoCredential => f.write_str("the membership source has no credential yet"),
             Self::Unsupported => f.write_str("the membership source can't read this scope in full"),
             Self::UnknownForm => f.write_str("the answer holds a member or a thread in a form no capture showed"),
-            Self::UnregisteredCall => f.write_str("no call this run's fence registered holds this link"),
+            Self::UnregisteredCall => f.write_str("no call or offered invitation of this run's fence holds this link"),
             Self::CallEnded => f.write_str("the call ended"),
         }
     }
@@ -325,6 +327,24 @@ pub struct Fence {
     serial: AtomicU64,
     /// The calls this fence permitted, and the links their services handed out ([`crate::calls`]).
     calls: CallRegistry,
+    /// How it decides an operation on a call and a call delivery response.
+    call_rule: CallRule,
+}
+
+/// How a fence decides an operation on a call ([`Scope::CallOperation`]) and a call delivery response
+/// ([`Fence::check_delivery_response`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallRule {
+    /// The lab's: only a call's entry is judged. A join by the chat it joins (read fresh, complete, lab-only), an
+    /// answer or a decline only of an offered invitation (a lab caller's, to the fence's own account, its group chat
+    /// read fresh), an `add` by its invitees; everything else a call sends once it was let in (its follow-ups, its
+    /// ring-time sends, its `leave`, its delivery responses) is permitted and logged with no registry lookup. The
+    /// registry still reads what passes (its deliveries, its answers), so the native client's call machine sees the
+    /// same deliveries.
+    Entry,
+    /// The call registry's ([`crate::calls`]): a follow-up only to a link a call or an offered invitation this fence
+    /// registered handed out, a delivery response only to a delivery it waits for: the personal build's.
+    Registry,
 }
 
 /// The id of the next fence made in this process.
@@ -384,8 +404,14 @@ impl Fence {
         Ok(Self::of(Rules::Lab, Roster::from_lab(config), log, None))
     }
 
-    /// A fence of `rules`, with its own id, no permit issued yet and no call registered.
+    /// A fence of `rules`, with its own id, no permit issued yet and no call registered. A lab fence decides calls by
+    /// their entry ([`CallRule::Entry`]), a personal one by the call registry ([`CallRule::Registry`]).
     fn of(rules: Rules, roster: Roster, log: FenceLog, own: Option<Mri>) -> Self {
+        let call_rule = match rules {
+            Rules::Lab => CallRule::Entry,
+            #[cfg(feature = "personal")]
+            Rules::Personal => CallRule::Registry,
+        };
         Self {
             rules,
             roster,
@@ -394,6 +420,7 @@ impl Fence {
             id: NEXT_FENCE.fetch_add(1, Ordering::Relaxed),
             serial: AtomicU64::new(0),
             calls: CallRegistry::default(),
+            call_rule,
         }
     }
 
@@ -429,6 +456,25 @@ impl Fence {
     #[must_use]
     pub fn is_personal(&self) -> bool {
         self.rules != Rules::Lab
+    }
+
+    /// The fence deciding calls by the call registry, as a personal fence does (see [`Fence::tracks_calls`]), over its
+    /// lab roster. Tests only (`test-support`): the registry's rule is tested on a lab roster.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn tracking_calls(mut self) -> Self {
+        self.call_rule = CallRule::Registry;
+        self
+    }
+
+    /// Whether this fence decides an operation on a call and a call delivery response by its call registry (a personal
+    /// fence): only to a link a call or an offered invitation it registered handed out, a response only to a delivery
+    /// it waits for. A lab fence doesn't (`false`): it judges a call's entry (its start, a join, an answer or a decline,
+    /// an `add`) and permits what the call sends once it was let in; its registry only keeps what it reads. The native
+    /// transport refuses a call write the registry won't pend only on a fence that tracks calls.
+    #[must_use]
+    pub fn tracks_calls(&self) -> bool {
+        self.call_rule == CallRule::Registry
     }
 
     /// The fence with `mri` as its own account (see [`Fence::own_account`]). Tests only (`test-support`).
@@ -471,9 +517,14 @@ impl Fence {
     ///   are fetched and judged like any write;
     /// - the account's own availability, allowed only on [`Scope::Account`] naming the fence's
     ///   [own account](Fence::own_account), a lab account, with nobody added;
-    /// - an operation on a call ([`Scope::CallOperation`]), with no member read: the call registry ([`crate::calls`])
-    ///   resolves it to a live call this fence permitted and registered, and the call's participants with any invitee
-    ///   must all be lab accounts or approved services.
+    /// - an operation on a call ([`Scope::CallOperation`]), by the fence's call rule. A lab fence judges a call's entry
+    ///   only: a join by the group chat it names, read fresh, complete and listing the joiner; an answer or a decline
+    ///   only of an invitation it offered (by the call leg its link names), the invitation's group chat read fresh; an
+    ///   `add` by its sender and invitees; and it permits every other operation (what a call sends once it was let in)
+    ///   with no member read and no registry lookup, logged. Under the registry's rule ([`Fence::tracks_calls`]) the
+    ///   call registry ([`crate::calls`]) resolves it to a live call this fence permitted and registered, with no
+    ///   member read. Either way the participants (with any invitee and the chat's members) must all be lab accounts
+    ///   or approved services.
     ///
     /// Nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
     /// logged is denied.
@@ -486,8 +537,11 @@ impl Fence {
     /// # Errors
     /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, when
     /// a kind that doesn't create a target names [`Scope::New`], when an own availability isn't the fence's own
-    /// account's or another write names [`Scope::Account`], or when an allow can't be logged. A call operation is also
-    /// denied as [`PartialReason::UnregisteredCall`] when no registered call holds its link,
+    /// account's or another write names [`Scope::Account`], or when an allow can't be logged. A lab fence denies an
+    /// answer or a decline of no offered invitation as [`PartialReason::UnregisteredCall`], one of an invitation no
+    /// longer open for it as [`PartialReason::CallEnded`], and a join naming no chat or an `add` naming nobody as
+    /// [`DenyReason::CallMismatch`]. Under the registry's rule a call operation is denied as
+    /// [`PartialReason::UnregisteredCall`] when no registered call holds its link,
     /// [`PartialReason::CallEnded`] when its call is ending (other than its `leave`) or ended, and
     /// [`DenyReason::CallMismatch`] when it isn't its operation's kind, from the call's caller, adding exactly its
     /// invitees and handing out only the call's own callbacks. A personal fence denies
@@ -500,6 +554,9 @@ impl Fence {
             return self.decided(target, verdict);
         }
         let membership = match target.scope() {
+            Scope::CallOperation { .. } if self.call_rule == CallRule::Entry => {
+                return self.check_call_entry(target, source).await;
+            }
             Scope::CallOperation { .. } => return self.check_call_operation(target, source).await,
             Scope::New | Scope::Account { .. } => Membership::Complete(Vec::new()),
             _ if target.kind() == WriteKind::OwnAvailability || is_signal_on_a_chat(&target) => {
@@ -545,6 +602,55 @@ impl Fence {
             Ok(resolved) => resolved,
             Err(reason) => return self.decided(target, Verdict::Deny(reason)),
         };
+        self.judge_resolved(target, resolved, source).await
+    }
+
+    /// The lab's decision on an operation on a call ([`CallRule::Entry`]): only a call's entry is judged, by who takes
+    /// part in it.
+    /// - a join (a `POST` to a conversation): the group chat it names (`joins`), read fresh, complete and listing the
+    ///   joiner, every member and the joiner a lab account or an approved service;
+    /// - an answer (`accept`) or a decline (`reject`): only of an invitation this fence offered (a lab caller's, to its
+    ///   own account), by the call leg its link names, still open for it; the invitation's parties and its group chat,
+    ///   read fresh, all lab accounts or approved services;
+    /// - an `add`: its sender and every invitee lab accounts or approved services;
+    /// - anything else (a follow-up of a call let in, a ring-time send, a `leave`): permitted and logged, with no member
+    ///   read and no registry lookup. The registry still reads it (a `leave` ends its call there, an `attach` binds the
+    ///   callbacks its ring ends at), but decides nothing.
+    async fn check_call_entry(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
+        let Scope::CallOperation {
+            operation, from, joins, ..
+        } = target.scope()
+        else {
+            return self.decided(target, Verdict::Deny(DenyReason::CallMismatch));
+        };
+        let sender: BTreeSet<Mri> = from.iter().cloned().collect();
+        let resolved = match operation {
+            CallOperation::Join if joins.is_some() && !sender.is_empty() && target.added().is_empty() => {
+                Ok(Resolved::unbound(sender, joins.clone()))
+            }
+            CallOperation::Add if !target.added().is_empty() => Ok(Resolved::unbound(sender, None)),
+            CallOperation::Join | CallOperation::Add => Err(DenyReason::CallMismatch),
+            CallOperation::Accept | CallOperation::Reject => self.calls.resolve_answer(&target),
+            _ => {
+                self.calls.note(&target);
+                return self.decided(target, Verdict::Allow);
+            }
+        };
+        match resolved {
+            Ok(resolved) => self.judge_resolved(target, resolved, source).await,
+            Err(reason) => self.decided(target, Verdict::Deny(reason)),
+        }
+    }
+
+    /// The decision on a call operation resolved to what it acts on: its group chat, if any, read fresh; still open
+    /// once it was read; every participant (the resolved ones, the chat's members, any invitee) admitted. A permitted
+    /// one moves what it acts on (`CallRegistry::permitted`).
+    async fn judge_resolved(
+        &self,
+        target: Target,
+        resolved: Resolved,
+        source: &dyn MembershipSource,
+    ) -> Result<WritePermit, Denied> {
         let chat = match self
             .chat_members(resolved.chat.as_deref(), &resolved.participants, source)
             .await
@@ -695,7 +801,9 @@ impl Fence {
     }
 
     /// Decides a Trouter delivery response sent on `connection` (`response`: the socket.io message's JSON, after
-    /// `3:::`), once per delivery ([`crate::calls`]): permitted only as the captured acknowledgement of a pending
+    /// `3:::`). A lab fence permits every one that names a delivery (a numeric `id`), logged
+    /// ([`Self::permit_delivery_response`]). Under the registry's rule ([`Fence::tracks_calls`]) it is decided once per
+    /// delivery ([`crate::calls`]): permitted only as the captured acknowledgement of a pending
     /// acceptance delivery of a live call on that connection, as the captured receipt (an empty body) of a renegotiation
     /// or its answer delivered on that connection at a live call's or an answered invitation's own callback, or as the
     /// captured response to an offered invitation's delivery on that connection while it rings, its caller and callee lab accounts or approved services and the
@@ -707,9 +815,9 @@ impl Fence {
         response: &[u8],
         source: &dyn MembershipSource,
     ) -> DeliveryDecision {
-        const ACKNOWLEDGEMENT: &str = "call_acceptance_acknowledgement";
-        const RECEIPT: &str = "call_invitation_receipt";
-        const NEGOTIATION_RECEIPT: &str = "call_negotiation_receipt";
+        if self.call_rule == CallRule::Entry {
+            return self.permit_delivery_response(connection, response);
+        }
         let (kind, decided) = match self.calls.respond(connection, response) {
             None => return DeliveryDecision::NotPending,
             Some(Response::Acknowledgement(decided)) => (ACKNOWLEDGEMENT, decided),
@@ -744,6 +852,26 @@ impl Fence {
             (Ok(delivery), Ok(())) => DeliveryDecision::Permitted(DeliveryPermit::new(delivery)),
             (Ok(_), Err(_)) => DeliveryDecision::Denied(crate::calls::DeliveryDenyReason::LogUnavailable),
             (Err(reason), _) => DeliveryDecision::Denied(reason),
+        }
+    }
+
+    /// The lab's decision on a call delivery response ([`CallRule::Entry`]): a response to a delivery the account's
+    /// calling socket received goes back to that call's services, so it is permitted and logged, whatever it answers;
+    /// the registry still takes the delivery it answers, if one waits, which names its kind in the log. A response
+    /// without a numeric `id` answers no delivery: [`DeliveryDecision::NotPending`].
+    fn permit_delivery_response(&self, connection: &str, response: &[u8]) -> DeliveryDecision {
+        let Some(id) = strict_json(response).and_then(|envelope| envelope.get("id")?.as_i64()) else {
+            return DeliveryDecision::NotPending;
+        };
+        let kind = match self.calls.respond(connection, response) {
+            Some(Response::Acknowledgement(_)) => ACKNOWLEDGEMENT,
+            Some(Response::NegotiationReceipt(_)) => NEGOTIATION_RECEIPT,
+            Some(Response::Receipt { .. } | Response::ReceiptDenied(_)) => RECEIPT,
+            None => DELIVERY_RESPONSE,
+        };
+        match self.log.record_delivery_response(kind, None) {
+            Ok(()) => DeliveryDecision::Permitted(DeliveryPermit::new(id)),
+            Err(_) => DeliveryDecision::Denied(crate::calls::DeliveryDenyReason::LogUnavailable),
         }
     }
 
@@ -811,6 +939,13 @@ impl Fence {
         }
     }
 }
+
+/// The kinds of call delivery response `fence.log` names: the acceptance's acknowledgement, an invitation's receipt, a
+/// renegotiation's receipt, and (under the lab's call rule) any other.
+const ACKNOWLEDGEMENT: &str = "call_acceptance_acknowledgement";
+const RECEIPT: &str = "call_invitation_receipt";
+const NEGOTIATION_RECEIPT: &str = "call_negotiation_receipt";
+const DELIVERY_RESPONSE: &str = "call_delivery_response";
 
 /// Whether `target` is typing or a read receipt on a chat by its id ([`is_chat_id`]: a 1:1, group or meeting chat, the
 /// same rule [`crate::contacting`] carves them out by), which the fence permits without a member read. On anything else

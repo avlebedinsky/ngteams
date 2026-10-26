@@ -36,16 +36,16 @@
       "expected": "allow"
     },
     {
-      "name": "a delivery acknowledged with an empty body (unknown: which deliveries an empty success only acknowledges isn't established)",
+      "name": "a delivery acknowledged with an empty body (a delivery response: it goes back to the service that delivered it, and passes)",
       "socket": "first",
       "frame": "3:::{\"id\":1234567,\"status\":200,\"headers\":{\"MS-CV\":\"SyntheticCorrelation00.1.0\",\"trouter-request\":\"{\\\"id\\\":\\\"x\\\",\\\"src\\\":\\\"y\\\"}\",\"trouter-client\":\"{\\\"cd\\\":2}\"},\"body\":\"\"}",
-      "expected": "unknown"
+      "expected": "allow"
     },
     {
-      "name": "the call acceptance answered over the socket, with the call's next links in the body (unknown to the frame rule alone: the fence lets it through only as the response to a pending acceptance delivery of a registered call)",
+      "name": "the call acceptance answered over the socket, with the call's next links in the body (a delivery response of a call let in: it passes)",
       "socket": "first",
       "frame": "3:::{\"id\":7654321,\"status\":200,\"headers\":{\"MS-CV\":\"SyntheticCorrelation00.1.0\",\"trouter-request\":\"{\\\"id\\\":\\\"x\\\",\\\"src\\\":\\\"y\\\"}\",\"trouter-client\":\"{\\\"cd\\\":2}\"},\"body\":\"{\\\"callAcceptanceAcknowledgement\\\":{\\\"links\\\":{\\\"mediaRenegotiation\\\":\\\"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/x/1/call/mediaRenegotiation/\\\"}}}\"}",
-      "expected": "unknown"
+      "expected": "allow"
     },
     {
       "name": "the disconnect",

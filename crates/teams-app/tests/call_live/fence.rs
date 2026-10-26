@@ -5,9 +5,10 @@
 //! - No deny of a write (a line with a `kind`): every write the apps and the page asked for was one the fence maps
 //!   and permitted. A deny of the browser's own (a line with a `channel`: the reviewed expected-deny list's, the
 //!   run's forced ones) only while b's page ran, which judged them itself (its run exited 0).
-//! - Every write permitted: a call write only on a call the fence registered or offered (its `call_operation` scope:
-//!   the registry resolved it), a test call's start (`new`, the caller and the echo service), a call or message only
-//!   in the a–b chat or the recorded group chat, an availability only of a lab account's own.
+//! - Every write permitted: a call's operation (its `call_operation` scope: a join, an answer or a decline judged by the
+//!   lab's call rule, the rest let through once the call was let in), a test call's start (`new`, the caller and the
+//!   echo service), a call or message only in the a–b chat or the recorded group chat, an availability only of a lab
+//!   account's own.
 //! - The rest is counted: requests let through because they reach nobody (`allowed`, by shape), the typed delivery
 //!   responses, the frames logged.
 

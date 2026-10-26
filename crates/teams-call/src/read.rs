@@ -307,6 +307,18 @@ pub struct RemoteEnd {
     pub code: Option<i64>,
     pub sub_code: Option<i64>,
     pub phrase: Option<String>,
+    /// The conversation a conversation's end names (`conversationUrl.Location`, its query left out): a start refused
+    /// because the chat already has a running call names that call's (code 409, sub-code 5704).
+    pub conversation: Option<String>,
+}
+
+impl RemoteEnd {
+    /// Whether the service ended the call at once because its chat already has a running call: a conversation's end
+    /// of code 409, sub-code 5704 ("failure to resolve ownership", seen 2026-10-26).
+    #[must_use]
+    pub fn chat_has_running_call(&self) -> bool {
+        self.code == Some(409) && self.sub_code == Some(5704)
+    }
 }
 
 /// The end `body` delivers (`{"callEnd": {…}}`, or a conversation's end); every part `None` when it doesn't read.
@@ -324,6 +336,10 @@ pub(crate) fn remote_end(body: &[u8]) -> RemoteEnd {
         code: end.get("code").and_then(Value::as_i64),
         sub_code: end.get("subCode").and_then(Value::as_i64),
         phrase: end.get("phrase").and_then(Value::as_str).map(str::to_owned),
+        conversation: end
+            .pointer("/conversationUrl/Location")
+            .and_then(Value::as_str)
+            .map(|url| url.split(['?', '#']).next().unwrap_or_default().to_owned()),
     }
 }
 
@@ -495,5 +511,22 @@ mod tests {
         assert_eq!(remote_end(b"{\"callEnd\":{\"code\":\"x\"}}").code, None);
         let bare = remote_end(br#"{"code":409,"subCode":5704,"phrase":"Conversation cannot be created"}"#);
         assert_eq!((bare.code, bare.sub_code), (Some(409), Some(5704)));
+        assert!(bare.chat_has_running_call());
+        assert_eq!(bare.conversation, None);
+        assert!(!end.chat_has_running_call());
+    }
+
+    #[test]
+    fn a_start_refused_by_a_running_call_names_that_call_s_conversation() {
+        let conversation = format!("{PROXY}/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation9");
+        let refused = json!({
+            "code": 409,
+            "subCode": 5704,
+            "phrase": "Conversation cannot be created due to a failure to resolve ownership.",
+            "conversationUrl": {"Location": format!("{conversation}?i=10-0-0-1&e=1")},
+        });
+        let end = remote_end(refused.to_string().as_bytes());
+        assert!(end.chat_has_running_call());
+        assert_eq!(end.conversation.as_deref(), Some(conversation.as_str()));
     }
 }

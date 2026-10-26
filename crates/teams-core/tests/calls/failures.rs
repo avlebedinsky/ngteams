@@ -25,23 +25,47 @@ fn test_call() -> CallAction {
     CallAction::TestCall { echo: Mri::new(ECHO) }
 }
 
-#[tokio::test]
-async fn a_follow_up_of_a_call_the_fence_didn_t_register_is_refused_before_it_is_sent() {
-    let lab = Lab::start().await;
-    let log = SharedLog::default();
-    let fence = Arc::new(
-        Fence::new(
-            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), [Mri::new(ECHO)]),
-            FenceLog::from_writer(log.clone()),
-        )
-        .with_own_account(Mri::new(LAB_A)),
-    );
-    let tokens = Arc::new(tokens(&lab, LAB_A));
+/// A's outbox on the mock, its fence logging to `log`: deciding calls by the call registry when `tracking` (the
+/// personal build's rule), by the lab's own rule otherwise.
+fn outbox_of(lab: &Lab, log: &SharedLog, tracking: bool) -> Outbox<HttpTransport<crate::support::Tokens>> {
+    let fence = Fence::new(
+        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), [Mri::new(ECHO)]),
+        FenceLog::from_writer(log.clone()),
+    )
+    .with_own_account(Mri::new(LAB_A));
+    let fence = Arc::new(if tracking { fence.tracking_calls() } else { fence });
+    let tokens = Arc::new(tokens(lab, LAB_A));
     let transport =
         Arc::new(HttpTransport::with_mock_origin(tokens, Arc::clone(&fence), CHAT_BASE, &lab.mock.origin()).unwrap());
     let members: Arc<dyn MembershipSource + Send> =
         Arc::new(LiveMembershipSource::with_mock_origin(&lab.mock.origin()).unwrap());
-    let outbox = Outbox::new(transport, fence, members, Author::new(Mri::new(LAB_A), "Lab A"));
+    Outbox::new(transport, fence, members, Author::new(Mri::new(LAB_A), "Lab A"))
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_follow_up_goes_with_its_permit_whatever_the_registry_holds() {
+    let lab = Lab::start().await;
+    let log = SharedLog::default();
+    let outbox = outbox_of(&lab, &log, false);
+    let write =
+        AcknowledgeMediaAnswer::new(&CallContext::fresh().unwrap(), &CallLink::parse(UNREGISTERED).unwrap()).unwrap();
+    let tried = outbox.try_call(write).await;
+    assert!(matches!(tried, CallTried::Answered(_)), "{tried:?}");
+    assert!(log.denials().is_empty());
+    assert!(log.permitted_any("media_acknowledge"), "{:#?}", log.permitted());
+    let sent = lab.mock.received_requests().await;
+    assert!(
+        sent.iter()
+            .any(|request| request.url.path().contains("MockCallNobodyStarted")),
+        "it went out"
+    );
+}
+
+#[tokio::test]
+async fn a_follow_up_of_a_call_the_fence_didn_t_register_is_refused_before_it_is_sent() {
+    let lab = Lab::start().await;
+    let log = SharedLog::default();
+    let outbox = outbox_of(&lab, &log, true);
     let write =
         AcknowledgeMediaAnswer::new(&CallContext::fresh().unwrap(), &CallLink::parse(UNREGISTERED).unwrap()).unwrap();
     let tried = outbox.try_call(write).await;
@@ -270,6 +294,20 @@ async fn the_engine_stopping_while_the_start_is_in_flight_waits_for_it_and_leave
     let lab = Lab::start().await;
     let a = lab.account(LAB_A, A_TONE).await;
     // the action is answered once the start was handed to the outbox: it is in flight as the engine stops
+    let _ = a.handle.requests().call(test_call()).await.unwrap();
+    let log = a.shut_down().await;
+    wait_until(|| lab.sent_by(LAB_A).last().map(String::as_str) == Some("leave")).await;
+    assert_eq!(lab.sent_by(LAB_A).first().map(String::as_str), Some("start"));
+    assert!(log.denials().is_empty(), "{:#?}", log.denials());
+}
+
+#[tokio::test]
+async fn a_start_answered_after_the_shutdown_grace_still_gets_its_leave() {
+    let lab = Lab::start().await;
+    let a = lab.account(LAB_A, A_TONE).await;
+    // the start's answer comes past `SHUTDOWN_GRACE`, within the request's timeout
+    lab.mock
+        .delay_next_call_op("epconv", teams_core::calling::SHUTDOWN_GRACE + Duration::from_secs(2));
     let _ = a.handle.requests().call(test_call()).await.unwrap();
     let log = a.shut_down().await;
     wait_until(|| lab.sent_by(LAB_A).last().map(String::as_str) == Some("leave")).await;

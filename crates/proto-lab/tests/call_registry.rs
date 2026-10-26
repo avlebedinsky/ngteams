@@ -1,21 +1,22 @@
-//! The browser fence feeds the fence's call registry (`teams_fence`'s `calls`, `docs/protocol/fence-targets.md`): a
-//! call start it permitted pends with its body, the Trouter deliveries the page receives bind the call controller's
-//! links and wait for their responses, and the one response the fence lets through is the acknowledgement of a
-//! pending acceptance on its own connection. Synthetic, shaped like the echo-call capture's (made-up ids, hosts and
-//! placeholder MRIs); the response-stage read of the start's answer is in `tests/fence_http.rs`.
+//! The browser fence under the lab's call rule (`teams_fence`'s `calls`, `docs/protocol/fence-targets.md`): a call is
+//! judged by its entry (a start, an answer or a decline of the account's own offered invitation, a join, an `add`),
+//! and what it sends once it was let in passes with no registry lookup: its follow-ups, the callee's ring-time sends
+//! and every Trouter delivery response, which the frame rule lets through. The Trouter deliveries the page receives
+//! still go to the call registry, which offers the account's own invitations from lab callers. Synthetic, shaped like
+//! the echo-call and `ab-call` captures (made-up ids, hosts and placeholder MRIs).
 
 use std::io::Write as _;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use proto_lab::cdp::{Event, SessionId};
-use proto_lab::classify::{Classification, Classifier};
+use proto_lab::classify::Classifier;
 use proto_lab::fence_http::{DenyCause, HttpFence, PausedRequest, Verdict};
 use proto_lab::fence_ws::{Frame, GuardScript, Payload, WsFence, delivery_of};
 use serde_json::{Value, json};
 use teams_fence::{
-    CALL_START_URL, DeliveryDenyReason, DenyReason, FailClosed, Fence, FenceLog, Membership, MembershipFuture,
-    MembershipSource, Mri, PartialReason, Roster, Scope, TEST_CALL_SCENARIO,
+    CALL_START_URL, DenyReason, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, PartialReason,
+    Roster, Scope, TEST_CALL_SCENARIO,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -78,31 +79,6 @@ fn start_body() -> String {
         "callInvitation": {"links": {"acceptance": format!("{CALLBACKS}/03030303/call/acceptance/")}},
     })
     .to_string()
-}
-
-fn answer() -> Vec<u8> {
-    json!({
-        "conversationController": format!("{CONVERSATION}?{ROUTE}"),
-        "links": {"updateEndpointMetadata": format!("{CONVERSATION}/updateEndpointMetadata?{ROUTE}")},
-    })
-    .to_string()
-    .into_bytes()
-}
-
-/// Registers the test call with the fence directly, as the response stage would.
-async fn register(lab: &Lab) -> TestResult {
-    let Classification::Write(target) =
-        classifier().classify("POST", CALL_START_URL, &[], Some(start_body().as_bytes()))
-    else {
-        return Err("the start isn't a write".into());
-    };
-    let permit = lab.fence.check(target, &FailClosed).await?;
-    let pending = lab
-        .fence
-        .pend_start(&permit, start_body().as_bytes())
-        .ok_or("pending")?;
-    lab.fence.register_start(pending, &answer())?;
-    Ok(())
 }
 
 fn acceptance_body() -> String {
@@ -185,10 +161,6 @@ fn text(url: &str, data: &str) -> Frame {
     }
 }
 
-fn session(id: &str) -> SessionId {
-    SessionId::new(id)
-}
-
 // --- reading a delivery ---
 
 #[test]
@@ -212,76 +184,30 @@ fn a_delivery_is_read_with_its_body_decoded() -> TestResult {
     Ok(())
 }
 
-// --- the acceptance and its response, through the WebSocket layer ---
+// --- the delivery responses, through the WebSocket layer ---
 
 #[tokio::test]
-async fn the_acceptance_s_acknowledgement_passes_once_on_its_own_connection() -> TestResult {
+async fn every_delivery_response_on_a_trouter_socket_passes_by_the_frame_rule() -> TestResult {
     let lab = new_lab()?;
-    register(&lab).await?;
     let ws = ws_fence(&lab)?;
     ws.observe(&created("S1", "ws-1", TROUTER));
     ws.observe(&received("S1", "ws-1", &acceptance_frame(41)?));
-    let response = text(TROUTER, &response_frame(41));
-    assert_eq!(
-        ws.decide_on(Some(&session("S2")), &response).await,
-        Verdict::Deny(DenyCause::Unclassified),
-        "another session's socket"
-    );
-    assert_eq!(ws.decide_on(Some(&session("S1")), &response).await, Verdict::Allow);
-    assert_eq!(
-        ws.decide_on(Some(&session("S1")), &response).await,
-        Verdict::Deny(DenyCause::Unclassified),
-        "once"
-    );
-    // an empty response to the same kind of delivery is no acknowledgement
-    ws.observe(&received("S1", "ws-1", &acceptance_frame(42)?));
+    // the acknowledgement of a delivery no registered call waits for, again, and an empty receipt: all pass
     let empty = format!(
         r#"3:::{{"id":42,"status":200,"headers":{{"MS-CV":"a","trouter-request":{},"trouter-client":"b"}},"body":""}}"#,
         serde_json::to_string(TROUTER_REQUEST)?
     );
-    assert_eq!(
-        ws.decide_on(Some(&session("S1")), &text(TROUTER, &empty)).await,
-        Verdict::Deny(DenyCause::DeliveryResponse(DeliveryDenyReason::Shape))
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_closed_or_reopened_socket_or_a_socket_elsewhere_answers_nothing() -> TestResult {
-    let lab = new_lab()?;
-    register(&lab).await?;
-    let ws = ws_fence(&lab)?;
-    // a delivery on a socket that isn't Trouter's binds nothing
-    ws.observe(&created("S1", "ws-3", "wss://elsewhere.example/socket"));
-    ws.observe(&received("S1", "ws-3", &acceptance_frame(8)?));
-    let http = http_fence(&lab);
-    let acknowledge = format!("{CC}/callAcceptance/call-1/1/a1/1/acknowledge?i=10-0-0-2");
-    let body = json!({"callAcceptanceAcknowledgement": {"links": {}}}).to_string();
-    let request = paused("POST", &acknowledge, &body);
-    assert_eq!(
-        http.decide(&request).await,
-        Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::UnregisteredCall)))
-    );
-    assert_eq!(
-        ws.decide_on(
-            Some(&session("S1")),
-            &text("wss://elsewhere.example/socket", &response_frame(8))
-        )
-        .await,
-        Verdict::Allow,
-        "a frame on a socket of no contacting service passes by the frame rule, as before"
-    );
-    // on Trouter's socket it binds the call, and its response waits on that socket alone
-    ws.observe(&created("S1", "ws-1", TROUTER));
-    ws.observe(&received("S1", "ws-1", &acceptance_frame(7)?));
-    assert_eq!(http.decide(&request).await, Verdict::Allow);
-    ws.observe(&event("S1", "Network.webSocketClosed", json!({"requestId": "ws-1"})));
-    ws.observe(&created("S1", "ws-2", TROUTER));
-    assert_eq!(
-        ws.decide_on(Some(&session("S1")), &text(TROUTER, &response_frame(7)))
-            .await,
-        Verdict::Deny(DenyCause::Unclassified)
-    );
+    for response in [response_frame(41), response_frame(41), empty, response_frame(99)] {
+        assert_eq!(ws.decide(&text(TROUTER, &response)).await, Verdict::Allow, "{response}");
+    }
+    // a JSON message and an acknowledgement are still denied on a Trouter socket
+    for other in ["4:::{}", "6:::1+[]"] {
+        assert_eq!(
+            ws.decide(&text(TROUTER, other)).await,
+            Verdict::Deny(DenyCause::Unclassified),
+            "{other}"
+        );
+    }
     Ok(())
 }
 
@@ -300,27 +226,25 @@ fn paused(method: &str, url: &str, body: &str) -> PausedRequest {
 }
 
 #[tokio::test]
-async fn a_follow_up_passes_only_on_the_registered_call() -> TestResult {
+async fn a_call_s_follow_ups_pass_with_no_registered_call() -> TestResult {
     let lab = new_lab()?;
     let http = http_fence(&lab);
-    let url = format!("{CONVERSATION}/updateEndpointMetadata?{ROUTE}");
+    // nothing was started, read or bound
+    let metadata = format!("{CONVERSATION}/updateEndpointMetadata?{ROUTE}");
     let body = json!({"participants": {"from": {"id": LAB_A}}}).to_string();
-    assert_eq!(
-        http.decide(&paused("PUT", &url, &body)).await,
-        Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::UnregisteredCall)))
-    );
-    register(&lab).await?;
-    assert_eq!(http.decide(&paused("PUT", &url, &body)).await, Verdict::Allow);
-    let other = url.replace("SyntheticConversation0", "SyntheticConversation1");
-    assert_eq!(
-        http.decide(&paused("PUT", &other, &body)).await,
-        Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::UnregisteredCall)))
-    );
+    assert_eq!(http.decide(&paused("PUT", &metadata, &body)).await, Verdict::Allow);
+    let acknowledge = format!("{CC}/callAcceptance/call-1/1/a1/1/acknowledge?i=10-0-0-2");
+    let body = json!({"callAcceptanceAcknowledgement": {"links": {}}}).to_string();
+    assert_eq!(http.decide(&paused("POST", &acknowledge, &body)).await, Verdict::Allow);
+    let leave = format!("{CONVERSATION}/leave?{ROUTE}");
+    let body = json!({"participants": {"from": {"id": LAB_A}}}).to_string();
+    assert_eq!(http.decide(&paused("POST", &leave, &body)).await, Verdict::Allow);
+    assert!(http.denials().is_empty());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_permitted_start_pends_once_whichever_layer_permits_it_first() -> TestResult {
+async fn a_permitted_start_passes_on_both_layers() -> TestResult {
     let lab = new_lab()?;
     let http = http_fence(&lab);
     let start = paused("POST", CALL_START_URL, &start_body());
@@ -329,13 +253,6 @@ async fn a_permitted_start_pends_once_whichever_layer_permits_it_first() -> Test
         http.decide(&start).await,
         Verdict::Allow,
         "the browser's layer after the target's"
-    );
-    // nothing is registered until the answer is read at the response stage
-    let url = format!("{CONVERSATION}/updateEndpointMetadata?{ROUTE}");
-    let body = json!({"participants": {"from": {"id": LAB_A}}}).to_string();
-    assert_eq!(
-        http.decide(&paused("PUT", &url, &body)).await,
-        Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::UnregisteredCall)))
     );
     Ok(())
 }
@@ -346,6 +263,9 @@ const LAB_B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
 const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
 const INVITATION_PATH: &str = "/v4/f/SyntheticEndpoint00001/";
 const ATTACH_URL: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/SyntheticCall1/27/i1/1/attach?i=10-0-0-1";
+/// The call leg's acceptance and rejection, on the leg the invitation's `attach` names.
+const ACCEPT_URL: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/accept?i=10-0-0-1";
+const REJECT_URL: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/SyntheticCall1/27/t/2/reject?i=10-0-0-1";
 const INVITED_CONVERSATION: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation1?i=10-0-0-2&e=1";
 const B_CALLBACKS: &str =
     "https://pub-ent-zz-02-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00001/callAgent/agent-b";
@@ -414,44 +334,52 @@ fn attach_body(from: &str) -> String {
     .to_string()
 }
 
+fn accept_body(from: &str) -> String {
+    json!({"callAcceptance": {"acceptedBy": {"id": from}, "acceptedCallModalities": ["audio"]}}).to_string()
+}
+
+fn reject_body() -> String {
+    json!({"callEnd": {"code": 603, "phrase": "CallEndReasonLocalUserInitiated"}}).to_string()
+}
+
 #[tokio::test]
-async fn an_offered_invitation_s_receipt_and_attach_pass_and_nothing_for_another_s() -> TestResult {
+async fn only_an_offered_invitation_is_answered_or_declined_and_its_ring_time_sends_pass() -> TestResult {
     let lab = lab_of_b()?;
     let ws = ws_fence(&lab)?;
     let http = http_fence(&lab);
+    let unregistered = Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::UnregisteredCall)));
     ws.observe(&created("S1", "ws-1", TROUTER));
-    // an invitation to c (the fence is b's): ignored, its receipt denied by the frame rule, its attach unregistered
+    // an invitation to c (the fence is b's): ignored, so no answer and no decline of it pass
     ws.observe(&received("S1", "ws-1", &invitation_frame(7, LAB_A, LAB_C)));
     assert_eq!(
-        ws.decide_on(Some(&session("S1")), &text(TROUTER, &receipt_frame(7)))
-            .await,
-        Verdict::Deny(DenyCause::Unclassified)
+        http.decide(&paused("POST", ACCEPT_URL, &accept_body(LAB_B))).await,
+        unregistered
     );
     assert_eq!(
-        http.decide(&paused("POST", ATTACH_URL, &attach_body(LAB_C))).await,
-        Verdict::Deny(DenyCause::Fenced(DenyReason::Partial(PartialReason::UnregisteredCall)))
+        http.decide(&paused("DELETE", REJECT_URL, &reject_body())).await,
+        unregistered
     );
-    // a's invitation to b: offered
-    ws.observe(&received("S1", "ws-1", &invitation_frame(8, LAB_A, LAB_B)));
-    assert_eq!(
-        ws.decide_on(Some(&session("S1")), &text(TROUTER, &receipt_frame(8)))
-            .await,
-        Verdict::Allow
-    );
-    assert_eq!(
-        ws.decide_on(Some(&session("S1")), &text(TROUTER, &receipt_frame(8)))
-            .await,
-        Verdict::Deny(DenyCause::Unclassified),
-        "once"
-    );
+    // what the page sends by itself while it rings passes, whoever's ring it is
+    assert_eq!(ws.decide(&text(TROUTER, &receipt_frame(7))).await, Verdict::Allow);
     assert_eq!(
         http.decide(&paused("POST", ATTACH_URL, &attach_body(LAB_B))).await,
         Verdict::Allow
     );
+    // a's invitation to b: offered, and only b's own answer of it passes, with nothing of the leg bound
+    ws.observe(&received("S1", "ws-1", &invitation_frame(8, LAB_A, LAB_B)));
     assert_eq!(
-        http.decide(&paused("POST", ATTACH_URL, &attach_body(LAB_A))).await,
+        http.decide(&paused("POST", ACCEPT_URL, &accept_body(LAB_A))).await,
         Verdict::Deny(DenyCause::Fenced(DenyReason::CallMismatch)),
-        "sent as the caller"
+        "an answer sent as the caller"
+    );
+    assert_eq!(
+        http.decide(&paused("POST", ACCEPT_URL, &accept_body(LAB_B))).await,
+        Verdict::Allow
+    );
+    assert_eq!(
+        http.decide(&paused("POST", ACCEPT_URL, &accept_body(LAB_B))).await,
+        Verdict::Allow,
+        "the browser's layer after the target's"
     );
     Ok(())
 }

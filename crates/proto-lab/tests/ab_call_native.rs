@@ -2,7 +2,6 @@
 //! output it reads (a ring that ended as answered elsewhere among it), the scenario's name.
 
 use proto_lab::scenario::ScenarioName;
-use proto_lab::scenario::ab_call::{ANSWER_HELD, CALLER_JOIN_HELD, RING_SENDS};
 use proto_lab::scenario::ab_call_native::{
     ANSWERED_ELSEWHERE, FORCED, HEADLESS_BIN, NATIVE_FRAMES, PAGE_FRAMES, TONE_HZ, is_summary, native_heard,
     native_video_frames, ring_ended_elsewhere,
@@ -10,8 +9,8 @@ use proto_lab::scenario::ab_call_native::{
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 
 #[test]
-fn b_s_page_expects_its_probe_ring_answer_and_join_holds_and_nothing_else() {
-    assert_eq!(FORCED, [EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD, CALLER_JOIN_HELD]);
+fn b_s_page_expects_only_an_earlier_run_s_probe() {
+    assert_eq!(FORCED, [EARLIER_RUN_PROBE]);
     assert_eq!(ScenarioName::AbCallNative.as_str(), "ab-call-native");
     assert_eq!(HEADLESS_BIN, "TEAMS_HEADLESS_BIN");
     // the tone the page's audio tap reads

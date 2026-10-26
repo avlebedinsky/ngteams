@@ -42,7 +42,7 @@
 //!   sees c's video again; a hangs up; whoever is still in the call then hangs up too.
 //!
 //! Then every app quits from its tray (its broker exits with it), and `fence.log` over the run is judged
-//! (`call_live/fence.rs`): no breach, no deny of a write, writes only on calls the fence registered or offered and in
+//! (`call_live/fence.rs`): no breach, no deny of a write, call writes only as the lab's call rule lets them and in
 //! the lab's chats. Setup times, the echo's round trip, a → b latency, frames per second and CPU are in
 //! `summary.json` with the load average beside them. The traces, the apps' and brokers' and b's page's output, the
 //! recordings and `summary.json` go to `<data_dir>/call-live/<time>/` (`0700`), screenshots to

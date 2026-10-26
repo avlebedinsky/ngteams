@@ -5,7 +5,9 @@
 # running call, and the caller's native client calls (`teams-headless <caller> call <chat>`). Each plays its own tone
 # keyed (a 1000 Hz, b 660 Hz, c 880 Hz) and listens for every other's (`--hear`), recording to $OUT; each one's output
 # goes to $OUT/<alias>-<command>.txt. Waits for every callee's and the joiner's calling registration before the caller
-# starts, interrupts the watchers 5 s after the caller exits, and prints every exit status.
+# starts, interrupts the watchers 5 s after the caller exits, and prints every exit status. A call in a chat starts at
+# least 90 s after the chat's last run ended (its end stamped under the lab's data dir), and a call the service refused
+# because the chat still had a running call (`remote 409`) is placed once more 90 s later.
 #
 # Usage: native-call-run.sh OUT CALLER CHAT [CALLEE…] [--join JOINER]
 #   e.g. native-call-run.sh ~/.local/share/teams-lab/headless/ab a b b
@@ -70,11 +72,39 @@ for WHO in "${CALLEES[@]}" ${JOINER:+"$JOINER"}; do
   done
   grep -q "calling_registration registered=true" "$FILE" || echo "warning: $WHO's calling stack didn't register" >&2
 done
-echo "caller starts unix_ms $(date +%s%3N)"
-# shellcheck disable=SC2046
-"$BIN" "$CALLER" call "$CHAT" --tone "${TONE[$CALLER]}" $(others "$CALLER") --record "$OUT/$CALLER-call.wav" \
-  --seconds "${HOLD:-45}" --wait 90 ${TONE_SECONDS:+--tone-seconds "$TONE_SECONDS"} $(extra "$CALLER") >"$OUT/$CALLER-call.txt" 2>&1
-echo "$CALLER call exit $?"
+# the service refuses a chat's call for a while after the chat's last one (409, 5704: "failure to resolve ownership",
+# ~60 s seen): a call in a chat starts at least $SPACING s after the chat's last run here ended
+SPACING=90
+STAMPS=${XDG_DATA_HOME:-$HOME/.local/share}/teams-lab/headless
+STAMP=$STAMPS/.last-call-$CHAT
+if [ -f "$STAMP" ]; then
+  WAIT=$(($(cat "$STAMP") + SPACING - $(date +%s)))
+  if [ "$WAIT" -gt 0 ]; then
+    echo "waiting ${WAIT}s: the chat's last call ended less than ${SPACING}s ago"
+    sleep "$WAIT"
+  fi
+fi
+# the caller's call, its output into $OUT/$CALLER-call.txt
+place() {
+  echo "caller starts unix_ms $(date +%s%3N)"
+  # shellcheck disable=SC2046
+  "$BIN" "$CALLER" call "$CHAT" --tone "${TONE[$CALLER]}" $(others "$CALLER") --record "$OUT/$CALLER-call.wav" \
+    --seconds "${HOLD:-45}" --wait 90 ${TONE_SECONDS:+--tone-seconds "$TONE_SECONDS"} $(extra "$CALLER") \
+    >"$OUT/$CALLER-call.txt" 2>&1
+}
+place
+STATUS=$?
+if grep -q "remote 409" "$OUT/$CALLER-call.txt"; then
+  # the chat still had a running call: once more, $SPACING s later (the refused try kept beside it)
+  mv "$OUT/$CALLER-call.txt" "$OUT/$CALLER-call-409.txt"
+  echo "$CALLER call refused (remote 409): trying again in ${SPACING}s"
+  sleep "$SPACING"
+  place
+  STATUS=$?
+fi
+mkdir -p -m 0700 "$STAMPS"
+date +%s >"$STAMP"
+echo "$CALLER call exit $STATUS"
 if [ -n "$JOINING" ]; then
   wait "$JOINING"
   echo "$JOINER join exit $?"

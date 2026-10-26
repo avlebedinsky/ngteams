@@ -1,17 +1,17 @@
-//! The `ab-call` and `abc-call` scenarios' offline parts: what each run holds back (a's starts in `start-held`, every
-//! callee's sends to the calling services and its delivery responses while it rings and once it acted), which forced
-//! denies each account's run expects, how held-back requests are counted, and how a callee's capture shows the call's
-//! invitation reaching its page. All ids, hosts and bodies here are made up.
+//! The `ab-call` and `abc-call` scenarios' offline parts: what a run holds back (a's starts in `start-held`, nothing
+//! of a callee's), which forced denies each account's run expects, how held-back requests are counted, how a callee's
+//! capture shows the call's invitation reaching its page and what its step sent, how a failed run sees the `leave` of a
+//! page it hung up, and how a call the service ended at once because the chat already has a running call is read. All
+//! ids, hosts and bodies here are made up.
 
 use base64::Engine as _;
 use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
-use proto_lab::fence_ws::{Frame, Payload};
 use proto_lab::scenario::ab_call::{
-    ACCEPT_AUDIO_CSS, ANSWER_HELD, CALLER_JOIN_HELD, CallStep, CalleeAction, CalleeRole, DECLINE_CSS, DECLINE_HELD,
-    DECLINE_SENDS, EarlierRings, INVITATION_EVENTS, JOIN_HELD, Modality, RING_SENDS, RingCheck, RingSends, RunCall,
-    START_HELD, allowed_requests, callee_forced, callee_rules, caller_forced, caller_join_rule, calling_socket_up,
-    chat_shown, held_back, invitations, judge_step_sends, keep_alives, own_invitations, phase_ring_check,
-    registered_joins, ring_check, ring_rules, ring_sends, start_held_rule, video_frames,
+    ACCEPT_AUDIO_CSS, CALLEE_FORCED, CallStep, CalleeAction, CalleeRole, DECLINE_CSS, DECLINE_SENDS, EarlierRings,
+    INVITATION_EVENTS, Modality, NATIVE_CONFLICT, RingCheck, RingSends, RunCall, START_HELD, allowed_requests,
+    caller_forced, calling_socket_up, chat_shown, held_back, invitations, judge_step_sends, keep_alives, leaves,
+    native_call_conflict, own_invitations, phase_ring_check, ring_check, ring_sends, running_call_conflict,
+    start_held_rule, video_frames,
 };
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 use serde_json::json;
@@ -31,35 +31,8 @@ fn request(method: &str, url: &str) -> PausedRequest {
     }
 }
 
-fn text(url: &str, data: &str) -> Frame {
-    Frame {
-        url: url.to_owned(),
-        payload: Payload::Text(data.to_owned()),
-    }
-}
-
 const FORKED: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/call-1/27/i1/1/attach?i=10-0-0-1";
 const TROUTER: &str = "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c?tc=made-up";
-
-#[test]
-fn the_caller_s_join_of_a_running_call_is_held_back_and_nothing_else() -> TestResult {
-    let rule = caller_join_rule()?;
-    assert_eq!(rule.label(), Some(CALLER_JOIN_HELD));
-    let conversation =
-        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/Synthetic1";
-    assert!(rule.matches(&request("POST", conversation)));
-    assert!(rule.matches(&request("POST", &format!("{conversation}?i=10-0-0-1&e=1"))));
-    for (method, url) in [
-        ("POST", format!("{conversation}/leave")),
-        ("PUT", format!("{conversation}/updateEndpointMetadata")),
-        ("GET", conversation.to_owned()),
-        ("POST", CALL_START_URL.to_owned()),
-        ("POST", FORKED.to_owned()),
-    ] {
-        assert!(!rule.matches(&request(method, &url)), "{method} {url}");
-    }
-    Ok(())
-}
 
 #[test]
 fn start_held_holds_back_every_call_start_and_nothing_else() -> TestResult {
@@ -74,96 +47,6 @@ fn start_held_holds_back_every_call_start_and_nothing_else() -> TestResult {
         ("POST", CALL_START_URL.replace("flightproxy", "flightproxy2")),
     ] {
         assert!(!rule.matches(&request(method, &url)), "{method} {url}");
-    }
-    Ok(())
-}
-
-#[test]
-fn a_callee_holds_back_every_write_to_the_calling_services_and_every_delivery_response() -> TestResult {
-    let (requests, frames) = callee_rules(RING_SENDS)?;
-    assert!(requests.iter().all(|rule| rule.label() == Some(RING_SENDS)));
-    assert_eq!(frames.label(), Some(RING_SENDS));
-    let denied = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
-    for method in ["POST", "PUT", "PATCH", "DELETE"] {
-        for url in [
-            FORKED,
-            CALL_START_URL,
-            "https://api.fl.teams.microsoft.com/api/v2/ep/x/conv/y/leave",
-            "https://conv-zz-01-prod-aks.conv.skype.com/conv/y",
-            "https://cc-zz-01-prod-aks.cc.skype.com:443/cc/v1/callParticipant/x/replacement",
-        ] {
-            assert!(denied(method, url), "{method} {url}");
-        }
-    }
-    for (method, url) in [
-        ("GET", FORKED),
-        ("OPTIONS", FORKED),
-        (
-            "POST",
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/x/messages",
-        ),
-        (
-            "POST",
-            "https://flightproxy.teams.microsoft.com.example.com/api/v2/epconv",
-        ),
-        ("POST", "https://skype.com.example.com/x"),
-    ] {
-        assert!(!denied(method, url), "{method} {url}");
-    }
-    assert!(frames.matches(&text(TROUTER, r#"3:::{"id":-7,"status":200}"#)));
-    assert!(frames.matches(&text(
-        "wss://go.trouter.teams.microsoft.com:443/v4/c",
-        r#"3:::{"id":1,"status":404}"#
-    )));
-    for frame in [
-        text(TROUTER, r#"5:3+::{"name":"ping"}"#),
-        text(TROUTER, "2::"),
-        text("wss://example.com/v4/c", r#"3:::{"id":1}"#),
-    ] {
-        assert!(!frames.matches(&frame), "{frame:?}");
-    }
-    Ok(())
-}
-
-#[test]
-fn while_it_rings_a_callee_holds_back_every_write_to_the_calling_services_but_its_attach_and_progress() -> TestResult {
-    let requests = ring_rules()?;
-    assert!(requests.iter().all(|rule| rule.label() == Some(RING_SENDS)));
-    let denied = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
-    // the attach and the progress go to the fence, which maps them on the offered invitation
-    assert!(!denied("POST", FORKED));
-    assert!(!denied(
-        "POST",
-        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/incoming/call-1/27/t/2/progress?i=1"
-    ));
-    assert!(!denied(
-        "POST",
-        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/forked/call-1/27/i1/1/attach"
-    ));
-    for (method, url) in [
-        ("POST", FORKED.replace("/attach", "/progress")),
-        (
-            "POST",
-            FORKED.replace("forked", "incoming").replace("/attach", "/accept"),
-        ),
-        (
-            "POST",
-            FORKED.replace("forked", "incoming").replace("/attach", "/reject"),
-        ),
-        ("DELETE", FORKED.replace("/attach", "")),
-        ("POST", FORKED.replace("/attach", "/acceptance")),
-        ("POST", FORKED.replace("forked", "callAcceptance")),
-        ("POST", FORKED.replace("/attach?", "/attach/x?")),
-        ("POST", FORKED.replace("api.flightproxy", "api.fl")),
-        ("PUT", FORKED.to_owned()),
-        ("POST", CALL_START_URL.to_owned()),
-        (
-            "POST",
-            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/y"
-                .to_owned(),
-        ),
-    ] {
-        assert!(denied(method, &url), "{method} {url}");
     }
     Ok(())
 }
@@ -194,29 +77,20 @@ fn a_callee_s_capture_counts_the_ring_time_sends_its_fence_let_through() {
 #[test]
 fn each_account_expects_only_its_step_s_own_forced_denies() {
     assert_eq!(caller_forced(CallStep::StartHeld), [EARLIER_RUN_PROBE, START_HELD]);
-    for step in [CallStep::Answer, CallStep::Decline, CallStep::Cancel, CallStep::Timeout] {
-        assert_eq!(caller_forced(step), [EARLIER_RUN_PROBE, CALLER_JOIN_HELD], "{step:?}");
+    for step in [
+        CallStep::Answer,
+        CallStep::Decline,
+        CallStep::Cancel,
+        CallStep::Timeout,
+        CallStep::KeepAlive,
+        CallStep::Join,
+    ] {
+        assert_eq!(caller_forced(step), [EARLIER_RUN_PROBE], "{step:?}");
     }
-    assert_eq!(
-        callee_forced(CallStep::Answer),
-        [EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD]
-    );
-    assert_eq!(
-        callee_forced(CallStep::Decline),
-        [EARLIER_RUN_PROBE, RING_SENDS, DECLINE_HELD]
-    );
-    assert_eq!(
-        callee_forced(CallStep::KeepAlive),
-        [EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD]
-    );
-    assert_eq!(
-        caller_forced(CallStep::KeepAlive),
-        [EARLIER_RUN_PROBE, CALLER_JOIN_HELD]
-    );
+    // nothing a callee's page sends for the call is held back: the fence judges its answer, decline or join
+    assert_eq!(CALLEE_FORCED, [EARLIER_RUN_PROBE]);
     assert_eq!(CallStep::KeepAlive.as_str(), "keep-alive");
     assert_eq!(CallStep::KeepAlive.callee_action(), CallStep::Answer.callee_action());
-    assert_eq!(callee_forced(CallStep::Cancel), [EARLIER_RUN_PROBE, RING_SENDS]);
-    assert_eq!(callee_forced(CallStep::Timeout), [EARLIER_RUN_PROBE, RING_SENDS]);
     assert_eq!(CallStep::default(), CallStep::Answer);
     let names: Vec<&str> = [
         CallStep::StartHeld,
@@ -232,11 +106,10 @@ fn each_account_expects_only_its_step_s_own_forced_denies() {
 }
 
 #[test]
-fn a_callee_s_click_is_held_back_under_a_label_its_run_expects() {
+fn a_callee_clicks_its_step_s_button() {
     assert_eq!(
         CallStep::Answer.callee_action(),
         Some(CalleeAction {
-            label: ANSWER_HELD,
             button: ACCEPT_AUDIO_CSS,
             what: "answer"
         })
@@ -244,21 +117,12 @@ fn a_callee_s_click_is_held_back_under_a_label_its_run_expects() {
     assert_eq!(
         CallStep::Decline.callee_action(),
         Some(CalleeAction {
-            label: DECLINE_HELD,
             button: DECLINE_CSS,
             what: "decline"
         })
     );
     for step in [CallStep::StartHeld, CallStep::Cancel, CallStep::Timeout] {
         assert_eq!(step.callee_action(), None, "{step:?}");
-    }
-    // the label a callee's click is held back under is one its run expects
-    for step in [CallStep::Answer, CallStep::Decline] {
-        let action = step.callee_action().map(|action| action.label);
-        assert!(
-            action.is_some_and(|label| callee_forced(step).contains(&label)),
-            "{step:?}"
-        );
     }
 }
 
@@ -275,12 +139,12 @@ fn held_back_requests_count_once_per_network_request_under_their_label() {
         forced(START_HELD, Some("1.1")),
         forced(START_HELD, Some("1.2")),
         forced(START_HELD, None),
-        forced(RING_SENDS, Some("1.3")),
+        forced(EARLIER_RUN_PROBE, Some("1.3")),
         Denial::new("POST", CALL_START_URL, DenyCause::Unclassified),
     ];
     assert_eq!(held_back(&denials, START_HELD), 3);
-    assert_eq!(held_back(&denials, RING_SENDS), 1);
-    assert_eq!(held_back(&denials, ANSWER_HELD), 0);
+    assert_eq!(held_back(&denials, EARLIER_RUN_PROBE), 1);
+    assert_eq!(held_back(&denials, "another label"), 0);
 }
 
 /// A capture line: the page received this socket.io message on a Trouter socket.
@@ -677,76 +541,6 @@ const CC: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01
 const CONV: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/c1";
 
 #[test]
-fn once_it_answered_a_callee_s_mapped_sends_go_to_the_fence_and_the_rest_stays_held() -> TestResult {
-    let (requests, frames) = callee_rules(ANSWER_HELD)?;
-    let held = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
-    for (method, url) in [
-        ("POST", format!("{CC}/incoming/call-1/27/t/2/accept?i=1")),
-        ("POST", format!("{CONV}/updateEndpointState?i=1")),
-        ("POST", format!("{CONV}/updateParticipantProperties?i=1")),
-        ("POST", format!("{CONV}/leave?i=1")),
-        ("PUT", format!("{CONV}/updateEndpointMetadata?i=1")),
-        ("POST", format!("{CC}/negotiations/call-1/27/t/3/answer?i=1")),
-        ("POST", format!("{CC}/active/call-1/27/a4/3/renegotiate?i=1")),
-        (
-            "POST",
-            format!("{CC}/active/call-1/27/a4/3/updateMediaDescriptions?i=1"),
-        ),
-        ("POST", format!("{CC}/mediaAnswers/call-1/27/t/4/acknowledge?i=1")),
-        (
-            "POST",
-            format!("{CC}/mcProxy/call-1/27/k27/3/applyChannelParameters?i=1"),
-        ),
-        // the keep-alive, at the call leg's own link
-        ("POST", format!("{CC}/active/call-1/27/a4/3?i=1")),
-    ] {
-        assert!(!held(method, &url), "{method} {url}");
-    }
-    for (method, url) in [
-        ("PUT", format!("{CC}/active/call-1/27/a4/3?i=1")),
-        ("POST", format!("{CC}/active/call-1/27/a4?i=1")),
-        ("POST", format!("{CC}/incoming/call-1/27/t/2/progress?i=1")),
-        ("DELETE", format!("{CC}/incoming/call-1/27/t/2/reject?i=1")),
-        ("POST", CONV.to_owned()),
-        ("POST", format!("{CONV}/add?i=1")),
-        ("POST", format!("{CC}/active/call-1/27/a4/3/transfer?i=1")),
-        ("PUT", format!("{CONV}/leave?i=1")),
-    ] {
-        assert!(held(method, &url), "{method} {url}");
-    }
-    assert!(frames.matches(&text(TROUTER, r#"3:::{"id":1,"status":200}"#)));
-    Ok(())
-}
-
-#[test]
-fn once_it_declined_only_its_decline_goes_to_the_fence() -> TestResult {
-    let (requests, _) = callee_rules(DECLINE_HELD)?;
-    let held = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
-    assert!(!held("DELETE", &format!("{CC}/incoming/call-1/27/t/2/reject?i=1")));
-    assert!(held("POST", &format!("{CC}/incoming/call-1/27/t/2/accept?i=1")));
-    assert!(held("DELETE", &format!("{CC}/active/call-1/27/a4/3?i=1")));
-    Ok(())
-}
-
-#[test]
-fn the_one_who_joins_late_sends_its_joins_and_its_call_s_operations_to_the_fence() -> TestResult {
-    let (requests, _) = callee_rules(JOIN_HELD)?;
-    let held = |method: &str, url: &str| requests.iter().any(|rule| rule.matches(&request(method, url)));
-    for (method, url) in [
-        ("POST", format!("{CONV}?i=1&e=2")),
-        ("POST", format!("{CC}/callAcceptance/call-1/1/a3/2/acknowledge?i=1")),
-        ("PUT", format!("{CONV}/updateEndpointMetadata?i=1")),
-        ("POST", format!("{CONV}/leave?i=1")),
-    ] {
-        assert!(!held(method, &url), "{method} {url}");
-    }
-    assert!(held("POST", &format!("{CONV}/add?i=1")));
-    assert!(held("POST", &format!("{CC}/incoming/call-1/27/t/2/accept?i=1")));
-    assert_eq!(callee_forced(CallStep::Join).last(), Some(&JOIN_HELD));
-    Ok(())
-}
-
-#[test]
 fn a_page_s_calling_socket_is_up_once_connected_and_until_it_closes() {
     let event = |method: &str, params: serde_json::Value| {
         json!({"type": "cdp", "method": method, "params": params}).to_string()
@@ -805,15 +599,6 @@ const JOIN: &str =
 fn verdict(method: &str, url: &str, network_id: &str, verdict: &str) -> String {
     json!({"type": "verdict", "channel": "http", "method": method, "url": url, "network_id": network_id, "verdict": verdict})
         .to_string()
-}
-
-fn continued(url: &str, network_id: &str, status: u16, bound: Option<bool>) -> String {
-    let mut entry =
-        json!({"type": "response_continued", "method": "POST", "url": url, "network_id": network_id, "status": status});
-    if let Some(bound) = bound {
-        entry["bound"] = json!(bound);
-    }
-    entry.to_string()
 }
 
 #[test]
@@ -892,26 +677,6 @@ fn a_decline_passes_only_with_its_rejection_let_through() {
     assert_eq!(judge_step_sends(CalleeRole::Other, ""), Ok(None));
 }
 
-#[test]
-fn a_join_passes_only_once_its_answer_registered_its_call() {
-    // a join allowed but its answer not read (no media: nothing waited for it), read without registering, failed, or
-    // elsewhere: no join registered
-    let none = [
-        verdict("POST", JOIN, "2.1", "allow"),
-        continued(JOIN, "2.1", 200, None),
-        continued(JOIN, "2.2", 200, Some(false)),
-        continued(JOIN, "2.3", 500, Some(true)),
-        continued(&format!("{CALL_START_URL}?x=1"), "2.4", 201, Some(true)),
-        continued(&JOIN.replace("/conv/c1", "/conv/c1/leave"), "2.5", 200, Some(true)),
-    ]
-    .join("\n");
-    assert_eq!(registered_joins(&none), 0);
-    assert!(judge_step_sends(CalleeRole::Joins, &none).is_err());
-    let joined = [none, continued(JOIN, "2.6", 201, Some(true))].join("\n");
-    assert_eq!(registered_joins(&joined), 1);
-    assert!(judge_step_sends(CalleeRole::Joins, &joined).is_ok());
-}
-
 fn reading(sends: u64, ours: u64, joins: u64) -> String {
     json!({"sends": sends, "ours": ours, "joins": joins, "where": []}).to_string()
 }
@@ -929,5 +694,107 @@ fn the_join_is_clicked_only_with_the_run_s_chat_shown_and_one_join() {
         ("an empty reading", "{}".to_owned()),
     ] {
         assert!(chat_shown(&refused).is_err(), "{name}");
+    }
+}
+
+#[test]
+fn a_join_passes_only_once_its_fence_let_it_through() {
+    // a join denied, or another request on the conversation let through: no join
+    let none = [
+        verdict("POST", JOIN, "2.1", "deny"),
+        verdict("POST", &JOIN.replace("/conv/c1?", "/conv/c1/leave?"), "2.2", "allow"),
+        verdict("GET", JOIN, "2.3", "allow"),
+    ]
+    .join("\n");
+    assert!(judge_step_sends(CalleeRole::Joins, &none).is_err());
+    // the browser decides a request on two layers: one join
+    let joined = [
+        none,
+        verdict("POST", JOIN, "2.4", "allow"),
+        verdict("POST", JOIN, "2.4", "allow"),
+    ]
+    .join("\n");
+    assert_eq!(
+        judge_step_sends(CalleeRole::Joins, &joined),
+        Ok(Some("the fence let 1 join(s) of the running call through".to_owned()))
+    );
+}
+
+#[test]
+fn a_page_that_hung_up_counts_the_leaves_its_fence_let_through() {
+    let leave = format!("{CONV}/leave?i=10-0-0-2&e=1");
+    let text = [
+        verdict("POST", &leave, "3.1", "allow"),
+        verdict("POST", &leave, "3.1", "allow"),
+        verdict("POST", &leave, "3.2", "deny"),
+        verdict("POST", &format!("{CONV}/updateEndpointMetadata"), "3.3", "allow"),
+        verdict("POST", &leave.replace("flightproxy", "flightproxy2"), "3.4", "allow"),
+    ]
+    .join("\n");
+    assert_eq!(leaves(&text), 1);
+    assert_eq!(leaves(""), 0);
+}
+
+/// A capture line: the page received a call's conversation end, as the call agent delivers it, with this body.
+fn conversation_end(body: &serde_json::Value) -> String {
+    received(&json!({
+        "id": -4,
+        "method": "POST",
+        "url": "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/05050505/conversation/conversationEnd/",
+        "headers": {"trouter-request": "{\"id\":\"request-1\"}"},
+        "body": body.to_string(),
+    }))
+}
+
+#[test]
+fn a_start_ended_at_once_by_a_running_call_in_its_chat_names_that_call() {
+    let running = format!("{CONV}?i=10-0-0-2&e=1");
+    let refused = json!({
+        "code": 409,
+        "subCode": 5704,
+        "phrase": "Conversation cannot be created due to a failure to resolve ownership.",
+        "conversationUrl": {"OriginalString": running, "Location": running},
+        "threadId": "19:0123456789abcdef0123456789abcdef@thread.v2",
+    });
+    let text = [
+        conversation_end(&json!({"code": 0, "phrase": "noError"})),
+        conversation_end(&refused),
+    ]
+    .join("\n");
+    assert_eq!(running_call_conflict(&text), Some(CONV.to_owned()));
+    // naming no conversation, it is still the conflict
+    let bare = conversation_end(&json!({"code": 409, "subCode": 5704}));
+    assert_eq!(running_call_conflict(&bare), Some("?".to_owned()));
+    // any other end, another sub-code, or the same body at another callback is none
+    for other in [
+        conversation_end(&json!({"code": 409, "subCode": 5700})),
+        conversation_end(&json!({"code": 487, "subCode": 5704})),
+        received(&json!({
+            "id": 2,
+            "url": "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/04040404/call/end/",
+            "headers": {},
+            "body": refused.to_string(),
+        })),
+    ] {
+        assert_eq!(running_call_conflict(&other), None, "{other}");
+    }
+}
+
+#[test]
+fn a_native_call_ended_at_once_by_a_running_call_names_that_call() {
+    let output = format!(
+        "1792978360556 call call=1 end=\"{NATIVE_CONFLICT}{CONV}\" status=\"ended\"\n1792978360557 call_summary"
+    );
+    assert_eq!(native_call_conflict(&output), Some(CONV.to_owned()));
+    assert_eq!(
+        native_call_conflict(&format!("end=\"{NATIVE_CONFLICT}\"")),
+        Some("?".to_owned())
+    );
+    for other in [
+        "call call=1 end=\"remote 409 Conversation cannot be created\" status=\"ended\"",
+        "call call=1 end=\"hung_up\" status=\"ended\"",
+        "",
+    ] {
+        assert_eq!(native_call_conflict(other), None, "{other}");
     }
 }

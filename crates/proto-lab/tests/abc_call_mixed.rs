@@ -2,7 +2,6 @@
 //! client's output it reads (who its call shows on which line, the frames each line brought).
 
 use proto_lab::scenario::ScenarioName;
-use proto_lab::scenario::ab_call::{ANSWER_HELD, JOIN_HELD, RING_SENDS};
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 use proto_lab::scenario::abc_call_mixed::{
     FORCED_B, FORCED_C, Shown, frames_on, latest_participants, latest_video_lines, native_lines, shows,
@@ -10,9 +9,9 @@ use proto_lab::scenario::abc_call_mixed::{
 };
 
 #[test]
-fn each_page_expects_its_probe_ring_answer_holds_and_c_its_join_hold() {
-    assert_eq!(FORCED_B, [EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD]);
-    assert_eq!(FORCED_C, [EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD, JOIN_HELD]);
+fn each_page_expects_only_an_earlier_run_s_probe() {
+    assert_eq!(FORCED_B, [EARLIER_RUN_PROBE]);
+    assert_eq!(FORCED_C, [EARLIER_RUN_PROBE]);
     assert_eq!(ScenarioName::AbcCallMixed.as_str(), "abc-call-mixed");
 }
 

@@ -481,16 +481,10 @@ impl Capture {
         self.recorder.record(entry);
     }
 
-    /// Records a response the fence paused at the response stage and continued (a call answer: a call start's, a
-    /// conversation's (a join's among them), an `attach`'s or an `accept`'s, their preflights'; the login origin's): its
-    /// method, URL and status or error, and, for a call answer the fence read (`bound`: Some), whether it registered
-    /// its call or bound its links (`"bound"`).
-    pub(crate) fn continued(&self, event: &Event, bound: Option<bool>) {
-        let mut entry = paused_entry("response_continued", event);
-        if let Some(bound) = bound {
-            entry["bound"] = json!(bound);
-        }
-        self.recorder.record(entry);
+    /// Records a response the fence paused at the response stage and continued (the login origin's): its method, URL
+    /// and status or error.
+    pub(crate) fn continued(&self, event: &Event) {
+        self.recorder.record(paused_entry("response_continued", event));
     }
 
     /// Records a target the fence couldn't arm, as `fence.log` does, plus its session, target id and error.
@@ -596,8 +590,5 @@ fn cause_value(cause: DenyCause) -> Value {
         DenyCause::ForeignSocket => json!("foreign_socket"),
         DenyCause::Forced => json!("forced"),
         DenyCause::Fenced(reason) => json!({"fenced": serde_json::to_value(reason).unwrap_or(Value::Null)}),
-        DenyCause::DeliveryResponse(reason) => {
-            json!({"delivery_response": serde_json::to_value(reason).unwrap_or(Value::Null)})
-        }
     }
 }

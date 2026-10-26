@@ -1,8 +1,9 @@
-//! The call registry (`teams_fence`'s `calls` module, `docs/protocol/fence-targets.md`): a call this run's fence
-//! permitted is registered once its start's answer is read, its call controller links are bound only by the acceptance
-//! delivered at the start's own acceptance callback, and a follow-up passes only as a captured operation to exactly a
-//! link of a live registered call. Shaped like the echo-call capture's (`tests/fixtures/calling/echo/`), with made-up
-//! ids, hosts and placeholder MRIs.
+//! The call registry (`teams_fence`'s `calls` module, `docs/protocol/fence-targets.md`), under the registry's rule (the
+//! personal build's, `Fence::tracking_calls` here): a call this run's fence permitted is registered once its start's
+//! answer is read, its call controller links are bound only by the acceptance delivered at the start's own acceptance
+//! callback, and a follow-up passes only as a captured operation to exactly a link of a live registered call. The lab's
+//! rule, which judges only a call's entry, is at the end ("the lab's call rule"). Shaped like the echo-call capture's
+//! (`tests/fixtures/calling/echo/`), with made-up ids, hosts and placeholder MRIs.
 
 use std::fs;
 use std::path::PathBuf;
@@ -47,7 +48,7 @@ fn new_lab() -> TestResult<Lab> {
     let dir = tempfile::tempdir()?;
     let log = dir.path().join("fence.log");
     let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], [Mri::new(ECHO)]);
-    let fence = Fence::new(roster, FenceLog::open(&log)?);
+    let fence = Fence::new(roster, FenceLog::open(&log)?).tracking_calls();
     Ok(Lab { _dir: dir, log, fence })
 }
 
@@ -365,7 +366,7 @@ fn new_lab_of_three() -> TestResult<Lab> {
     let dir = tempfile::tempdir()?;
     let log = dir.path().join("fence.log");
     let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]);
-    let fence = Fence::new(roster, FenceLog::open(&log)?);
+    let fence = Fence::new(roster, FenceLog::open(&log)?).tracking_calls();
     Ok(Lab { _dir: dir, log, fence })
 }
 
@@ -1652,5 +1653,158 @@ async fn an_acknowledgement_of_the_account_s_answer_binds_no_link_and_gets_its_r
             .await,
         DeliveryDecision::NotPending
     ));
+    Ok(())
+}
+
+// --- the lab's call rule: only a call's entry is judged ---
+
+/// A lab of a, b and c with the echo service whose fence decides calls by the lab's rule (a lab fence's own).
+fn lab_rule() -> TestResult<Lab> {
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("fence.log");
+    let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]);
+    let fence = Fence::new(roster, FenceLog::open(&log)?);
+    assert!(!fence.tracks_calls(), "a lab fence judges a call's entry only");
+    Ok(Lab { _dir: dir, log, fence })
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_call_s_follow_ups_pass_with_no_registered_call() -> TestResult {
+    let lab = lab_rule()?;
+    // nothing was started, pended, registered or delivered: every captured follow-up passes, with no member read
+    let follow_ups = [
+        write(
+            CallOperation::UpdateEndpointMetadata,
+            &op_url(CallOperation::UpdateEndpointMetadata, "conv-1"),
+            &[],
+        )?,
+        write(CallOperation::Acknowledge, &acknowledge_url("call-1"), &[])?,
+        write(CallOperation::ApplyChannelParameters, &channel_url("call-1"), &[])?,
+        keep_alive(&call_leg_url("call-1"))?,
+        write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?,
+        // after its leave, and again (the web client resends it)
+        write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?,
+        keep_alive(&call_leg_url("call-1"))?,
+    ];
+    for target in follow_ups {
+        assert_eq!(verdict(&lab.fence, target.clone()).await, Ok(()), "{target}");
+    }
+    // a call's end delivered changes nothing of that
+    lab.fence.observe_delivery(&delivery(2, END_PATH, b"{}".to_vec()));
+    assert_eq!(verdict(&lab.fence, keep_alive(&call_leg_url("call-1"))?).await, Ok(()));
+    let log = fs::read_to_string(&lab.log)?;
+    assert_eq!(
+        log.matches(r#""kind":"call_follow_up""#).count(),
+        8,
+        "each one logged: {log}"
+    );
+    assert!(!log.contains(LAB_A), "no sender in fence.log: {log}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_every_delivery_response_passes_logged() -> TestResult {
+    let lab = lab_rule()?;
+    // no delivery waits: the acknowledgement passes all the same, on any connection, in any shape
+    for (connection, response) in [
+        (CONNECTION, response(-7, TROUTER_REQUEST, CALLBACKS)),
+        (
+            "session-2/socket-1",
+            response(8, "another request", "https://elsewhere.example"),
+        ),
+        (CONNECTION, br#"{"id":9,"status":200,"headers":{},"body":""}"#.to_vec()),
+    ] {
+        let decision = lab
+            .fence
+            .check_delivery_response(connection, &response, &FailClosed)
+            .await;
+        assert!(permitted(&decision), "{decision:?}");
+    }
+    // the acceptance's acknowledgement of a registered call names its kind
+    registered(&lab.fence, "conv-1").await?;
+    lab.fence
+        .observe_delivery(&delivery(-3, ACCEPTANCE_PATH, acceptance("call-1")));
+    let decision = lab
+        .fence
+        .check_delivery_response(CONNECTION, &response(-3, TROUTER_REQUEST, CALLBACKS), &FailClosed)
+        .await;
+    assert!(matches!(decision, DeliveryDecision::Permitted(ref permit) if permit.delivery() == -3));
+    // a frame that names no delivery answers none
+    assert!(matches!(
+        lab.fence
+            .check_delivery_response(CONNECTION, br#"{"status":200}"#, &FailClosed)
+            .await,
+        DeliveryDecision::NotPending
+    ));
+    let log = fs::read_to_string(&lab.log)?;
+    assert_eq!(log.matches(r#""event":"delivery_response""#).count(), 4, "{log}");
+    assert!(log.contains("call_acceptance_acknowledgement"), "{log}");
+    assert!(log.contains("call_delivery_response"), "{log}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_start_still_goes_only_to_lab_callees_in_a_lab_only_chat() -> TestResult {
+    let lab = lab_rule()?;
+    let judged = async |target: Target, source: &Members| {
+        lab.fence
+            .check(target, source)
+            .await
+            .map(drop)
+            .map_err(|denied| *denied.reason())
+    };
+    let group = chat_start(&chat_start_body(&[LAB_B, LAB_C], Some(GROUP_CHAT)))?;
+    assert_eq!(
+        judged(group.clone(), &Members::of(&[LAB_A, LAB_B, LAB_C])).await,
+        Ok(())
+    );
+    assert_eq!(
+        judged(group, &Members::of(&[LAB_A, LAB_B, COWORKER])).await,
+        Err(DenyReason::Outsiders { count: 1 }),
+        "a chat with someone outside the lab"
+    );
+    let outsider = chat_start(&chat_start_body(&[LAB_B, COWORKER], Some(GROUP_CHAT)))?;
+    assert_eq!(
+        judged(outsider, &Members::of(&[LAB_A, LAB_B, LAB_C])).await,
+        Err(DenyReason::Outsiders { count: 1 }),
+        "a callee outside the lab"
+    );
+    let one = chat_start(&chat_start_body(&[COWORKER], None))?;
+    assert_eq!(
+        judged(one, &Members::of(&[LAB_A, COWORKER])).await,
+        Err(DenyReason::Outsiders { count: 1 }),
+        "a 1:1 call to someone outside the lab"
+    );
+    let partial = chat_start(&chat_start_body(&[LAB_B], None))?;
+    assert_eq!(
+        judged(partial, &Members(Membership::Partial(PartialReason::NoSource))).await,
+        Err(DenyReason::Partial(PartialReason::NoSource)),
+        "a chat that can't be read in full"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_an_add_is_judged_per_invitee_on_any_call() -> TestResult {
+    let lab = lab_rule()?;
+    // no call registered: an add is judged by its sender and invitees alone
+    let url = op_url(CallOperation::Add, "conv-1");
+    for invitee in [ECHO, LAB_B] {
+        assert_eq!(
+            verdict(&lab.fence, write(CallOperation::Add, &url, &[invitee])?).await,
+            Ok(()),
+            "{invitee}"
+        );
+    }
+    assert_eq!(
+        verdict(&lab.fence, write(CallOperation::Add, &url, &[COWORKER])?).await,
+        Err(DenyReason::Outsiders { count: 1 })
+    );
+    assert_eq!(
+        verdict(&lab.fence, write(CallOperation::Add, &url, &[ECHO, COWORKER])?).await,
+        Err(DenyReason::Outsiders { count: 1 })
+    );
+    let log = fs::read_to_string(&lab.log)?;
+    assert_eq!(log.matches(r#""kind":"invite""#).count(), 4, "{log}");
     Ok(())
 }

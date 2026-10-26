@@ -48,7 +48,8 @@
 //!   [`CONNECT_WITHIN`] of the far end's SDP or stays lost past [`RECOVER_WITHIN`] fail the call the same way
 //!   (`End::Failed("media")`).
 //! - **The engine stopping** hangs the call up (its `leave`, or the decline of an answer whose `accept` hasn't gone),
-//!   lets an invitation that rings go unanswered, waits up to [`SHUTDOWN_GRACE`] for those last writes, closes the
+//!   lets an invitation that rings go unanswered, waits up to [`SHUTDOWN_GRACE`] for those last writes (a start or a
+//!   join in flight up to its request's timeout more, for the answer its `leave` needs), closes the
 //!   media and stops the calling socket.
 //!
 //! The calling runs as a task of its own on the engine's thread ([`Calling::spawn`]; a `LocalSet`'s, as the outbox it
@@ -1203,13 +1204,19 @@ where
     C: Credentials + 'static,
     T: Transport<Error = HttpError> + Send + 'static,
 {
-    /// Hangs the call up, lets an invitation that rings go, sends the last writes within [`SHUTDOWN_GRACE`], closes
-    /// the media and stops the calling socket.
+    /// Hangs the call up, lets an invitation that rings go, sends the last writes within [`SHUTDOWN_GRACE`] (a start or
+    /// a join still in flight first gets up to its request's timeout for its answer, so the `leave` that answer makes
+    /// possible can go: without it the call would stay running in its chat), closes the media and stops the calling
+    /// socket.
     async fn shut_down(mut self) {
         let now = Instant::now();
         if let Some(preparing) = self.preparing.take() {
             let _ = preparing.reply.send(Err(EngineError::Stopped));
         }
+        let grace = match self.writing.as_ref().map(|writing| writing.name) {
+            Some("start" | "join") => teams_proto::REQUEST_TIMEOUT + SHUTDOWN_GRACE,
+            _ => SHUTDOWN_GRACE,
+        };
         self.calls.shut_down(now);
         self.drive(now);
         let last_writes = async {
@@ -1221,8 +1228,8 @@ where
                 self.drive(Instant::now());
             }
         };
-        if tokio::time::timeout(SHUTDOWN_GRACE, last_writes).await.is_err() {
-            log::warn!("the call's last writes didn't finish within {SHUTDOWN_GRACE:?}");
+        if tokio::time::timeout(grace, last_writes).await.is_err() {
+            log::warn!("the call's last writes didn't finish within {grace:?}");
         }
         if let Some(live) = self.live.take() {
             let (call, session) = (live.call, live.session);

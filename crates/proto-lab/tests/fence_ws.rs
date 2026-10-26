@@ -67,7 +67,7 @@ fn binary(url: &str, base64: &str) -> Frame {
 // --- the frame rule ---
 
 #[test]
-fn on_a_trouter_socket_the_session_s_frames_pass_and_a_delivery_s_answer_does_not() {
+fn on_a_trouter_socket_the_session_s_frames_and_a_delivery_s_answer_pass() {
     let regional = "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c";
     for url in [TROUTER, regional, "ws://go.trouter.teams.microsoft.com/other/path"] {
         for text_frame in [
@@ -79,6 +79,9 @@ fn on_a_trouter_socket_the_session_s_frames_pass_and_a_delivery_s_answer_does_no
             r#"5:3+::{"name":"user.activity","args":[{"state":"active","cv":"made-up"}]}"#,
             r#"5:12+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[]}]}"#,
             "5::/endpoint:{}",
+            // a delivery's answer, which goes back to the service that delivered it
+            r#"3:::{"id":"-123","status":200,"headers":{},"body":""}"#,
+            "3::",
         ] {
             assert_eq!(
                 classify_frame(&text(url, text_frame)),
@@ -87,9 +90,6 @@ fn on_a_trouter_socket_the_session_s_frames_pass_and_a_delivery_s_answer_does_no
             );
         }
         for text_frame in [
-            // a delivery's answer, which goes back to whoever sent it
-            r#"3:::{"id":"-123","status":200,"headers":{},"body":""}"#,
-            "3::",
             // a JSON message, an acknowledgement, an error, a noop: no client frame of the session
             "4:::{}",
             "6:::1+[]",

@@ -23,15 +23,16 @@ pub enum WriteKind {
     Call,
     /// Answering an incoming call.
     CallAnswer,
-    /// What the callee's client sends by itself while an offered invitation rings ([`Scope::CallOperation`] on the
-    /// invitation, judged like an answer by the call registry): never one that answers, declines, joins a call or
-    /// adds anyone.
+    /// What the callee's client sends by itself while an invitation rings ([`Scope::CallOperation`]: permitted under
+    /// the lab's call rule, judged on its offered invitation by the call registry's): never one that answers, declines,
+    /// joins a call or adds anyone.
     CallRinging,
     /// Declining an offered invitation: the captured rejection of its call leg, so the ringing stops everywhere and the
     /// caller sees it declined; judged like an answer.
     CallDecline,
-    /// A captured operation on a call this run's fence registered ([`Scope::CallOperation`], other than an `add`, which
-    /// is an [`WriteKind::Invite`]): judged by the call registry, never by a member read.
+    /// A captured operation on a call ([`Scope::CallOperation`], other than an `add`, which is an
+    /// [`WriteKind::Invite`]), never judged by a member read: permitted under the lab's call rule once the call was let
+    /// in, resolved to a call this run's fence registered under the call registry's.
     CallFollowUp,
     Invite,
     Meeting,
@@ -148,14 +149,16 @@ pub enum Scope {
     Team { id: String },
     /// A call, placed or incoming, by an id: judged by its fetched members, which no source reads yet.
     Call { id: String },
-    /// A captured operation on a call this run's fence registered (`crate::Fence::pend_start`): `url` is the exact URL
-    /// the write goes to, one of the links the call's services handed out for that operation, and `from` the
-    /// participant the body names as its sender (`participants.from.id`), for the operations that carry one, and
-    /// `callbacks` the endpoint callback links the body hands the call's services (an acknowledgement's
-    /// `callAcceptanceAcknowledgement.links`, an `add`'s `links`, an `attach`'s), each of which must be on the call's
-    /// own endpoint and call agent, and `joins` the conversation an `attach` subscribes to (its one `join` action's
-    /// URL), which must be the invitation's. The call registry resolves it; nothing else is fetched but the group
-    /// chat an incoming group call names.
+    /// A captured operation on a call: under the lab's call rule judged by its entry (a join by the chat `joins` names,
+    /// an answer or a decline by the offered invitation its call leg names, an `add` by its invitees, anything else
+    /// permitted); under the call registry's, on a call this run's fence registered (`crate::Fence::pend_start`). `url`
+    /// is the exact URL the write goes to, one of the links the call's services handed out for that operation, and
+    /// `from` the participant the body names as its sender (`participants.from.id`), for the operations that carry
+    /// one, and `callbacks` the endpoint callback links the body hands the call's services (an acknowledgement's
+    /// `callAcceptanceAcknowledgement.links`, an `add`'s `links`, an `attach`'s), which under the registry's rule must
+    /// be on the call's own endpoint and call agent, and `joins` the conversation an `attach` subscribes to (its one
+    /// `join` action's URL) or the group chat a join names. Nothing is fetched but the group chat a join names or an
+    /// incoming group call names.
     CallOperation {
         operation: CallOperation,
         url: String,

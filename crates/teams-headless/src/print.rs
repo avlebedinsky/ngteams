@@ -344,12 +344,18 @@ pub const fn call_status_word(status: &CallStatus) -> &'static str {
     }
 }
 
-/// How a call ended, as printed: `hung_up`, `declined`, `remote <code> <phrase>`, `failed <step>`.
+/// How a call ended, as printed: `hung_up`, `declined`, `remote <code> <phrase>`, `failed <step>`; a start the service
+/// refused because the chat already has a running call (409, 5704) as `remote 409 chat has a running call <its
+/// conversation>`.
 #[must_use]
 pub fn end_word(end: &End) -> String {
     match end {
         End::HungUp => "hung_up".to_owned(),
         End::Declined => "declined".to_owned(),
+        End::Remote(remote) if remote.chat_has_running_call() => format!(
+            "remote 409 chat has a running call {}",
+            remote.conversation.as_deref().map_or_else(|| "?".to_owned(), visible)
+        ),
         End::Remote(remote) => format!(
             "remote {} {}",
             remote.code.map_or_else(|| "-".to_owned(), |code| code.to_string()),

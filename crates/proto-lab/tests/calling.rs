@@ -43,18 +43,20 @@ fn the_trouter_session_s_own_frames_pass_on_either_socket() {
 }
 
 #[test]
-fn a_delivery_response_is_unknown_even_with_an_empty_body() {
-    // the endpoint's answer to something the service delivered goes back to whoever sent it, an incoming call's among
-    // them: none passes
+fn a_delivery_response_passes_and_an_acknowledgement_or_a_binary_frame_does_not() {
+    // the endpoint's answer to something the service delivered goes back to the service that delivered it, a call's
+    // receipts and acknowledgements among them: each passes the frame rule
     for data in [
         r#"3:::{"id":2029851735,"status":200,"headers":{"MS-CV":"SyntheticCv.0.1","trouter-request":"{\"id\":\"x\",\"src\":\"y\"}","trouter-client":"{\"cd\":2}"},"body":""}"#,
         r#"3:::{"id":-2129608987,"status":204,"headers":{},"body":""}"#,
         r#"3:::{"id":1,"status":200,"headers":{},"body":"{\"callAcceptanceAcknowledgement\":{}}"}"#,
-        "6:::1+[]",
     ] {
         for url in [TROUTER, REGIONAL] {
-            assert_eq!(classify_frame(&text(url, data)), Classification::Unknown, "{data}");
+            assert_eq!(classify_frame(&text(url, data)), Classification::Allow, "{data}");
         }
+    }
+    for url in [TROUTER, REGIONAL] {
+        assert_eq!(classify_frame(&text(url, "6:::1+[]")), Classification::Unknown);
     }
     let binary = Frame {
         url: REGIONAL.to_owned(),
@@ -535,7 +537,7 @@ fn every_captured_registration_is_what_the_fixture_says() {
 }
 
 #[test]
-fn chat_deliveries_come_on_the_messaging_path_and_their_answers_stay_unknown() {
+fn chat_deliveries_come_on_the_messaging_path_and_their_answers_pass() {
     let fixture: serde_json::Value = serde_json::from_str(&filled(DELIVERIES)).unwrap();
     let socket = fixture["socket"].as_str().unwrap();
     let cases = fixture["deliveries"].as_array().unwrap();
@@ -555,11 +557,11 @@ fn chat_deliveries_come_on_the_messaging_path_and_their_answers_stay_unknown() {
         let body: serde_json::Value = serde_json::from_str(delivery["body"].as_str().unwrap()).unwrap();
         assert_eq!(body["type"], "EventMessage", "{name}");
         assert_eq!(body["resourceType"], case["resource_type"], "{name}");
-        // the web client's answer: a socket.io message, which the frame rule denies
+        // the web client's answer: a socket.io message, which the frame rule lets through
         let answer = text(socket, case["answer"].as_str().unwrap());
         let answered: serde_json::Value =
             serde_json::from_str(case["answer"].as_str().unwrap().strip_prefix("3:::").unwrap()).unwrap();
         assert_eq!(answered["id"], delivery["id"], "{name}");
-        assert_eq!(classify_frame(&answer), Classification::Unknown, "{name}");
+        assert_eq!(classify_frame(&answer), Classification::Allow, "{name}");
     }
 }

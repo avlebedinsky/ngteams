@@ -236,6 +236,10 @@ fn a_device_that_goes_away_is_reported_and_the_rest_goes_on() {
         };
         let session = start(&turn, &devices);
         wait_for(&session, &SessionEvent::DeviceClosed(gone), CONNECT_WAIT);
+        if gone == SessionDevice::Microphone {
+            // a microphone that went away hears nothing: its last level isn't kept
+            assert_eq!(session.levels().captured.to_bits(), 0);
+        }
         // the network thread still answers
         session.offer_audio().unwrap();
         drop(session);

@@ -808,7 +808,11 @@ fn account(denials: Vec<Denial>, fence: FenceReport) -> AccountRun {
 fn a_writing_run_fails_on_a_denied_frame_off_the_list() -> TestResult {
     let policy = ab_chat::policy(Some(CHAT))?;
     let frame = FrameDenial::new("wss://teams.microsoft.com/api/socket", DenyCause::Unclassified);
-    let listed = FrameDenial::new("wss://go.trouter.teams.microsoft.com/v4/c", DenyCause::Unclassified);
+    // no class of denied frames is on the list: a frame held back under a label the scenario names is the one expected
+    let listed = FrameDenial {
+        label: Some(ab_chat::EARLIER_RUN_PROBE.to_owned()),
+        ..FrameDenial::new("wss://go.trouter.teams.microsoft.com/v4/c", DenyCause::Forced)
+    };
     let fence = FenceReport {
         denied_frames: 2,
         ..FenceReport::default()
@@ -826,7 +830,7 @@ fn a_writing_run_fails_on_a_denied_frame_off_the_list() -> TestResult {
         report.failures
     );
 
-    // a frame on a listed socket alone passes
+    // the expected frame alone passes
     let mut clean = ScenarioReport::new(ScenarioName::AbChat);
     let run = AccountRun {
         frame_denials: vec![listed],

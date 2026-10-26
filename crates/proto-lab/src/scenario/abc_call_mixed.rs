@@ -8,15 +8,14 @@
 //! bursts and its camera (the file backend's test pattern) on
 //! [`NATIVE_CAMERA_AFTER`](super::ab_call_native::NATIVE_CAMERA_AFTER) after its call connected. Three phases, in
 //! order:
-//! 1. **a calls, b and c answer**: each page, held as a callee while it rings ([`RING_SENDS`]), must show the incoming
-//!    call and clicks answer only on the run's own call (`ab-call`'s ring check: every invitation the page received is
-//!    a's call to it in the run's chat); its answer and the answered call's sends held as `ab-call`'s ([`ANSWER_HELD`]).
-//!    Each page must hear the tone (its audio tap) and its audio go both ways, then turns its camera on and must decode
+//! 1. **a calls, b and c answer**: each page must show the incoming call and clicks answer only on the run's own call
+//!    (`ab-call`'s ring check: every invitation the page received is a's call to it in the run's chat), which the
+//!    fence permits only on the page's own offered invitation. Each page must hear the tone (its audio tap) and its audio go both ways, then turns its camera on and must decode
 //!    video ([`PAGE_FRAMES`] within [`VIDEO_WAIT`]); a's native client must show both pages in its call, each on a
 //!    receiving line of its own with its camera on (its `call_participants` lines).
 //! 2. **c leaves**: c's page hangs up; a's native client must show b alone.
-//! 3. **c joins late**: c's page opens the chat, holds what it sends to the calling services but what the fence maps for
-//!    the join ([`JOIN_HELD`]), and clicks the header's join of the running call only on the run's call (its invitation
+//! 3. **c joins late**: c's page opens the chat and clicks the header's join of the running call (which the fence judges
+//!    by the chat it names) only on the run's call (its invitation
 //!    in its capture, the page showing the run's chat with one join); it must show the call screen, decode video
 //!    again, and a's native client must show both pages again, c's line bringing at least [`NATIVE_FRAMES`] frames
 //!    after the join click (the counts `teams-headless` prints while the call runs, its `video_lines` lines, measured
@@ -26,7 +25,7 @@
 //! two lines (each [`NATIVE_FRAMES`] at least). The native client's output goes into b's capture dir
 //! (`native-a-call-abc.txt`, lab data like the capture). Judged by each page's fence: no deny but the reviewed list's and
 //! the run's forced ones ([`FORCED_B`], [`FORCED_C`]), each page receiving the run's invitation and its attach let
-//! through, and c's join registering its call.
+//! through, and c's join let through.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,10 +41,10 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_call::{
-    ACCEPT_AUDIO_CSS, ANSWER_HELD, CAMERA, CHAT_JOIN, CHAT_JOIN_CSS, CONNECT_WAIT, CalleeRole, EarlierRings,
-    HANG_UP_CSS, INCOMING_CALL, JOIN_HELD, RING_SENDS, RING_WAIT, RingCheck, RunCall, TONE_WAIT, VIDEO_WAIT,
-    chat_shown, chat_shown_script, check_ring, hang_up_page, hold_callee, invitations, judge_callee, mri, open_join,
-    policy, ring_check, stand_up_calling, switch_microphone, video_frames, wait_calling_socket, watch_controls,
+    ACCEPT_AUDIO_CSS, CAMERA, CHAT_JOIN, CHAT_JOIN_CSS, CONNECT_WAIT, CalleeRole, EarlierRings, HANG_UP_CSS,
+    INCOMING_CALL, RING_WAIT, RingCheck, RunCall, TONE_WAIT, VIDEO_WAIT, chat_shown, chat_shown_script, check_ring,
+    hang_up_page, invitations, judge_callee, mri, open_join, policy, ring_check, stand_up_calling, switch_microphone,
+    video_frames, wait_calling_socket, watch_controls,
 };
 use super::ab_call_native::{
     ANSWER, NATIVE_CONNECT, NATIVE_EXIT, NATIVE_FRAMES, Native, PAGE_FRAMES, TONE_HZ, capture_len, headless_binary,
@@ -60,10 +59,10 @@ use super::echo_call::{
 };
 use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// The forced denies b's page expects: an earlier run's probe, its sends while it rings and once it answered.
-pub const FORCED_B: &[&str] = &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD];
-/// The forced denies c's page expects: b's, and its sends around its late join.
-pub const FORCED_C: &[&str] = &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD, JOIN_HELD];
+/// The forced denies b's page expects: an earlier run's probe.
+pub const FORCED_B: &[&str] = &[EARLIER_RUN_PROBE];
+/// The forced denies c's page expects: an earlier run's probe, as b's.
+pub const FORCED_C: &[&str] = &[EARLIER_RUN_PROBE];
 /// How long a's native client holds its call once the media connected: the three phases fit in it.
 pub const NATIVE_HOLD: Duration = Duration::from_secs(200);
 /// How long a's native client gets to show what a phase changed in its call.
@@ -163,7 +162,7 @@ async fn open_pages(
 }
 
 /// Closes `page` under its policy and judges its capture: the run's invitation received and its attach let through,
-/// and c's join registering its call.
+/// and c's join let through.
 async fn close_page(page: Page, run: &Mixed, report: &mut ScenarioReport) {
     let (forced, role) = if page.alias == Alias::C {
         (FORCED_C, CalleeRole::Joins)
@@ -211,7 +210,6 @@ impl Mixed {
             stand_up_calling(page.alias, &mut page.session.driver(), report).await?;
             wait_calling_socket(page.alias, &mut page.session, report).await?;
             watch_controls(page.alias, &page.session).await?;
-            hold_callee(&page.session, RING_SENDS)?;
         }
         self.everyone_in(pages, report).await?;
         let absent = self.c_leaves(pages, report).await?;
@@ -271,7 +269,6 @@ impl Mixed {
             return Err(setup("the run's pages are b's and c's".to_owned()));
         };
         let alias = last.alias;
-        hold_callee(&last.session, JOIN_HELD)?;
         open_join(alias, &last.session, report).await?;
         self.check_join(last, report).await?;
         // what each of the native client's lines brought before the join, counted after c was seen gone (a count
@@ -485,7 +482,6 @@ async fn answer(
         EarlierRings::Judged,
     )
     .await?;
-    hold_callee(session, ANSWER.label)?;
     session
         .driver()
         .click(&format!("{alias} clicks answer"), Selector::Css(ACCEPT_AUDIO_CSS))

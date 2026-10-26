@@ -249,14 +249,39 @@ Rules that keep the mapping fail-closed:
   (`docs/backlog/ams-image-sending.md`, [chat.md](chat.md)).
 - Calls map the test call's start, as a new call of its caller and the echo service; a chat header's call start, as
   a call in the chat it carries with the caller and its callees ([calling.md](calling.md#the-start)); and the captured
-  operations on a call the fence registered ([the call registry](#the-call-registry)); any other write on a call, any
-  answer, decline, join and the callee's ring-time sends stay unreadable ([calling-echo.md](calling-echo.md),
-  `docs/backlog/fence-call-follow-ups.md` for what M3 maps next).
+  operations on a call, each in its captured shape: a join, an answer, a decline, an `add`, the follow-ups and the
+  callee's ring-time sends, judged by the lab's call rule ([below](#the-labs-call-rule)); any other write on a call
+  stays unreadable ([calling-echo.md](calling-echo.md), [calling.md](calling.md)).
   Meetings, invites, mail and channel posts aren't mapped.
+
+## The lab's call rule
+
+Every lab fence (`Fence::open_lab`, `Fence::open_lab_account`, `Fence::new` in tests) judges a call by its entry
+(`crates/teams-fence/src/decision.rs`, `CallRule::Entry`; CLAUDE.md, "Calls go only to the lab, both ways"), the
+user's decision after the registry's link binding kept failing the lab's own calls (a retried start shadowed by a stale
+pending one, acknowledgements and receipts denied on a live call):
+
+| Operation | Judged by |
+|---|---|
+| a start (`epconv`) | its callees and the chat it carries, read fresh ([above](#writes)), as before |
+| a join (`POST …/conv/<id>`, roster-only or with a call invitation) | the group chat it names (`joins`), read fresh: complete, listing the joiner, lab-only; no invitation need bind the conversation to it |
+| an answer (`accept`) or a decline (`reject` 603) | an invitation this fence offered (below), tied to it by the call leg its link names (`…/cc/v1/incoming/<call>/…`, the call the invitation's `attach` link names: `CallRegistry::resolve_answer`), the answer from its callee, while it is open for the operation (ringing; the same `accept` again once answered, the same `reject` once declined), its group chat read fresh; no attach answer need have bound the link |
+| an `add` | its sender and every invitee lab accounts or approved services (the row maps it only naming the 1:1 chat of the sender and its one invitee, and the sender as organizer) |
+| every other operation: the follow-ups (endpoint metadata and state, participant properties, the acceptance's acknowledgement, channel parameters, renegotiation, media answers and acknowledgements, media descriptions, the keep-alive), the callee's `attach` and `progress`, `leave` | permitted with no member read and no lookup, logged (`call_follow_up`, `call_ringing`) |
+| a Trouter delivery response | the browser's frame rule lets every `3:::` through on a Trouter socket, logged `allowed`; the native client's typed responses are permitted by `Fence::check_delivery_response` when they name a delivery id, logged (`delivery_response`, by the kind the registry knows them as, else `call_delivery_response`) |
+
+The browser fence reads no call answer at the response stage and registers or binds nothing. The registry still reads
+every delivery the account's calling socket receives (`Fence::observe_delivery`): it offers the account's own
+invitations from lab callers (only an offered one is answered or declined), ends an invitation's ring at the callbacks
+its `attach` handed out, and, for the native client, registers its own starts from their answers and binds their
+acceptances, which is how its call machine reads its deliveries (`Observed::Acceptance`, `Observed::Renegotiation`).
+None of that decides a lab write. The native transport refuses a call write the registry won't pend only on a fence
+that tracks calls (`Fence::tracks_calls`): a lab fence's `attach` or `accept` goes with its answer unread.
 
 ## The call registry
 
-A call's follow-ups reach its participants, and no source reads a call's members (the conversation's
+The personal build's call rule (`CallRule::Registry`, `Fence::tracks_calls`; its tests run it on a lab roster through
+`Fence::tracking_calls`, `test-support` only). A call's follow-ups reach its participants, and no source reads a call's members (the conversation's
 `getAllParticipants` answered an empty list for a call that had its caller in it:
 [calling-echo.md](calling-echo.md#open)).
 So the fence trusts only the calls it permitted itself (CLAUDE.md, "Calls go only to the lab, both ways"): each fence
@@ -285,7 +310,7 @@ registered it from its answer and bound a voicemail's acceptance, [calling.md](c
 | Step | What binds | How |
 |---|---|---|
 | the start | a pending call: its caller (`participants.from.id`), its participants (the permit's), the endpoint's own callbacks (`callInvitation.links`, `conversationRequest.links`) | `Fence::pend_start(&permit, start body)`: the permit must be this fence's (it carries the fence's run-unique id) and is taken once (by its serial); the body must read as the start the permit was issued for |
-| the start's answer | the call is registered: of the answer's `links`, `updateEndpointMetadata`, `leave` and `addParticipantAndModality` (the `/add` the client posts to, not `addParticipant`), each only when it is `conversationController`'s path plus the operation's segment, with its query | `Fence::register_start(pending, answer)`; the browser pauses the answer to `CALL_START_URL` at the response stage on its own session, ties it to the permitted start by the request's `Network` id, reads it and only then continues it |
+| the start's answer | the call is registered: of the answer's `links`, `updateEndpointMetadata`, `leave` and `addParticipantAndModality` (the `/add` the client posts to, not `addParticipant`), each only when it is `conversationController`'s path plus the operation's segment, with its query | `Fence::register_start(pending, answer)`: the native transport reads the answer of the start it sent (the browser fence, under the lab's rule, reads none) |
 | the acceptance | the call controller's links: `acknowledgement` (`…/cc/v1/callAcceptance/<call>/…/acknowledge`) and `applyChannelParameters` (`…/cc/v1/mcProxy/<call>/…/applyChannelParameters`), when every link of `callAcceptance.links` names one call controller host and one call id (a redelivery naming another binds nothing) | `Fence::observe_delivery`: a Trouter delivery at exactly the path of the start's own `acceptance` callback (the endpoint, call agent and random segment), its body decoded (gzip and base64, as the call controller sends it). One that arrives before the answer waits on the pending call |
 | a `conversationUpdate` | nothing | none of the captured operations needs it: the callee's side binds from the attach's and the accept's answers, a join from the invitation (below) |
 
@@ -313,8 +338,7 @@ call's follow-ups resolve to it alone; a live call keeps its links, and a link t
 **The acceptance's delivery response** is one of the two Trouter delivery responses the fence lets through (the other
 is an offered invitation's receipt, below; `Fence::check_delivery_response`, logged as a `delivery_response` entry): it
 answers a pending acceptance delivery of
-a live call on the same connection (in the browser: the socket's session and `Network` id; a closed socket's pending
-deliveries are dropped), once, in the captured envelope (`id` the delivery's, `status` 200, exactly the headers
+a live call on the same connection (a closed socket's pending deliveries are dropped), once, in the captured envelope (`id` the delivery's, `status` 200, exactly the headers
 `MS-CV`, `trouter-client`, and `trouter-request`, `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID`
 each equal to the delivery's own), its body a `callAcceptanceAcknowledgement` whose
 links are all callbacks on the start's own endpoint and call agent (same authority, same path prefix). Every other
@@ -346,9 +370,8 @@ lab client, and an `add` is judged per invitee). What passes on an offered invit
 | it rings, then on the click | the endpoint state (`CallFollowUp`), the `accept` (`CallAnswer`) or the `reject` (`CallDecline`, only code 603 `CallEndReasonLocalUserInitiated`) | the conversation subscription's `updateEndpointState` link; the attach answer's `acceptance` and `callLeg` links; the accept's callbacks on the attach's call agent |
 | it was answered | the answered call's endpoint metadata and state, its own participant properties (`to` only the sender), its `leave` (then only that leave again), its `renegotiate`, media lines (`updateMediaDescriptions`), `applyChannelParameters`, a renegotiation's `answer` and an answer's `acknowledge` | the conversation subscription's links; the accept answer's `mediaRenegotiation`, `updateMediaDescriptions` and `applyChannelParameters`; the links a renegotiation or an answer delivered at the callee's own `mediaRenegotiation` / `mediaAnswer` callback hands out |
 
-The browser pauses the `attach`'s and the `accept`'s answers at the response stage, tied to the permit by `Network`
-id (`Fence::pend_answer`, `Fence::bind_answer`), as it does the start's. A decided `accept` or `reject` passes again
-(the browser decides a request on two layers, and the client resends), nothing else of the ring does. A delivery at the
+The native transport reads the `attach`'s and the `accept`'s answers (`Fence::pend_answer`, `Fence::bind_answer`), as
+it does the start's. A decided `accept` or `reject` passes again (the client resends), nothing else of the ring does. A delivery at the
 attach's `call/end` or `conversationEnd` callback ends the invitation for good, answered or not; it is never offered
 again.
 
@@ -363,8 +386,8 @@ chat it named, whatever its ring did since; the join's sender is the account the
 callbacks on that account's endpoint, and `Fence::check` reads the chat fresh. Without a call invitation the join only
 subscribes to the conversation's roster (the client does so by itself once its ring ended, and only then shows the
 chat's join); with one it enters the call, and pends and registers its call as a start does (its answer, the
-conversation, read at the response stage; its acceptance at its own callback). The caller's own re-subscription after
-its call ended stays held back (no invitation binds it).
+conversation, read by the native transport; its acceptance at its own callback). The caller's own re-subscription
+after its call ended is denied under this rule (no invitation binds it); the lab's rule judges it by its chat.
 
 ## Reading a chat's members
 

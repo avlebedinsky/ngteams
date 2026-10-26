@@ -258,9 +258,9 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
         ScenarioName::EchoCall => (echo_call::forced_rules()?, echo_call::policy()),
         // every page of a call run, the caller's and each callee's, under the earlier run's probe rules
         ScenarioName::AbCall | ScenarioName::AbcCall => {
-            use proto_lab::scenario::ab_call::{CallStep, callee_forced, caller_forced, policy};
+            use proto_lab::scenario::ab_call::{CALLEE_FORCED, CallStep, caller_forced, policy};
             let step = CallStep::default();
-            assert!(callee_forced(step).contains(&EARLIER_RUN_PROBE));
+            assert!(CALLEE_FORCED.contains(&EARLIER_RUN_PROBE));
             (probe_rules(None)?, policy(caller_forced(step)))
         }
         // b's page, under the earlier run's probe rules

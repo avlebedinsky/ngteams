@@ -5,7 +5,8 @@ Status: 2026-10-24, M3 Tasks 5 and 6; [The SDP dialect](#the-sdp-dialect) 2026-1
 headless, muted, with fake devices, the fence armed with the lab rule. The captures stay outside the repository; the
 fixtures in `tests/fixtures/calling/chat/` are synthetic, shaped like them. Ids, hosts' numbers, tokens and addresses
 below are placeholders. The echo test call is in [calling-echo.md](calling-echo.md); the fence's side of a call is in
-[fence-targets.md](fence-targets.md#the-call-registry).
+[fence-targets.md](fence-targets.md#the-labs-call-rule): a call is judged by its entry (its start, a join, an answer
+or a decline, an `add`), and what it sends once it was let in passes.
 
 The code: the scenarios are `crates/proto-lab/src/scenario/ab_call.rs` and `abc_call.rs`; the start's row is
 `chat_call_start`, the callee's and the call's operations `follow_up`, in `crates/teams-fence/src/contacting/call.rs`;
@@ -18,12 +19,12 @@ delivery responses `crates/teams-proto/src/frame.rs`.
 | `--call` | Browsers | What is held back (labelled forced denies) | What happens |
 |---|---|---|---|
 | `start-held` | a | every `POST epconv` (`the call start, held back`) | a clicks the call button(s); nothing rings |
-| `answer` | a, each callee | while it rings, everything each callee's page sends to the calling services but its `attach` and `progress`, which the fence maps on the offered invitation (`a callee's sends while ringing, held back`); its delivery responses go to the fence; after its click everything but the answered call's mapped operations (`a callee's answer, held back`) | each callee answers by the run's click (only on the run's own lab-only invitation), the call connects, every page turns its noise suppression off and its microphone over, the audio is judged both ways by the WebRTC statistics (the tone noted when heard), then each callee hangs up |
-| `decline` | a, each callee | as `answer`; after the click everything but the decline's `DELETE` (`a callee's decline, held back`) | each callee declines by the run's click, its rejection let through by the fence; a hangs up when its call is still up |
+| `answer` | a, each callee | nothing: the fence judges the answer, and the rest of the call passes | each callee answers by the run's click (only on the run's own lab-only invitation), the call connects, every page turns its noise suppression off and its microphone over, the audio is judged both ways by the WebRTC statistics (the tone noted when heard), then each callee hangs up |
+| `decline` | a, each callee | as `answer` | each callee declines by the run's click, its rejection let through by the fence; a hangs up when its call is still up |
 | `video` | a, each callee | as `answer` | as `answer`, and once the audio was judged every page turns its camera on; each must decode video |
 | `dropped` | a, each callee | as `answer` | as `answer`, and the last callee's page goes off the network for 10 s with its calling socket closed by the run (it must close; none closed fails the run), then comes back; 25 s later every page must still show the call |
-| `join` | a, b and c (`abc-call`) | as `answer` for b; c's ring ends unanswered, then everything c sends but its joins and its call's mapped operations (`a callee's join of the running call, held back`) | b answers; once c's ring ended c opens the chat and, only on the run's own call with the run's chat shown and one join, clicks the header's join of the running call; c must then show the call screen, and its capture the join's answer registering the call |
-| `cancel` | a, each callee | the callees' sends while ringing as above; a's own join of the running call (`the caller's join of the running call, held back`) | a hangs up 8 s after it placed the call |
+| `join` | a, b and c (`abc-call`) | as `answer` | b answers; once c's ring ended c opens the chat and, only on the run's own call with the run's chat shown and one join, clicks the header's join of the running call, which the fence judges by the chat it names; c must then show the call screen, and its capture the join let through |
+| `cancel` | a, each callee | as `answer` | a hangs up 8 s after it placed the call |
 | `timeout` | a, each callee | as `cancel` | nobody acts for 50 s, then a hangs up if its call is still up |
 
 Before a calls, every page's calling socket must be up (a socket naming the calling stack's client, `SkypeSpaces`, that
@@ -73,8 +74,8 @@ same body; then it shows a retry screen (`calling-retry-screen`, `calling-retry-
 **The fence** maps it as a call in the chat it carries (`WriteKind::Call` on `Scope::Conversation`, the caller and
 every callee added): the group chat `groupChat.threadId` names, or for a 1:1 start the 1:1 chat of the caller and its
 one callee as the chat service names it. Only the captured shape maps; anything else on that URL is unreadable
-([fence-targets.md](fence-targets.md#the-call-registry)). The start's answer is the conversation, as for the test
-call, and registers the call.
+([fence-targets.md](fence-targets.md#the-labs-call-rule)). The start's answer is the conversation, as for the test
+call.
 
 ## The invitation
 
@@ -251,8 +252,7 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   response, as it answers an invitation. Native runs without them showed the call controller holding the call: the
   acknowledgement came about 22 s after the answer, and a renegotiation in that window was rejected; with the receipts
   it came in under a second. So the native client sends each receipt (`InvitationReceipt`, decided by
-  `Fence::check_delivery_response` like the other two delivery responses, once per delivery at a live call's own
-  callback).
+  `Fence::check_delivery_response` like its other delivery responses: permitted and logged under the lab's call rule).
 - **A renegotiation rejected with `491`** ("Negotiation is in progress": both ends turned their cameras on at once,
   or the far end's previous negotiation isn't acknowledged yet) goes again with the same offer 3 s later, at most 5
   times, and no other renegotiation of ours begins meanwhile (the camera's button is refused: the offer waiting to
@@ -344,8 +344,14 @@ control whose `data-tid` names a join in `chat-calling-meeting-buttons`); with i
 `participantPropertyBag`; let through, its answer is the conversation, an acceptance comes at its own `acceptance`
 callback, and it puts its metadata and acknowledges by request, as a caller does. The caller's own roster join after
 its call ended has the same shape. A start in a group chat whose call still runs (one left behind by a broken run)
-ends at once with `conversationEnd` `409` "Conversation cannot be created due to a failure to resolve ownership",
-naming the running conversation (`conversationUrl`) and the chat (`threadId`); the client then joins that one.
+ends at once with `conversationEnd` `409`, `subCode` `5704`, "Conversation cannot be created due to a failure to
+resolve ownership", naming the running conversation (`conversationUrl`) and the chat (`threadId`); the captures show no
+join of that one: the client posts a roster-only join to its own new conversation four times and sends no `leave`
+(seen 2026-10-26). A native start ended so ends its call at once (`End::Remote`, printed by `teams-headless` as
+`remote 409 chat has a running call <conversation>`). The service refused a chat's call for about a minute after its
+last call ended, too (seen 2026-10-26, starts ~60 s after a cleanly left call; ones 78 s and later went):
+`scripts/native-call-run.sh` leaves 90 s between calls in a chat. A failed `ab-call` or `abc-call` run hangs up every
+page that shows its call before it closes, so it leaves none running.
 
 ## A call held past a dropped socket
 
@@ -367,8 +373,8 @@ Two keep-alives came, from each page:
   {}}` to its call leg's own `callLeg` link: the caller's from its acceptance (`…/cc/v1/active/<call>/<n>/<leg>/<n>
   ?i&e`), the callee's from its accept's answer (the same form, a leg of its own). Denied (the caller's as unreadable,
   the callee's held back), each page tried it again twice, 4 s apart, then waited for the next interval. Its answer
-  isn't captured. Mapped since: `CallOperation::KeepAlive` on exactly a link the acceptance or the accept's answer
-  bound, exactly that body ([endpoints.md](endpoints.md#calling-teamsmicrosoftcomtrap-apiflightproxyteamsmicrosoftcomapiv2));
+  isn't captured. Mapped since: `CallOperation::KeepAlive` to the call leg's own link, exactly that body, passing once
+  the call was let in ([endpoints.md](endpoints.md#calling-teamsmicrosoftcomtrap-apiflightproxyteamsmicrosoftcomapiv2));
   the native client sends it the same way (`teams-call`, every 90 % of the interval while the call is up, a keep-alive
   not taken ending nothing). Live, a native a → b call held 42 minutes: both ends sent it 2430 s into the call, each
   answered `202`, every write of the call permitted.
@@ -411,7 +417,7 @@ call; a native callee whose call ended while its endpoint metadata was on its wa
 - **Nobody acts, 1:1** (`timeout`): about 22 s after the start a receives a `callProgress` at its `progress` callback,
   `status: "forwarded"`, `forwardingDestinationType: "voicemail"`, then an acceptance at its `acceptance` callback whose
   `acceptedBy` is the callee's MRI with `endpointType: "voicemail"`: the callee's own voicemail takes the call, and
-  a's call connects to it (the registry binds the acceptance, its acknowledgement passes, a's follow-ups pass). The
+  a's call connects to it (its acknowledgement and a's follow-ups pass). The
   roster then lists the callee with a voicemail endpoint (`GraphCommunicationsClient-Voicemail`). a's tone is
   recorded into the callee's voicemail, which reaches only the callee's own mailbox.
 - **Nobody acts, group call** (`timeout`): the call's mixer accepts a's leg at once (about 3 s after the start, an
@@ -419,7 +425,7 @@ call; a native callee whose call ended while its endpoint metadata was on its wa
   then the call's `end` and `conversationEnd`; the group call ends without voicemail.
 - **The caller's join after it left** (group calls): after its call ended or it hung up, a's page posts a roster-only
   join to the conversation controller itself ([Joining a running call](#joining-a-running-call)), and retries it twice,
-  4 s apart. No invitation binds it on a's side; the scenario holds it back by name.
+  4 s apart. The fence judges it by the group chat it names, lab-only, and lets it through.
 - **Answered, declined**: [The answer](#the-answer), [The decline](#the-decline).
 - **Answered elsewhere** (`ab-call-native`'s third phase: b's web client and b's native client up together, a's call
   answered on b's page): b's native client's ring ends 1.2–1.6 s after the page's click with a delivery at its

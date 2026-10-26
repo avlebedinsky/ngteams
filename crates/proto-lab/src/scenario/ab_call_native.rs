@@ -13,11 +13,10 @@
 //! camera on (Chrome's fake camera) once it heard the native client's tone; the page must decode the native client's
 //! video ([`video_frames`] from the phase's capture on, at least [`PAGE_FRAMES`] within [`VIDEO_WAIT`]) and the native
 //! client must show the page's (its `video received=` line, at least [`NATIVE_FRAMES`]). Three phases, in order:
-//! 1. **a's native client calls b** (`teams-headless a call b`): b's page, held as a callee while it rings
-//!    ([`RING_SENDS`]), must show the incoming call; it clicks answer only on the run's own call (`ab-call`'s ring
-//!    check, [`EarlierRings::OwnLeftOut`]: every invitation the page received is a's call to b in no group chat, an
-//!    earlier phase's ring of a's call to b aside, and the page shows one incoming call), its answer held as
-//!    `ab-call`'s ([`ANSWER_HELD`]); the page must hear a's tone and its audio go both ways, and a's
+//! 1. **a's native client calls b** (`teams-headless a call b`): b's page must show the incoming call; it clicks
+//!    answer only on the run's own call (`ab-call`'s ring check, [`EarlierRings::OwnLeftOut`]: every invitation the
+//!    page received is a's call to b in no group chat, an earlier phase's ring of a's call to b aside, and the page
+//!    shows one incoming call); the page must hear a's tone and its audio go both ways, and a's
 //!    native client must hear the page's tone, hold the call [`NATIVE_HOLD`], hang up and exit 0.
 //! 2. **b's page calls a** (`teams-headless a watch --answer-lab-calls`): once a's calling stack registered, b's page
 //!    calls from the chat's header (its start decided by the fence) and a's native client answers it (the engine
@@ -45,10 +44,10 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_call::{
-    ACCEPT_AUDIO_CSS, ANSWER_HELD, CALLER_JOIN_HELD, CAMERA, CONNECT_WAIT, CalleeAction, CalleeRole, EarlierRings,
-    HANG_UP_CSS, INCOMING_CALL, Modality, RING_SENDS, RING_WAIT, RunCall, TONE_WAIT, VIDEO_WAIT, back_to_chat,
-    caller_join_rule, check_ring, hang_up_page, hold_callee, judge_callee, mri, place_call, policy, stand_up_calling,
-    switch_microphone, video_frames, wait_calling_socket, watch_controls,
+    ACCEPT_AUDIO_CSS, CAMERA, CONNECT_WAIT, CalleeAction, CalleeRole, EarlierRings, HANG_UP_CSS, INCOMING_CALL,
+    Modality, RING_LOOK, RING_WAIT, RunCall, TONE_WAIT, VIDEO_WAIT, back_to_chat, check_ring, hang_up_page,
+    judge_callee, mri, native_call_conflict, place_call, policy, stand_up_calling, switch_microphone, video_frames,
+    wait_calling_socket, watch_controls,
 };
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, setup};
 use super::dsl::{Selector, js_string};
@@ -58,9 +57,8 @@ use super::echo_call::{
 };
 use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// The forced denies b's run expects: an earlier run's probe, its sends while it rings and once it answered, and its
-/// own join of a running call (as a caller's in `ab-call`).
-pub const FORCED: &[&str] = &[EARLIER_RUN_PROBE, RING_SENDS, ANSWER_HELD, CALLER_JOIN_HELD];
+/// The forced denies b's run expects: an earlier run's probe.
+pub const FORCED: &[&str] = &[EARLIER_RUN_PROBE];
 
 /// The environment variable naming the `teams-headless` binary the scenario spawns: a normal lab build
 /// (`cargo build --release -p teams-headless --target-dir target/lab`), which refuses to run with `test-support` in.
@@ -94,9 +92,8 @@ pub const PAGE_FRAMES: u64 = 30;
 /// The page's video frames a native client must have shown.
 pub const NATIVE_FRAMES: u64 = 30;
 
-/// What b's page clicks on its incoming call: answer, what it sends from then on held as `ab-call`'s.
+/// What b's page clicks on its incoming call: answer.
 pub(crate) const ANSWER: CalleeAction = CalleeAction {
-    label: ANSWER_HELD,
     button: ACCEPT_AUDIO_CSS,
     what: "answer",
 };
@@ -228,11 +225,10 @@ impl Run {
         report
             .notes
             .push("phase 1: a's native client calls b's page".to_owned());
-        hold_callee(session, RING_SENDS)?;
         let since = now_ms();
         self.first_ring = Some(since);
         self.spawn(Alias::A, CALLER, &call_args(NATIVE_HOLD, true))?;
-        self.answer_on_page(session, since, report).await?;
+        self.answer_on_page(session, (CALLER, since), report).await?;
         let from = capture_len(session);
         hear_on_page(session, from, report).await?;
         see_on_page(session, from, report).await?;
@@ -260,7 +256,6 @@ impl Run {
         for rule in probe_rules(None).map_err(|error| setup(error.to_string()))? {
             session.force_deny(rule);
         }
-        session.force_deny(caller_join_rule().map_err(|error| setup(error.to_string()))?);
         back_to_chat(Alias::B, &mut session.driver(), report).await?;
         let from = capture_len(session);
         place_call((Alias::B, session), Modality::Audio, report).await?;
@@ -305,11 +300,10 @@ impl Run {
         self.spawn(Alias::B, OTHER, &watch_args("--calls", false))?;
         self.wait_output(OTHER, session, "calling_registration registered=true", NATIVE_REGISTER)
             .await?;
-        hold_callee(session, RING_SENDS)?;
         let since = now_ms();
         self.spawn(Alias::A, CALLER, &call_args(ELSEWHERE_HOLD, false))?;
         self.wait_output(OTHER, session, "incoming_call", RING_WAIT).await?;
-        self.answer_on_page(session, since, report).await?;
+        self.answer_on_page(session, (CALLER, since), report).await?;
         self.wait_output(OTHER, session, "ring_ended", ELSEWHERE_WAIT).await?;
         let rang = self.native(OTHER)?.output();
         if !ring_ended_elsewhere(&rang) {
@@ -348,17 +342,32 @@ impl Run {
 
     /// b's page shows the incoming call within [`RING_WAIT`], clicks answer on the run's own call only (`ab-call`'s
     /// ring check: every invitation the page received is the run's call, but an earlier phase's of the same call, and
-    /// the page shows one incoming call), and is in the call within [`CONNECT_WAIT`].
+    /// the page shows one incoming call), and is in the call within [`CONNECT_WAIT`]. Meanwhile the native caller's
+    /// output (`caller`, the call placed at `since`) is read every [`RING_LOOK`]: a call the service ended at once
+    /// because the chat already has a running call ([`native_call_conflict`]) fails the phase then.
     async fn answer_on_page(
         &self,
         session: &mut LabSession,
-        since: u64,
+        (caller, since): (&str, u64),
         report: &mut ScenarioReport,
     ) -> Result<(), ScenarioError> {
-        session
-            .driver()
-            .wait_for("b shows the incoming call", INCOMING_CALL, RING_WAIT)
-            .await?;
+        let started = tokio::time::Instant::now();
+        loop {
+            let left = RING_WAIT.saturating_sub(started.elapsed());
+            let shown = session
+                .driver()
+                .wait_for("b shows the incoming call", INCOMING_CALL, left.min(RING_LOOK))
+                .await;
+            let Err(error) = shown else { break };
+            if let Some(conversation) = native_call_conflict(&self.native(caller)?.output()) {
+                return Err(setup(format!(
+                    "chat has a running call {conversation}: the service ended {caller}'s call at once (409, 5704)"
+                )));
+            }
+            if started.elapsed() >= RING_WAIT {
+                return Err(error.into());
+            }
+        }
         report
             .notes
             .push(format!("b: the incoming call showed at {}", now_ms()));
@@ -370,7 +379,6 @@ impl Run {
             EarlierRings::OwnLeftOut,
         )
         .await?;
-        hold_callee(session, ANSWER.label)?;
         session
             .driver()
             .click("b clicks answer", Selector::Css(ACCEPT_AUDIO_CSS))

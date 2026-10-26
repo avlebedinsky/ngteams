@@ -151,18 +151,16 @@ fn the_channel_classes_take_a_channel_s_id_only() -> TestResult {
 }
 
 #[test]
-fn trouter_frames_are_expected_by_their_socket_host_and_nothing_else_is() -> TestResult {
+fn no_denied_frame_is_expected() -> TestResult {
     let policy = ab_chat_policy()?;
     for url in [
+        // a delivery response passes the frame rule: a Trouter frame denied means something is off
         "wss://go.trouter.teams.microsoft.com/v4/c",
         "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c",
     ] {
         let denied = frame(url, DenyCause::Unclassified);
-        assert_eq!(
-            frame_class(&denied).map(|entry| entry.class),
-            Some("Trouter delivery responses")
-        );
-        assert!(policy.expects_frame(&denied), "{url}");
+        assert_eq!(frame_class(&denied).map(|entry| entry.class), None);
+        assert!(!policy.expects_frame(&denied), "{url}");
         assert!(!policy.expects_frame(&frame(url, DenyCause::ForeignSocket)), "{url}");
         assert!(!policy.expects_frame(&frame(url, DenyCause::Forced)), "{url}");
     }
@@ -602,10 +600,7 @@ async fn the_list_changes_only_the_judgement_never_the_verdict() -> TestResult {
             alias: Alias::A,
             fence: FenceReport::default(),
             denials,
-            frame_denials: vec![frame(
-                "wss://go.trouter.teams.microsoft.com/v4/c",
-                DenyCause::Unclassified,
-            )],
+            frame_denials: Vec::new(),
             capture: None,
         },
         &policy,

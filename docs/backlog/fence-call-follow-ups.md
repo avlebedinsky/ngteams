@@ -5,12 +5,13 @@ added: 2026-10-20
 ---
 # M3 maps the call writes: lab-only calls started and answered, the follow-ups by a call registry
 
-Status: the echo call's follow-ups are mapped on the call registry and `echo-call` completes (the echo joins and plays
-the tone back, the run exits 0); the start from a 1:1 or group chat to lab callees is mapped and registers its call
-(M3 Task 5, `docs/protocol/calling.md`); the callee's ring-time sends, answering, declining and joining a lab-only
-call are mapped on offered invitations and run live in the browser, with video and media renegotiation on registered
-and answered calls (M3 Task 6). What is left: the native side's feeding of the registry and the follow-ups no page
-has sent yet (hold, `updateCallState`, `controlVideoStreaming`, screen sharing).
+Status: since 2026-10-26 (the user's decision) the lab judges a call by its entry only: its start, a join, an
+answer or a decline of the account's own offered invitation, an `add` by its invitees; every mapped follow-up, the
+callee's ring-time sends and the call's delivery responses pass once the call was let in, with no registry lookup
+(CLAUDE.md, "Calls go only to the lab, both ways"; `docs/protocol/fence-targets.md`, "The lab's call rule"). The call
+registry below is the personal build's call rule now (M3 Task 22 turns it on). What is left: the follow-ups no page
+has sent yet (hold, `updateCallState`, `controlVideoStreaming`, screen sharing, the conversation's `notificationLinks`
+keep-alive), each still unreadable until a capture maps it.
 
 M0 Task 18: `proto-lab run echo-call` places the web client's test call and the fence allows the call start (a new
 call of lab account a and the approved echo service). Every later request lands on the call that now exists, is no

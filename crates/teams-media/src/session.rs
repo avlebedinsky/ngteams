@@ -990,12 +990,16 @@ impl Capture {
                 // no frame for a while: the microphone hears nothing now (its last level isn't kept)
                 Ok(None) => self.shared.captured_level.store(0, Ordering::Relaxed),
                 Err(_) => {
+                    // a closed microphone hears nothing from now on
+                    self.shared.captured_level.store(0, Ordering::Relaxed);
                     self.shared
                         .report(SessionEvent::DeviceClosed(SessionDevice::Microphone));
                     break;
                 }
             }
         }
+        // however the capture ended (a frame that couldn't be encoded among it), its last level isn't kept
+        self.shared.captured_level.store(0, Ordering::Relaxed);
         self.outgoing.close();
     }
 

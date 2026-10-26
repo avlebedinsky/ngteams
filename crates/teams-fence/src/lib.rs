@@ -7,7 +7,11 @@
 //! outside participant, a [`Scope::New`] target for a kind that doesn't create one. A write that reaches nobody
 //! ([`WriteKind::is_contacting`] false) is judged without a member read: typing and read receipts on a chat, and the account's
 //! own availability ([`WriteKind::OwnAvailability`] on [`Scope::Account`]), only the fence's own account's
-//! ([`Fence::open_lab_account`], [`Fence::own_account`]). Every decision goes to `fence.log` ([`FenceLog`]), and so do
+//! ([`Fence::open_lab_account`], [`Fence::own_account`]). An operation on a call ([`Scope::CallOperation`]) goes by the
+//! fence's call rule: a lab fence judges a call's entry (a join by the chat it names, an answer or a decline of the
+//! account's own offered invitation, an `add` by its invitees) and permits what the call sends once it was let in; the
+//! call registry's rule ([`Fence::tracks_calls`], the personal build's) resolves every one to a call it registered.
+//! Every decision goes to `fence.log` ([`FenceLog`]), and so do
 //! the mutating requests let through because they reach nobody ([`AllowedRecord`]), the browser requests the browser
 //! fence decides without a membership check ([`RequestRecord`]), the targets it couldn't arm ([`ArmingRecord`]) and the
 //! personal build's WebSocket frames ([`FrameRecord`]; the lab's frame sink logs none).

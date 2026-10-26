@@ -868,10 +868,12 @@ impl<C: Credentials> HttpTransport<C> {
     /// body sent) and registered from a successful answer ([`Fence::register_start`]), ended unregistered by any other
     /// ([`Fence::abandon_start`], so a start sent again is the call its acceptance binds to); an `attach` or an
     /// `accept` pends its answer ([`Fence::pend_answer`]) and binds the links a successful answer hands out
-    /// ([`Fence::bind_answer`]). A permit the registry won't take is [`Refusal::NotPended`], nothing sent. The answer
+    /// ([`Fence::bind_answer`]). A start's permit the registry won't take is [`Refusal::NotPended`], nothing sent, and so
+    /// is an `attach`'s or an `accept`'s on a fence that tracks calls ([`Fence::tracks_calls`]); a lab fence's goes with
+    /// its answer unread (its fence judged it by its entry, and nothing it sends later needs a binding). The answer
     /// comes back whatever its
     /// status, as any write's; after a 401 the session renews the skypetoken for a later request. A registration that
-    /// fails is logged (the call's follow-ups then stay denied), never retried.
+    /// fails is logged (on a fence that tracks calls the call's follow-ups then stay denied), never retried.
     async fn deliver_call(&self, permit: &WritePermit, call: &CallWire) -> Result<Response, HttpError> {
         let url = call.url();
         if !on_calling_base(url) {
@@ -891,11 +893,12 @@ impl<C: Credentials> HttpTransport<C> {
                 .pend_start(permit, body.as_deref().unwrap_or_default())
                 .map(Pending::Start)
                 .ok_or(HttpError::Refused(Refusal::NotPended))?,
-            Registry::Answer => self
-                .fence
-                .pend_answer(permit)
-                .map(Pending::Answer)
-                .ok_or(HttpError::Refused(Refusal::NotPended))?,
+            Registry::Answer => match self.fence.pend_answer(permit) {
+                Some(pending) => Pending::Answer(pending),
+                // a lab fence permitted it by its entry rule and binds nothing on it: it goes, its answer unread
+                None if !self.fence.tracks_calls() => Pending::Nothing,
+                None => return Err(HttpError::Refused(Refusal::NotPended)),
+            },
         };
         // a `POST` with nothing to say (an acknowledgement) goes as the web client sends one: an empty JSON body,
         // `Content-Length: 0` with its `Content-Type` (the `mediaAnswers` acknowledgement, `ab-call --call video`). Sent

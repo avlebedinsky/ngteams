@@ -1,7 +1,9 @@
 //! Offered invitations (`teams_fence`'s `calls::offer`, `docs/protocol/fence-targets.md`, "Offered invitations"): an
-//! incoming call is offered only when it is readable, addressed to the fence's own account and called by a lab account;
-//! only its ring-time sends pass on it (its delivery response, the callee's `attach`), each bound to it, a group call's
-//! only while its group chat reads lab-only, and nothing passes once its ring ended. Shaped like the `ab-call` and
+//! incoming call is offered only when it is readable, addressed to the fence's own account and called by a lab account.
+//! Under the registry's rule (the personal build's, `Fence::tracking_calls` here) only its ring-time sends pass on it
+//! (its delivery response, the callee's `attach`), each bound to it, a group call's only while its group chat reads
+//! lab-only, and nothing passes once its ring ended. Under the lab's rule (at the end) only its answer and its decline
+//! are judged, and a join by the chat it names. Shaped like the `ab-call` and
 //! `abc-call` captures (`tests/fixtures/calling/chat/`), with made-up ids.
 
 use std::path::PathBuf;
@@ -141,7 +143,7 @@ fn lab_of(own: Option<&str>) -> TestResult<Lab> {
     let dir = tempfile::tempdir()?;
     let log = dir.path().join("fence.log");
     let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]);
-    let fence = Fence::new(roster, FenceLog::open(&log)?);
+    let fence = Fence::new(roster, FenceLog::open(&log)?).tracking_calls();
     let fence = match own {
         Some(own) => fence.with_own_account(Mri::new(own)),
         None => fence,
@@ -1326,5 +1328,146 @@ async fn a_join_with_media_pends_and_registers_its_call_as_a_start_does() -> Tes
         .check(case_write(ROSTER_JOIN, |_| ())?, &Members::of(&[LAB_A, LAB_B, LAB_C]))
         .await?;
     assert!(lab.fence.pend_start(&roster_permit, roster.as_bytes()).is_none());
+    Ok(())
+}
+
+// --- the lab's call rule: an answer, a decline and a join are judged; the rest of a call passes ---
+
+/// b's fence under the lab's own call rule (no `tracking_calls`), in a lab of a, b and c with the echo service.
+fn lab_rule_b() -> TestResult<Lab> {
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("fence.log");
+    let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]);
+    let fence = Fence::new(roster, FenceLog::open(&log)?).with_own_account(Mri::new(LAB_B));
+    assert!(!fence.tracks_calls());
+    Ok(Lab { _dir: dir, log, fence })
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_the_ring_time_sends_and_the_answered_call_s_pass_with_nothing_bound() -> TestResult {
+    let lab = lab_rule_b()?;
+    // nothing offered, attached or bound: the attach, the endpoint state and the receipt pass all the same
+    let (url, body) = attach_case()?;
+    lab.fence.check(attach_target(&url, &body)?, &FailClosed).await?;
+    lab.fence.check(case_write(STATE, |_| ())?, &FailClosed).await?;
+    assert!(matches!(
+        respond(&lab, &receipt(51), &FailClosed).await,
+        DeliveryDecision::Permitted(_)
+    ));
+    let log = std::fs::read_to_string(&lab.log)?;
+    assert!(log.contains(r#""kind":"call_ringing""#), "{log}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_only_an_offered_invitation_is_answered_or_declined() -> TestResult {
+    let unregistered = Some(DenyReason::Partial(PartialReason::UnregisteredCall));
+    // no invitation offered: no answer, no decline
+    let lab = lab_rule_b()?;
+    assert_eq!(reason(&lab, case_write(ACCEPT, |_| ())?).await, unregistered);
+    assert_eq!(reason(&lab, case_write(REJECT, |_| ())?).await, unregistered);
+    // an outsider's invitation is ignored, never offered: answering it is denied too
+    let (delivery, gp) = invitation(0, 61)?;
+    let mut outsider = gp.clone();
+    outsider["callNotification"]["from"]["id"] = json!(COWORKER);
+    let outsider = invitation_delivery(&delivery.path, 61, &outsider);
+    assert_eq!(lab.fence.observe_delivery(&outsider), Observed::Ignored);
+    assert_eq!(reason(&lab, case_write(ACCEPT, |_| ())?).await, unregistered);
+    assert_eq!(reason(&lab, case_write(REJECT, |_| ())?).await, unregistered);
+    // a lab caller's: answered with no attach answer bound (the leg its link names ties it to the invitation)
+    assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Offered);
+    let from_a = case_write(ACCEPT, |body| body["callAcceptance"]["acceptedBy"]["id"] = json!(LAB_A))?;
+    assert_eq!(reason(&lab, from_a).await, Some(DenyReason::CallMismatch));
+    let permit = lab.fence.check(case_write(ACCEPT, |_| ())?, &FailClosed).await?;
+    assert_eq!(permit.target().kind(), WriteKind::CallAnswer);
+    // the same accept again (the browser's second layer), never a decline once answered
+    lab.fence.check(case_write(ACCEPT, |_| ())?, &FailClosed).await?;
+    assert_eq!(
+        reason(&lab, case_write(REJECT, |_| ())?).await,
+        Some(DenyReason::Partial(PartialReason::CallEnded))
+    );
+    // on another fence the same invitation is declined, and then only declined again
+    let other = lab_rule_b()?;
+    other.fence.observe_delivery(&delivery);
+    let permit = other.fence.check(case_write(REJECT, |_| ())?, &FailClosed).await?;
+    assert_eq!(permit.target().kind(), WriteKind::CallDecline);
+    other.fence.check(case_write(REJECT, |_| ())?, &FailClosed).await?;
+    assert_eq!(
+        reason(&other, case_write(ACCEPT, |_| ())?).await,
+        Some(DenyReason::Partial(PartialReason::CallEnded))
+    );
+    let log = std::fs::read_to_string(&lab.log)?;
+    assert!(log.contains(r#""kind":"call_answer""#), "{log}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_group_invitation_is_answered_only_while_its_chat_reads_lab_only() -> TestResult {
+    let lab = lab_rule_b()?;
+    let (delivery, gp) = invitation(1, 62)?;
+    // the 1:1 case's accept, sent to the group invitation's leg
+    let leg = gp["callNotification"]["links"]["attach"]
+        .as_str()
+        .ok_or("attach")?
+        .to_owned();
+    let accept = |url: String| -> TestResult<Target> {
+        let fixture: Value = serde_json::from_str(&fill(CHAT_FOLLOW_UPS))?;
+        let body = fixture["cases"][ACCEPT]["body"].to_string();
+        match contacting(
+            &Request::new("POST", &url).with_body(Some(body.as_bytes())),
+            &Policy::new(),
+        ) {
+            Contact::Write(target) => Ok(target),
+            other => Err(format!("the accept is {other:?}").into()),
+        }
+    };
+    let url = leg.replace("/forked/", "/incoming/").replace("/attach", "/accept");
+    let url = url.replacen("/i1/", "/t/", 1);
+    assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Offered);
+    let outsider = Members::of(&[LAB_A, LAB_B, COWORKER]);
+    let denied = lab.fence.check(accept(url.clone())?, &outsider).await;
+    assert_eq!(
+        denied.err().map(|denied| *denied.reason()),
+        Some(DenyReason::Outsiders { count: 1 })
+    );
+    let lab_only = Members::of(&[LAB_A, LAB_B, LAB_C]);
+    lab.fence.check(accept(url)?, &lab_only).await?;
+    assert_eq!(lab_only.reads(), 1, "the answer reads the chat fresh");
+    Ok(())
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_join_is_judged_by_the_chat_it_names() -> TestResult {
+    let lab = lab_rule_b()?;
+    // no invitation binds the conversation to the chat: the chat the join names is what it is judged by
+    let lab_only = Members::of(&[LAB_A, LAB_B, LAB_C]);
+    let permit = lab.fence.check(case_write(ROSTER_JOIN, |_| ())?, &lab_only).await?;
+    assert_eq!(permit.target().kind(), WriteKind::Call);
+    lab.fence.check(case_write(MEDIA_JOIN, |_| ())?, &lab_only).await?;
+    assert_eq!(lab_only.reads(), 2, "each join reads the chat fresh");
+    // the caller's own join of its call's chat passes too
+    let from_a = case_write(ROSTER_JOIN, |body| body["participants"]["from"]["id"] = json!(LAB_A))?;
+    lab.fence.check(from_a, &lab_only).await?;
+    let cases: [(&str, Members, DenyReason); 3] = [
+        (
+            "an outsider in the chat",
+            Members::of(&[LAB_A, LAB_B, COWORKER]),
+            DenyReason::Outsiders { count: 1 },
+        ),
+        (
+            "a chat that can't be read in full",
+            Members::new(Membership::Partial(PartialReason::NoSource)),
+            DenyReason::Partial(PartialReason::NoSource),
+        ),
+        (
+            "a chat that doesn't list the joiner",
+            Members::of(&[LAB_A, LAB_C]),
+            DenyReason::CallMismatch,
+        ),
+    ];
+    for (name, members, expected) in cases {
+        let denied = lab.fence.check(case_write(ROSTER_JOIN, |_| ())?, &members).await;
+        assert_eq!(denied.err().map(|denied| *denied.reason()), Some(expected), "{name}");
+    }
     Ok(())
 }

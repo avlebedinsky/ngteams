@@ -19,22 +19,20 @@
 //! call from one would hand the token to whatever that world defined as the resolver.
 //!
 //! **The decision** classifies a frame by the frame rule ([`classify_frame`]): on a Trouter socket the socket.io 0.9
-//! type decides (the session's disconnect, connect, heartbeat and events pass; a message, which is how a delivery is
-//! answered, a JSON message, an acknowledgement, a binary frame and anything that doesn't parse are denied); every frame
+//! type decides (the session's disconnect, connect, heartbeat and events pass, and a message, which is how a delivery
+//! is answered, a call's delivery responses among them; a JSON message, an acknowledgement, a binary frame and anything
+//! that doesn't parse are denied); every frame
 //! on a socket of a contacting service (`teams_fence::on_contacting_service`: calling, the chat service, …) is denied;
 //! on any other socket a frame passes. A frame let through is logged to `fence.log` as `allowed` (method `SEND`, the
 //! socket's host and path shape), a denied one with the socket's URL without its query (channel `web_socket`, method
 //! `SEND`), never a frame's content. A run can force a deny on frames too ([`ForcedFrameDeny`], before the rule), as it
 //! can on requests.
 //!
-//! **The call registry's one delivery response.** Trouter deliveries the page receives on a Trouter socket
-//! (`Network.webSocketFrameReceived`, socket.io `3:::` requests, their bodies decoded: [`delivery_of`]) go to the
-//! fence's call registry ([`Fence::observe_delivery`]), on a connection keyed by the socket's session and `Network`
-//! id: a registered call's acceptance binds its call controller's links and waits for its response; the end of a call
-//! ends it. A closed socket's pending deliveries are dropped. A `3:::` frame the page sends on a Trouter socket that
-//! answers such a pending delivery on its connection (the one open socket of its session with its URL) is the
-//! fence's to decide ([`Fence::check_delivery_response`]: the captured acknowledgement of a live call's acceptance,
-//! once); every other `3` stays denied by the frame rule.
+//! **Deliveries the page receives** on a Trouter socket (`Network.webSocketFrameReceived`, socket.io `3:::` requests,
+//! their bodies decoded: [`delivery_of`]) go to the fence's call registry ([`Fence::observe_delivery`]), on a
+//! connection keyed by the socket's session and `Network` id: an incoming call's invitation is offered there when it is
+//! the account's own from a lab caller (only an offered invitation is answered or declined), and the end of its ring
+//! ends it. A closed socket's pending deliveries are dropped.
 //!
 //! **The audit** compares what the browser reports as sent (`Network.webSocketFrameSent`, on the session of the target
 //! that sent it) with the guard's allows: each allow covers one frame with the same opcode and content on the same
@@ -52,9 +50,7 @@ use base64::Engine as _;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
-use teams_fence::{
-    Channel, Delivery, DeliveryDecision, Fence, MembershipSource, RequestOutcome, RequestRecord, on_contacting_service,
-};
+use teams_fence::{Channel, Delivery, Fence, MembershipSource, RequestOutcome, RequestRecord, on_contacting_service};
 use url::{Host, Url};
 
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
@@ -183,10 +179,11 @@ pub struct Frame {
 pub const TROUTER_DOMAIN: &str = "trouter.teams.microsoft.com";
 
 /// The socket.io 0.9 frame types that pass on a Trouter socket: the disconnect (`0`), the connect (`1`), the heartbeat
-/// (`2`) and an event (`5`: the session's own, such as its authentication, keep-alive, activity and loss
-/// acknowledgement). A message (`3`) is how a delivery is answered, which goes back to whoever sent it; a JSON message
-/// (`4`) and an acknowledgement (`6`) are denied with it, and so is every other type.
-const TROUTER_TYPES: [u8; 4] = *b"0125";
+/// (`2`), a message (`3`: how a delivery is answered, which goes back to the service that delivered it, a call's
+/// receipts and acknowledgements among them) and an event (`5`: the session's own, such as its authentication,
+/// keep-alive, activity and loss acknowledgement). A JSON message (`4`) and an acknowledgement (`6`) are denied, and so
+/// is every other type.
+const TROUTER_TYPES: [u8; 5] = *b"01235";
 
 /// What the fence makes of one frame (see the module docs): on a Trouter socket ([`is_trouter_socket`]) a text frame
 /// passes ([`Classification::Allow`]) only when it parses as a socket.io 0.9 frame of a type that passes; on a socket of
@@ -522,18 +519,11 @@ impl WsFence {
         self.forced.lock().unwrap_or_else(PoisonError::into_inner).clear();
     }
 
-    /// Classifies a frame and decides it, as a frame of no known session ([`Self::decide_on`]).
+    /// Classifies a frame and decides it. Every deny is logged and kept. A [`Payload::Foreign`] frame is denied
+    /// unclassified ([`DenyCause::ForeignSocket`]; `fence.log` has it as `unclassified`); a forced one comes next
+    /// ([`DenyCause::Forced`], logged as `forced`; [`DenyCause::LogUnavailable`] when the log won't take it); any other
+    /// frame goes by the frame rule ([`classify_frame`]).
     pub async fn decide(&self, frame: &Frame) -> Verdict {
-        self.decide_on(None, frame).await
-    }
-
-    /// Classifies a frame sent on `session` and decides it. Every deny is logged and kept. A [`Payload::Foreign`] frame
-    /// is denied unclassified ([`DenyCause::ForeignSocket`]; `fence.log` has it as `unclassified`); a forced one comes
-    /// next ([`DenyCause::Forced`], logged as `forced`; [`DenyCause::LogUnavailable`] when the log won't take it). A
-    /// delivery response (`3:::`) on a Trouter socket that answers a pending call delivery of that socket is the
-    /// fence's to decide ([`Fence::check_delivery_response`], which logs it; [`DenyCause::DeliveryResponse`] when it
-    /// refuses); any other frame goes by the frame rule ([`classify_frame`]).
-    pub async fn decide_on(&self, session: Option<&SessionId>, frame: &Frame) -> Verdict {
         if frame.payload == Payload::Foreign {
             let record = RequestRecord {
                 channel: Channel::WebSocket,
@@ -571,46 +561,7 @@ impl WsFence {
             });
             return Verdict::Deny(cause);
         }
-        if let Some(verdict) = self.delivery_response(session, frame).await {
-            return verdict;
-        }
         self.judge(classify_frame(frame), &frame.url).await
-    }
-
-    /// The fence's decision on a delivery response answering a pending call delivery (see [`Self::decide_on`]); `None`
-    /// for any other frame, and for one whose socket isn't exactly one open socket of `session` with its URL.
-    async fn delivery_response(&self, session: Option<&SessionId>, frame: &Frame) -> Option<Verdict> {
-        let Payload::Text(text) = &frame.payload else {
-            return None;
-        };
-        let response = text.strip_prefix("3:::")?;
-        if !Url::parse(&frame.url).is_ok_and(|url| is_trouter_socket(&url)) {
-            return None;
-        }
-        let connection = {
-            let audit = self.audit();
-            let mut open = audit
-                .sockets
-                .iter()
-                .filter(|((owner, _), url)| owner.as_ref() == session && **url == frame.url);
-            match (open.next(), open.next()) {
-                (Some((socket, _)), None) => connection_key(socket),
-                _ => return None,
-            }
-        };
-        match self
-            .fence
-            .check_delivery_response(&connection, response.as_bytes(), self.members.as_ref())
-            .await
-        {
-            DeliveryDecision::NotPending => None,
-            DeliveryDecision::Permitted(_) => Some(Verdict::Allow),
-            DeliveryDecision::Denied(reason) => {
-                let cause = DenyCause::DeliveryResponse(reason);
-                self.keep(FrameDenial::new(&frame.url, cause));
-                Some(Verdict::Deny(cause))
-            }
-        }
     }
 
     /// Decides a frame already classified, sent on the socket at `url`. Every deny is logged and kept.
@@ -685,7 +636,7 @@ impl WsFence {
             return Ok(Some(Verdict::Deny(DenyCause::Malformed)));
         };
         let session = event.session_id.as_ref();
-        let verdict = self.decide_on(session, &request.frame).await;
+        let verdict = self.decide(&request.frame).await;
         if request.frame.payload == Payload::Foreign {
             return Ok(Some(verdict));
         }

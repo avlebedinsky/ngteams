@@ -3,8 +3,9 @@
 //! target what the browser fence's classifier makes of the same bytes, sent only as `Authorized<_>` to the calling
 //! service (the flight proxy, the account's skypetoken, the call's headers, the link exactly as handed out), and the
 //! fence's call registry fed by the transport: a start and a join with media registered from their answers, an
-//! `attach` and an `accept` binding theirs, so every later write of the call passes `Fence::check` only on the links
-//! the call's services handed out.
+//! `attach` and an `accept` binding theirs, so under the registry's rule (the personal build's, `Fence::tracking_calls`
+//! here) every later write of the call passes `Fence::check` only on the links the call's services handed out. Under
+//! the lab's own rule (at the end) only a call's entry is judged, and the rest goes under its permit, logged.
 //!
 //! Tokens, ids, MRIs, hosts and links here are placeholders.
 
@@ -249,11 +250,22 @@ struct Lab {
     transport: HttpTransport<Tokens>,
 }
 
+/// `own`'s lab whose fence decides calls by the call registry (the personal build's rule): the transport's registry
+/// feeding is tested on it.
 async fn lab(own: &str) -> Lab {
     lab_with(own, true).await
 }
 
 async fn lab_with(own: &str, skypetoken: bool) -> Lab {
+    lab_of(own, skypetoken, true).await
+}
+
+/// `own`'s lab whose fence decides calls by the lab's own rule: only a call's entry is judged.
+async fn lab_rule(own: &str) -> Lab {
+    lab_of(own, true, false).await
+}
+
+async fn lab_of(own: &str, skypetoken: bool, tracking: bool) -> Lab {
     let server = MockServer::start().await;
     let log = SharedLog::default();
     let fence = Fence::new(
@@ -261,6 +273,7 @@ async fn lab_with(own: &str, skypetoken: bool) -> Lab {
         FenceLog::from_writer(log.clone()),
     )
     .with_own_account(Mri::new(own));
+    let fence = if tracking { fence.tracking_calls() } else { fence };
     let fence = Arc::new(fence);
     let tokens = Arc::new(Tokens {
         skypetoken,
@@ -1480,4 +1493,131 @@ fn a_relay_answer_outside_its_shape_reads_nothing() {
             "{answer}"
         );
     }
+}
+
+// --- the lab's call rule: the transport sends what a call sends once it was let in, each under its permit ---
+
+#[tokio::test]
+async fn under_the_lab_rule_a_call_s_follow_ups_go_with_their_permits_and_no_registered_call() {
+    let lab = lab_rule(LAB_A).await;
+    assert!(!lab.fence.tracks_calls());
+    lab.answers("PUT", &conv("Synthetic1", "updateEndpointMetadata"), json!({}))
+        .await;
+    lab.answers(
+        "POST",
+        &cc("mcProxy", "SyntheticCall0", "applyChannelParameters"),
+        json!({}),
+    )
+    .await;
+    lab.answers("POST", &conv("Synthetic1", "leave"), json!({})).await;
+    // nothing was started, pended or registered: each goes all the same, under its own permit
+    lab.send(
+        UpdateEndpointMetadata::new(
+            &context(),
+            &link(&conv("Synthetic1", "updateEndpointMetadata")),
+            &participant(LAB_A),
+        )
+        .unwrap(),
+    )
+    .await;
+    let (_, request) = lab
+        .send(
+            ApplyChannelParameters::new(
+                &context(),
+                &link(&cc("mcProxy", "SyntheticCall0", "applyChannelParameters")),
+                &ChannelParameters {
+                    mids: vec!["*".into()],
+                    media_parameter: "{}".into(),
+                },
+            )
+            .unwrap(),
+        )
+        .await;
+    assert!(request.url.path().ends_with("/applyChannelParameters"));
+    lab.send(
+        LeaveCall::new(
+            &context(),
+            &link(&conv("Synthetic1", "leave")),
+            &participant(LAB_A),
+            LeaveReason::HungUp,
+        )
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(lab.server.received_requests().await.unwrap().len(), 3);
+    let follow_ups = lab
+        .log
+        .lines()
+        .into_iter()
+        .filter(|line| line["kind"] == "call_follow_up" && line["verdict"] == "allow")
+        .count();
+    assert_eq!(follow_ups, 3, "each one logged by the fence before it went");
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_an_offered_invitation_is_answered_with_nothing_bound_and_its_receipt_goes() {
+    let lab = lab_rule(LAB_B).await;
+    let offered = delivery(3, ENDPOINT_B, &invitation(false, LAB_A));
+    lab.fence.observe_delivery(&offered);
+    let socket = Socket::default();
+    let mut sink = FrameSink::new(socket.clone()).with_call_responses(Arc::clone(&lab.fence), "calling");
+    sink.respond(InvitationReceipt::new(&offered, 2).unwrap(), &LabChats)
+        .await
+        .unwrap();
+    assert_eq!(socket.texts().len(), 1);
+    // no attach went, so no answer bound the acceptance link: the accept goes on the leg its link names
+    lab.answers("POST", &cc("incoming", "SyntheticCall1", "accept"), json!({}))
+        .await;
+    let accept = AcceptCall::new(
+        &context(),
+        &link(&cc("incoming", "SyntheticCall1", "accept")),
+        &AcceptParts {
+            accepted_by: participant(LAB_B),
+            modalities: vec!["Audio".into()],
+            call_links: Links::new(),
+            media_controller_links: Links::new(),
+            media: media(None),
+            client: client(),
+        },
+    )
+    .unwrap();
+    let (_, request) = lab.send(accept).await;
+    assert!(request.url.path().ends_with("/accept"));
+    let lines = lab.log.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["kind"] == "call_answer" && line["verdict"] == "allow"),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_an_outsider_s_invitation_is_never_answered() {
+    let lab = lab_rule(LAB_B).await;
+    let ignored = delivery(4, ENDPOINT_B, &invitation(false, OUTSIDER));
+    assert_eq!(lab.fence.observe_delivery(&ignored), teams_fence::Observed::Ignored);
+    let accept = AcceptCall::new(
+        &context(),
+        &link(&cc("incoming", "SyntheticCall1", "accept")),
+        &AcceptParts {
+            accepted_by: participant(LAB_B),
+            modalities: vec!["Audio".into()],
+            call_links: Links::new(),
+            media_controller_links: Links::new(),
+            media: media(None),
+            client: client(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        lab.decide(&accept).await,
+        Err(DenyReason::Partial(PartialReason::UnregisteredCall))
+    );
+    let decline = DeclineCall::new(&context(), &link(&cc("incoming", "SyntheticCall1", "reject"))).unwrap();
+    assert_eq!(
+        lab.decide(&decline).await,
+        Err(DenyReason::Partial(PartialReason::UnregisteredCall))
+    );
+    assert!(lab.server.received_requests().await.unwrap().is_empty());
 }

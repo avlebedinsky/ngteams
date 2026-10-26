@@ -1,10 +1,16 @@
 //! The call registry: the calls this run's fence permitted, and the links their services handed out for each one.
 //!
+//! Every fence keeps one. Under the lab's call rule (`crate::Fence::check`, `CallRule::Entry`) it decides nothing but
+//! which invitations are offered and which offered invitation an answer or a decline acts on
+//! ([`CallRegistry::resolve_answer`]); what it binds otherwise is bookkeeping, which the native client's call machine
+//! reads its deliveries by ([`Observed`]). Under the call registry's own rule (the personal build's, `CallRule::Registry`)
+//! it decides every operation on a call, as follows.
+//!
 //! A follow-up on a call (`docs/protocol/calling-echo.md`: the endpoint's metadata, an `add`, the `leave`, the
 //! acceptance's acknowledgement, a media line's channel parameters) reaches the call's participants, and no source reads
 //! a call's members. So the fence trusts only the calls it permitted itself, and a follow-up passes only when it goes to
-//! exactly a link the call's own services handed out for that operation (CLAUDE.md, "Calls go only to the lab, both
-//! ways"). The bindings, each only as the echo call's capture shows it:
+//! exactly a link the call's own services handed out for that operation. The bindings, each only as the echo call's
+//! capture shows it:
 //!
 //! 1. **The start.** A permit [`crate::Fence::check`] issued for a call start, with the start's body, makes a *pending*
 //!    call ([`crate::Fence::pend_start`]): its caller, its participants (the permit's), and the endpoint's own callback
@@ -377,6 +383,18 @@ pub(crate) struct Resolved {
     subject: Subject,
 }
 
+impl Resolved {
+    /// An operation bound to nothing the registry moves on: judged by `participants` and the group chat `chat` alone
+    /// (the lab's join, read by the chat it names, and its `add`, by its invitees).
+    pub(crate) fn unbound(participants: BTreeSet<Mri>, chat: Option<String>) -> Self {
+        Self {
+            participants,
+            chat,
+            subject: Subject::Unbound,
+        }
+    }
+}
+
 /// What a resolved operation acts on.
 enum Subject {
     /// A registered call; `leave` when the operation is its `leave`.
@@ -387,9 +405,10 @@ enum Subject {
         operation: CallOperation,
         callbacks: Box<[String]>,
     },
-    /// A join of a running call an invitation bound to its chat: nothing to move on (a join with media pends as a
-    /// start does, `crate::Fence::pend_start`).
-    Join,
+    /// Nothing to move on: a join of a running call (bound to its chat by an invitation under the registry's rule, by
+    /// the chat it names under the lab's; a join with media pends as a start does, `crate::Fence::pend_start`), or
+    /// the lab's `add`.
+    Unbound,
 }
 
 /// A renegotiation delivered at a live call's (or an answered invitation's) own `mediaRenegotiation` or `mediaAnswer`
@@ -701,11 +720,79 @@ impl CallRegistry {
         })
     }
 
+    /// The lab's resolution of an answer (`accept`) or a decline (`reject`), `target`: the invitation this registry
+    /// offered whose call leg (`…/cc/v1/incoming/<call>/…`, the leg its `attach` link named) the link names, open for
+    /// the operation (the latest such one); the write of its kind, adding nobody, joining nothing, an answer from the
+    /// invitation's callee and a decline naming no sender. No link of the invitation's need be bound: the leg is what
+    /// ties it to the invitation. [`PartialReason::UnregisteredCall`] when no offered invitation names the leg,
+    /// [`PartialReason::CallEnded`] when none naming it is open for the operation any more.
+    pub(crate) fn resolve_answer(&self, target: &Target) -> Result<Resolved, DenyReason> {
+        let Scope::CallOperation {
+            operation,
+            url,
+            from,
+            callbacks,
+            joins,
+        } = target.scope()
+        else {
+            return Err(DenyReason::CallMismatch);
+        };
+        let leg = Url::parse(url)
+            .ok()
+            .as_ref()
+            .and_then(controller_path)
+            .filter(|(_, _, kind, last)| kind == "incoming" && last == operation.segment())
+            .map(|(_, call, _, _)| call)
+            .ok_or(DenyReason::CallMismatch)?;
+        let sender_fits = match operation {
+            CallOperation::Accept => true,
+            CallOperation::Reject => from.is_none(),
+            _ => false,
+        };
+        if target.kind() != operation.kind() || !target.added().is_empty() || joins.is_some() || !sender_fits {
+            return Err(DenyReason::CallMismatch);
+        }
+        let inner = self.lock();
+        let mut named = inner
+            .offers
+            .iter()
+            .enumerate()
+            .filter(|(_, offer)| offer.invitation.leg.1 == leg)
+            .peekable();
+        if named.peek().is_none() {
+            return Err(DenyReason::Partial(PartialReason::UnregisteredCall));
+        }
+        let (index, offer) = named
+            .rfind(|(_, offer)| offer.open_for(*operation))
+            .ok_or(DenyReason::Partial(PartialReason::CallEnded))?;
+        if *operation == CallOperation::Accept && from.as_ref() != Some(&offer.invitation.callee) {
+            return Err(DenyReason::CallMismatch);
+        }
+        Ok(Resolved {
+            participants: offer.parties(),
+            chat: offer.invitation.group_chat.clone(),
+            subject: Subject::Offer {
+                index,
+                operation: *operation,
+                callbacks: callbacks.clone(),
+            },
+        })
+    }
+
+    /// What the lab's fence permitted without a lookup does to the registry: when it resolves as the registry's own
+    /// rule would ([`Self::resolve`]), what it acts on moves as after a permit ([`Self::permitted`]: a `leave` ends its
+    /// call's or its answered invitation's part, an `attach` binds the callbacks its ring ends at); otherwise nothing.
+    pub(crate) fn note(&self, target: &Target) {
+        if let Ok(resolved) = self.resolve(target) {
+            self.permitted(&resolved);
+        }
+    }
+
     /// Whether what `resolved` acts on may still be acted on once its group chat was read: an invitation still
     /// ringing (a ring can end during the read). A call's operation needs no read, so it is still as resolved.
     pub(crate) fn still_open(&self, resolved: &Resolved) -> bool {
         match &resolved.subject {
-            Subject::Call { .. } | Subject::Join => true,
+            Subject::Call { .. } | Subject::Unbound => true,
             Subject::Offer { index, operation, .. } => self
                 .lock()
                 .offers
@@ -727,7 +814,7 @@ impl CallRegistry {
                     call.deliveries.clear();
                 }
             }
-            Subject::Call { leave: false, .. } | Subject::Join => {}
+            Subject::Call { leave: false, .. } | Subject::Unbound => {}
             Subject::Offer {
                 index,
                 operation,
@@ -854,7 +941,7 @@ fn resolve_join(offers: &[offer::Offer], target: &Target) -> Result<Resolved, De
     Ok(Resolved {
         participants: from.iter().cloned().collect(),
         chat: joins.clone(),
-        subject: Subject::Join,
+        subject: Subject::Unbound,
     })
 }
 

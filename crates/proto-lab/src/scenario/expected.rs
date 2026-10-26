@@ -13,12 +13,12 @@
 //! The one exception to both is a forced deny ([`DenyCause::Forced`]) whose rule's label the scenario names
 //! ([`Review::expecting_forced`]): the enforcement probes, an earlier run's probe sent again on load, `abc-chat`'s
 //! first messages, `ab-image`'s and `ab-file`'s media and file writes, and what a scenario holds back on purpose
-//! (`ab-trouter-quiet`'s, the `own-presence` runs', and `ab-call`'s and `abc-call`'s starts and callee sends). Any other
+//! (`ab-trouter-quiet`'s, the `own-presence` runs', and `ab-call`'s and `abc-call`'s starts in `start-held`). Any other
 //! forced deny is unexpected.
 //!
 //! What isn't here keeps failing the run until it is added with its reason: writes on a conversation other than the
-//! scenario's, and every request on a call (`echo-call` needs those: `docs/backlog/fence-call-follow-ups.md`, so they
-//! are no class of the list and the run fails on them).
+//! scenario's, and every request on a call (a call's entry is judged by who takes part, and the rest of a call passes,
+//! so a deny there is no class of the list and the run fails on it).
 
 use url::Url;
 
@@ -195,14 +195,10 @@ pub const REQUESTS: &[ExpectedRequest] = &[
     },
 ];
 
-/// The denied WebSocket frames a writing scenario expects (see the module docs).
-pub const FRAMES: &[ExpectedFrames] = &[ExpectedFrames {
-    class: "Trouter delivery responses",
-    hosts: Hosts::Under("trouter.teams.microsoft.com"),
-    reason: "the answer to a delivery of the push channel (a socket.io message), which goes back to whoever sent the \
-             delivery: no delivery is answered, an incoming call's among them; the service delivers again what went \
-             unanswered, and the scenario reads its chats from the chat service",
-}];
+/// The denied WebSocket frames a writing scenario expects (see the module docs): none. A Trouter delivery response (a
+/// socket.io message, `3:::`) passes the frame rule, so the frames the web client sends on its push channels are all
+/// let through; any frame denied fails the run until it is added here with its reason.
+pub const FRAMES: &[ExpectedFrames] = &[];
 
 /// The list's class of `denial`'s request, whatever the deny's cause.
 #[must_use]

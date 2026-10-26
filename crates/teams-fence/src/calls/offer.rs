@@ -57,7 +57,7 @@ pub(crate) struct Invitation {
     /// `callNotification.links.attach`, exactly.
     attach: String,
     /// The forked call leg the links name (the call controller's host and call id).
-    leg: Controller,
+    pub(crate) leg: Controller,
 }
 
 /// An invitation delivery waiting for its response.
