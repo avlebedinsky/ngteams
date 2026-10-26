@@ -43,8 +43,8 @@ use crate::session::{LabSession, SessionOptions};
 use super::ab_call::{
     ACCEPT_AUDIO_CSS, CAMERA, CHAT_JOIN, CHAT_JOIN_CSS, CONNECT_WAIT, CalleeRole, EarlierRings, HANG_UP_CSS,
     INCOMING_CALL, RING_WAIT, RingCheck, RunCall, TONE_WAIT, VIDEO_WAIT, chat_shown, chat_shown_script, check_ring,
-    hang_up_page, invitations, judge_callee, mri, open_join, policy, ring_check, stand_up_calling, switch_microphone,
-    video_frames, wait_calling_socket, watch_controls,
+    hang_up_after_failure, hang_up_page, invitations, judge_callee, mri, open_join, policy, ring_check,
+    stand_up_calling, switch_microphone, video_frames, wait_calling_socket, watch_controls,
 };
 use super::ab_call_native::{
     ANSWER, NATIVE_CONNECT, NATIVE_EXIT, NATIVE_FRAMES, Native, PAGE_FRAMES, TONE_HZ, capture_len, headless_binary,
@@ -111,6 +111,10 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             if let Some(note) = save_screenshot(page.alias, &page.session).await {
                 report.notes.push(note);
             }
+        }
+        // b and c leave the group call too, so none is left running in the chat once a's native client stopped
+        for page in &mut pages {
+            hang_up_after_failure(page.alias, &mut page.session, &mut report).await;
         }
     }
     if let (Some(native), Some(page)) = (run.native.take(), pages.first_mut()) {

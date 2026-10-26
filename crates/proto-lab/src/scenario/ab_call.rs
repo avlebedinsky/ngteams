@@ -415,31 +415,38 @@ fn capture_text(session: &LabSession) -> Option<String> {
 /// [`running_call_conflict`]). What each page did goes into the notes; nothing here fails the run further.
 pub(crate) async fn hang_up_all(sessions: &mut [(Alias, LabSession)], report: &mut ScenarioReport) {
     for (alias, session) in sessions.iter_mut() {
-        let before = capture_text(session).map_or(0, |text| leaves(&text));
-        match hang_up_page(*alias, session, report).await {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => {
-                report
-                    .notes
-                    .push(format!("{alias}: couldn't hang up after the failure: {error}"));
-                continue;
-            }
+        hang_up_after_failure(*alias, session, report).await;
+    }
+}
+
+/// One page of a failed run hangs up, if it shows the call's hang-up control, and the run waits up to
+/// [`HANG_UP_WAIT`] for its fence to let a `leave` through ([`hang_up_all`]'s step for one page, also the native
+/// scenarios' for their pages).
+pub(crate) async fn hang_up_after_failure(alias: Alias, session: &mut LabSession, report: &mut ScenarioReport) {
+    let before = capture_text(session).map_or(0, |text| leaves(&text));
+    match hang_up_page(alias, session, report).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            report
+                .notes
+                .push(format!("{alias}: couldn't hang up after the failure: {error}"));
+            return;
         }
-        let deadline = tokio::time::Instant::now() + HANG_UP_WAIT;
-        loop {
-            if capture_text(session).is_some_and(|text| leaves(&text) > before) {
-                report.notes.push(format!("{alias}: its leave went by {}", unix_ms()));
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                report
-                    .notes
-                    .push(format!("{alias}: no leave went within {HANG_UP_WAIT:?} of its hang-up"));
-                break;
-            }
-            linger(session, Duration::from_millis(500)).await;
+    }
+    let deadline = tokio::time::Instant::now() + HANG_UP_WAIT;
+    loop {
+        if capture_text(session).is_some_and(|text| leaves(&text) > before) {
+            report.notes.push(format!("{alias}: its leave went by {}", unix_ms()));
+            return;
         }
+        if tokio::time::Instant::now() >= deadline {
+            report
+                .notes
+                .push(format!("{alias}: no leave went within {HANG_UP_WAIT:?} of its hang-up"));
+            return;
+        }
+        linger(session, Duration::from_millis(500)).await;
     }
 }
 

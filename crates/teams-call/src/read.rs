@@ -209,13 +209,16 @@ pub(crate) fn acceptance(body: &[u8]) -> Option<Acceptance> {
 
 /// One participant of a call as its roster lists them (a `rosterUpdate` delivered at the conversation's callback:
 /// `{"participants": {<MRI>: {"version", "state", "details": {"displayName"}, "endpoints": {<id>: {"call":
-/// {"mediaStreams": [{"type", "label", "sourceId", "direction"}]}}}}}, "type": "Delta", "sequenceNumber"}`).
+/// {"mediaStreams": [{"type", "label", "sourceId", "direction"}]}}}}}, "type": "Delta", "sequenceNumber"}`). A 1:1
+/// call's endpoints list no media streams (its media goes between the two ends, through no mixer): their `call`
+/// holds only `serverMuteVersion`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RosterEntry {
     pub(crate) mri: Mri,
     /// Counts up per participant: an entry delivered again, or older, changes nothing.
     pub(crate) version: u64,
-    /// `active` while in the call; `inactive` once gone (its endpoints empty).
+    /// `active` with an endpoint in the call (one with a `call`, its media streams listed or not); `inactive` once
+    /// gone (its endpoints empty).
     pub(crate) active: bool,
     pub(crate) name: Option<String>,
     /// The main audio's and the main video's source ids, and whether the main video goes out (`sendrecv` or
@@ -239,7 +242,13 @@ pub(crate) fn roster(body: &[u8]) -> Option<Vec<RosterEntry>> {
 
 fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
     let version = entry.get("version")?.as_u64()?;
-    let streams = entry.get("endpoints").and_then(Value::as_object).and_then(|endpoints| {
+    let endpoints = entry.get("endpoints").and_then(Value::as_object);
+    let in_call = endpoints.is_some_and(|endpoints| {
+        endpoints
+            .values()
+            .any(|endpoint| endpoint.get("call").is_some_and(Value::is_object))
+    });
+    let streams = endpoints.and_then(|endpoints| {
         endpoints
             .values()
             .find_map(|endpoint| endpoint.pointer("/call/mediaStreams")?.as_array())
@@ -253,7 +262,7 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
     Some(RosterEntry {
         mri: Mri::new(mri),
         version,
-        active: entry.get("state").and_then(Value::as_str) == Some("active") && streams.is_some(),
+        active: entry.get("state").and_then(Value::as_str) == Some("active") && in_call,
         name: entry
             .pointer("/details/displayName")
             .and_then(Value::as_str)
@@ -348,7 +357,7 @@ mod tests {
     use base64::Engine as _;
     use serde_json::json;
 
-    use super::{accept_answer, acceptance, attached, conversation, invitation, remote_end};
+    use super::{accept_answer, acceptance, attached, conversation, invitation, remote_end, roster};
 
     const PROXY: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep";
     const CALLER: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -528,5 +537,56 @@ mod tests {
         let end = remote_end(refused.to_string().as_bytes());
         assert!(end.chat_has_running_call());
         assert_eq!(end.conversation.as_deref(), Some(conversation.as_str()));
+    }
+
+    #[test]
+    fn a_one_to_one_roster_s_parties_are_in_the_call_without_media_streams() {
+        // a 1:1 call's roster, in the captured shape: its endpoints' `call` lists no media streams
+        let party = |name: &str| {
+            json!({
+                "version": 1,
+                "state": "active",
+                "details": {"displayName": name},
+                "endpoints": {"00000000-0000-4000-8000-000000000001": {
+                    "call": {"serverMuteVersion": 0},
+                    "modalityJoined": "Call",
+                }},
+            })
+        };
+        let body = json!({
+            "participants": {CALLER: party("Lab A"), CALLEE: party("Lab B")},
+            "type": "Delta",
+            "sequenceNumber": 1,
+        });
+        let mut read = roster(body.to_string().as_bytes()).unwrap();
+        read.sort_by(|one, other| one.mri.as_str().cmp(other.mri.as_str()));
+        assert_eq!(read.len(), 2);
+        assert!(read.iter().all(|entry| entry.active), "{read:?}");
+        assert_eq!(read[0].name.as_deref(), Some("Lab A"));
+        assert_eq!(
+            (read[0].audio_source, read[0].video_source, read[0].video_on),
+            (None, None, false)
+        );
+    }
+
+    #[test]
+    fn a_party_is_in_the_call_only_while_active_with_an_endpoint_in_it() {
+        let active = |state: &str, endpoints: &serde_json::Value| {
+            let body = json!({"participants": {CALLER: {"version": 2, "state": state, "endpoints": endpoints}}});
+            roster(body.to_string().as_bytes()).unwrap()[0].active
+        };
+        let in_call = json!({"e1": {"call": {"serverMuteVersion": 0}}});
+        let streams = json!({"e1": {"call": {"mediaStreams": [
+            {"type": "audio", "label": "main-audio", "sourceId": 10, "direction": "sendrecv"},
+        ]}}});
+        assert!(active("active", &in_call), "a 1:1 call's");
+        assert!(active("active", &streams), "a group call's, its streams listed");
+        assert!(!active("inactive", &json!({})), "gone");
+        assert!(!active("inactive", &in_call));
+        assert!(!active("active", &json!({})), "no endpoint");
+        assert!(
+            !active("active", &json!({"e1": {"modalityJoined": "Call"}})),
+            "no endpoint in the call"
+        );
     }
 }

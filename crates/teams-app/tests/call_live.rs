@@ -735,8 +735,8 @@ fn processes(apps: &mut [&mut App]) -> Vec<(String, u32)> {
 /// speech-band level) must be [`ECHO_MARGIN_DB`] or more under the echo at b's microphone: what b played of a's speech
 /// less the loopback's [`B_ECHO`] attenuation. b's microphone must have heard something (its trace's
 /// `call-participant self` `mic-sound`, the level before its processing) at both ends of the window: the loopback
-/// reached what b's app captures, so the margin is the canceller's, not a dead microphone's. Then b's voice is plugged
-/// in again.
+/// reached what b's app captures, so the margin is the canceller's, not a dead microphone's (a call whose grid never
+/// showed has no such line at all, and fails as that). Then b's voice is plugged in again.
 fn echo_check(
     [a, b]: [&mut App; 2],
     (b_call, b_voice): (&Value, &mut Option<AddedNode>),
@@ -767,6 +767,12 @@ fn echo_check(
     let b_trace = b.trace();
     b_trace.drain();
     let b_mic = [from, to].map(|at| mic_heard_at(&b_trace.seen, b_call, at / 1_000));
+    // the `self` line closes the participant grid, which shows once the roster named someone: none at all is a grid
+    // that never showed, not a silent microphone
+    let b_grid = b_trace
+        .seen
+        .iter()
+        .any(|line| is(line, "call-participant", "self") && line["call"] == *b_call);
     speech.remove().unwrap();
     *b_voice = Some(plug_voice(b, B_TONE));
     // all a heard back counts as echo, whatever of it was there before (the floor, noted); nothing under what a 16-bit
@@ -778,6 +784,11 @@ fn echo_check(
          the window's ends: {b_mic:?}), a heard back {heard_back:.6} over a floor of {floor:.6}: {margin:.1} dB"
     );
     assert!(played >= 0.001, "b didn't play a's speech ({played:.5})");
+    assert!(
+        b_grid,
+        "b's call never showed its participant grid (no `call-participant self` line): its roster named nobody, so its \
+         microphone can't be read"
+    );
     assert_eq!(
         b_mic,
         [Some(true); 2],

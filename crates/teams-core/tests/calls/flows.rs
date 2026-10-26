@@ -92,6 +92,14 @@ async fn a_calls_b_b_answers_by_its_action_and_each_hears_the_other() {
     assert_eq!(answered, incoming.call);
     b.status(incoming.call, &CallStatus::Connected).await;
     a.status(call, &CallStatus::Connected).await;
+    // each sees the other, on the 1:1 call's one line, from the roster that lists no media streams
+    let shows = |who: &'static str| {
+        move |view: &teams_core::CallView| {
+            view.participants.len() == 1 && view.participants[0].mri == who && view.participants[0].line == Some(0)
+        }
+    };
+    a.view(call, shows(LAB_B)).await;
+    b.view(incoming.call, shows(LAB_A)).await;
     tokio::time::sleep(TALK).await;
     a.handle.requests().call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);

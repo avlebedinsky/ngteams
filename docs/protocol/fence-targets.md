@@ -79,9 +79,9 @@ its static hosts. [endpoints.md](endpoints.md) lists every endpoint seen with it
 
 A WebSocket's URL is read the same way (`teams_fence::on_contacting_service`, any scheme): the lab browser denies
 every frame on a contacting service's socket, and on a Trouter socket judges each frame by its socket.io type (`0`,
-`1`, `2` and `5` pass; `3`, the answer to a delivery, `4`, `6`, a binary frame and anything that doesn't parse are
-denied: [trouter.md](trouter.md#answering-deliveries)), but for the acknowledgement of a registered call's acceptance,
-which the call registry decides ([the call registry](#the-call-registry)). Frames on any other socket pass.
+`1`, `2`, `3` and `5` pass, `3` the answer to a delivery, a call's receipts and acknowledgements among them; `4`, `6`,
+a binary frame and anything that doesn't parse are denied: [trouter.md](trouter.md#answering-deliveries),
+[the lab's call rule](#the-labs-call-rule)). Frames on any other socket pass.
 
 ## The chat service
 
@@ -672,7 +672,7 @@ services](#the-contacting-services) give today's.
       sends (`POST v1/agents/<bot>/invoke`, `composeExtension/fetchCommands`) and the own activity feed's item read
       (`PUT v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread`). Under the lab rule
       all of these pass but the bot invokes and, on the Trouter socket, every frame but socket.io types `0`, `1`, `2`
-      and `5`: an answer to a delivery (`3:::`) stays denied.
+      and `5`: an answer to a delivery (`3:::`) was denied then (the lab's call rule now lets it pass).
 
 The synthetic fixtures in `tests/fixtures/chatsvc/` stay until they are rewritten synthetic-from-capture: written by
 hand from a local reference copy of these captures, with the same shape and made-up values. Captures never enter the

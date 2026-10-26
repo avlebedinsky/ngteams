@@ -318,7 +318,10 @@ that made it work, and `abc-call-mixed`'s captures, where the lab browser's data
 - **The roster.** Who is in the call, and their sources, come only in `rosterUpdate` deliveries at the
   conversation's callback (`{"participants": {<MRI>: {"version", "state", "details": {"displayName"}, "endpoints":
   {<id>: {"call": {"mediaStreams": [{"type", "label", "sourceId", "direction"}]}}}}}, "type": "Delta",
-  "sequenceNumber"}`): a participant is in the call while its `state` is `active` with an endpoint in the call, the
+  "sequenceNumber"}`): a participant is in the call while its `state` is `active` with an endpoint in the call (one
+  with a `call`; a 1:1 call's endpoints list no `mediaStreams`, their `call` only `serverMuteVersion`, as its media
+  goes through no mixer; both ends of a 1:1 call get the same updates, the first listing both once the callee
+  accepted), the
   `main-video` stream's `sourceId` is what a source request names and its direction says whether its camera is on,
   the `main-audio` stream's `sourceId` is what `dsh` names; a newer `version` replaces an older one. An update
   lists only who changed, so a client knows the others only from what it was told before: a callee's `attach`
@@ -350,8 +353,9 @@ join of that one: the client posts a roster-only join to its own new conversatio
 (seen 2026-10-26). A native start ended so ends its call at once (`End::Remote`, printed by `teams-headless` as
 `remote 409 chat has a running call <conversation>`). The service refused a chat's call for about a minute after its
 last call ended, too (seen 2026-10-26, starts ~60 s after a cleanly left call; ones 78 s and later went):
-`scripts/native-call-run.sh` leaves 90 s between calls in a chat. A failed `ab-call` or `abc-call` run hangs up every
-page that shows its call before it closes, so it leaves none running.
+`scripts/native-call-run.sh` leaves 90 s between calls in a chat (keyed by the chat, however it is named). A failed
+`ab-call`, `abc-call`, `ab-call-native` or `abc-call-mixed` run hangs up every page that shows its call (each waiting
+up to 10 s for its `leave`) before it stops its native clients and closes, so it leaves none running.
 
 ## A call held past a dropped socket
 

@@ -632,8 +632,10 @@ impl Fence {
             CallOperation::Join | CallOperation::Add => Err(DenyReason::CallMismatch),
             CallOperation::Accept | CallOperation::Reject => self.calls.resolve_answer(&target),
             _ => {
-                self.calls.note(&target);
-                return self.decided(target, Verdict::Allow);
+                // logged first: a permit the log can't take is refused, and the registry never hears of it
+                let permit = self.decided(target, Verdict::Allow)?;
+                self.calls.note(permit.target());
+                return Ok(permit);
             }
         };
         match resolved {

@@ -1,8 +1,12 @@
-//! A group call's roster (M3 Task 19): who is in the call, delivered at the `rosterUpdate` callbacks whenever that
+//! A call's roster (M3 Task 19): who is in the call, delivered at the `rosterUpdate` callbacks whenever that
 //! changed, in the shape the captures show (`docs/protocol/calling.md`, "Group video"): `{"participants": {<MRI>:
 //! {"version", "state", "details": {"id", "displayName"}, "endpoints": {<id>: {"call": {"mediaStreams": [main audio,
 //! main video]}}}}}, "type": "Delta", "sequenceNumber"}`. A delivery lists only the party that changed, as the
 //! service's do, so a client knows the others only from what it was told before.
+//!
+//! A 1:1 call's roster (the test call has none here) lists its endpoints' `call` with no media streams, as captured,
+//! and tells nobody anything before the callee answered; then both parties and every watcher are told both, and only
+//! the changes after.
 //!
 //! - **Parties**: the caller from its start, a callee once it answered, a joiner once it joined with media; each with
 //!   the callback its start, `attach` or join handed out.
@@ -19,9 +23,10 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::calling::CallPhase;
 use crate::world::State;
 
-/// A party of a group call's roster.
+/// A party of a call's roster.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Party {
     pub(crate) mri: String,
@@ -43,12 +48,13 @@ pub(crate) fn link_of(body: &Value) -> Option<String> {
     }
 }
 
-/// `mri` is in group call `index` (again), told at `link`: everyone is told.
+/// `mri` is in call `index` (again), told at `link`: in a group call everyone is told the change; in a 1:1 call
+/// (never the test call's) nobody is told before the callee answered, then everyone everything.
 pub(crate) fn enter(state: &mut State, index: usize, mri: &str, link: Option<String>) {
     let Some(call) = state.calling.calls.get_mut(index) else {
         return;
     };
-    if call.group_chat.is_none() {
+    if call.test_call {
         return;
     }
     call.roster.retain(|party| party.mri != mri);
@@ -58,19 +64,26 @@ pub(crate) fn enter(state: &mut State, index: usize, mri: &str, link: Option<Str
         active: true,
         video_on: false,
     });
-    send(state, index, Some(mri));
+    if call.group_chat.is_some() {
+        send(state, index, Some(mri));
+    } else if call.phase == CallPhase::Connected {
+        send(state, index, None);
+    }
 }
 
-/// A callee's `attach` in group call `index` subscribes `link` to its roster: told everyone now, and every change after.
+/// A callee's `attach` in call `index` subscribes `link` to its roster: in a group call told everyone now, and every
+/// change after (in a 1:1 call, from the answer on).
 pub(crate) fn watch(state: &mut State, index: usize, link: &str) {
     let Some(call) = state.calling.calls.get_mut(index) else {
         return;
     };
-    if call.group_chat.is_none() || call.roster_watchers.iter().any(|watcher| watcher == link) {
+    if call.test_call || call.roster_watchers.iter().any(|watcher| watcher == link) {
         return;
     }
     call.roster_watchers.push(link.to_owned());
-    if let Some(body) = body(state, index, None) {
+    if call.group_chat.is_some()
+        && let Some(body) = body(state, index, None)
+    {
         state.call_back(Some(link), body);
     }
 }
@@ -99,7 +112,12 @@ pub(crate) fn leave(state: &mut State, index: usize, mri: &str) -> bool {
 
 /// `mri`'s main video in group call `index` goes out (`on`) or not: everyone is told.
 pub(crate) fn video(state: &mut State, index: usize, mri: &str, on: bool) {
-    let Some(call) = state.calling.calls.get_mut(index) else {
+    let Some(call) = state
+        .calling
+        .calls
+        .get_mut(index)
+        .filter(|call| call.group_chat.is_some())
+    else {
         return;
     };
     let mut changed = false;
@@ -121,14 +139,17 @@ fn body(state: &mut State, index: usize, changed: Option<&str>) -> Option<Value>
     let call = state.calling.calls.get_mut(index)?;
     call.roster_version += 1;
     let version = call.roster_version;
-    let (id, parties) = (call.id.clone(), call.roster.clone());
+    let (id, parties, group) = (call.id.clone(), call.roster.clone(), call.group_chat.is_some());
     let mut participants = Map::new();
     for (number, party) in (1_u64..).zip(&parties) {
         if changed.is_some_and(|mri| mri != party.mri) {
             continue;
         }
-        let sources = state.mixer_sources(&id, &party.mri);
-        participants.insert(party.mri.clone(), entry(state, party, number, version, sources));
+        let sources = group.then(|| state.mixer_sources(&id, &party.mri)).flatten();
+        participants.insert(
+            party.mri.clone(),
+            entry(state, party, (number, version), group, sources),
+        );
     }
     Some(json!({"participants": participants, "type": "Delta", "sequenceNumber": version}))
 }
@@ -155,8 +176,15 @@ fn send(state: &mut State, index: usize, changed: Option<&str>) {
     }
 }
 
-/// One party as the roster lists it.
-fn entry(state: &State, party: &Party, number: u64, version: u64, sources: Option<(i64, i64)>) -> Value {
+/// One party as the roster lists it: a group call's (`group`) with its `sources` if any; a 1:1 call's endpoint lists
+/// no media streams, as captured.
+fn entry(
+    state: &State,
+    party: &Party,
+    (number, version): (u64, u64),
+    group: bool,
+    sources: Option<(i64, i64)>,
+) -> Value {
     let stream = |kind: &str, label: &str, source: Option<i64>, direction: &str| {
         let mut stream = json!({"type": kind, "label": label, "direction": direction, "serverMuted": false});
         if let Some(source) = source {
@@ -164,14 +192,17 @@ fn entry(state: &State, party: &Party, number: u64, version: u64, sources: Optio
         }
         stream
     };
-    let endpoints = if party.active {
-        let direction = if party.video_on { "sendrecv" } else { "recvonly" };
-        json!({format!("00000000-0000-4000-8000-{number:012}"): {"call": {"mediaStreams": [
-            stream("audio", "main-audio", sources.map(|(audio, _)| audio), "sendrecv"),
-            stream("video", "main-video", sources.map(|(_, video)| video), direction),
-        ]}}})
-    } else {
-        json!({})
+    let endpoint = format!("00000000-0000-4000-8000-{number:012}");
+    let endpoints = match group {
+        _ if !party.active => json!({}),
+        true => {
+            let direction = if party.video_on { "sendrecv" } else { "recvonly" };
+            json!({endpoint: {"call": {"mediaStreams": [
+                stream("audio", "main-audio", sources.map(|(audio, _)| audio), "sendrecv"),
+                stream("video", "main-video", sources.map(|(_, video)| video), direction),
+            ]}}})
+        }
+        false => json!({endpoint: {"call": {"serverMuteVersion": 0}, "modalityJoined": "Call"}}),
     };
     json!({
         "version": version,

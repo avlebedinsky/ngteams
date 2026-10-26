@@ -7,6 +7,8 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 use teams_fence::{
@@ -1806,5 +1808,43 @@ async fn under_the_lab_rule_an_add_is_judged_per_invitee_on_any_call() -> TestRe
     );
     let log = fs::read_to_string(&lab.log)?;
     assert_eq!(log.matches(r#""kind":"invite""#).count(), 4, "{log}");
+    Ok(())
+}
+
+/// A log that takes every entry until `broken` is set.
+struct Breakable(Arc<AtomicBool>);
+
+impl std::io::Write for Breakable {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("disk full"));
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_leave_the_log_refuses_leaves_the_registry_as_it_was() -> TestResult {
+    let broken = Arc::new(AtomicBool::new(false));
+    let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]);
+    let fence = Fence::new(roster, FenceLog::from_writer(Breakable(Arc::clone(&broken))));
+    registered(&fence, "conv-1").await?;
+    fence.observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("call-1")));
+    broken.store(true, Ordering::SeqCst);
+    let leave = write(CallOperation::Leave, &op_url(CallOperation::Leave, "conv-1"), &[])?;
+    assert_eq!(verdict(&fence, leave).await, Err(DenyReason::LogUnavailable));
+    // the leave never went: the call is still live there, a renegotiation of it still read as the call's
+    let answer_url = format!("{PROXY}/{CC_HOST}/cc/v1/negotiations/call-1/1/t/2/answer?i=10-0-0-2");
+    let renegotiation = json!({"mediaNegotiation": {"links": {"mediaAnswer": answer_url}}})
+        .to_string()
+        .into_bytes();
+    let at = "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/0c0c0c0c/call/mediaRenegotiation/";
+    assert_eq!(
+        fence.observe_delivery(&delivery(2, at, renegotiation)),
+        Observed::Renegotiation
+    );
     Ok(())
 }

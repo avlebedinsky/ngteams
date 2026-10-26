@@ -75,8 +75,23 @@ done
 # the service refuses a chat's call for a while after the chat's last one (409, 5704: "failure to resolve ownership",
 # ~60 s seen): a call in a chat starts at least $SPACING s after the chat's last run here ended
 SPACING=90
-STAMPS=${XDG_DATA_HOME:-$HOME/.local/share}/teams-lab/headless
-STAMP=$STAMPS/.last-call-$CHAT
+LAB_DATA=${XDG_DATA_HOME:-$HOME/.local/share}/teams-lab
+STAMPS=$LAB_DATA/headless
+# the chat's own key, the same whoever calls and however the chat is named: a 1:1 chat named by the other account's
+# alias by both aliases sorted, the recorded group chat (`abc`) by its thread id as chats.toml records it, any other
+# chat by the id given
+chat_key() {
+  local id=$CHAT
+  case "$CHAT" in
+    a | b | c)
+      printf '%s\n' "$CALLER" "$CHAT" | sort | tr -d '\n'
+      return
+      ;;
+    abc) id=$(sed -n 's/^abc *= *"\(.*\)"$/\1/p' "$LAB_DATA/chats.toml" 2>/dev/null) ;;
+  esac
+  printf '%s' "${id:-$CHAT}" | tr -c 'A-Za-z0-9._-' '_'
+}
+STAMP=$STAMPS/.last-call-$(chat_key)
 if [ -f "$STAMP" ]; then
   WAIT=$(($(cat "$STAMP") + SPACING - $(date +%s)))
   if [ "$WAIT" -gt 0 ]; then

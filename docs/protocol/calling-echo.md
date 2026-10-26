@@ -72,11 +72,11 @@ fence of the time, which allowed each as the account's own state in its captured
   "surl":…,…}]}` naming the endpoint's push URLs (`https://<name>-f.trouter.teams.microsoft.com:8443|3443/v4/f/<id>/`).
   Requests the service delivers come as `3:::{"id":…,"method":…,"url":…,"headers":…,"body":…}` and the client answers
   each with `3:::{"id":…,"status":200,"headers":{"MS-CV":…,"trouter-request":…,"trouter-client":…},"body":…}`: an
-  empty body for most, the call's `callAcceptanceAcknowledgement` for the acceptance callback. **These responses stay
-  unknown and denied**: a response goes back to whoever sent the delivery, and which deliveries an empty success only
-  acknowledges (and which it might answer: an incoming call's) isn't established (Codex and Claude, 2026-10-20). The
-  service redelivers; the calls still reached the media controller without them. Under the lab's call rule
-  every one of them now passes the frame rule ([fence-targets.md](fence-targets.md#the-labs-call-rule)). The
+  empty body for most, the call's `callAcceptanceAcknowledgement` for the acceptance callback. These responses were
+  then unknown and denied: a response goes back to whoever sent the delivery, and which deliveries an empty success
+  only acknowledges (and which it might answer: an incoming call's) wasn't established (Codex and Claude, 2026-10-20).
+  The service redelivered; the calls still reached the media controller without them. **Under the lab's call rule
+  every one of them now passes the frame rule** ([fence-targets.md](fence-targets.md#the-labs-call-rule)). The
   acceptance's acknowledgement also
   echoes the delivery's `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID` (five headers in all).
 - **Endpoint registration.** `POST <teams>/registrar/prod/V2/registrations` with `clientDescription` (`appId`,
@@ -220,8 +220,8 @@ muted with its fake audio manager, the call registry of
 - **The end.** On hanging up the page sends `leave` (`CallEndReasonLocalUserInitiated`) and the call controller then
   delivers `call/end` at the start's own end callback: `callEnd` with `code` 0, `phrase`, `reason: "noError"`,
   `resultCategories`, and the `sender` (the caller's participant). No `conversationEnd` came.
-- **Redeliveries.** Every delivery whose response stays denied (the conversation and roster updates, `call/end`) is
-  delivered again about 13 s later (`Trouter-Timeout`); the redeliveries carry the same bodies.
+- **Redeliveries.** Every delivery whose response was denied in these runs (the conversation and roster updates,
+  `call/end`) was delivered again about 13 s later (`Trouter-Timeout`); the redeliveries carried the same bodies.
 - **Timing.** The tone came back about 32 s after the call screen showed (the echo greets, beeps, records, beeps and
   plays the recording back), on one run.
 

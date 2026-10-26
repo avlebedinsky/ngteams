@@ -227,8 +227,8 @@ chat other than its forced denies, one for a partial or refused membership, or a
   in `chats.toml`, once; after that a messages it and b and c must show it, each write permitted by a fresh read of
   the chat's member list, as for any chat.
 - `ab-trouter`, `ab-trouter-quiet`: b's push channel while a sends, edits and reacts (the Trouter session's own
-  frames and the endpoints' registrations pass, the answers to deliveries stay denied), observed for 16 minutes; the
-  quiet one holds back every `user.activity` with a forced deny (`docs/protocol/trouter.md`).
+  frames, the endpoints' registrations and the answers to deliveries pass), observed for 16 minutes; the quiet one
+  holds back every `user.activity` with a forced deny (`docs/protocol/trouter.md`).
 - `chat-shapes`: a and b, as `ab-trouter`: a sets and takes back each quick reaction
   the hover bar offers, types for 45 s, leaves the text for 35 s, empties its compose box and waits 15 s more
   (`TYPE_FOR`, `PAUSE`, `AFTER_EMPTYING`) while b's open chat records its typing
@@ -244,12 +244,12 @@ chat other than its forced denies, one for a partial or refused membership, or a
   440 Hz tone. The run's classifier knows the echo service's MRI (`Classifier::with_test_call_callee`): what sets up
   the account's own endpoint reaches nobody and passes, and the call start maps only in exactly its captured shape, a
   new call of a and the echo (`teams_fence::contacting`'s calling row, `docs/protocol/calling-echo.md`), which
-  `Fence::check` permits and registers; the call's follow-ups (the echo's `add`, the endpoint metadata, the channel
-  parameters, the acceptance's acknowledgement over Trouter, `leave`) pass only on that registered call. The run turns
-  the call's noise suppression off (it takes the tone for noise), waits until the hooks' audio tap reads the tone
-  coming back in the page, hangs up, and exits 0 only when the start, the `add`, the acknowledgement and the `leave`
-  were permitted, the statistics show audio both ways and the tone came back, with no deny off the expected-deny
-  list. An incoming call is never answered.
+  `Fence::check` permits; the echo's `add` is judged by its invitee, and the call's other sends (the endpoint
+  metadata, the channel parameters, the acceptance's acknowledgement over Trouter, `leave`) pass, logged, once its
+  start was let in. The run turns the call's noise suppression off (it takes the tone for noise), waits until the
+  hooks' audio tap reads the tone coming back in the page, hangs up, and exits 0 only when the start, the `add`, the
+  acknowledgement and the `leave` were permitted, the statistics show audio both ways and the tone came back, with no
+  deny off the expected-deny list. An incoming call is never answered.
 - `ab-call`, `abc-call` (`--call start-held|answer|decline|cancel|timeout|video|dropped|join`): account a calls b
   from their 1:1 chat, or the recorded a–b–c group chat, every page with fake devices, muted. `start-held` (a alone)
   holds back each call start with a labelled forced deny; the other steps let a's start through (a call in the chat it
@@ -281,8 +281,9 @@ chat other than its forced denies, one for a partial or refused membership, or a
   video, and a's native client must show both on receiving lines of their own; c's page hangs up (a must show b
   alone), then joins the running call from the chat's header (a must show both again, c's line bringing frames after
   the join, as the native client's `video_lines` counts say); a's native client must have
-  heard the tone and decoded video on two lines. `scripts/native-call-run.sh` runs the same group call natively (a
-  calls, b and c answer, or `--join c` for a late join; `EXTRA="--video --camera-after 5"`).
+  heard the tone and decoded video on two lines. A failed `ab-call-native` or `abc-call-mixed` run hangs up every
+  page that shows its call before it stops its native clients. `scripts/native-call-run.sh` runs the same group call
+  natively (a calls, b and c answer, or `--join c` for a late join; `EXTRA="--video --camera-after 5"`).
 
 Every lab browser runs with its output muted and Chrome's fake audio manager (`--mute-audio`,
 `--disable-audio-output`): nothing is played aloud and the desktop's audio server is never opened; a call scenario's

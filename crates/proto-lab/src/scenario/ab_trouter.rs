@@ -2,9 +2,8 @@
 //! sends, edits and reacts in the a–b chat, recorded for the native client's Trouter notes.
 //!
 //! Both accounts run under the lab rule with members read live, as `ab-chat`: the Trouter session's own frames
-//! (authenticate, keep-alives, the client's own `user.activity`, the loss acknowledgement) and the endpoints'
-//! registrations reach nobody and pass; the responses to what the service delivers stay denied
-//! (`crate::fence_ws::classify_frame`), so the run shows what an endpoint that never answers a delivery gets.
+//! (authenticate, keep-alives, the client's own `user.activity`, the loss acknowledgement), the responses to what the
+//! service delivers (`crate::fence_ws::classify_frame`) and the endpoints' registrations reach nobody and pass.
 //! `ab-trouter-quiet` ([`Activity::HeldBack`]) also holds back every `user.activity` ([`hold_activity`]), to see
 //! whether the service treats an endpoint that never reports its activity differently.
 //!
@@ -23,12 +22,12 @@
 //! 5. a edits the message and reacts to it with a like ([`edit`], [`react`]); b must show the edit, and the reaction
 //!    must be answered with a 2xx. These steps failing fails the run but doesn't end it: the observation still runs.
 //! 6. Both pages stay open, nothing driven, for [`observation`] (when the activity is reported, longer than the
-//!    lifetime a chat delivery carries): the capture shows whether the service delivers again what went unanswered,
-//!    how often and for how long, and whether it closes the socket.
+//!    lifetime a chat delivery carries): the capture shows what the service delivers to an idle endpoint and whether
+//!    it closes the socket (the runs made while the delivery responses were denied showed it delivering again what
+//!    went unanswered).
 //! 7. The notes count each account's endpoint registrations, answered and denied ([`registrations_note`]). Judged as
 //!    `ab-chat` ([`trouter_policy`]): no deny but the probes' forced ones (and, quiet, the held-back activity) and the
-//!    reviewed expected-deny list (the denied delivery responses are Trouter frames, on it); nothing denied on the a–b
-//!    chat.
+//!    reviewed expected-deny list (it holds no Trouter frame); nothing denied on the a–b chat.
 //!
 //! Nothing in the run answers a call.
 

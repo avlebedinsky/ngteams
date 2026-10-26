@@ -45,9 +45,9 @@ use crate::session::{LabSession, SessionOptions};
 
 use super::ab_call::{
     ACCEPT_AUDIO_CSS, CAMERA, CONNECT_WAIT, CalleeAction, CalleeRole, EarlierRings, HANG_UP_CSS, INCOMING_CALL,
-    Modality, RING_LOOK, RING_WAIT, RunCall, TONE_WAIT, VIDEO_WAIT, back_to_chat, check_ring, hang_up_page,
-    judge_callee, mri, native_call_conflict, place_call, policy, stand_up_calling, switch_microphone, video_frames,
-    wait_calling_socket, watch_controls,
+    Modality, RING_LOOK, RING_WAIT, RunCall, TONE_WAIT, VIDEO_WAIT, back_to_chat, check_ring, hang_up_after_failure,
+    hang_up_page, judge_callee, mri, native_call_conflict, place_call, policy, stand_up_calling, switch_microphone,
+    video_frames, wait_calling_socket, watch_controls,
 };
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, setup};
 use super::dsl::{Selector, js_string};
@@ -143,6 +143,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         if let Some(note) = save_screenshot(Alias::B, &session).await {
             report.notes.push(note);
         }
+        hang_up_after_failure(Alias::B, &mut session, &mut report).await;
     }
     run.stop_natives(&mut session, &mut report).await;
     report.close_account(Alias::B, session, &policy(FORCED)).await;
