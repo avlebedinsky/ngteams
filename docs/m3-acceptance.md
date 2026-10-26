@@ -286,3 +286,254 @@ metadata 13, endpoint state 6, channel parameters 4, media descriptions 4, parti
 native clients' delivery responses (5 acceptance acknowledgements, 5 invitation receipts, 31 negotiation receipts) all
 permitted. The 26 denies are b's page's, on the expected-deny list: the call log's read horizon (24) and the file
 browser's prewarm (2).
+
+# The user's real-call checklist (the personal build)
+
+M3 Task 23. The steps above ran in the lab; these are the user's, on their own desktop with the personal build
+(`teams`), their own account, their colleagues and their own devices. Agents never build, install or run it and never
+read anything under `~/.local/share/teams/` (`docs/personal-build.md`), so every step here is the user's, and a problem
+comes back by its reason: what the window said, the kind and reason of the `fence.log` line, and what the diagnostic
+log showed in the user's own words, never a chat id, a name, a token or an excerpt of a log.
+
+## Before the first call (once)
+
+1. **Install the build with calls.** Quit the running `teams` (the tray item's "Quit"; closing the window only hides it
+   while the tray has the item), then from a checkout that holds M3's calls (the branch `native-teams-m3-calls`, or
+   `main` once it is merged) run `scripts/install-personal.sh` (a release build of `teams` and
+   `teams-signin-personal`, installed under `~/.local/lib/teams/`, `teams` linked from `~/.local/bin/`) and start
+   `teams`. The same two steps update it after a fix. Its first-run screen isn't shown again to an account that
+   confirmed it; for calls it says: "Calls: when someone calls you, the call is told it rings here, as any Teams app
+   does. Answering, declining, calling and joining go out only when you click; your microphone opens only then, and
+   your camera only when you turn it on." What the build sends for calls without a click: the ring-time sends of an
+   invitation it rings for (its receipt, `attach`, `progress`), and once the user's call is up that call's own setup,
+   keep-alive and end writes.
+2. **Video (optional; the H.264 question is the user's: `docs/backlog/openh264-patents-and-the-personal-build.md`).**
+   Run `scripts/fetch-openh264.sh ~/.local/share/teams` once (Cisco's OpenH264 2.6.0, checked against its SHA-256,
+   saved with its licence under `~/.local/share/teams/openh264/`), then restart `teams`. The settings then show the
+   switch "Video in calls: OpenH264 Video Codec provided by Cisco Systems, Inc." and the in-call bar a "Camera on"
+   button. Without the library every call is audio only and the bar has no camera button. With the switch off (it is on
+   by default, and read at each call's start) calls are audio only too, but the bar keeps its "Camera on" button and
+   answers it with "Couldn't turn the camera on or off: this call carries no video". Keep the switch on for step 4.
+3. **Devices.** Settings (the rail) → **Devices** lists Microphone, Speaker and Camera, each on "Follow the system
+   (<the current default>)" until another is chosen. The build opens the desktop's PipeWire; if a chat's header never
+   shows **Call**, start `teams` from a terminal: `teams: no calls: <why>` on its stderr says why the calls are off.
+4. **The camera portal.** The camera comes through the desktop's camera portal, which asks once, at the first "Camera
+   on". `busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop
+   org.freedesktop.portal.Camera` should list `AccessCamera`; without it the camera can't be turned on (the bar says
+   "Couldn't turn the camera on or off: …") and the calls are still audio.
+5. **The logs.** `~/.local/share/teams/fence.log` has a line for every call write, every call delivery response and
+   every frame of the calling socket. The diagnostic log is `~/.local/share/teams/logs/teams-app.log` (rotated at
+   8 MiB to `.1` … `.4`): at `info` (the default) it names each call write and its outcome (`call write accept (3):
+   fence allowed, HTTP 200`), the calling socket's drops and reconnects, and an invitation the fence didn't offer; at
+   `debug` it has every request, answer and frame in full. To read a failure in full, set Settings → **Diagnostic
+   log** to `debug` (or start `TEAMS_APP_LOG=debug teams`), do the step again, read the log, and set it back to
+   `info`. A debug log holds colleagues' names and messages: it, and what "Copy diagnostics" copies, are for the
+   user's own reading only.
+6. **Where to click.** A 1:1 or group chat's header has **Call** once the calling endpoint is registered (**Join** where
+   an invitation named a running call in that group chat). An incoming call rings with a ringtone, a notification
+   ("<caller> is calling", "Incoming call" or "Incoming group call", with Answer and Decline) and a banner over the
+   conversation pane ("<caller> is calling", or "… is calling in <chat>"; Answer, Decline). The in-call bar shows who
+   the call is with, its state ("Calling…", "Ringing…", "Answering…", "Joining…", "Connecting…", "Connected · m:ss"),
+   Mute/Unmute, Camera on/off and Hang up; once the call's roster names who is in it, a cell per participant under it
+   (their video when they send one, a border while they speak) and "You". After a call the bar says how it ended
+   ("Call ended", "Call declined", "Call ended by the other side (…)", "Call failed (<step>)", "Call ended (it went to
+   voicemail)") until Dismiss. Keys: Ctrl+Shift+C calls the chat shown, Ctrl+Shift+J joins, Ctrl+Shift+S answers,
+   Ctrl+Shift+D declines, Ctrl+Shift+M mutes, Ctrl+Shift+O turns the camera on or off, Ctrl+Shift+H hangs up; Ctrl+K
+   offers the same as commands ("Call", "Test call", "Join call", "Answer call", "Decline call", "Hang up", "Mute or
+   unmute", "Camera on or off").
+
+## What to send back when a step fails
+
+- The step's number, what was done, and which client the other side used (Teams on Windows or macOS, the web client in
+  a browser, the phone app).
+- What the window said, word for word: the bar's end text ("Call failed (accept)", "Call ended by the other side
+  (…)"), a "Couldn't …: …" line, or what didn't appear (no ring, no banner, no picture). Leave out a name or a chat if
+  one is in it.
+- The step's `fence.log` lines, only their kind, call operation and verdict: `jq -c '{verdict, kind, op: ((.scope |
+  objects | .call_operation.operation?) // null), event, response, own, reason, message}'
+  ~/.local/share/teams/fence.log | tail -n 30` prints them without the `scope`'s ids and the `url` fields, which hold
+  chat and call ids; `op` is the operation's name (`leave`, `attach`, `renegotiate`, …) on a call's follow-up and
+  `null` elsewhere. A `deny` line's `reason` and `message` are what is needed most.
+- What the diagnostic log showed, in the user's own words: which call write failed and how (`accept`, "fence allowed,
+  HTTP 403"; of a "fence denied: …" only the words after its last colon, the rest names the chat), the calling socket
+  going down, "an incoming call the fence doesn't offer", and about when in the call (the bar's duration).
+
+## The steps
+
+Wait about 90 s between two calls in the same chat (see "Known gaps"). Every `fence.log` line a step names is an
+`allow`; a `deny` is a failure to send back even when the call worked.
+
+### 1. The test call
+
+- **Do**: Ctrl+K, type "Test call", Enter. Talk when the echo service asks, then listen; Hang up.
+- **See**: the bar "Test call", "Calling…", then "Connected"; the service's prompt, then what was said played back
+  (the lab's round trip was about 17 s from speaking to hearing it back); "Call ended" after Hang up.
+- **`fence.log`**: `call` (the test call's start, in no chat), `invite` (the echo service added), `call_follow_up`
+  lines and `delivery_response` lines (`call_acceptance_acknowledgement`, `call_negotiation_receipt`), and the `leave`
+  (a `call_follow_up`). No chat is created for it.
+
+### 2. A lab account, through its 1:1 chat
+
+- **Before**: once, from the user's own Teams client, start a 1:1 chat with a lab account (a, b or c, as `lab.toml`
+  names them); it then shows in `teams`' chat list. No lab live run may hold the lab's live lock: in a second terminal
+  hold it for the length of the step, `flock -n ~/.local/share/teams-lab/live.lock -c 'echo "lab lock held: place the
+  call, then press Enter"; read _'`. If that exits at once, a lab run holds the lock: wait for it to end and try again
+  (a lab run started meanwhile waits for the lock).
+- **Do**: open that chat, Call (or Ctrl+Shift+C). Optionally answer it on a device of the user's own signed in as that
+  lab account, talk, hang up there.
+- **See**: "Calling…", "Ringing…". Nothing of the lab answers or declines it (the lab never calls, answers or declines
+  the user's account). Unanswered, it ends when the service gives up: voicemail ("Declined or not answered:
+  voicemail"; hang up) or "Call ended by the other side (…)". Answered on the user's device: "Connected", audio both
+  ways.
+- **`fence.log`**: `call` (the start, after the chat's fresh read listed the account and the callee), then the call's
+  follow-ups.
+
+### 3. 1:1 audio with a colleague, each way
+
+- **Do**: (a) call a colleague from the 1:1 chat with them; talk for a minute; the colleague hangs up. (b) The
+  colleague calls; answer once from the banner's Answer, and on another call from the notification's Answer; talk;
+  hang up from `teams`.
+- **See**: (a) "Calling…", "Ringing…", "Connected · 0:01" once they answer; each hears the other; "Call ended by the
+  other side" when they hang up. (b) The ringtone, the notification and the banner naming the colleague; on Answer
+  all three go and the bar shows "Answering…", "Connecting…", "Connected"; each hears the other; Hang up gives "Call
+  ended" here and ends the call for the colleague.
+- **`fence.log`**: (a) `call`; (b) while it rings `call_ringing` lines (`attach`, `progress`) and a
+  `delivery_response` `call_invitation_receipt`; on Answer `call_answer`; then `call_follow_up` lines and the
+  `leave`. Before Answer nothing is sent for the ring but those ring-time sends.
+
+### 4. Video, 1:1, both sides
+
+Needs the video setup above, with its switch on.
+
+- **Do**: in a 1:1 call (either way), check that the bar reads "Camera on" (the camera is off at every start, answer
+  and join); click it (or Ctrl+Shift+O); the first time, allow the desktop's camera dialog. Ask the colleague to turn
+  their camera on. Later "Camera off", then on again.
+- **See**: your own picture appears, and the colleague sees you, smoothly (the lab's test camera's 15 fps came
+  through whole); their video appears once they turn it on. "Camera off": they see your video stop, and nothing more of your camera is sent.
+- **`fence.log`**: `call_follow_up` lines (`renegotiate`, `media_answer`, `media_acknowledge`) as the cameras come
+  and go.
+
+### 5. A group-chat call
+
+- **Do**: open a group chat with two or more colleagues told beforehand; Call. Let two of them answer; turn cameras on;
+  talk; one of them leaves; hang up.
+- **See**: "Calling…", then "Connected" once the first answers; the bar's title is the chat's name; a cell per
+  participant as they come in, their videos in their cells, a border on whoever speaks. Everyone hears everyone. A
+  colleague who leaves goes from the grid (up to a minute late, see "Known gaps"). Hang up ends the call for the user
+  only: the others go on while two are in it.
+- **`fence.log`**: `call` (the start, after the group chat's fresh read listed the account and every callee), then
+  the follow-ups (`update_media_descriptions` and `apply_channel_parameters` among them as cameras turn on).
+
+### 6. Joining a running group-chat call
+
+- **Do**: with `teams` running and no call up, a colleague starts a call in a group chat the user is in. It rings
+  here: let it ring until it stops (don't Decline). Then open that chat: its header shows **Join**; click it (or
+  Ctrl+Shift+J).
+- **See**: "Joining…", then "Connected"; the participants' cells; the user hears and is heard. Answering the ring
+  itself (the banner's Answer) is also a way in, worth one run.
+- **`fence.log`**: `call` (the join, on the group chat the invitation named, its fresh read listing the account), then
+  the follow-ups.
+- **Note**: Join is offered only for a call the app was rung for. A call that began while `teams` wasn't running, or
+  while another call was up, shows **Call**, and a Call there ends at once (see "Known gaps"): join that one from
+  another client. Once its ring has stopped here the app hears no more of that call, so it doesn't know when the call
+  ends: a Join after the call has ended still goes out and ends as "Call failed (join)" (or "Call ended by the other
+  side (…)"), and the header still shows Join. That is expected, not something to send back. A second Join then says
+  "Couldn't join: the call there has ended", and the header goes back to Call.
+
+### 7. A colleague's call declined
+
+- **Do**: the colleague calls; Decline from the banner, from the notification, or with Ctrl+Shift+D.
+- **See**: the ringtone, the banner and the notification go; "Call declined" here; the user's other clients stop
+  ringing; the colleague's client shows the call declined, or puts them through to the user's voicemail (the service
+  has done both).
+- **`fence.log`**: the ring-time sends, then `call_decline`.
+
+### 8. A microphone or headset switched mid-call
+
+- **Do**: in a 1:1 call with a colleague: (a) Settings → Devices → Microphone, pick another (a headset's); after a
+  minute, back to "Follow the system". (b) With "Follow the system", plug in (or connect over Bluetooth) a headset
+  the desktop makes its default, then unplug it. The same for Speaker.
+- **See**: the colleague hears the user through the new microphone within about 2 s (the lab: 1.1–1.6 s), and the
+  user hears them on the new speaker; the call never ends or reconnects. A device chosen and then unplugged shows
+  "(not connected)" in the settings, and its stream falls back to the system's default. A Bluetooth headset's
+  microphone appears only once the desktop has switched the headset to its headset profile.
+- **`fence.log`**: nothing new; a device switch sends no write.
+
+### 9. An incoming call from someone outside the user's chats
+
+- **Do**: a colleague of the same tenant with whom the user has no chat in `teams` calls; answer.
+- **See**: the ring, the notification and the banner naming them as the call's invitation names them ("Someone"
+  without a name); Answer connects as in step 3; the bar's title is their name.
+- **`fence.log`**: as step 3 (b).
+- **Note**: a caller of another tenant or a personal Microsoft account isn't offered here until a lab capture shows
+  that kind of caller: it doesn't ring in `teams` (it rings on the other clients), and the info log says "an incoming
+  call the fence doesn't offer: ignored". For a caller of the same tenant that line is a failure to send back.
+
+### 10. A call answered on the user's phone
+
+- **Do**: a colleague calls while `teams` and the phone app are both signed in; answer on the phone.
+- **See**: `teams` stops ringing within a couple of seconds: the ringtone, the banner and the notification go, and no
+  call bar appears. The call goes on on the phone.
+- **`fence.log`**: the ring-time sends only; no `call_answer`.
+
+### 11. A call longer than an hour
+
+- **Do**: keep a 1:1 call with a colleague (audio is enough) up for at least 75 minutes, past a token renewal (the
+  tokens last 60–90 minutes and are renewed 5 minutes before they expire). Talk now and then, and at the end. Before
+  hanging up, check that the info log has a `session: the skypetoken renewed` line whose time (UTC) falls within the
+  call; if none does yet, keep the call up until one does.
+- **See**: the duration passes "1:00:00" and the call stays "Connected"; each still hears the other at the end; Hang
+  up ends it normally.
+- **If it drops**: the bar's end text, the duration at which it happened, and from the info log around that time the
+  call write that failed and how, a "calling socket down" or "stopped" line, or a "can't be renewed" line.
+
+### 12. Echo heard by the colleague, or not
+
+- **Do**: in a 1:1 call, use the laptop's own speakers and microphone (the hardest case) at a normal volume, and talk
+  both ways for two minutes; then the same on a headset. Ask the colleague whether they hear their own voice back.
+- **See**: no echo of their voice after the first few seconds of the call (the canceller adapts within seconds; the
+  lab measured the echo 39–46 dB under what was played).
+- **Send back**: echo or none, on which devices, from when, how loud, and whether it went away.
+
+## Known gaps a step may hit
+
+- **A call in a chat soon after its last one, or in a chat whose call still runs**: the service refuses a new call in
+  a chat for about a minute after its last call ended, and in a chat that has a running call, with "Call ended by the
+  other side (Conversation cannot be created due to a failure to resolve ownership)" (`409`, sub-code `5704`;
+  `docs/protocol/calling.md`). Wait 90 s and call again; for a running group call, Join (step 6).
+- **The web client and the camera**: with a colleague on the Teams web client in a browser, their camera turned on in
+  a 1:1 call made the page renegotiate after every answer of the native client until the service ended the call
+  ("Call ended by the other side (Too many media renegotiations have occurred on this call leg.)", `429`), in one lab
+  run of three (`docs/backlog/web-renegotiates-against-a-native-answer-in-a-loop.md`). Whether the desktop clients do
+  it is what step 4 shows; say which client it was.
+- **A leave seen late**: when the user hangs up a group call, the others may see the user in it for up to a minute
+  more, and a colleague who leaves goes from the user's grid as late
+  (`docs/backlog/native-group-leave-seen-a-minute-late.md`). Nothing to send back unless it takes longer.
+- **One call or ringing invitation at a time**: a call coming in during a call doesn't ring in `teams` (it rings on the
+  other clients), and nothing is sent for it.
+- **No call write is sent twice**: a call write whose answer didn't come ends the call ("Call failed (<step>)")
+  instead of going again. That is by design, but which step failed is worth sending back.
+- **Not part of M3**: meetings, screen sharing, transfer, forwarding, hold, call park, phone numbers (PSTN), adding
+  someone to a call (only the test call adds its echo service).
+- **The view trace** marks a 1:1 call's other participant `camera-off` whatever their camera; it is the live test's
+  record only, and the picture shows as it should.
+
+## Outcome
+
+Pending: the user's run. Each problem reported is fixed (tests first, on the mock or in the lab) and the step run again
+by the user; the outcome goes here, in the user's words where they give them.
+
+| step | result | the user's notes |
+|---|---|---|
+| 1. the test call | | |
+| 2. a lab account through its 1:1 chat | | |
+| 3. 1:1 audio with a colleague, each way | | |
+| 4. video, 1:1, both sides | | |
+| 5. a group-chat call | | |
+| 6. joining a running group-chat call | | |
+| 7. a colleague's call declined | | |
+| 8. a microphone or headset switched mid-call | | |
+| 9. an incoming call from outside the user's chats | | |
+| 10. a call answered on the phone | | |
+| 11. a call longer than an hour | | |
+| 12. echo heard by the colleague or not | | |

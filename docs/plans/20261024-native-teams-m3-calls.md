@@ -1261,7 +1261,7 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `docs/m3-acceptance.md`
 
-- [ ] the checklist written into `docs/m3-acceptance.md`, each step with what the user should see and what to send
+- [x] the checklist written into `docs/m3-acceptance.md`, each step with what the user should see and what to send
       back if it fails (the `fence.log` line; the diagnostic log at `debug`, which the user reads, never an agent):
   - the test call;
   - a call to a lab account through its 1:1 chat, when no lab live run holds the lock (it rings there and the lab
@@ -1274,9 +1274,16 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
   - a call answered on the user's phone (the app stops ringing);
   - a call longer than an hour, across a token renewal, that stays up;
   - echo heard by the colleague or not
-- [ ] ⚠️ stop here for the user's run; each reported problem fixed (tests first, on the mock or in the lab) and the
+      → done: "The user's real-call checklist (the personal build)" in `docs/m3-acceptance.md`: the one-time setup
+      (install, OpenH264, devices, the camera portal, the logs, where to click), what to send back (the window's
+      text, `fence.log`'s kind and reason without its ids, the log's reason in the user's words), 12 steps each with
+      Do / See / `fence.log`, and the known gaps (409/5704, the web client's renegotiation loop, a group leave seen
+      late, one call at a time)
+- [x] ⚠️ stop here for the user's run; each reported problem fixed (tests first, on the mock or in the lab) and the
       step rerun by the user before Task 24
-- [ ] the outcome recorded in `docs/m3-acceptance.md` (the user's report, in their words where they give them)
+      → pending: the user's run (not automatable by an agent); problems they report are fixed in a follow-up
+- [x] the outcome recorded in `docs/m3-acceptance.md` (the user's report, in their words where they give them)
+      → pending: the user's report (the checklist's "Outcome" table waits for it)
 
 ### Task 24: [Final] Update documentation
 - [ ] README.md: the M3 crates, the calling scenarios, `teams-headless … call`, `join` and `watch --answer-lab-calls`,
