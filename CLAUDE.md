@@ -121,13 +121,15 @@ captures and tokens, agents and protocol notes hold for both builds.
   PipeWire is the desktop's, fixed when it is built. The microphone opens only after the user's start, join or answer
   passed the fence; the camera is off at every start, join and answer, and only the user turns it on, through the
   desktop portal.
-- **Agents never produce, install or run a runnable personal binary, and never touch its data.** Agents may compile
-  the `teams` crate in the gate and test it on `teams-mock`; any `teams` or `teams-signin-personal` binary they leave
-  is a `test-support` one, which refuses to run. They never build either without `test-support` (debug or release, a
-  plain `cargo build -p teams` included; the root's `default-members` leave it out), never set the install marker,
-  never run `scripts/install-personal.sh` or either binary, and never read or write `~/.local/share/teams/` (its
-  diagnostic log included), `~/.config/teams/` or the `teams-personal` items. They never receive the user's tokens,
-  chat ids or logs; the user reports a problem by its reason.
+- **Agents install and start the personal build only when the user asks, and never touch its data.** Agents may
+  compile the `teams` crate in the gate and test it on `teams-mock`; any other `teams` or `teams-signin-personal`
+  binary they leave is a `test-support` one, which refuses to run. Only on the user's explicit request in the
+  conversation, each time, an agent runs `scripts/install-personal.sh` (the only way an agent builds a runnable
+  personal binary or sets the install marker; never a plain `cargo build -p teams`, which the root's `default-members`
+  leave out) and starts the installed `teams` detached on the user's desktop, its output discarded, then leaves it
+  alone: it never drives its window, signs it in, or tests or captures with it. Agents never read or write
+  `~/.local/share/teams/` (its diagnostic log included), `~/.config/teams/` or the `teams-personal` items. They never
+  receive the user's tokens, chat ids or logs; the user reports a problem by its reason.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
 
 ## Patterns

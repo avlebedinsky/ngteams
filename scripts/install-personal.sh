@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the personal build (`crates/teams`, docs/personal-build.md) as a release and installs it under ~/.local, for
-# the user to run on their own desktop. **Agents never run this script** (CLAUDE.md): it is the only thing that sets
-# the install marker, without which both personal binaries refuse to start.
+# the user to run on their own desktop. **Agents run this script only when the user asks** (CLAUDE.md): it is the only
+# thing that sets the install marker, without which both personal binaries refuse to start.
 #
 # - Builds `teams` and `teams-signin-personal` with one `cargo build --release -p teams`, its target dir apart from
 #   every other build (`target/personal`), so no `test-support` or lab build is unified in.

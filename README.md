@@ -69,7 +69,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `build/patches/`, `vendor/`, `scripts/vendor-gpui.sh` | GPUI (`gpui-pre` 0.3.9) vendored with agterm-rs's external-surfaces patches, used through `[patch.crates-io]`; `scripts/vendor-gpui.sh --check` verifies it |
 | `scripts/lint-report.sh` | refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s |
 | `scripts/own-presence-run.sh` | one `own-presence-*` live run with b's presence reads of a sampled beside it (M2 Task 18) |
-| `scripts/install-personal.sh`, `packaging/teams.desktop` | the personal build's release build and install under `~/.local` (its binaries, the install marker, the desktop entry), for the user to run; agents never run it |
+| `scripts/install-personal.sh`, `packaging/teams.desktop` | the personal build's release build and install under `~/.local` (its binaries, the install marker, the desktop entry), for the user to run; agents run it only when the user asks |
 | `scripts/native-call-run.sh` | one native lab call (`teams-headless` on every end: a caller, callees answering with `watch --answer-lab-calls`, a late joiner), spaced 90 s after the chat's last call, run under the live lock (M3 Task 16) |
 | `scripts/fetch-openh264.sh` | downloads Cisco's prebuilt OpenH264 and its licence into a data dir's `openh264/` (the lab's; the user's own for the personal build, run by the user), its SHA-256 checked |
 | `scripts/own-availability-native-run.sh` | one native own-availability run (`teams-headless a availability`) with b's presence reads of a sampled beside it (M2 Task 19) |
