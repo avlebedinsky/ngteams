@@ -246,7 +246,7 @@ answer at the response stage, and the scenarios hold nothing of a call's back bu
 | `proto-lab run ab-call-native --headless` | **ok on the third attempt** (11:58Z). 11:49Z: phase 1's call ended `remote 429 Too many media renegotiations` after b's page renegotiated again after every native answer for 22 s (a loop the capture of 03:26Z, before this change, shows too: `docs/backlog/web-renegotiates-against-a-native-answer-in-a-loop.md`); 11:53Z: b's page's WebRTC statistics showed 4 packets sent in phase 1, though each side heard the other's tone |
 | `proto-lab run abc-call --call video --headless` (12:02Z) | **ok**: a's start let through, b and c answered, every page decoded video |
 | `proto-lab run abc-call-mixed --headless` (12:08Z, 90 s after the last group call) | **ok**: a's native client called, b and c answered, c left and joined again (2 joins let through), video on two lines |
-| `call_live`, every case (12:15Z, 12:20Z) | **failed twice at the same check**: `one-to-one`'s echo check reads b's microphone from b's `call-participant self` trace line, which b's 1:1 call never has (its grid shows only once the roster names a participant, and a 1:1 callee's never does: run 23's b had none either); the echo margin itself measured 38.3 and 39.4 dB. The test call (round trip p50 16.9 and 16.7 s) and both `web` directions passed in both runs (`docs/backlog/one-to-one-callee-sees-no-roster.md`) |
+| `call_live`, every case (12:15Z, 12:20Z) | **failed twice at the same check**: `one-to-one`'s echo check reads b's microphone from b's `call-participant self` trace line, which b's 1:1 call never has (its grid shows only once the roster names a participant, and a 1:1 callee's never does: run 23's b had none either); the echo margin itself measured 38.3 and 39.4 dB. The test call (round trip p50 16.9 and 16.7 s) and both `web` directions passed in both runs (the cause, a 1:1 call's roster read as nobody in the call, was fixed after: below) |
 | `call_live`, `CALL_LIVE_PHASES=decline,group` (12:26Z) | **passed**: b declined and a was told (ended, 2.7 s); the group call (setup a 2245, b 1953, c 1856 ms; each hears the other two; two lines on every window), c left (seen by a after 70.6 s, as before) and joined again (2294 ms) |
 
 **`fence.log`** over these runs (11:47:32–12:28:59Z, 3 720 whole lines): no breach, no arming failure, no deny of a
@@ -265,3 +265,24 @@ The gate on the tree of this change passed (`cargo fmt --all --check`, `cargo cl
 --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p fixture-guard`, `PROTO_LAB_REQUIRE_CHROME=1
 GPUI_SMOKE_REQUIRE=1 cargo test --workspace`), with `teams-headless`'s echo test failing once on its tone's timing at a
 load average of 44 (the lab build running beside it) and passing twice alone.
+
+**A 1:1 call's roster.** Neither end of a native 1:1 call ever had a participant (`call N: 0 participant(s)`), so
+its participant grid never showed and `one-to-one`'s echo check found no `call-participant self` line on b. The 1:1
+call's `rosterUpdate` deliveries did come, at the start's and the `attach`'s callbacks alike (the captures of
+`ab-call`, `ab-call-native` and `ab-call-app` show both ends getting the same updates, the first listing both once the
+callee accepted), but a 1:1 call's endpoints list no `mediaStreams` (its media goes through no mixer: their `call`
+holds only `serverMuteVersion`), and the native client took a participant as in the call only with media streams
+listed. It now takes an `active` participant with an endpoint holding a `call` (`teams-call`'s `read::roster`); the
+mock delivers a 1:1 roster in that shape too, and the echo check fails by name when b's grid never showed. The rerun:
+
+| run | result |
+|---|---|
+| `call_live`, every case (13:22Z, 431 s; `teams-app`, `proto-lab` release builds from `target/lab`) | **passed, first attempt**: the test call (setup 2427 ms, round trip p50 16.8 s over 7 agreeing blocks); a calls b's page (6139 ms) and b's page calls a (968 ms), each heard and seen; 1:1 between the apps (b 1405, a 1336 ms), each window's grid showing the other (b's 1:1 call traced its `call-participant` lines for the first time), each hears the other, b's echo 39.0 dB under the echo at its microphone, b's microphone hearing at both ends of the window, a's microphone switch 1369 / 1053 ms, a → b latency p50 210 ms, video 15 fps both ways; b declined (a told after 366 ms); the group call (a 2408, b 1895, c 2054 ms; each hears the other two; two lines on every window), c's leave seen by a after 70.5 s, its join 1742 ms |
+
+Its `fence.log` (512 lines): no breach, no arming failure, no deny of a write. Starts 8 (1 test call, 5 in the a–b
+chat, 1 in the group chat, 1 join), answers 6 and a decline 1 on offered invitations, the echo's `add` 1; with no
+lookup `attach` 7, `progress` 7 and 107 follow-ups (renegotiate 28, media answer 18, media acknowledge 24, endpoint
+metadata 13, endpoint state 6, channel parameters 4, media descriptions 4, participant properties 2, `leave` 8); the
+native clients' delivery responses (5 acceptance acknowledgements, 5 invitation receipts, 31 negotiation receipts) all
+permitted. The 26 denies are b's page's, on the expected-deny list: the call log's read horizon (24) and the file
+browser's prewarm (2).
