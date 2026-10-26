@@ -4,8 +4,9 @@
 //! fence.
 //!
 //! - **Shown or not**: a build shows calls only when its models were made with them ([`crate::Models::with_calls`]:
-//!   the lab app); the personal build's models are made without (`Models::new`), so it shows no call, rings for none
-//!   and asks for none, whatever the engine tells, until its call rule is built (M3 Task 22).
+//!   the lab app, and the personal build once its calling opened); models made without (`Models::new`: a run whose
+//!   engine has no calling, such as the personal build's when its devices couldn't be opened) show no call, ring for
+//!   none and ask for none, whatever the engine tells.
 //! - **What is kept**: whether the calling endpoint is registered; the invitation that rings (the engine offered it:
 //!   [`IncomingCall`], its caller's name as the invitation gives it); the call up or being set up ([`ActiveCall`]: its
 //!   kind, its chat, its status, when its media connected, muted, its camera on, taken by voicemail); the group chats
@@ -16,8 +17,8 @@
 //!   answer or the decline of the invitation that rings, a hang-up, mute or unmute, the camera on or off (off when a
 //!   call starts; a 1:1 call's video, M3 Task 18). Each is the user's: a button, a key, the switcher's command or the
 //!   incoming call's notification. Nothing here answers, declines or turns the camera on by itself.
-//! - **The video** a build shows ([`Calls::with_video`]: the lab app's, when it has the codec) is the feed the call's
-//!   media draws on ([`crate::video::VideoFeed`]).
+//! - **The video** a build shows ([`Calls::with_video`]: the lab app's or the personal build's, when it has the codec)
+//!   is the feed the call's media draws on ([`crate::video::VideoFeed`]).
 //!
 //! The asks are traced by the caller's trace (`call asked`, `call refused` with the ask and why), never with a name.
 

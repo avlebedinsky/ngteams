@@ -55,7 +55,7 @@ pub use calls::{
 };
 pub use contacting::{
     CALL_PROXY_HOST, CALL_START_URL, Contact, OVERRIDE_HEADERS, OWN_VIEW_PROPERTIES, Policy, Request, Service,
-    TEST_CALL_SCENARIO, contacting, on_contacting_service, service_of,
+    TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, contacting, on_contacting_service, service_of,
 };
 pub use decision::{
     Denied, DenyReason, FailClosed, Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, OpenError,

@@ -26,9 +26,7 @@ use teams_fence::lab::{Alias, LabConfig};
 use teams_fence::{Fence, LiveMembershipSource};
 
 use teams_fence::lab::LabPaths;
-use teams_media::video::codec::{EncoderSettings, H264Library};
-use teams_media::video::convert::MaxSize;
-use teams_proto::ClientInfo;
+use teams_media::video::codec::H264Library;
 
 use crate::account::{self, Account, AccountCalls, AccountEngine, AccountError, Membership};
 pub use crate::account::{CSA_GTM, MIDDLE_TIER_GTM, PRESENCE_GTM};
@@ -87,48 +85,21 @@ pub fn start<S: SecretStore + 'static>(
     Ok(account::start(lab_account, fence, membership)?)
 }
 
-/// How a lab account describes its client in its calls: as the web client's calling stack does in the captures
-/// (`docs/protocol/calling-echo.md`): its endpoint's and its client's capability numbers and its platform's name, in
-/// the form the web client sends it. The native client takes the web client's place in a call.
-#[must_use]
-pub fn web_client_info() -> ClientInfo {
-    ClientInfo {
-        endpoint_capabilities: Some(WEB_ENDPOINT_CAPABILITIES),
-        client_endpoint_capabilities: Some(WEB_CLIENT_ENDPOINT_CAPABILITIES),
-        platform_name: Some(WEB_PLATFORM_NAME.to_owned()),
-    }
-}
+/// How a lab account describes its client in its calls, and its calls' video: as every account does
+/// ([`crate::account::web_client_info`], [`crate::account::call_video`]).
+pub use crate::account::{
+    OPENH264_DIR, WEB_CLIENT_ENDPOINT_CAPABILITIES, WEB_ENDPOINT_CAPABILITIES, WEB_PLATFORM_NAME, call_video,
+    web_client_info,
+};
 
-/// The web client's `endpointCapabilities` in the captured starts.
-pub const WEB_ENDPOINT_CAPABILITIES: u64 = 73_463;
-/// The web client's `clientEndpointCapabilities` in the captured starts.
-pub const WEB_CLIENT_ENDPOINT_CAPABILITIES: u64 = 114_259_690;
-/// The web client's platform name (`pstnContent.platformName`), in the captured form.
-pub const WEB_PLATFORM_NAME: &str = "SkypeSpaces/1415/26100212018/os=linux; osVer=undefined; deviceType=computer; \
-                                     browser=chrome; browserVer=155.0.0.0/TsCallingVersion=2026.37.01.11";
 /// The language a lab account's calls name, as the captured starts do.
-pub const LAB_LANGUAGE: &str = "en-us";
+pub const LAB_LANGUAGE: &str = crate::account::CALL_LANGUAGE;
 
-/// Where the lab keeps its copy of Cisco's OpenH264 library, under its data dir (`scripts/fetch-openh264.sh` puts it
-/// there, with Cisco's licence for it beside it).
-pub const OPENH264_DIR: &str = "openh264";
-
-/// The lab's H.264 library: Cisco's, in [`OPENH264_DIR`] (loaded only when it is the one Cisco published).
+/// The lab's H.264 library: Cisco's, in [`OPENH264_DIR`] under the lab's data dir (`scripts/fetch-openh264.sh` puts it
+/// there, with Cisco's licence for it beside it; loaded only when it is the one Cisco published).
 #[must_use]
 pub fn openh264(paths: &LabPaths) -> H264Library {
     H264Library::cisco_in(&paths.data_dir().join(OPENH264_DIR))
-}
-
-/// A lab call's video on `library`, shown on `output`: the camera encoded at up to 1.5 Mb/s, 30 frames a second, no
-/// bigger than 1280 by 720.
-#[must_use]
-pub fn call_video(library: H264Library, output: Arc<dyn crate::VideoOutput>) -> crate::CallVideo {
-    crate::CallVideo {
-        library,
-        encoder: EncoderSettings::default(),
-        max_size: MaxSize::HD,
-        output,
-    }
 }
 
 /// The lab accounts' names as lab.toml has them ([`display_name`]), by MRI: the last a person's name comes from.

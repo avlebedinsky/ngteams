@@ -952,6 +952,9 @@ fn the_first_run_screen_shows_over_everything_until_it_is_confirmed() {
     ] {
         assert!(bounds(cx, switch).is_some(), "{switch}");
     }
+    // and what a call sends without a click, which has no switch
+    assert!(bounds(cx, "first-run-calls").is_some());
+    assert!(teams_ui::first_run::CALLS_NOTE.contains("rings here"));
     assert!(cx.update(|_, cx| shell.read(cx).settings().read(cx).awaiting_first_run()));
     click(cx, "first-run-send-typing");
     click(cx, "first-run-confirm");

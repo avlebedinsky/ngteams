@@ -240,8 +240,7 @@ impl Client {
         let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter_origin)
             .unwrap()
             .with_options(options())
-            .for_calls(CallStack::new(Arc::clone(&fence), Arc::new(LabChats)))
-            .unwrap();
+            .for_calls(CallStack::new(Arc::clone(&fence), Arc::new(LabChats)));
         let identity = Identity {
             mri: Mri::new(mri),
             display_name: Some(format!(
@@ -448,6 +447,7 @@ impl Driver {
                 Effect::Event(event) => {
                     let _ = self.told.send(event);
                 }
+                Effect::LetGo { attach } => self.sink.fence.let_go(attach.as_str()),
             }
         }
     }

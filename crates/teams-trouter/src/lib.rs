@@ -25,8 +25,8 @@
 //! **Two stacks, two sockets.** A [`Trouter`] is the messaging stack's socket (chat deliveries); built
 //! [`Trouter::for_calls`], it is the calling stack's own (`SkypeSpaces`, its own endpoint): its deliveries read by the
 //! fence and handed on as [`PushEvent::Call`], an invitation the fence doesn't offer ignored, a delivery answered only
-//! by a typed response the fence permits for that call on that connection ([`calls`]). The personal build opens no
-//! calling socket ([`BuildError::PersonalCalls`]).
+//! by a typed response the fence permits for that call on that connection ([`calls`]). The personal build's calling
+//! socket registers as its own-state entry and logs its frames, as its messaging socket does.
 //!
 //! **What it requests over HTTP.** The registrar registration of the endpoint for its stack and its renewal
 //! ([`registration`]): `teams_proto::EndpointRegistration` (`TeamsCDLWebWorker`) or

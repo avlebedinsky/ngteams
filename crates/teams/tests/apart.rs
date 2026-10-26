@@ -96,8 +96,10 @@ fn only_this_crate_enables_the_personal_features() {
         [
             // the two crates' own tests of their personal parts, which no binary links
             "crates/teams dependencies teams-fence",
+            "crates/teams dependencies teams-media",
             "crates/teams dependencies teams-signin",
             "crates/teams dev-dependencies teams-fence",
+            "crates/teams dev-dependencies teams-media",
             "crates/teams-fence dev-dependencies teams-fence",
             // with `test-support` beside it, which wins: the build still opens only the sandbox's PipeWire
             "crates/teams-media dev-dependencies teams-media",
@@ -144,7 +146,11 @@ fn a_lab_binary_built_alone_has_neither_personal_feature() {
     let tree = features_of("teams");
     assert!(tree.contains(r#"teams-fence feature "personal""#), "{tree}");
     assert!(tree.contains(r#"teams-signin feature "personal""#), "{tree}");
+    // its calls' devices: the desktop's PipeWire, and no test reach in a plain build of it
+    assert!(tree.contains(r#"teams-media feature "personal""#), "{tree}");
     assert!(!tree.contains(r#"teams-fence feature "test-support""#), "{tree}");
+    assert!(!tree.contains(r#"teams-media feature "test-support""#), "{tree}");
+    assert!(!tree.contains(r#"teams-core feature "test-support""#), "{tree}");
 }
 
 #[test]

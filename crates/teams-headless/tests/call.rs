@@ -1007,8 +1007,7 @@ impl Lab {
                 backoff_jitter_percent: 0,
                 ..Options::default()
             })
-            .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)))
-            .unwrap();
+            .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
         let name = mri.rsplit(':').next().unwrap();
         let files = CallFiles::write(self.dir.path().join(format!("{name}-call.wav")), hz, &PLAN).unwrap();
         let relay = Relay::Fixed(vec![RelayServer {

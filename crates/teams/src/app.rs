@@ -1,6 +1,8 @@
 //! The personal app on GPUI: the bridge over the account's engine, the main window (`teams-ui`'s shell, with the first
 //! run's screen of the writes that happen on their own, [`settings`]), the notifications and the tray on the desktop's
-//! session bus, the sign-out and the quit.
+//! session bus, the calls when the engine has its calling ([`PersonalCalls`]: a call button and "Test call", an
+//! incoming call's ringtone, notification and banner, the in-call view, the video switch and the devices in the
+//! settings), the sign-out and the quit.
 //!
 //! **Signed out** ([`watch_sign_out`]): once the session can't renew its tokens (`invalid_grant`: a sign-in frequency
 //! policy, a password change, a revoked session; or no refresh token stored), the window shows [`SIGNED_OUT_HINT`], the
@@ -21,9 +23,11 @@ use teams_ui::bus::BusError;
 use teams_ui::window::{KitRoot, PERSONAL_APP_ID};
 use teams_ui::{
     Bridge, Core, Desktop, DesktopEvent, DesktopParts, LogLevel, Models, SettingsFile, SettingsModel, ShellParts,
-    ViewTrace,
+    VideoFeed, ViewTrace,
 };
 use tokio::sync::watch;
+
+use crate::calling::PersonalCalls;
 
 /// The window's title and the app's name on its notifications and tray item.
 pub const TITLE: &str = "Teams";
@@ -44,6 +48,8 @@ pub struct Launch {
     /// The desktop's session bus, for the notifications and the tray item.
     pub bus: Result<String, BusError>,
     pub sign_in_again: SignInAgain,
+    /// The window's calls, when the engine has its calling (`crate::calling::open`); `None` shows no call.
+    pub calls: Option<PersonalCalls>,
 }
 
 /// The settings in `file` (`~/.local/share/teams/settings.toml`) with the first run's screen asked for: none of
@@ -112,19 +118,26 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         settings,
         bus,
         sign_in_again,
+        calls,
     } = launch;
     // closing the window keeps the app in the tray: it quits itself once the engine is shut down
     cx.set_quit_mode(QuitMode::Explicit);
-    let (models, bridge) = bridge(engine, cx);
+    let (models, bridge) = bridge(engine, calls.as_ref(), cx);
     watch_sign_out(signed_out, bridge.downgrade(), sign_in_again, cx);
     for problem in settings.problems() {
         eprintln!("teams: {problem}");
         log::warn!("{problem}");
     }
+    let video = calls.as_ref().and_then(|calls| calls.video.clone());
+    let settings = settings_entity(settings, video, cx);
+    if let Some(devices) = calls.as_ref().and_then(|calls| calls.devices.clone()) {
+        // the calls' devices as the settings choose them, from the start
+        teams_ui::settings::attach_devices(&settings, devices, cx);
+    }
     let parts = ShellParts {
         core: bridge.read(cx).core(),
         models,
-        settings: cx.new(|_| settings),
+        settings,
         trace: Arc::new(ViewTrace::off()),
     };
     let desktop = cx.new(|cx| {
@@ -134,8 +147,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
                 app_name: TITLE.into(),
                 title: TITLE.into(),
                 shell: parts,
-                // no call rings in the personal build until its call rule is built (M3 Task 22)
-                ringer: None,
+                ringer: calls.and_then(|calls| calls.ringer),
             },
             cx,
         )
@@ -170,14 +182,41 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     })
 }
 
-/// The models and the bridge holding `engine`. The models show no call: the personal build keeps calling off until its
-/// call rule is built (M3 Task 22), so whatever the engine told of a call would be left out.
-pub fn bridge(engine: EngineHandle, cx: &mut App) -> (Models, Entity<Bridge>) {
-    let models = Models::new(cx);
+/// The models and the bridge holding `engine`. The models show calls when the window has them (`calls`: its test call
+/// to the echo service, its calls' video on their feed); without them whatever the engine told of a call is left out.
+pub fn bridge(engine: EngineHandle, calls: Option<&PersonalCalls>, cx: &mut App) -> (Models, Entity<Bridge>) {
+    let models = match calls {
+        Some(calls) => match calls.video.clone() {
+            Some(feed) => Models::with_video_calls(Some(calls.echo.clone()), feed, cx),
+            None => Models::with_calls(Some(calls.echo.clone()), cx),
+        },
+        None => Models::new(cx),
+    };
     let core: Arc<dyn Core> = Arc::new(engine.requests());
     let drained = models.clone();
     let bridge = cx.new(|cx| Bridge::start(engine, core, drained, cx));
     (models, bridge)
+}
+
+/// The settings as an entity; when the calls carry video, with the switch for its codec (shown beside the attribution
+/// its licence asks for), which `video` follows.
+fn settings_entity(settings: SettingsModel, video: Option<VideoFeed>, cx: &mut App) -> Entity<SettingsModel> {
+    let settings = match &video {
+        Some(feed) => {
+            let settings = settings.with_video_switch();
+            feed.set_enabled(settings.settings().video_calls);
+            settings
+        }
+        None => settings,
+    };
+    let settings = cx.new(|_| settings);
+    if let Some(feed) = video {
+        cx.observe(&settings, move |model, cx| {
+            feed.set_enabled(model.read(cx).settings().video_calls);
+        })
+        .detach();
+    }
+    settings
 }
 
 /// Once `signed_out` says the session is signed out: shows [`SIGNED_OUT_HINT`], shuts the engine down (nothing more is

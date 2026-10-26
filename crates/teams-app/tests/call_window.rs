@@ -700,7 +700,7 @@ fn engine(
                 .with_options(options),
         )
     };
-    let calling = trouter()?.for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)))?;
+    let calling = trouter()?.for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
     let name = display_name(&format!("bot-{alias}@lab.example.test")).to_owned();
     let identity = Identity {
         mri: Mri::new(mri),

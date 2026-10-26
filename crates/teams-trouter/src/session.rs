@@ -231,9 +231,6 @@ pub enum BuildError {
     MockOrigin,
     #[error("the system random source failed")]
     Random,
-    /// The personal build's calls aren't turned on: no calling socket opens through its fence.
-    #[error("the personal build opens no calling socket")]
-    PersonalCalls,
 }
 
 /// One account's push channel (see the module docs), built and then [`Self::spawn`]ed.
@@ -294,17 +291,12 @@ where
 
     /// The same client as the calling stack's socket (see the module docs and [`crate::calls`]): its deliveries read
     /// by `calls`' fence, which must be `transport`'s own (its call writes feed the same call registry), and answered
-    /// only as that fence permits.
-    ///
-    /// # Errors
-    /// [`BuildError::PersonalCalls`] for the personal build's fence: its calls aren't turned on, so it opens no calling
-    /// socket and sends no calling registration.
-    pub fn for_calls(mut self, calls: CallStack) -> Result<Self, BuildError> {
-        if calls.fence.is_personal() {
-            return Err(BuildError::PersonalCalls);
-        }
+    /// only as that fence permits. Through the personal build's fence, its registration goes as its own-state entry and
+    /// its frames are logged by their kind, as the messaging socket's are.
+    #[must_use]
+    pub fn for_calls(mut self, calls: CallStack) -> Self {
         self.calls = Some(calls);
-        Ok(self)
+        self
     }
 
     /// As [`Self::new`], but every socket goes to `origin` (`ws://127.0.0.1:<port>`, a local mock) instead, with the

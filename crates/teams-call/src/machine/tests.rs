@@ -515,6 +515,55 @@ fn invitation(callee: &str) -> Value {
 }
 
 #[test]
+fn an_invitation_whose_attach_failed_for_good_or_whose_answer_doesn_t_read_is_let_go() {
+    let now = Instant::now();
+    let root = "/v4/f/SyntheticEndpoint00000/";
+    let outcomes = [
+        Outcome::Failed,
+        failed(),
+        Outcome::Answered {
+            status: 401,
+            body: Vec::new(),
+        },
+        ok(&json!({})),
+    ];
+    for outcome in outcomes {
+        let mut calls = Calls::new(identity(B));
+        calls.set_push_url(PUSH).unwrap();
+        calls.on_delivery(&delivery(root, &invitation(B)), Observed::Offered, now);
+        let [(attach, "attach")] = sent(&effects(&mut calls))[..] else {
+            panic!("{outcome:?}");
+        };
+        // the engine's last word on the attach: no further attempt goes
+        calls.on_outcome(attach, &outcome, now);
+        let dropped = effects(&mut calls);
+        let let_go: Vec<&str> = dropped
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::LetGo { attach } => Some(attach.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(let_go, [cc("forked", "attach")], "{outcome:?}");
+        assert!(events(&dropped).is_empty(), "never shown: {outcome:?}");
+        assert!(sent(&dropped).is_empty(), "nothing sent for it: {outcome:?}");
+        assert_eq!(calls.current(), None);
+    }
+    // the engine stopping while it is attached lets it go too
+    let mut calls = Calls::new(identity(B));
+    calls.set_push_url(PUSH).unwrap();
+    calls.on_delivery(&delivery(root, &invitation(B)), Observed::Offered, now);
+    let _ = effects(&mut calls);
+    calls.shut_down(now);
+    assert!(
+        effects(&mut calls)
+            .iter()
+            .any(|effect| matches!(effect, Effect::LetGo { .. })),
+        "the engine stopping while it attaches"
+    );
+}
+
+#[test]
 fn only_an_offered_invitation_to_the_account_gets_its_receipt_and_attach_and_rings_once_attached() {
     let now = Instant::now();
     let mut calls = Calls::new(identity(B));

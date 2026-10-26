@@ -42,7 +42,9 @@
 //! it any more. A call is never removed or restored: an ended one stays ended for the run, whatever arrives later.
 //! A rejoin (a later start or join of this run answered with the same conversation) takes the conversation's links
 //! from an ending or ended call, so they resolve to the new call alone; a live call keeps its links, and a link two
-//! calls hold resolves to none.
+//! calls hold resolves to none. A re-invitation to that conversation answered since holds its links too (its attach's
+//! answer binds them): an operation on them acts on the invitation's call while it is open for the operation, and on
+//! the left call's tombstone only when no such invitation holds them.
 //!
 //! **The acceptance's delivery response.** The one Trouter delivery response the fence lets through: the acceptance's
 //! acknowledgement, answering a pending acceptance delivery of a live call on the same connection, once
@@ -366,6 +368,22 @@ struct Inner {
     taken: HashSet<u64>,
 }
 
+impl Inner {
+    /// Whether the account is in a call or one rings for it: a registered call that is live, an offered invitation
+    /// answered and not left, or one that rings and whose `attach` bound where its ring ends (so its end is seen). A
+    /// start still waiting for its answer doesn't count (one whose answer never came would count for the rest of the
+    /// run; the call machine takes no invitation meanwhile), nor an offer never attached, nor one the call machine let
+    /// go before it rang ([`CallRegistry::let_go`] ends it).
+    fn busy(&self) -> bool {
+        self.calls.iter().any(|call| call.state == State::Live)
+            || self.offers.iter().any(|offer| match offer.state {
+                offer::OfferState::Answered => true,
+                offer::OfferState::Ringing => offer.ring_end_known(),
+                _ => false,
+            })
+    }
+}
+
 impl fmt::Debug for CallRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CallRegistry")
@@ -556,9 +574,27 @@ impl CallRegistry {
         if bound { Ok(()) } else { Err(RegisterError::Unreadable) }
     }
 
+    /// Retires the ringing invitation whose `attach` link is exactly `attach`: the call machine let it go before it rang
+    /// here (its attach failed for good, its answer didn't read, its media failed), so its ring ends here for good. The
+    /// service may never have taken the callbacks that attach handed out (a credential failure, a refusal), so no
+    /// delivery at its `call/end` or `conversationEnd` would ever end the ring; ended, it holds no call open
+    /// ([`Inner::busy`]) and nothing passes on it any more. It only ends an invitation: an answered one moves nothing.
+    pub(crate) fn let_go(&self, attach: &str) {
+        let mut inner = self.lock();
+        for offer in inner
+            .offers
+            .iter_mut()
+            .filter(|offer| offer.state == offer::OfferState::Ringing && offer.holds(CallOperation::Attach, attach))
+        {
+            offer.end();
+        }
+    }
+
     /// Offers `invitation`, delivered as `delivery` (the fence decided it may be offered): a new offer, or another
-    /// delivery of one already offered, whose response then waits too. An invitation whose ring ended stays ignored.
-    pub(crate) fn offer(&self, invitation: Invitation, delivery: &Delivery) -> Observed {
+    /// delivery of one already offered, whose response then waits too. An invitation whose ring ended stays ignored,
+    /// and so does a new one while the account is busy with a call when `one_at_a_time` (the personal build's rule:
+    /// [`Inner::busy`]).
+    pub(crate) fn offer(&self, invitation: Invitation, delivery: &Delivery, one_at_a_time: bool) -> Observed {
         let mut inner = self.lock();
         if let Some(offer) = inner.offers.iter_mut().find(|offer| offer.is_redelivery(&invitation)) {
             if offer.state == offer::OfferState::Ended {
@@ -566,6 +602,9 @@ impl CallRegistry {
             }
             offer.expect_receipt(delivery);
             return Observed::Offered;
+        }
+        if one_at_a_time && inner.busy() {
+            return Observed::Ignored;
         }
         let mut offer = offer::Offer::new(invitation);
         offer.expect_receipt(delivery);
@@ -667,10 +706,7 @@ impl CallRegistry {
             return Err(DenyReason::CallMismatch);
         };
         let inner = self.lock();
-        let on_a_call = inner
-            .calls
-            .iter()
-            .any(|call| call.links.iter().any(|(held, link)| held == operation && link == url));
+        let on_a_call = held_by_a_call(&inner, *operation, url);
         if *operation == CallOperation::Join {
             return resolve_join(&inner.offers, target);
         }
@@ -902,6 +938,23 @@ impl CallRegistry {
     }
 }
 
+/// Whether a registered call holds `url` for `operation` and an operation on it acts on that call
+/// ([`CallRegistry::resolve`]): a live call holding it, or any call holding it while no offered invitation open for the
+/// operation holds it too. A call the account left (ending or ended) keeps its conversation's links as a tombstone, and
+/// a re-invitation to that conversation answered since holds them alike (its attach's answer binds them,
+/// [`offer::Offer::bind_answer`]): the operation then acts on the invitation's call, not on the tombstone.
+fn held_by_a_call(inner: &Inner, operation: CallOperation, url: &str) -> bool {
+    let holds = |call: &Call| call.links.iter().any(|(held, link)| *held == operation && link == url);
+    let on_an_open_offer = || {
+        inner
+            .offers
+            .iter()
+            .any(|offer| offer.holds(operation, url) && offer.open_for(operation))
+    };
+    inner.calls.iter().any(|call| call.state == State::Live && holds(call))
+        || (inner.calls.iter().any(holds) && !on_an_open_offer())
+}
+
 /// A rejoin: the call `new` registers with `links` its conversation handed out, which an earlier call of the run (a
 /// session of the same conversation the account left) may hold too. An ending or ended call gives them up, so each
 /// resolves to the new call alone; a live one keeps them, and a link two live calls hold resolves to neither.
@@ -945,9 +998,10 @@ fn resolve_join(offers: &[offer::Offer], target: &Target) -> Result<Resolved, De
     })
 }
 
-/// [`CallRegistry::resolve`] of an operation on an offered invitation: the one offer holding exactly `url` for
-/// `operation`, open for the operation in its state ([`offer::Offer::open_for`]), the write of its kind, adding nobody,
-/// and fitting the invitation ([`offer::Offer::fits`]).
+/// [`CallRegistry::resolve`] of an operation on an offered invitation: the latest offer holding exactly `url` for
+/// `operation` that is open for the operation in its state ([`offer::Offer::open_for`]; one closed for it is a
+/// tombstone, [`PartialReason::CallEnded`] when no other holds the link), the write of its kind, adding nobody, and
+/// fitting the invitation ([`offer::Offer::fits`]).
 fn resolve_on_offer(
     offers: &[offer::Offer],
     target: &Target,
@@ -963,13 +1017,16 @@ fn resolve_on_offer(
     let mut holding = offers
         .iter()
         .enumerate()
-        .filter(|(_, offer)| offer.holds(operation, url));
-    let (Some((index, offer)), None) = (holding.next(), holding.next()) else {
+        .filter(|(_, offer)| offer.holds(operation, url))
+        .peekable();
+    if holding.peek().is_none() {
         return Err(DenyReason::Partial(PartialReason::UnregisteredCall));
-    };
-    if !offer.open_for(operation) {
-        return Err(DenyReason::Partial(PartialReason::CallEnded));
     }
+    // the invitations of one conversation (a re-invitation after a decline or a leave) hold its links alike: one
+    // closed for the operation keeps them only as a tombstone, so the operation acts on the latest one open for it
+    let (index, offer) = holding
+        .rfind(|(_, offer)| offer.open_for(operation))
+        .ok_or(DenyReason::Partial(PartialReason::CallEnded))?;
     let fits = target.kind() == operation.kind()
         && target.added().is_empty()
         && offer.fits(operation, from.as_ref(), joins.as_deref(), callbacks);

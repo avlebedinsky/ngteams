@@ -66,12 +66,22 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
         file.load().settings.log_level,
         setup.paths.fence_log(),
     );
+    // the calls on the desktop's PipeWire; without it the app runs without calls
+    let (engine_calls, app_calls) = match teams::calling::open(&setup.paths) {
+        Ok((engine_calls, app_calls)) => (Some(engine_calls), Some(app_calls)),
+        Err(error) => {
+            eprintln!("teams: no calls: {error}");
+            log::warn!("no calls: {error}");
+            (None, None)
+        }
+    };
     let engine = teams::engine::start(
         &setup.paths,
         &account,
         fence,
         LazyKeyring::new(KEYRING_APPLICATION),
         true,
+        engine_calls,
     )
     .map_err(|error| error.to_string())?;
     let restart = Rc::new(Cell::new(false));
@@ -86,6 +96,7 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
             // the desktop's own session bus: the notifications, the tray and nothing else
             bus: teams_ui::bus::address_from_env(),
             sign_in_again: again,
+            calls: app_calls,
         };
         if let Err(failure) = app::launch(cx, launch) {
             eprintln!("teams: the window can't be opened: {}", failure.error);

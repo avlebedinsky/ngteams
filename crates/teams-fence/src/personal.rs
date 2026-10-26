@@ -11,8 +11,10 @@
 //!   on a group chat (never a channel, a meeting chat, a stream, a new chat, a call), adding nobody, and the chat's
 //!   thread, read fresh when the fence decides by [`PersonalMembershipSource`] (one unpaged read in a shape a capture
 //!   showed, every member in a captured MRI form: [`crate::parse_listing`]), lists the account. The one write without
-//!   a conversation is the account's own availability, on the account itself. Every decision goes to the personal
-//!   `fence.log` first; an allow that can't be logged is denied.
+//!   a conversation is the account's own availability, on the account itself. The calls go by the personal call
+//!   rule (`crate::decision`'s `personal_calls`: a start in such a chat whose read lists every callee too, the test
+//!   call with the echo service alone, every operation on a call by the call registry). Every decision goes to the
+//!   personal `fence.log` first; an allow that can't be logged is denied.
 //! - **Its reads by `POST`**: [`Fence::check_post_read_among`] with the people of the account's chats.
 
 use std::fmt;
@@ -32,7 +34,8 @@ use crate::log::{FenceLog, Verdict};
 use crate::membership::{CredentialSource, LiveMembershipSource, LiveSourceError, is_group_chat_id, one_to_one_pair};
 use crate::target::{Mri, Scope, Target, WriteKind};
 
-/// The kinds of write the personal build sends (besides the account's own availability).
+/// The kinds of chat write the personal build sends (besides the account's own availability and the calls, which its
+/// call rule judges).
 pub const PERSONAL_KINDS: [WriteKind; 6] = [
     WriteKind::Message,
     WriteKind::Edit,
@@ -504,7 +507,7 @@ impl Fence {
 }
 
 /// The same MRI, case aside (an object id is a GUID).
-fn same(one: &Mri, other: &Mri) -> bool {
+pub(crate) fn same(one: &Mri, other: &Mri) -> bool {
     one.as_str().eq_ignore_ascii_case(other.as_str())
 }
 

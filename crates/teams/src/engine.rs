@@ -2,14 +2,16 @@
 //! build's parts: the fence the binary opened (`Fence::open_personal`, its account from `account.toml`), its own
 //! membership source (`PersonalMembershipSource`: a chat's thread read fresh at every decision, its credential the chat
 //! transport's), the account's own store at `~/.local/share/teams/store/<oid>.sqlite` (never another account's: a store
-//! kept after `teams --forget` stays its account's), the region the sign-in saved, the push channel.
+//! kept after `teams --forget` stays its account's), the region the sign-in saved, the push channel, and the calling
+//! (`crate::calling`: the calling stack's socket under the same fence, the calls' media on the desktop's devices) when
+//! the devices could be opened.
 //! Nothing is sent while it is built: the session asks its store for a token only when a request needs one.
 
 use std::sync::Arc;
 
 use teams_auth::authz::{Region, RegionFileError};
 use teams_auth::secrets::SecretStore;
-use teams_core::account::{self, Account, AccountEngine, AccountError, Membership};
+use teams_core::account::{self, Account, AccountCalls, AccountEngine, AccountError, Membership};
 use teams_fence::Fence;
 use teams_fence::personal::{PersonalAccount, PersonalMembershipSource, PersonalPaths};
 
@@ -28,7 +30,7 @@ pub enum StartError {
 pub type PersonalEngine<S> = AccountEngine<S>;
 
 /// Builds and starts `account`'s engine over `fence` (the personal fence the binary opened) and `secrets`, with its
-/// push channel when `push` (see the module docs).
+/// push channel when `push` and its calling when `calls` is given (`crate::calling`; see the module docs).
 ///
 /// # Errors
 /// [`StartError`]; [`AccountError::Engine`] with `EngineError::AlreadyRunning` when another `teams` runs.
@@ -38,6 +40,7 @@ pub fn start<S: SecretStore + 'static>(
     fence: Arc<Fence>,
     secrets: S,
     push: bool,
+    calls: Option<AccountCalls>,
 ) -> Result<PersonalEngine<S>, StartError> {
     let mri = account.mri().ok_or(StartError::NotSignedIn)?;
     let store_file = paths.store_file(account).ok_or(StartError::NotSignedIn)?;
@@ -51,8 +54,7 @@ pub fn start<S: SecretStore + 'static>(
         secrets,
         push,
         known_names: Vec::new(),
-        // the personal build keeps calling off until its call rule is built (M3 Task 22)
-        calls: None,
+        calls,
     };
     let membership: Membership<'_> = Box::new(|fence, credential| {
         let membership = PersonalMembershipSource::for_fence(fence)?;

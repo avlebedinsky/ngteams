@@ -22,6 +22,8 @@ use teams_auth::session::Session;
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
 use teams_call::Identity;
 use teams_fence::{ChatPeople, CredentialSource, Fence, LiveSourceError, MembershipSource, Mri};
+use teams_media::video::codec::{EncoderSettings, H264Library};
+use teams_media::video::convert::MaxSize;
 use teams_proto::{Author, BuildError, Client, ClientInfo, Credentials, HttpTransport};
 use teams_store::{Store, StoreError};
 use teams_trouter::{CallStack, Trouter};
@@ -29,6 +31,65 @@ use teams_trouter::{CallStack, Trouter};
 use crate::Outbox;
 use crate::calling::{CallMedia, CallParts};
 use crate::engine::{self, EngineError, EngineHandle, EngineOptions, Parts, Push};
+
+/// How an account describes its client in its calls: as the web client's calling stack does in the captures
+/// (`docs/protocol/calling-echo.md`): its endpoint's and its client's capability numbers and its platform's name, in
+/// the form the web client sends it. The native client takes the web client's place in a call.
+#[must_use]
+pub fn web_client_info() -> ClientInfo {
+    ClientInfo {
+        endpoint_capabilities: Some(WEB_ENDPOINT_CAPABILITIES),
+        client_endpoint_capabilities: Some(WEB_CLIENT_ENDPOINT_CAPABILITIES),
+        platform_name: Some(WEB_PLATFORM_NAME.to_owned()),
+    }
+}
+
+/// The web client's `endpointCapabilities` in the captured starts.
+pub const WEB_ENDPOINT_CAPABILITIES: u64 = 73_463;
+/// The web client's `clientEndpointCapabilities` in the captured starts.
+pub const WEB_CLIENT_ENDPOINT_CAPABILITIES: u64 = 114_259_690;
+/// The web client's platform name (`pstnContent.platformName`), in the captured form.
+pub const WEB_PLATFORM_NAME: &str = "SkypeSpaces/1415/26100212018/os=linux; osVer=undefined; deviceType=computer; \
+                                     browser=chrome; browserVer=155.0.0.0/TsCallingVersion=2026.37.01.11";
+/// The language an account's calls name, as the captured starts do.
+pub const CALL_LANGUAGE: &str = "en-us";
+
+/// Where a build keeps its copy of Cisco's OpenH264 library, under its data dir (`scripts/fetch-openh264.sh <data
+/// dir>` puts it there, with Cisco's licence for it beside it).
+pub const OPENH264_DIR: &str = "openh264";
+
+/// A call's video on `library`, shown on `output`: the camera encoded at up to 1.5 Mb/s, 30 frames a second, no bigger
+/// than 1280 by 720.
+#[must_use]
+pub fn call_video(library: H264Library, output: Arc<dyn crate::VideoOutput>) -> crate::CallVideo {
+    crate::CallVideo {
+        library,
+        encoder: EncoderSettings::default(),
+        max_size: MaxSize::HD,
+        output,
+    }
+}
+
+/// An app's calling on `devices` (the lab app's and the personal build's alike): the calls' media on those devices,
+/// relayed through Teams' relay, the microphone processed as a call's is, their video `video` (none without), and the
+/// account describing its client as the web client does ([`web_client_info`], [`CALL_LANGUAGE`]).
+#[must_use]
+pub fn account_calls(
+    devices: Arc<dyn teams_media::devices::Devices + Send + Sync>,
+    video: Option<crate::CallVideo>,
+) -> AccountCalls {
+    AccountCalls {
+        media: CallMedia {
+            devices,
+            relay: crate::Relay::Teams,
+            relay_options: teams_media::relay::RelayOptions::default(),
+            session: teams_media::session::SessionConfig::default(),
+            video,
+        },
+        client: web_client_info(),
+        language_id: Some(CALL_LANGUAGE.to_owned()),
+    }
+}
 
 /// Why an account's engine couldn't be built or started.
 #[derive(Debug, thiserror::Error)]
@@ -167,7 +228,7 @@ pub fn start<S: SecretStore + 'static>(
                 partition: session.region().partition,
             };
             let socket = Trouter::new(Arc::clone(&transport), Arc::clone(&session))?
-                .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)))?;
+                .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
             Some(CallParts::new(socket, identity, calls.media))
         }
         None => None,

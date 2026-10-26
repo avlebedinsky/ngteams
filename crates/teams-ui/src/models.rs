@@ -243,22 +243,22 @@ pub struct Models {
 }
 
 impl Models {
-    /// The models of a build that shows no call (the personal build until its call rule is built): whatever the
-    /// engine tells of calls is left out.
+    /// The models of a build or a run that shows no call (an engine without calling, such as the personal build's
+    /// when its devices couldn't be opened): whatever the engine tells of calls is left out.
     #[must_use]
     pub fn new(cx: &mut App) -> Self {
         Self::with(Calls::default(), cx)
     }
 
-    /// The models of a build that shows calls (the lab app), its test call to `echo` (the echo service's MRI, when
-    /// known).
+    /// The models of a build that shows calls (the lab app, the personal build), its test call to `echo` (the echo
+    /// service's MRI, when known).
     #[must_use]
     pub fn with_calls(echo: Option<teams_fence::Mri>, cx: &mut App) -> Self {
         Self::with(Calls::shown(echo), cx)
     }
 
-    /// The models of a build that shows calls with their video (the lab app with its codec), its test call to `echo`
-    /// and its 1:1 calls' video shown on `feed`.
+    /// The models of a build that shows calls with their video (the lab app or the personal build, with its codec), its
+    /// test call to `echo` and its 1:1 calls' video shown on `feed`.
     #[must_use]
     pub fn with_video_calls(echo: Option<teams_fence::Mri>, feed: crate::video::VideoFeed, cx: &mut App) -> Self {
         Self::with(Calls::shown(echo).with_video(feed), cx)

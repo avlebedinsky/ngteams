@@ -254,7 +254,6 @@ async fn kinds_and_targets_the_personal_build_doesn_t_write_are_denied_unread() 
         WriteKind::MemberChange,
         WriteKind::Invite,
         WriteKind::ChannelPost,
-        WriteKind::Call,
         WriteKind::CallAnswer,
         WriteKind::Meeting,
         WriteKind::BotReply,
@@ -296,7 +295,136 @@ async fn kinds_and_targets_the_personal_build_doesn_t_write_are_denied_unread() 
         fence.check(adding, &source).await.unwrap_err().reason(),
         &DenyReason::AddsParticipants
     );
+    // a call start the account doesn't place (it names nobody, the account included)
+    assert_eq!(
+        fence
+            .check(Target::new(WriteKind::Call, chat.clone()), &source)
+            .await
+            .unwrap_err()
+            .reason(),
+        &DenyReason::CallMismatch
+    );
     assert!(server.received_requests().await.unwrap_or_default().is_empty());
+    Ok(())
+}
+
+/// A call start from the account to `callees` on the chat `id` (the caller and every callee added, as the start's row
+/// maps it).
+fn call_start(id: &str, callees: &[&str]) -> Target {
+    Target::new(WriteKind::Call, Scope::Conversation { id: id.to_owned() })
+        .with_added(std::iter::once(mri(GUID_A)).chain(callees.iter().map(|guid| mri(guid))))
+}
+
+#[tokio::test]
+async fn a_call_starts_only_in_a_chat_whose_fresh_read_lists_the_account_and_every_callee() -> TestResult {
+    let server = MockServer::start().await;
+    let (fence, lines) = personal(GUID_A);
+    let source = source(&server)?;
+    // a group chat with an outsider: listed, so callable
+    let a = format!("8:orgid:{GUID_A}");
+    let b = format!("8:orgid:{GUID_B}");
+    let x = format!("8:orgid:{GUID_X}");
+    serve(&server, GROUP, 200, &thread(GROUP, &[&a, &b, &x])?).await;
+    let permit = fence.check(call_start(GROUP, &[GUID_B, GUID_X]), &source).await?;
+    assert_eq!(permit.target().kind(), WriteKind::Call);
+    // a callee the read doesn't list
+    let denied = fence
+        .check(call_start(GROUP, &[GUID_B, GUID_C]), &source)
+        .await
+        .unwrap_err();
+    assert_eq!(denied.reason(), &DenyReason::CalleesNotInChat);
+    // a chat whose read doesn't list the account
+    let other = "19:0000000000000000000000000000beef@thread.v2";
+    serve(&server, other, 200, &thread(other, &[&b, &x])?).await;
+    let denied = fence.check(call_start(other, &[GUID_B]), &source).await.unwrap_err();
+    assert_eq!(denied.reason(), &DenyReason::NotAMember);
+    let reads = server.received_requests().await.unwrap_or_default().len();
+    assert_eq!(reads, 3, "each decision read its chat fresh");
+    // a 1:1 chat that doesn't name the account: denied unread
+    let theirs = one_to_one(GUID_B, GUID_X);
+    let denied = fence.check(call_start(&theirs, &[GUID_X]), &source).await.unwrap_err();
+    assert_eq!(denied.reason(), &DenyReason::NotAMember);
+    // no channel, meeting chat or stream
+    let meeting = call_start("19:meeting_abc@thread.v2", &[GUID_B]);
+    assert_eq!(
+        fence.check(meeting, &source).await.unwrap_err().reason(),
+        &DenyReason::NotPersonalScope
+    );
+    assert_eq!(server.received_requests().await.unwrap_or_default().len(), reads);
+    let verdicts: Vec<Value> = lines
+        .entries()
+        .into_iter()
+        .filter(|entry| entry["kind"] == "call")
+        .map(|entry| entry["verdict"].clone())
+        .collect();
+    assert_eq!(
+        verdicts,
+        ["allow", "deny", "deny", "deny", "deny"],
+        "every decision logged"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_test_call_is_the_account_and_the_echo_service_alone() -> TestResult {
+    let (fence, _) = personal(GUID_A);
+    let source = teams_fence::FailClosed;
+    let echo = Mri::new(teams_fence::TEAMS_ECHO_BOT_MRI);
+    let test_call = |added: Vec<Mri>| Target::new(WriteKind::Call, Scope::New).with_added(added);
+    assert!(
+        fence
+            .check(test_call(vec![mri(GUID_A), echo.clone()]), &source)
+            .await
+            .is_ok()
+    );
+    for added in [
+        vec![mri(GUID_A), Mri::new("28:00000000-0000-4000-8000-0000000000e0")],
+        vec![mri(GUID_A), echo.clone(), mri(GUID_B)],
+        vec![mri(GUID_A), mri(GUID_B)],
+    ] {
+        let denied = fence.check(test_call(added), &source).await.unwrap_err();
+        assert_eq!(denied.reason(), &DenyReason::NotTheTestCall);
+    }
+    // a chat creation stays denied: the native test call creates none
+    let create = Target::new(WriteKind::ChatCreate, Scope::New).with_added([mri(GUID_A), echo]);
+    assert_eq!(
+        fence.check(create, &source).await.unwrap_err().reason(),
+        &DenyReason::NotPersonalKind
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_operation_on_no_call_of_this_run_is_denied() -> TestResult {
+    let (fence, _) = personal(GUID_A);
+    let source = teams_fence::FailClosed;
+    let conversation = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv.example.test/conv/made-up";
+    let operation = |operation: teams_fence::CallOperation, url: String, joins: Option<String>| {
+        let kind = operation.kind();
+        Target::new(
+            kind,
+            Scope::CallOperation {
+                operation,
+                url,
+                from: Some(mri(GUID_A)),
+                callbacks: Box::new([]),
+                joins,
+            },
+        )
+    };
+    let unregistered = DenyReason::Partial(PartialReason::UnregisteredCall);
+    let leave = operation(teams_fence::CallOperation::Leave, format!("{conversation}/leave"), None);
+    assert_eq!(fence.check(leave, &source).await.unwrap_err().reason(), &unregistered);
+    let add = operation(teams_fence::CallOperation::Add, format!("{conversation}/add"), None)
+        .with_added([Mri::new(teams_fence::TEAMS_ECHO_BOT_MRI)]);
+    assert_eq!(fence.check(add, &source).await.unwrap_err().reason(), &unregistered);
+    // a join of a running call no invitation of this run bound to its chat
+    let join = operation(
+        teams_fence::CallOperation::Join,
+        conversation.to_owned(),
+        Some(GROUP.to_owned()),
+    );
+    assert_eq!(fence.check(join, &source).await.unwrap_err().reason(), &unregistered);
     Ok(())
 }
 

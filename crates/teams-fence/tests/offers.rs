@@ -1471,3 +1471,294 @@ async fn under_the_lab_rule_a_join_is_judged_by_the_chat_it_names() -> TestResul
     }
     Ok(())
 }
+
+// --- the personal build's rule ---
+
+/// b's personal fence (its own account b): the call registry's rule, no roster.
+fn personal_b() -> TestResult<Lab> {
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("fence.log");
+    let fence = Fence::personal(Mri::new(LAB_B), FenceLog::open(&log)?);
+    Ok(Lab { _dir: dir, log, fence })
+}
+
+/// The 1:1 invitation to b, its caller a colleague outside the lab.
+fn coworker_invitation(id: i64) -> TestResult<(Delivery, Value)> {
+    let (delivery, gp) = invitation(0, id)?;
+    let mut from_coworker = gp;
+    *from_coworker.pointer_mut("/callNotification/from/id").ok_or("from")? = Value::from(COWORKER);
+    Ok((invitation_delivery(&delivery.path, id, &from_coworker), from_coworker))
+}
+
+#[tokio::test]
+async fn the_personal_fence_offers_any_invitation_to_the_account_and_its_receipt_reads_no_chat() -> TestResult {
+    let lab = personal_b()?;
+    let (delivery, gp) = coworker_invitation(90)?;
+    assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Offered);
+    // the lab's fence ignores the same invitation
+    assert_eq!(lab_b()?.fence.observe_delivery(&delivery), Observed::Ignored);
+    let unread = Members::new(Membership::Partial(PartialReason::NoSource));
+    let decision = respond(&lab, &receipt(90), &unread).await;
+    assert!(matches!(decision, DeliveryDecision::Permitted(ref permit) if permit.delivery() == 90));
+    assert_eq!(unread.reads(), 0, "whoever calls, no chat is read for it");
+    // the callee's own ring-time send passes on it
+    let (url, body) = attach_case()?;
+    lab.fence.check(attach_target(&url, &body)?, &unread).await?;
+    // an invitation addressed to someone else, or from the account itself, is ignored
+    for (pointer, mri) in [("/callNotification/to/id", LAB_A), ("/callNotification/from/id", LAB_B)] {
+        let mut other = gp.clone();
+        *other.pointer_mut(pointer).ok_or(pointer)? = Value::from(mri);
+        let other = invitation_delivery(&delivery.path, 91, &other);
+        assert_eq!(lab.fence.observe_delivery(&other), Observed::Ignored, "{pointer}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_personal_fence_offers_one_ringing_invitation_at_a_time() -> TestResult {
+    let lab = personal_b()?;
+    let (first, gp) = coworker_invitation(92)?;
+    assert_eq!(lab.fence.observe_delivery(&first), Observed::Offered);
+    let (url, body) = attach_case()?;
+    lab.fence.check(attach_target(&url, &body)?, &FailClosed).await?;
+    // while it rings, another invitation (the group call's) isn't offered, and nothing passes for it
+    let (second, _) = invitation(1, 93)?;
+    assert_eq!(lab.fence.observe_delivery(&second), Observed::Ignored);
+    assert!(matches!(
+        respond(&lab, &receipt(93), &FailClosed).await,
+        DeliveryDecision::NotPending
+    ));
+    // the ringing one's own redelivery still is
+    let again = invitation_delivery(&first.path, 94, &gp);
+    assert_eq!(lab.fence.observe_delivery(&again), Observed::Offered);
+    // its ring ends at its attach's `call/end` callback: the next invitation is offered
+    let end = body["attach"]["links"]["end"].as_str().ok_or("end")?;
+    let ended = Delivery {
+        path: url::Url::parse(end)?.path().to_owned(),
+        id: 95,
+        body: b"{}".to_vec(),
+        ..first.clone()
+    };
+    assert_eq!(lab.fence.observe_delivery(&ended), Observed::RingEnded);
+    let (third, _) = invitation(1, 96)?;
+    assert_eq!(lab.fence.observe_delivery(&third), Observed::Offered);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_attach_sent_again_after_one_its_service_refused_passes_and_its_invitation_is_answered() -> TestResult {
+    // the personal fence and the lab's: an attach answered 401 or 503 binds nothing and retires nothing (the transport
+    // gives its pending answer up), so the attempt after it goes on the same invitation, which is then answered
+    for lab in [personal_b()?, lab_rule_b()?] {
+        let (delivery, _) = invitation(0, 97)?;
+        assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Offered);
+        let (url, body) = attach_case()?;
+        let refused = lab.fence.check(attach_target(&url, &body)?, &FailClosed).await?;
+        let _refused = lab.fence.pend_answer(&refused).ok_or("the attach pends")?;
+        let permit = lab.fence.check(attach_target(&url, &body)?, &FailClosed).await?;
+        let pending = lab.fence.pend_answer(&permit).ok_or("the attach sent again pends")?;
+        let (_, _, answer) = progress_case()?;
+        lab.fence.bind_answer(pending, answer.to_string().as_bytes())?;
+        lab.fence.check(case_write(STATE, |_| ())?, &FailClosed).await?;
+        let accept = lab.fence.check(case_write(ACCEPT, |_| ())?, &FailClosed).await?;
+        assert_eq!(accept.target().kind(), WriteKind::CallAnswer);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_invitation_the_call_machine_let_go_is_retired_and_the_next_one_is_offered() -> TestResult {
+    let lab = personal_b()?;
+    let (first, gp) = coworker_invitation(97)?;
+    assert_eq!(lab.fence.observe_delivery(&first), Observed::Offered);
+    let (url, body) = attach_case()?;
+    // its attach permitted: it rings with its end known, and no other invitation is offered meanwhile
+    lab.fence.check(attach_target(&url, &body)?, &FailClosed).await?;
+    let (next, _) = invitation(1, 98)?;
+    assert_eq!(lab.fence.observe_delivery(&next), Observed::Ignored);
+    // the attach failed for good (not sent for a credential failure, no answer, a refusal no attempt follows): the
+    // call machine lets the invitation go, and the service may never have taken the callbacks its ring would end at
+    lab.fence.let_go(&url);
+    // nothing more passes on it, and it isn't offered again
+    assert_eq!(
+        reason(&lab, attach_target(&url, &body)?).await,
+        Some(DenyReason::Partial(PartialReason::CallEnded))
+    );
+    let again = invitation_delivery(&first.path, 99, &gp);
+    assert_eq!(lab.fence.observe_delivery(&again), Observed::Ignored);
+    // and it holds no call open: the next invitation is offered
+    let (next, _) = invitation(1, 100)?;
+    assert_eq!(lab.fence.observe_delivery(&next), Observed::Offered);
+    // an invitation answered isn't let go: its call goes on
+    let answered = answered().await?;
+    answered.fence.let_go(&url);
+    answered.fence.check(case_write(METADATA, |_| ())?, &FailClosed).await?;
+    Ok(())
+}
+
+/// The fixture `text` on call leg `SyntheticCall<leg>` instead of the invitation fixture's (`SyntheticCall1`): a
+/// re-invitation to the same conversation, on a new leg.
+fn on_leg(text: &str, leg: u8) -> String {
+    text.replace("SyntheticCall1/", &format!("SyntheticCall{leg}/"))
+}
+
+/// b, invited to the 1:1 conversation on call leg `leg`, attached and its attach's answer bound.
+async fn bound_on_leg(lab: &Lab, leg: u8, id: i64) -> TestResult {
+    let (delivery, gp) = invitation(0, id)?;
+    let gp: Value = serde_json::from_str(&on_leg(&gp.to_string(), leg))?;
+    let delivery = invitation_delivery(&delivery.path, id, &gp);
+    assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Offered, "leg {leg}");
+    let (url, body) = attach_case()?;
+    let permit = lab
+        .fence
+        .check(attach_target(&on_leg(&url, leg), &body)?, &FailClosed)
+        .await?;
+    let (_, _, answer) = progress_case()?;
+    let pending = lab.fence.pend_answer(&permit).ok_or("pending")?;
+    lab.fence
+        .bind_answer(pending, on_leg(&answer.to_string(), leg).as_bytes())?;
+    Ok(())
+}
+
+/// The follow-ups fixture's case `index` (as [`case_write`]) on call leg `leg`.
+fn case_on_leg(index: usize, leg: u8) -> TestResult<Target> {
+    let fixture: Value = serde_json::from_str(&on_leg(&fill(CHAT_FOLLOW_UPS), leg))?;
+    let case = &fixture["cases"][index];
+    let body = (!case["body"].is_null()).then(|| case["body"].to_string());
+    let (method, url) = (
+        case["method"].as_str().ok_or("method")?,
+        case["url"].as_str().ok_or("url")?,
+    );
+    match contacting(
+        &Request::new(method, url).with_body(body.as_deref().map(str::as_bytes)),
+        &Policy::new(),
+    ) {
+        Contact::Write(target) => Ok(target),
+        other => Err(format!("case {index} on leg {leg} is {other:?}").into()),
+    }
+}
+
+#[tokio::test]
+async fn after_a_decline_a_re_invitation_to_the_same_conversation_is_answered() -> TestResult {
+    let lab = personal_b()?;
+    let ended = Some(DenyReason::Partial(PartialReason::CallEnded));
+    bound_on_leg(&lab, 1, 100).await?;
+    lab.fence.check(case_on_leg(REJECT, 1)?, &FailClosed).await?;
+    // the declined invitation keeps the conversation's links only as a tombstone
+    assert_eq!(reason(&lab, case_on_leg(STATE, 1)?).await, ended);
+    // a re-invitation to the same conversation on a new leg: its attach's answer binds the same conversation links
+    bound_on_leg(&lab, 2, 101).await?;
+    lab.fence.check(case_on_leg(STATE, 2)?, &FailClosed).await?;
+    let permit = lab.fence.check(case_on_leg(ACCEPT, 2)?, &FailClosed).await?;
+    assert_eq!(permit.target().kind(), WriteKind::CallAnswer);
+    // the declined leg stays declined: no answer goes on it, its own decline still does
+    assert_eq!(reason(&lab, case_on_leg(ACCEPT, 1)?).await, ended);
+    lab.fence.check(case_on_leg(REJECT, 1)?, &FailClosed).await?;
+    // and the answered call's own operations go on the conversation's links
+    lab.fence.check(case_on_leg(STATE, 2)?, &FailClosed).await?;
+    Ok(())
+}
+
+/// The fixture `text` in the group call's conversation (`SyntheticConversation2`), on its call leg
+/// `SyntheticCall<leg>`: the 1:1 case's sends, made in the group call.
+fn in_group_call(text: &str, leg: u8) -> String {
+    let leg = format!("SyntheticCall{leg}/");
+    text.replace("SyntheticConversation1", "SyntheticConversation2")
+        .replace("SyntheticCall1/", &leg)
+        .replace("SyntheticCall2/", &leg)
+}
+
+/// The follow-ups fixture's case `index` (as [`case_write`]) in the group call, on call leg `leg`.
+fn group_case(index: usize, leg: u8) -> TestResult<Target> {
+    let fixture: Value = serde_json::from_str(&in_group_call(&fill(CHAT_FOLLOW_UPS), leg))?;
+    let case = &fixture["cases"][index];
+    let body = (!case["body"].is_null()).then(|| case["body"].to_string());
+    let (method, url) = (
+        case["method"].as_str().ok_or("method")?,
+        case["url"].as_str().ok_or("url")?,
+    );
+    match contacting(
+        &Request::new(method, url).with_body(body.as_deref().map(str::as_bytes)),
+        &Policy::new(),
+    ) {
+        Contact::Write(target) => Ok(target),
+        other => Err(format!("case {index} in the group call is {other:?}").into()),
+    }
+}
+
+/// b, re-invited to the group call on call leg `leg` (delivery `id`), attaches and answers: each answer bound.
+async fn group_call_answered(lab: &Lab, members: &Members, leg: u8, id: i64) -> TestResult {
+    let (delivery, gp) = invitation(1, id)?;
+    let gp: Value = serde_json::from_str(&in_group_call(&gp.to_string(), leg))?;
+    let delivery = invitation_delivery(&delivery.path, id, &gp);
+    assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Offered, "leg {leg}");
+    let (url, body) = group_attach(&gp)?;
+    let permit = lab.fence.check(attach_target(&url, &body)?, members).await?;
+    let fixture: Value = serde_json::from_str(&in_group_call(&fill(CHAT_FOLLOW_UPS), leg))?;
+    let pending = lab.fence.pend_answer(&permit).ok_or("the attach pends")?;
+    lab.fence
+        .bind_answer(pending, fixture["attach_answer"].to_string().as_bytes())?;
+    lab.fence.check(group_case(STATE, leg)?, members).await?;
+    let permit = lab.fence.check(group_case(ACCEPT, leg)?, members).await?;
+    let pending = lab.fence.pend_answer(&permit).ok_or("the accept pends")?;
+    lab.fence
+        .bind_answer(pending, fixture["accept_answer"].to_string().as_bytes())?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn after_leaving_a_group_call_a_re_invitation_to_it_is_answered_and_its_call_goes_on() -> TestResult {
+    let lab = personal_b()?;
+    let members = Members::new(Membership::Listed(vec![
+        Mri::new(LAB_A),
+        Mri::new(LAB_B),
+        Mri::new(LAB_C),
+    ]));
+    let ended = Some(DenyReason::Partial(PartialReason::CallEnded));
+    // b joins the running group call once its ring ended: its join registers the call on the conversation's links
+    let (delivery, gp) = invitation(1, 110)?;
+    assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Offered);
+    let (url, attach, ring_end) = group_ring_end(&delivery, &gp, 111)?;
+    lab.fence.check(attach_target(&url, &attach)?, &members).await?;
+    assert_eq!(lab.fence.observe_delivery(&ring_end), Observed::RingEnded);
+    let fixture: Value = serde_json::from_str(&fill(CHAT_FOLLOW_UPS))?;
+    let join = fixture["cases"][MEDIA_JOIN]["body"].to_string();
+    let permit = lab.fence.check(case_write(MEDIA_JOIN, |_| ())?, &members).await?;
+    let pending = lab
+        .fence
+        .pend_start(&permit, join.as_bytes())
+        .ok_or("the media join pends")?;
+    let conversation = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation2";
+    let answer = json!({
+        "conversationController": format!("{conversation}?i=10-0-0-2&e=1"),
+        "links": {
+            "updateEndpointMetadata": format!("{conversation}/updateEndpointMetadata?i=10-0-0-2&e=1"),
+            "leave": format!("{conversation}/leave?i=10-0-0-2&e=1"),
+        },
+    });
+    lab.fence.register_start(pending, answer.to_string().as_bytes())?;
+    lab.fence.check(group_case(METADATA, 2)?, &members).await?;
+    // b leaves while the others stay: the call it left keeps the conversation's links as a tombstone
+    lab.fence.check(group_case(LEAVE, 2)?, &members).await?;
+    assert_eq!(reason_with(&lab, group_case(METADATA, 2)?, &members).await, ended);
+    // re-invited to the same conversation on a new leg, b answers: the conversation's links act on the answered call
+    group_call_answered(&lab, &members, 3, 112).await?;
+    for index in [METADATA, PROPERTIES, MEDIA_LINES, RENEGOTIATE] {
+        lab.fence.check(group_case(index, 3)?, &members).await?;
+    }
+    // b leaves it too: then only its leave again, and the conversation's other links are tombstones once more
+    lab.fence.check(group_case(LEAVE, 3)?, &members).await?;
+    lab.fence.check(group_case(LEAVE, 3)?, &members).await?;
+    assert_eq!(reason_with(&lab, group_case(METADATA, 3)?, &members).await, ended);
+    // and no answer goes on the left leg
+    assert_eq!(reason_with(&lab, group_case(ACCEPT, 3)?, &members).await, ended);
+    Ok(())
+}
+
+async fn reason_with(lab: &Lab, target: Target, members: &Members) -> Option<DenyReason> {
+    lab.fence
+        .check(target, members)
+        .await
+        .err()
+        .map(|denied| *denied.reason())
+}

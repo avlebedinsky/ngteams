@@ -11,14 +11,19 @@
 //!   refresh token stored under [`KEYRING_APPLICATION`] on the desktop's Secret Service, the region from authz.
 //! - [`engine`]: the account's engine (`teams_core::account`) under the personal fence (`Fence::open_personal`) and its
 //!   own membership source, the account's own store at `~/.local/share/teams/store/<oid>.sqlite`.
-//! - [`app`]: the window (`teams-ui`'s shell with the first run's screen of the writes that happen on their own), the
-//!   tray, and the sign-out: a session that can't renew its tokens shows "signed out", stops the engine (nothing more
-//!   is sent) and opens the sign-in window again; a sign-in that goes through starts the app afresh.
+//! - [`calling`]: the calls (`docs/personal-build.md`, "Calls"; M3 Task 22): the engine's calling on the desktop's
+//!   PipeWire and camera portal, the window's ringtone, test call, video and devices, under the personal fence's call
+//!   rule.
+//! - [`app`]: the window (`teams-ui`'s shell with the first run's screen of the writes that happen on their own, and
+//!   the calls), the tray, and the sign-out: a session that can't renew its tokens shows "signed out", stops the
+//!   engine (nothing more is sent) and opens the sign-in window again; a sign-in that goes through starts the app
+//!   afresh.
 //! - [`cli`]: `teams [--account <UPN>]`, `teams --forget` ([`forget`]: refused while the account's engine runs).
 //!
 //! No broker and no sandbox: it is the user's own app. It never opens the lab's fence, data dir or keyring items.
 
 pub mod app;
+pub mod calling;
 pub mod cli;
 pub mod engine;
 pub mod forget;

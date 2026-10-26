@@ -27,7 +27,7 @@ use std::fmt;
 
 use url::{Host, Url};
 
-pub use call::{CALL_START_URL, PROXY_HOST as CALL_PROXY_HOST, TEST_CALL_SCENARIO};
+pub use call::{CALL_START_URL, PROXY_HOST as CALL_PROXY_HOST, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO};
 pub use chat::OWN_VIEW_PROPERTIES;
 
 use crate::{Mri, Target};

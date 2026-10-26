@@ -34,8 +34,8 @@
 //!   [`notify`] notifications of messages that come (as the "notifications" setting says; a chat shown in a focused
 //!   window never notifies; activating one opens its chat) and the [`tray`] item (the unread total, open, quit;
 //!   closing the window keeps the app in the tray), both on the bus the app is given ([`bus`]) and nowhere else.
-//! - [`calls`] (M3 Task 17): the account's calls as the views show them, in a build that shows them (the lab app; the
-//!   personal build shows none yet), and the user's asks; [`call_view`] the incoming call's banner and the in-call bar,
+//! - [`calls`] (M3 Task 17): the account's calls as the views show them, in a build that shows them (the lab app and the
+//!   personal build), and the user's asks; [`call_view`] the incoming call's banner and the in-call bar,
 //!   [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification with
 //!   Answer and Decline.
 //! - [`view`]: the window's root view; [`window`] opens it inside the kit's root, which applies the theme to the

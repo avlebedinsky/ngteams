@@ -3,8 +3,8 @@
 //! member of (by a fresh read), a target the personal build doesn't write and a partial read are denied; a read by
 //! `POST` naming someone of the account's chats goes out under its permit and one naming anyone else doesn't; a plain
 //! request (a search's shape) never goes out through the personal fence; the registration goes as its own-state entry;
-//! the whole engine sends a message to the outsider's chat; and, until its calls are turned on, the personal build
-//! opens no calling socket and sends no calling registration. Every id and token here is made up.
+//! the whole engine sends a message to the outsider's chat. The calls are `tests/calls.rs`'s. Every id and token here
+//! is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -12,14 +12,13 @@
 use std::future::{self, Future};
 use std::io::Write;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
-use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
-use teams_core::engine::{self, Action, EngineOptions, Event, Parts, Push};
+use teams_core::engine::{self, Action, EngineOptions, Event, Parts};
 use teams_fence::personal::PersonalMembershipSource;
 use teams_fence::{
     ChatPeople, DenyReason, Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, PartialReason, Roster, Scope,
@@ -32,8 +31,6 @@ use teams_proto::{
     Request as PlainRequest, Service, ShortProfileLookup, register,
 };
 use teams_store::{OutboxState, Store};
-use teams_trouter::{BuildError, CallStack, RegistrationReport, Trouter, TrouterCredentials};
-use tokio::sync::broadcast;
 
 const MIDDLE_TIER: &str = "https://teams.microsoft.com/api/mt/part/amer-03";
 const WAIT: Duration = Duration::from_secs(30);
@@ -336,97 +333,4 @@ async fn the_engine_sends_a_message_to_the_outsider_s_chat_through_the_personal_
             .any(|entry| entry["kind"] == "message" && entry["verdict"] == "allow")
     );
     handle.shutdown();
-}
-
-/// The push channel's `ic3` token: the account's, never renewed.
-struct PushTokens {
-    token: String,
-    renewals: broadcast::Sender<Renewal>,
-}
-
-impl TrouterCredentials for PushTokens {
-    fn ic3(&self) -> impl Future<Output = Result<AccessToken, TokenError>> + Send {
-        future::ready(Ok(AccessToken {
-            token: Secret::new(self.token.clone()),
-            expires_at: SystemTime::now() + Duration::from_secs(7_200),
-            scopes: Vec::new(),
-        }))
-    }
-
-    fn ic3_after(&self, _old: &Secret) -> impl Future<Output = Result<AccessToken, TokenError>> + Send {
-        self.ic3()
-    }
-
-    fn renewals(&self) -> broadcast::Receiver<Renewal> {
-        self.renewals.subscribe()
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_personal_build_opens_no_calling_socket_and_sends_no_calling_registration() {
-    let mock = ChatServiceMock::start().await.unwrap();
-    let trouter = mock.start_trouter().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let (fence, log) = personal(LAB_A);
-    let transport = transport(&mock, LAB_A, &fence);
-    let tokens = Arc::new(PushTokens {
-        token: mock.token(LAB_A).unwrap(),
-        renewals: broadcast::channel(4).0,
-    });
-    // no calling socket can be built through the personal fence until its calls are turned on
-    let membership: Arc<dyn MembershipSource + Send> = Arc::new(source(&mock, &transport));
-    let calling = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())
-        .unwrap()
-        .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&membership)));
-    assert!(matches!(calling, Err(BuildError::PersonalCalls)), "{calling:?}");
-
-    // the engine with its push channel, as the personal build assembles it: the messaging stack's socket only
-    let push = Trouter::with_mock_origin(Arc::clone(&transport), tokens, trouter.origin()).unwrap();
-    let client = Arc::new(Client::new(http(&mock, LAB_A, &fence)));
-    let outbox = Outbox::new(
-        transport,
-        Arc::clone(&fence),
-        membership,
-        Author::new(Mri::new(LAB_A), "a"),
-    );
-    let mut handle = engine::start(Parts {
-        calls: None,
-        store: Store::open(&dir.path().join("store.sqlite")).unwrap(),
-        client,
-        outbox,
-        push: Some(Push::new(push)),
-        options: EngineOptions::default(),
-        known_names: Vec::new(),
-    })
-    .unwrap();
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
-        let event = tokio::time::timeout_at(deadline, handle.next_event())
-            .await
-            .expect("the push channel registered in time")
-            .expect("the engine runs");
-        if let Event::Registration(report) = event {
-            assert_eq!(report, RegistrationReport::Registered);
-            break;
-        }
-    }
-    handle.shutdown();
-
-    let sockets = trouter.sockets();
-    assert!(!sockets.is_empty());
-    assert!(sockets.iter().all(|socket| !socket.calling), "{sockets:#?}");
-    let registrations = trouter.registrations();
-    assert!(
-        registrations
-            .iter()
-            .all(|registration| registration.app_id == teams_mock::MESSAGING_APP),
-        "{registrations:?}"
-    );
-    let own: Vec<Value> = log
-        .entries()
-        .into_iter()
-        .filter_map(|entry| entry.get("own").cloned())
-        .collect();
-    assert!(own.contains(&json!("endpoint_registration")), "{own:?}");
-    assert!(!own.contains(&json!("calling_endpoint_registration")), "{own:?}");
 }

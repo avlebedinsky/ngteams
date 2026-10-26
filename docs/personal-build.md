@@ -11,7 +11,8 @@ and nothing was loosened.
 [Calls](#calls) was added for M3 (`docs/plans/20261024-native-teams-m3-calls.md`, Task 2) from the user's decisions
 of 2026-10-24; its wording was approved on 2026-10-24 through a codex-discussion the user delegated the approval to
 (transcript: `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-2-call-rules/`), and
-CLAUDE.md carries its rule. Until M3 Task 22 implements it the personal build keeps calling off.
+CLAUDE.md carries its rule. M3 Task 22 implemented it ([How the implementation reads it](#how-the-implementation-reads-it),
+"Calls").
 
 It writes up the direction the user gave on 2026-10-21 (the plan's "Decisions of 2026-10-21", last bullet) against
 the code as it stands after M2 Tasks 1–16 and 24: `teams-fence` (`Fence`, `Fence::open_lab`, `LiveMembershipSource`,
@@ -53,6 +54,7 @@ personal build widens what a lab account may do.
 | bus | the sandbox's private bus | the user's session bus (notifications, tray, Secret Service) |
 | sign-in | `proto-lab auth` (the armed Chrome fence) | `teams-signin-personal`, a second binary of `crates/teams` (below) |
 | live lock | `~/.local/share/teams-lab/live.lock` around every live command | none: it is the user's own app |
+| calls | the UI sandbox's private PipeWire and fake camera portal; the lab's call rule (a call judged by its entry); the echo service from `lab.toml`; OpenH264 in `<lab data>/openh264/` | the desktop's PipeWire and camera portal (fixed when built); the personal call rule ([Calls](#calls)) on the call registry; the echo service from the web bundle (`teams_proto::TEAMS_ECHO_BOT_MRI`); OpenH264 in `~/.local/share/teams/openh264/` (`scripts/fetch-openh264.sh ~/.local/share/teams`, once; without it the calls carry audio only) |
 
 `account.toml` holds what the first sign-in learned, never a token: the UPN the user typed, and the ID token's `oid`
 and `tid`. Every later sign-in must give the same `oid` and `tid` (the ID token's `preferred_username` checked as
@@ -586,3 +588,29 @@ Written after the approval and the lab fence's rewrite, by Task 27:
   `personal`, as before; the app itself refuses both.
 - **CLAUDE.md** carries the approved text without its date (CLAUDE.md holds current rules only), its references to
   the lab rules that the rewrite renamed adjusted, and the reads sentence as above.
+
+Written by M3 Task 22, for [Calls](#calls):
+
+- **The fence** (`teams-fence`, `decision/personal_calls.rs`): a start (`WriteKind::Call` on the chat it carries) is
+  permitted only on a 1:1 chat naming the account or a group chat, whose one fresh thread read (`Listed`) lists the
+  account and every participant the start names, the account among them; the test call's start (`Scope::New`) only
+  with exactly the account and `TEAMS_ECHO_BOT_MRI`; an `add` only of exactly that bot to a call the fence permitted
+  for it; a join only of a running call an offered invitation bound to its group chat, from the account, that chat's
+  fresh read listing the account; every other operation only as the call registry resolves it (a call this run's
+  fence registered, or an invitation it offered, in a state open for it), with no roster and no further read. An
+  offered invitation is any readable one addressed to the account whose caller isn't the account, offered only while
+  no registered call is live and no other offered one is answered or rings with its end bound (a start still waiting
+  for its answer doesn't count: the call machine takes no invitation meanwhile). Its receipt reads no chat. A start or
+  a join pends in the registry only as the account's own (`Fence::pend_start`).
+- **No chat is created for the test call**: the native test call needs none (its `add` names the 1:1 chat of the
+  account and the bot, as the lab's native echo call does), so `ChatCreate` stays denied.
+- **What a call sends besides its sealed writes and typed delivery responses**, as the lab's native calls showed
+  (the `allowed` lines of M3 Tasks 15, 16 and 21 in the lab's `fence.log`, and `docs/protocol/endpoints.md`): the
+  calling registration (`POST registrations`, `SkypeSpacesWeb`), which goes as its own-state entry
+  (`calling_endpoint_registration`, `Transport::send_own`), and the TURN credentials (`GET trap/tokens`), a read. The
+  web client's calling policy reads (`useraggregatesettings`, `effectivePolicies`) are the browser's, never the native
+  client's: unneeded. The personal build sends no plain request for a call (`crates/teams/tests/calls.rs`).
+- **The devices** are `teams-media`'s PipeWire backend as this build allows it: the desktop's, the camera through the
+  desktop's camera portal; a build with `test-support` (every `cargo test` of `crates/teams`) only the UI sandbox's.
+  Without them the app runs without calls (`teams::calling::open`). The first run's screen says what a call sends
+  without a click (an incoming call told it rings here), which has no switch.

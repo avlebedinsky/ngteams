@@ -31,6 +31,11 @@ teams-core.workspace = true
 teams-fence = { workspace = true, features = ["personal"] }
 # the diagnostic log, installed once before the engine starts
 teams-log.workspace = true
+# the calls' devices: the desktop's PipeWire and its camera portal (only this crate enables `personal`;
+# `test-support`, which every test build unifies in, wins over it: the UI sandbox's only)
+teams-media = { workspace = true, features = ["personal"] }
+# the echo service's MRI the test call goes to (`TEAMS_ECHO_BOT_MRI`, from the web bundle)
+teams-proto.workspace = true
 # the personal sign-in window: only this crate enables `personal`
 teams-signin = { workspace = true, features = ["personal"] }
 # `teams --forget` takes the account's engine lock before it deletes anything
@@ -44,6 +49,8 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 [dev-dependencies]
 # a call's id for the call events the personal app's models are shown (`CallId::for_tests`)
 teams-call = { workspace = true, features = ["test-support"] }
+# the calls on the mock relay through its loopback TURN server (`Relay::Fixed`)
+teams-core = { workspace = true, features = ["test-support"] }
 base64.workspace = true
 gpui-pre = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
@@ -51,7 +58,11 @@ tempfile.workspace = true
 # a personal fence over a test log and given lab locations, its source and the transports reaching the mock; the two
 # binaries refuse to run when a test build unified it in
 teams-fence = { workspace = true, features = ["test-support", "personal"] }
-teams-mock.workspace = true
+# the calls' media in the tests: the file devices, the loopback relay's types (`test-support` wins over `personal`: the
+# UI sandbox's PipeWire only, and the tests open none)
+teams-media = { workspace = true, features = ["test-support", "personal"] }
+# the mock's calling service with its media: a loopback TURN server and a peer behind each party it plays
+teams-mock = { workspace = true, features = ["media"] }
 teams-proto = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }

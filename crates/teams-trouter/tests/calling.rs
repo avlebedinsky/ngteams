@@ -226,7 +226,6 @@ impl Lab {
             .unwrap()
             .with_options(options())
             .for_calls(CallStack::new(Arc::clone(&self.fence), source))
-            .unwrap()
     }
 
     /// b's calling socket over its lab transport.

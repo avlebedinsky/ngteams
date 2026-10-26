@@ -4,8 +4,8 @@
 //! Answer and Decline, only for an invitation the engine offered, its caller named as the invitation names them, all
 //! gone once its ring ends or the account signs out; the in-call view (who it is with, mute, hang up, the duration, the
 //! call's state, how it ended, an ask refused while it is up or after, voicemail); one start at a time, its media's
-//! setup included; the keys for each; the trace lines for each, never with a name; and a build that shows no call (the
-//! personal build's models) showing none of it, its call keys included. Every id and name is made up.
+//! setup included; the keys for each; the trace lines for each, never with a name; and a run that shows no call (an
+//! engine without calling) showing none of it, its call keys included. Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -685,7 +685,7 @@ fn the_in_call_view_tells_a_refusal_a_failure_and_voicemail() {
 
 #[test]
 fn a_build_that_shows_no_call_shows_rings_and_offers_none_of_it() {
-    // the personal build's models, until its call rule is built
+    // the models of a run whose engine has no calling (the personal build's when its devices couldn't be opened)
     let rig = Rig::start();
     seed(&rig);
     rig.cx.update(teams_ui::window::init);

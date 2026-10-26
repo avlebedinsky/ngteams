@@ -1015,6 +1015,74 @@ async fn an_invitation_from_outside_the_lab_is_never_attached() {
     );
 }
 
+/// A transport of `lab`'s fence and tokens whose every service is a closed port: each write it sends gets a network
+/// error, no answer.
+fn unreachable(lab: &Lab) -> HttpTransport<Tokens> {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    HttpTransport::with_mock_origin(
+        Arc::clone(&lab.tokens),
+        Arc::clone(&lab.fence),
+        CHAT_BASE,
+        &format!("http://127.0.0.1:{closed}"),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_attach_its_service_didn_t_take_leaves_its_invitation_to_the_next_attempt() {
+    // a 401 (the skypetoken renewed for the next attempt), a throttle, a refusal and no answer at all: the transport
+    // binds nothing and retires nothing; whether another attempt goes, or the invitation is let go, is the call
+    // machine's to say (`Fence::let_go`)
+    let cases = [401, 503, 404, 0]
+        .into_iter()
+        .flat_map(|failure| [(failure, true), (failure, false)]);
+    for (failure, tracking) in cases {
+        let lab = lab_of(LAB_B, true, tracking).await;
+        let invited = delivery(3, ENDPOINT_B, &invitation(false, LAB_A));
+        assert_eq!(lab.fence.observe_delivery(&invited), teams_fence::Observed::Offered);
+        let attach_at = cc("forked", "SyntheticCall1", "attach");
+        let attach = || AttachCall::new(&context(), &link(&attach_at), &attach_parts()).unwrap();
+        let authorized = lab.authorize(attach()).await;
+        if failure == 0 {
+            let error = unreachable(&lab).deliver(authorized).await.unwrap_err();
+            assert!(!matches!(error, HttpError::Refused(_)), "{error:?}");
+        } else {
+            Mock::given(method("POST"))
+                .and(path(url::Url::parse(&attach_at).unwrap().path()))
+                .respond_with(ResponseTemplate::new(failure))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&lab.server)
+                .await;
+            let answer = lab.transport.deliver(authorized).await.unwrap();
+            assert_eq!(answer.status(), failure);
+        }
+        // the next attempt goes on the same invitation, and its answer binds the invitation's links: it is answered
+        lab.answers("POST", &attach_at, attach_answer()).await;
+        let (answer, _) = lab.send(attach()).await;
+        assert_eq!(answer.status(), 200, "{failure} (tracking: {tracking})");
+        let call_link = |name: &str| callback(PUSH_B, "20202020", "call", name);
+        let accept = AcceptCall::new(
+            &context(),
+            &link(&cc("incoming", "SyntheticCall1", "accept")),
+            &AcceptParts {
+                accepted_by: participant(LAB_B),
+                modalities: vec!["Audio".into()],
+                call_links: Links::new().with("mediaRenegotiation", call_link("mediaRenegotiation")),
+                media_controller_links: Links::new().with("controlVideoStreaming", call_link("controlVideoStreaming")),
+                media: media(Some("nonByPass")),
+                client: client(),
+            },
+        )
+        .unwrap();
+        assert_eq!(lab.decide(&accept).await, Ok(()), "{failure} (tracking: {tracking})");
+    }
+}
+
 #[tokio::test]
 async fn a_join_with_media_of_a_running_group_call_registers_it() {
     let lab = lab(LAB_B).await;

@@ -1,9 +1,10 @@
 //! The personal app's sign-out on GPUI's test context: once the session can't renew its tokens the window shows
 //! "signed out", the engine is stopped (nothing more is sent: every request answers that it stopped) and the sign-in
-//! window is opened again, once; the settings ask for the first run's screen. And the personal build shows no call
-//! (M3 Task 17, until its call rule is built in Task 22): its engine has no calling, and its models leave out whatever
-//! of a call they would be told. The engine is the personal build's own
-//! (`teams::engine::start`) over a `MemorySecretStore` holding no refresh token, so no request leaves the process.
+//! window is opened again, once; the settings ask for the first run's screen. The personal build's window shows calls
+//! when its devices opened (its test call to the web bundle's echo service, an invitation ringing by the name it
+//! gives), and none without them; a test build opens no PipeWire outside the UI sandbox. The engine is the personal
+//! build's own (`teams::engine::start`) over a `MemorySecretStore` holding no refresh token, so no request leaves the
+//! process; the calls themselves run in `tests/calls.rs`.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -16,12 +17,14 @@ use std::time::{Duration, Instant};
 
 use gpui::TestAppContext;
 use teams::app::{self, SIGNED_OUT_HINT, SignInAgain};
+use teams::calling::PersonalCalls;
 use teams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
 use teams_core::{CallAction, CallActionError, CallId, EngineError, Event, IncomingCall, RegistrationReport};
 use teams_fence::Fence;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
+use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_mock::CHAT_BASE;
 use teams_ui::{Account, Engine, SettingsFile};
 
@@ -70,10 +73,10 @@ fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false).unwrap();
+    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let core = engine.handle.requests();
     let cx = TestAppContext::single();
-    let (models, bridge) = cx.update(|cx| app::bridge(engine.handle, cx));
+    let (models, bridge) = cx.update(|cx| app::bridge(engine.handle, None, cx));
     let asked = Rc::new(Cell::new(0));
     let counted = Rc::clone(&asked);
     let again: SignInAgain = Rc::new(move |_| counted.set(counted.get() + 1));
@@ -102,25 +105,16 @@ fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
     assert_eq!(asked.get(), 1, "the sign-in window is opened again once");
 }
 
-#[test]
-fn the_personal_build_shows_no_call_and_its_engine_places_none() {
+/// What the models show of a call once the engine registered the calling endpoint and an invitation rang: whether
+/// calls are shown, registered, ringing, idle, and the test call can be asked for.
+fn shown_after_a_ring(calls: Option<&PersonalCalls>) -> (bool, bool, bool, bool, bool) {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false).unwrap();
-    let core = engine.handle.requests();
-    let refused = core
-        .call(CallAction::Call {
-            chat: "19:00000000-0000-4000-8000-0000000000ff_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces"
-                .to_owned(),
-        })
-        .blocking_wait();
-    assert!(
-        matches!(refused, Err(EngineError::Call(CallActionError::NoCalling))),
-        "no calling: {refused:?}"
-    );
+    // the engine without calling: the models' side alone is under test here (tests/calls.rs runs the calls)
+    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let cx = TestAppContext::single();
-    let (models, _bridge) = cx.update(|cx| app::bridge(engine.handle, cx));
+    let (models, _bridge) = cx.update(|cx| app::bridge(engine.handle, calls, cx));
     cx.update(|cx| {
         models.apply(Event::CallingRegistration(RegistrationReport::Registered), cx);
         models.apply(
@@ -133,20 +127,71 @@ fn the_personal_build_shows_no_call_and_its_engine_places_none() {
             cx,
         );
     });
-    let calls = cx.read(|cx| {
+    cx.read(|cx| {
         let calls = models.calls.read(cx);
         (
             calls.shows(),
             calls.registered(),
             calls.ringing().is_some(),
             calls.idle(),
+            calls.has_test_call(),
         )
+    })
+}
+
+#[test]
+fn the_personal_build_shows_its_calls_and_an_invitation_rings_by_the_name_it_gives() {
+    // file devices: no PipeWire, no portal
+    let devices = Arc::new(FileDevices {
+        input: AudioInput::Silence,
+        recording: None,
+        camera: PatternCamera::default(),
+        pacing: Pacing::RealTime,
     });
+    let (engine_calls, calls) = teams::calling::on_devices(devices, None);
     assert_eq!(
-        calls,
-        (false, false, false, false),
+        calls.echo.as_str(),
+        teams_proto::TEAMS_ECHO_BOT_MRI,
+        "the web bundle's echo service"
+    );
+    assert!(calls.ringer.is_some() && calls.video.is_none());
+    assert!(engine_calls.media.video.is_none(), "no codec, no video");
+    assert_eq!(
+        shown_after_a_ring(Some(&calls)),
+        (true, true, true, false, true),
+        "shown, registered, ringing (so not idle), with the test call"
+    );
+}
+
+#[test]
+fn without_its_devices_the_personal_build_shows_no_call() {
+    assert_eq!(
+        shown_after_a_ring(None),
+        (false, false, false, false, false),
         "nothing of a call is kept, shown or offered"
     );
+}
+
+#[test]
+fn a_test_build_s_devices_are_the_sandbox_s_and_its_engine_without_them_places_no_call() {
+    // `test-support` wins over `personal`: outside the UI sandbox the PipeWire is refused, so no call opens the desktop's
+    let dir = tempfile::tempdir().unwrap();
+    let (setup, account) = signed_in_setup(&dir);
+    assert!(teams::calling::open(&setup.paths).is_err() || std::env::var_os("UI_SANDBOX_DIR").is_some());
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
+    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+    let refused = engine
+        .handle
+        .requests()
+        .call(CallAction::TestCall {
+            echo: teams::calling::echo(),
+        })
+        .blocking_wait();
+    assert!(
+        matches!(refused, Err(EngineError::Call(CallActionError::NoCalling))),
+        "no calling: {refused:?}"
+    );
+    engine.handle.shutdown();
 }
 
 #[test]

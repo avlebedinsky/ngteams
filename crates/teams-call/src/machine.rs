@@ -193,6 +193,11 @@ pub enum Effect {
     },
     /// Tell the account.
     Event(CallEvent),
+    /// The invitation whose `attach` link is `attach` was let go here before it rang (its `attach` failed for good, its
+    /// answer didn't read, the call's media failed, its ring ended, the engine stopped): tell the fence
+    /// (`teams_fence::Fence::let_go`), which ends its offer, so it holds no call open. Its service may never have taken
+    /// the callbacks that `attach` handed out, so no delivery would end it there.
+    LetGo { attach: CallLink },
 }
 
 /// How a write went.
@@ -824,6 +829,18 @@ impl Calls {
         Some(call)
     }
 
+    /// The invitation being attached ([`Phase::Attaching`]) goes away here unseen, and the engine tells the fence to let
+    /// it go ([`Effect::LetGo`]).
+    fn let_go(&mut self) {
+        if let Some(call) = self.end_call()
+            && let Some(invitation) = call.invitation()
+        {
+            self.out.effects.push_back(Effect::LetGo {
+                attach: invitation.attach.clone(),
+            });
+        }
+    }
+
     /// The call ends here with `end`.
     fn finish(&mut self, end: End) {
         if let Some(call) = self.end_call() {
@@ -909,7 +926,7 @@ impl Calls {
     /// answered ends for what it was leaving for.
     fn abandon(&mut self, ending: Ending, now: Instant) {
         match self.call.as_ref().map(|call| call.phase) {
-            Some(Phase::Attaching) => drop(self.end_call()),
+            Some(Phase::Attaching) => self.let_go(),
             Some(Phase::Leaving { sent: false, end }) => self.leave(end, now),
             Some(_) => self.leave(ending, now),
             None => {}
@@ -970,7 +987,7 @@ impl Calls {
             return;
         };
         match phase {
-            Phase::Attaching => drop(self.end_call()),
+            Phase::Attaching => self.let_go(),
             Phase::Offered => {
                 drop(self.end_call());
                 self.out.event(CallEvent::RingEnded {
@@ -1278,7 +1295,7 @@ impl Calls {
             return;
         };
         let Some(leg) = read::attached(body, &invitation.conversation) else {
-            drop(self.end_call());
+            self.let_go();
             return;
         };
         let Some(call) = self.call.as_mut() else { return };
@@ -1451,7 +1468,7 @@ impl Calls {
     fn ended(&mut self, delivery: &Delivery) {
         let end = read::remote_end(&delivery.body);
         match self.call.as_ref().map(|call| (call.id, call.phase)) {
-            Some((_, Phase::Attaching)) => drop(self.end_call()),
+            Some((_, Phase::Attaching)) => self.let_go(),
             Some((id, Phase::Offered)) => {
                 drop(self.end_call());
                 self.out.event(CallEvent::RingEnded { call: id, end });

@@ -2,7 +2,8 @@
 //! their own"): the three writes that happen without a per-item action, typing, read receipts and the account's own
 //! availability, each with its switch at Teams' own default (on, presence following the app), and "Confirm". Until it
 //! is confirmed none of them is sent ([`SettingsModel::awaiting_first_run`]); afterwards each is a setting like any
-//! other, in the settings view. The shell shows it over everything while it waits.
+//! other, in the settings view. It also says what a call sends without a click ([`CALLS_NOTE`]: an incoming call told
+//! it rings here), which has no switch. The shell shows it over everything while it waits.
 
 use gpui::{
     AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
@@ -13,6 +14,12 @@ use gpui_component::switch::Switch;
 
 use crate::settings::{Settings, SettingsModel};
 use crate::theme;
+
+/// What the screen says of calls, which have no switch (`docs/personal-build.md`, "Calls"): what a call sends without
+/// a click, and what only the user's action sends.
+pub const CALLS_NOTE: &str = "Calls: when someone calls you, the call is told it rings here, as any Teams app does. \
+                              Answering, declining, calling and joining go out only when you click; your microphone \
+                              opens only then, and your camera only when you turn it on.";
 
 /// The first run's screen (see the module docs).
 pub struct FirstRun {
@@ -91,6 +98,12 @@ impl Render for FirstRun {
                 settings.send_presence,
                 |settings, on| settings.send_presence = on,
             ))
+            .child(
+                div()
+                    .debug_selector(|| "first-run-calls".to_owned())
+                    .text_sm()
+                    .child(CALLS_NOTE),
+            )
             .child(
                 div().debug_selector(|| "first-run-confirm".to_owned()).child(
                     Button::new("first-run-confirm")

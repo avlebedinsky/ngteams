@@ -1,7 +1,7 @@
-//! The lab app's calls (M3 Task 17): the account's engine gets its calling ([`account_calls`]: the calls' media on
-//! the devices the app opened, relayed through Teams' relay, the microphone processed as a call's is, the account
-//! describing its client as the web client does), and the window shows calls ([`AppCalls`]: the ringtone on the same
-//! devices, the echo service's MRI for the test call).
+//! The lab app's calls (M3 Task 17): the account's engine gets its calling ([`account_calls`], shared with the
+//! personal build: the calls' media on the devices the app opened, relayed through Teams' relay, the microphone
+//! processed as a call's is, the account describing its client as the web client does), and the window shows calls
+//! ([`AppCalls`]: the ringtone on the same devices, the echo service's MRI for the test call).
 //!
 //! The devices are the PipeWire the build allows ([`PipeWireDevices`]): a lab or test build's is the UI sandbox's
 //! private one only, so a lab app's microphone, speaker, camera and ringtone never reach the desktop's. Without it (no
@@ -16,16 +16,12 @@
 
 use std::sync::Arc;
 
-use teams_core::account::AccountCalls;
-use teams_core::lab::{LAB_LANGUAGE, web_client_info};
-use teams_core::{CallMedia, CallVideo, Relay};
+use teams_core::account::{AccountCalls, account_calls};
 use teams_fence::Mri;
 use teams_fence::lab::LabConfig;
 use teams_media::devices::catalog::DeviceDirectory;
 use teams_media::devices::pipewire::PipeWireDevices;
 use teams_media::devices::{DeviceError, Devices};
-use teams_media::relay::RelayOptions;
-use teams_media::session::SessionConfig;
 use teams_media::video::codec::H264Library;
 use teams_ui::{DeviceRinger, Ringer, VideoFeed};
 
@@ -50,22 +46,6 @@ impl std::fmt::Debug for AppCalls {
             .field("video", &self.video.is_some())
             .field("devices", &self.devices.is_some())
             .finish()
-    }
-}
-
-/// The account's calling on `devices` (see the module docs), its 1:1 calls' video `video` (none without).
-#[must_use]
-pub fn account_calls(devices: Arc<dyn Devices + Send + Sync>, video: Option<CallVideo>) -> AccountCalls {
-    AccountCalls {
-        media: CallMedia {
-            devices,
-            relay: Relay::Teams,
-            relay_options: RelayOptions::default(),
-            session: SessionConfig::default(),
-            video,
-        },
-        client: web_client_info(),
-        language_id: Some(LAB_LANGUAGE.to_owned()),
     }
 }
 

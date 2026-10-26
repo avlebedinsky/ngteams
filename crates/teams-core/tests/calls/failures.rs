@@ -3,7 +3,8 @@
 //! an acceptance that doesn't read binds nothing, a start sent again after a throttle is the call its acceptance binds
 //! to), and what a failure does as Task 14 decided with Codex (a media setup that fails refuses the action and sends
 //! nothing, an answer's keeps the invitation ringing; the media closing under the call fails it with a `leave`; a
-//! throttled write hung up during its wait isn't sent again); the microphone opens only once a start passed the fence;
+//! throttled write hung up during its wait isn't sent again; an `attach` refused with a 401 goes again and its
+//! invitation is answered); the microphone opens only once a start passed the fence;
 //! the engine stopping hangs the call up; a test call of an engine that doesn't know the account's tenant reads it
 //! from the account's token first, and is refused, nothing sent, when the token names none.
 
@@ -154,6 +155,33 @@ async fn an_answer_whose_media_fails_keeps_the_invitation_ringing_until_it_is_de
         .unwrap();
     assert_eq!(b.ended(incoming.call).await, End::Declined);
     assert_eq!(lab.sent_by(LAB_B), ["attach", "progress", "reject"]);
+}
+
+/// An `attach` refused with a 401 (the skypetoken renewed) goes once more on the same invitation: the lab's fence keeps
+/// it offered, so it rings and is answered (the `accept` needs its invitation still offered).
+#[tokio::test]
+async fn an_attach_refused_with_a_401_goes_again_and_its_invitation_is_answered() {
+    let lab = Lab::start().await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    lab.mock.refuse_next("POST", "/attach", 401).await;
+    let _ = lab.mock.ring(LAB_C, LAB_B);
+    let incoming = b.incoming().await;
+    let requests = b.handle.requests();
+    let call = requests.call(CallAction::Answer { call: incoming.call }).await.unwrap();
+    b.status(call, &CallStatus::Connected).await;
+    requests.call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(b.ended(call).await, End::HungUp);
+    assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
+    let attaches = b.log.permitted().iter().filter(|line| line.contains("/attach")).count();
+    assert_eq!(
+        attaches,
+        2,
+        "the refused attach and the one sent again: {:#?}",
+        b.log.permitted()
+    );
+    let sent = lab.sent_by(LAB_B);
+    assert_eq!(sent.first().map(String::as_str), Some("attach"), "{sent:?}");
+    assert!(sent.contains(&"accept".to_owned()), "{sent:?}");
 }
 
 /// The far end closing the media with no end of the call delivered after it (seen live: a web client's hang-up

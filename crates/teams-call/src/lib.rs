@@ -11,6 +11,7 @@
 //!         Effect::Send { id, write } => write.submit_to(id, &mut sink), // fence, outbox; `calls.on_outcome(id, …)`
 //!         Effect::Respond { delivery, reply } => { /* the delivery's own responder; `on_response_failed` */ }
 //!         Effect::Event(event) => { /* tell the account */ }
+//!         Effect::LetGo { attach } => fence.let_go(attach.as_str()), // an invitation dropped before it rang
 //!     }
 //! }
 //! ```
@@ -22,7 +23,8 @@
 //! media failing ([`Calls::fail_media`]), the engine stopping ([`Calls::shut_down`]) and the time ([`Calls::tick`]).
 //! **Out** ([`Calls::poll`]): [`Effect::Send`] (a [`CallWrite`], handed to the engine's [`WriteSink`] as its own sealed
 //! type, checked by the fence and sent in order), [`Effect::Respond`] (a typed delivery response, for the delivery's
-//! own responder) and [`Effect::Event`]. An engine keeps one write in flight: beside it it takes only what isn't a
+//! own responder), [`Effect::Event`] and [`Effect::LetGo`] (an invitation dropped before it rang, for the fence to
+//! retire once no further attempt at its `attach` goes). An engine keeps one write in flight: beside it it takes only what isn't a
 //! write ([`Calls::poll_beside_write`]), so the writes after it stay in the machine's queue, where a call that ends
 //! drops them; a write refused without being acted on (a 401, a throttled one) goes again only while its call still
 //! wants it ([`Calls::may_send_again`]).

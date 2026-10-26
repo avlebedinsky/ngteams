@@ -165,7 +165,7 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
 
     // the engine: the personal fence from account.toml, the store under the personal data dir; nothing is sent
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &signed, fence, MemorySecretStore::new(), false).unwrap();
+    let engine = teams::engine::start(&setup.paths, &signed, fence, MemorySecretStore::new(), false, None).unwrap();
     let store_file = setup.paths.store_file(&signed).unwrap();
     assert!(store_file.is_file());
     assert_eq!(
@@ -268,7 +268,7 @@ async fn forget_is_refused_while_the_engine_runs_and_the_next_account_never_open
         .await
         .unwrap();
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &signed, fence, MemorySecretStore::new(), false).unwrap();
+    let engine = teams::engine::start(&setup.paths, &signed, fence, MemorySecretStore::new(), false, None).unwrap();
 
     // the engine runs: nothing is deleted
     let error = forget::forget(&setup, &secrets).await.unwrap_err();
@@ -306,7 +306,7 @@ async fn forget_is_refused_while_the_engine_runs_and_the_next_account_never_open
         .await
         .unwrap();
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &other, fence, MemorySecretStore::new(), false).unwrap();
+    let engine = teams::engine::start(&setup.paths, &other, fence, MemorySecretStore::new(), false, None).unwrap();
     let own = setup.paths.store_file(&other).unwrap();
     assert_ne!(own, kept);
     assert!(own.is_file());

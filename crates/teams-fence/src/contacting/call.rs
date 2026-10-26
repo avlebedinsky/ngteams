@@ -27,6 +27,11 @@ pub const CALL_START_URL: &str = "https://api.flightproxy.teams.microsoft.com/ap
 /// of its own and then adds the echo participant with the conversation's `add`.
 pub const TEST_CALL_SCENARIO: &str = "UserInitiatedTestCall";
 
+/// The echo service's MRI as the web bundle's commercial config names it (`teamsEchoBotMri`): the one bot the personal
+/// build's test call may bring in (its start counts it in, its `add` invites exactly it). Never taken from the network
+/// or the UI; `teams-proto` names it too (`teams_proto::TEAMS_ECHO_BOT_MRI`). The lab's echo service is `lab.toml`'s.
+pub const TEAMS_ECHO_BOT_MRI: &str = "28:cf28171e-fcfd-47e4-a1d6-79460b0b3ca0";
+
 /// What a value of a call start may be: the type the capture had there (every call start of 2026-10-20 alike).
 #[derive(Clone, Copy)]
 pub(crate) enum Shape {

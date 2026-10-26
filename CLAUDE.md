@@ -254,6 +254,15 @@ What the code does and why. A change that undoes one of these needs a new reason
   only that `leave` passing; a delivery at the start's `conversationEnd` or call `end` callback ends the call for good.
   `fence.log` never holds the sender. The native transport feeds the registry around a call write's send (below,
   "The call writes"). A `conversationUpdate` binds nothing.
+- **The personal fence's calls** (`crates/teams-fence/src/decision/personal_calls.rs`, `docs/personal-build.md`,
+  "Calls"): no roster. A start is judged by its chat's one fresh thread read (`Listed`) listing the account and every
+  participant it names, the account among them (`CalleesNotInChat`, `NotAMember`); the test call's start and its
+  `add` only with exactly the account and `TEAMS_ECHO_BOT_MRI` (the web bundle's, a constant in `teams-fence`
+  re-exported by `teams-proto`; `NotTheTestCall`); a join by the registry's binding and its chat's read listing the
+  account; everything else as the registry resolves it, with no read. `observe_delivery` offers any readable
+  invitation addressed to the account whose caller isn't the account, one at a time (none while a registered call is
+  live, an offered one answered, or one rings with its end bound); an offered invitation's receipt reads no chat;
+  `pend_start` takes only the account's own start or join. The personal build creates no chat for the test call.
 - **Offered invitations** (`crates/teams-fence/src/calls/offer.rs`): an invitation delivery (Trouter `evt` 107 or
   109, `callNotification`) to the fence's own account (`Fence::open_lab_account`) from a lab caller is offered by
   `observe_delivery`; a group call's invitation names only its caller, callee and group chat, so every decision on it
@@ -350,9 +359,11 @@ What the code does and why. A change that undoes one of these needs a new reason
   before it goes (`Fence::pend_start`, exactly the body sent; `Refusal::NotPended` when the registry won't take the
   permit) and registers the call from a successful answer; an `attach` or an `accept` pends its answer and binds its
   links, and on a lab fence one the registry won't pend goes with its answer unread (only a fence that tracks calls
-  refuses it, `NotPended`). The registry's bookkeeping is what the call machine reads its deliveries by
-  (`Observed`); under the lab's rule it decides nothing. The TURN credentials are a read (`RelayTokens` on
-  `Service::Relay`).
+  refuses it, `NotPended`); one answered without success binds and retires nothing (a 401 or a short throttle is
+  followed by another attempt), and only the call machine, once it drops an invitation before it rang (no further
+  attempt at its `attach` goes), retires it (`Effect::LetGo`, `Fence::let_go`). The registry's bookkeeping is what
+  the call machine reads its deliveries by (`Observed`); under the lab's rule it decides nothing. The TURN credentials
+  are a read (`RelayTokens` on `Service::Relay`).
 - **A group call's video** (`teams-media/src/mcp.rs`, `session/control.rs`, `teams-core/src/calling/gallery.rs`;
   `docs/protocol/calling.md`, "Group video") goes through the call's mixer: every video line answered and offered
   `sendrecv` as the web client does, which way each really goes told by the media descriptions; the start, join,
@@ -379,8 +390,9 @@ What the code does and why. A change that undoes one of these needs a new reason
   (`teams_trouter::Trouter::for_calls`, its own endpoint registered as `SkypeSpacesWeb`) hands every delivery to the
   fence first (`Fence::observe_delivery`): an invitation it doesn't offer or can't read is ignored and nothing is sent
   for it, the rest go to their consumer, answered only through the delivery's own connection by `FrameSink::respond`
-  (or its two halves, above); the personal fence opens no calling socket (`BuildError::PersonalCalls`) until its calls
-  are turned on. The native client sends no `user.activity`; what makes an account show online is UPS's endpoint
+  (or its two halves, above); the personal build opens its calling socket only when its devices opened
+  (`teams::calling::open`), its registration an own-state entry and its frames logged. The native client sends no
+  `user.activity`; what makes an account show online is UPS's endpoint
   `PUT`, not `user.activity` (`docs/protocol/trouter.md`, "Own presence"). Its own availability goes out only as the sealed writes
   `SetEndpointAvailability` and `ForceAvailability`, transient writes of the outbox on `Scope::Account`, which the
   fence permits without a member read only for its own account (`Fence::open_lab_account`), each naming only a

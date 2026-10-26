@@ -281,7 +281,11 @@ that tracks calls (`Fence::tracks_calls`): a lab fence's `attach` or `accept` go
 ## The call registry
 
 The personal build's call rule (`CallRule::Registry`, `Fence::tracks_calls`; its tests run it on a lab roster through
-`Fence::tracking_calls`, `test-support` only). A call's follow-ups reach its participants, and no source reads a call's members (the conversation's
+`Fence::tracking_calls`, `test-support` only). Through the personal fence itself (M3 Task 22,
+`docs/personal-build.md`, "How the implementation reads it") the roster plays no part: the starts below are judged by
+the chat's fresh thread read listing the account and every callee, the test call by the echo service's MRI from the
+web bundle, any invitation addressed to the account is offered (one at a time), and what the registry resolves passes
+with no further read but a join's chat. A call's follow-ups reach its participants, and no source reads a call's members (the conversation's
 `getAllParticipants` answered an empty list for a call that had its caller in it:
 [calling-echo.md](calling-echo.md#open)).
 So the fence trusts only the calls it permitted itself (CLAUDE.md, "Calls go only to the lab, both ways"): each fence
@@ -333,7 +337,9 @@ it); a delivery at the start's own `conversationEnd` or call `end` callback ends
 An ended call is never restored, whatever arrives after. A rejoin (a later start or join of the run, permitted on its
 own, answered with the same conversation) takes the conversation's links from an ending or ended call, so the new
 call's follow-ups resolve to it alone; a live call keeps its links, and a link two calls hold resolves to none
-(`Partial(UnregisteredCall)`).
+(`Partial(UnregisteredCall)`). A re-invitation to that conversation answered since holds its links too (its `attach`'s
+answer binds them): an operation on them acts on the invitation's call while it is open for the operation, and on the
+left call's tombstone (`Partial(CallEnded)`) only when no such invitation holds them.
 
 **The acceptance's delivery response** is one of the two Trouter delivery responses the fence lets through (the other
 is an offered invitation's receipt, below; `Fence::check_delivery_response`, logged as a `delivery_response` entry): it
@@ -373,7 +379,13 @@ lab client, and an `add` is judged per invitee). What passes on an offered invit
 The native transport reads the `attach`'s and the `accept`'s answers (`Fence::pend_answer`, `Fence::bind_answer`), as
 it does the start's. A decided `accept` or `reject` passes again (the client resends), nothing else of the ring does. A delivery at the
 attach's `call/end` or `conversationEnd` callback ends the invitation for good, answered or not; it is never offered
-again.
+again. So does the call machine letting it go before it rang (`Fence::let_go`, the engine's for the machine's
+`Effect::LetGo`): its `attach` failed for good (no further attempt goes: not sent, denied, an unknown outcome, a
+refusal no retry follows), its answer didn't read, or its media failed; the service may never have taken the callbacks
+its ring would end at. An `attach` refused for a reason another attempt may clear (a 401, a short throttle) retires
+nothing: the attempt after it goes on the same invitation. The invitations of one conversation (a
+re-invitation after a decline or a leave) hold its links alike: an operation on such a link acts on the latest one open
+for it, and one closed for it keeps the links only as a tombstone (`CallEnded` when no other holds them).
 
 **The caller's side of the media negotiation** binds the same way: the acceptance also binds the call controller's
 `mediaRenegotiation` (`…/cc/v1/active/<call>/…/renegotiate`) and `updateMediaDescriptions`; a renegotiation or an

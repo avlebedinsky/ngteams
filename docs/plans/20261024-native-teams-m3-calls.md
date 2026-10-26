@@ -1228,11 +1228,16 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
   `crates/teams-proto/src/*`, `crates/teams-trouter/src/*`, `crates/teams-core/src/*`, `crates/teams-media/src/*`,
   `crates/teams-call/src/*`, `docs/personal-build.md`
 
-- [ ] CLAUDE.md holds Task 2's approved text before this task's code
-- [ ] every plain request a lab call sends (the `allowed` lines in Tasks 15, 16 and 21's `fence.log`, such as the
+- [x] CLAUDE.md holds Task 2's approved text before this task's code
+      → done: both personal rules were already in CLAUDE.md's hard rules; the Patterns gained the personal fence's
+      calls
+- [x] every plain request a lab call sends (the `allowed` lines in Tasks 15, 16 and 21's `fence.log`, such as the
       calling policy's read) listed, and each given a personal route (a `GET`, an `OwnState` entry or a `PostRead`) or
       shown unneeded; tests first: a personal call on the mock completes with no `Refusal::Personal`
-- [ ] tests first on the mock (`teams`' lib): a start or a join in a chat whose fresh thread read lists the account
+      → done: the calling registration (an own-state entry, `calling_endpoint_registration`) and the TURN credentials
+      (a `GET`); the calling policy reads (`useraggregatesettings`, `effectivePolicies`) are the browser's, unneeded
+      (`docs/personal-build.md`, "How the implementation reads it"); `crates/teams/tests/calls.rs`: no `allowed` line
+- [x] tests first on the mock (`teams`' lib): a start or a join in a chat whose fresh thread read lists the account
       permitted; a start naming a callee outside that read denied; a start in a chat whose read doesn't list the
       account denied; the test call (the bot's chat, the start, the bot's `add`) permitted and an `add` of anyone else
       denied; an outsider's invitation offered, answered or declined only on the action, never without it, shown by the
@@ -1240,10 +1245,17 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
       during a call not offered; the calling registration as an `OwnState` entry and no plain request; the calling
       socket's frames logged; the camera off when a call starts; the microphone opened only after a start, a join or an
       answer; every call write with its `fence.log` line
-- [ ] the personal build on the desktop's PipeWire and the camera portal (fixed at build time, Task 8); `cargo test -p
+      → done: `crates/teams/tests/calls.rs` (personal engines on the mock), `teams-fence/tests/personal.rs` and
+      `offers.rs` (the rule: `decision/personal_calls.rs`, one-at-a-time offering in the registry); the native test call
+      creates no chat (its `add` names the bot's 1:1 chat), so `ChatCreate` stays denied
+- [x] the personal build on the desktop's PipeWire and the camera portal (fixed at build time, Task 8); `cargo test -p
       teams` opens neither (the seam's fake); agents build no runnable personal binary
-- [ ] `docs/personal-build.md`'s "calls" row and the first-run screen's wording, if it lists what the build sends
-- [ ] `cargo test -p teams -p teams-fence -p teams-call -p teams-ui -p fence-seal` and the gate pass
+      → done: `teams::calling` (`teams-media` with `personal`, file devices in the tests; a test build's `open` refuses
+      outside the sandbox); OpenH264 from `~/.local/share/teams/openh264/`
+- [x] `docs/personal-build.md`'s "calls" row and the first-run screen's wording, if it lists what the build sends
+      → done: the row in "The binary and its data", the first run's `CALLS_NOTE` (an incoming call told it rings here)
+- [x] `cargo test -p teams -p teams-fence -p teams-call -p teams-ui -p fence-seal` and the gate pass
+      → done (the workspace run's `call_echo_places…` flaked once under load, passed alone and in the rerun)
 
 ### Task 23: The user's real-call checklist
 **Files:**

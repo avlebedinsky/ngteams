@@ -868,12 +868,13 @@ impl<C: Credentials> HttpTransport<C> {
     /// body sent) and registered from a successful answer ([`Fence::register_start`]), ended unregistered by any other
     /// ([`Fence::abandon_start`], so a start sent again is the call its acceptance binds to); an `attach` or an
     /// `accept` pends its answer ([`Fence::pend_answer`]) and binds the links a successful answer hands out
-    /// ([`Fence::bind_answer`]). A start's permit the registry won't take is [`Refusal::NotPended`], nothing sent, and so
-    /// is an `attach`'s or an `accept`'s on a fence that tracks calls ([`Fence::tracks_calls`]); a lab fence's goes with
-    /// its answer unread (its fence judged it by its entry, and nothing it sends later needs a binding). The answer
-    /// comes back whatever its
-    /// status, as any write's; after a 401 the session renews the skypetoken for a later request. A registration that
-    /// fails is logged (on a fence that tracks calls the call's follow-ups then stay denied), never retried.
+    /// ([`Fence::bind_answer`]); one answered without success binds nothing (whether its invitation is let go is the
+    /// call machine's to say once no further attempt goes, [`Fence::let_go`]). A start's permit the registry won't take
+    /// is [`Refusal::NotPended`], nothing sent, and so is an `attach`'s or an `accept`'s on a fence that tracks calls
+    /// ([`Fence::tracks_calls`]); a lab fence's goes with its answer unread (its fence judged it by its entry, and
+    /// nothing it sends later needs a binding). The answer comes back whatever its status, as any write's; after a 401
+    /// the session renews the skypetoken for a later request. A registration that fails is logged (on a fence that
+    /// tracks calls the call's follow-ups then stay denied), never retried.
     async fn deliver_call(&self, permit: &WritePermit, call: &CallWire) -> Result<Response, HttpError> {
         let url = call.url();
         if !on_calling_base(url) {
@@ -930,11 +931,20 @@ impl<C: Credentials> HttpTransport<C> {
         }
         if answer.is_success() {
             self.register(pending, answer.body(), url);
-        } else if let Pending::Start(pending) = pending {
-            // the service didn't take it: the start sent again pends a call of its own, and this one binds nothing
-            self.fence.abandon_start(pending);
+        } else {
+            self.unregistered(pending);
         }
         Ok(answer)
+    }
+
+    /// A pended call write answered without success: the service didn't take it. A start ends unregistered (the start
+    /// sent again pends a call of its own, and this one binds nothing); an attach or an accept binds nothing, and its
+    /// invitation stays as it was: an attach refused for a reason another attempt may clear (a 401, a short throttle)
+    /// goes again on it, and one that failed for good is let go by the call machine ([`Fence::let_go`]).
+    fn unregistered(&self, pending: Pending) {
+        if let Pending::Start(pending) = pending {
+            self.fence.abandon_start(pending);
+        }
     }
 
     /// Registers a pended call write's answer in the fence's call registry (see [`Self::deliver_call`]).

@@ -517,6 +517,9 @@ where
                 Some(Effect::Send { id, write }) => self.send(id, *write),
                 Some(Effect::Respond { delivery, reply }) => self.respond(delivery, reply),
                 Some(Effect::Event(event)) => self.told(event, now),
+                // an invitation dropped before it rang: its attach failed for good (no further attempt goes), its
+                // answer didn't read, its media failed; the fence ends its offer, which then holds no call open
+                Some(Effect::LetGo { attach }) => self.outbox.fence().let_go(attach.as_str()),
             }
         }
     }

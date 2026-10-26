@@ -326,9 +326,7 @@ impl Account {
                 .unwrap()
                 .with_options(options())
         };
-        let calling = trouter()
-            .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)))
-            .unwrap();
+        let calling = trouter().for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
         let store = tempfile::tempdir().unwrap();
         let recording = lab.dir.path().join(format!("{}.wav", mri.rsplit(':').next().unwrap()));
         let microphones = Arc::new(AtomicUsize::new(0));

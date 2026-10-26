@@ -14,9 +14,10 @@
 //! - **the `attach`**: to exactly the invitation's `attach` link, its one `join` action to exactly the invitation's
 //!   conversation (roster only: it joins no call), its sender the callee, every callback it hands out on one call agent
 //!   of the endpoint the invitation was delivered to. A permitted attach records the callbacks the call's end comes back
-//!   to (`call/end`, `conversationEnd`): a delivery at one of them ends the ring for good. Its answer, read at the
-//!   response stage ([`Offer::bind_answer`]), binds the call leg's `progress`, `acceptance` and `callLeg` links and the
-//!   conversation's links;
+//!   to (`call/end`, `conversationEnd`): a delivery at one of them ends the ring for good, and so does the call machine
+//!   letting the invitation go before it rang (`crate::Fence::let_go`: its attach failed for good, and its service may
+//!   never have taken them). Its answer, read at the response stage ([`Offer::bind_answer`]), binds the call leg's
+//!   `progress`, `acceptance` and `callLeg` links and the conversation's links;
 //! - while it rings, **`progress`** (`ringing`), the **endpoint state**, and the user's **answer** (`accept`) or
 //!   **decline** (`reject`, `603` only), each to exactly a bound link;
 //! - once answered, the answered call's follow-ups to the links the attach's answer, the `accept`'s answer
@@ -130,6 +131,11 @@ impl Offer {
     /// Whether a delivery at `path` ends the ring.
     pub(crate) fn ends_at(&self, path: &str) -> bool {
         self.ends.iter().any(|end| end.path == path)
+    }
+
+    /// Whether an `attach` bound where its ring ends (its `call/end`, its `conversationEnd`), so its end is seen.
+    pub(crate) fn ring_end_known(&self) -> bool {
+        !self.ends.is_empty()
     }
 
     /// Ends the ring for good.

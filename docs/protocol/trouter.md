@@ -127,8 +127,10 @@ one yet (the call session in the engine does, M3 Task 14). Tested against `Trout
 - **A dropped socket or a renewal** reconnects with the cached `connectparams`, so the endpoint and every call link
   under its push URL stay the same, and registers again; nothing is sent to the call (as the web client did,
   `calling.md`, "A call held past a dropped socket").
-- **The personal build** opens none: `for_calls` refuses a personal fence (`BuildError::PersonalCalls`) until M3
-  Task 22 turns its calls on.
+- **The personal build** opens one when its devices opened (M3 Task 22): its registration goes as its own-state entry
+  (`calling_endpoint_registration`) and its frames are logged by kind (`FrameSink::logging`), as its messaging
+  socket's; the personal fence offers any readable invitation addressed to the account, one at a time
+  (`docs/personal-build.md`, "Calls").
 
 ## Connect and the regional move
 

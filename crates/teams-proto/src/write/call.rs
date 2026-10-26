@@ -417,6 +417,11 @@ impl Sealed for StartCall {
 /// opens it names no callee. The fence's own, which its classifier reads a test call by.
 pub use teams_fence::TEST_CALL_SCENARIO;
 
+/// The echo service's MRI from the web bundle's `teamsEchoBotMri` (its commercial config): the bot the personal build's
+/// "Test call" calls ([`StartCall::echo_test`], then [`AddToCall`] of exactly it). The fence's own, which the personal
+/// fence judges the test call by; never taken from the network or the UI.
+pub use teams_fence::TEAMS_ECHO_BOT_MRI;
+
 /// Invites someone into a call that exists: the conversation's `add` (how the test call brings the echo in).
 ///
 /// [`AddToCall::invite`] posts to the `addParticipantAndModality` link the start's answer handed out (`…/conv/<id>/add`

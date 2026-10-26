@@ -94,7 +94,7 @@ pub use write::{
     CreateChat, DeclineCall, DeleteMessage, EditMessage, ForceAvailability, Invitee, JoinCall, JoinMedia, JoinParts,
     KeepAliveCall, LeaveCall, LeaveReason, Links, ManualAvailability, MediaContent, MediaDescription,
     MediaDescriptions, MeetingInfo, Mutating, Original, ReadReceipt, RemoveReaction, RenegotiateMedia, ReportRinging,
-    SendMessage, SetEndpointAvailability, SetReaction, StartCall, StartParts, TEST_CALL_SCENARIO, TargetMismatch,
-    Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
-    VoiceConsent, Wire,
+    SendMessage, SetEndpointAvailability, SetReaction, StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO,
+    TargetMismatch, Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
+    UpdateParticipantProperties, VoiceConsent, Wire,
 };
