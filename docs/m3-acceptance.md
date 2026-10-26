@@ -164,9 +164,10 @@ CPU per process in the 1:1 video call (both cameras on, 20 one-second samples, %
 An app holding a 1:1 video call (OpenH264 at 640×360, 15 fps each way, Opus, the audio processing) takes about 15 %
 of one CPU on this machine: no case for hardware video encoding yet.
 
-## 7. `fence.log`
+## 7. `fence.log` (run 23, before the lab's call rule changed)
 
-Run 23, from the byte the run began: 519 whole lines, no breach, no deny of a write; every permitted write is one the
+Run 23 ran under the call registry's rule (every follow-up resolved to a call the fence registered); §10 has the runs
+after the lab's call rule changed to judging a call's entry. Run 23, from the byte the run began: 519 whole lines, no breach, no deny of a write; every permitted write is one the
 run made:
 
 | writes permitted | count |
@@ -228,3 +229,39 @@ None was a breach. Each failed run's output is kept under `<data_dir>/call-live/
 On the final tree: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
 `scripts/lint-report.sh` (two reasoned `expect`s, unchanged), `cargo test -p fixture-guard` and
 `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 cargo test --workspace` all passed.
+
+## 10. After the lab's call rule changed
+
+The lab's fence now judges a call by its entry only (CLAUDE.md, "Calls go only to the lab, both ways";
+`docs/protocol/fence-targets.md`, "The lab's call rule"): a start, a join by the chat it names, an answer or a decline of
+the account's own offered invitation, an `add` by its invitees, each read fresh; the follow-ups, the ring-time sends,
+the `leave` and every Trouter delivery response pass, logged, with no registry lookup. The browser fence reads no call
+answer at the response stage, and the scenarios hold nothing of a call's back but `start-held`'s starts. The runs of
+2026-10-26 11:47–12:29Z, from normal release builds (`target/lab`), headless, under the live lock and an outer
+`timeout --signal=INT`, one browser per lab profile, nothing left running after any run:
+
+| run | result |
+|---|---|
+| `proto-lab run echo-call --headless` (11:47Z) | **ok**: the tone came back; start, `add`, `updateEndpointMetadata`, channel parameters and `leave` permitted, the acceptance acknowledged over Trouter (20 delivery responses let through) |
+| `proto-lab run ab-call-native --headless` | **ok on the third attempt** (11:58Z). 11:49Z: phase 1's call ended `remote 429 Too many media renegotiations` after b's page renegotiated again after every native answer for 22 s (a loop the capture of 03:26Z, before this change, shows too: `docs/backlog/web-renegotiates-against-a-native-answer-in-a-loop.md`); 11:53Z: b's page's WebRTC statistics showed 4 packets sent in phase 1, though each side heard the other's tone |
+| `proto-lab run abc-call --call video --headless` (12:02Z) | **ok**: a's start let through, b and c answered, every page decoded video |
+| `proto-lab run abc-call-mixed --headless` (12:08Z, 90 s after the last group call) | **ok**: a's native client called, b and c answered, c left and joined again (2 joins let through), video on two lines |
+| `call_live`, every case (12:15Z, 12:20Z) | **failed twice at the same check**: `one-to-one`'s echo check reads b's microphone from b's `call-participant self` trace line, which b's 1:1 call never has (its grid shows only once the roster names a participant, and a 1:1 callee's never does: run 23's b had none either); the echo margin itself measured 38.3 and 39.4 dB. The test call (round trip p50 16.9 and 16.7 s) and both `web` directions passed in both runs (`docs/backlog/one-to-one-callee-sees-no-roster.md`) |
+| `call_live`, `CALL_LIVE_PHASES=decline,group` (12:26Z) | **passed**: b declined and a was told (ended, 2.7 s); the group call (setup a 2245, b 1953, c 1856 ms; each hears the other two; two lines on every window), c left (seen by a after 70.6 s, as before) and joined again (2294 ms) |
+
+**`fence.log`** over these runs (11:47:32–12:28:59Z, 3 720 whole lines): no breach, no arming failure, no deny of a
+write. Writes permitted: call starts 29 (test call 4, in a chat 25, each a browser's two layers or a native client's
+one), joins 5, answers 33 and a decline 1, all on the account's own offered invitation from a lab caller; the echo's
+`add` 4; and with no lookup the ring-time sends (`attach` 37, `progress` 37) and the follow-ups (renegotiate 197, media
+answer 100, media acknowledge 145, endpoint metadata 70, endpoint state 33, participant properties 24, channel
+parameters 19, media descriptions 17, `leave` 37). The native clients' typed delivery responses: 15 acceptance
+acknowledgements, 13 invitation receipts, 148 negotiation receipts, all permitted; the pages' delivery responses passed
+the frame rule, logged `allowed`. The denies (186) are all browser denies on the expected-deny list or forced: the call
+log's read horizon (168), the file browser's prewarm (13), an earlier run's probe in the group chat (5). No answer or
+decline went outside the lab: every `accept` and `reject` was decided on an invitation the fence had offered (a lab
+caller's, to the account's own MRI).
+
+The gate on the tree of this change passed (`cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+--all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p fixture-guard`, `PROTO_LAB_REQUIRE_CHROME=1
+GPUI_SMOKE_REQUIRE=1 cargo test --workspace`), with `teams-headless`'s echo test failing once on its tone's timing at a
+load average of 44 (the lab build running beside it) and passing twice alone.
