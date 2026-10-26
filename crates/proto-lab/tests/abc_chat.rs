@@ -277,6 +277,13 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
             assert!(FORCED_B.contains(&EARLIER_RUN_PROBE) && FORCED_C.contains(&EARLIER_RUN_PROBE));
             (probe_rules(None)?, policy(FORCED_C))
         }
+        // b's page beside a's app, under the earlier run's probe rules, in either step
+        ScenarioName::AbCallApp => {
+            use proto_lab::scenario::ab_call::policy;
+            use proto_lab::scenario::ab_call_app::{FORCED_ANSWER, FORCED_PLACE};
+            assert!(FORCED_ANSWER.contains(&EARLIER_RUN_PROBE) && FORCED_PLACE.contains(&EARLIER_RUN_PROBE));
+            (probe_rules(None)?, policy(FORCED_ANSWER))
+        }
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth

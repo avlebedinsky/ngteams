@@ -43,8 +43,8 @@ use super::gallery::Gallery;
 pub const CONNECT_WITHIN: Duration = Duration::from_secs(30);
 /// How long the media may stay lost (ICE disconnected) before the call fails.
 pub const RECOVER_WITHIN: Duration = Duration::from_secs(15);
-/// How long after the far end closed the media the call's own end may still come (a hang-up closes both) before the
-/// call fails.
+/// How long after the far end closed the media the call's own end may still come (a hang-up closes both): after it a
+/// call that was up ends as the far end's (`MediaChange::Closed`), and one not up yet fails.
 pub const CLOSED_GRACE: Duration = Duration::from_secs(2);
 /// How many participants' video a group call receives at once (the mixer offers as many receiving lines; the M0
 /// spike drew nine 720p tiles at 30 fps).
@@ -483,6 +483,8 @@ pub(super) enum MediaChange {
     Lost,
     /// The media failed, for good: the call fails.
     Failed(String),
+    /// The far end closed the media and the call's own end didn't come within [`CLOSED_GRACE`]: the far end left.
+    Closed,
     /// The camera went off by itself (its device went away, or its encoder failed): nothing more is sent on our video
     /// line until the account turns it on again.
     CameraOff,
@@ -570,8 +572,10 @@ impl LiveMedia {
                 SessionEvent::DominantSpeakers(speakers) => changes.push(MediaChange::Speakers(speakers)),
             }
         }
-        if let Some(why) = self.overdue(now) {
-            changes.push(MediaChange::Failed(why.to_owned()));
+        match self.overdue(now) {
+            Some(CLOSED) => changes.push(MediaChange::Closed),
+            Some(why) => changes.push(MediaChange::Failed(why.to_owned())),
+            None => {}
         }
         changes
     }
@@ -586,12 +590,40 @@ impl LiveMedia {
 
     /// A deadline that passed at `now`, if one did.
     fn overdue(&self, now: Instant) -> Option<&'static str> {
+        Deadlines {
+            applied: self.applied,
+            connected: self.connected,
+            lost: self.lost,
+            closed: self.closed,
+        }
+        .overdue(now)
+    }
+}
+
+/// Why the media ended when the far end closed it ([`Deadlines::overdue`]).
+const CLOSED: &str = "the far end closed the media";
+
+/// What a call's media deadlines run from.
+#[derive(Clone, Copy, Debug, Default)]
+struct Deadlines {
+    applied: Option<Instant>,
+    connected: bool,
+    lost: Option<Instant>,
+    closed: Option<Instant>,
+}
+
+impl Deadlines {
+    /// A deadline that passed at `now`, if one did: the far end's close gets [`CLOSED_GRACE`] for the call's own end to
+    /// come (a hang-up closes the media first), a loss [`RECOVER_WITHIN`], media never connected [`CONNECT_WITHIN`] of
+    /// the far end's SDP. Media the far end closed isn't media that didn't connect.
+    fn overdue(self, now: Instant) -> Option<&'static str> {
         let past = |since: Option<Instant>, within: Duration| since.is_some_and(|since| now >= since + within);
         if past(self.closed, CLOSED_GRACE) {
-            Some("the far end closed the media")
+            Some(CLOSED)
         } else if past(self.lost, RECOVER_WITHIN) {
             Some("the media was lost and didn't come back")
-        } else if !self.connected && self.lost.is_none() && past(self.applied, CONNECT_WITHIN) {
+        } else if !self.connected && self.lost.is_none() && self.closed.is_none() && past(self.applied, CONNECT_WITHIN)
+        {
             Some("the media didn't connect")
         } else {
             None
@@ -772,4 +804,61 @@ pub(super) fn slots(live: &LiveMedia) -> Vec<Option<u32>> {
         .into_iter()
         .map(|(_, stream)| stream)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_the_far_end_closed_gets_its_grace_however_long_ago_it_was_applied() {
+        let start = Instant::now();
+        let closed_at = start + Duration::from_secs(40);
+        let closed = Deadlines {
+            applied: Some(start),
+            connected: false,
+            lost: None,
+            closed: Some(closed_at),
+        };
+        // the call's own end may still come: no failure yet, though the connect deadline is long past
+        assert_eq!(closed.overdue(closed_at), None);
+        assert_eq!(
+            closed.overdue(closed_at + CLOSED_GRACE.saturating_sub(Duration::from_millis(1))),
+            None
+        );
+        assert_eq!(
+            closed.overdue(closed_at + CLOSED_GRACE),
+            Some("the far end closed the media")
+        );
+    }
+
+    #[test]
+    fn media_that_never_connects_or_stays_lost_fails_on_its_deadline() {
+        let start = Instant::now();
+        let never = Deadlines {
+            applied: Some(start),
+            ..Deadlines::default()
+        };
+        assert_eq!(
+            never.overdue(start + CONNECT_WITHIN.saturating_sub(Duration::from_millis(1))),
+            None
+        );
+        assert_eq!(never.overdue(start + CONNECT_WITHIN), Some("the media didn't connect"));
+        let lost = Deadlines {
+            applied: Some(start),
+            lost: Some(start + Duration::from_secs(60)),
+            ..Deadlines::default()
+        };
+        assert_eq!(lost.overdue(start + Duration::from_secs(61)), None);
+        assert_eq!(
+            lost.overdue(start + Duration::from_secs(60) + RECOVER_WITHIN),
+            Some("the media was lost and didn't come back")
+        );
+        let up = Deadlines {
+            applied: Some(start),
+            connected: true,
+            ..Deadlines::default()
+        };
+        assert_eq!(up.overdue(start + Duration::from_secs(3_600)), None);
+    }
 }

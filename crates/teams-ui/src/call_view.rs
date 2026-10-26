@@ -550,7 +550,7 @@ impl CallBar {
     }
 
     /// Traces the grid's cells when the grid of `call` changed: each participant's MRI, camera, line and speaking, and
-    /// the account's own speaking.
+    /// the account's own speaking and whether its microphone hears anything (a closing `self` line).
     fn trace_grid(&mut self, call: CallId, view: &CallView) {
         if self
             .grid_traced
@@ -575,7 +575,8 @@ impl CallBar {
         self.trace.record(
             &TraceLine::new("call-participant", "self")
                 .call(call.get())
-                .kind(if view.speaking { "speaking" } else { "quiet" }),
+                .kind(if view.speaking { "speaking" } else { "quiet" })
+                .kind(if view.hearing { "mic-sound" } else { "mic-silent" }),
         );
         self.grid_traced = Some((call, view.clone()));
     }

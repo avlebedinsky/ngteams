@@ -61,7 +61,7 @@
 mod gallery;
 mod media;
 
-pub use gallery::{CallParticipant, CallView, SPEAKING_HOLD, SPEAKING_LEVEL};
+pub use gallery::{CallParticipant, CallView, HEARING_LEVEL, SPEAKING_HOLD, SPEAKING_LEVEL};
 pub use media::{CLOSED_GRACE, CONNECT_WITHIN, CallMedia, CallVideo, GROUP_SLOTS, RECOVER_WITHIN, Relay, VideoOutput};
 
 use std::collections::{HashMap, VecDeque};
@@ -1019,6 +1019,14 @@ where
                 }
                 MediaChange::Failed(why) => {
                     self.media_failed(call, &why, now);
+                    return;
+                }
+                MediaChange::Closed => {
+                    log::info!(
+                        "call {}: the far end closed the media and the call's end didn't come: it left",
+                        call.get()
+                    );
+                    self.calls.media_closed(call, now);
                     return;
                 }
             }

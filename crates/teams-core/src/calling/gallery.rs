@@ -14,6 +14,8 @@
 //!   a control plane (the mixed playout says nothing of who in it speaks). The account itself is speaking while what
 //!   its microphone hears is. A level that falls quiet keeps its speaker for [`SPEAKING_HOLD`], so a pause between
 //!   words doesn't flicker.
+//! - **Whether the microphone hears anything** (before its processing, muted or not; held as speaking is): what the
+//!   speaking mark can't tell when the processing takes everything out, as it does an echo it cancels.
 
 use std::time::{Duration, Instant};
 
@@ -22,6 +24,9 @@ use teams_media::session::{AudioLevels, SourceRequest};
 
 /// The RMS level (0 to 1) above which a side is speaking: about -34 dBFS, above a quiet room's noise.
 pub const SPEAKING_LEVEL: f32 = 0.02;
+/// The RMS level (0 to 1) of what the microphone delivers, before its processing, above which it hears something:
+/// -80 dBFS, under any real microphone's own noise, over a silent source's.
+pub const HEARING_LEVEL: f32 = 1e-4;
 /// How long a side stays speaking after its level fell below [`SPEAKING_LEVEL`].
 pub const SPEAKING_HOLD: Duration = Duration::from_millis(400);
 
@@ -39,11 +44,15 @@ pub struct CallParticipant {
     pub speaking: bool,
 }
 
-/// What a call's view is now: its participants, and whether the account itself is speaking.
+/// What a call's view is now: its participants, whether the account itself is speaking, and whether its microphone
+/// hears anything.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CallView {
     pub participants: Vec<CallParticipant>,
     pub speaking: bool,
+    /// What the microphone delivers is above [`HEARING_LEVEL`] before its processing (or was within
+    /// [`SPEAKING_HOLD`]).
+    pub hearing: bool,
 }
 
 /// A running call's participants and lines (see the module docs).
@@ -63,6 +72,8 @@ pub(super) struct Gallery {
     /// Until when the far end (a 1:1 call's) and the account are speaking.
     far_until: Option<Instant>,
     near_until: Option<Instant>,
+    /// Until when the microphone hears something.
+    captured_until: Option<Instant>,
     /// What was last told.
     told: Option<CallView>,
 }
@@ -159,6 +170,9 @@ impl Gallery {
         if levels.near > SPEAKING_LEVEL {
             self.near_until = Some(now + SPEAKING_HOLD);
         }
+        if levels.captured > HEARING_LEVEL {
+            self.captured_until = Some(now + SPEAKING_HOLD);
+        }
     }
 
     /// The view at `now`, when it changed since last told.
@@ -202,6 +216,7 @@ impl Gallery {
         CallView {
             participants,
             speaking: self.near_until.is_some_and(|until| now < until),
+            hearing: self.captured_until.is_some_and(|until| now < until),
         }
     }
 }
@@ -224,7 +239,11 @@ mod tests {
     }
 
     fn levels(near: f32, far: f32) -> AudioLevels {
-        AudioLevels { near, far }
+        AudioLevels {
+            near,
+            far,
+            captured: near,
+        }
     }
 
     /// Who the view marks speaking: the account first, then each participant.
@@ -262,6 +281,30 @@ mod tests {
             speaking(&gallery.changed(now + SPEAKING_HOLD).unwrap()),
             (false, vec![false])
         );
+    }
+
+    #[test]
+    fn the_microphone_hears_what_its_processing_took_out_and_nothing_from_a_silent_source() {
+        let mut gallery = Gallery::new(false, false);
+        gallery.set_participants(vec![participant("8:orgid:far", 10)]);
+        let now = Instant::now();
+        let heard = |captured| AudioLevels {
+            near: 0.0,
+            far: LOUD,
+            captured,
+        };
+        // a silent source
+        gallery.levels(heard(0.0), now);
+        let view = gallery.changed(now).unwrap();
+        assert!(!view.hearing && !view.speaking);
+        // the far end's echo, cancelled: heard, not spoken
+        gallery.levels(heard(HEARING_LEVEL * 50.0), now);
+        let view = gallery.changed(now).unwrap();
+        assert!(view.hearing && !view.speaking);
+        // held as speaking is, then gone
+        gallery.levels(heard(0.0), now + SPEAKING_HOLD / 2);
+        assert_eq!(gallery.changed(now + SPEAKING_HOLD / 2), None);
+        assert!(!gallery.changed(now + SPEAKING_HOLD).unwrap().hearing);
     }
 
     #[test]

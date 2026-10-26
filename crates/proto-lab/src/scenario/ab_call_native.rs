@@ -724,7 +724,11 @@ pub(crate) async fn hear_on_page(
 /// b's page turns its camera on (Chrome's fake camera) and must decode at least [`PAGE_FRAMES`] of the native client's
 /// video (its camera on [`NATIVE_CAMERA_AFTER`] after the call connected) within [`VIDEO_WAIT`] (the capture from byte
 /// `from` on).
-async fn see_on_page(session: &mut LabSession, from: u64, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+pub(crate) async fn see_on_page(
+    session: &mut LabSession,
+    from: u64,
+    report: &mut ScenarioReport,
+) -> Result<(), ScenarioError> {
     session.driver().click("b turns its camera on", CAMERA).await?;
     report.notes.push(format!("b: camera on at {}", now_ms()));
     let Some(file) = session.capture_dir().map(|dir| dir.join(EVENTS_FILE)) else {

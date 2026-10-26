@@ -1,12 +1,13 @@
-//! Devices added to the sandbox's PipeWire while it runs, and removed again: a microphone playing a tone of its own
-//! (an `Audio/Source`), or a speaker recorded to a file of its own (an `Audio/Sink`), each a stream of the helper's
-//! thread that the session manager takes for a device. A node's `priority.session` above the sandbox's own devices'
+//! Devices added to the sandbox's PipeWire while it runs, and removed again: a microphone playing a sound of its own
+//! (an `Audio/Source`: a steady tone, or given samples over and over, each buffer of those marked on a [`Timeline`]),
+//! or a speaker recorded to a file of its own (an `Audio/Sink`), each a stream of the helper's thread that the session
+//! manager takes for a device. A node's `priority.session` above the sandbox's own devices'
 //! ([`super::DEVICE_PRIORITY`]) makes it the system's default as it comes, as a headset plugged in does; below, it is
 //! only there to be chosen. Dropping its [`AddedNode`] removes it, as a device unplugged.
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use pipewire::core::CoreRc;
@@ -17,6 +18,7 @@ use teams_media::devices::wav::WavWriter;
 use teams_media::tone::{Tone, ToneGenerator};
 
 use super::media::{self, Command, Open, as_pod, audio_format, text, to_usize};
+use super::timeline::{Timeline, now_us};
 use crate::SandboxResult;
 
 /// How long the helper's thread gets to add or remove a node.
@@ -30,10 +32,19 @@ pub struct NodeSpec {
     pub priority: u32,
 }
 
+/// What an added microphone plays.
+pub enum Sound {
+    /// A steady tone.
+    Tone(Tone),
+    /// These samples, over and over from the first; each buffer marked on the timeline (its first sample counted
+    /// from the node's start).
+    Looped(Arc<[f32]>, Timeline),
+}
+
 /// What a node added does.
 pub(super) enum Added {
-    /// Plays `tone`.
-    Microphone(NodeSpec, Tone),
+    /// Plays its sound.
+    Microphone(NodeSpec, Sound),
     /// Records what it is given to `recording`.
     Speaker(NodeSpec, PathBuf),
 }
@@ -50,6 +61,7 @@ impl Added {
 pub struct AddedNode {
     name: String,
     recording: Option<PathBuf>,
+    timeline: Option<Timeline>,
     commands: pipewire::channel::Sender<Command>,
     removed: bool,
 }
@@ -62,6 +74,10 @@ impl AddedNode {
             Added::Speaker(_, path) => Some(path.clone()),
             Added::Microphone(..) => None,
         };
+        let timeline = match &added {
+            Added::Microphone(_, Sound::Looped(_, timeline)) => Some(timeline.clone()),
+            Added::Microphone(..) | Added::Speaker(..) => None,
+        };
         let (done, answer) = mpsc::channel();
         commands
             .send(Command::Add(added, done))
@@ -72,6 +88,7 @@ impl AddedNode {
         Ok(Self {
             name,
             recording,
+            timeline,
             commands,
             removed: false,
         })
@@ -86,6 +103,12 @@ impl AddedNode {
     #[must_use]
     pub fn recording(&self) -> Option<&Path> {
         self.recording.as_deref()
+    }
+
+    /// When a looped microphone's samples were played ([`Sound::Looped`]); `None` for any other node.
+    #[must_use]
+    pub fn timeline(&self) -> Option<&Timeline> {
+        self.timeline.as_ref()
     }
 
     /// Removes the node, as a device unplugged, and waits until it is gone.
@@ -118,7 +141,7 @@ impl Drop for AddedNode {
 /// Makes the node on the helper's thread.
 pub(super) fn add(core: &CoreRc, added: Added) -> Result<Box<dyn Any>, String> {
     match added {
-        Added::Microphone(spec, tone) => microphone(core, &spec, tone),
+        Added::Microphone(spec, sound) => microphone(core, &spec, sound),
         Added::Speaker(spec, recording) => speaker(core, &spec, &recording),
     }
 }
@@ -143,10 +166,54 @@ fn connect(stream: &StreamRc, direction: Direction) -> Result<(), String> {
         .map_err(text)
 }
 
-fn microphone(core: &CoreRc, spec: &NodeSpec, tone: Tone) -> Result<Box<dyn Any>, String> {
+/// What an added microphone's stream plays, and how many samples it played so far.
+struct Playing {
+    source: Source,
+    played: u64,
+}
+
+enum Source {
+    Tone(ToneGenerator),
+    Looped {
+        samples: Arc<[f32]>,
+        at: usize,
+        timeline: Timeline,
+    },
+}
+
+impl Playing {
+    fn new(sound: Sound) -> Self {
+        let source = match sound {
+            Sound::Tone(tone) => Source::Tone(ToneGenerator::new(tone)),
+            Sound::Looped(samples, timeline) => Source::Looped {
+                samples,
+                at: 0,
+                timeline,
+            },
+        };
+        Self { source, played: 0 }
+    }
+
+    /// The next `out.len()` samples, marked on a looped sound's timeline as played now.
+    fn fill(&mut self, out: &mut [f32]) {
+        match &mut self.source {
+            Source::Tone(tone) => tone.fill(out),
+            Source::Looped { samples, at, timeline } => {
+                timeline.mark(self.played, now_us());
+                for sample in out.iter_mut() {
+                    *sample = samples.get(*at).copied().unwrap_or(0.0);
+                    *at = if *at + 1 >= samples.len() { 0 } else { *at + 1 };
+                }
+            }
+        }
+        self.played += u64::try_from(out.len()).unwrap_or(0);
+    }
+}
+
+fn microphone(core: &CoreRc, spec: &NodeSpec, sound: Sound) -> Result<Box<dyn Any>, String> {
     let stream = device_stream(core, spec, "Audio/Source")?;
     let listener = stream
-        .add_local_listener_with_user_data(ToneGenerator::new(tone))
+        .add_local_listener_with_user_data(Playing::new(sound))
         .process(|stream, tone| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;

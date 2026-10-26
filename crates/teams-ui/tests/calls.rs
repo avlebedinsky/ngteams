@@ -980,6 +980,7 @@ fn view(who: &[(&str, &str, bool, Option<usize>, bool)], speaking: bool) -> Call
             })
             .collect(),
         speaking,
+        hearing: speaking,
     }
 }
 
@@ -1028,7 +1029,7 @@ fn a_group_call_s_grid_shows_each_participant_its_video_and_who_speaks() {
     assert_eq!(cells[0]["people"], serde_json::json!([LAB_B]));
     assert_eq!(
         kinds(lines(&written, "call-participant", "self").last().unwrap()),
-        ["quiet"]
+        ["quiet", "mic-silent"]
     );
 
     // c leaves and the account speaks: the grid follows
@@ -1041,7 +1042,7 @@ fn a_group_call_s_grid_shows_each_participant_its_video_and_who_speaks() {
     assert!(!drawn(cx, "call-participant-1"));
     assert_eq!(
         kinds(lines(&written, "call-participant", "self").last().unwrap()),
-        ["speaking"]
+        ["speaking", "mic-sound"]
     );
     no_name_in(&written);
 }

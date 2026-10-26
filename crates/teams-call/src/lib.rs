@@ -66,7 +66,8 @@
 //!   renegotiation and an answer name the `Video` modality ([`Calls::set_video`]).
 //! - **Media and the engine**: the media failing ends the call as a failed step does ([`Calls::fail_media`],
 //!   [`End::Failed`] `"media"`; a call whose start or join is unanswered leaves once it is, as a hang-up then does);
-//!   the engine stopping hangs a call up and lets an invitation that rings go unanswered
+//!   media the far end closed with no end delivered after it ends an up call as the far end's ([`Calls::media_closed`],
+//!   [`End::Remote`] with nothing read into it, a `leave` sent); the engine stopping hangs a call up and lets an invitation that rings go unanswered
 //!   ([`Calls::shut_down`]).
 //! - **Not sent**: the account's own participant properties (its AI voice consent), which the web client posts once it
 //!   answered: nothing of the call waits for them.

@@ -121,7 +121,8 @@ enum Command {
         /// Seconds the web client may take to load, per account.
         #[arg(long, default_value_t = 180)]
         timeout: u64,
-        /// What a call scenario (`ab-call`, `abc-call`) does: hold back a's starts, or which end the ring comes to.
+        /// What a call scenario (`ab-call`, `abc-call`) does: hold back a's starts, or which end the ring comes to; for
+        /// `ab-call-app`, whether b's page answers a's call (`answer`) or calls a (`place`).
         #[arg(long, value_enum, default_value_t = CallStep::Answer)]
         call: CallStep,
     },

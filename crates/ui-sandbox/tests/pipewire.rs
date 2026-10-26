@@ -18,14 +18,17 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use teams_media::devices::DeviceError;
 use teams_media::devices::pipewire::{PipeWireDevices, QUEUED_VIDEO, SANDBOX_CLIENT_CONF, SANDBOX_SOCKET};
 use teams_media::devices::wav;
-use teams_media::tone::{Tone, amplitude_at, decibels};
+use teams_media::tone::{Tone, ToneGenerator, amplitude_at, decibels};
 use tempfile::TempDir;
-use ui_sandbox::pipewire::{Echo, PipeWireOptions, PipeWireTools, PrivatePipeWire};
+use ui_sandbox::pipewire::nodes::NodeSpec;
+use ui_sandbox::pipewire::timeline::now_us;
+use ui_sandbox::pipewire::{DEVICE_PRIORITY, Echo, PipeWireOptions, PipeWireTools, PrivatePipeWire};
 use ui_sandbox::{
     LineError, Running, SANDBOX_ENV, SandboxOptions, SandboxResult, clean_command, required, spawn, unavailable,
 };
@@ -209,6 +212,69 @@ fn recording_level(pipewire: &PrivatePipeWire, hz: f32) -> SandboxResult<f32> {
         .chunks(24_000)
         .map(|window| amplitude_at(window, hz))
         .fold(0.0, f32::max))
+}
+
+/// A microphone plugged in that plays given samples over and over is heard as the default and marks when it played
+/// them, at the devices' rate on the wall clock; the speaker's recording marks when it heard each sample, so a tone
+/// played into the speaker is found in the recording at the time it was played.
+#[test]
+fn a_looped_microphone_and_the_recording_mark_when_their_samples_went_through() {
+    let Some(private) = private_or_skip("the timelines", &PipeWireOptions::default()) else {
+        return;
+    };
+    if let Err(error) = check_timelines(&private.pipewire) {
+        panic!("{error}{}", private.pipewire.logs());
+    }
+}
+
+fn check_timelines(pipewire: &PrivatePipeWire) -> SandboxResult {
+    let env = pipewire.client_env();
+    let started = now_us();
+    // a second of 990 Hz, then a second of silence, over and over
+    let mut samples = vec![0.0; 96_000];
+    ToneGenerator::new(Tone {
+        hz: 990.0,
+        amplitude: 0.4,
+    })
+    .fill(&mut samples[..48_000]);
+    let spec = NodeSpec {
+        name: "sandbox-looped-mic".to_owned(),
+        description: "Looped microphone".to_owned(),
+        priority: DEVICE_PRIORITY + 1_000,
+    };
+    let node = pipewire.add_looped_microphone(spec, Arc::from(samples))?;
+    let heard = probe(&env, &["mic", "3", "990", "440"])?;
+    assert!(value::<f32>(&heard, "level_990") > 0.2, "{heard:?}");
+    let marks = node.timeline().ok_or("no timeline")?.marks();
+    let (first, last) = (marks[0], marks[marks.len() - 1]);
+    assert_eq!(first.sample, 0, "{first:?}");
+    assert!(first.unix_us >= started, "{first:?} before {started}");
+    let played = f64::from(u32::try_from(last.sample - first.sample)?);
+    let seconds = Duration::from_micros(u64::try_from(last.unix_us - first.unix_us)?).as_secs_f64();
+    assert!(seconds > 2.0, "{seconds} s of marks");
+    let rate = played / seconds;
+    assert!((rate - 48_000.0).abs() < 48_000.0 * 0.05, "played at {rate} Hz");
+    drop(node);
+
+    // a tone played into the speaker: the recording's first sample of it was heard while the probe played it
+    let before = now_us();
+    probe(&env, &["speaker", "1", "1000", "0.5"])?;
+    let after = now_us();
+    std::thread::sleep(Duration::from_millis(1_500));
+    let recorded = wav::read(&pipewire.recording())?;
+    let onset = recorded
+        .chunks(480)
+        .position(|window| amplitude_at(window, 1_000.0) > 0.25)
+        .ok_or("the tone isn't in the recording")?;
+    let heard_at = pipewire
+        .recording_timeline()
+        .time_of(u64::try_from(onset * 480)?)
+        .ok_or("the recording marked nothing")?;
+    assert!(
+        (before..after).contains(&heard_at),
+        "heard at {heard_at}, played between {before} and {after}"
+    );
+    Ok(())
 }
 
 /// The microphone, the speaker and the camera each say they are closed once the server they stream on goes away, and

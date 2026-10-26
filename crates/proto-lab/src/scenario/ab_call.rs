@@ -100,6 +100,8 @@ pub enum CallStep {
     /// As `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past the call's keep-alive interval, to record its
     /// keep-alive, which the fence permits on the call's own `callLeg` link: every page must have sent one.
     KeepAlive,
+    /// `ab-call-app` only: b's page places the call to a, whose app answers it (`ab-call` and `abc-call` refuse it).
+    Place,
 }
 
 impl CallStep {
@@ -116,6 +118,7 @@ impl CallStep {
             Self::Dropped => "dropped",
             Self::Join => "join",
             Self::KeepAlive => "keep-alive",
+            Self::Place => "place",
         }
     }
 
@@ -135,7 +138,7 @@ impl CallStep {
                 button: DECLINE_CSS,
                 what: "decline",
             }),
-            Self::StartHeld | Self::Cancel | Self::Timeout => None,
+            Self::StartHeld | Self::Cancel | Self::Timeout | Self::Place => None,
         }
     }
 }
@@ -468,8 +471,15 @@ pub(crate) fn mri(config: &LabConfig, alias: Alias) -> Result<String, ScenarioEr
 /// Runs a call scenario's `plan` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no tone file, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: `--call place` (`ab-call-app`'s only), no tone file, no Chrome, no fence, a browser that
+/// can't be armed.
 pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<ScenarioReport, ScenarioError> {
+    if plan.step == CallStep::Place {
+        return Err(setup(format!(
+            "{} doesn't take --call place: only ab-call-app does",
+            plan.scenario
+        )));
+    }
     let mut report = ScenarioReport::new(plan.scenario);
     report
         .notes
@@ -1352,7 +1362,7 @@ fn judge_audio(caller: &mut LabSession, callees: &mut [(Alias, LabSession)], rep
 }
 
 /// Notes what `alias`'s call screen says of its microphone (the microphone button's label: muted or not).
-async fn note_microphone(alias: Alias, session: &LabSession, report: &mut ScenarioReport) {
+pub(crate) async fn note_microphone(alias: Alias, session: &LabSession, report: &mut ScenarioReport) {
     let mut driver = session.driver();
     driver.set_call_timeout(Duration::from_secs(10));
     let label = driver

@@ -79,6 +79,8 @@ pub(crate) enum Ending {
     Failed(Step),
     /// The call's media failed ([`crate::Calls::fail_media`]).
     Media,
+    /// The far end closed the call's media and its end wasn't delivered ([`crate::Calls::media_closed`]).
+    Closed,
 }
 
 /// The name a call whose media failed ends with ([`End::Failed`]).
@@ -90,6 +92,7 @@ impl Ending {
             Self::HungUp => End::HungUp,
             Self::Failed(step) => End::Failed(step.name()),
             Self::Media => End::Failed(MEDIA),
+            Self::Closed => End::Remote(crate::RemoteEnd::default()),
         }
     }
 }

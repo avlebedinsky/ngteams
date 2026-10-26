@@ -1183,24 +1183,44 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 - Create: `crates/teams-app/tests/call_live.rs` (`required-features = ["live"]`),
   `crates/proto-lab/src/scenario/ab_call_app.rs`, `docs/m3-acceptance.md`
 
-- [ ] the live test is an orchestrator only, as `ui_live` is: a sandbox per app with its private PipeWire and fake
+- [x] the live test is an orchestrator only, as `ui_live` is: a sandbox per app with its private PipeWire and fake
       camera, each app's broker outside, the normally built (release) app for a, b and c, keyboard only, traces,
       recordings and `fence.log`; b's web side, where a case needs it, is a spawned normally built `proto-lab run
       ab-call-app` (wait and answer, or call), coordinated by the app's trace lines; no browser and no write in the
       `cargo test` process
-- [ ] (`PROTO_LAB_LIVE=1`): a's test call returns its tone; a calls b, b's ringtone plays, b answers from the
+      → done: `crates/teams-app/tests/call_live.rs` (+ `call_live/{apps,audio,fence,numbers,web}.rs`, cases picked by
+      `CALL_LIVE_PHASES`); `proto-lab run ab-call-app --call answer|place` (`CallStep::Place`, progress lines on
+      stdout, the page's own microphone checked and switched again while silent); `ui_sandbox::pipewire::timeline`
+      (the recording's and a looped microphone's buffers marked on the wall clock) and `add_looped_microphone` for the
+      keyed voices, the keyed headset and the speech-like probe
+- [x] (`PROTO_LAB_LIVE=1`): a's test call returns its tone; a calls b, b's ringtone plays, b answers from the
       notification, the tone crosses both ways, video frames shown both ways, a switches its microphone mid-call, a
       hangs up; b declines a call and a sees it declined; a calls the group chat, b and c answer, audio and video among
       all three, c leaves and joins again, a ends it; the app on a and b's web client call each other both ways with
       audio and video
-- [ ] the echo-cancellation check through the whole app: b's sink looped into b's source by the sandbox's loopback
+      → done: run 23 (`docs/m3-acceptance.md`) passed every case. Found and fixed live (tests first): media the far
+      end closed was taken for media that never connected (the call failed at once, Task 16's open item), and a far
+      end's hang-up with no `call/end` delivered now ends the call as the far end's with a `leave`
+      (`Calls::media_closed`). Seen, not fixed: the service drops a native group leaver from the roster 34–71 s after
+      its `leave` (`docs/backlog/native-group-leave-seen-a-minute-late.md`); a decline now ends the caller's call
+      (0/5002) where the capture showed voicemail; b's page's fake microphone stays silent in calls it places
+      (harness, noted)
+- [x] the echo-cancellation check through the whole app: b's sink looped into b's source by the sandbox's loopback
       (Task 8), a hears no echo of itself beyond the margin
-- [ ] numbers: setup time, the echo's round trip, a → b tone latency, video frames per second, CPU per process in a
+      → done: b silent (its voice unplugged), a talking a speech-like signal: a heard back nothing above the
+      recording's resolution, 45.7 dB or more under what b played (margin 25 dB, Task 10's)
+- [x] numbers: setup time, the echo's round trip, a → b tone latency, video frames per second, CPU per process in a
       1:1 video call (p50/p95/max, load average beside them)
-- [ ] `fence.log`: writes only on calls the fence registered or offered and the lab chats; no deny of a mapped write;
+      → done: setup p50 2.1 s (1.3–5.9 s), echo round trip p50 16.8 s, a → b latency p50 230 ms (p95 230), 15 fps both
+      ways (the fake camera's), each app 14–15 % of a CPU (p95 15–18), load average 0.7–0.8
+- [x] `fence.log`: writes only on calls the fence registered or offered and the lab chats; no deny of a mapped write;
       no answer or decline outside the lab; screenshots and recordings under the lab's data dir, never the repo
-- [ ] `ui_live`, `chat_live`, `ab-chat` and `abc-chat` still pass; the gate passes; `docs/m3-acceptance.md` (numbers,
+      → done: judged by the test (`call_live/fence.rs`): run 23's 519 lines, no breach, no deny of a write, browser
+      denies only inside the page's runs; over every run of the task 4 070 allows, no write denied, no breach
+- [x] `ui_live`, `chat_live`, `ab-chat` and `abc-chat` still pass; the gate passes; `docs/m3-acceptance.md` (numbers,
       the fence's picture, flakes, any breached run next to its clean rerun)
+      → done: all four passed (`abc-chat` on its third run, once a call a failed run left in the group chat had
+      ended; the first round lost the network); the gate passes; no run was breached
 
 ### Task 22: The personal build's calls (after Task 2's approval)
 **Files:**

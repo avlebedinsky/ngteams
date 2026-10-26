@@ -946,6 +946,22 @@ impl Calls {
         }
     }
 
+    /// The far end closed the call `call`'s media, and the call's own end wasn't delivered in the grace the engine gives
+    /// it (a far end's hang-up closes the media first): the far end left. A call that is up ends as the far end's end
+    /// ([`End::Remote`], nothing read into it), with a `leave` so nothing of the account's leg is left behind; a call
+    /// in any other phase as [`Self::fail_media`] does.
+    pub fn media_closed(&mut self, call: CallId, now: Instant) {
+        let phase = self
+            .call
+            .as_ref()
+            .filter(|current| current.id == call)
+            .map(|current| current.phase);
+        match phase {
+            Some(Phase::Connected) => self.abandon(Ending::Closed, now),
+            _ => self.fail_media(call, now),
+        }
+    }
+
     /// The engine stops: the call that is up is hung up as [`Self::hang_up`] does (a `leave`, or the decline of an
     /// answer whose `accept` hasn't gone), and an invitation that rings here (or isn't shown yet) is let go here
     /// unanswered: nothing is sent for it, its ring goes on at the account's other endpoints.

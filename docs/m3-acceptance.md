@@ -1,0 +1,230 @@
+# M3 acceptance check (the lab)
+
+Date: 2026-10-26. M3 Task 21 (`docs/plans/20261024-native-teams-m3-calls.md`), on branch `native-teams-m3-calls`. Every
+live command ran from a **normal release build** (`cargo build --release -p teams-app --target-dir target/lab`, the same
+for `proto-lab` and `teams-headless`: no `test-support`, no `personal`), headless, under the lab's live lock (`flock
+~/.local/share/teams-lab/live.lock`) with an outer `timeout --signal=INT`; one app (and one broker) per lab account, each
+app in a UI sandbox of its own with its private PipeWire, one browser per lab profile in the `proto-lab` runs; nothing
+was left running after any run (checked after each). Writes went only to the lab's a–b chat, the recorded a–b–c group
+chat, the calls the fence registered or offered there, the echo service's test call and the lab accounts' own
+availability. No call outside the lab was answered or declined. The machine was quiet (load average 0.7–1.8 during
+the measured calls).
+
+| # | criterion | verdict |
+|---|---|---|
+| 1 | a's test call returns its tone | **met** (round trip p50 16.8 s, as Task 15's native echo call) |
+| 2 | a calls b; b's ringtone plays; b answers from the notification; the tone crosses both ways | **met** |
+| 3 | video frames shown both ways in the 1:1 call | **met** (15 fps each way: the fake camera's rate) |
+| 4 | a switches its microphone mid-call | **met** (a headset plugged into a's sandbox, followed in 1.6 s, back in 1.6 s; the call never ended) |
+| 5 | a hangs up; b's call ends with it | **met** |
+| 6 | b declines a call and a sees it declined | **met** (a's call ended by the service 0.4 s after b's decline; see §4) |
+| 7 | a calls the group chat, b and c answer, audio and video among all three | **met** (each hears both others; each window presents the other two on two lines) |
+| 8 | c leaves and joins again | **met**, slowly seen: a's grid dropped c 56 s after c's `leave` (§5, `docs/backlog/native-group-leave-seen-a-minute-late.md`); c's join connected in 1.7 s and a saw c's video again |
+| 9 | a ends it | **met**: a hung up; b's and c's calls went on (the service keeps a group call up while two are in it), and each hung up after 15 s |
+| 10 | the app on a and b's web client call each other both ways with audio and video | **met**, with one gap of the harness: the page's fake microphone was silent in the call it placed (§2) |
+| 11 | the echo-cancellation check through the whole app | **met**: a heard nothing of itself above what the recording resolves, 45.7 dB or more under what b played (b's speaker, the loopback's 6 dB included; §3) |
+| 12 | numbers: setup, the echo's round trip, a → b latency, video fps, CPU per process with the load average | **met** (§6) |
+| 13 | `fence.log`: writes only on calls the fence registered or offered and in the lab chats; no deny of a mapped write; no answer or decline outside the lab | **met** (§7) |
+| 14 | screenshots and recordings under the lab's data dir, never the repo | **met** (`<data_dir>/call-live/<time>/`, `<data_dir>/screenshots/<time>/`) |
+| 15 | `ui_live`, `chat_live`, `ab-chat` and `abc-chat` still pass | **met** (§8; `abc-chat` passed on its third run, after a call left running in the group chat by a failed run had ended) |
+| 16 | the gate | **met** (§9) |
+
+## The live test
+
+`crates/teams-app/tests/call_live.rs` (`--features live`, and only with `PROTO_LAB_LIVE=1`) is an orchestrator, as
+`ui_live` is: it opens no fence, holds no token and sends nothing itself. The acceptance run is run 23 (09:16Z, 410 s,
+every case in one process: `CALL_LIVE_PHASES` unset).
+
+- **A UI sandbox per account** with its private PipeWire (`ui-sandbox`): its own microphone, its speaker recorded, its
+  fake camera (a moving test pattern at 15 fps), and microphones plugged in and out as the cases need. a's own
+  microphone plays 440 Hz steady (the tone b's page's audio tap listens for); b's and c's are silent, and b's speaker
+  is looped back into b's own microphone (100 ms, 6 dB down).
+- **Voices**: before the app-to-app cases each account plugs in a microphone above its sandbox's own playing its tone
+  keyed (a 440, b 660, c 550 Hz, on and off in 200 ms slots of a degree-9 shift register's pattern). The call's noise
+  suppression lowers a steady tone within seconds (a's 440 Hz reached b at 0.0002 after ten seconds in run 10), so a
+  steady tone can't tell whether a voice still crosses.
+- **The one clock**: the sandbox's recorder marks when each buffer of the speaker's recording was heard, and a looped
+  microphone marks when each buffer it played went out (`ui_sandbox::pipewire::timeline`). Lining a keyed tone's
+  slots up with a recording, each 2 s of it, on this one clock gives a delay per block: the echo's round trip
+  (`test-call`) and a → b's latency (`one-to-one`).
+- **b's web client**: `proto-lab run ab-call-app --headless --call answer|place` (the new scenario,
+  `crates/proto-lab/src/scenario/ab_call_app.rs`), a normally built binary the test spawns, which arms its own browser
+  fence and says how far it got on stdout (`ab-call-app: ready|in-call|heard|mic|saw|ended at <ms>`); the test keeps
+  a's side in step by a's trace.
+- **The keyboard only**: Ctrl+K and "Test call", Ctrl+Shift+C (call), Ctrl+Shift+S (answer), Ctrl+Shift+J (join),
+  Ctrl+Shift+O (camera), Ctrl+Shift+H (hang up); b's answer and decline go through the call notification's actions on
+  b's sandbox's bus, as a desktop's would.
+- **What it reads**: each app's view trace (`in-call`, `call-banner`, `ringtone`, `call-notification`,
+  `video-tile presented`, `call-participant`), the recordings, `/proc` for CPU, and `fence.log` from the byte the run
+  began at. Outputs: traces, the apps', brokers' and page's output, the recordings and `summary.json` under
+  `<data_dir>/call-live/<time>/`; no text file there holds a token (checked by the run).
+
+## 1. The test call
+
+a plugs in the keyed headset (990 Hz) and runs "Test call" from the switcher; connected 5.9 s after the switcher was
+opened for it. That figure includes the test's own wait before Enter (the query typed, then 3 s for the switcher to
+take it in): run 23 took the time before the switcher, and the test now measures from the app's `call asked` line. The
+call is held 48 s; the echo service plays back what it recorded, and 8 blocks of a's recording lined up with what the
+headset played: round trip p50 16 760 ms, min 16 730, p95/max 21 800 (one block matched a later slot of the pattern's
+playback). Task 15's native echo call measured 16.7–16.9 s. Run 23 counted every block that lined up; the test now
+takes only the delay at least three blocks agree on (within 50 ms of each other), so a block lined up elsewhere, as
+that 21 800 ms one, is left out of the round trip.
+
+## 2. The app and b's web client
+
+- **a calls, b's page answers** (`--call answer`): a connected 5.6 s after Ctrl+Shift+C (the page's ring and its
+  scripted click included); a turned its camera on and presented the page's video; the page heard a's tone 3.4 s
+  after it was in the call, decoded a's video, and its own microphone played its tone (`mic`); a heard it (0.48);
+  a hung up; the page's run exited 0.
+- **b's page calls, a answers** (`--call place`): a's banner named b, its ringtone played (0.18 in a's recording);
+  Ctrl+Shift+S connected a 1.3 s later; a presented the page's video; the page heard a and decoded a's video; the
+  page hung up after 40 s and a's call ended `remote`; the page's run exited 0.
+- **The gap**: in every run where the page placed the call (runs 2–7, 9, 23) and in one where it answered (run 7), the
+  page's own microphone sent silence: its WebRTC audio source's level stayed 0 for the whole call, however often it
+  was switched to another microphone (three more switches, its microphone button "Mute mic", i.e. unmuted), while
+  Chrome's fake input played the tone file and the page heard and saw a throughout. The page then sent DTX packets
+  only (5–12 a second), and a's speaker played silence. So the page → app audio is checked only when the page says
+  `mic` (it did in the answering direction of run 23); the app's own reception is checked in every app-to-app case.
+  The earlier `ab-call-native` runs had the same gap unseen: a native callee answering the page heard its tone only
+  4–9 s of 20 (`tone hz=440 heard=true seconds=…`).
+
+## 3. 1:1 between the apps
+
+- **The ring**: a's Ctrl+Shift+C; b's banner named a, b's ringtone started and was in b's recording (0.19 at 784 Hz),
+  b's notification came; after 3 s b answered from it; b connected 1.3 s after the answer, a 1.3 s after.
+- **The voices**: a heard b's (0.14 at 660 Hz), b heard a's (0.07 at 440 Hz).
+- **Echo cancellation**: b's voice unplugged (b silent, its microphone only the loopback of its speaker), a talked (a
+  speech-like signal: low-passed noise in 250 ms syllables, every fourth a pause, as `teams_media::test_signal`'s far
+  end); after 8 s b played a's speech at 0.0019 (its speech-band level), and a heard back 0.0000001, under the floor
+  measured while a was quiet (0.000013): 45.7 dB under what b played, the margin capped at what a 16-bit recording
+  resolves. The earlier measure with steady tones (runs 9–10) read 19.3 and 11.6 dB: a steady tone is noise to the
+  suppression and a period of it is no echo to the canceller, and b's own steady tone was constant double talk.
+  Run 23's margin was taken against b's speaker, so the loopback's 6 dB count in it; the test now takes it against
+  the echo at b's microphone (what b played, 6 dB down), as Task 10's test does, and also requires b's microphone to
+  have heard something before its processing at both ends of the window (b's trace, `call-participant self`
+  `mic-sound`), so a dead microphone can't pass for a canceller. Neither was in run 23.
+- **The microphone switched**: a headset (the keyed 990 Hz) plugged into a's sandbox above the system's; a's app
+  follows the system, and b heard the headset alone 1.6 s after it was plugged in; over 20 s 9 blocks gave a → b's
+  latency: p50 230 ms, min 190, p95/max 230. Unplugged, b heard a's voice alone again 1.6 s later. a's call never
+  ended. (The settings' own choice of a device is checked on the mock: `call_window`, M3 Task 20.)
+- **Video**: both cameras on; each window presented the other's video and its own self view, 15.0 fps each (p50; min
+  14.9, max 15.1 over 20 s): the fake camera's 15 fps.
+- **The end**: a hung up; a's call ended `hung-up`, b's `remote`.
+
+## 4. The decline
+
+a called b again; b declined from the notification 3 s into the ring; b's call ended `declined` 0.15 s later. The
+service then ended a's call 0.43 s after the decline, as `remote` with code 0/5002 ("all participants left the
+audio-video modality"). When the decline was captured (M3 Task 6, Task 17) the service took a declined call to b's
+voicemail instead (a's bar says "Declined or not answered: voicemail"); in all of today's runs it ended the call. The
+test takes either as a seeing the decline.
+
+## 5. The group call
+
+- a called the group chat from its header (connected 2.4 s after Ctrl+Shift+C); b answered from its notification
+  (connected 2.1 s after), c by Ctrl+Shift+S (2.1 s).
+- Each heard both others' voices (0.11–0.92), every camera went on, and each window presented the other two, each on
+  a line of its own (`line-1`, `line-2`), 30 frames or more each.
+- **c leaves**: c's Ctrl+Shift+H; c's call ended `hung-up` at once, its `leave` answered 204. a's grid dropped c 56 s
+  later (34–71 s over four runs), when the service's roster first marked c inactive: the roster kept c active with its
+  call's media until then. c's web client leaving the same kind of call is seen within 7 s (`abc-call-mixed`), with
+  the same `leave` body. Filed: `docs/backlog/native-group-leave-seen-a-minute-late.md`.
+- **c joins again**: c's chat offered Join (`call-button shown join`); Ctrl+Shift+J connected 1.7 s later; a's grid
+  listed c again, c heard a and b, b heard c, c turned its camera on and saw both, and a presented c's video on
+  `line-2` again (30 more frames).
+- **a ends it**: a hung up; b's and c's calls stayed up (two are still in it), and each hung up 15 s later.
+
+## 6. The numbers
+
+Run 23, one machine, one clock (Unix ms of the traces and the sandbox's marks), load average 0.7–0.8.
+
+| | n | min | p50 | p95 | max |
+|---|---|---|---|---|---|
+| setup: the ask that brings a call up → the asker's media connected, ms (every call of the run; the test call's includes the test's 3 s wait, §1) | 9 | 1 270 | 2 103 | 5 878 | 5 878 |
+| the echo's round trip, ms (2 s blocks, every block that lined up, §1) | 8 | 16 730 | 16 760 | 21 800 | 21 800 |
+| a → b tone latency, ms (2 s blocks) | 9 | 190 | 230 | 230 | 230 |
+| a's window presenting b's video, fps | 9 | 15.0 | 15.0 | 15.1 | 15.1 |
+| b's window presenting a's video, fps | 9 | 14.9 | 15.0 | 15.1 | 15.1 |
+
+Setup by call: the test call 5 878 ms (from before the switcher's typing and the test's 3 s wait before Enter, §1, to
+connected: its start, the echo service's answer and media), a calling
+b's page 5 573 ms (the page's ring and click included), b's page calling a 1 296 ms (from a's answer), 1:1 b's
+answer → b 1 335 / → a 1 270, group a 2 355 / b 2 130 / c 2 103, c's join 1 693 ms.
+
+CPU per process in the 1:1 video call (both cameras on, 20 one-second samples, % of one CPU):
+
+| process | p50 | p95 | max |
+|---|---|---|---|
+| a's app | 14 | 15 | 16 |
+| b's app | 15 | 18 | 18 |
+| a's niri / weston / PipeWire / WirePlumber | 2 / 0 / 0 / 0 | 3 / 2 / 1 / 0 | 3 / 2 / 1 / 0 |
+| b's niri / weston / PipeWire / WirePlumber | 2 / 1 / 0 / 0 | 2 / 1 / 1 / 0 | 3 / 2 / 1 / 0 |
+| the orchestrator (the sandboxes' cameras and recorders) | 2 | 2 | 3 |
+
+An app holding a 1:1 video call (OpenH264 at 640×360, 15 fps each way, Opus, the audio processing) takes about 15 %
+of one CPU on this machine: no case for hardware video encoding yet.
+
+## 7. `fence.log`
+
+Run 23, from the byte the run began: 519 whole lines, no breach, no deny of a write; every permitted write is one the
+run made:
+
+| writes permitted | count |
+|---|---|
+| call starts: the test call (`new`, the caller and the echo service) / in the a–b chat / in the group chat | 1 / 5 / 1 |
+| the join of the running group call | 1 |
+| answers (`accept`) / the decline (`reject`) / the ring's `attach` and `progress` | 6 / 1 / 7 and 7 |
+| follow-ups on registered calls: endpoint metadata 13, endpoint state 6, renegotiate 10, media answer 12, media acknowledge 8, channel parameters 4, media descriptions 4, participant properties 2, leave 8; the echo's `add` 1 | 68 |
+| the lab accounts' own availability | 8 |
+| typed delivery responses: acceptance acknowledgements / invitation receipts / negotiation receipts | 6 / 6 / 19 |
+
+Every call write but the starts is on `Scope::CallOperation`, so the call registry resolved it: a call this run's
+fence started, joined or answered, or an invitation it offered. Every answer and the decline were on an invitation the
+fence offered (a lab caller's, naming only lab accounts). The denies (113) are all browser denies inside b's page's two
+runs (95 of the reviewed expected-deny list, 18 of the runs' labelled forced holds), which the scenario judged itself
+(both runs exited 0). Requests let through because they reach nobody (`allowed`): the registrations, presence reads
+and subscriptions, the endpoints' availability `PUT`, telemetry and the page's own token and settings requests.
+
+Over every run of the task (06:31–09:26Z, runs 1–23 and the regressions): 4 070 allows and 1 046 browser denies, no
+deny of a write and no breach, contained or arming-failure line.
+
+## 8. The other live checks
+
+- `proto-lab run ab-chat --headless` (08:02Z): exit 0, `ok`.
+- `teams-headless`'s `chat_live` (08:05Z): passed. `teams-app`'s `ui_live` (08:08Z): passed.
+- `proto-lab run abc-chat --headless`: failed at 08:04Z and 08:13Z (b's page showed the group chat at Saturday's
+  messages and never the new one, with no jump to the newest offered) while a call a failed run had left running
+  in the group chat was still up (§ The failed runs, run 13); passed at 09:24Z (exit 0, `ok`) once it had ended.
+- The first attempt at all four (07:53Z) lost the network: `teams.microsoft.com` didn't answer for about 10 minutes.
+
+## The failed runs
+
+None was a breach. Each failed run's output is kept under `<data_dir>/call-live/`.
+
+- **Runs 2–4** (web): a heard nothing from the page in the call the page placed. Read: the page's microphone was
+  silent (§2), not the app. `ab-call-app` now switches its microphone again while its own audio source stays silent,
+  and says `mic` when it plays.
+- **Runs 4–6** (web): a's call the page hung up ended `failed media` instead of `remote` (the open item Task 16 left: b
+  "failed media about 90 ms after a hung up"). Two defects, fixed with tests: media the far end closed counted as
+  media that never connected once the connect deadline had passed (`teams-core`, `calling/media.rs`, `Deadlines`), so
+  the call failed at once instead of giving the call's own end its grace; and when that end never comes (none did in
+  runs 5–6: the media closed and no `call/end` was delivered), the call now ends as the far end's (`End::Remote`, nothing
+  read into it) with a `leave`, not as a failure (`Calls::media_closed`).
+- **Run 8**: the test call's start got no answer within 10 s (outcome unknown, not sent again): environment.
+- **Runs 9–11**: the echo check measured with steady tones and b talking throughout (§3), then a floor measured too
+  soon after b fell silent; fixed in the test.
+- **Run 12**: a was told of b's decline by the call ending, not by voicemail (§4); the test takes both now.
+- **Runs 13, 18, 20, 21**: a's in-call bar never dropped c after c left: the bar's people are its callees, not the roster;
+  the test reads the grid (`call-participant shown`) now, which drops c once the service does (§5).
+- **Runs 14–16**: the group call's start answered 409 ("Conversation cannot be created due to a failure to resolve
+  ownership") or timed out for 40 minutes: run 13's failure killed a's and b's apps inside the group call, which the
+  service kept up. The test now asks an app to quit from its tray when a run fails (its engine hangs up), and kills it
+  only after 15 s.
+- **Runs 17, 19**: Entra's token endpoint didn't answer (08:34–08:41Z, 08:49–09:02Z): environment.
+- **Runs 1, 22**: passed their phases (the test call; the group call).
+
+## 9. The gate
+
+On the final tree: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+`scripts/lint-report.sh` (two reasoned `expect`s, unchanged), `cargo test -p fixture-guard` and
+`PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 cargo test --workspace` all passed.

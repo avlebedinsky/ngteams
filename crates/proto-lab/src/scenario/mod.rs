@@ -36,12 +36,16 @@
 //! - [`abc_call_mixed`] (b's and c's web clients, and a's native client as `ab-call-native`'s): a's native client calls
 //!   the a–b–c group chat with video and both pages answer, c's page leaves and joins late; audio and video among all
 //!   three; recorded.
+//! - [`ab_call_app`] (account b's web client, as `ab-call-native`'s page): the far end of a call with a's app, which the
+//!   app's live test runs and spawns this scenario beside: b's page answers a's call (`--call answer`) or calls a
+//!   (`--call place`), with audio and video, saying how far it got on stdout as it goes; recorded.
 //!
 //! The steps are in [`dsl`]. A run fails (`proto-lab run` exits non-zero) when its goal isn't reached, when the fence
 //! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`]. The writing scenarios
 //! judge by the reviewed expected-deny list ([`expected`]), which never changes what the fence denies.
 
 pub mod ab_call;
+pub mod ab_call_app;
 pub mod ab_call_native;
 pub mod ab_chat;
 pub mod ab_chat_full;
@@ -111,6 +115,9 @@ pub enum ScenarioName {
     /// a's native client (`teams-headless`, `TEAMS_HEADLESS_BIN`) calls the a–b–c group chat with video, b's and c's web
     /// clients answer; c leaves and joins late; recorded.
     AbcCallMixed,
+    /// b's web client, the far end of a call with a's app (run by the app's live test): b answers a's call (`--call
+    /// answer`) or calls a (`--call place`), with audio and video; recorded.
+    AbCallApp,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -142,6 +149,7 @@ impl ScenarioName {
             Self::AbcCall => "abc-call",
             Self::AbCallNative => "ab-call-native",
             Self::AbcCallMixed => "abc-call-mixed",
+            Self::AbCallApp => "ab-call-app",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -163,7 +171,7 @@ pub struct RunOptions {
     pub display: Display,
     /// How long the web client gets to load, per account.
     pub load_timeout: Duration,
-    /// What a call scenario (`ab-call`, `abc-call`) does; the others don't read it.
+    /// What a call scenario (`ab-call`, `abc-call`, `ab-call-app`) does; the others don't read it.
     pub call: ab_call::CallStep,
 }
 
@@ -378,7 +386,8 @@ pub async fn run(
         | ScenarioName::AbCall
         | ScenarioName::AbcCall
         | ScenarioName::AbCallNative
-        | ScenarioName::AbcCallMixed => run_call(scenario, paths, options).await,
+        | ScenarioName::AbcCallMixed
+        | ScenarioName::AbCallApp => run_call(scenario, paths, options).await,
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth
@@ -398,6 +407,7 @@ async fn run_call(
         ScenarioName::AbCall => ab_call::run(paths, options).await,
         ScenarioName::AbcCall => abc_call::run(paths, options).await,
         ScenarioName::AbcCallMixed => abc_call_mixed::run(paths, options).await,
+        ScenarioName::AbCallApp => ab_call_app::run(paths, options).await,
         _ => ab_call_native::run(paths, options).await,
     }
 }

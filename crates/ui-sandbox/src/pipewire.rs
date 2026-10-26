@@ -23,6 +23,7 @@
 
 pub mod media;
 pub mod nodes;
+pub mod timeline;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -30,6 +31,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use teams_media::devices::file::PatternCamera;
@@ -37,7 +39,8 @@ use teams_media::devices::pipewire::{SANDBOX_CLIENT_CONF, SANDBOX_SOCKET};
 use teams_media::tone::Tone;
 
 use crate::{SANDBOX_ENV, SOCKET_WAIT, SandboxResult, private_dir, spawn, wait_until};
-use nodes::{Added, AddedNode, NodeSpec};
+use nodes::{Added, AddedNode, NodeSpec, Sound};
+use timeline::Timeline;
 
 /// The speaker's node (the default output).
 pub const SPEAKER_NODE: &str = "sandbox-speaker";
@@ -369,7 +372,32 @@ impl PrivatePipeWire {
     /// # Errors
     /// The helper's thread has stopped, or the node isn't there in time.
     pub fn add_microphone(&self, spec: NodeSpec, tone: Tone) -> SandboxResult<AddedNode> {
-        AddedNode::add(nodes::commands_of(self.media.as_ref())?, Added::Microphone(spec, tone))
+        AddedNode::add(
+            nodes::commands_of(self.media.as_ref())?,
+            Added::Microphone(spec, Sound::Tone(tone)),
+        )
+    }
+
+    /// Adds a microphone playing `samples` over and over (see [`nodes`]), as a device plugged in, each buffer it plays
+    /// marked on its [`AddedNode::timeline`]; it goes when the node is dropped.
+    ///
+    /// # Errors
+    /// The helper's thread has stopped, or the node isn't there in time.
+    pub fn add_looped_microphone(&self, spec: NodeSpec, samples: Arc<[f32]>) -> SandboxResult<AddedNode> {
+        AddedNode::add(
+            nodes::commands_of(self.media.as_ref())?,
+            Added::Microphone(spec, Sound::Looped(samples, Timeline::new())),
+        )
+    }
+
+    /// When the speaker's recording's samples were heard ([`timeline`]): sample `n` of the recording is sample `n` of
+    /// its timeline. Empty without the recording thread.
+    #[must_use]
+    pub fn recording_timeline(&self) -> Timeline {
+        self.media
+            .as_ref()
+            .map(media::MediaHelper::recording_timeline)
+            .unwrap_or_default()
     }
 
     /// Adds a speaker recorded to `recordings/<its name>.wav` in the sandbox dir (see [`nodes`]); it goes when the

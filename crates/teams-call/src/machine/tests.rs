@@ -1576,6 +1576,32 @@ fn a_renegotiation_delivered_again_as_it_was_is_a_replay_and_changes_nothing() {
 }
 
 #[test]
+fn media_the_far_end_closed_ends_the_call_as_the_far_end_s_with_a_leave_once() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    calls.media_closed(CallId(99), now);
+    assert!(changes(&mut calls).is_empty(), "another call's");
+    calls.media_closed(call, now);
+    let ended = effects(&mut calls);
+    assert_eq!(names(&ended), ["leave"]);
+    assert_eq!(
+        events(&ended).last(),
+        Some(&CallEvent::Ended {
+            call,
+            end: End::Remote(crate::RemoteEnd::default())
+        })
+    );
+    calls.media_closed(call, now);
+    assert!(changes(&mut calls).is_empty(), "it ended already");
+
+    // a call not up yet fails as its media failing does
+    let (mut calls, call, _start) = placing_call(now);
+    calls.media_closed(call, now);
+    let _ = effects(&mut calls);
+    assert!(calls.current().is_some(), "its start's answer is awaited first");
+}
+
+#[test]
 fn a_media_failure_fails_the_call_with_a_leave_once() {
     let now = Instant::now();
     let (mut calls, call) = connected_call(now);

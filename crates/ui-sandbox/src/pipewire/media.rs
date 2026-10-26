@@ -4,7 +4,7 @@
 //!   size and rate asked, a frame on each tick of its own timer (it drives its graph, as a camera does), each frame
 //!   carrying its index.
 //! - **The recording**: a capture of the speaker's monitor, written to a WAV file whose header is brought up to date
-//!   every second.
+//!   every second, each buffer marked on its [`Timeline`] (when its first sample was heard).
 //! - **Devices added and removed while it runs** ([`super::nodes`]): another microphone playing a tone of its own, or
 //!   another speaker recorded to a file of its own, as a device plugged in and out.
 //!
@@ -46,6 +46,7 @@ use teams_media::devices::pattern::TestPattern;
 use teams_media::devices::pipewire::CONFIG_OVERRIDES;
 use teams_media::devices::wav::WavWriter;
 
+use super::timeline::{Timeline, now_us, samples_to_us};
 use super::{CAMERA_NODE, SPEAKER_NODE};
 use crate::{SOCKET_WAIT, SandboxResult};
 
@@ -54,6 +55,7 @@ pub struct MediaHelper {
     commands: pipewire::channel::Sender<Command>,
     thread: Option<JoinHandle<()>>,
     frames: Arc<AtomicU64>,
+    recorded: Timeline,
 }
 
 /// What the helper's thread is asked.
@@ -87,7 +89,9 @@ impl MediaHelper {
         let (commands, commands_rx) = pipewire::channel::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let frames = Arc::new(AtomicU64::new(0));
+        let recorded = Timeline::new();
         let setup = Setup {
+            recorded: recorded.clone(),
             stream,
             client_conf: client_conf.to_owned(),
             recording: recording.to_owned(),
@@ -105,6 +109,7 @@ impl MediaHelper {
             commands,
             thread: Some(thread),
             frames,
+            recorded,
         };
         match ready_rx.recv_timeout(SOCKET_WAIT) {
             Ok(Ok(())) => Ok(helper),
@@ -117,6 +122,12 @@ impl MediaHelper {
     #[must_use]
     pub fn frames_shown(&self) -> u64 {
         self.frames.load(Ordering::Relaxed)
+    }
+
+    /// When the recording's samples were heard.
+    #[must_use]
+    pub fn recording_timeline(&self) -> Timeline {
+        self.recorded.clone()
     }
 
     /// The way to the helper's thread, for the nodes it adds.
@@ -146,6 +157,7 @@ fn config_override(var: impl Fn(&str) -> Option<OsString>) -> Option<&'static st
 }
 
 struct Setup {
+    recorded: Timeline,
     stream: UnixStream,
     client_conf: PathBuf,
     recording: PathBuf,
@@ -172,7 +184,7 @@ impl Setup {
         let context =
             ContextRc::new(&main_loop, Some(properties! { *pipewire::keys::CONFIG_NAME => conf })).map_err(text)?;
         let core = context.connect_fd_rc(self.stream.into(), None).map_err(text)?;
-        let _recorder = recorder(&core, &self.recording, ready.clone())?;
+        let _recorder = recorder(&core, &self.recording, self.recorded, ready.clone())?;
         let camera = Camera::show(&core, self.camera, self.frames)?;
         let ticks = camera.stream.clone();
         let timer = main_loop.loop_().add_timer(move |_| {
@@ -245,9 +257,17 @@ pub(super) fn audio_format() -> Result<Vec<u8>, String> {
 struct Recording {
     writer: Option<WavWriter>,
     ready: Option<mpsc::Sender<Result<(), String>>>,
+    /// Each buffer written, marked when its first sample was heard; `written` samples so far.
+    timeline: Timeline,
+    written: u64,
 }
 
-fn recorder(core: &CoreRc, path: &Path, ready: mpsc::Sender<Result<(), String>>) -> Result<Open<Recording>, String> {
+fn recorder(
+    core: &CoreRc,
+    path: &Path,
+    timeline: Timeline,
+    ready: mpsc::Sender<Result<(), String>>,
+) -> Result<Open<Recording>, String> {
     let props = properties! {
         *pipewire::keys::MEDIA_TYPE => "Audio",
         *pipewire::keys::MEDIA_CATEGORY => "Capture",
@@ -263,6 +283,8 @@ fn recorder(core: &CoreRc, path: &Path, ready: mpsc::Sender<Result<(), String>>)
     let state = Recording {
         writer: Some(WavWriter::create(path).map_err(text)?),
         ready: Some(ready),
+        timeline,
+        written: 0,
     };
     let listener = stream
         .add_local_listener_with_user_data(state)
@@ -285,10 +307,14 @@ fn recorder(core: &CoreRc, path: &Path, ready: mpsc::Sender<Result<(), String>>)
             let end = offset.saturating_add(size).min(bytes.len());
             let (samples, _) = bytes.get(offset..end).unwrap_or_default().as_chunks::<4>();
             let samples: Vec<f32> = samples.iter().map(|sample| f32::from_le_bytes(*sample)).collect();
-            if let Some(writer) = &mut state.writer
-                && writer.write(&samples).is_err()
-            {
-                state.writer = None;
+            let count = u64::try_from(samples.len()).unwrap_or(0);
+            if let Some(writer) = &mut state.writer {
+                if writer.write(&samples).is_err() {
+                    state.writer = None;
+                    return;
+                }
+                state.timeline.mark(state.written, now_us() - samples_to_us(count));
+                state.written += count;
             }
         })
         .register()

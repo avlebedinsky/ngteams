@@ -132,14 +132,16 @@ async fn an_answer_whose_media_fails_keeps_the_invitation_ringing_until_it_is_de
     assert_eq!(lab.sent_by(LAB_B), ["attach", "progress", "reject"]);
 }
 
+/// The far end closing the media with no end of the call delivered after it (seen live: a web client's hang-up
+/// closed its media and no `call/end` came): the far end left, and the account's leg leaves too.
 #[tokio::test]
-async fn the_far_end_closing_the_media_fails_the_call_with_a_leave() {
+async fn the_far_end_closing_the_media_ends_the_call_as_the_far_end_s_with_a_leave() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
     let call = a.handle.requests().call(test_call()).await.unwrap();
     a.status(call, &CallStatus::Connected).await;
     let _ = lab.mock.close_peer(&lab.last_call(), LAB_A);
-    assert_eq!(a.ended(call).await, End::Failed("media"));
+    assert_eq!(a.ended(call).await, End::Remote(teams_call::RemoteEnd::default()));
     wait_until(|| lab.sent_by(LAB_A).last().map(String::as_str) == Some("leave")).await;
     assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
 }

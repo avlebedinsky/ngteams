@@ -152,6 +152,9 @@ pub enum SessionEvent {
 pub struct AudioLevels {
     pub near: f32,
     pub far: f32,
+    /// The last 10 ms the microphone delivered, before its processing, muted or not (0 once it delivered nothing for
+    /// 100 ms): whether it hears anything at all (an echo the processing takes out is still here).
+    pub captured: f32,
 }
 
 /// The RMS level of a frame's samples.
@@ -212,6 +215,7 @@ struct Shared {
     /// [`AudioLevels`], each an `f32`'s bits.
     near_level: AtomicU32,
     far_level: AtomicU32,
+    captured_level: AtomicU32,
 }
 
 impl Shared {
@@ -226,6 +230,7 @@ impl Shared {
             video: VideoShared::default(),
             near_level: AtomicU32::new(0),
             far_level: AtomicU32::new(0),
+            captured_level: AtomicU32::new(0),
         }
     }
 
@@ -233,6 +238,7 @@ impl Shared {
         AudioLevels {
             near: f32::from_bits(self.near_level.load(Ordering::Relaxed)),
             far: f32::from_bits(self.far_level.load(Ordering::Relaxed)),
+            captured: f32::from_bits(self.captured_level.load(Ordering::Relaxed)),
         }
     }
 
@@ -981,7 +987,8 @@ impl Capture {
                         break;
                     }
                 }
-                Ok(None) => {}
+                // no frame for a while: the microphone hears nothing now (its last level isn't kept)
+                Ok(None) => self.shared.captured_level.store(0, Ordering::Relaxed),
                 Err(_) => {
                     self.shared
                         .report(SessionEvent::DeviceClosed(SessionDevice::Microphone));
@@ -994,6 +1001,9 @@ impl Capture {
 
     fn encode(&mut self, mut frame: AudioFrame) -> Result<(), Error> {
         let captured = Instant::now();
+        self.shared
+            .captured_level
+            .store(rms(frame.samples()).to_bits(), Ordering::Relaxed);
         if let Some(processing) = &self.processing {
             processing.near_end(&mut frame)?;
         }
