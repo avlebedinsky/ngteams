@@ -1286,15 +1286,32 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
       → pending: the user's report (the checklist's "Outcome" table waits for it)
 
 ### Task 24: [Final] Update documentation
-- [ ] README.md: the M3 crates, the calling scenarios, `teams-headless … call`, `join` and `watch --answer-lab-calls`,
+- [x] README.md: the M3 crates, the calling scenarios, `teams-headless … call`, `join` and `watch --answer-lab-calls`,
       the live call test, the sandbox's PipeWire and camera, calls in the personal build
-- [ ] CLAUDE.md: the patterns M3 settled (the call registry, the calling rows, answering, declining and joining, the
+      → done: M3's status line, the layout (`teams-fence`'s call rules, `teams-ui`'s calls, `teams`' calls, the
+      sandbox's added nodes, timelines and fake camera portal, `calling.md`, `m3-acceptance.md`, `native-call-run.sh`,
+      `fetch-openh264.sh`), the lab's `openh264/` and `call-live/`, the frame rule and the expected-deny list as they
+      are, `ab-call-app`, `--video`/`--camera-after`, the app's video, camera key, devices and `call_live`, the
+      personal build's calls (its "no call yet" gone), OpenH264 and which PipeWire each build opens
+- [x] CLAUDE.md: the patterns M3 settled (the call registry, the calling rows, answering, declining and joining, the
       media's reach, the device seam and which PipeWire each build opens, the personal build's calls), current rules
       only
-- [ ] `docs/protocol/endpoints.md` checked against every endpoint M3 touched
-- [ ] write the M4 plan (meetings and the calendar), informed by M3
-- [ ] `cargo test -p fixture-guard` and the gate pass
-- [ ] move this plan to `docs/plans/completed/`
+      → done: most were in already (the lab's entry rule, the registry as the personal rule, the personal fence's
+      calls); added the registry's tombstones, rejoin and `Fence::let_go`, the personal fence's offering in "Offered
+      invitations", a 1:1 call's roster, "A call's media reach" (relayed only, the dialect, OpenH264), "Calls in the
+      app", which PipeWire each build opens; the header points at M4
+- [x] `docs/protocol/endpoints.md` checked against every endpoint M3 touched
+      → done: status and reading notes (the personal rule beside the lab's), the calling section's intro (entry rule,
+      registry rule), the registrar, Trouter, calling, relay and OpenH264 rows checked against the code: stale native
+      claims fixed (`JoinCall::enter` only, `UpdateParticipantProperties` and `subscribe` not sent), the invitation's
+      chat read at answer time, the 1:1 roster; no endpoint missing
+- [x] write the M4 plan (meetings and the calendar), informed by M3
+      → done: `docs/plans/20261026-native-teams-m4-meetings.md` (20 tasks: rules' wording first, captures first, the
+      lab fence's entry rule kept, the app's live acceptance, the personal build, the user's checklist)
+- [x] `cargo test -p fixture-guard` and the gate pass
+      → done (the open M3 item, the user's real-call run, is at the top of `docs/m3-acceptance.md`)
+- [x] move this plan to `docs/plans/completed/`
+      → the harness moves it after the run
 
 ## Validation commands
 

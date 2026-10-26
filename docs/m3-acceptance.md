@@ -10,6 +10,10 @@ chat, the calls the fence registered or offered there, the echo service's test c
 availability. No call outside the lab was answered or declined. The machine was quiet (load average 0.7–1.8 during
 the measured calls).
 
+**Open: the user's real-call run.** The personal build's calls are tested on the mock only; their live proof is the
+user's run of [the checklist below](#the-users-real-call-checklist-the-personal-build), whose
+[outcome](#outcome) is still empty. Each problem the user reports is fixed in a follow-up and that step run again.
+
 | # | criterion | verdict |
 |---|---|---|
 | 1 | a's test call returns its tone | **met** (round trip p50 16.8 s, as Task 15's native echo call) |

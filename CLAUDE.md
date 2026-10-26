@@ -1,8 +1,8 @@
 # ms-teams
 
 A native Microsoft Teams client for Linux in Rust + GPUI, written against Teams' internal APIs with the web client as
-the reference. The work in progress is M3, calls (`docs/plans/20261024-native-teams-m3-calls.md`); finished plans
-are in `docs/plans/completed/`. Commands and layout are in [README.md](README.md).
+the reference. The next work is M4, meetings and the calendar (`docs/plans/20261026-native-teams-m4-meetings.md`);
+finished plans are in `docs/plans/completed/`. Commands and layout are in [README.md](README.md).
 
 ## Hard rules
 
@@ -252,8 +252,12 @@ What the code does and why. A change that undoes one of these needs a new reason
   call agent; an `add` maps only when its `groupChat` is the 1:1 chat of the sender and its one invitee and its
   `meetingInfo` names the sender as organizer; otherwise `Partial(UnregisteredCall)`, `Partial(CallEnded)` or `CallMismatch`. A permitted `leave` leaves
   only that `leave` passing; a delivery at the start's `conversationEnd` or call `end` callback ends the call for good.
-  `fence.log` never holds the sender. The native transport feeds the registry around a call write's send (below,
-  "The call writes"). A `conversationUpdate` binds nothing.
+  `fence.log` never holds the sender. A link held by a live call acts on that call; a call the account left keeps its
+  links as a tombstone, which yields to a re-invitation to that conversation answered since and to a rejoin (a later
+  start or join answered with the same conversation takes the links from an ending or ended call); a link two live
+  calls hold resolves to neither. An invitation the call machine dropped before it rang is retired for good
+  (`Fence::let_go`). The native transport feeds the registry around a call write's send (below, "The call writes").
+  A `conversationUpdate` binds nothing.
 - **The personal fence's calls** (`crates/teams-fence/src/decision/personal_calls.rs`, `docs/personal-build.md`,
   "Calls"): no roster. A start is judged by its chat's one fresh thread read (`Listed`) listing the account and every
   participant it names, the account among them (`CalleesNotInChat`, `NotAMember`); the test call's start and its
@@ -265,8 +269,10 @@ What the code does and why. A change that undoes one of these needs a new reason
   `pend_start` takes only the account's own start or join. The personal build creates no chat for the test call.
 - **Offered invitations** (`crates/teams-fence/src/calls/offer.rs`): an invitation delivery (Trouter `evt` 107 or
   109, `callNotification`) to the fence's own account (`Fence::open_lab_account`) from a lab caller is offered by
-  `observe_delivery`; a group call's invitation names only its caller, callee and group chat, so every decision on it
-  also reads that chat fresh. Every other invitation is ignored, and nothing answers or declines it under either rule.
+  `observe_delivery` (a personal fence offers one from any caller but the account itself, one at a time: above);
+  under the lab's rule a group call's invitation names only its caller, callee and group chat, so every decision on
+  it also reads that chat fresh. Every other invitation is ignored, and nothing answers or declines it under either
+  rule.
   Under the lab's call rule only an offered invitation's answer and decline are judged (above). Under the registry's
   rule, on it pass, each to exactly a link the invitation or an answer bound
   (`Scope::CallOperation`, `joins` naming the conversation an `attach` subscribes to): its receipt, the `attach`
@@ -370,8 +376,19 @@ What the code does and why. A change that undoes one of these needs a new reason
   `accept` and every answer to the mixer's renegotiations carry the descriptions and the bandwidth seed (without
   them the mixer sends no video on the receiving lines); our offers number H.264 as the mixer does (`107`, its
   retransmissions `99`: it takes only its own numbers); whose video each receiving line shows is a source request
-  on the data channel's control plane, which is media (never classified, never a write). Who is in the call comes
-  from the `rosterUpdate` deliveries, read only to show it: nothing is sent for them and the fence reads no roster.
+  on the data channel's control plane, which is media (never classified, never a write). Who is in a call, 1:1 or
+  group, comes from the `rosterUpdate` deliveries (a participant counts when it is `active` with an endpoint holding a
+  `call`: `teams-call`'s `read::roster`), read only to show it: nothing is sent for them and the fence reads no roster.
+- **A call's media reach** (`teams-media`): the peer gathers and writes only relayed candidates, through Teams' fixed
+  relay host (`TEAMS_RELAY_HOST`, resolved when the call's media is set up: every address over UDP 3478, then TCP 443,
+  a `300 Try Alternate` followed once; `RelayTokens` gives only the credentials and their expiry), never a host
+  candidate or a local address in an offer; its
+  sockets are `teams-media`'s own, never the HTTP transport's. Media and the data channel's control plane aren't
+  classified: they carry a call the signaling fence permitted. SDP goes to and from the call controller only in
+  Teams' dialect (`application/sdp-ngc-1.0`; a browser's SDP is refused where the dialect is required). H.264 is
+  Cisco's prebuilt OpenH264, loaded at run time only when its SHA-256 is Cisco's (the lab's from its data dir's
+  `openh264/`, the personal build's from the user's own copy); only a `test-support` build compiles the bundled
+  source. Without the library a call carries audio only.
 - **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The
@@ -466,10 +483,23 @@ What the code does and why. A change that undoes one of these needs a new reason
   Available while the window was used within the idle time or a manual status is chosen, refreshed on a timer; nothing
   once idle and nothing on quit (no captured request reports Away or Offline for one endpoint); a manual status when
   chosen and its reset when Automatic is chosen again. A failed report is shown and never sent again on its own.
+- **Calls in the app** (`teams-ui/src/calls.rs`, `call_alert.rs`, `call_view.rs`, `ringtone.rs`, `video.rs`): a
+  build shows calls only when its models were made with them (`Models::with_calls`: the lab app, and the personal
+  build once its calling opened); without them it shows, rings for and asks for none, whatever the engine tells. Every
+  ask is one `CallAction` through `Core::call`, which the engine judges again and sends under the fence, and each is
+  the user's: a button, a key, a switcher command or the incoming call's notification (Answer and Decline on the bus
+  the app is given). Nothing in the views answers, declines or turns the camera on by itself. The ringtone plays
+  through the device seam on the PipeWire the build allows; the video is drawn from the media's `VideoFeed` through
+  GPUI's external surfaces, and the settings' video switch turns the codec on or off for the calls from then on.
+  Calls are traced by number and kind (`call asked`, `ringtone started`, `video-tile presented`), never with a name.
 - **The calls' devices** (`teams-media/src/devices/pipewire*`, `devices/catalog.rs`, `devices/portal.rs`): the
   settings list PipeWire's microphones, speakers and cameras and keep a choice by node name, "follow the system" (no
   `target.object`) by default; a choice moves every open stream of its kind by making its replacement and swapping it
-  in once linked (make before break), so a call's device never says it closed. The personal build's camera comes
+  in once linked (make before break), so a call's device never says it closed. Which PipeWire a build opens is fixed
+  when it is built, never by an argument (`devices::pipewire::THIS_BUILD`): the UI sandbox's private one for the lab
+  and for every `test-support` build (even with `personal` on, as `--all-features` builds it), the desktop's only for
+  `personal` alone, which only `crates/teams` enables; `teams-headless` opens none (its media is files). The lab app
+  refuses a PipeWire outside the sandbox as it refuses a window outside it. The personal build's camera comes
   through the desktop's camera portal; a sandbox build asks only a portal on a bus inside the sandbox dir, where the
   sandbox's fake answers. WirePlumber moves a stream whose `target.object` names the current default to every later
   default (PulseAudio's rule), so a chosen device's stream sets `node.dont-move` (it stays on its node and falls back to

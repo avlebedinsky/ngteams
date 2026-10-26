@@ -21,7 +21,15 @@ Status:
   rules the user approved (`docs/personal-build.md`), built, installed and first run by the user alone. Images and
   files are a placeholder with a link to the web client (sending stays deferred). Plan
   `docs/plans/completed/20261021-native-teams-m2-gpui-daily-driver.md`, outcome `docs/m2-acceptance.md`.
-- **Next: M3**, calls (`docs/plans/20261024-native-teams-m3-calls.md`).
+- **M3 is done in the lab**: calls. 1:1 and group-chat calls, audio and video, made, answered, declined and joined
+  under the fence: the web client's calls mapped from captures, then native signaling (`teams-call`), media
+  (`teams-media`: Teams' SDP dialect, TURN, Opus, echo cancellation, H.264 on Cisco's OpenH264, PipeWire devices) and
+  the app's calls, checked live for a, b and c in the UI sandbox, against each other and against the web client both
+  ways (setup p50 2.1 s, a → b latency p50 230 ms, no echo above the recording's resolution). The personal build
+  (`teams`) makes and answers the user's own calls under the rules the user approved (`docs/personal-build.md`,
+  "Calls"), tested on the mock; the user's own real-call run, the checklist in `docs/m3-acceptance.md`, is still to
+  come. Plan `docs/plans/completed/20261024-native-teams-m3-calls.md`, outcome `docs/m3-acceptance.md`.
+- **Next: M4**, meetings and the calendar (`docs/plans/20261026-native-teams-m4-meetings.md`).
 
 Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
@@ -29,7 +37,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
 | path | contents |
 |---|---|
-| `crates/teams-fence` | the write fence of the lab rule: `contacting`, the one classifier the browser fence and the native transport share (a request reaches nobody and is allowed, is a mapped write with its target, or is a mutating request on a contacting service no row reads, denied); `Fence::check`, which permits a contacting write only when every participant of its target, read fresh and complete, is a lab account or an approved service (a new target, a chat or call created, judged by its added participants alone; typing, read receipts and the account's own availability without a member read); the lab config (`lab.toml`, and `chats.toml`, lab data the fence doesn't read), `fence.log` (appends locked across processes), the membership sources (`FailClosed`; `LiveMembershipSource`: 1:1 chats, and group and meeting chats from one fresh member-list read), the native client's credential for them (`CredentialSource`) |
+| `crates/teams-fence` | the write fence of the lab rule: `contacting`, the one classifier the browser fence and the native transport share (a request reaches nobody and is allowed, is a mapped write with its target, or is a mutating request on a contacting service no row reads, denied); `Fence::check`, which permits a contacting write only when every participant of its target, read fresh and complete, is a lab account or an approved service (a new target, a chat or call created, judged by its added participants alone; typing, read receipts and the account's own availability without a member read); the lab config (`lab.toml`, and `chats.toml`, lab data the fence doesn't read), `fence.log` (appends locked across processes), the membership sources (`FailClosed`; `LiveMembershipSource`: 1:1 chats, and group and meeting chats from one fresh member-list read), the native client's credential for them (`CredentialSource`); the calls (M3): the calling rows (`contacting/call.rs`: a chat's call start and the test call's, a join, an answer, a decline, an `add`, the follow-ups, each in its captured shape), the lab's call rule (`CallRule::Entry`: a call judged by its entry, a start by its chat's fresh read, a join by the chat it names, an answer or a decline only of the account's own offered invitation, an `add` by its invitees; what the call sends after that passes, logged), the call registry (`calls`: the calls this run's fence permitted and the links their services handed out, the invitations it offered; the personal build's rule, `CallRule::Registry`, under which a follow-up passes only to a link of a call it registered) and the personal build's call rule (`decision/personal_calls.rs`) |
 | `crates/fence-seal` | compile checks without `test-support`: no other crate can mint a `WritePermit`, send a request outside the native transport's three classes or hand a plain request over as a write, send a Trouter frame that isn't one of `teams-proto`'s typed `OwnFrame`s, or reach a mock origin; a lab binary has its membership sources |
 | `crates/teams-auth` | PKCE, the authorize URL and redirect, the code exchange and refresh, the account check on the ID token, the skypetoken (authz), secret storage (Secret Service through `oo7`), the credential broker (`broker`: one account's secrets served on a socket, and the `BrokerSecretStore` a sandboxed process uses); the `Session`: an access token per audience refreshed before it expires, the skypetoken renewed after its Entra token, throttling shared by waiting callers, renewal notifications |
 | `crates/teams-proto` | Teams' internal API and the native HTTP transport. Three request classes only: reads (`GET`, no body: the chat service's, Graph's name and picture, CSA's teams), plain requests (`Request`, an open trait: any method and body, sent only when `teams_fence::contacting` says it reaches nobody, logged to `fence.log` as `allowed` first: the messaging stack's endpoint registration, the middle tier's profile lookup, UPS's presence read, whoever they name), and sealed writes sent only as `Authorized<_>` with a `WritePermit` for their exact target (`SendMessage`, `EditMessage`, `DeleteMessage`, `SetReaction`/`RemoveReaction`, `ReadReceipt`, `Typing`, `CreateChat`, the account's own availability `SetEndpointAvailability`/`ForceAvailability` naming a `RegisteredEndpoint`; a call's requests, `StartCall`, `JoinCall`, the callee's `AttachCall`/`ReportRinging`, `AcceptCall`, `DeclineCall` and every captured operation on a call, each built whole and classified when made, sent to the calling service with the account's skypetoken, the links exactly as handed out, the fence's call registry fed around the send; a lab fence judges a call by its entry and permits the rest); a plain request the classifier calls a write or can't read is refused before anything is sent. Beside them the personal build's sealed lists (`OwnState`, `PostRead`), which no lab binary uses. The chat model (`chat`: conversations, messages, versions, reactions, mentions, quotes, a sanitized rich-text tree, paging and sync links) and `MessageText`, which builds a message's markup and its mentioned MRIs from one value. The Trouter frames: a `FrameSink` that sends only the typed `OwnFrame`s this crate builds, never raw text, none of them logged to `fence.log`, and answers a call delivery only with a typed response (`AcceptanceAcknowledgement`, `InvitationReceipt`) the fence permitted for its connection (`FrameSink::respond`). One base per service (the chat service, the registrar, Trouter's HTTP side, Graph, the calling service (the flight proxy), the TURN credentials' read and, once given the account's bases, the middle tier, CSA and UPS), each token only to its own service's host, `https` only, no proxy, no redirects, no hidden retries |
@@ -38,22 +46,22 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-call` | a call's signaling, sans-IO (M3): the state machine of the account's calls, one at a time (`Calls`), building each request a call makes as a sealed `teams-proto` write (the start of a chat's call or the test call, the join of a running group call, an invitation's receipt and `attach`, `progress`, the answer and the decline only on the account's action, the acceptance's acknowledgement as its delivery response or by request when that failed, the endpoint's state and metadata, the echo's `add`, a renegotiation of the account's and its answer's acknowledgement, the answer to a renegotiation delivered to it, the `leave`), handed to the engine's `WriteSink` with the id its outcome comes back under: it sends nothing itself. In: the account's actions, the calling socket's deliveries as the fence read them, the writes' outcomes, the media failing, the engine stopping, time; out: writes (one in flight at a time: beside it the engine takes everything but the next write, and a write refused unacted goes again only while its call wants it), typed delivery responses, events (an invitation that rings, a ring's end, the call's state, the far end's media or its renegotiation's offer, its end as delivered). An invitation during a call isn't offered; the keep-alive interval is kept and told, with no request (none captured) |
 | `crates/teams-core` | the headless client: the outbox (a `clientmessageid` per row, a fresh `Fence::check` for every attempt, the retry table, no resend across runs; transient writes; the call kind, `try_call`: no row, the answer back to the call machine, one more attempt only after a 401 or a short throttle), the catch-up sync (conversation list, message sync links, history), and the engine (its own tokio runtime, reached through a channel: actions in, events out); the account's calls (`calling`, M3 Task 14): the calling socket, the `teams-call` machine and the call's media (`teams-media`: the relay's credentials, an allocation, the session on the devices, Teams' SDP dialect, all before the start, join or answer goes; the far end's SDP applied, renegotiations either way), `EngineRequests::call` (a call from a chat, the test call, a join, an answer or a decline of an invitation it offered, a hang-up, mute, a renegotiation) and `Event::{IncomingCall, RingEnded, Call, CallingRegistration}`, one call at a time, a failed step or failed media ending the call with a `leave`, the engine's stop hanging up; a lab account's engine assembled as every lab binary builds it (`lab`) |
 | `crates/teams-media` | a call's media, apart from its signaling: Teams' SDP dialect (`sdp`: `application/sdp-ngc-1.0`, and the mixer's `-0.5` read only) to and from the standard SDP `str0m` speaks, both ways and on both sides of a call, the m-lines' mids and labels kept for the call's life, only relayed candidates written, a browser's SDP refused; the TURN client (RFC 8656, `stun`, `turn`) and its relay link on UDP or TCP with the fallback from UDP to TCP (`relay`); a loopback TURN server for tests (`test_turn`, `test-support` only), which can drop and reorder the RTP it relays; the call's `str0m` audio peer, sans-IO, and the same behind a TURN allocation with relayed candidates only (`peer`); Opus as the calls configure it (`codec`: 20 ms packets from two 10 ms frames, in-band FEC, DTX when the far end asks) and the receiving side's jitter buffer (`jitter`: packets back in media-time order, a lost one recovered from the next one's FEC or concealed, late, duplicate and overflowing ones dropped, a backlog shed so the delay stays near its depth, a jump far back in media time (a new source) starting it afresh); the microphone's echo cancellation, noise suppression and gain control (`processing`: WebRTC's audio processing module, AEC3, on the 10 ms frames, each frame the speaker plays handed to it as the far end; on in a call, off for a probe that needs a steady tone); a call's audio session on threads of its own (`session`: capture, network and playout threads, bounded handoffs to and from the devices, SDP commands answered by the network thread, DTX following the far end's Opus line); the device seam (`devices`: a call's microphone, speaker and camera as 10 ms mono frames at 48 kHz and raw video frames), with a file backend (`devices::file`: a tone, a WAV file or silence in, a WAV recording out, a test pattern carrying each frame's index as the camera, received frames counted; no audio server) and a PipeWire backend (`devices::pipewire`: the microphone, speaker and camera as streams on the one server the build may open, fixed when it is built: the UI sandbox's private one for the lab and every `test-support` build, the desktop's only for `personal` alone); tones and their levels for tests and probes (`tone`), and the speech-like and voice-like signals the processing is judged with (`test_signal`, `test-support` only). Sends no signaling |
-| `crates/teams-ui` | the GPUI views and models over the engine: the bridge (it owns the engine, drains its events into the models on GPUI's foreground, shuts it down off it; views reach it only through `Core`), the models, the root view and window, the shell (rail, chat list, conversation pane), the chat view (a conversation's messages from the store, a page at a time), our own rich text renderer (`teams-proto`'s `RichText` drawn with GPUI's text elements, links opened only through `open_url`), the chat switcher (Ctrl+K), the settings and their file, the desktop (the window, the notifications of messages that come and the tray item with the unread total, both over `zbus` on the session bus the app is given and nowhere else; closing the window keeps the app in the tray), the view trace (ids, kinds and times, never text), the theme (the UI kit's, Teams-like and compact, light and dark following the window); no HTTP or socket client, GPUI's HTTP client the null one |
+| `crates/teams-ui` | the GPUI views and models over the engine (and, from M3, calls: Call and Join in a chat's header, the incoming call's ringtone, banner and notification, the in-call bar, the video tiles and the participant grid, the devices in the settings): the bridge (it owns the engine, drains its events into the models on GPUI's foreground, shuts it down off it; views reach it only through `Core`), the models, the root view and window, the shell (rail, chat list, conversation pane), the chat view (a conversation's messages from the store, a page at a time), our own rich text renderer (`teams-proto`'s `RichText` drawn with GPUI's text elements, links opened only through `open_url`), the chat switcher (Ctrl+K), the settings and their file, the desktop (the window, the notifications of messages that come and the tray item with the unread total, both over `zbus` on the session bus the app is given and nowhere else; closing the window keeps the app in the tray), the view trace (ids, kinds and times, never text), the theme (the UI kit's, Teams-like and compact, light and dark following the window); no HTTP or socket client, GPUI's HTTP client the null one |
 | `crates/teams-log` | the app's diagnostic log: one file per account (`0600` in a `0700` dir, rotated at 8 MiB, 4 older kept), our own crates' records only, written from a thread of its own; every line redacted by the logger itself (credential headers, token fields, sign-in's codes, Trouter's `user.authenticate`, a call SDP's ICE credentials, then JWT-shaped strings, `skypetoken=`, `Bearer `); full requests and frames only at `debug`; the "copy diagnostics" text |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter,calling}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; the calling service (the flight proxy's call requests with the account's skypetoken, their invitations, acceptances and ends delivered to the registered calling endpoints, calls of a caller it plays, their ring's end and hang-up, renegotiations); the TURN relay's credentials (`/trap/tokens`); with its `media` feature, a loopback media peer (a `teams-media` session behind the loopback TURN server answering and offering in Teams' dialect), and once a test turns the media on (`start_media`) one behind every party the mock plays (the test call's media controller, a group call's mixer, a caller of its own) and its renegotiations, on a loopback TURN server whose credentials `/trap/tokens` then hands out; clients reach it through the `test-support` mock origins |
 | `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
 | `crates/teams-signin` | the sign-in window: Microsoft's sign-in page in a `WebKitGTK` 6.0 webview, in a process of its own, behind a request guard that classifies every request a page sends (`teams_signin::classify`: reads, the token endpoint and authz in their captured queries, Entra's sign-in form) and logs it to `fence.log` before it goes; the `nativeclient` redirect is caught in the navigation policy and its code handed to the parent on a channel of its own, and `teams-auth` redeems it. Not a complete fence (two kinds of redirect never reach the guard, `docs/backlog/webkit-sign-in-guard-redirects.md`), so the lab's `teams-signin` binary opens only a loopback page and reaches nothing else; the `personal` feature (only `crates/teams` enables it) binds the same window to Entra's and the identity provider's hosts through a host gate |
 | `crates/teams-signin-extension` | the sign-in window's `WebKitGTK` web process extension (a `cdylib`, hand FFI on the GLib `-sys` crates): connects every page's `send-request` to the guard's socket and drops each request the guard doesn't allow, every one when it has no guard |
-| `crates/teams` | the personal build (`docs/personal-build.md`): `teams`, the user's own account on the user's desktop under the personal fence (`teams-fence`'s `personal` feature, which only this crate enables), and `teams-signin-personal`, its sign-in window bound to Entra's and the identity provider's hosts through a host gate. No broker, no sandbox; its data under `~/.local/share/teams/` and `~/.config/teams/`, its tokens under `teams-personal` on the Secret Service. Left out of the root's `default-members`; both binaries refuse a `test-support` build and one `scripts/install-personal.sh` didn't make. Agents compile and mock-test it only |
+| `crates/teams` | the personal build (`docs/personal-build.md`): `teams`, the user's own account on the user's desktop under the personal fence (`teams-fence`'s `personal` feature, which only this crate enables), and `teams-signin-personal`, its sign-in window bound to Entra's and the identity provider's hosts through a host gate. No broker, no sandbox; its data under `~/.local/share/teams/` and `~/.config/teams/`, its tokens under `teams-personal` on the Secret Service. Left out of the root's `default-members`; both binaries refuse a `test-support` build and one `scripts/install-personal.sh` didn't make. Its calls (M3) run on the desktop's PipeWire and its camera through the desktop's camera portal (`teams::calling`), under the personal fence's call rule. Agents compile and mock-test it only |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and a call's network data (public IP addresses, ICE credentials, DTLS fingerprints, TURN credentials), and checks each fixture's `_synthetic` marker |
-| `crates/ui-sandbox` | tests and lab runs only: the UI sandbox every GUI process runs in, never the desktop's: a headless weston with a niri nested in it (screenshots and window control through `niri msg`), a private D-Bus session bus with no service activation and a fake notification server and tray watcher that record what they get, a virtual keyboard and pointer in the nested niri, a no-op URI opener first on `PATH`, a spawn that passes only the descriptors its caller names; when asked (`SandboxOptions::pipewire`, or `pipewire::PrivatePipeWire` alone), a private PipeWire with its own WirePlumber (policy only), a tone microphone with a loopback of the speaker at a set delay and attenuation, a speaker recorded to a WAV file and a moving test-pattern camera; `ui-sandbox-probe`, the window its own tests drive, and `ui-sandbox-media-probe`, the PipeWire client its own tests run |
+| `crates/ui-sandbox` | tests and lab runs only: the UI sandbox every GUI process runs in, never the desktop's: a headless weston with a niri nested in it (screenshots and window control through `niri msg`), a private D-Bus session bus with no service activation and a fake notification server and tray watcher that record what they get, a virtual keyboard and pointer in the nested niri, a no-op URI opener first on `PATH`, a spawn that passes only the descriptors its caller names; when asked (`SandboxOptions::pipewire`, or `pipewire::PrivatePipeWire` alone), a private PipeWire with its own WirePlumber (policy only), a tone microphone with a loopback of the speaker at a set delay and attenuation, a speaker recorded to a WAV file and a moving test-pattern camera, microphones and speakers added and removed while it runs (a headset plugged in, a keyed or looped voice: `add_microphone`, `add_looped_microphone`, `add_speaker`), each recording's and looped microphone's buffers marked on the wall clock (`pipewire::timeline`), and a fake camera portal on the sandbox's bus; `ui-sandbox-probe`, the window its own tests drive, and `ui-sandbox-media-probe`, the PipeWire client its own tests run |
 | `spikes/gpui-video` | GPUI on niri (smoke window in a private weston + nested niri), then a 3×3 grid of 720p video (M0 Tasks 15–16) |
 | `spikes/media-loop` | two `str0m` peers on loopback carrying an Opus tone, checked with Goertzel (M0 Task 17; its sans-IO peer is `teams-media`'s since M3) |
-| `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike: `auth/` (Entra and authz answers), `calling/` (the echo call's signaling), `chatsvc/` (the chat service), `csa/` (the account's teams), `graph/` (a profile), `mt/` (the profile lookup's answer), `trouter/` (the push channel), `ups/` (presence) |
-| `docs/protocol/` | protocol notes in our own words: `auth.md`, `chat.md` (the chat service's reads and writes as captured), `channels.md`, `graph.md`, `fence-targets.md` (the contacting services, the classifier's rows, member reads), `trouter.md`, `calling-echo.md`, and `endpoints.md`, one row for every endpoint seen or used, whether it is contacting and how the native client sends it |
-| `docs/m0-acceptance.md`, `docs/m1-acceptance.md`, `docs/m2-acceptance.md` | each milestone's acceptance check: numbers, the fence's picture, every live run |
+| `tests/fixtures/` | synthetic fixtures (made-up values, a `_synthetic` marker), as in every `tests/fixtures/` of a crate or spike: `auth/` (Entra and authz answers), `calling/` (the calls' signaling: the echo call's, a chat's call, an invitation, its answer and decline, a join, renegotiations, group video), `chatsvc/` (the chat service), `csa/` (the account's teams), `graph/` (a profile), `mt/` (the profile lookup's answer), `trouter/` (the push channel), `ups/` (presence) |
+| `docs/protocol/` | protocol notes in our own words: `auth.md`, `chat.md` (the chat service's reads and writes as captured), `channels.md`, `graph.md`, `fence-targets.md` (the contacting services, the classifier's rows, member reads), `trouter.md`, `calling-echo.md` (the test call), `calling.md` (lab-to-lab calls: the starts, the ring, answering, declining and joining, renegotiation, group video, the H.264 codec), and `endpoints.md`, one row for every endpoint seen or used, whether it is contacting and how the native client sends it |
+| `docs/m0-acceptance.md`, `docs/m1-acceptance.md`, `docs/m2-acceptance.md`, `docs/m3-acceptance.md` | each milestone's acceptance check: numbers, the fence's picture, every live run; M3's also holds the user's real-call checklist for the personal build and its outcome |
 | `docs/personal-build.md` | the personal build's rules as the user approved them, and how the code reads them |
 | `docs/spikes/` | spike write-ups: `ca-probe.md`, `auth.md`, `gpui-video.md` (+ raw runs), `echo-call.md` (its spike crate is gone: its parts are `teams-media`'s, `teams-call`'s and `teams-core`'s) |
 | `docs/backlog/` | deferred work, one file per item |
@@ -62,6 +70,8 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `scripts/lint-report.sh` | refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s |
 | `scripts/own-presence-run.sh` | one `own-presence-*` live run with b's presence reads of a sampled beside it (M2 Task 18) |
 | `scripts/install-personal.sh`, `packaging/teams.desktop` | the personal build's release build and install under `~/.local` (its binaries, the install marker, the desktop entry), for the user to run; agents never run it |
+| `scripts/native-call-run.sh` | one native lab call (`teams-headless` on every end: a caller, callees answering with `watch --answer-lab-calls`, a late joiner), spaced 90 s after the chat's last call, run under the live lock (M3 Task 16) |
+| `scripts/fetch-openh264.sh` | downloads Cisco's prebuilt OpenH264 and its licence into a data dir's `openh264/` (the lab's; the user's own for the personal build, run by the user), its SHA-256 checked |
 | `scripts/own-availability-native-run.sh` | one native own-availability run (`teams-headless a availability`) with b's presence reads of a sampled beside it (M2 Task 19) |
 | `tools/` | interim Node tools: `ca-probe` (the Conditional Access probe), `lab-login` (the first sign-in of the profiles) |
 
@@ -113,6 +123,8 @@ outside the repo:
 | `…/store/<alias>.sqlite` | the account's native store (`teams-headless`): conversations, messages, reactions, the outbox (`0600`, its dir `0700`); `<alias>.sqlite-runs/` holds a lock per open run |
 | `…/headless/<time>…/` | the native live runs' outputs (`teams-headless` and `chat_live`'s `summary.json`) |
 | `…/recordings/` | a native call's audio (`teams-headless … call`): the keyed tone sent and what the far end played (`0700`) |
+| `…/call-live/<time>/` | `call_live`'s traces, outputs, recordings and `summary.json` (`0700`); its screenshots go to `…/screenshots/<time>/` |
+| `…/openh264/` | Cisco's prebuilt OpenH264 and its licence (`scripts/fetch-openh264.sh`), which the lab binaries load for a call's video only when its SHA-256 is Cisco's |
 | `…/live.lock` | the live lock: every live run (a lab browser or a native client against the tenant) holds it with `flock` |
 | `…/auth/<alias>.json` | the account's region, partition, region GTMs and skypetoken expiry from `auth` (`0600`) |
 | `…/status-<alias>.json` | `login`'s steps, and why it stopped |
@@ -131,7 +143,12 @@ proto-lab --target-dir target/lab`), so a later `cargo test` can't rebuild it wi
 `teams-media` builds native code: libopus from the source `opusic-sys` bundles, and WebRTC's audio processing module
 from the source `webrtc-audio-processing-sys` bundles, with `meson` and `ninja` against the system's Abseil (found
 through `pkg-config`; without it meson would download Abseil during the build). Its PipeWire binding needs
-libpipewire's headers and `clang` for `bindgen`.
+libpipewire's headers and `clang` for `bindgen`. A normal build has no H.264 code of its own: it loads Cisco's
+prebuilt OpenH264 at run time, only when its SHA-256 is Cisco's (`scripts/fetch-openh264.sh`); only a `test-support`
+build compiles the bundled OpenH264 source, for the offline tests (`docs/protocol/calling.md`, "The H.264 codec").
+Which PipeWire a build opens is fixed when it is built: the UI sandbox's private one for the lab binaries and every
+`test-support` build, the desktop's only for the personal build (`teams-media`'s `personal` feature, which only
+`crates/teams` enables and `test-support` overrides); `teams-headless` opens none (its media is files).
 
 ## `proto-lab`
 
@@ -199,17 +216,18 @@ stops the run, kills its browsers and lets the fence's decisions still running l
 Every run uses the one classifier of the lab rule (`teams_fence::contacting`, through `proto-lab`'s `Classifier`): a
 read passes, a mutating request that reaches nobody passes and is logged `allowed`, a contacting write passes only with
 a permit from `Fence::check`, and a mutating request on a contacting service that no row reads is denied. On a Trouter
-socket only the session's own socket.io frames pass (a delivery's answer is denied), on a contacting service's socket
-no frame does, and anywhere else every frame passes (`fence_ws::classify_frame`). What a scenario holds back on purpose
-is a labelled forced deny.
+socket only the session's own socket.io frames and the answers to deliveries pass (a call's receipts and
+acknowledgements among them), on a contacting service's socket no frame does, and anywhere else every frame passes
+(`fence_ws::classify_frame`). What a scenario holds back on purpose is a labelled forced deny.
 
 A writing scenario first proves enforcement live: a probe post to its chat is force-denied, must fail in the page and
 must never show on the other accounts. It reads the target's members live (`LiveMembershipSource`, with the `ic3`
 bearer token the page itself sent). It expects only its own forced denies and the web client's requests and frames on
 the reviewed expected-deny list (`crates/proto-lab/src/scenario/expected.rs`: bot invokes, the account's own channel
-entry and channel properties, the file browser's prewarm), each with the reason the
-scenario doesn't need it. The list only judges the run: everything on it stays denied. A deny on the scenario's own
-chat other than its forced denies, one for a partial or refused membership, or a class off the list fails the run.
+entry and channel properties, the read horizon of the account's own call log, the file browser's prewarm), each with
+the reason the scenario doesn't need it. The list only judges the run: everything on it stays denied. A deny on the
+scenario's own chat other than its forced denies, one for a partial or refused membership, or a class off the list
+fails the run.
 
 - `load`: account a loads the web client, fail-closed (every write whose target's members have to be read is denied;
   a new chat naming only lab accounts can still pass); every deny is expected.
@@ -283,7 +301,13 @@ chat other than its forced denies, one for a partial or refused membership, or a
   the join, as the native client's `video_lines` counts say); a's native client must have
   heard the tone and decoded video on two lines. A failed `ab-call-native` or `abc-call-mixed` run hangs up every
   page that shows its call before it stops its native clients. `scripts/native-call-run.sh` runs the same group call
-  natively (a calls, b and c answer, or `--join c` for a late join; `EXTRA="--video --camera-after 5"`).
+  natively (a calls, b and c answer, or `--join c` for a late join; `EXTRA="--video --camera-after 5"`), a call in a
+  chat at least 90 s after that chat's last one, and one the service refused because the chat still had a running call
+  placed once more 90 s later.
+- `ab-call-app` (`--call answer|place`): b's web client as the far end of a call with a's app, spawned by `call_live`
+  (below), which runs the app; the two keep in step by this scenario's progress lines on stdout (`ab-call-app:
+  <step>`) and the app's trace. `answer` waits for a's call and answers only the run's own; `place` calls a from the
+  chat's header. Either way the page must hear a's tone and decode a's video once its camera is on.
 
 Every lab browser runs with its output muted and Chrome's fake audio manager (`--mute-audio`,
 `--disable-audio-output`): nothing is played aloud and the desktop's audio server is never opened; a call scenario's
@@ -328,7 +352,8 @@ teams-headless a profile <mri>... [--wait 30]           # where the engine's nam
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
 teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--record <wav>] [--seconds 45] \
-  [--wait 60] [--tone-seconds <s>]        # a call through the engine, its media on files; held, hung up, its tone looked for
+  [--wait 60] [--tone-seconds <s>] [--video [--camera-after <s>]]
+                                          # a call through the engine, its media on files; held, hung up, its tone looked for
 teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 60] \
                                           # the group chat's running call joined late, once its invitation rang out here
 ```
@@ -374,6 +399,10 @@ sent for it), each answer judged by the fence again; the flag exists in `teams-h
 registers the calling stack and answers nothing (an offered call rings until its ring ends). Both play `--tone` (for
 `--tone-seconds`, 180 s by default) and record each answered call, and print what the last one's recording holds when
 they end, as text: neither takes `--json`.
+`--video` (`call`, `join`, `watch`) takes video on Cisco's OpenH264 from the lab's `openh264/`: a 1:1 call's main line,
+a group call's main and receiving lines, the frames received counted per line (`video_lines …` every 2 s, `video …` at
+the end); the camera, a test pattern carrying each frame's index, stays off unless `--camera-after` turns it on that
+many seconds after the media connected.
 `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on
 stderr (Trouter's packets and deliveries by kind and size, never a payload); nothing else is logged.
 
@@ -455,20 +484,42 @@ registered again with a new one, opening it again and quitting it) and keeps its
 under `target/ui-shots/`: `teams-app-window.png` (the window as the catch-up filled it) and `teams-app-chat.png` (the
 chat opened).
 
-Calls (M3 Task 17): the app's engine gets its calling on the UI sandbox's PipeWire (the only one a lab build may
-open; without it the app runs without calls). A chat's header has Call once the calling endpoint is registered (Join
+Calls (M3): the app's engine gets its calling on the UI sandbox's PipeWire (the only one a lab build may open; without
+it the app runs without calls). A chat's header has Call once the calling endpoint is registered (Join
 where an invitation named a running call in that group chat); an invitation the engine offered rings with a ringtone on
 the default output, a banner (Answer, Decline) and a notification with Answer and Decline on the bus the app is given,
 the caller named as the invitation names them, all gone once its ring ends; the in-call bar above the panes shows who
 the call is with, its state and duration, Mute and Hang up, and how it ended (a 1:1 call the callee declined is taken by
-their voicemail, as captured, and says so). Keys: Ctrl+Shift+C calls the chat shown, Ctrl+Shift+J joins its running
-call, Ctrl+Shift+S answers, Ctrl+Shift+D declines, Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+H hangs up; the switcher
+their voicemail, as captured, and says so). Once the call is up the window shows the far end's video and the self
+view, or in a group call the participant grid (a cell per participant as the roster names them, its video when a
+line shows it, a mark while it speaks). The camera is off at every start, join and answer; only the user turns it on.
+Keys: Ctrl+Shift+C calls the chat shown, Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers, Ctrl+Shift+D
+declines, Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+O turns the camera on or off, Ctrl+Shift+H hangs up; the switcher
 (Ctrl+K) offers the commands that fit the moment ("Call", "Test call", "Join call", "Answer call", "Decline call",
-"Hang up", "Mute or unmute"). Nothing answers or declines a call but the user. The personal build shows no call yet.
+"Hang up", "Mute or unmute", "Camera on or off"). Nothing answers or declines a call but the user. The settings list
+the sandbox's microphones, speakers and cameras ("Follow the system" by default; a choice moves a running call's
+device without dropping it) and the video switch, on only with Cisco's OpenH264 in the lab's `openh264/`.
 `crates/teams-app/tests/call_window.rs` runs a's and b's apps in two sandboxes, each with its private PipeWire's tone,
 on `teams-mock` with its calling media: a calls b by the keyboard, b's ringtone is in b's recording, b answers from the
 notification, each tone is in the other's recording, a hangs up; b declines a second call and a's bar says it went to
 voicemail; screenshots `teams-app-call-incoming.png`, `teams-app-call-connected.png`, `teams-app-call-declined.png`.
+
+The live acceptance of calls (M3 Task 21, `tests/call_live.rs`, `docs/m3-acceptance.md`) is an orchestrator as
+`ui_live` is: a UI sandbox per lab account with its private PipeWire and fake camera, the normally built release app
+for a, b and c with each one's broker outside, driven by the keyboard and the notifications' actions, read by the
+traces, the recordings and `fence.log`; b's web client, where a case needs it, is a spawned `proto-lab run ab-call-app`.
+Its cases (`CALL_LIVE_PHASES`, comma-separated, all by default): `test-call` (the echo's round trip), `web` (the app
+and b's web client call each other, audio and video), `one-to-one` (ringtone, answer from the notification, audio both
+ways, the echo check on a loop of b's speaker into its microphone, a microphone switched mid-call, video, CPU and fps),
+`decline` and `group` (a–b–c with video, c leaving and joining again). `CALL_LIVE_APP_LOG` sets the apps' log level.
+Outputs go to `<data_dir>/call-live/<time>/`. Run it under the live lock:
+
+```sh
+cargo build --release -p teams-app -p proto-lab --target-dir target/lab
+flock ~/.local/share/teams-lab/live.lock timeout --signal=INT --kill-after=60 2400 \
+  env TEAMS_APP_BIN=$PWD/target/lab/release/teams-app PROTO_LAB_BIN=$PWD/target/lab/release/proto-lab \
+  PROTO_LAB_LIVE=1 cargo test -p teams-app --features live --test call_live -- --nocapture
+```
 
 The live acceptance test (M2 Task 25, `tests/ui_live.rs`, `docs/m2-acceptance.md`) is an orchestrator only: it opens no
 fence, holds no token and sends nothing. It starts a UI sandbox per lab account, each app's broker outside it with the
@@ -502,6 +553,16 @@ again. Its fence permits a write only to a 1:1 or group chat whose thread, read 
 meeting chats and new chats stay read-only), its reads by `POST` only for people of the account's chats, and logs every
 decision to `~/.local/share/teams/fence.log`. A plain `cargo build` at the root leaves it out; `cargo build -p teams`
 gives binaries that refuse to start (no install marker).
+
+Calls (`docs/personal-build.md`, "Calls"): 1:1 and group-chat calls, audio and video, on the desktop's PipeWire (fixed
+when the build is made) with the camera through the desktop's camera portal. A call starts or joins only on the user's
+action in an existing chat whose fresh thread read lists the account and every callee; any invitation addressed to the
+account rings (one at a time) and is answered or declined only by the user; a call's own follow-ups pass only on the
+call this run registered. "Test call" calls the echo service named in the web bundle. The microphone opens only once
+the call passed the fence; the camera is off at every start, join and answer. Video needs Cisco's OpenH264, which the
+user downloads with `scripts/fetch-openh264.sh ~/.local/share/teams` (the patent question is the user's:
+`docs/backlog/openh264-patents-and-the-personal-build.md`); without it calls carry audio only. Without a PipeWire the
+app runs without calls. The user's own real-call run is the checklist in `docs/m3-acceptance.md`.
 
 ## `teams-app secrets`
 
@@ -576,9 +637,11 @@ fence_ws --test fence_targets --test calling --test expected_denies`.
 | `PROTO_LAB_CHROME=<binary>` | the Chrome the browser tests use; by default the pinned install in the lab's `chrome/` dir (`proto-lab chrome install`) |
 | `PROTO_LAB_REQUIRE_CHROME=1` | without a Chrome the browser tests fail instead of skipping |
 | `GPUI_SMOKE_REQUIRE=1` | without weston ≥ 15.0 (for `--fake-seat`), niri, `dbus-daemon`, `pipewire` and `wireplumber` on `PATH`, and the PipeWire plugins and modules the sandbox's PipeWire links (`spa-0.2`, `pipewire-0.3`, `wireplumber-0.5`, WirePlumber's data dir), the UI sandbox's and the GPUI smoke tests fail instead of skipping |
-| `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests: `crates/proto-lab/tests/auth_live.rs` (a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory), `crates/teams-headless/tests/chat_live.rs` (M1's acceptance: it only spawns the normally built `teams-headless` and reads its output and `fence.log`) and `crates/teams-app/tests/ui_live.rs` (M2's acceptance: the normally built `teams-app` for a, b and c, each in a UI sandbox of its own with its broker outside, driven by the keyboard and read through its view trace and `fence.log`); without the feature they aren't built, without the variable they skip |
+| `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests: `crates/proto-lab/tests/auth_live.rs` (a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory), `crates/teams-headless/tests/chat_live.rs` (M1's acceptance: it only spawns the normally built `teams-headless` and reads its output and `fence.log`), `crates/teams-app/tests/ui_live.rs` (M2's acceptance: the normally built `teams-app` for a, b and c, each in a UI sandbox of its own with its broker outside, driven by the keyboard and read through its view trace and `fence.log`) and `crates/teams-app/tests/call_live.rs` (M3's acceptance of calls, as `ui_live` with each sandbox's private PipeWire, and b's web client from a spawned `proto-lab run ab-call-app`); without the feature they aren't built, without the variable they skip |
 | `TEAMS_HEADLESS_BIN=<binary>` | the normally built `teams-headless` that `chat_live` spawns (required: a test build refuses to run) |
-| `TEAMS_APP_BIN=<binary>` | the normally built `teams-app` that `ui_live` spawns, and whose `secrets` subcommand it starts as each app's broker (required, as above) |
+| `TEAMS_APP_BIN=<binary>` | the normally built `teams-app` that `ui_live` and `call_live` spawn, and whose `secrets` subcommand they start as each app's broker (required, as above) |
+| `PROTO_LAB_BIN=<binary>` | the normally built `proto-lab` that `call_live` spawns for b's web client (`run ab-call-app`) |
+| `CALL_LIVE_PHASES`, `CALL_LIVE_APP_LOG` | `call_live`'s cases to run (comma-separated, all by default) and its apps' diagnostic log level |
 | `TEAMS_HEADLESS_LOG=debug` | `teams-headless` logs our own crates' debug lines on stderr, never a payload or a token |
 | `TEAMS_APP_LOG=<level>` | `teams-app`'s diagnostic log at `error`, `warn`, `info` or `debug` for this run, over the settings' `log_level` (`debug`: full requests, responses and frames, credentials redacted; never share such a log) |
 | `TEAMS_MEDIA_TURN_SERVER`, `TEAMS_MEDIA_TURN_USER`, `TEAMS_MEDIA_TURN_PASSWORD` | also run `crates/teams-media/tests/relay.rs`'s allocation and relay through a real TURN server (coturn on loopback) |
@@ -586,10 +649,9 @@ fence_ws --test fence_targets --test calling --test expected_denies`.
 
 The machine's own gate run: `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 cargo test --workspace`. The live tests
 run one at a time under the live lock: `flock ~/.local/share/teams-lab/live.lock env PROTO_LAB_LIVE=1 cargo test -p
-proto-lab --features live --test auth_live`, `chat_live` as in [`teams-headless`](#teams-headless) and `ui_live` as in
-[`teams-app`](#teams-app). No write ever
-comes from a `cargo test` process: a live test that needs one spawns a normally built lab binary, which writes under
-its own fence.
+proto-lab --features live --test auth_live`, `chat_live` as in [`teams-headless`](#teams-headless), `ui_live` and
+`call_live` as in [`teams-app`](#teams-app). No write ever comes from a `cargo test` process: a live test that needs
+one spawns a normally built lab binary, which writes under its own fence.
 
 The browser tests run headless Chrome for Testing on throwaway profiles, never the lab's. The lab's `chrome/` dir is
 under `data_dir` when `lab.toml` sets one, else `~/.local/share/teams-lab/chrome/`; no lab config is needed for this,

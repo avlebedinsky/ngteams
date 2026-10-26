@@ -24,7 +24,8 @@ Two things are left to the user, and owed before the personal build's calls carr
   user, never by an agent), the settings' switch and the attribution beside it, and Cisco's licence text where the
   app shows licensing information (condition 4 of `BINARY_LICENSE.txt`).
 
-Meanwhile: the personal build shows no call UI and loads no codec (Task 17 pinned it); the lab binaries use Cisco's
-binary only. To undo: nothing ships a codec to the user until Task 22 decides.
+Meanwhile: the personal build loads Cisco's binary only from the user's own download in its data dir's `openh264/`
+(`teams::calling::openh264`, its SHA-256 checked), with the settings' switch and Cisco's attribution beside it; no
+download, and its calls carry audio only. Nothing ships a codec to the user; the value call above is still the user's.
 
 Transcript: `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-18-openh264/transcript.md`.
